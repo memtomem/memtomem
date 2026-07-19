@@ -417,7 +417,10 @@ class TestExtractSkills:
         assert "canonical exists" in result.skipped[0][1]
         assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "old"
 
-    def test_overwrite_flag(self, tmp_path):
+    def test_overwrite_existing_skill_is_refused(self, tmp_path):
+        """Overwriting an existing skill needs directory-tree snapshots (PR-G);
+        until then it is refused at the engine level (ADR-0030 §6) — only a
+        ``new`` skills Pull is allowed. The stored copy is left untouched."""
         src = tmp_path / ".claude/skills/existing"
         src.mkdir(parents=True)
         (src / "SKILL.md").write_text("new", encoding="utf-8")
@@ -427,8 +430,23 @@ class TestExtractSkills:
         (canonical / "SKILL.md").write_text("old", encoding="utf-8")
 
         result = extract_skills_to_canonical(tmp_path, overwrite=True)
-        assert len(result.imported) == 1
-        assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "new"
+        assert result.imported == []
+        assert len(result.skipped) == 1
+        assert result.skipped[0][2] == "skills_overwrite_unsupported"
+        assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "old"  # untouched
+
+    def test_overwrite_existing_skill_refusal_dry_run_parity(self, tmp_path):
+        """The refusal fires identically under dry_run (preview/real parity)."""
+        src = tmp_path / ".claude/skills/existing"
+        src.mkdir(parents=True)
+        (src / "SKILL.md").write_text("new", encoding="utf-8")
+        canonical = tmp_path / CANONICAL_SKILL_ROOT / "existing"
+        canonical.mkdir(parents=True)
+        (canonical / "SKILL.md").write_text("old", encoding="utf-8")
+
+        preview = extract_skills_to_canonical(tmp_path, overwrite=True, dry_run=True)
+        assert preview.imported == []
+        assert [s[2] for s in preview.skipped] == ["skills_overwrite_unsupported"]
 
     def test_only_name_filters_to_one(self, tmp_path):
         for name in ("alpha", "beta"):

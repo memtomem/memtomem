@@ -41,7 +41,11 @@ from typing import TypeVar, cast
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
-from memtomem.context._canonical_txn import _CANONICAL_LOCK_BUDGET_S, write_canonical_locked
+from memtomem.context._canonical_txn import (
+    _CANONICAL_LOCK_BUDGET_S,
+    SnapshotError,
+    write_canonical_locked,
+)
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import (
@@ -215,7 +219,7 @@ def import_passthrough_runtime(
     claude then gemini) and sibling inline branches (commands: gemini TOML)
     dedupe against each other.
 
-    ADR-0030 §6 (PR-B2a): the write goes through
+    ADR-0030 §6: the write goes through
     :func:`memtomem.context._canonical_txn.write_canonical_locked`, which holds
     the cross-process name-keyed canonical sidecar lock and **re-resolves the
     destination inside the lock** — so a concurrent flat→dir migrate cannot
@@ -223,8 +227,12 @@ def import_passthrough_runtime(
     stay as a fast path (skip early without reading bytes / scanning), mirroring
     the skills importer's pre-lock preflight + under-lock re-check.
     ``lock_remaining`` (set by the extract wrapper) is the whole-call
-    acquisition budget; ``None`` blocks indefinitely (CLI default). PR-B2a only
-    serializes the write — overwrite still clobbers; the snapshot lands in B2b.
+    acquisition budget; ``None`` blocks indefinitely (CLI default). An
+    overwrite-import (PR-B2b) is snapshot-first for a dir-layout canonical (the
+    pre-image is copied into ``versions/`` before the replace, inside the same
+    lock); a byte-identical overwrite is a no-op (``identical``), and a
+    flat-layout canonical is refused (``snapshot_requires_dir_layout``) since it
+    has no version store — see the pre-lock flat fast path above.
 
     ``seen`` mutation contract (pre-extraction semantics, byte-identical):
     a name is marked seen on CANONICAL_EXISTS (pre-lock or under-lock), on a
@@ -282,6 +290,23 @@ def import_passthrough_runtime(
             logger.warning("skip %s from %s: %s", name, runtime_label, reason)
             seen[name] = runtime_label
             continue
+        if dst.exists() and overwrite and layout == "flat":
+            # An overwrite-import snapshots the current canonical into its
+            # per-artifact ``versions/`` store first (ADR-0030 §6) — a flat
+            # ``<name>.md`` has no such store, so refuse rather than clobber
+            # unsnapshotted. Fires here (pre-lock) so a ``dry_run`` preview
+            # reports the same refusal a real run would (preview/real parity);
+            # ``write_canonical_locked`` re-checks under the lock as a backstop
+            # against a concurrent dir→flat migrate.
+            reason = (
+                "cannot overwrite a flat-layout canonical (no version store to "
+                "snapshot into) — run `mm context migrate` to convert it to "
+                "directory layout first"
+            )
+            skipped.append((name, reason, skip_codes.SNAPSHOT_REQUIRES_DIR_LAYOUT))
+            logger.warning("skip %s from %s: %s", name, runtime_label, reason)
+            seen[name] = runtime_label
+            continue
         try:
             content_bytes = md_file.read_bytes()
         except OSError as exc:
@@ -331,16 +356,27 @@ def import_passthrough_runtime(
                     content_bytes,
                     resolve_target=_resolve,
                     overwrite=overwrite,
+                    snapshot_note=f"pre-overwrite snapshot (import from {runtime})",
                     lock_timeout=None if lock_remaining is None else lock_remaining(),
                 )
             except TimeoutError:
                 reason = (
-                    "another process held the canonical destination lock past "
-                    f"the {_CANONICAL_LOCK_BUDGET_S:g}s acquisition budget — "
-                    "re-run the import to retry"
+                    "another process held the canonical destination lock (or its "
+                    f"version store) past the {_CANONICAL_LOCK_BUDGET_S:g}s "
+                    "acquisition budget — re-run the import to retry"
                 )
                 skipped.append((name, reason, skip_codes.LOCK_TIMEOUT))
                 logger.warning("skip %s from %s: %s", name, runtime_label, reason)
+                continue
+            except SnapshotError as exc:
+                # The pre-image snapshot failed, so the overwrite was aborted
+                # (fail-closed — never clobber unsnapshotted). Destination-side
+                # failure, so ``seen`` is marked: a later runtime's copy would
+                # hit the same version-store error.
+                reason = f"could not snapshot the current canonical before overwrite: {exc}"
+                skipped.append((name, reason, skip_codes.SNAPSHOT_FAILED))
+                logger.warning("skip %s from %s: %s", name, runtime_label, reason)
+                seen[name] = runtime_label
                 continue
             if write_outcome == "exists":
                 # Under-lock re-check: a parallel importer landed dst between
@@ -350,6 +386,24 @@ def import_passthrough_runtime(
                 logger.warning("skip %s from %s: %s", name, runtime_label, reason)
                 seen[name] = runtime_label
                 continue
+            if write_outcome == "flat_refused":
+                # Under-lock backstop for a concurrent dir→flat migrate — the
+                # pre-lock fast path above covers the common case and the
+                # dry-run preview.
+                reason = (
+                    "cannot overwrite a flat-layout canonical (no version store to "
+                    "snapshot into) — run `mm context migrate` first"
+                )
+                skipped.append((name, reason, skip_codes.SNAPSHOT_REQUIRES_DIR_LAYOUT))
+                logger.warning("skip %s from %s: %s", name, runtime_label, reason)
+                seen[name] = runtime_label
+                continue
+            # ``created`` / ``overwritten`` / ``identical`` all mean the Store
+            # now holds the requested bytes → imported. A future ``WriteOutcome``
+            # variant must be handled explicitly rather than silently reported
+            # as imported — raise (not ``assert``, which ``python -O`` strips).
+            if write_outcome not in ("created", "overwritten", "identical"):
+                raise RuntimeError(f"unhandled canonical write outcome: {write_outcome!r}")
         imported.append((dst, layout))
         seen[name] = runtime_label
         if source_runtimes is not None:

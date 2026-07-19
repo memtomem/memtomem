@@ -57,6 +57,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mm context import --overwrite` is snapshot-first and refuses unsafe
+  overwrites** (ADR-0030 §6) — importing a runtime copy over an *existing*
+  canonical no longer clobbers it blindly. For agents and commands in the
+  current directory layout, the existing canonical is first snapshotted into
+  its per-artifact `versions/` store (the ADR-0022 versioning engine) and only
+  then replaced, both inside one canonical-lock transaction — so a rollback
+  point always exists and a concurrent writer can't be lost. A re-import of
+  byte-identical content is a no-op (no snapshot is accrued). Two shapes are
+  now refused with a typed skip instead of overwriting: an existing **skill**
+  (`skills_overwrite_unsupported` — directory-tree snapshots land in a later
+  release; delete the stored skill first to re-import) and a **flat-layout**
+  agent/command (`snapshot_requires_dir_layout` — it has no version store; run
+  `mm context migrate` to convert it first). A first-time import (`new`) is
+  unchanged.
+
 - **Historical searches decay to the requested instant** (#1802) — a search
   with an explicit `as_of_unix` now applies time decay relative to that
   instant instead of the wall clock, matching how validity filtering already

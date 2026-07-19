@@ -50,6 +50,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator, Literal, TypeVar
 
+from memtomem.context import versioning
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_bytes
 from memtomem.context._names import Layout
 
@@ -58,6 +59,7 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 __all__ = [
+    "SnapshotError",
     "acquire_canonical_locks",
     "canonical_lock_path",
     "canonical_lock_shared_budget",
@@ -67,6 +69,20 @@ __all__ = [
     "write_canonical_locked",
 ]
 
+
+class SnapshotError(Exception):
+    """A pre-overwrite snapshot could not be taken, so the write was aborted.
+
+    Raised by :func:`write_canonical_locked` on the overwrite branch when the
+    current canonical bytes cannot be read or :func:`versioning.create_version`
+    fails — the destination is left **untouched** (fail-closed: never clobber a
+    canonical we could not first snapshot). Distinct from ``TimeoutError``
+    (lock contention, which callers map to a ``lock_timeout`` skip): a
+    ``SnapshotError`` is a durable failure of the version store, so a caller
+    maps it to a ``snapshot_failed`` skip and does not silently overwrite.
+    """
+
+
 # Whole-call acquisition budget (seconds) for a canonical sidecar lock. Mirrors
 # ``skills._SKILLS_LOCK_BUDGET_S`` so a stuck holder surfaces as a typed
 # ``lock_timeout`` skip / HTTP 503 rather than an unbounded wait. Monkeypatchable
@@ -74,9 +90,19 @@ __all__ = [
 _CANONICAL_LOCK_BUDGET_S: float = 30.0
 
 # Outcome of a locked canonical write, mapped by callers onto their existing
-# imported / skipped result rows. (PR-B2b adds the snapshot behind
-# ``"overwritten"``.)
-WriteOutcome = Literal["created", "overwritten", "exists"]
+# imported / skipped result rows.
+#
+# - ``created`` / ``overwritten`` / ``exists``: as before (``exists`` = present
+#   and not overwriting → caller's ``canonical_exists`` skip).
+# - ``identical`` (PR-B2b): overwrite requested but the new bytes equal the
+#   current canonical — no snapshot and no write (versions/ has no GC, so a
+#   re-import of unchanged content must not spam ``vN.md``). The caller treats
+#   it as imported: the Store already holds the requested state.
+# - ``flat_refused`` (PR-B2b): overwrite requested onto a flat-layout canonical,
+#   which has no per-artifact ``versions/`` store to snapshot into — refused
+#   with no write; the caller emits a ``snapshot_requires_dir_layout`` skip
+#   pointing at ``mm context migrate``.
+WriteOutcome = Literal["created", "overwritten", "exists", "identical", "flat_refused"]
 
 
 def new_lock_budget() -> Callable[[], float]:
@@ -225,6 +251,7 @@ def write_canonical_locked(
     *,
     resolve_target: Callable[[], tuple[Path, Layout]],
     overwrite: bool,
+    snapshot_note: str = "",
     lock_timeout: float | None = None,
 ) -> tuple[WriteOutcome, Path, Layout]:
     """Resolve the canonical destination and write *content_bytes* under the lock.
@@ -239,19 +266,82 @@ def write_canonical_locked(
     - ``dst`` absent → ``mkdir`` + atomic write → ``("created", dst, layout)``.
     - ``dst`` present and not *overwrite* → no write → ``("exists", …)`` (the
       caller emits its existing ``canonical_exists`` skip).
-    - ``dst`` present and *overwrite* → atomic write → ``("overwritten", …)``.
+    - ``dst`` present, *overwrite*, **dir layout**, bytes differ → snapshot the
+      current canonical into ``versions/vN.md`` (ADR-0022 engine), then atomic
+      write → ``("overwritten", …)``.
+    - ``dst`` present, *overwrite*, bytes identical → no snapshot, no write →
+      ``("identical", …)`` (the Store already holds the requested state;
+      ``versions/`` has no GC so an unchanged re-import must not accrue snapshots).
+    - ``dst`` present, *overwrite*, **flat layout** → no write →
+      ``("flat_refused", …)`` (a flat artifact has no per-artifact ``versions/``
+      store; the caller points the user at ``mm context migrate``).
 
-    PR-B2a only serializes the write (behavior otherwise unchanged — overwrite
-    clobbers). PR-B2b inserts the pre-image snapshot on the overwrite branch.
+    PR-B2b (ADR-0030 §6): the snapshot read + the replace run inside this one
+    canonical-sidecar-lock transaction, so a concurrent writer cannot land
+    between snapshot(A) and replace(C) and be lost. Lock order is normative:
+    the canonical sidecar (held here) → the ``versions.json`` child lock (taken
+    by ``create_version``); *lock_timeout* is one monotonic budget spanning
+    BOTH acquisitions (the M1 nested-budget hazard — two fresh 30s budgets under
+    one route timeout can orphan the worker), so ``create_version`` is fed the
+    remaining budget, not a fresh one.
 
-    ``TimeoutError`` (sidecar lock unavailable within *lock_timeout*) propagates
-    to the caller, which maps it to a typed ``lock_timeout`` skip / 503.
+    ``TimeoutError`` (sidecar or child ``versions.json`` lock unavailable within
+    the budget) propagates to the caller, which maps it to a typed
+    ``lock_timeout`` skip / 503. :class:`SnapshotError` (the current canonical
+    could not be read, or ``create_version`` failed) also propagates, leaving
+    *dst* untouched — the caller maps it to a ``snapshot_failed`` skip.
     """
-    with canonical_sidecar_lock(canonical_root, name, timeout=lock_timeout):
+    deadline = None if lock_timeout is None else time.monotonic() + lock_timeout
+
+    def _remaining() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    with canonical_sidecar_lock(canonical_root, name, timeout=_remaining()):
         dst, layout = resolve_target()
         if dst.exists():
             if not overwrite:
                 return "exists", dst, layout
+            if layout == "flat":
+                # No per-artifact ``versions/`` store to snapshot into. Refuse
+                # rather than clobber unsnapshotted; the caller hints at
+                # ``mm context migrate`` (ADR-0030 §6 — no flat-snapshot machinery).
+                return "flat_refused", dst, layout
+            try:
+                old_bytes = dst.read_bytes()
+            except OSError as exc:
+                raise SnapshotError(
+                    f"cannot read current canonical {dst} to snapshot before overwrite: {exc}"
+                ) from exc
+            if old_bytes == content_bytes:
+                return "identical", dst, layout
+            # Snapshot the pre-image under the SAME transaction (canonical
+            # sidecar already held → versions.json child lock, one budget).
+            # ``source_bytes`` snapshots exactly the bytes we just read, closing
+            # the read→write TOCTOU.
+            #
+            # ``TimeoutError`` here can only be the versions.json child lock
+            # (``create_version``'s only blocking wait), so it propagates as-is
+            # for the caller's ``lock_timeout`` skip. ``TimeoutError`` is an
+            # ``OSError`` subclass, so it MUST be caught first. Every other
+            # failure — a ``VersionError`` (unreadable/malformed manifest) or a
+            # raw ``OSError`` from the ``vN.md`` / ``versions.json`` write
+            # (disk full, EACCES) — fails closed as a durable ``SnapshotError``
+            # so the caller emits a ``snapshot_failed`` skip instead of letting
+            # a bare I/O error abort the whole import. The canonical is still
+            # untouched: the snapshot write precedes the ``atomic_write_bytes``
+            # replace below.
+            try:
+                versioning.create_version(
+                    dst.parent,
+                    dst,
+                    note=snapshot_note,
+                    source_bytes=old_bytes,
+                    lock_timeout=_remaining(),
+                )
+            except TimeoutError:
+                raise
+            except (versioning.VersionError, OSError) as exc:
+                raise SnapshotError(f"could not snapshot {dst} before overwrite: {exc}") from exc
             atomic_write_bytes(dst, content_bytes)
             return "overwritten", dst, layout
         dst.parent.mkdir(parents=True, exist_ok=True)

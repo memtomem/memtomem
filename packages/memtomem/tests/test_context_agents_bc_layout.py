@@ -139,10 +139,14 @@ def test_parse_flat_layout_with_filename_agent(tmp_path: Path) -> None:
 # ── extract_agents_to_canonical layout policy ───────────────────────────
 
 
-def test_extract_preserves_flat_layout_when_only_flat_exists(
+def test_extract_refuses_overwrite_of_flat_layout(
     tmp_path: Path,
 ) -> None:
-    _write_flat_agent(tmp_path, "legacy")
+    """An overwrite-import onto a flat-layout canonical is refused (ADR-0030
+    §6): a flat ``<name>.md`` has no versions/ store to snapshot into. The flat
+    file is left untouched and no dir layout is created."""
+    flat = _write_flat_agent(tmp_path, "legacy")
+    original = flat.read_text()
     runtime = tmp_path / ".claude/agents"
     runtime.mkdir(parents=True)
     runtime_md = runtime / "legacy.md"
@@ -151,11 +155,12 @@ def test_extract_preserves_flat_layout_when_only_flat_exists(
             "Generic helper", "UPDATED"
         )
     )
-    extract_agents_to_canonical(tmp_path, overwrite=True)
-    # Flat preserved; no dir layout created.
+    result = extract_agents_to_canonical(tmp_path, overwrite=True)
+    assert result.imported == []
+    assert [s[2] for s in result.skipped] == ["snapshot_requires_dir_layout"]
+    # Flat untouched; no dir layout created.
     flat_path = tmp_path / CANONICAL_AGENT_ROOT / "legacy.md"
-    assert flat_path.is_file()
-    assert "UPDATED" in flat_path.read_text()
+    assert flat_path.read_text() == original
     assert not (tmp_path / CANONICAL_AGENT_ROOT / "legacy" / "agent.md").exists()
 
 

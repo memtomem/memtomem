@@ -1018,20 +1018,38 @@ def extract_skills_to_canonical(
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                 continue
             dst = canonical_root / skill_name
-            if dst.exists() and not overwrite:
-                reason = "canonical exists (use --overwrite)"
-                skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+            if dst.exists():
+                if not overwrite:
+                    reason = "canonical exists (use --overwrite)"
+                    skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+                    logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
+                    seen[skill_name] = runtime_label
+                    continue
+                # ``--overwrite`` onto a canonical dst holding non-skill content
+                # (or a plain file) would make copy_skill's promote raise
+                # mid-import — typed skip instead (#1229). Checked BEFORE the
+                # overwrite refusal below so junk gets the precise "add a
+                # SKILL.md or remove it" remediation rather than the generic
+                # skills-overwrite refusal. Checked for dry-run too, so the
+                # preview's skip decisions match the real run.
+                conflict = _target_conflict(dst)
+                if conflict is not None:
+                    skipped.append((skill_name, str(conflict), skip_codes.TARGET_CONFLICT))
+                    logger.warning("skip %s from %s: %s", skill_name, runtime_label, conflict)
+                    seen[skill_name] = runtime_label
+                    continue
+                # An existing skill Store entry + ``--overwrite``. Overwriting a
+                # skill means snapshotting its whole directory tree first
+                # (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G) — until
+                # that ships, only a ``new`` skills Pull is allowed; refuse
+                # rather than clobber unsnapshotted. Remediation: delete the
+                # canonical skill first, then re-import. Fires for dry-run too.
+                reason = (
+                    "overwriting an existing skill needs directory-tree snapshots "
+                    "(a future release) — delete the canonical skill first to re-import"
+                )
+                skipped.append((skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
-                seen[skill_name] = runtime_label
-                continue
-            # ``--overwrite`` onto a canonical dst holding non-skill content
-            # (or a plain file) would make copy_skill's promote raise
-            # mid-import — typed skip instead (#1229). Checked for dry-run
-            # too, so the preview's skip decisions match the real run.
-            conflict = _target_conflict(dst)
-            if conflict is not None:
-                skipped.append((skill_name, str(conflict), skip_codes.TARGET_CONFLICT))
-                logger.warning("skip %s from %s: %s", skill_name, runtime_label, conflict)
                 seen[skill_name] = runtime_label
                 continue
 
@@ -1152,13 +1170,36 @@ def extract_skills_to_canonical(
                     # canonical dst (previously unreachable for the import
                     # path, which relied on discovery filtering alone).
                     _reap_stale_internal_dirs(dst)
-                    # Re-check the no-overwrite contract under the lock: a
-                    # parallel importer can land dst between the lock-free
-                    # preflight above and our acquisition, and replacing its
-                    # fresh import would violate ``overwrite=False``.
-                    if dst.exists() and not overwrite:
-                        reason = "canonical exists (use --overwrite)"
-                        skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+                    # Re-check the existence contract under the lock: a parallel
+                    # importer can land dst between the lock-free preflight above
+                    # and our acquisition. Mirrors the pre-lock branch exactly so
+                    # a racing overwrite gets the same refusal (never clobber a
+                    # freshly imported skill).
+                    if dst.exists():
+                        if not overwrite:
+                            reason = "canonical exists (use --overwrite)"
+                            skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+                            logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
+                            seen[skill_name] = runtime_label
+                            continue
+                        conflict = _target_conflict(dst)
+                        if conflict is not None:
+                            skipped.append((skill_name, str(conflict), skip_codes.TARGET_CONFLICT))
+                            logger.warning(
+                                "skip %s from %s: %s", skill_name, runtime_label, conflict
+                            )
+                            seen[skill_name] = runtime_label
+                            continue
+                        # Existing skill + overwrite: refused until tree snapshots
+                        # land (PR-G) — same as the pre-lock preflight.
+                        reason = (
+                            "overwriting an existing skill needs directory-tree "
+                            "snapshots (a future release) — delete the canonical "
+                            "skill first to re-import"
+                        )
+                        skipped.append(
+                            (skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED)
+                        )
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                         seen[skill_name] = runtime_label
                         continue

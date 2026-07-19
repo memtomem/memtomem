@@ -402,6 +402,30 @@ class TestExtractCommandsToCanonical:
         assert result.runtime_candidates == {"shared": ["claude", "gemini"]}
 
     def test_overwrite_flag(self, tmp_path):
+        """Overwrite onto a DIR-layout canonical snapshots the pre-image into
+        versions/ then replaces (ADR-0030 §6, B2b snapshot-first)."""
+        d = tmp_path / ".claude/commands"
+        d.mkdir(parents=True)
+        new = SAMPLE_MINIMAL_COMMAND.replace("Simple prompt", "UPDATED")
+        (d / "hi.md").write_text(new, encoding="utf-8")
+
+        canonical = tmp_path / CANONICAL_COMMAND_ROOT / "hi" / "command.md"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("old", encoding="utf-8")
+
+        result = extract_commands_to_canonical(tmp_path)
+        assert result.imported == []
+        assert len(result.skipped) == 1
+        assert result.skipped[0][2] == "canonical_exists"
+        assert canonical.read_text(encoding="utf-8") == "old"
+
+        result = extract_commands_to_canonical(tmp_path, overwrite=True)
+        assert len(result.imported) == 1
+        assert "UPDATED" in canonical.read_text(encoding="utf-8")
+        assert (canonical.parent / "versions" / "v1.md").read_text(encoding="utf-8") == "old"
+
+    def test_overwrite_flat_layout_refused(self, tmp_path):
+        """A flat-layout canonical is refused on overwrite-import (ADR-0030 §6)."""
         d = tmp_path / ".claude/commands"
         d.mkdir(parents=True)
         new = SAMPLE_MINIMAL_COMMAND.replace("Simple prompt", "UPDATED")
@@ -411,15 +435,12 @@ class TestExtractCommandsToCanonical:
         canonical.parent.mkdir(parents=True)
         canonical.write_text("old", encoding="utf-8")
 
-        result = extract_commands_to_canonical(tmp_path)
+        result = extract_commands_to_canonical(tmp_path, overwrite=True)
         assert result.imported == []
         assert len(result.skipped) == 1
-        assert "canonical exists" in result.skipped[0][1]
+        assert result.skipped[0][2] == "snapshot_requires_dir_layout"
+        assert "mm context migrate" in result.skipped[0][1]
         assert canonical.read_text(encoding="utf-8") == "old"
-
-        result = extract_commands_to_canonical(tmp_path, overwrite=True)
-        assert len(result.imported) == 1
-        assert "UPDATED" in canonical.read_text(encoding="utf-8")
 
     def test_skips_hostile_runtime_filename(self, tmp_path):
         """#276: runtime filenames are interpolated into canonical paths."""
