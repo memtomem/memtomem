@@ -98,17 +98,18 @@ writing.
 
 BM25 ranking can vary slightly across OS / SQLite builds, so the **canonical
 baseline is produced on Ubuntu** (the CI runner). A maintainer on another OS
-should not hand-commit a locally produced baseline for the required gate: run the
-CI workflow with `workflow_dispatch` and input `refresh_baseline: true`, download
-the uploaded `cases.json` + `baseline_replay.json` (+ `versions.txt` recording the
-Python and SQLite versions), and commit those. During the advisory window
-(`continue-on-error: true`), a locally produced baseline is fine — the job's job
-is to surface mac↔Ubuntu drift, not to block on it.
+should not hand-commit a locally produced baseline: run the CI workflow with
+`workflow_dispatch` and input `refresh_baseline: true`, download the uploaded
+`cases.json` + `baseline_replay.json` (+ `versions.txt` recording the Python and
+SQLite versions), and commit those. A locally produced (e.g. macOS) baseline can
+diverge in raw BM25 scores from the Ubuntu runner; the gate thresholds on
+rankings and metrics, not raw scores, so this does not break the check, but the
+committed baseline should still come from the canonical producer.
 
 ## CI
 
 The `quality-gate` job in `.github/workflows/ci.yml` runs check mode on every push
-and PR as an **advisory** step (`continue-on-error: true`). Flipping it to a
-required check is a separate follow-up PR (delete the `continue-on-error` line
-after a stability window). The `workflow_dispatch` path additionally supports
-`refresh_baseline: true` to regenerate and upload the canonical assets.
+and PR as a **required** check: a policy violation fails the PR. The
+`workflow_dispatch` path additionally supports `refresh_baseline: true` to
+regenerate and upload the canonical assets. Any intended ranking change must
+refresh the baseline in the same PR, or the gate will (correctly) fail.
