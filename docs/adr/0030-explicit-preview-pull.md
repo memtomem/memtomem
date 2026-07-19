@@ -1,7 +1,7 @@
 # ADR-0030: Explicit Preview/Pull model for the Context Gateway
 
 **Status:** Proposed
-**Date:** 2026-07-18
+**Date:** 2026-07-18 (§10 amended 2026-07-19, post PR-G design-gate)
 **Context:** The Context Gateway's import path is a fixed-order "first
 runtime wins" scan (claude → gemini → codex → kimi;
 `context/skills.py:extract_skills_to_canonical`, and the agents/commands
@@ -244,42 +244,83 @@ version store itself, v2 would contain v1, and Push/diff/Gate A would
 leak internal metadata into runtimes. The protocol therefore starts
 from a payload definition:
 
-- **One shared skill-payload iterator** defines the artifact payload
-  everywhere: it excludes top-level `overrides/`, top-level `versions/`
-  and `versions.json`, lock/staging artifacts (`COPY_SKIP_NAMES`), and
-  symlinks. Snapshot, tree digest, privacy scan, fan-out, and diff all
-  consume this one iterator — today's per-caller walks
-  (`_iter_scannable_skill_files`, the `_stage_skill` copier surface)
-  converge on it, so version history can never fan out to runtimes and
-  a snapshot can never contain a snapshot.
+> **Amended 2026-07-19** after the PR-G design-gate (three review
+> rounds + POSIX durability/portability research). The bullets below are
+> the revised, code-ready baseline; they supersede the original where they
+> differ (the two surfaces below replace the earlier "one iterator for
+> everything" wording, orphan `vN/` dirs are **preserved not reaped**, and
+> the skills version surface is **read-only** in this campaign).
+
+- **Two surfaces, precisely scoped — not one.** A **payload iterator**
+  defines the artifact *content*: it excludes top-level `overrides/`,
+  top-level `versions/` and `versions.json`, lock/staging artifacts
+  (`COPY_SKIP_NAMES`), and symlinks. It drives the **snapshot content,
+  the tree digest, the Push diff, and the content that Push fans out**. The
+  **ingress Gate-A privacy scan stays WIDE** — it scans the full
+  would-land copier surface (payload **plus** `overrides/`), because a
+  secret under runtime metadata must still be caught before it lands
+  (§4). `_iter_scannable_skill_files` remains that wide scan; the payload
+  iterator is the narrower content view. Both are pinned so that version
+  history can never fan out to runtimes and a snapshot can never contain
+  a snapshot, without collapsing the ingress gate.
 - **Tree digest = SHA-256 over (relative path, bytes)** of the payload
-  iterator's files. The executable bit is **not** part of the digest:
-  the current copier normalizes file modes (0o644) and preserving a bit
-  the copier drops would make digests unreproducible. Campaign 2's
-  snapshot CAS adopts this same definition — one digest, two consumers;
-  the master plan's exec-bit mention is superseded here.
+  iterator's files, with length-prefixed framing so no `(rel, bytes)`
+  pair can be confused with a different split (the existing
+  `_payload_digest` shape is promoted as the canonical serialization).
+  The digest is **file-only** — empty directories are not tracked — and
+  the **executable bit is excluded** (the copier normalizes modes to
+  0o644; preserving a bit it drops would make digests unreproducible).
+  Campaign 2's snapshot CAS adopts this same definition — one digest, two
+  consumers; the master plan's exec-bit mention is superseded here.
 - Storage: `<canonical>/<name>/versions/vN/` directory snapshots beside
   today's `<canonical>/<name>/versions/vN.md` files, sharing
   `versions.json` with a per-entry `layout: "tree"` marker and a
   top-level `schema_version` bump.
-- **Schema-compat prep ships first** (inside PR-G, before any tree
-  manifest is ever written): today `load_manifest()` ignores unknown
-  top-level fields and `_save_manifest()` rewrites only
-  `versions`/`labels`, so an old mutator would silently strip
-  `schema_version`/`layout`. The prep step makes readers refuse an
-  unknown `schema_version` loudly and makes writers round-trip unknown
-  fields, with preservation/refusal tests pinned — only then does the
-  tree layout land.
-- Atomic promotion: stage the snapshot dir, fsync, rename into place
-  under the canonical sidecar lock (§6); a crash leaves either no entry
-  or a complete one. Orphan `vN/` dirs without a manifest row are
-  reaped on the next versioning operation (mirroring the staged-promote
-  reaper pattern in `context/skills.py`).
-- API compatibility: list/promote/delete keep their shapes; `enable`
-  (flat→dir adoption) is a no-op for skills (always dir-layout).
+- **Schema-compat prep ships first** (PR-G1, before any tree manifest is
+  ever written): today `load_manifest()` ignores unknown top-level fields
+  and `_save_manifest()` rewrites only `versions`/`labels`, so an old
+  mutator would silently strip `schema_version`/`layout`. The prep step
+  makes readers refuse an unknown/newer `schema_version` loudly
+  (validating it is a positive int), makes writers round-trip unknown
+  top-level **and** per-entry fields, with preservation/refusal tests
+  pinned — only then does the tree layout land.
+- **Snapshot creation copies bytes into new inodes** (like the flat
+  `create_version`, from the captured pre-image) — it never hardlinks
+  live payload, which an editor or a pre-swap crash could mutate through
+  a shared inode. Atomic promotion: stage the snapshot dir, flush (fsync,
+  plus `F_FULLFSYNC` on macOS), rename into place under the canonical
+  sidecar lock (§6), then flush the parent directory; a crash leaves
+  either no entry or a complete one. **Orphan `vN/` dirs without a
+  manifest row are PRESERVED, never reaped** — tag allocation reconciles
+  over on-disk `vN/` dirs (as it does over flat `vN.md` today), so an
+  orphan bumps the next tag rather than being deleted. Only the
+  `.staging-*`/`.old-*`/`.swap-*` transients are reaped, and an `.old-*`
+  only while the canonical is present.
+- **Overwrite-Pull transaction (the §6 mechanism, for skills).** The
+  runtime **payload** replaces the Store payload; the Store's
+  **`overrides/` is preserved via an independent copy** (mutable,
+  un-versioned per ADR-0027 — a runtime copy has none, so "replace" would
+  delete the user's edits) and the Store's **`versions/` via file
+  hardlink** (immutable). Because a non-empty directory cannot be
+  replaced atomically on POSIX, the swap is two renames guarded by a
+  durable `.swap` intent marker whose identity is bound by name and
+  transaction suffix, plus a recovery state machine with parent-directory
+  fsync barriers on both the forward and recovery paths; a foreign
+  out-of-band recreation of the destination fails closed rather than
+  clobbering. Durability degrades to process-crash consistency on
+  filesystems that reject directory fsync (network/tmpfs/Windows),
+  matching the existing single-file overwrite.
+- **API compatibility (read-only this campaign).** Skills gain a
+  read-only `version list` across CLI/Web/MCP; `create`/`promote`/
+  `delete-label` remain **refused for skills** (a skill version is
+  created only internally by an overwrite-Pull), and labeled skill
+  **fan-out** — which needs a `label` argument the skill generators do
+  not have — is deferred to a follow-up. The flat `agents`/`commands`
+  version table is unchanged; `enable` (flat→dir adoption) is a no-op for
+  skills (always dir-layout).
 
-This section is the design baseline; the implementing PR gets its own
-design-gate review before code lands.
+This section is the design baseline; it has had its design-gate review
+(three rounds) and is ready to implement as PR-G0..G4.
 
 ### 11. CLI shape
 
@@ -327,8 +368,12 @@ route (§4, §7) → B2: snapshot/lock transaction + skills overwrite
 refusal (§6) → C: CLI `pull` + `sync --runtime` (§11, §5) → D: Web Pull
 flow (picker + preview) → E: Push/Pull rename (§2) → F: user-tier
 portal + drift probe (§9, §1) → G: skills tree snapshots (§10, own
-gate) → H: MCP parity (§8). Fixture-based E2E is mandatory; real-project
-verification is read-only smoke only.
+gate), split **G0** ADR amendment → **G1** manifest schema-compat prep →
+**G2** shared payload iterator + tree digest → **G3** tree-snapshot
+storage/engine + read-only skills `version list` → **G4** lift the skills
+overwrite refusal (history-preserving transaction) → H: MCP parity (§8).
+Fixture-based E2E is mandatory; real-project verification is read-only
+smoke only.
 
 ## References
 
