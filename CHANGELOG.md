@@ -7,6 +7,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm context pull` — source-selectable, preview-first Import** (ADR-0030
+  §5/§11) — pull one runtime's copy of a `skills` / `agents` / `commands`
+  artifact into the Store, choosing which runtime to import from. Dry-run
+  preview by default (each candidate's would-land status + privacy-gate
+  outcome; `--diff` for a unified diff, `--json` for the structured shape);
+  `--apply` executes. When runtime copies diverge, `--apply` refuses until you
+  name a source with `--from <runtime>` — a stale copy can never silently beat
+  a fresher one — and the decision, privacy scan, and write happen in one
+  engine step so the bytes you previewed are the bytes written. Overwriting an
+  existing agents/commands entry snapshots the current canonical first (a
+  destination change since the preview refuses as stale); a `project_shared`
+  `--apply` requires an explicit `--scope project_shared` plus confirmation.
+  Section-level batch Import keeps its existing first-wins behavior.
+- **`mm context sync --runtime <name>`** (ADR-0030) — an additive, repeatable
+  filter that restricts a Sync's artifact fan-out to specific runtimes
+  (skills/agents/commands only). Omitting it is unchanged (all detected
+  runtimes); combining it with `--include settings` / `mcp-servers` (which have
+  no per-runtime targeting) or with no artifact kind is a clear usage error.
+
 - **Explicit relevance feedback for search runs (Quality Lab)** (#1801) —
   a committed `query_run_id` now accepts local judgments (`relevant` /
   `not_relevant`) for chunks in that run's snapshot: new `search_feedback`

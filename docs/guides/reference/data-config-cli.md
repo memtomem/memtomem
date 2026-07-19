@@ -369,6 +369,10 @@ mm context sync --include=skills --scope user --force-unsafe   # bypass Gate A o
 mm context sync --include=skills --scope project_local   # NO_FANOUT skip (no runtime per ADR §3)
 mm context sync --include=agents,commands --label production # sync using the 'production' labeled version (agents/commands only)
 mm context sync --all-projects --yes   # batch over every enrolled on-disk project (project_shared only, ADR-0025)
+mm context sync --runtime claude --include=skills   # fan out to ONE runtime only (repeatable; default all; skills/agents/commands only)
+mm context pull agents my-agent        # PREVIEW what a Pull would land in the Store, per runtime candidate (read-only, source-selectable)
+mm context pull agents my-agent --diff # preview + unified diff of the would-land content vs the current Store
+mm context pull agents my-agent --from gemini --apply --scope project_shared # import ONE runtime's copy; --from disambiguates divergent candidates (ADR-0030 §5)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
 mm context update skill <name> --force-head  # deliberately follow older/divergent Wiki HEAD; use --force separately for local edits
