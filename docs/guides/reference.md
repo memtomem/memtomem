@@ -87,8 +87,8 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **98 current MCP tools** organized into categories. Full mode
-also registers the deprecated `mem_context_migrate` compatibility alias (99
+memtomem provides **99 current MCP tools** organized into categories. Full mode
+also registers the deprecated `mem_context_migrate` compatibility alias (100
 registered names total):
 
 | Category | Tools | What they do |

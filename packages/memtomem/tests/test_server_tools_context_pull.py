@@ -309,9 +309,65 @@ async def test_user_tier_secret_bypassable_with_literal_true(proj: Path) -> None
     assert _store_exists(proj, "agents", "a", scope="user")
 
 
+@pytest.mark.parametrize(
+    "flag",
+    ["overwrite", "apply", "force_unsafe_import", "allow_host_writes", "confirm_project_shared"],
+)
+@pytest.mark.parametrize("bad", ["false", "true", 1, 0, "yes", None])
+async def test_stringified_booleans_are_refused_via_mem_do(
+    proj: Path, flag: str, bad: object
+) -> None:
+    """``mem_do`` forwards params raw. A stringified boolean must be REFUSED,
+    not coerced — ``"false"`` is truthy in Python, so a coercing implementation
+    would turn a declined consent into a write to the git-tracked tier."""
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
+    out = await mem_do(
+        action="context_pull",
+        params={"kind": "agents", "name": "a", "scope": "project_shared", flag: bad},
+    )
+    assert out.startswith("error:")
+    assert flag in out
+    assert "literal boolean" in out
+    assert not _store_exists(proj, "agents", "a")
+
+
+async def test_apply_false_string_does_not_write(proj: Path) -> None:
+    """The headline of the strict-bool guard: apply="false" must NOT execute."""
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
+    out = await mem_do(
+        action="context_pull",
+        params={
+            "kind": "agents",
+            "name": "a",
+            "scope": "project_shared",
+            "apply": "false",
+            "confirm_project_shared": "false",
+        },
+    )
+    assert out.startswith("error:")
+    assert not _store_exists(proj, "agents", "a")
+
+
+def test_pull_reason_scrubs_residual_absolute_paths() -> None:
+    """Paths under neither the project root nor the frozen ``$HOME`` (a
+    symlinked runtime dir, an odd mount) are scrubbed — the neutral twin of the
+    web ``_redact_pull_reason`` backstop."""
+    from memtomem.server.tools.context import _redact_pull_reason
+
+    out = _redact_pull_reason(
+        "could not read '/Volumes/My Drive/secrets/skill.md': EACCES",
+        Path("/some/project"),
+    )
+    assert "/Volumes" not in out
+    assert "My Drive" not in out
+    assert "<path>" in out
+
+
 async def test_force_unsafe_string_does_not_bypass_via_mem_do(proj: Path) -> None:
     """``mem_do`` forwards params raw, so a string ``"true"`` must NOT open the
-    Gate A valve (mirror the web ``_only_literal_true``)."""
+    Gate A valve. Strict-bool refuses it outright (stricter than the web
+    ``_only_literal_true``, which silently coerces to False) — either way the
+    secret never lands."""
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", f"tok {_SECRET}")}, scope="user")
     out = await mem_do(
         action="context_pull",
@@ -324,33 +380,56 @@ async def test_force_unsafe_string_does_not_bypass_via_mem_do(proj: Path) -> Non
             "force_unsafe_import": "true",  # string, not literal True
         },
     )
-    assert out.startswith("privacy block:")
+    assert out.startswith("error:")
+    assert "force_unsafe_import" in out
     assert not _store_exists(proj, "agents", "a", scope="user")
 
 
 # ── PullApplyStatus parity: every status has a rendering branch ────────────────
 
 
-def test_every_pull_status_has_a_render_branch() -> None:
-    """Guard: each ``PullApplyStatus`` member is handled by ``_format_pull_result``
-    (via the applied / gate_blocked / error-4 branches or the refused fallback),
-    so a new engine status can never silently render as a bare ``refused:`` that
-    the web route would have surfaced differently. Mirrors the web
-    ``_finalize_pull`` 4-status contract."""
+def test_pull_status_buckets_are_exhaustive() -> None:
+    """Every ``PullApplyStatus`` member must be classified into exactly one
+    rendering bucket. Adding an engine status without classifying it fails HERE
+    (and renders fail-closed as ``error: unhandled Pull status`` at runtime),
+    rather than silently inheriting a benign ``refused:`` prefix."""
     from typing import get_args
 
     from memtomem.context.pull_apply import PullApplyStatus
-    from memtomem.server.tools import context as ctx
+    from memtomem.server.tools.context import (
+        _PULL_ERROR_STATUSES,
+        _PULL_REFUSAL_STATUSES,
+    )
 
     statuses = set(get_args(PullApplyStatus))
-    # The four HTTP-semantic statuses the web maps to non-200 → MCP "error:".
-    http_semantic = {"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"}
-    assert http_semantic <= statuses  # the contract set still exists
-    # The tool renders these buckets explicitly; everything else is the
-    # actionable-refusal fallback. Assert the buckets are wired (source-grep the
-    # rendering function so a rename here fails loudly).
-    src = Path(ctx.__file__).read_text(encoding="utf-8")
-    assert 'result.status == "applied"' in src
-    assert 'result.status == "gate_blocked"' in src
-    for s in http_semantic:
-        assert f'"{s}"' in src
+    explicit = {"applied", "gate_blocked"}  # handled by their own branches
+    covered = explicit | set(_PULL_ERROR_STATUSES) | set(_PULL_REFUSAL_STATUSES)
+    assert covered == statuses, (
+        f"unclassified={sorted(statuses - covered)}, stale={sorted(covered - statuses)}"
+    )
+    # Buckets must not overlap — a status renders with exactly one prefix.
+    assert not (_PULL_ERROR_STATUSES & _PULL_REFUSAL_STATUSES)
+    # The four the web route maps to non-200 are exactly the MCP "error:" set.
+    assert set(_PULL_ERROR_STATUSES) == {
+        "lock_timeout",
+        "plan_stale",
+        "snapshot_failed",
+        "write_failed",
+    }
+
+
+def test_unknown_status_fails_closed() -> None:
+    """An unclassified status renders as ``error:``, never ``refused:``."""
+    from memtomem.context.pull_apply import PullApplyResult
+    from memtomem.server.tools.context import _format_pull_result
+
+    bogus = PullApplyResult(
+        status="some_future_status",  # type: ignore[arg-type]
+        kind="agents",
+        name="a",
+        scope="user",
+        reason="whatever",
+    )
+    out = _format_pull_result(bogus, Path("/nonexistent"))
+    assert out.startswith("error:")
+    assert "unhandled Pull status" in out

@@ -2584,6 +2584,73 @@ async def mem_context_promote(
 #: the ``lock_timeout`` outcome instead of hanging the call.
 _PULL_LOCK_BUDGET_S = 30.0
 
+#: ``PullApplyStatus`` → rendering bucket. Exhaustive by construction: the
+#: ``applied`` / ``gate_blocked`` branches plus these two sets must cover every
+#: member (pinned by ``test_every_pull_status_has_a_render_branch``), and an
+#: unrecognized status fails CLOSED rather than defaulting to ``refused:`` —
+#: a new engine status must be classified deliberately, not inherit a prefix
+#: that could understate it (e.g. a future data-loss status rendering as a
+#: benign refusal).
+#: The four the web route maps to non-200 (503/409/500/500) → ``error:``.
+_PULL_ERROR_STATUSES = frozenset({"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"})
+#: Actionable domain refusals the web route returns as a typed HTTP 200.
+_PULL_REFUSAL_STATUSES = frozenset(
+    {
+        "source_conflict",
+        "nothing_importable",
+        "selected_landing_error",
+        "canonical_exists",
+        "skills_overwrite_unsupported",
+        "snapshot_requires_dir_layout",
+        "target_conflict",
+    }
+)
+
+#: Write / consent flags on ``mem_context_pull``. ``mem_do`` forwards params RAW
+#: (``meta.py`` ``info.fn(**kwargs)``), so a stringified boolean would reach the
+#: tool untyped and read truthy — ``apply="false"`` would execute, and
+#: ``confirm_project_shared="false"`` would count as consent to write the
+#: git-tracked tier. Every one of these is validated with :func:`_strict_bool`.
+_PULL_BOOL_FLAGS = (
+    "overwrite",
+    "apply",
+    "force_unsafe_import",
+    "allow_host_writes",
+    "confirm_project_shared",
+)
+
+
+def _strict_bool(value: object, field: str) -> bool:
+    """Accept ONLY a literal ``True`` / ``False``; reject anything else.
+
+    The MCP twin of the web ``_only_literal_true`` validator, generalized to
+    both polarities because a *falsy-looking* string is the dangerous direction
+    here: ``"false"`` is truthy in Python, so a coercing implementation would
+    turn a declined consent into a write. Fails closed with a crisp message
+    instead of silently normalizing, so a malformed agent call is corrected
+    rather than acted on. ``1`` / ``0`` are rejected too (``1 is True`` is
+    ``False`` — ints are not booleans).
+    """
+    if value is True or value is False:
+        return value
+    raise ValueError(
+        f"{field} must be a literal boolean (true/false), got "
+        f"{type(value).__name__} {value!r} — a stringified boolean is refused "
+        "because 'false' would read as true."
+    )
+
+
+def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
+    """Redact a Pull engine reason for the MCP wire (defense in depth).
+
+    ``_redact_reason`` strips the roots it is handed plus the import-frozen
+    ``$HOME``; :func:`scrub_absolute_paths` then removes any residual absolute
+    path under neither (mirrors the web ``_redact_pull_reason`` composition).
+    """
+    from memtomem.context.error_redact import scrub_absolute_paths
+
+    return scrub_absolute_paths(_redact_reason(reason, *roots))
+
 
 def _format_pull_preview(
     preview: "PullPreview", root: Path, *, overwrite: bool, only_runtime: str | None
@@ -2607,7 +2674,7 @@ def _format_pull_preview(
             notes: list[str] = []
             if c.override_warning:
                 notes.append("matches vendor override — pull would bake it into base")
-            reason = _redact_reason(c.reason, root)
+            reason = _redact_pull_reason(c.reason, root)
             if reason:
                 notes.append(reason)
             if c.landing_group is not None and preview.distinct_landing_count > 1:
@@ -2655,7 +2722,7 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     """
     if result.status == "applied":
         if result.write_outcome == "identical":
-            return f"{_redact_reason(result.reason, root)}"
+            return f"{_redact_pull_reason(result.reason, root)}"
         dupes = (
             f" (byte-identical copies also in: {', '.join(result.duplicate_runtimes)})"
             if result.duplicate_runtimes
@@ -2675,12 +2742,17 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
             else ""
         )
         return f"privacy block: {result.reason}{valve}"
-    if result.status in ("lock_timeout", "plan_stale", "snapshot_failed", "write_failed"):
-        return f"error: {_redact_reason(result.reason, root)}"
-    # Actionable domain refusals: source_conflict, canonical_exists,
-    # skills_overwrite_unsupported, snapshot_requires_dir_layout,
-    # nothing_importable, selected_landing_error, target_conflict.
-    return f"refused: {_redact_reason(result.reason, root)}"
+    if result.status in _PULL_ERROR_STATUSES:
+        return f"error: {_redact_pull_reason(result.reason, root)}"
+    if result.status in _PULL_REFUSAL_STATUSES:
+        return f"refused: {_redact_pull_reason(result.reason, root)}"
+    # Fail closed: an engine status this tool has not classified must not
+    # inherit a benign prefix. Surface it as an error naming the status so the
+    # gap is visible (and the parity test fails first).
+    return (
+        f"error: unhandled Pull status {result.status!r} — this MCP surface has "
+        f"not classified it. {_redact_pull_reason(result.reason, root)}"
+    )
 
 
 @mcp.tool()
@@ -2760,6 +2832,37 @@ async def mem_context_pull(
     from memtomem.context.pull_preview import preview_pull
     from memtomem.context.scope_resolver import canonical_artifact_dir
 
+    # Strict-boolean the write/consent flags BEFORE anything else: via mem_do
+    # these arrive raw, and a stringified boolean is truthy — "false" would
+    # execute the write and count as consent (see _strict_bool / _PULL_BOOL_FLAGS).
+    try:
+        flags = dict(
+            zip(
+                _PULL_BOOL_FLAGS,
+                (
+                    _strict_bool(v, f)
+                    for f, v in zip(
+                        _PULL_BOOL_FLAGS,
+                        (
+                            overwrite,
+                            apply,
+                            force_unsafe_import,
+                            allow_host_writes,
+                            confirm_project_shared,
+                        ),
+                        strict=True,
+                    )
+                ),
+                strict=True,
+            )
+        )
+    except ValueError as exc:
+        return f"error: {exc}"
+    overwrite = flags["overwrite"]
+    apply = flags["apply"]
+    allow_host_writes = flags["allow_host_writes"]
+    confirm_project_shared = flags["confirm_project_shared"]
+
     k = kind.strip()
     nm = name.strip()
     frm = from_runtime.strip() or None
@@ -2784,12 +2887,10 @@ async def mem_context_pull(
     except InvalidNameError as exc:
         return f"error: {exc}"
     artifact_kind = cast("ArtifactKind", k)
-    # Gate A bypass valve: LITERAL True only. ``mem_do`` forwards params raw
-    # (meta.py ``info.fn(**kwargs)``), so a string ``"true"`` / ``1`` would reach
-    # here untyped and read truthy in the engine — mirror the web
-    # ``PullApplyRequest._only_literal_true`` so nothing but a real boolean True
-    # can open the privacy valve (ADR-0011 §5, [[flag_presence_not_content]]).
-    force_bypass = force_unsafe_import is True
+    # Gate A bypass valve — already strict-booled above, so nothing but a real
+    # ``True`` opens it (ADR-0011 §5; user tier only, project_shared hard-refuses
+    # in the engine regardless).
+    force_bypass = flags["force_unsafe_import"]
     # Validate from_runtime eligibility up front (export-only / unknown →
     # ValueError), reusing the engine's wording — a request-shape error, not an
     # engine outcome. Parity with the CLI / web boundary guard.
@@ -2845,15 +2946,16 @@ async def mem_context_pull(
         )
     if plan.scope == "user" and not allow_host_writes:
         target = canonical_artifact_dir(plan.kind, "user", plan.project_root) / plan.name
-        # Disclose the host path HOME-relative off the LIVE home (never
-        # ``str(target)`` — ``error_redact._HOME`` is frozen at import, so a
-        # process/test whose $HOME differs would leak the absolute path + OS
-        # username into the agent transcript). ``~/.memtomem`` in both prod and
-        # an isolated-HOME test.
+        # Disclose the host path HOME-relative off the LIVE, RESOLVED home
+        # (never ``str(target)`` — ``error_redact._HOME`` is frozen at import,
+        # so a process whose $HOME differs, or a symlinked home, would leak the
+        # absolute physical path + OS username into the agent transcript).
+        # Resolve BOTH sides so a symlinked home still matches. The fallback is
+        # a fixed string, never the formatted target.
         try:
-            shown = "~/" + target.relative_to(Path.home()).as_posix()
-        except ValueError:  # pragma: no cover — user tier is always under HOME
-            shown = _redact_reason(str(target), root)
+            shown = "~/" + target.resolve().relative_to(Path.home().resolve()).as_posix()
+        except (ValueError, OSError):  # pragma: no cover — user tier is under HOME
+            shown = f"the user tier (~/.memtomem/{plan.kind}/{plan.name})"
         return (
             f"needs confirmation: Pull {k}/{nm} from {plan.selected_runtime} writes to "
             f"the host path {shown} (outside any project root). Re-call with "
