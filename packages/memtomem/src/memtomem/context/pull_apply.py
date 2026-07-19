@@ -192,9 +192,11 @@ def _expected_digest(
         return _payload_digest(store_payload)
     # Single-file agents/commands: bytes of the one payload entry. ``_read_store``
     # guarantees a present (non-None) payload is non-empty for these kinds
-    # (``[("", bytes)]``); assert it so a future contract change surfaces here
-    # rather than as a silent IndexError.
-    assert store_payload, "agents/commands store_payload must be non-empty when present"
+    # (``[("", bytes)]``); guard it explicitly (not ``assert`` — stripped under
+    # -O) so a future contract change fails loud here, not as a silent
+    # IndexError.
+    if not store_payload:
+        raise RuntimeError("agents/commands store_payload must be non-empty when present")
     return hashlib.sha256(store_payload[0][1]).hexdigest()
 
 
@@ -452,7 +454,10 @@ def prepare_pull(
     # (so the bytes that were judged are the bytes committed). A block is
     # recorded here and refused before any confirmation prompt (R1/R2 Minor 2);
     # a proceed defers its counter record to commit-on-success.
-    assert selected.landing_full is not None  # computable candidates only reach here
+    if selected.landing_full is None:
+        # Unreachable: only computable candidates (landing_full set) reach here —
+        # the §5 selection above rejects landing_error / not_importable rows.
+        raise RuntimeError(f"selected candidate {selected.runtime} has no captured content")
     captured = tuple(selected.landing_full)
     src = _runtime_candidate_path(kind, selected.runtime, name, scope, resolved_root)
     src_root = src.parent if kind == "skills" else src  # type: ignore[union-attr]
