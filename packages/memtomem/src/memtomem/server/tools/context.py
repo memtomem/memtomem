@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from memtomem.context._names import Layout
     from memtomem.context.mcp_servers_copy import McpServerCopyResult
     from memtomem.context.migrate import MigrateRow, MigrateScopeResult
+    from memtomem.context.pull_apply import PullApplyResult
+    from memtomem.context.pull_preview import PullPreview
     from memtomem.context.scope_resolver import ArtifactKind
     from memtomem.context.transfer import TransferMode, TransferResult
     from memtomem.context.versioning import VersionsManifest
@@ -2562,3 +2564,301 @@ async def mem_context_promote(
         )
     except versioning.VersionError as exc:
         return f"error: {exc}"
+
+
+# ── mem_context_pull (ADR-0030 PR-H) ──────────────────────────────────────────
+# Headless parity for ``mm context pull`` (PR-C) and the web Pull route (PR-D)
+# over the SAME result-coded :mod:`context.pull_apply` engine (``prepare_pull``
+# → ``commit_pull``) and :mod:`context.pull_preview` (``preview_pull``). No
+# domain logic is re-implemented here: the tool validates the request shape,
+# renders the engine's typed outcome as prefix-coded text, and — because MCP
+# cannot prompt — gates destination consent by returning a ``needs
+# confirmation`` line (never a live prompt), exactly as ``mem_context_sync`` /
+# ``mem_context_artifact_transfer`` do for their host-write / project_shared
+# opt-ins.
+
+#: Canonical-lock acquisition budget forwarded to ``commit_pull``. Same value
+#: and rationale as the web route's ``_PULL_LOCK_BUDGET_S`` and this module's
+#: ``_TRANSFER_LOCK_BUDGET_S``: an MCP agent cannot Ctrl-C a stuck cross-process
+#: lock wait, so the engine self-aborts (writing nothing) and the tool renders
+#: the ``lock_timeout`` outcome instead of hanging the call.
+_PULL_LOCK_BUDGET_S = 30.0
+
+
+def _format_pull_preview(
+    preview: "PullPreview", root: Path, *, overwrite: bool, only_runtime: str | None
+) -> str:
+    """Dry-run Pull preview as a single prefix-free text blob (MCP twin of the
+    CLI ``_print_pull_preview``).
+
+    ``only_runtime`` (from ``from_runtime``) narrows the rows + summary to the
+    named source, so a scoped preview shows exactly what an ``apply`` from that
+    runtime would land. Every candidate ``reason`` is display-sanitized through
+    :func:`_redact_reason` — a ``*_error`` row's raw text may embed an absolute
+    source path, and this result flows to the calling agent's transcript.
+    """
+    rows = [c for c in preview.candidates if only_runtime is None or c.runtime == only_runtime]
+    lines: list[str] = [f"Pull preview: {preview.kind}/{preview.name} → {preview.scope}"]
+    if not rows:
+        who = f"runtime '{only_runtime}'" if only_runtime else "any runtime"
+        lines.append(f"  ({who} has no {preview.kind}/{preview.name} to pull)")
+    else:
+        for c in rows:
+            notes: list[str] = []
+            if c.override_warning:
+                notes.append("matches vendor override — pull would bake it into base")
+            reason = _redact_reason(c.reason, root)
+            if reason:
+                notes.append(reason)
+            if c.landing_group is not None and preview.distinct_landing_count > 1:
+                notes.append(f"content #{c.landing_group + 1}")
+            gate = c.gate_status or "-"
+            suffix = f" — {'; '.join(notes)}" if notes else ""
+            lines.append(f"  {c.runtime}: content={c.content_status} gate={gate}{suffix}")
+    store = "present" if preview.store_present else "absent"
+    if only_runtime is not None:
+        lines.append(f"  store: {store} · source: {only_runtime}")
+    elif preview.ambiguous:
+        lines.append(
+            f"  store: {store} · distinct contents: {preview.distinct_landing_count} · "
+            "ambiguous — pass from_runtime=<runtime> to apply"
+        )
+    elif preview.auto_source:
+        lines.append(f"  store: {store} · auto-source: {preview.auto_source}")
+    else:
+        lines.append(f"  store: {store} · nothing pullable")
+    if preview.store_present and preview.kind == "skills":
+        lines.append(
+            "  note: the Store already has this skill; overwriting skills is not yet "
+            "supported (ADR-0030 §10) — delete the canonical skill first."
+        )
+    elif preview.store_present and not overwrite:
+        lines.append("  note: apply=True needs overwrite=True (the Store already has it).")
+    lines.append("  Re-call with apply=True to execute.")
+    return "\n".join(lines)
+
+
+def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
+    """Render a ``prepare_pull`` refusal / ``commit_pull`` outcome as a
+    prefix-coded MCP line (``error:`` / ``refused:`` / ``privacy block:`` /
+    success), mirroring the web ``_finalize_pull`` status routing.
+
+    The four HTTP-semantic statuses the web route maps to non-200
+    (``lock_timeout`` 503, ``plan_stale`` 409, ``snapshot_failed`` /
+    ``write_failed`` 500) have no status channel over MCP, so they surface as
+    ``error:`` text; ``gate_blocked`` is ``privacy block:``; the actionable
+    domain refusals are ``refused:``; ``applied`` (incl. the byte-identical
+    no-op) is a success line. Every ``reason`` is redacted — except the
+    ``gate_blocked`` remediation text, which round-trips the full path so the
+    agent can act on it (matching ``mem_context_sync``'s ``privacy block:`` and
+    the web privacy 422; see ``context.error_redact`` module docstring).
+    """
+    if result.status == "applied":
+        if result.write_outcome == "identical":
+            return f"{_redact_reason(result.reason, root)}"
+        dupes = (
+            f" (byte-identical copies also in: {', '.join(result.duplicate_runtimes)})"
+            if result.duplicate_runtimes
+            else ""
+        )
+        return (
+            f"Pulled {result.kind}/{result.name} from {result.selected_runtime} "
+            f"into {result.scope} ({result.write_outcome}).{dupes}"
+        )
+    if result.status == "gate_blocked":
+        # Remediation-critical: keep the full path (the agent must locate the
+        # hit to review it), exactly as the sync ``privacy block:`` path does.
+        valve = (
+            " Re-call with force_unsafe_import=True to bypass for a reviewed "
+            "false positive (user tier only)."
+            if result.force_bypassable
+            else ""
+        )
+        return f"privacy block: {result.reason}{valve}"
+    if result.status in ("lock_timeout", "plan_stale", "snapshot_failed", "write_failed"):
+        return f"error: {_redact_reason(result.reason, root)}"
+    # Actionable domain refusals: source_conflict, canonical_exists,
+    # skills_overwrite_unsupported, snapshot_requires_dir_layout,
+    # nothing_importable, selected_landing_error, target_conflict.
+    return f"refused: {_redact_reason(result.reason, root)}"
+
+
+@mcp.tool()
+@tool_handler
+@register("context")
+async def mem_context_pull(
+    kind: str = "",
+    name: str = "",
+    from_runtime: str = "",
+    scope: str = "",
+    overwrite: bool = False,
+    apply: bool = False,
+    force_unsafe_import: bool = False,
+    allow_host_writes: bool = False,
+    confirm_project_shared: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Pull one runtime's copy of an artifact into the canonical Store.
+
+    Headless parity for ``mm context pull`` and the web Pull route — the reverse
+    of Push/fan-out (``mem_context_sync``): it brings a runtime's on-disk copy
+    (Claude Code / Gemini CLI / Codex CLI / Kimi) of a ``skills`` / ``agents`` /
+    ``commands`` artifact back into the ``.memtomem`` canonical Store, over the
+    same source-selectable, privacy-gated :mod:`context.pull_apply` engine. No
+    logic is re-implemented; refusals are the engine's typed result codes.
+
+    Dry-run by default (``apply=False``) returns a preview: each runtime's
+    content relation to the Store (``new`` / ``differs`` / ``identical`` /
+    error) and the privacy-gate outcome for the destination tier. Set
+    ``apply=True`` to execute. When runtime copies diverge, ``apply`` refuses
+    until you name a source via ``from_runtime`` (ADR-0030 §5).
+
+    Args:
+        kind: ``skills`` | ``agents`` | ``commands``. Required. (``settings`` /
+            ``mcp-servers`` have no per-runtime Pull source.)
+        name: Artifact name to pull. Required.
+        from_runtime: Pull from this runtime only (per-kind eligibility: skills
+            = claude/gemini/codex/kimi; agents/commands = claude/gemini).
+            Required when candidates diverge (else the apply refuses with
+            ``source_conflict``); omit to auto-select the single source.
+        scope: Destination canonical tier — ``user`` or ``project_shared``
+            (default ``project_shared``). ``apply=True`` into ``project_shared``
+            requires this passed explicitly (ADR-0030 §11); ``project_local`` is
+            rejected (no runtime fan-out to pull from — ADR-0011 §3).
+        overwrite: Allow replacing an existing Store entry (agents/commands: the
+            current canonical is snapshotted first; skills: not yet supported —
+            ADR-0030 §10).
+        apply: Execute the pull. Default ``False`` returns a dry-run preview.
+        force_unsafe_import: Bypass Gate A for a reviewed false positive — user
+            tier only (``project_shared`` hard-refuses regardless, ADR-0011 §5).
+            Literal ``True`` only; a string/int does not enable the bypass.
+        allow_host_writes: Required when ``scope='user'`` and ``apply=True`` —
+            the canonical lands at a host path outside any project root
+            (``~/.memtomem``). Re-call with ``allow_host_writes=True`` after
+            surfacing the host path to the user.
+        confirm_project_shared: Required when ``scope='project_shared'`` and
+            ``apply=True`` — the write lands in the git-tracked tier (history is
+            forever); MCP cannot prompt, so a missing confirmation returns a
+            ``needs confirmation`` line instead of writing.
+
+    Refusals are prefixed (``error:`` for bad input / a lock timeout / a stale
+    plan, ``refused:`` for a legitimate state that stops the pull — fix it and
+    re-call, ``needs confirmation:`` for a missing opt-in flag, ``privacy
+    block:`` for Gate A hits) so callers can branch on the prefix.
+    """
+    from memtomem.context._names import InvalidNameError, validate_name
+    from memtomem.context._runtime_targets import (
+        IMPORT_SOURCE_RUNTIMES,
+        resolve_import_runtimes,
+    )
+    from memtomem.context.pull_apply import (
+        PullApplyResult,
+        PullPlan,
+        commit_pull,
+        prepare_pull,
+    )
+    from memtomem.context.pull_preview import preview_pull
+    from memtomem.context.scope_resolver import canonical_artifact_dir
+
+    k = kind.strip()
+    nm = name.strip()
+    frm = from_runtime.strip() or None
+
+    if k not in IMPORT_SOURCE_RUNTIMES:
+        return (
+            f"error: kind {k or '(empty)'!r} has no Pull sources; choose one of: "
+            f"{', '.join(sorted(IMPORT_SOURCE_RUNTIMES))}."
+        )
+    scope_explicit = bool(scope.strip())
+    try:
+        artifact_scope = _resolve_artifact_mcp_scope(scope)
+    except ValueError as exc:
+        return f"error: {exc}"
+    if artifact_scope == "project_local":
+        return (
+            "error: project_local has no runtime fan-out to pull from (ADR-0011 §3); "
+            "pull into user or project_shared instead."
+        )
+    try:
+        validated = validate_name(nm, kind=f"{k[:-1]} name")
+    except InvalidNameError as exc:
+        return f"error: {exc}"
+    artifact_kind = cast("ArtifactKind", k)
+    # Gate A bypass valve: LITERAL True only. ``mem_do`` forwards params raw
+    # (meta.py ``info.fn(**kwargs)``), so a string ``"true"`` / ``1`` would reach
+    # here untyped and read truthy in the engine — mirror the web
+    # ``PullApplyRequest._only_literal_true`` so nothing but a real boolean True
+    # can open the privacy valve (ADR-0011 §5, [[flag_presence_not_content]]).
+    force_bypass = force_unsafe_import is True
+    # Validate from_runtime eligibility up front (export-only / unknown →
+    # ValueError), reusing the engine's wording — a request-shape error, not an
+    # engine outcome. Parity with the CLI / web boundary guard.
+    if frm is not None:
+        try:
+            resolve_import_runtimes(artifact_kind, frm)
+        except ValueError as exc:
+            return f"error: {exc}"
+
+    root = await asyncio.to_thread(_find_project_root)
+
+    if not apply:
+        preview = await asyncio.to_thread(
+            preview_pull,
+            artifact_kind,
+            validated,
+            scope=artifact_scope,
+            project_root=root,
+        )
+        return _format_pull_preview(preview, root, overwrite=overwrite, only_runtime=frm)
+
+    # ── apply ──
+    if artifact_scope == "project_shared" and not scope_explicit:
+        return (
+            "error: apply into the git-tracked project_shared tier requires an "
+            "explicit scope='project_shared' (ADR-0030 §11)."
+        )
+
+    outcome = await asyncio.to_thread(
+        prepare_pull,
+        artifact_kind,
+        validated,
+        scope=artifact_scope,
+        project_root=root,
+        source_runtime=frm,
+        overwrite=overwrite,
+        force_unsafe_import=force_bypass,
+        surface="mcp_context_pull",
+    )
+    if isinstance(outcome, PullApplyResult):
+        # A refusal, or the byte-identical no-op (status == "applied") — neither
+        # writes, so no destination-consent gate applies.
+        return _format_pull_result(outcome, root)
+
+    # A committable plan → a write is imminent. Gate destination consent now
+    # (never before: a source_conflict / nothing_importable must not prompt).
+    plan: PullPlan = outcome
+    if plan.scope == "project_shared" and not confirm_project_shared:
+        return (
+            f"needs confirmation: Pull {k}/{nm} from {plan.selected_runtime} writes to "
+            "the git-tracked project_shared canonical (history is forever). Re-call "
+            "with confirm_project_shared=True to proceed."
+        )
+    if plan.scope == "user" and not allow_host_writes:
+        target = canonical_artifact_dir(plan.kind, "user", plan.project_root) / plan.name
+        # Disclose the host path HOME-relative off the LIVE home (never
+        # ``str(target)`` — ``error_redact._HOME`` is frozen at import, so a
+        # process/test whose $HOME differs would leak the absolute path + OS
+        # username into the agent transcript). ``~/.memtomem`` in both prod and
+        # an isolated-HOME test.
+        try:
+            shown = "~/" + target.relative_to(Path.home()).as_posix()
+        except ValueError:  # pragma: no cover — user tier is always under HOME
+            shown = _redact_reason(str(target), root)
+        return (
+            f"needs confirmation: Pull {k}/{nm} from {plan.selected_runtime} writes to "
+            f"the host path {shown} (outside any project root). Re-call with "
+            "allow_host_writes=True to proceed."
+        )
+
+    result = await asyncio.to_thread(commit_pull, plan, lock_timeout=_PULL_LOCK_BUDGET_S)
+    return _format_pull_result(result, root)
