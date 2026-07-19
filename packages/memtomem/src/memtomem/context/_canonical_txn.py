@@ -43,6 +43,7 @@ in-process callers so the worker-thread flock never self-contends.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -102,7 +103,14 @@ _CANONICAL_LOCK_BUDGET_S: float = 30.0
 #   which has no per-artifact ``versions/`` store to snapshot into — refused
 #   with no write; the caller emits a ``snapshot_requires_dir_layout`` skip
 #   pointing at ``mm context migrate``.
-WriteOutcome = Literal["created", "overwritten", "exists", "identical", "flat_refused"]
+# - ``stale`` (PR-C / ADR-0030 §5): the caller passed an ``expected_state``
+#   (present, digest) captured at plan time and the destination observed under
+#   the lock no longer matches it — the destination was created, deleted, or
+#   its bytes changed between prepare and commit. Refused with no write; the
+#   caller (``pull_apply.commit_pull``) emits a ``plan_stale`` result so the
+#   user re-runs against the current state rather than overwriting a state
+#   they never previewed.
+WriteOutcome = Literal["created", "overwritten", "exists", "identical", "flat_refused", "stale"]
 
 
 def new_lock_budget() -> Callable[[], float]:
@@ -244,6 +252,20 @@ def versioning_op_locked(
         return op(_remaining())
 
 
+def _single_file_digest(path: Path) -> str | None:
+    """SHA-256 hex of *path*'s bytes, or ``None`` if it does not exist.
+
+    The ``expected_state`` precondition compares this against the digest a
+    caller froze at plan time (``pull_apply`` hashes the store copy's bytes the
+    same way). Any other ``OSError`` propagates — an unreadable-but-present
+    destination is a genuine failure, not a "no digest" match.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
 def write_canonical_locked(
     canonical_root: Path,
     name: str,
@@ -253,6 +275,8 @@ def write_canonical_locked(
     overwrite: bool,
     snapshot_note: str = "",
     lock_timeout: float | None = None,
+    expected_state: tuple[bool, str | None] | None = None,
+    pre_write: Callable[[], None] | None = None,
 ) -> tuple[WriteOutcome, Path, Layout]:
     """Resolve the canonical destination and write *content_bytes* under the lock.
 
@@ -276,6 +300,24 @@ def write_canonical_locked(
       ``("flat_refused", …)`` (a flat artifact has no per-artifact ``versions/``
       store; the caller points the user at ``mm context migrate``).
 
+    *expected_state* (ADR-0030 §5, PR-C, opt-in — ``None`` for every existing
+    caller, byte-identical behavior): a ``(present, digest)`` pair the caller
+    froze at plan time. Under the lock, before any exists/overwrite branching,
+    the destination's actual ``(exists, single-file sha-256)`` is compared to
+    it; **any** mismatch — created, deleted, or bytes-changed since the plan —
+    returns ``("stale", …)`` with no write, so a Pull cannot snapshot+overwrite
+    a state the user never previewed. ``digest`` is over a single canonical
+    file (the agents/commands shape); the skills tree precondition is checked
+    by ``pull_apply`` under its own lock, not here.
+
+    *pre_write* (opt-in — ``None`` for every existing caller): a callback run
+    **inside the lock**, only on the ``created``/``overwritten`` branches and
+    only right before the snapshot+write — never on ``exists``/``flat_refused``/
+    ``identical``/``stale`` (no audit for a non-write). It raises to abort
+    (``pull_apply`` passes the audited Gate A here so the scan records exactly
+    once, iff the write proceeds); the exception propagates like
+    :class:`SnapshotError`, leaving *dst* untouched.
+
     PR-B2b (ADR-0030 §6): the snapshot read + the replace run inside this one
     canonical-sidecar-lock transaction, so a concurrent writer cannot land
     between snapshot(A) and replace(C) and be lost. Lock order is normative:
@@ -298,6 +340,15 @@ def write_canonical_locked(
 
     with canonical_sidecar_lock(canonical_root, name, timeout=_remaining()):
         dst, layout = resolve_target()
+        if expected_state is not None:
+            # Destination-side plan precondition (ADR-0030 §5): the state the
+            # user previewed must still hold, or we refuse rather than write
+            # over a surprise. Existence AND content — a canonical that changed
+            # bytes (or migrated flat→dir with different bytes) while remaining
+            # present would otherwise be snapshotted and overwritten unapproved.
+            actual = (dst.exists(), _single_file_digest(dst))
+            if actual != expected_state:
+                return "stale", dst, layout
         if dst.exists():
             if not overwrite:
                 return "exists", dst, layout
@@ -314,6 +365,11 @@ def write_canonical_locked(
                 ) from exc
             if old_bytes == content_bytes:
                 return "identical", dst, layout
+            if pre_write is not None:
+                # Audited Gate A (or any caller precondition) runs here — after
+                # we have committed to overwriting, before the snapshot+write —
+                # so it records exactly once, only when the write proceeds.
+                pre_write()
             # Snapshot the pre-image under the SAME transaction (canonical
             # sidecar already held → versions.json child lock, one budget).
             # ``source_bytes`` snapshots exactly the bytes we just read, closing
@@ -344,6 +400,11 @@ def write_canonical_locked(
                 raise SnapshotError(f"could not snapshot {dst} before overwrite: {exc}") from exc
             atomic_write_bytes(dst, content_bytes)
             return "overwritten", dst, layout
+        if pre_write is not None:
+            # Create branch: same audited-once contract as the overwrite branch
+            # above — run the caller precondition only now that a write is
+            # certain, before the file lands.
+            pre_write()
         dst.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_bytes(dst, content_bytes)
         return "created", dst, layout

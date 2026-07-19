@@ -116,6 +116,7 @@ def apply_gate_a(
     message_kind: str,
     imported_so_far: int,
     surface: str = "cli_context_init",
+    raise_project_shared: bool = True,
 ) -> GateAOutcome:
     """Run :func:`privacy.enforce_write_guard` and decide proceed / skip / abort.
 
@@ -131,6 +132,15 @@ def apply_gate_a(
         ``scope != "project_shared"`` — return :class:`GateABlocked`
         with the matching ``code`` / ``hits_count`` / ``hint``.
       * Anything else — :class:`RuntimeError` (fail-loud on enum drift).
+
+    ``raise_project_shared=False`` (ADR-0030 PR-C, ``pull_apply``): a
+    ``project_shared`` block returns a typed :class:`GateABlocked` instead of
+    raising, so the pull engine stays click-free and maps it to a
+    ``gate_blocked`` result. The returned code is still whatever the guard
+    derived (``privacy_blocked`` for an ordinary unforced block,
+    ``privacy_blocked_project_shared`` for a refused force-bypass attempt) and
+    the hint is empty (project_shared is never force-bypassable). Every
+    existing caller keeps the default and the raising behavior byte-identical.
 
     Args:
         content_text: Bytes-decoded content to scan. Caller decodes with
@@ -187,15 +197,25 @@ def apply_gate_a(
     )
     if guard.decision in ("blocked", "blocked_project_shared"):
         if scope == "project_shared":
-            raise click.ClickException(
-                format_project_shared_block_message(
-                    src,
-                    hits_count=len(guard.hits),
-                    scope=scope,
-                    kind=message_kind,
-                    imported_so_far=imported_so_far,
+            if raise_project_shared:
+                raise click.ClickException(
+                    format_project_shared_block_message(
+                        src,
+                        hits_count=len(guard.hits),
+                        scope=scope,
+                        kind=message_kind,
+                        imported_so_far=imported_so_far,
+                    )
                 )
+            # Non-raising path (pull_apply): a typed refusal, NEVER bypassable
+            # (no ``--force-unsafe-import`` hint — the project_shared ban is
+            # hard, ADR-0011 §5).
+            ps_code: skip_codes.SkipCode = (
+                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED
+                if guard.decision == "blocked_project_shared"
+                else skip_codes.PRIVACY_BLOCKED
             )
+            return GateABlocked(code=ps_code, hits_count=len(guard.hits), hint="")
         code: skip_codes.SkipCode = (
             skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED
             if guard.decision == "blocked_project_shared"
