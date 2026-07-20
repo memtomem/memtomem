@@ -301,6 +301,42 @@ class TestStaleLeftoverReaping:
         assert not is_internal_artifact_dir(".staging-parity-notes.tmp")
         assert not is_internal_artifact_dir(".staging-parity-12345-xyz.tmp")
 
+    def test_owner_parse_splits_at_the_anchored_suffix(self) -> None:
+        """Pins the owner/suffix split itself, not just its consequences.
+
+        `internal_artifact_owner` is what makes reaping exact, and it is
+        unambiguous because the suffix is anchored to the end of the name: the
+        match must consume everything, so the suffix is necessarily the LAST
+        pid+rand run. (Measured, not assumed: the quantifier is irrelevant
+        here — greedy and non-greedy give identical results — and it is the
+        trailing `.tmp$` that does the work. An earlier version of this
+        docstring credited greediness and was wrong.)
+
+        The interesting input is a name carrying a second suffix-shaped run,
+        which is where an unanchored pattern would pick the wrong owner and
+        reap a neighbour.
+        """
+        from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
+
+        assert internal_artifact_owner(".old-foo-999999-abc123.tmp") == "foo"
+        assert internal_artifact_owner(".staging-foo-bar-999999-abc123.tmp") == "foo-bar"
+        # Two suffix-shaped runs: the LAST one is the suffix, the rest is the
+        # owner. A leftover carries exactly one pid+rand, so a skill genuinely
+        # named `foo-123-abc123` is the only way to produce this. Dropping the
+        # trailing `.tmp$` anchor is the mutation that flips this to "foo".
+        assert internal_artifact_owner(".old-foo-123-abc123-456-def789.tmp") == "foo-123-abc123"
+        # Not internal-shaped at all -> no owner (the #1229 rule).
+        assert internal_artifact_owner(".staging-parity-notes.tmp") is None
+        assert internal_artifact_owner("parity") is None
+        # The two predicates are one match, so they cannot disagree.
+        for name in (
+            ".old-foo-999999-abc123.tmp",
+            ".staging-parity-notes.tmp",
+            "parity",
+            ".old-archive.tmp",
+        ):
+            assert is_internal_artifact_dir(name) == (internal_artifact_owner(name) is not None)
+
     def test_reap_spares_user_dirs_matching_glob_but_not_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -537,6 +573,25 @@ class TestStaleLeftoverReaping:
 
         assert contended == [True], "copy_skill promoted without holding the destination lock"
         assert (dst / SKILL_MANIFEST).is_file()
+
+    def test_copy_skill_rejects_a_bad_source_without_touching_the_destination(
+        self, tmp_path: Path
+    ) -> None:
+        """Acquiring the lock has side effects — it creates `dst.parent` and a
+        `.{name}.lock` sidecar there — so the source is preflighted first.
+
+        Otherwise a call that previously created nothing at all would start
+        leaving a directory and a lock file behind whenever `src` was wrong.
+        """
+        root = tmp_path / "workspace"
+        src = root / "nonexistent"
+        dst = root / "runtime" / "skills" / "hello"
+
+        with pytest.raises(FileNotFoundError):
+            copy_skill(src, dst)
+
+        assert not dst.parent.exists(), "a rejected copy created the destination directory"
+        assert not root.exists(), "a rejected copy left artifacts behind"
 
     @pytest.mark.parametrize("scope", ["project_shared", "user"])
     def test_generate_reaps_stale_leftovers(

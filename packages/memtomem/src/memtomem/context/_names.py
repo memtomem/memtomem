@@ -151,10 +151,17 @@ def internal_artifact_owner(name: str) -> str | None:
     destination name is not recoverable from a prefix match. ``.old-foo-*``
     matches ``.old-foo-bar-<pid>-<rand>.tmp``, so a reaper working from a glob
     deletes the skill ``foo-bar``'s in-flight trees while holding only
-    ``foo``'s lock, and hyphenated skill names are the norm. The suffix is
-    anchored (``-<decimal pid>-<6 hex>.tmp``) and ``.+`` is greedy, so the
-    owner of ``.old-foo-bar-123-abc123.tmp`` parses as ``foo-bar`` and never
-    as ``foo``.
+    ``foo``'s lock, and hyphenated skill names are the norm.
+
+    The split is unambiguous because the suffix is **anchored to the end**
+    (``-<decimal pid>-<6 hex>`` followed by a literal ``.tmp`` and ``$``): the
+    match must consume the whole name, so the suffix is necessarily the LAST
+    pid+rand run and everything before it is the owner. That is what the
+    anchor buys, not the greediness of ``.+`` — both quantifiers agree here.
+    ``.old-foo-bar-123-abc123.tmp`` therefore parses as ``foo-bar``, never as
+    ``foo``, and ``.old-foo-123-abc123-456-def789.tmp`` as ``foo-123-abc123``,
+    which is only producible by a skill genuinely named that (a leftover
+    carries exactly one pid+rand).
     """
     match = _INTERNAL_DIR_RE.match(name)
     return match.group("owner") if match else None
@@ -173,9 +180,11 @@ def is_internal_artifact_dir(name: str) -> bool:
     Hiding is name-shape-only and stays that way: a leftover belonging to
     *another* destination must still be hidden from discovery. Deleting is
     the narrower question, and that is what :func:`internal_artifact_owner`
-    is for.
+    is for — which is also why this delegates to it rather than running its
+    own match. Two independent matches would be two things to keep in step;
+    one makes "hidden" and "deletable" agree by construction.
     """
-    return _INTERNAL_DIR_RE.match(name) is not None
+    return internal_artifact_owner(name) is not None
 
 
 def validate_name(s: object, *, kind: str = "name") -> str:

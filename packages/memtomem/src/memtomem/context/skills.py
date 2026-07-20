@@ -366,6 +366,20 @@ def _remove_internal_artifact(path: Path) -> None:
     review). The leak this fixes is one dead symlink; the cure must not be
     broader than that.
 
+    The classification is **best-effort against an out-of-band writer**: the
+    entry can change type between the ``lstat`` and the removal. Closing that
+    would need a portable compare-and-unlink, which does not exist (``O_PATH``
+    is Linux-only and Windows is supported here); a quarantine-rename dance
+    relocates the race rather than removing it. Reaching harm also requires
+    guessing the randomized reserved pathname while inside the destination
+    sidecar lock, so the residual is accepted.
+
+    On Windows, ``Path.unlink`` on a *directory* symlink is routed to
+    ``RemoveDirectoryW`` by CPython and works; it is nonetheless unexercised in
+    CI, since the symlink tests are ``requires_symlinks``-marked and skip
+    without Developer Mode. The failure mode if that ever changed is a logged
+    warning plus the pre-existing leak — no worse than before.
+
     Callers have already established ownership; this only decides *how*.
     """
     try:
@@ -576,7 +590,24 @@ def copy_skill(src: Path, dst: Path) -> None:
     rollback with nothing to restore (Codex review). Reaping cannot tell an
     in-flight move-aside from an abandoned one; the lock is what makes the
     distinction unnecessary.
+
+    Two consequences of taking that lock, both deliberate:
+
+    * The source is preflighted **before** acquiring it. Locking creates
+      ``dst.parent`` and a ``.{name}.lock`` sidecar there, so a bad ``src``
+      would otherwise leave both behind on a call that previously touched
+      nothing at all. :func:`_stage_skill` re-checks under the lock, so this
+      is a cheap early exit rather than the authoritative check: a source that
+      disappears before we lock still fails there, and one that disappears
+      mid-copy is already handled by staging cleanup.
+    * It can now raise ``TimeoutError`` after ``_SKILLS_LOCK_BUDGET_S``, when
+      another writer holds the destination past the budget. That is a new
+      failure mode for a public entry point; retry, or wait for the competing
+      push or import to finish.
     """
+    manifest = src / SKILL_MANIFEST
+    if not manifest.is_file():
+        raise FileNotFoundError(f"source skill missing {SKILL_MANIFEST}: {src}")
     with _file_lock(_lock_path_for(dst), timeout=_SKILLS_LOCK_BUDGET_S):
         staging = _stage_skill(src, dst)
         try:

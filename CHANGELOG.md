@@ -244,6 +244,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   first-party skill writer (ADR-0030 §6). It was the one path that could park a
   move-aside tree no other writer knew about, so a concurrent gateway push or
   import could reap it and leave this copy's rollback with nothing to restore.
+  Two consequences for direct callers of this public helper: it can now raise
+  `TimeoutError` when another writer holds the destination past the 30s
+  acquisition budget, and an invalid source is rejected before the lock is
+  taken so a failed call still creates nothing.
 - **Skills Pull no longer clobbers a skill created concurrently during
   staging** (#1839) — a first-time runtime→Store import now promotes its staged
   directory with an OS-level atomic no-replace rename. If a shell, editor, or
