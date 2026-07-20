@@ -42,6 +42,12 @@ def test_valid_names_pass_through(value: str) -> None:
         "   ",
         ".",
         "a\nb",
+        # TRAILING newline, distinct from the interior one above and previously
+        # untested. `fullmatch` already rejects it whatever the anchor, so this
+        # pins the documented "no control chars" contract rather than the `\Z`
+        # in the pattern — it would stay green if the anchor were loosened, and
+        # only turns red if the call site ever moves to `match`.
+        "skill\n",
         "a\rb",
         "a\x00b",
         "-x",  # leading dash

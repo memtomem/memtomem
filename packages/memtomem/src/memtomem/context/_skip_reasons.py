@@ -104,6 +104,20 @@ SNAPSHOT_REQUIRES_DIR_LAYOUT: Final = "snapshot_requires_dir_layout"
 # human reason carries the underlying error.
 SNAPSHOT_FAILED: Final = "snapshot_failed"
 
+# ``SWAP_RECOVERY_PENDING`` — an interrupted directory swap (ADR-0030 §10) left
+# the artifact in a state ``memtomem.context._dir_swap.recover_pending_swaps``
+# refuses to resolve on its own: two candidate trees whose provenance is
+# ambiguous, a destination recreated by a non-gateway writer, a tampered marker,
+# a transient that is not the directory it must be, or a swap marker that could
+# not be removed. Fail-closed: the requested operation did not run, and the
+# artifact stays wedged until it converges or an operator inspects the paths
+# named in the human reason. (Recovery may have safely advanced the artifact
+# before refusing — it never leaves it worse, and never half-applies the
+# operation that was asked for.) Deliberately NOT ``target_conflict``, which stays reserved
+# for genuine target/type conflicts at the destination: this one is not about
+# what the user put there, and the remediation is not "remove it and re-run".
+SWAP_RECOVERY_PENDING: Final = "swap_recovery_pending"
+
 # Explicit Pull (ADR-0030 §5, PR-C) apply-time refusals — emitted by
 # ``pull_apply.prepare_pull`` / ``commit_pull`` in ``PullApplyResult.reason_code``.
 #
@@ -192,6 +206,7 @@ SkipCode = Literal[
     "skills_overwrite_unsupported",
     "snapshot_requires_dir_layout",
     "snapshot_failed",
+    "swap_recovery_pending",
     "source_conflict",
     "nothing_importable",
     "selected_landing_error",

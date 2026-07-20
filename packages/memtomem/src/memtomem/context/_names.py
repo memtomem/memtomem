@@ -42,7 +42,22 @@ __all__ = [
 # cross-importing.
 Layout = Literal["flat", "dir"]
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# ``\Z``, never ``$``, in both name patterns here — but for different reasons,
+# and only one of them was a live defect.
+#
+# Python's ``$`` also matches immediately before a trailing newline, and a
+# newline is a legal POSIX filename character. Whether that is exploitable
+# depends entirely on the CALL SITE: ``.fullmatch()`` still requires the whole
+# string, so the trailing newline is left unconsumed and rejected regardless of
+# the anchor, while ``.match()`` stops at the assertion and accepts it.
+#
+# ``_NAME_RE`` is used via ``fullmatch`` below, so ``$`` never actually admitted
+# ``"skill\n"``; ``\Z`` here is belt-and-braces so the pattern stays correct if
+# a future caller reaches for ``match``. ``_INTERNAL_DIR_RE`` IS matched with
+# ``.match()``, where ``$`` classified ``.old-<name>-<pid>-<rand>.tmp\n`` as our
+# own leftover and handed it to the reaper — a name we never generate, so
+# anything wearing one belongs to somebody else.
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 _MAX_LEN = 64
 
 # ADR-0008 PR-C: per-(asset_type, vendor) override file extension. The
@@ -141,7 +156,7 @@ class InvalidNameError(ValueError):
 # ``.tmp`` names, so a looser ``.staging-*.tmp`` match would silently hide —
 # and let the sync-time reaper delete — a legitimately named user skill like
 # ``.staging-notes.tmp`` (Codex review on #1229).
-_INTERNAL_DIR_RE = re.compile(r"^\.(?:staging|old)-(?P<owner>.+)-\d+-[0-9a-f]{6}\.tmp$")
+_INTERNAL_DIR_RE = re.compile(r"^\.(?:staging|old)-(?P<owner>.+)-\d+-[0-9a-f]{6}\.tmp\Z")
 
 
 def internal_artifact_owner(name: str) -> str | None:
@@ -155,7 +170,7 @@ def internal_artifact_owner(name: str) -> str | None:
     ``foo``'s lock, and hyphenated skill names are the norm.
 
     The split is unambiguous because the suffix is both **anchored to the end**
-    (``-<decimal pid>-<6 hex>`` then a literal ``.tmp`` and ``$``) and matched
+    (``-<decimal pid>-<6 hex>`` then a literal ``.tmp`` and ``\\Z``) and matched
     after a **greedy** ``.+``: the match must consume the whole name and the
     owner takes as much of it as it can, so the suffix is necessarily the LAST
     pid+rand run. So ``.old-foo-bar-123-abc123.tmp`` parses as ``foo-bar``,

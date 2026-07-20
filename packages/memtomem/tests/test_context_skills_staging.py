@@ -301,6 +301,17 @@ class TestStaleLeftoverReaping:
         assert not is_internal_artifact_dir(".staging-parity-notes.tmp")
         assert not is_internal_artifact_dir(".staging-parity-12345-xyz.tmp")
 
+    def test_a_trailing_newline_is_not_an_internal_artifact(self) -> None:
+        """Python's ``$`` also matches immediately before a final newline, and
+        a newline is a legal POSIX filename character — so an anchored
+        ``…\\.tmp$`` would classify ``.old-parity-12345-abc123.tmp\\n`` as our
+        own leftover and hand it to the reaper. We never create such a name, so
+        anything wearing one belongs to somebody else."""
+        from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
+
+        assert not is_internal_artifact_dir(".old-parity-12345-abc123.tmp\n")
+        assert internal_artifact_owner(".staging-parity-12345-abc123.tmp\n") is None
+
     def test_owner_parse_splits_at_the_anchored_suffix(self) -> None:
         """Pins the owner/suffix split itself, not just its consequences.
 
@@ -311,7 +322,7 @@ class TestStaleLeftoverReaping:
         This pins the OUTCOME, and deliberately does not name a mechanism.
         Measured against `.old-foo-123-abc123-456-def789.tmp`, the anchor and
         the greedy quantifier are **independently sufficient** — only dropping
-        the trailing `.tmp$` *and* making `.+` lazy flips the parse to `foo`,
+        the trailing `.tmp\\Z` *and* making `.+` lazy flips the parse to `foo`,
         and either single mutation leaves this green. Two earlier versions of
         this docstring each credited one of them; the first was wrong, and the
         second "verified" its claim with a mutation that changed both at once.
