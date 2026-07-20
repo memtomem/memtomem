@@ -9,6 +9,19 @@ class StorageError(Mem2MemError):
     """Storage backend error."""
 
 
+class NamespaceConflictError(StorageError):
+    """A namespace rename was refused because it would collide.
+
+    Raised by ``rename_namespace`` when the target namespace already
+    exists (holds chunks or a metadata row) and the caller did not opt
+    into ``merge=True``, and when source and target are the same name.
+    Distinct from the generic :class:`StorageError` so the web layer can
+    answer 409 (a caller-resolvable conflict) instead of falling through
+    to the generic 500 handler; MCP surfaces it as a plain ``Error: …``
+    string via ``tool_handler``'s ``StorageError`` branch.
+    """
+
+
 class StorageStartupError(StorageError):
     """Classified, path-safe storage initialization failure."""
 

@@ -6,8 +6,15 @@ import re
 import sqlite3
 from typing import Callable, Sequence
 
-from memtomem.errors import StorageError
+from memtomem.errors import NamespaceConflictError, StorageError
+from memtomem.storage.base import NamespaceRenameResult
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders
+
+# Savepoint name for ``rename_namespace``. A savepoint (rather than a bare
+# commit/rollback pair) is what makes the method safe inside an outer
+# ``SqliteBackend.transaction()``: it can undo exactly its own writes without
+# tearing down a transaction it does not own.
+_RENAME_SAVEPOINT = "ns_rename"
 
 # Namespace names: alphanumeric, hyphens, underscores, dots, colons, @, spaces
 # (max 255). Automatic namespace generators use a ``{bucket}-{kind}:`` format
@@ -66,6 +73,7 @@ class NamespaceOps:
         self,
         get_db: Callable[[], sqlite3.Connection],
         has_vec_table: Callable[[], bool],
+        in_transaction: Callable[[], bool],
     ) -> None:
         self._get_db = get_db
         # Live lookup so reset_embedding_meta()'s flag flip is visible here
@@ -73,6 +81,11 @@ class NamespaceOps:
         # SqliteBackend.initialize(); a default would silently regress the
         # dim=0 guard if a future caller forgets it.
         self._has_vec_table = has_vec_table
+        # Same live-lookup shape for the backend's outer-transaction flag:
+        # ``rename_namespace`` must not commit or roll back a transaction
+        # opened by ``SqliteBackend.transaction()``. Required (no default)
+        # so a future caller can't silently regress to "always owns".
+        self._in_transaction = in_transaction
 
     async def list_namespaces(self) -> list[tuple[str, int]]:
         db = self._get_db()
@@ -135,16 +148,161 @@ class NamespaceOps:
             ) from exc
         return len(rows)
 
-    async def rename_namespace(self, old: str, new: str) -> int:
+    async def rename_namespace(
+        self, old: str, new: str, *, merge: bool = False
+    ) -> NamespaceRenameResult:
+        """Rename namespace *old* to *new*, atomically.
+
+        **Existence is decided by ``chunks`` ∪ ``namespace_metadata``.**
+        Those two tables are what a namespace *is*; everything else that
+        stores a namespace string merely points at it:
+
+        * ``sessions.namespace`` **follows** the rename inside the same
+          transaction — a live session's auto-summary filters chunks by
+          the namespace recorded on its row, so leaving it behind would
+          make the summary find nothing (``server/tools/session.py``).
+          It does not make a namespace *exist*, though: a session-only
+          namespace is not renameable and is not a rename target.
+        * ``chunk_links.namespace_target`` is deliberately **not**
+          rewritten. It records what the target namespace was called at
+          share time — an immutable historical fact, not a live pointer.
+
+        Conflict policy: if *new* already exists, the rename is refused
+        with :class:`NamespaceConflictError` **before any write**.
+        ``merge=True`` opts into consolidation; the target's metadata row
+        then wins (its description / color survive, only ``updated_at``
+        moves) and the source's row is dropped. Renaming a namespace onto
+        itself is always refused — under the merge branch it would delete
+        the sole metadata row.
+
+        Returns a :class:`NamespaceRenameResult`; ``chunks_moved == 0``
+        does not mean nothing changed (see that class).
+        """
         _ensure_valid_namespace(new)
+        if old == new:
+            raise NamespaceConflictError(
+                f"Cannot rename namespace {old!r} onto itself (source and target are equal)"
+            )
+
         db = self._get_db()
-        cursor = db.execute("UPDATE chunks SET namespace=? WHERE namespace=?", (new, old))
-        db.execute(
-            "UPDATE namespace_metadata SET namespace=?, updated_at=? WHERE namespace=?",
-            (new, now_iso(), old),
+        # Two independent signals — conflating them reopens a race (the
+        # same distinction ``SqliteBackend.reset_all`` documents):
+        #   * the write lock is gated on ``db.in_transaction``, because
+        #     ``transaction()`` only flips the backend's flag and does NOT
+        #     begin a SQLite transaction — a rename that is the first
+        #     statement inside that CM still needs its own BEGIN. Python's
+        #     lazy transaction start would only promote on the first DML,
+        #     leaving the preflight SELECTs below unprotected against a
+        #     concurrent writer creating the target between check and UPDATE.
+        #   * ownership (``_in_transaction``) decides only whether *we* are
+        #     allowed to commit/rollback the whole transaction at the end.
+        # The savepoint covers the borrowed case: a caller that catches this
+        # method's StorageError inside its own ``transaction()`` block must
+        # not end up committing our half-written rows.
+        owns_txn = not self._in_transaction()
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        db.execute(f"SAVEPOINT {_RENAME_SAVEPOINT}")
+
+        try:
+            if not self._namespace_exists(db, old):
+                # Renaming a namespace that holds nothing is a no-op, not an
+                # error — and not a conflict either, so this check precedes
+                # the target evaluation below. Falls through to the shared
+                # finalize path so the lock taken above is always released.
+                result = NamespaceRenameResult(
+                    chunks_moved=0, metadata_renamed=False, merged=False
+                )
+            else:
+                target_chunks = db.execute(
+                    "SELECT COUNT(*) FROM chunks WHERE namespace=?", (new,)
+                ).fetchone()[0]
+                target_meta = self._has_namespace_meta(db, new)
+                merged = bool(target_chunks) or target_meta
+                if merged and not merge:
+                    raise NamespaceConflictError(
+                        f"Cannot rename namespace {old!r} to {new!r}: target already exists "
+                        f"({target_chunks} chunk(s), metadata row: "
+                        f"{'yes' if target_meta else 'no'}). Pass merge=True to consolidate "
+                        f"into it (the target's description/color are kept), or move only the "
+                        f"chunks with ns_assign(namespace={new!r}, old_namespace={old!r})."
+                    )
+
+                now = now_iso()
+                chunks_moved = db.execute(
+                    "UPDATE chunks SET namespace=? WHERE namespace=?", (new, old)
+                ).rowcount
+                # Sessions follow the rename (see docstring) — their
+                # namespace is a live filter, not a historical record.
+                db.execute("UPDATE sessions SET namespace=? WHERE namespace=?", (new, old))
+
+                if target_meta:
+                    # Target wins: keep its description/color, drop the
+                    # source row. A plain UPDATE would trip the PK here —
+                    # which is exactly the failure this method used to leave
+                    # half-applied (#1874).
+                    db.execute(
+                        "UPDATE namespace_metadata SET updated_at=? WHERE namespace=?",
+                        (now, new),
+                    )
+                    db.execute("DELETE FROM namespace_metadata WHERE namespace=?", (old,))
+                    metadata_renamed = False
+                else:
+                    metadata_renamed = bool(
+                        db.execute(
+                            "UPDATE namespace_metadata SET namespace=?, updated_at=? "
+                            "WHERE namespace=?",
+                            (new, now, old),
+                        ).rowcount
+                    )
+                result = NamespaceRenameResult(
+                    chunks_moved=chunks_moved,
+                    metadata_renamed=metadata_renamed,
+                    merged=merged,
+                )
+
+            db.execute(f"RELEASE {_RENAME_SAVEPOINT}")
+            if owns_txn:
+                db.commit()
+            return result
+        except NamespaceConflictError:
+            # Typed passthrough — the conflict is caller-resolvable and each
+            # surface translates it (web → 409); wrapping it in a generic
+            # StorageError would erase that.
+            self._undo_rename(db, owns_txn)
+            raise
+        except Exception as exc:
+            self._undo_rename(db, owns_txn)
+            raise StorageError(f"rename_namespace failed, transaction rolled back: {exc}") from exc
+
+    @staticmethod
+    def _undo_rename(db: sqlite3.Connection, owns_txn: bool) -> None:
+        """Discard this rename's writes, whether we own the transaction or not."""
+        db.execute(f"ROLLBACK TO {_RENAME_SAVEPOINT}")
+        db.execute(f"RELEASE {_RENAME_SAVEPOINT}")
+        if owns_txn:
+            # Also ends the transaction opened above, releasing the RESERVED
+            # lock instead of leaving it for the next unrelated commit.
+            db.rollback()
+
+    @staticmethod
+    def _has_namespace_meta(db: sqlite3.Connection, namespace: str) -> bool:
+        return (
+            db.execute(
+                "SELECT 1 FROM namespace_metadata WHERE namespace=?", (namespace,)
+            ).fetchone()
+            is not None
         )
-        db.commit()
-        return cursor.rowcount
+
+    def _namespace_exists(self, db: sqlite3.Connection, namespace: str) -> bool:
+        """True when *namespace* holds chunks or a metadata row.
+
+        Sessions are excluded on purpose — see ``rename_namespace``.
+        """
+        row = db.execute(
+            "SELECT 1 FROM chunks WHERE namespace=? LIMIT 1", (namespace,)
+        ).fetchone()
+        return row is not None or self._has_namespace_meta(db, namespace)
 
     async def get_namespace_meta(self, namespace: str) -> dict | None:
         db = self._get_db()

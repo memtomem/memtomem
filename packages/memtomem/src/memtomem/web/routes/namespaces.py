@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from memtomem.errors import NamespaceConflictError
 from memtomem.web.deps import get_storage
 from memtomem.web.schemas import (
     DeleteResponse,
@@ -92,8 +93,23 @@ async def rename_namespace(
     body: RenameRequest,
     storage=Depends(get_storage),
 ) -> NamespaceInfoResponse:
-    """Rename a namespace."""
-    count = await storage.rename_namespace(namespace, body.new_name)
+    """Rename a namespace.
+
+    Refuses (409) when the target already exists, unless ``merge`` is a
+    literal ``true`` — see ``NamespaceOps.rename_namespace``.
+    """
+    try:
+        await storage.rename_namespace(namespace, body.new_name, merge=body.merge)
+    except NamespaceConflictError as exc:
+        # Caller-resolvable collision (existing target, or old == new), not an
+        # internal fault — without this it would land on the generic 500
+        # handler in web/app.py.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Report the target's resulting total, the way ``get_namespace`` does:
+    # on a merge the moved-row count and the namespace's size differ, and the
+    # list / info endpoints would immediately contradict a moved count.
+    ns_list = await storage.list_namespaces()
+    count = dict(ns_list).get(body.new_name, 0)
     meta = await storage.get_namespace_meta(body.new_name)
     return NamespaceInfoResponse(
         namespace=body.new_name,

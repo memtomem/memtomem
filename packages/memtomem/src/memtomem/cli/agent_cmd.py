@@ -58,9 +58,15 @@ async def _run_migrate(dry_run: bool) -> None:
             click.echo("No legacy `agent/` namespaces found. Nothing to migrate.")
             return
 
+        # Which targets already exist: the migration consolidates into them
+        # (rename passes merge=True), so say so up front rather than letting
+        # the dry-run imply an empty destination.
+        existing = {row["namespace"] for row in await comp.storage.list_namespace_meta()}
+
         click.echo(f"Legacy namespaces to migrate: {len(mapping)}")
         for old, new in mapping:
-            click.echo(f"  {old}  ->  {new}")
+            suffix = "  (merges into existing namespace)" if new in existing else ""
+            click.echo(f"  {old}  ->  {new}{suffix}")
 
         if dry_run:
             click.echo("\n(dry-run — no changes made. Re-run without --dry-run to apply.)")
@@ -68,18 +74,29 @@ async def _run_migrate(dry_run: bool) -> None:
 
         total = 0
         for old, new in mapping:
-            renamed = await comp.storage.rename_namespace(old, new)
-            total += renamed
-            click.echo(f"Renamed: {old}  ->  {new}  ({renamed} chunk(s))")
+            # merge=True: folding a legacy ``agent/{id}`` into an existing
+            # ``agent-runtime:{id}`` is the point of the migration — same
+            # agent, two namespace spellings.
+            result = await comp.storage.rename_namespace(old, new, merge=True)
+            total += result.chunks_moved
+            suffix = "  (merged)" if result.merged else ""
+            click.echo(f"Renamed: {old}  ->  {new}  ({result.chunks_moved} chunk(s)){suffix}")
 
         click.echo(f"\nMigration complete. {len(mapping)} namespace(s), {total} chunk(s) updated.")
 
 
 async def _collect_legacy_mapping(storage: SqliteBackend) -> list[tuple[str, str]]:
-    """Return ``[(old, new), ...]`` pairs for namespaces needing migration."""
-    pairs = await storage.list_namespaces()
+    """Return ``[(old, new), ...]`` pairs for namespaces needing migration.
+
+    Sourced from ``list_namespace_meta`` (chunks ∪ namespace_metadata), not
+    ``list_namespaces`` (chunks only): an agent registered under the legacy
+    ``agent/{id}`` name but never written to exists purely as a metadata row,
+    and a chunks-only listing would leave it stranded on the old prefix
+    forever.
+    """
+    rows = await storage.list_namespace_meta()
     out: list[tuple[str, str]] = []
-    for ns, _count in pairs:
+    for ns in sorted(row["namespace"] for row in rows):
         if not ns.startswith(_LEGACY_PREFIX):
             continue
         suffix = ns[len(_LEGACY_PREFIX) :]

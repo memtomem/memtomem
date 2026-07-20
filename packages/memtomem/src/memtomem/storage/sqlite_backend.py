@@ -24,7 +24,7 @@ from memtomem.errors import (
     StorageError,
     StorageStartupError,
 )
-from memtomem.storage.base import ChunkAuditRow, SearchMetadataFilter
+from memtomem.storage.base import ChunkAuditRow, NamespaceRenameResult, SearchMetadataFilter
 from memtomem.models import (
     Chunk,
     ChunkMetadata,
@@ -310,7 +310,9 @@ class SqliteBackend(
 
             stage = "schema"
             self._meta = MetaManager(self._get_db)
-            self._ns = NamespaceOps(self._get_db, lambda: self._has_vec_table)
+            self._ns = NamespaceOps(
+                self._get_db, lambda: self._has_vec_table, lambda: self._in_transaction
+            )
 
             self._dimension, self._dim_mismatch, self._model_mismatch = create_tables(
                 self._db,
@@ -2355,9 +2357,11 @@ class SqliteBackend(
         assert self._ns is not None
         return await self._ns.delete_by_namespace(namespace)
 
-    async def rename_namespace(self, old: str, new: str) -> int:
+    async def rename_namespace(
+        self, old: str, new: str, *, merge: bool = False
+    ) -> NamespaceRenameResult:
         assert self._ns is not None
-        return await self._ns.rename_namespace(old, new)
+        return await self._ns.rename_namespace(old, new, merge=merge)
 
     async def get_namespace_meta(self, namespace: str) -> dict | None:
         assert self._ns is not None
