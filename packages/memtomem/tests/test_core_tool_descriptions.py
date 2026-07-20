@@ -58,30 +58,57 @@ def test_no_core_description_is_empty() -> None:
     assert not empty, f"suspiciously short core descriptions: {empty}"
 
 
-#: Caller-visible contracts. Each is something a client cannot discover by
-#: calling the tool — it either governs consent, or it changes how the result
-#: must be interpreted. The trim may reword these; it may not drop them.
-_MUST_SURVIVE: tuple[tuple[str, str, str], ...] = (
-    ("mem_add", "force_unsafe", "the redaction-bypass valve must stay documented"),
-    ("mem_add", "redaction guard", "what force_unsafe bypasses"),
-    ("mem_add", "project_shared", "the tier that is never bypassable"),
-    ("mem_add", "confirm_project_shared", "consent for a git-tracked write"),
-    ("mem_add", "idempotency_key", "retry semantics"),
-    ("mem_add", "scope", "which tier the write lands in"),
-    ("mem_search", "scope", "which tiers are searched by default"),
-    ("mem_search", "structured", "the machine-readable output mode"),
-    ("mem_search", "score_scale", "scores are only comparable within one scale"),
-    ("mem_search", "rerank", "the latency escape hatch"),
-    ("mem_recall", "scope", "which tiers are recalled by default"),
-    ("mem_status", "stored", "DB side of an embedding mismatch"),
-    ("mem_status", "configured", "runtime side of an embedding mismatch"),
+#: Caller-visible contracts, pinned inside the **parsed ``Args:`` entry** for
+#: the parameter they belong to. Searching the whole description for a
+#: parameter *name* proves nothing: the name is already there as the argument
+#: label, so an entry could be emptied or inverted and still match. Each tuple
+#: is (tool, parameter, required phrase, why it matters).
+_ARG_CONTRACTS: tuple[tuple[str, str, str, str], ...] = (
+    ("mem_add", "force_unsafe", "redaction guard", "what the valve bypasses"),
+    ("mem_add", "force_unsafe", "bypassed", "the bypass is recorded, not silent"),
+    ("mem_add", "force_unsafe", "project_shared", "the tier that is never bypassable"),
+    ("mem_add", "confirm_project_shared", "consent", "a git-tracked write needs opt-in"),
+    ("mem_add", "idempotency_key", "24h", "how long a retry replays"),
+    ("mem_add", "idempotency_key", "at-least-once", "the semantics without a key"),
+    ("mem_add", "scope", "user", "the default write tier"),
+    ("mem_search", "scope", "project_shared", "how to search across projects"),
+    ("mem_search", "as_of", "valid_from", "which frontmatter drives the time filter"),
+    ("mem_search", "rerank", "top_k", "rerank=false also narrows the candidate pool"),
+    ("mem_search", "output_format", "structured", "the machine-readable mode"),
+    ("mem_recall", "scope", "user", "the default recall tier"),
 )
 
 
 @pytest.mark.parametrize(
-    "tool,marker,why", _MUST_SURVIVE, ids=[f"{t}-{m}" for t, m, _ in _MUST_SURVIVE]
+    "tool,param,phrase,why",
+    _ARG_CONTRACTS,
+    ids=[f"{t}-{p}-{ph}".replace(" ", "-") for t, p, ph, _ in _ARG_CONTRACTS],
 )
-def test_caller_visible_contracts_survive_the_trim(tool: str, marker: str, why: str) -> None:
+def test_argument_contracts_survive_the_trim(tool: str, param: str, phrase: str, why: str) -> None:
+    from memtomem.server.tool_registry import _parse_arg_docs
+
+    entry = _parse_arg_docs(_wire_descriptions()[tool]).get(param, "")
+    assert entry, f"{tool} lost its Args entry for {param!r}"
+    assert phrase in entry, f"{tool}.{param} no longer states {phrase!r} — {why}"
+
+
+#: Prose contracts that live outside ``Args:`` — they describe the result, not
+#: an argument.
+_PROSE_CONTRACTS: tuple[tuple[str, str, str], ...] = (
+    ("mem_search", "score_scale", "structured output names the scale scores are on"),
+    ("mem_search", "does not promise", "a wider top_k is a request, not a guarantee"),
+    ("mem_status", "stored", "DB side of an embedding mismatch"),
+    ("mem_status", "configured", "runtime side of an embedding mismatch"),
+    ("mem_status", "kind", "warning-schema key consumers match on"),
+    ("mem_status", "fix", "warning-schema key consumers match on"),
+    ("mem_status", "doc", "warning-schema key consumers match on"),
+)
+
+
+@pytest.mark.parametrize(
+    "tool,marker,why", _PROSE_CONTRACTS, ids=[f"{t}-{m}" for t, m, _ in _PROSE_CONTRACTS]
+)
+def test_result_contracts_survive_the_trim(tool: str, marker: str, why: str) -> None:
     description = _wire_descriptions()[tool]
     assert marker in description, f"{tool} description lost {marker!r} — {why}"
 
@@ -140,10 +167,30 @@ def _tool_first_lines() -> dict[str, str]:
 
 
 def test_every_tool_has_a_summary_line() -> None:
-    assert len(_tool_first_lines()) > 90
+    """Compare against the tool set itself, not a count.
+
+    A count check passes when a docstring is deleted — the function simply
+    stops appearing in the mapping. Derive the exposed/routed set
+    independently and require exact coverage.
+    """
+    import ast
+    from pathlib import Path
+
+    tools_dir = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "server" / "tools"
+    expected: set[str] = set()
+    for path in sorted(tools_dir.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = [ast.unparse(d) for d in node.decorator_list]
+            if any(d.startswith("mcp.tool") or d.startswith("register(") for d in decorators):
+                expected.add(node.name)
+    assert expected, "sweep found no tools — the sweep is broken"
+    missing = sorted(expected - set(_tool_first_lines()))
+    assert not missing, f"tools with no docstring at all: {missing}"
 
 
-def test_first_lines_are_one_sentence() -> None:
+def test_first_lines_fit_one_catalog_row() -> None:
     """A catalog entry is a line, not a paragraph.
 
     ``mem_ns_set`` packed two sentences into 91 characters, and only the

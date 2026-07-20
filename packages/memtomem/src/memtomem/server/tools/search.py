@@ -138,12 +138,15 @@ async def mem_search(
             Pass ``project_shared`` from outside a project to search across
             projects.
         rerank: ``false`` skips the cross-encoder rerank stage — the fast path
-            for latency-bounded callers (typically <100ms vs several seconds).
-            Omitted/``true`` follows server config; ``true`` cannot enable
-            reranking on a server that has it disabled.
+            for latency-bounded callers (typically <100ms vs several seconds) —
+            and collapses the candidate pool to ``top_k``, so it narrows recall
+            as well as changing the score scale. Omitted/``true`` follows server
+            config; ``true`` cannot enable reranking on a server that has it
+            disabled.
 
-    Fewer than ``top_k`` results means filters excluded candidates, not that
-    nothing else matched — raise ``top_k`` for a wider request.
+    A result count below ``top_k`` can mean filters excluded candidates or that
+    the index simply holds no more matches. Raising ``top_k`` widens the
+    request; it does not promise more results.
 
     ``output_format="structured"`` adds a top-level ``score_scale`` naming the
     scale ``score`` is on: ``rerank`` (model-dependent range; the ``reranker``
