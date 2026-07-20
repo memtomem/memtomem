@@ -672,7 +672,7 @@ def extract_commands_to_canonical(
                 logger.warning("skip %r from %s: invalid name", cmd_name, gemini_label)
                 continue
             if cmd_name in seen:
-                reason = f"already imported from {seen[cmd_name]}"
+                reason = f"already pulled from {seen[cmd_name]}"
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                 continue
@@ -767,7 +767,7 @@ def extract_commands_to_canonical(
                     reason = (
                         "another process held the canonical destination lock (or its "
                         f"version store) past the {_CANONICAL_LOCK_BUDGET_S:g}s "
-                        "acquisition budget — re-run the import to retry"
+                        "acquisition budget — re-run the pull to retry"
                     )
                     skipped.append((cmd_name, reason, skip_codes.LOCK_TIMEOUT))
                     logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)

@@ -731,11 +731,11 @@ async def sync_skills(
     ),
 ) -> dict:
     """Fan out canonical skills to all runtimes."""
-    reject_project_local_write(target_scope, "Sync skills")
+    reject_project_local_write(target_scope, "Push skills")
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes if body else False,
-        action="Sync skills",
+        action="Push skills",
         host_targets=_user_sync_host_targets(project_root),
     )
     if gate is not None:
@@ -935,7 +935,7 @@ async def import_skill(
         if target_scope == "user" and not allow_host_writes:
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise _error(404, "missing", f"No runtime skill named {name!r} to import")
+                raise _error(404, "missing", f"No runtime skill named {name!r} to pull")
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
@@ -952,7 +952,7 @@ async def import_skill(
         # project_shared Gate A privacy block → 422 (see import_skills).
         raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
-        raise _error(404, "missing", f"No runtime skill named {name!r} to import")
+        raise _error(404, "missing", f"No runtime skill named {name!r} to pull")
     return _import_payload(result, project_root, target_scope, dry_run=None)
 
 
@@ -1022,7 +1022,7 @@ async def import_skill_to_user(
             # reviewed force surfaces the would-import target (see #1379).
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise _error(404, "missing", f"No project runtime skill named {name!r} to import")
+                raise _error(404, "missing", f"No project runtime skill named {name!r} to pull")
             gate = host_write_gate(
                 "user",
                 allow_host_writes,
@@ -1043,7 +1043,7 @@ async def import_skill_to_user(
         # uses. Translate to 422 anyway rather than risk a generic 500 (#1378).
         raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
-        raise _error(404, "missing", f"No project runtime skill named {name!r} to import")
+        raise _error(404, "missing", f"No project runtime skill named {name!r} to pull")
     return _import_payload(
         result, project_root, "user", dry_run=None, source_scope="project_shared"
     )

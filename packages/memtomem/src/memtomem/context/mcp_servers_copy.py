@@ -193,7 +193,7 @@ def _dst_mcp_json_notes(dst_root: Path, name: str) -> tuple[str, ...]:
     except OSError as exc:
         return (
             f"destination {PROJECT_MCP_CONFIG} could not be read ({exc}); "
-            f"its mcp-servers sync will fail until the file is readable",
+            f"its mcp-servers push will fail until the file is readable",
         )
     try:
         # The sync's own parser, not a bare json.loads: every shape sync
@@ -204,13 +204,13 @@ def _dst_mcp_json_notes(dst_root: Path, name: str) -> tuple[str, ...]:
     except McpServerParseError as exc:
         return (
             f"destination {PROJECT_MCP_CONFIG} cannot be parsed ({exc}); "
-            f"its mcp-servers sync will fail until the file is fixed",
+            f"its mcp-servers push will fail until the file is fixed",
         )
     servers = config.get("mcpServers") or {}
     if name in servers:
         return (
             f"destination {PROJECT_MCP_CONFIG} already defines '{name}'; the "
-            f"destination's next mcp-servers sync will overwrite that entry "
+            f"destination's next mcp-servers push will overwrite that entry "
             f"with the copied canonical",
         )
     return ()

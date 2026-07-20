@@ -148,7 +148,7 @@ class TestUserTierSync:
         assert r.json() == {
             "status": "needs_confirmation",
             "confirm": "allow_host_writes",
-            "reason": _HOST_REASON.format(action="Sync skills"),
+            "reason": _HOST_REASON.format(action="Push skills"),
             "host_targets": [
                 str(home / ".agents" / "skills" / "uskill"),
                 str(home / ".claude" / "skills" / "uskill"),

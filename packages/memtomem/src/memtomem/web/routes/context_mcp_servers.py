@@ -508,7 +508,7 @@ async def sync_mcp_servers(
         description="Canonical-residency tier to fan out. Only project_shared is supported in v1.",
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Sync MCP servers")
+    _reject_non_shared_write(target_scope, "Push MCP servers")
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:

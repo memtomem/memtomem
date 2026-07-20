@@ -869,7 +869,7 @@ class TestExtractLock:
     ) -> None:
         """Contention is transient and destination-specific, so a timed-out
         name is NOT marked ``seen``: the later runtime's copy gets its own
-        (fail-fast) attempt instead of a misleading ``already imported``
+        (fail-fast) attempt instead of a misleading ``already pulled``
         skip. Deterministic pin: with copies in two runtimes and the lock
         held throughout, BOTH attempts surface as ``lock_timeout``."""
         import memtomem.context.skills as skills_mod
@@ -995,7 +995,7 @@ class TestExtractLock:
         assert len(parse_skips) == 1, result.skipped
         assert parse_skips[0][0] == "foo"
         assert "unreadable" in parse_skips[0][1]
-        # The gemini copy won the fallback — not an ``already imported`` skip.
+        # The gemini copy won the fallback — not an ``already pulled`` skip.
         assert [p.name for p in result.imported] == ["foo"]
         text = (canonical / "foo" / SKILL_MANIFEST).read_text(encoding="utf-8")
         assert text == "---\nname: foo\n---\ngemini\n"

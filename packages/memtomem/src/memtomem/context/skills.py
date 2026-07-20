@@ -1107,7 +1107,7 @@ def extract_skills_to_canonical(
                 logger.warning("skip %r from %s: invalid name", skill_name, runtime_label)
                 continue
             if skill_name in seen:
-                reason = f"already imported from {seen[skill_name]}"
+                reason = f"already pulled from {seen[skill_name]}"
                 skipped.append((skill_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                 continue
@@ -1249,7 +1249,7 @@ def extract_skills_to_canonical(
                     reason = (
                         "another process held the canonical destination lock "
                         f"past the {_SKILLS_LOCK_BUDGET_S:g}s acquisition "
-                        "budget — re-run the import to retry"
+                        "budget — re-run the pull to retry"
                     )
                     # No ``seen`` mark: contention is transient and
                     # destination-lock-specific, so a later runtime's copy of

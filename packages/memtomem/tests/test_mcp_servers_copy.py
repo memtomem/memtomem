@@ -356,7 +356,7 @@ def test_notes_disclose_same_name_runtime_entry(roots) -> None:
     result = _copy(roots, apply_=False)
     assert result.notes == (
         "destination .mcp.json already defines 'pg'; the destination's next "
-        "mcp-servers sync will overwrite that entry with the copied canonical",
+        "mcp-servers push will overwrite that entry with the copied canonical",
     )
 
 
@@ -367,7 +367,7 @@ def test_notes_disclose_broken_dst_mcp_json(roots) -> None:
     assert len(result.notes) == 1
     note = result.notes[0]
     assert note.startswith("destination .mcp.json cannot be parsed (invalid JSON in .mcp.json:")
-    assert note.endswith("its mcp-servers sync will fail until the file is fixed")
+    assert note.endswith("its mcp-servers push will fail until the file is fixed")
 
 
 def test_notes_disclose_every_shape_sync_would_refuse(roots) -> None:

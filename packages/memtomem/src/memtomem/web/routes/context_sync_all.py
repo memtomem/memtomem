@@ -277,16 +277,16 @@ def _reject_ineligible_tier(target_scope: TargetScope) -> None:
         raise _error(
             400,
             "validation",
-            "Sync all is supported on the project_shared tier; project_local "
+            "Push All is supported on the project_shared tier; project_local "
             "is a draft tier with no runtime fan-out (ADR-0011 §3).",
         )
     if target_scope == "user":
         raise _error(
             400,
             "validation",
-            "Sync all is a project-tier action (#1263); sync skills, commands, "
+            "Push All is a project-tier action (#1263); push skills, commands, "
             "agents, and settings individually on the user tier (mcp-servers "
-            "sync is project_shared-only).",
+            "push is project_shared-only).",
         )
 
 
@@ -298,7 +298,7 @@ async def sync_all_context(
         description=(
             "Canonical-residency tier to fan out. Only project_shared is "
             "supported: project_local has no runtime fan-out (ADR-0011 §3) "
-            "and Sync All stays a project-tier action (#1263) — sync "
+            "and Push All stays a project-tier action (#1263) — push "
             "artifact types individually on the user tier."
         ),
     ),
