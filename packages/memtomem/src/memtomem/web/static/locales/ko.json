@@ -860,6 +860,8 @@
   "settings.ctx.versions.remove_label_tooltip": "이 라벨 제거",
   "settings.ctx.versions.empty": "아직 버전이 없습니다 — 현재 저장된 내용을 고정하면 v1 이 생성됩니다.",
   "settings.ctx.versions.migrate_required": "이 아티팩트는 버전 저장소가 없는 플랫 레이아웃입니다. 버전 관리를 시작하면 디렉터리 레이아웃으로 변환됩니다.",
+  "settings.ctx.versions.read_only": "읽기 전용 이력입니다 — 스킬 버전은 여기서 고정하지 않고 Pull 시 생성됩니다.",
+  "settings.ctx.versions.empty_read_only": "아직 버전이 없습니다 — 이 이력은 여기서 고정하지 않고 Pull 시 기록됩니다.",
   "settings.ctx.versions.enable": "버전 관리 시작",
   "settings.ctx.versions.enable_tooltip": "이 플랫 아티팩트를 디렉터리 레이아웃으로 변환해 버전 관리를 활성화합니다",
   "settings.ctx.versions.enable_success": "{name} 버전 관리가 활성화되었습니다 — 현재 저장된 내용을 고정하면 v1 이 생성됩니다.",

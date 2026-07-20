@@ -143,10 +143,19 @@ function _ctxRenderDetailChipsHtml(specs) {
 //   POST   .../versions                              freeze working canonical
 //   PUT    .../labels/<label>                         promote (== rollback)
 //   DELETE .../labels/<label>                         drop a label pointer
-// Skills and flat-layout artifacts have no version store — the GET returns
+// A flat-layout artifact has no version store — the GET returns
 // ``migrate_required`` and the section renders a hint instead of controls
-// (ADR-0022 invariants 3 + 7).
-const _CTX_VERSIONABLE_TYPES = new Set(['agents', 'commands']);
+// (ADR-0022 invariant 3).
+//
+// Skills mount the section too, but READ-ONLY (ADR-0030 §10): their versions
+// are ``versions/vN/`` tree snapshots created only by an overwrite Pull.
+const _CTX_VERSIONABLE_TYPES = new Set(['agents', 'commands', 'skills']);
+// Types whose version CONTROLS may be rendered. Belt-and-braces with the
+// server's per-response ``writable`` flag: the set above decides whether to
+// MOUNT the section, this one and the response decide whether to render write
+// controls. Never render a control just because the type is mountable — a
+// control the server will 409 is worse than no control.
+const _CTX_VERSION_WRITE_TYPES = new Set(['agents', 'commands']);
 // Label names always offered in the promote picker, unioned with whatever
 // labels already exist on the artifact (ADR-0022 allows arbitrary names).
 const _CTX_DEFAULT_LABELS = ['production', 'staging'];
@@ -161,18 +170,29 @@ function _ctxLabelsByTag(labels) {
   return byTag;
 }
 
-function _ctxRenderVersionsInner(data) {
+function _ctxRenderVersionsInner(data, writable) {
   const versions = Array.isArray(data.versions) ? data.versions : [];
   const labels = data.labels || {};
   const byTag = _ctxLabelsByTag(labels);
 
   let html = '<div class="ctx-detail-versions-header">';
   html += `<span class="ctx-detail-versions-title" data-i18n="settings.ctx.versions.title">${escapeHtml(t('settings.ctx.versions.title'))}</span>`;
-  html += `<button class="btn-ghost ctx-version-freeze-btn" data-i18n="settings.ctx.versions.freeze" data-i18n-title="settings.ctx.versions.freeze_tooltip" title="${escapeHtml(t('settings.ctx.versions.freeze_tooltip'))}">${escapeHtml(t('settings.ctx.versions.freeze'))}</button>`;
+  if (writable) {
+    html += `<button class="btn-ghost ctx-version-freeze-btn" data-i18n="settings.ctx.versions.freeze" data-i18n-title="settings.ctx.versions.freeze_tooltip" title="${escapeHtml(t('settings.ctx.versions.freeze_tooltip'))}">${escapeHtml(t('settings.ctx.versions.freeze'))}</button>`;
+  }
   html += '</div>';
 
+  if (!writable) {
+    html += `<div class="ctx-version-readonly text-muted" data-i18n="settings.ctx.versions.read_only">${escapeHtml(t('settings.ctx.versions.read_only'))}</div>`;
+  }
+
   if (!versions.length) {
-    html += `<div class="ctx-version-empty text-muted" data-i18n="settings.ctx.versions.empty">${escapeHtml(t('settings.ctx.versions.empty'))}</div>`;
+    // The writable empty state tells the user to freeze v1 — nonsense two lines
+    // under a notice saying freezing is unavailable here.
+    const emptyKey = writable
+      ? 'settings.ctx.versions.empty'
+      : 'settings.ctx.versions.empty_read_only';
+    html += `<div class="ctx-version-empty text-muted" data-i18n="${emptyKey}">${escapeHtml(t(emptyKey))}</div>`;
     return html;
   }
 
@@ -186,14 +206,17 @@ function _ctxRenderVersionsInner(data) {
   for (const v of versions) {
     const tag = String(v.tag || '');
     const here = byTag[tag] || [];
+    // Read-only: the label is still shown, but without the remove affordance.
     const labelChips = here
       .map(l =>
         `<span class="ctx-version-label-chip" data-label="${escapeHtml(l)}">`
         + `<span class="ctx-version-label-name">${escapeHtml(l)}</span>`
-        + `<button class="ctx-version-label-remove" data-label="${escapeHtml(l)}" `
-        + `data-i18n-title="settings.ctx.versions.remove_label_tooltip" `
-        + `title="${escapeHtml(t('settings.ctx.versions.remove_label_tooltip'))}" `
-        + `aria-label="${escapeHtml(t('settings.ctx.versions.remove_label_tooltip'))}">×</button>`
+        + (writable
+          ? `<button class="ctx-version-label-remove" data-label="${escapeHtml(l)}" `
+            + `data-i18n-title="settings.ctx.versions.remove_label_tooltip" `
+            + `title="${escapeHtml(t('settings.ctx.versions.remove_label_tooltip'))}" `
+            + `aria-label="${escapeHtml(t('settings.ctx.versions.remove_label_tooltip'))}">×</button>`
+          : '')
         + `</span>`,
       )
       .join('');
@@ -201,20 +224,27 @@ function _ctxRenderVersionsInner(data) {
     const note = v.note
       ? `<span class="ctx-version-note">${escapeHtml(String(v.note))}</span>`
       : '';
+    // A tree snapshot is a directory, not a single .md copy (ADR-0030 §10).
+    const shape = v.layout === 'tree'
+      ? `<span class="ctx-version-shape text-muted">tree</span>`
+      : '';
     html += `<li class="ctx-version-row" data-tag="${escapeHtml(tag)}">`
       + `<div class="ctx-version-main">`
       + `<span class="ctx-version-tag">${escapeHtml(tag)}</span>`
+      + shape
       + `<span class="ctx-version-labels-inline">${labelChips}</span>`
       + note
       + `<span class="ctx-version-date text-muted">${date}</span>`
       + `</div>`
-      + `<div class="ctx-version-actions">`
-      + `<select class="ctx-version-label-select" aria-label="${escapeHtml(t('settings.ctx.versions.promote'))}">${opts}</select>`
-      + `<button class="btn-ghost ctx-version-promote-btn" data-tag="${escapeHtml(tag)}" `
-      + `data-i18n="settings.ctx.versions.promote" `
-      + `data-i18n-title="settings.ctx.versions.promote_tooltip" `
-      + `title="${escapeHtml(t('settings.ctx.versions.promote_tooltip'))}">${escapeHtml(t('settings.ctx.versions.promote'))}</button>`
-      + `</div>`
+      + (writable
+        ? `<div class="ctx-version-actions">`
+          + `<select class="ctx-version-label-select" aria-label="${escapeHtml(t('settings.ctx.versions.promote'))}">${opts}</select>`
+          + `<button class="btn-ghost ctx-version-promote-btn" data-tag="${escapeHtml(tag)}" `
+          + `data-i18n="settings.ctx.versions.promote" `
+          + `data-i18n-title="settings.ctx.versions.promote_tooltip" `
+          + `title="${escapeHtml(t('settings.ctx.versions.promote_tooltip'))}">${escapeHtml(t('settings.ctx.versions.promote'))}</button>`
+          + `</div>`
+        : '')
       + `</li>`;
   }
   html += '</ul>';
@@ -243,7 +273,12 @@ async function _ctxLoadVersions(type, name, detailEl, seq) {
   }
   if (seq != null && seq !== _ctxDetailSeq[type]) return;
 
-  if (data.migrate_required) {
+  // Server-driven, with the client type set as a floor: a response that
+  // omits ``writable`` (older server) must not unlock controls for a type we
+  // know is read-only.
+  const writable = data.writable !== false && _CTX_VERSION_WRITE_TYPES.has(type);
+
+  if (data.migrate_required && writable) {
     // Flat-layout artifact: no per-artifact directory to hold a versions/
     // store (ADR-0022 inv 3). Offer an explicit "Enable versioning" action
     // that adopts the flat canonical into directory layout (rank 6) — the CLI
@@ -267,7 +302,8 @@ async function _ctxLoadVersions(type, name, detailEl, seq) {
   }
 
   container.hidden = false;
-  container.innerHTML = _ctxRenderVersionsInner(data);
+  container.innerHTML = _ctxRenderVersionsInner(data, writable);
+  if (!writable) return;  // nothing rendered to wire, and nothing to gate
   _ctxWireVersionControls(type, name, detailEl, seq);
   // The freeze/promote/remove buttons just landed — re-run the tier gate so
   // they pick up ``data-write-blocked`` without a full detail re-render (#943).
@@ -513,9 +549,9 @@ async function loadCtxDetail(type, name, opts = {}) {
     // commands. Skills get the meta only — no chip row.
     html += _ctxRenderDetailMetaHeader(type, data);
 
-    // ADR-0022 version/label manager — agents + commands only. The
-    // placeholder mounts hidden and is filled asynchronously by
-    // ``_ctxLoadVersions`` (a separate GET), so a flat-layout / skill /
+    // ADR-0022 version/label manager (read-only for skills, ADR-0030 §10).
+    // The placeholder mounts hidden and is filled asynchronously by
+    // ``_ctxLoadVersions`` (a separate GET), so a flat-layout /
     // no-versions artifact never flashes an empty box before the store
     // resolves.
     if (_CTX_VERSIONABLE_TYPES.has(type)) {

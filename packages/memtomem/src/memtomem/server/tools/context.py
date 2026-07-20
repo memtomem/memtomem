@@ -2142,8 +2142,8 @@ async def mem_context_artifact_transfer(
 # (``production`` / ``staging`` / …) is a movable pointer over versions, where a
 # promote doubles as a rollback. Both tools reuse the SAME pure-filesystem
 # ``context/versioning.py`` store the CLI and web routes use — no logic is
-# re-implemented. agents + commands only (skills are tree-snapshot artifacts,
-# deferred per ADR-0022 invariant 7).
+# re-implemented. agents + commands are writable; skills READ their
+# tree-snapshot store but every mutation is refused (ADR-0030 §10).
 
 
 def _resolve_version_artifact(
@@ -2154,25 +2154,31 @@ def _resolve_version_artifact(
 ) -> tuple[str, Path, Layout]:
     """Resolve ``(artifact_type, name, scope)`` → ``(name, working_file, layout)``.
 
-    Mirrors the web router's ``_resolve_versionable`` (agents + commands only;
-    skills / unknown types rejected — ADR-0022 invariant 7). Raises
-    ``ValueError`` with a clean, path-free message for an unsupported type, an
-    invalid name (``validate_name``'s ``InvalidNameError`` is a ``ValueError``),
-    or a missing artifact — the caller catches it and returns ``error: …``.
+    Mirrors the web router's ``_resolve_versionable``. Raises ``ValueError``
+    with a clean, path-free message for an unsupported type, an invalid name
+    (``validate_name``'s ``InvalidNameError`` is a ``ValueError``), or a missing
+    artifact — the caller catches it and returns ``error: …``.
+
+    Skills resolve to their ``SKILL.md``, whose ``.parent`` is the artifact
+    directory owning ``versions/`` — the same relationship ``agent.md`` has,
+    which is why the callers need no skill-specific path handling. Their version
+    surface is READ-ONLY (:data:`_VERSION_WRITABLE_TYPES`).
     """
     from memtomem.context._names import validate_name
     from memtomem.context.agents import resolve_canonical_agent
     from memtomem.context.commands import resolve_canonical_command
+    from memtomem.context.skills import resolve_canonical_skill
 
     resolvers = {
         "agents": (resolve_canonical_agent, "agent"),
         "commands": (resolve_canonical_command, "command"),
+        "skills": (resolve_canonical_skill, "skill"),
     }
     entry = resolvers.get(artifact_type)
     if entry is None:
         raise ValueError(
             f"Versioning is not supported for {artifact_type!r} "
-            f"(agents and commands only — skills are deferred, ADR-0022 invariant 7)."
+            f"({', '.join(sorted(resolvers))} only)."
         )
     resolver, kind = entry
     name = validate_name(raw_name, kind=kind)
@@ -2181,6 +2187,34 @@ def _resolve_version_artifact(
         raise ValueError(f"{kind} {name!r} not found")
     working_file, layout = resolved
     return name, working_file, layout
+
+
+#: Types whose version store MCP may mutate. Skills are read-only (ADR-0030
+#: §10) — mirrors the CLI ``_VERSION_WRITABLE_TYPES`` and the web ``_Eligible.writable``.
+_VERSION_WRITABLE_TYPES = frozenset({"agents", "commands"})
+
+
+def _read_only_version_refusal(artifact_type: str, name: str, verb: str) -> str | None:
+    """The ``error: …`` line for a mutating verb on a read-only type, else ``None``.
+
+    Deliberately distinct wording from the unsupported-type message: the store
+    exists and lists fine, so "not supported" would misdirect. Callers run this
+    AFTER resolution (a missing skill keeps its "not found") and BEFORE the
+    Gate-B confirm prompt — never ask a user to confirm a write that cannot land.
+
+    The remediation must not name a command that would itself refuse. An
+    overwrite pull is what will eventually write these snapshots, but it is
+    still refused today, so pointing an agent at it would just cost it a
+    round-trip into a second refusal.
+    """
+    if artifact_type in _VERSION_WRITABLE_TYPES:
+        return None
+    return (
+        f"error: the {artifact_type} version surface is read-only, so {verb} is not "
+        f"available: a {artifact_type} version is written only by the Store itself, and "
+        f"that path is not exposed yet. Use mem_context_version(artifact_type="
+        f"'{artifact_type}', name='{name}', action='list') to read the history."
+    )
 
 
 def _flat_layout_hint(artifact_type: str, name: str) -> str:
@@ -2218,7 +2252,10 @@ def _format_version_list(
         pointers = labels_by_tag.get(tag, [])
         suffix = f"  [{', '.join(sorted(pointers))}]" if pointers else ""
         note = f"  — {rec.note}" if rec.note else ""
-        lines.append(f"  {tag:6s} {rec.created_at}{suffix}{note}")
+        # Mark a tree snapshot (versions/vN/) so it is not read as a single
+        # .md copy — skills version this way (ADR-0030 §10).
+        shape = "  (tree)" if rec.layout == "tree" else ""
+        lines.append(f"  {tag:6s} {rec.created_at}{shape}{suffix}{note}")
     return "\n".join(lines)
 
 
@@ -2251,12 +2288,14 @@ async def mem_context_version(
     freeze a known-good working canonical into an immutable ``versions/vN.md``
     snapshot, then point a label at it with ``mem_context_promote`` — so
     editing the canonical and deploying it become two acts with instant
-    rollback. Covers ``agents`` and ``commands`` only (skills are directory-tree
-    artifacts, deferred per ADR-0022 invariant 7).
+    rollback. Writable for ``agents`` and ``commands``; ``skills`` are
+    READ-ONLY here (``action="list"`` only, ADR-0030 §10) because a skill
+    version is a ``versions/vN/`` directory-tree snapshot created only by an
+    overwrite pull.
 
     Args:
-        artifact_type: ``agents`` or ``commands``. Any other type (including
-            ``skills``) is rejected.
+        artifact_type: ``agents``, ``commands`` or ``skills`` (``list`` only).
+            Any other type is rejected.
         name: Canonical artifact name (the directory under
             ``.memtomem/<type>/``).
         action: ``list`` (default, read-only) to show versions + label
@@ -2318,6 +2357,15 @@ async def mem_context_version(
         return _format_version_list(artifact_type, name, artifact_scope, manifest)
 
     if action == "enable":
+        if artifact_type not in _VERSION_WRITABLE_TYPES:
+            # ADR-0030 §10: enable is flat→dir adoption, and a read-only type is
+            # always dir layout — the requested end state already holds. Report
+            # the no-op rather than the read-only refusal, and do so BEFORE Gate
+            # B: there is nothing to confirm. Mirrors the web/CLI enable.
+            return (
+                f"{artifact_type}/{name} [{artifact_scope}] always uses directory layout; "
+                f"nothing to do."
+            )
         # Adopt a flat-layout artifact into directory layout so it can be
         # versioned — the MCP twin of ``mm context version enable`` and the web
         # ``POST …/versions/enable`` route. The adopt itself is a byte-identical,
@@ -2384,6 +2432,9 @@ async def mem_context_version(
         )
 
     # ── action == "create" ──
+    refusal = _read_only_version_refusal(artifact_type, name, "create")
+    if refusal is not None:
+        return refusal
     # Gate B: an explicit project_shared write into the git-tracked tree needs
     # confirmation MCP cannot prompt for (mirrors mem_context_init / migrate).
     if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
@@ -2522,6 +2573,12 @@ async def mem_context_promote(
         )
     except ValueError as exc:
         return f"error: {exc}"
+
+    refusal = _read_only_version_refusal(
+        artifact_type, name, "deleting a label" if delete else "moving a label"
+    )
+    if refusal is not None:
+        return refusal
 
     # Gate B: explicit project_shared write into the git-tracked label map.
     if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:

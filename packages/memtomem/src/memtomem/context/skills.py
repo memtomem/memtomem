@@ -24,7 +24,6 @@ import logging
 import os
 import secrets
 import shutil
-import sys
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -40,12 +39,14 @@ from memtomem.context._atomic import (
     _lock_path_for,
     atomic_write_bytes,
     copy_tree_atomic,
+    rename_no_replace,
 )
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import (
     GENERATOR_VENDOR,
     InvalidNameError,
+    Layout,
     is_internal_artifact_dir,
     validate_name,
 )
@@ -243,6 +244,44 @@ def list_canonical_skills(
     return skills
 
 
+def resolve_canonical_skill(
+    project_root: Path, name: str, *, scope: TargetScope = "project_shared"
+) -> tuple[Path, Layout] | None:
+    """Return the canonical ``(SKILL.md path, "dir")`` for *name*, or ``None``.
+
+    Shape-compatible with :func:`~memtomem.context.agents.resolve_canonical_agent`
+    and :func:`~memtomem.context.commands.resolve_canonical_command` so the
+    version surfaces (CLI / web / MCP) can hold ONE eligible-type table instead
+    of three ad-hoc probes that would drift apart on the discovery rules.
+
+    Two shape notes that matter to those callers:
+
+    - The layout is a constant ``"dir"``. Skills have no flat form, so there is
+      nothing to migrate and ``enable`` (flat→dir adoption) is a no-op for them.
+    - The returned path is the MANIFEST, not a "working canonical". A skill's
+      content is its whole payload tree (ADR-0030 §10), so version callers use
+      this value as an existence probe plus a handle on ``.parent`` — the
+      artifact directory that owns ``versions/`` and ``versions.json``. Nothing
+      should snapshot it as if it were the artifact.
+
+    Applies the same rules as :func:`list_canonical_skills`: an internal
+    ``.staging-*`` / ``.old-*`` leftover or an invalid name is NOT a skill.
+    Name validation is left to callers, mirroring the agent/command resolvers.
+    """
+    root = canonical_skills_root(project_root, scope=scope)
+    skill_dir = root / name
+    if is_internal_artifact_dir(name):
+        return None
+    try:
+        validate_name(name, kind="skill name")
+    except InvalidNameError:
+        return None
+    manifest = skill_dir / SKILL_MANIFEST
+    if not skill_dir.is_dir() or not manifest.is_file():
+        return None
+    return manifest, "dir"
+
+
 # ── Copy primitive ────────────────────────────────────────────────────
 
 
@@ -379,81 +418,12 @@ def _promote_race_conflict(exc: OSError) -> bool:
     return exc.errno in (errno.ENOTEMPTY, errno.EEXIST)
 
 
-def _rename_no_replace(staging: Path, dst: Path) -> None:
-    """Atomically rename ``staging`` to an absent ``dst`` or fail closed.
-
-    Directory promotion needs an OS no-replace primitive: plain POSIX
-    :func:`os.rename` may replace an empty destination directory, leaving a
-    shell/editor writer's ``mkdir`` → ``SKILL.md`` sequence vulnerable. Linux
-    and macOS expose the required flag only through native APIs, so call those
-    lazily via :mod:`ctypes`; Windows :func:`os.rename` is already exclusive.
-
-    A missing native symbol or unsupported platform/filesystem is loud
-    ``ENOTSUP``. Never degrade to ``exists()`` + :func:`os.replace`, which
-    would recreate the race this helper closes (#1839).
-    """
-    if staging.parent != dst.parent:
-        raise OSError(
-            errno.EXDEV,
-            "atomic no-replace skill promote requires a shared parent directory",
-            str(dst),
-        )
-
-    if sys.platform == "win32":
-        # Python's Windows contract refuses every existing destination.
-        os.rename(staging, dst)
-        return
-
-    import ctypes
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    staging_bytes = os.fsencode(staging)
-    dst_bytes = os.fsencode(dst)
-    unsupported_errno = getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)
-
-    if sys.platform.startswith("linux"):
-        try:
-            rename = getattr(libc, "renameat2")
-        except AttributeError:
-            raise OSError(
-                unsupported_errno,
-                "atomic no-replace directory rename is unavailable",
-                str(dst),
-            ) from None
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename.restype = ctypes.c_int
-        # Linux <fcntl.h>: AT_FDCWD=-100; <stdio.h>: RENAME_NOREPLACE=1.
-        args = (-100, staging_bytes, -100, dst_bytes, 1)
-    elif sys.platform == "darwin":
-        try:
-            rename = getattr(libc, "renamex_np")
-        except AttributeError:
-            raise OSError(
-                unsupported_errno,
-                "atomic no-replace directory rename is unavailable",
-                str(dst),
-            ) from None
-        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        rename.restype = ctypes.c_int
-        # Darwin <sys/stdio.h>: RENAME_EXCL=0x00000004.
-        args = (staging_bytes, dst_bytes, 0x00000004)
-    else:
-        raise OSError(
-            unsupported_errno,
-            "atomic no-replace directory rename is unavailable",
-            str(dst),
-        )
-
-    ctypes.set_errno(0)
-    if rename(*args) != 0:
-        native_errno = ctypes.get_errno() or errno.EIO
-        raise OSError(native_errno, os.strerror(native_errno), str(dst))
+# Moved to ``_atomic`` (ADR-0030 PR-G3) — the version store's write-once
+# snapshot promote needs the same primitive, and a second copy is exactly how
+# one call site would silently lose the #1839 exclusivity contract. This is the
+# SAME object, not a re-export of a copy; ``test_context_atomic`` pins the
+# identity so a future "tidy-up" cannot fork them.
+_rename_no_replace = rename_no_replace
 
 
 def _promote_staging(

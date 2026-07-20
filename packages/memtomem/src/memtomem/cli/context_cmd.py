@@ -145,6 +145,7 @@ from memtomem.context.scope_resolver import (
     find_project_root,
 )
 from memtomem.context.skills import (
+    SKILL_MANIFEST,
     diff_skills,
     extract_skills_to_canonical,
     generate_all_skills,
@@ -1961,7 +1962,21 @@ def _run_sync_all_projects(
 
 # ── Version snapshots + label pointers (ADR-0022) ────────────────────
 
-_VERSION_ARTIFACT_TYPES = ("agents", "commands")
+_VERSION_ARTIFACT_TYPES = ("agents", "commands", "skills")
+
+#: Types whose version store this CLI may MUTATE. Skills are READ-ONLY
+#: (ADR-0030 §10): a skill version is a ``versions/vN/`` tree snapshot created
+#: only by an overwrite pull, and labeled skill fan-out is deferred.
+_VERSION_WRITABLE_TYPES = frozenset({"agents", "commands"})
+
+_VERSION_WORKING_FILENAME = {
+    "agents": AGENT_DIR_FILENAME,
+    "commands": COMMAND_DIR_FILENAME,
+    # A skill has no single working canonical — its content is the whole
+    # payload tree. ``SKILL.md`` stands in as the EXISTENCE PROBE only; it is
+    # consumed by ``.is_file()`` checks behind the write gate, never snapshotted.
+    "skills": SKILL_MANIFEST,
+}
 
 
 def _resolve_version_target(
@@ -1969,12 +1984,13 @@ def _resolve_version_target(
 ) -> tuple[Path, Path, TargetScope, Path]:
     """Resolve ``(artifact_dir, working_file, scope, project_root)``.
 
-    Validates ``artifact_type`` (agents/commands) and ``name``, resolves the
-    scoped canonical root, and returns the per-artifact directory, its working
-    canonical file (``agent.md`` / ``command.md``), the resolved scope, and the
-    project root. Raises ``click.ClickException`` on a bad type/name. The
-    directory may not exist yet (flat-layout or absent) — the versioning layer
-    raises a clean error in that case.
+    Validates ``artifact_type`` and ``name``, resolves the scoped canonical
+    root, and returns the per-artifact directory, its working canonical file
+    (``agent.md`` / ``command.md``, or ``SKILL.md`` as an existence probe — see
+    :data:`_VERSION_WORKING_FILENAME`), the resolved scope, and the project
+    root. Raises ``click.ClickException`` on a bad type/name. The directory may
+    not exist yet (flat-layout or absent) — the versioning layer raises a clean
+    error in that case.
     """
     if artifact_type not in _VERSION_ARTIFACT_TYPES:
         raise click.ClickException(
@@ -1987,21 +2003,43 @@ def _resolve_version_target(
         raise click.ClickException(str(exc)) from exc
     root = _find_project_root()
     scope = _resolve_artifact_cli_scope(scope_flag)
-    # ``artifact_type`` is narrowed to agents/commands by the guard above; cast
-    # to the ``canonical_artifact_dir`` literal so mypy keeps the kind typed.
-    kind = cast("Literal['agents', 'commands']", artifact_type)
+    # ``artifact_type`` is narrowed by the guard above; cast to the
+    # ``canonical_artifact_dir`` literal so mypy keeps the kind typed.
+    kind = cast("Literal['agents', 'commands', 'skills']", artifact_type)
     artifact_dir = canonical_artifact_dir(kind, scope, root) / name
-    working_filename = AGENT_DIR_FILENAME if artifact_type == "agents" else COMMAND_DIR_FILENAME
-    return artifact_dir, artifact_dir / working_filename, scope, root
+    return artifact_dir, artifact_dir / _VERSION_WORKING_FILENAME[artifact_type], scope, root
+
+
+def _require_version_writes(artifact_type: str) -> None:
+    """Refuse a mutating ``mm context version`` verb on a read-only type.
+
+    Deliberately a DIFFERENT message from the unknown-type refusal even though
+    both exit 1: "dogs is not a thing" and "skills is read-only" call for
+    different next actions, and a script parsing stderr must be able to tell
+    them apart. That is also why an UNKNOWN type falls through untouched —
+    callers run this before ``_resolve_version_target``, so claiming a
+    nonexistent type is merely "read-only" would swallow the real error.
+    """
+    if artifact_type in _VERSION_WRITABLE_TYPES or artifact_type not in _VERSION_ARTIFACT_TYPES:
+        return
+    raise click.ClickException(
+        f"`mm context version` is read-only for {artifact_type}: a {artifact_type} version is "
+        f"written only by the Store itself, and that path is not exposed yet. "
+        f"`mm context version list {artifact_type} <name>` works."
+    )
 
 
 @context.group("version")
 def version_group() -> None:
-    """Manage version snapshots + label pointers for agents/commands (ADR-0022).
+    """Manage version snapshots + label pointers (ADR-0022).
 
     A version is an immutable snapshot of an artifact's working canonical;
     a label (e.g. 'production') is a movable pointer over versions. Use
     `mm context sync --label <name>` to fan out a labeled version.
+
+    Writable for agents and commands. For skills this group is READ-ONLY
+    (`list` only, ADR-0030 §10): a skill version is a directory-tree snapshot
+    created only by an overwrite pull.
     """
 
 
@@ -2015,6 +2053,7 @@ def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str
 
     Example: `mm context version create agents my-agent --note "stable"`
     """
+    _require_version_writes(artifact_type)
     artifact_dir, working_file, scope, root = _resolve_version_target(
         artifact_type, name, scope_flag
     )
@@ -2086,6 +2125,7 @@ def version_promote_cmd(
 
     Example: `mm context version promote agents my-agent --to production --version v2`
     """
+    _require_version_writes(artifact_type)
     artifact_dir, _, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
     try:
         # ADR-0030 §6 (Codex B4): canonical name lock first, then versions.json.
@@ -2123,7 +2163,10 @@ def version_list_cmd(artifact_type: str, name: str, scope_flag: str | None) -> N
         pointers = labels_by_tag.get(tag, [])
         suffix = f"  [{', '.join(sorted(pointers))}]" if pointers else ""
         note = f"  — {rec.note}" if rec.note else ""
-        click.echo(f"  {tag:6s} {rec.created_at}{suffix}{note}")
+        # A tree snapshot (versions/vN/) reads differently from a file one —
+        # mark it so `vN` is not mistaken for a single .md copy (ADR-0030 §10).
+        shape = "  (tree)" if rec.layout == "tree" else ""
+        click.echo(f"  {tag:6s} {rec.created_at}{shape}{suffix}{note}")
 
 
 @version_group.command("delete-label")
@@ -2144,6 +2187,7 @@ def version_delete_label_cmd(
 
     Example: `mm context version delete-label agents my-agent production`
     """
+    _require_version_writes(artifact_type)
     artifact_dir, working_file, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
     if not working_file.is_file():
         # Mirror the web route's dir-layout gate: a flat artifact has no
@@ -2188,11 +2232,27 @@ def version_enable_cmd(artifact_type: str, name: str, scope_flag: str | None) ->
     already-dir artifact; refuses a flat+dir collision and an orphaned
     version store rather than silently mishandling them.
 
+    Skills are always directory layout (ADR-0030 §10), so this is a reported
+    no-op for them rather than a refusal — the end state it asks for already
+    holds — even though every other `version` verb is read-only for skills.
+
     Example: `mm context version enable agents my-agent`
     """
     artifact_dir, working_file, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
     canonical_root = artifact_dir.parent
     flat_path = canonical_root / f"{name}.md"
+
+    if artifact_type not in _VERSION_WRITABLE_TYPES:
+        # No flat form exists for this type, so the flat/dir collision and
+        # orphan-store checks below are meaningless. Mirror the web route's
+        # idempotent ``migrated: false``.
+        if not working_file.is_file():
+            raise click.ClickException(f"No canonical artifact at {artifact_dir}.")
+        click.secho(
+            f"{artifact_type}/{name} always uses directory layout; nothing to do.",
+            fg="cyan",
+        )
+        return
 
     if working_file.is_file():
         if flat_path.exists():

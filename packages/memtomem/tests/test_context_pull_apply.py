@@ -229,6 +229,31 @@ def test_skills_store_present_is_overwrite_unsupported(home: Path, proj: Path) -
     out = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
     assert isinstance(out, PullApplyResult)
     assert out.status == "skills_overwrite_unsupported"
+
+
+def test_skills_overwrite_still_refused_after_tree_storage_landed(home: Path, proj: Path) -> None:
+    """PR-G3 ships the tree-snapshot WRITER but wires no caller — PR-G4's
+    history-preserving transaction is the only thing that will ever call it.
+
+    Pinned so "the storage layer exists" can never be mistaken for "skills
+    overwrite works": the engine must keep refusing, and it must do so WITHOUT
+    having created a version store as a side effect.
+    """
+    from memtomem.context import versioning
+
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
+    d = _store_skill_dir(proj, "s")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(_skill_body("s", "old store"), encoding="utf-8")
+
+    # The writer is importable and functional…
+    assert callable(versioning.create_tree_version)
+    # …and the Pull path still refuses, leaving no version store behind.
+    out = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(out, PullApplyResult)
+    assert out.status == "skills_overwrite_unsupported"
+    assert not (d / "versions").exists()
+    assert not (d / "versions.json").exists()
     # Store intact.
     assert "old store" in _store_skill_text(proj, "s")
 
