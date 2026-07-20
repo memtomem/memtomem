@@ -7,6 +7,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
+  primitive that replaces a whole artifact tree and can recover from an
+  interruption. A non-empty directory cannot be replaced atomically on POSIX,
+  so the replacement is inherently two renames, and a crash between them leaves
+  the canonical position empty with the only copy of the original under an
+  `.old-*` name. The swap now writes a **durable intent marker** before the
+  first rename and unlinks it after the second, so a later run can tell
+  "mid-swap" from "nothing happened" and converge: complete the promotion, roll
+  back to the pre-image, or — when two candidate trees survive and which one is
+  the original is genuinely ambiguous — **fail closed**, name both paths and
+  change nothing. Both renames are exclusive, so a destination recreated by an
+  editor or shell during the window is never clobbered. Durability degrades to
+  process-crash consistency on filesystems that reject directory `fsync`
+  (Windows, some network/tmpfs mounts) rather than failing the operation.
+  Ships **with no caller** — the skills overwrite Pull that will use it is
+  still refused (PR-G4b) — so nothing changes for users yet.
+
 - **Skill version history — tree snapshots + a read-only `version list`**
   (ADR-0030 §10, PR-G3) — the version store learns a second storage shape.
   Agents and commands version a single file (`versions/vN.md`); a skill is a
