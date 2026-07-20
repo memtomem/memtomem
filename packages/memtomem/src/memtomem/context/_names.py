@@ -140,7 +140,24 @@ class InvalidNameError(ValueError):
 # ``.tmp`` names, so a looser ``.staging-*.tmp`` match would silently hide —
 # and let the sync-time reaper delete — a legitimately named user skill like
 # ``.staging-notes.tmp`` (Codex review on #1229).
-_INTERNAL_DIR_RE = re.compile(r"^\.(?:staging|old)-.+-\d+-[0-9a-f]{6}\.tmp$")
+_INTERNAL_DIR_RE = re.compile(r"^\.(?:staging|old)-(?P<owner>.+)-\d+-[0-9a-f]{6}\.tmp$")
+
+
+def internal_artifact_owner(name: str) -> str | None:
+    """The destination name an internal artifact belongs to, or ``None``.
+
+    Same predicate as :func:`is_internal_artifact_dir`, but it also answers
+    *whose* leftover this is — which a reaper must know, because the
+    destination name is not recoverable from a prefix match. ``.old-foo-*``
+    matches ``.old-foo-bar-<pid>-<rand>.tmp``, so a reaper working from a glob
+    deletes the skill ``foo-bar``'s in-flight trees while holding only
+    ``foo``'s lock, and hyphenated skill names are the norm. The suffix is
+    anchored (``-<decimal pid>-<6 hex>.tmp``) and ``.+`` is greedy, so the
+    owner of ``.old-foo-bar-123-abc123.tmp`` parses as ``foo-bar`` and never
+    as ``foo``.
+    """
+    match = _INTERNAL_DIR_RE.match(name)
+    return match.group("owner") if match else None
 
 
 def is_internal_artifact_dir(name: str) -> bool:
@@ -152,6 +169,11 @@ def is_internal_artifact_dir(name: str) -> bool:
     ``skills._reap_stale_internal_dirs`` deletes them under the destination
     sidecar lock. Both sides MUST use this one predicate so "hidden" and
     "deletable" can never drift apart.
+
+    Hiding is name-shape-only and stays that way: a leftover belonging to
+    *another* destination must still be hidden from discovery. Deleting is
+    the narrower question, and that is what :func:`internal_artifact_owner`
+    is for.
     """
     return _INTERNAL_DIR_RE.match(name) is not None
 

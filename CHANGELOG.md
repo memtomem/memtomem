@@ -222,6 +222,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Syncing a skill no longer deletes a similarly-named skill's crash
+  leftovers** — the crash-leftover reaper selected trees with a prefix glob on
+  the destination name, so pushing or importing `foo` matched `foo-bar`'s
+  `.staging-…`/`.old-…` trees and deleted them while holding only `foo`'s lock.
+  Since a move-aside tree is the original a promote is mid-rollback onto, that
+  could destroy the only copy of a neighbouring skill — and hyphenated skill
+  names are ordinary, so this needed no unusual input. Candidates are now
+  matched by parsing the leftover's owning destination and comparing it
+  exactly; a destination whose own name contains a glob metacharacter is also
+  escaped so it cannot widen the scan.
+- **Dead `.old-…` symlinks are now removed** — a destination that was a symlink
+  passed the promote's conflict check (which follows links), so the promote
+  moved the *link* aside, and `shutil.rmtree(..., ignore_errors=True)` silently
+  refuses symlinks. Nothing reported it and nothing retried it, so a setup that
+  recreates a managed symlink before each push accumulated one dead link per
+  run. Internal-artifact removal now dispatches on `lstat`: directories are
+  removed as trees and symlinks are unlinked. Any other type is preserved and
+  logged rather than deleted — only the symlink leak is being fixed.
+- **`copy_skill` now holds the destination sidecar lock**, like every other
+  first-party skill writer (ADR-0030 §6). It was the one path that could park a
+  move-aside tree no other writer knew about, so a concurrent gateway push or
+  import could reap it and leave this copy's rollback with nothing to restore.
 - **Skills Pull no longer clobbers a skill created concurrently during
   staging** (#1839) — a first-time runtime→Store import now promotes its staged
   directory with an OS-level atomic no-replace rename. If a shell, editor, or
