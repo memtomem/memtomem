@@ -258,8 +258,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   missing it is kept and logged at WARNING with both paths, since it may be the
   original. Staging trees, which are always copies of something still on disk,
   are reaped as before. The kept tree is cleared by the promote that recreates
-  the destination, so a normal push or import still finishes with no residue.
-  That is a retry guarantee, not a recovery one: when the run that recreates
+  the destination — where that promote succeeds; a destination taken over by a
+  non-gateway writer is left alone, since the kept tree may still be the only
+  copy of ours — so a normal push or import finishes with no residue. That is a
+  retry guarantee, not a recovery one: when the run that recreates
   the destination installs *different* content — pulling an older Store copy,
   say — the pre-crash tree is still destroyed, a few milliseconds after its own
   WARNING. Recovering the interrupted swap itself, rather than surviving it,

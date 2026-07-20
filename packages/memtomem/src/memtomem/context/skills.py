@@ -488,9 +488,18 @@ def _reap_move_aside(dst: Path) -> None:
     descriptor-relative traversal across every walker here, which is a separate
     change (tracked in the PR-G4 design note, §2.3).
 
-    **Never raises.** It runs AFTER the rename has committed, so a failure here
-    is a failure to collect garbage, not a failure to write. Letting one out
-    would make the promote report the write it already performed as an error —
+    **Never lets an ``OSError`` out**, which is the whole failure class a
+    filesystem sweep produces. It runs AFTER the rename has committed, so a
+    failure here is a failure to collect garbage, not a failure to write.
+    Deliberately not ``except Exception``: post-commit is exactly where a
+    swallowed programming error would be hardest to notice, and the calling
+    surfaces funnel ``OSError`` specifically (a ``TypeError`` from a bad edit
+    should crash loudly rather than be logged as a reaping hiccup). The same
+    reading applies to :func:`_remove_internal_artifact` on the promote's own
+    cleanup path, which is likewise post-commit and swallows ``OSError``.
+
+    Letting one out would make the promote report the write it already
+    performed as an error —
     in :func:`~memtomem.context.pull_apply._commit_skills` a raw ``OSError``
     becomes a ``write_failed`` refusal while ``dst`` is installed, and the
     privacy gate's success is never recorded. The individual removals were

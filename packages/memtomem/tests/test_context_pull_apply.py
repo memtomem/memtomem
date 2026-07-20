@@ -454,18 +454,25 @@ def test_post_promote_reap_failure_still_applies_and_records(
     installed and skip ``_record_gate_success`` — the privacy counter silently
     losing a write that happened. ``skills`` pins the swallow at the unit; this
     pins the surface the split-brain would actually appear on (code review).
+
+    ``fired`` is what keeps the pin honest. Both outcome assertions hold
+    vacuously if the collector never runs, so dropping ``reap_move_aside=True``
+    from the call below — the regression this test exists for — would leave it
+    green (verified by mutation, code review).
     """
     seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "v")})
     records: list[str] = []
     monkeypatch.setattr(privacy, "record", lambda outcome, tool: records.append(outcome))
 
     orig_scan = skills._iter_own_internal_dirs
+    fired: list[Path] = []
 
     def scan(dst: Path, **kwargs: object):  # type: ignore[no-untyped-def]
         # Only the post-promote collector asks for ("old",); the pre-write
         # prelude takes the default and must keep working, or this would pin a
         # failure before the commit rather than after it.
         if kwargs.get("kinds") == ("old",):
+            fired.append(dst)
             raise OSError(errno.EIO, "Input/output error", str(dst))
         return orig_scan(dst, **kwargs)  # type: ignore[arg-type]
 
@@ -475,6 +482,7 @@ def test_post_promote_reap_failure_still_applies_and_records(
     assert isinstance(plan, PullPlan)
     res = commit_pull(plan)
 
+    assert fired, "the post-promote collector never ran — the assertions below are vacuous"
     assert res.status == "applied"
     assert "v" in _store_skill_text(proj, "s")
     assert records == ["pass"], "the gate success went unrecorded for a write that happened"
