@@ -31,22 +31,26 @@ contract, not an omission.
 
 from __future__ import annotations
 
-from typing import Final, Literal, cast
+from typing import Literal, cast
 
 from memtomem.context._skip_reasons import SkipCode
 
 #: Which surface's vocabulary to render remediation in.
 HintSurface = Literal["cli", "mcp", "web"]
 
-#: The Gate A ``project_shared`` hard-abort (``_gate_a.apply_gate_a`` RAISES
-#: rather than emitting a skip row, so this condition has no ``SkipCode`` of its
-#: own). Keyed here because its remediation — retry into another tier — is as
-#: surface-specific as the rest.
-GATE_A_PROJECT_SHARED_ABORT: Final[Literal["gate_a_project_shared_abort"]] = (
-    "gate_a_project_shared_abort"
-)
-
-HintKey = SkipCode | Literal["gate_a_project_shared_abort"]
+#: Keys are ``reason_code`` values, which every refusal already carries all the
+#: way to the surface. That is the whole addressing scheme: no refusal here is
+#: identified by anything a caller has to remember to pass.
+#:
+#: The Gate A ``project_shared`` hard-abort is deliberately ABSENT even though
+#: it is a refusal. Its only conceivable remediation was "retry in another
+#: tier", and there is no such tier: ``project_local`` has no runtime fan-out
+#: (ADR-0011 §3) and ``user`` resolves its runtime sources from ``$HOME``,
+#: ignoring ``project_root`` (``_runtime_targets.runtime_fanout_root``) — so it
+#: reads a DIFFERENT copy, not the one that was blocked. The honest remediation
+#: is "remove the secret", which is identical on every surface and therefore
+#: belongs in the neutral text (Codex review, round 2).
+HintKey = SkipCode
 
 #: ``(key, surface) → remediation clause``. Only conditions the user can
 #: actually act on appear; ``write_failed`` / ``plan_stale`` and friends carry
@@ -73,39 +77,6 @@ _HINTS: dict[HintKey, dict[HintSurface, str]] = {
         "false positive (user tier only).",
         "web": "",  # settings.ctx.pull_hint_privacy_blocked
     },
-    # ``user`` ONLY. The pre-#1869 wording offered ``project_local`` too, but
-    # that tier has no runtime fan-out (ADR-0011 §3): every Pull surface refuses
-    # it outright and the extract engines short-circuit with
-    # ``no_project_fanout_for_runtime``. Following that remediation landed the
-    # user in a second refusal (Codex review).
-    GATE_A_PROJECT_SHARED_ABORT: {
-        "cli": "Retry with --scope=user.",
-        "mcp": 'Re-call with scope="user".',
-        "web": "",  # the route replaces the message entirely (path disclosure)
-    },
-}
-
-#: ``surface=`` attribution prefixes → hint surface. These are the privacy
-#: counter identifiers every ingress entrypoint already carries
-#: (``cli_context_init``, ``web_context_skills_import``, ``mcp_context_pull``,
-#: …), reused rather than threading a second surface parameter through the
-#: engines. Anything unprefixed (e.g. ``memory_migrate``) classifies as
-#: ``None`` — fail-closed to neutral text.
-#:
-#: **The hint inherits an existing contract, it does not create one.** The
-#: extract engines default ``surface`` to ``"cli_context_init"``, so a non-CLI
-#: caller that omits it gets CLI-flavored remediation — but that same caller is
-#: already misfiling its privacy counters and its force-unsafe audit lines under
-#: the CLI, which is the louder pre-existing bug (#1229 fixed exactly that class
-#: for the web and MCP surfaces). Passing an accurate ``surface`` was mandatory
-#: before this module existed; it is the same obligation, now visible in the
-#: user-facing text as well.
-#: ``test_context_refusal_neutrality.py`` pins that every literal actually
-#: passed by the three context surfaces classifies.
-_SURFACE_PREFIXES: dict[str, HintSurface] = {
-    "cli_": "cli",
-    "mcp_": "mcp",
-    "web_": "web",
 }
 
 
@@ -139,16 +110,3 @@ def append_hint(reason: str, code: str | None, surface: HintSurface) -> str:
     if body and body[-1] not in ".!?:":
         body += "."
     return f"{body} {hint}"
-
-
-def hint_surface_for(attribution_surface: str) -> HintSurface | None:
-    """Classify a privacy ``surface=`` attribution string, or ``None``.
-
-    ``None`` means "no hint" (neutral text only), never a guessed surface: a
-    new attribution literal that forgets the prefix costs a hint, not a wrong
-    flag in an agent's transcript.
-    """
-    for prefix, surface in _SURFACE_PREFIXES.items():
-        if attribution_surface.startswith(prefix):
-            return surface
-    return None

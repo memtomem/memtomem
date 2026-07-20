@@ -169,6 +169,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the valve does not exist there (ADR-0011 §5). Runnable `mm context …` command
   strings are unchanged — those are commands to paste, not remediation clauses.
 
+- **Privacy-block refusals no longer point at a tier that cannot help** (CLI,
+  MCP and web) — the shared-tier Gate A message and its web twin offered a
+  retry in the `user` or `project_local` tier. Neither works: `project_local`
+  has no runtime fan-out at all (ADR-0011 §3), and `user` resolves its runtime
+  sources from `$HOME` regardless of the project you are in, so it inspects a
+  different copy than the one that was blocked. The remediation is now "remove
+  the secret", which is the whole truth and the same on every surface.
+
 - **Push/Pull wording now reaches engine, route, and MCP output** (ADR-0030 §2,
   PR-H2) — the rename that landed for the UI, CLI help, and docs stopped at the
   backend, so results and refusals still said "Sync"/"import" while the surface

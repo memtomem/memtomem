@@ -63,11 +63,16 @@ PRIVACY_BLOCK_DETAIL = (
     "Remove the secret, or migrate the artifact to a writable tier (project_local), "
     "then re-run the push."
 )
+#: The pull-side twin. Deliberately offers NO tier retry (#1869): every web
+#: import route rejects ``project_local`` (no runtime fan-out, ADR-0011 §3) and
+#: the ``user`` tier reads its runtime sources from ``$HOME`` rather than this
+#: project, so neither one re-attempts the copy that was blocked. Contrast
+#: ``PRIVACY_BLOCK_DETAIL`` above, where ``project_local`` IS a valid canonical
+#: destination — that is the push direction, a different question.
 PRIVACY_BLOCK_IMPORT_DETAIL = (
     "Privacy scan blocked this pull: a secret was detected in the source bytes. "
     "git history is forever — project_shared has no force bypass (ADR-0011 §5). "
-    "Pull into the user or project_local tier instead, or remove the secret "
-    "from the source first."
+    "Remove the secret from the source first."
 )
 
 

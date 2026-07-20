@@ -469,12 +469,13 @@ def prepare_pull(
             )
         else:
             reason = (
-                # ``user`` only: ``project_local`` has no runtime fan-out to pull
-                # from (ADR-0011 §3) — every Pull surface refuses that tier, so
-                # naming it here sends the user into a second refusal.
+                # No tier retry is offered: ``project_local`` has no runtime
+                # fan-out (ADR-0011 §3) and ``user`` resolves its sources from
+                # ``$HOME``, so neither re-attempts THIS copy. "Remove the
+                # secret" is the whole remediation, and it is surface-neutral.
                 f"Gate A blocked the pull into scope='{scope}' — no force bypass for "
-                f"project_shared (ADR-0011 §5). Remove the secret or pull into "
-                f"the user tier."
+                f"project_shared (ADR-0011 §5). Remove the secret from the source "
+                f"first."
             )
         return _refuse(
             "gate_blocked",

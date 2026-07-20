@@ -30,7 +30,6 @@ import click
 from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context import remediation
 
 # Pull-preview Gate A vocabulary (ADR-0030 §4). The gate outcome as a
 # non-raising status, distinct from :class:`GateAOutcome` (the write-path
@@ -48,7 +47,6 @@ def format_project_shared_block_message(
     scope: TargetScope,
     kind: str,
     imported_so_far: int = 0,
-    remediation_hint: str | None = None,
 ) -> str:
     """User-facing ``ClickException`` message for project_shared Gate A hard-abort.
 
@@ -60,15 +58,17 @@ def format_project_shared_block_message(
         kind: Singular noun for the artifact kind ("agent", "skill", "command").
         imported_so_far: Files already imported in this run (clean ones that
             passed Gate A before this hit). Surface for cleanup hint.
-        remediation_hint: The calling surface's spelling of "retry in another
-            tier" (``remediation.action_hint``), prefixed to the neutral retry
-            line. ``None`` keeps the message surface-neutral — this helper
-            builds a COMPLETE message and raises it, so a downstream surface
-            cannot decorate it afterwards; the hint has to arrive here (#1869,
-            same shape as ``privacy_scan.format_scan_block_message``).
 
     Returns:
         A multi-line string suitable for ``raise click.ClickException(...)``.
+
+    The remediation is "remove the secret", full stop — the same instruction on
+    every surface, so it needs no per-surface hint (#1869). The pre-#1869
+    wording also offered a tier retry, which was wrong twice over:
+    ``project_local`` has no runtime fan-out (ADR-0011 §3), and ``user``
+    resolves its runtime sources from ``$HOME`` regardless of ``project_root``
+    (``_runtime_targets.runtime_fanout_root``), so it would read a different
+    copy than the one blocked here.
     """
     tail = (
         f"\n  {imported_so_far} clean {kind}(s) already pulled in this run "
@@ -76,13 +76,11 @@ def format_project_shared_block_message(
         if imported_so_far > 0
         else ""
     )
-    hint = f" {remediation_hint}" if remediation_hint else ""
     return (
         f"Gate A: {src.name} contains {hits_count} privacy pattern hit(s); "
         f"pull to scope='{scope}' was rejected. git history is forever — "
         f"no force bypass available for project_shared (ADR-0011 §5).\n"
-        f"  Remove the secret from {src} first, or retry in the user "
-        f"scope.{hint}{tail}"
+        f"  Remove the secret from {src} first.{tail}"
     )
 
 
@@ -199,15 +197,6 @@ def apply_gate_a(
     )
     if guard.decision in ("blocked", "blocked_project_shared"):
         if scope == "project_shared":
-            # The calling surface is already named by the privacy attribution
-            # string — reuse it rather than threading a second parameter down
-            # every ingress entrypoint. Unclassifiable ⇒ neutral text (#1869).
-            hint_surface = remediation.hint_surface_for(surface)
-            hint = (
-                remediation.action_hint(remediation.GATE_A_PROJECT_SHARED_ABORT, hint_surface)
-                if hint_surface is not None
-                else ""
-            )
             raise click.ClickException(
                 format_project_shared_block_message(
                     src,
@@ -215,7 +204,6 @@ def apply_gate_a(
                     scope=scope,
                     kind=message_kind,
                     imported_so_far=imported_so_far,
-                    remediation_hint=hint or None,
                 )
             )
         code: skip_codes.SkipCode = (

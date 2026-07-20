@@ -48,7 +48,6 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("remediation.py", "--overwrite"),
         ("remediation.py", "--from <runtime>"),
         ("remediation.py", "--force-unsafe-import"),
-        ("remediation.py", "--scope=user"),
         ("remediation.py", "overwrite=True"),
         ("remediation.py", "from_runtime="),
         ("remediation.py", "force_unsafe_import=True"),
@@ -183,53 +182,6 @@ def test_web_hints_are_localized_client_side_not_baked_into_python() -> None:
         assert remediation.action_hint(key, "web") == ""
 
 
-def test_hint_surface_classification_is_fail_closed() -> None:
-    from memtomem.context import remediation
-
-    assert remediation.hint_surface_for("cli_context_pull") == "cli"
-    assert remediation.hint_surface_for("mcp_context_pull") == "mcp"
-    assert remediation.hint_surface_for("web_context_skills_import") == "web"
-    # Unprefixed attribution literals exist (e.g. ``memory_migrate``) — they
-    # must cost a hint, never inherit the wrong surface's flags.
-    assert remediation.hint_surface_for("memory_migrate") is None
-
-
-def test_every_ingress_surface_literal_is_classifiable() -> None:
-    """Any ``surface="..."`` literal that reaches Gate A should classify.
-
-    Gate A's ``project_shared`` abort builds a COMPLETE message and raises it,
-    so the hint has to be chosen from this attribution string — an unclassified
-    literal silently drops the remediation for that whole surface.
-    """
-    from memtomem.context import remediation
-
-    # The three CONTEXT surfaces only: memory-side ingress (``mem_add``,
-    # ``mem_import``, the LangGraph adapters) shares the privacy counter
-    # namespace but never reaches ``context._gate_a``, so its unprefixed
-    # attribution literals are not this contract's business.
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem"
-    surface_files = [
-        src / "cli" / "context_cmd.py",
-        src / "server" / "tools" / "context.py",
-        *sorted((src / "web" / "routes").glob("context_*.py")),
-    ]
-    literals: set[str] = set()
-    for path in surface_files:
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.keyword) and node.arg in ("surface", "import_surface"):
-                if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                    literals.add(node.value.value)
-    unclassified = sorted(
-        s
-        for s in literals
-        if remediation.hint_surface_for(s) is None
-        # Known unprefixed legacy literals — memory-tier migration, which has
-        # no Gate A remediation of its own.
-        and s not in {"memory_migrate"}
-    )
-    assert not unclassified, f"unclassifiable ingress surface literals: {unclassified}"
-
-
 # ── Gate A hard-abort: the one message the engine RAISES fully formed ────────
 
 
@@ -254,28 +206,22 @@ def _gate_a_message(surface: str, tmp_path: pathlib.Path) -> str:
     return str(exc.value)
 
 
-def test_gate_a_abort_speaks_each_surfaces_own_vocabulary(tmp_path: pathlib.Path) -> None:
-    """This message is built and raised inside the engine, so no downstream
-    surface can decorate it — the hint has to be selected here, from the
-    attribution string the caller already passes (#1869)."""
-    cli = _gate_a_message("cli_context_init", tmp_path)
-    mcp = _gate_a_message("mcp_context_init", tmp_path)
+def test_gate_a_abort_offers_no_tier_retry_on_any_surface(tmp_path: pathlib.Path) -> None:
+    """The hard-abort's remediation is "remove the secret" — identical on every
+    surface, therefore not a per-surface hint at all.
 
-    assert "Retry with --scope=user." in cli
-    assert 'Re-call with scope="user".' in mcp
-    assert "--scope=" not in mcp  # never the other surface's spelling
-
-
-def test_gate_a_abort_stays_neutral_for_the_browser_and_the_unclassifiable(
-    tmp_path: pathlib.Path,
-) -> None:
-    """The web route replaces this message wholesale (it embeds the source
-    path), and an unclassifiable attribution must cost a hint rather than
-    inherit one."""
-    for surface in ("web_context_agents_import", "some_future_surface"):
+    The pre-#1869 wording pointed at another tier, which cannot work:
+    ``project_local`` has no runtime fan-out (ADR-0011 §3) and ``user`` reads
+    its runtime sources from ``$HOME`` regardless of ``project_root``
+    (``_runtime_targets.runtime_fanout_root``), so it inspects a DIFFERENT copy
+    than the blocked one. Advice that reliably fails is worse than none
+    (Codex review, round 2).
+    """
+    for surface in ("cli_context_init", "mcp_context_init", "web_context_agents_import"):
         message = _gate_a_message(surface, tmp_path)
-        assert "or retry in the user scope." in message
-        assert "--scope=" not in message
+        assert "Remove the secret from" in message
+        assert "project_local" not in message
+        assert "--scope" not in message
         assert 'scope="user"' not in message
 
 
@@ -292,7 +238,22 @@ def test_remediation_never_names_a_tier_that_cannot_be_pulled_into() -> None:
             assert "project_local" not in clause, f"{key}/{surface} names a dead tier"
 
 
-def test_gate_a_and_pull_refusals_do_not_route_users_to_project_local(
-    tmp_path: pathlib.Path,
-) -> None:
-    assert "project_local" not in _gate_a_message("cli_context_init", tmp_path)
+def test_pull_side_refusal_copy_never_advertises_a_dead_tier() -> None:
+    """Route-level refusal copy is remediation too — the round-1 fix corrected
+    the engine and left the web's twin saying "Pull into the user or
+    project_local tier" (Codex review, round 2).
+
+    Scoped to the PULL direction on purpose: ``project_local`` is a perfectly
+    valid canonical destination for a push/migrate, so a blanket ban on the
+    word would be a false positive on ``PRIVACY_BLOCK_DETAIL``.
+    """
+    from memtomem.web.routes import _errors
+
+    pull_side = {
+        name: value
+        for name, value in vars(_errors).items()
+        if isinstance(value, str) and ("IMPORT" in name or "PULL" in name)
+    }
+    assert pull_side, "no pull-side refusal constants found — did they get renamed?"
+    for name, value in pull_side.items():
+        assert "project_local" not in value, f"{name} advertises a tier that cannot be pulled into"
