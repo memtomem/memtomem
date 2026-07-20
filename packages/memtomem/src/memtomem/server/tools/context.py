@@ -10,7 +10,8 @@ import click
 from pydantic import StrictBool
 
 from memtomem.config import TargetScope
-from memtomem.context import versioning
+from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context import remediation, versioning
 from memtomem.context._canonical_txn import versioning_op_locked
 from memtomem.context.error_redact import redact_engine_reason
 from memtomem.context.scope_resolver import find_project_root
@@ -230,7 +231,6 @@ async def mem_context_init(
             ``user`` / ``project_local`` imports. ``project_shared`` still
             hard-refuses unsafe imports.
     """
-    from memtomem.context import _skip_reasons as skip_codes
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import (
         canonical_agent_name,
@@ -371,7 +371,12 @@ async def mem_context_init(
         # full-path channel stays the ``privacy block:`` exception returns;
         # a redacted reason keeps the project-relative remainder, so blocked
         # rows stay actionable.
-        return f"  {prefix} {name}: {_redact_reason(reason, root)}"
+        #
+        # The hint is appended AFTER redaction: it is a fixed clause built from
+        # the code alone (never from paths), so redacting it would be a no-op
+        # that only risks mangling a flag spelling.
+        shown = remediation.append_hint(_redact_reason(reason, root), code, "mcp")
+        return f"  {prefix} {name}: {shown}"
 
     if "skills" in inc:
         try:
@@ -1197,7 +1202,9 @@ async def mem_context_memory_migrate(
             return f"error: Unknown {label}='{value}'. Supported: {sorted(_KNOWN_MEMORY_SCOPES)}"
 
     if from_scope == to_scope:
-        return "error: --from and --to must differ."
+        # Name THIS surface's parameters (#1869) — ``--from`` / ``--to`` are the
+        # CLI spellings of the two arguments validated three lines above.
+        return "error: from_scope and to_scope must differ."
 
     # Gate B: project_shared writes go to the git-tracked memory tier.
     # MCP has no interactive prompt, so refuse early and tell the caller
@@ -2806,9 +2813,11 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
             f"into {result.scope} ({result.write_outcome}).{dupes}"
         )
     if result.status == "gate_blocked":
+        # ``privacy_blocked`` arrives on BOTH tiers; only the non-git-tracked
+        # ones can force past it (``pull_apply._evaluate_gate``). The valve flag
+        # — not the code — decides whether the bypass hint is honest here.
         valve = (
-            " Re-call with force_unsafe_import=True to bypass for a reviewed "
-            "false positive (user tier only)."
+            f" {remediation.action_hint(skip_codes.PRIVACY_BLOCKED, 'mcp')}"
             if result.force_bypassable
             else ""
         )
@@ -2816,7 +2825,10 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     if result.status in _PULL_ERROR_STATUSES:
         return f"error: {_redact_pull_reason(result.reason, root)}"
     if result.status in _PULL_REFUSAL_STATUSES:
-        return f"refused: {_redact_pull_reason(result.reason, root)}"
+        shown = remediation.append_hint(
+            _redact_pull_reason(result.reason, root) or "", result.reason_code, "mcp"
+        )
+        return f"refused: {shown}"
     # Fail closed: an engine status this tool has not classified must not
     # inherit a benign prefix. Surface it as an error naming the status so the
     # gap is visible (and the parity test fails first).

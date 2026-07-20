@@ -434,8 +434,8 @@ def prepare_pull(
             return _refuse(
                 "canonical_exists",
                 skip_codes.CANONICAL_EXISTS,
-                f"the Store already has {kind}/{name}; pass --overwrite to replace it "
-                f"(the current canonical is snapshotted first).",
+                f"the Store already has {kind}/{name}; a plain pull will not replace it "
+                f"(an overwrite snapshots the current canonical first).",
             )
 
     # Gate A — ONE audited decision for the whole Pull, over the captured bytes
@@ -464,8 +464,8 @@ def prepare_pull(
     if isinstance(gate, _GateBlocked):
         if gate.force_bypassable:
             reason = (
-                f"Gate A flagged the '{selected.runtime}' copy — pass "
-                f"--force-unsafe-import to pull it into scope='{scope}' after review."
+                f"Gate A flagged the '{selected.runtime}' copy; it was not pulled into "
+                f"scope='{scope}'."
             )
         else:
             reason = (
@@ -533,7 +533,7 @@ def _source_conflict_reason(kind: ArtifactKind, name: str, working: list[_Cand])
         msg = (
             f"multiple distinct contents would land for {kind}/{name}: "
             + "; ".join(parts)
-            + " — pass --from <runtime> to choose."
+            + ". Name a source runtime."
         )
         if unreadable:
             msg += (
@@ -547,7 +547,7 @@ def _source_conflict_reason(kind: ArtifactKind, name: str, working: list[_Cand])
     # distinct contents" when the distinct count is zero or one.
     return (
         f"the {', '.join(unreadable)} copy of {kind}/{name} could not be read, so "
-        f"auto-selection is off — pass --from <runtime> to choose a source explicitly."
+        f"auto-selection is off. Name a source runtime explicitly."
     )
 
 
@@ -751,7 +751,7 @@ def _map_write_outcome(plan: PullPlan, outcome: str, dst: Path, layout: Layout) 
             plan,
             "canonical_exists",
             skip_codes.CANONICAL_EXISTS,
-            f"the Store already has {plan.kind}/{plan.name}; pass --overwrite to replace it.",
+            f"the Store already has {plan.kind}/{plan.name}; a plain pull will not replace it.",
         )
     if outcome == "flat_refused":
         return _refusal_for(

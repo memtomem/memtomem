@@ -30,6 +30,7 @@ import click
 from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context import remediation
 
 # Pull-preview Gate A vocabulary (ADR-0030 §4). The gate outcome as a
 # non-raising status, distinct from :class:`GateAOutcome` (the write-path
@@ -47,6 +48,7 @@ def format_project_shared_block_message(
     scope: TargetScope,
     kind: str,
     imported_so_far: int = 0,
+    remediation_hint: str | None = None,
 ) -> str:
     """User-facing ``ClickException`` message for project_shared Gate A hard-abort.
 
@@ -58,6 +60,12 @@ def format_project_shared_block_message(
         kind: Singular noun for the artifact kind ("agent", "skill", "command").
         imported_so_far: Files already imported in this run (clean ones that
             passed Gate A before this hit). Surface for cleanup hint.
+        remediation_hint: The calling surface's spelling of "retry in another
+            tier" (``remediation.action_hint``), prefixed to the neutral retry
+            line. ``None`` keeps the message surface-neutral — this helper
+            builds a COMPLETE message and raises it, so a downstream surface
+            cannot decorate it afterwards; the hint has to arrive here (#1869,
+            same shape as ``privacy_scan.format_scan_block_message``).
 
     Returns:
         A multi-line string suitable for ``raise click.ClickException(...)``.
@@ -68,12 +76,13 @@ def format_project_shared_block_message(
         if imported_so_far > 0
         else ""
     )
+    hint = f" {remediation_hint}" if remediation_hint else ""
     return (
         f"Gate A: {src.name} contains {hits_count} privacy pattern hit(s); "
         f"pull to scope='{scope}' was rejected. git history is forever — "
         f"no force bypass available for project_shared (ADR-0011 §5).\n"
-        f"  Retry with --scope=user or --scope=project_local, or remove the "
-        f"secret from {src} first.{tail}"
+        f"  Remove the secret from {src} first, or retry in the user or "
+        f"project_local scope.{hint}{tail}"
     )
 
 
@@ -93,13 +102,16 @@ class GateABlocked:
         code: ``PRIVACY_BLOCKED`` or ``PRIVACY_BLOCKED_PROJECT_SHARED``.
         hits_count: Number of privacy pattern hits — count only, never
             echo bytes.
-        hint: ``" — pass --force-unsafe-import to bypass"`` for
-            ``decision == "blocked"``, otherwise ``""``.
+
+    Carries no remediation clause: the ``code`` travels with the skip row all
+    the way to CLI / web / MCP, and each renders its own bypass spelling from
+    :mod:`memtomem.context.remediation` (#1869). A ``hint`` field here used to
+    hard-code ``--force-unsafe-import``, which is not a thing an MCP client or
+    the browser can pass.
     """
 
     code: skip_codes.SkipCode
     hits_count: int
-    hint: str
 
 
 # Discriminated union — callers narrow with ``isinstance(outcome, GateABlocked)``.
@@ -129,7 +141,7 @@ def apply_gate_a(
         ``force_unsafe_import`` (ADR-0011 §5).
       * ``decision in ("blocked", "blocked_project_shared")`` AND
         ``scope != "project_shared"`` — return :class:`GateABlocked`
-        with the matching ``code`` / ``hits_count`` / ``hint``.
+        with the matching ``code`` / ``hits_count``.
       * Anything else — :class:`RuntimeError` (fail-loud on enum drift).
 
     Args:
@@ -187,6 +199,15 @@ def apply_gate_a(
     )
     if guard.decision in ("blocked", "blocked_project_shared"):
         if scope == "project_shared":
+            # The calling surface is already named by the privacy attribution
+            # string — reuse it rather than threading a second parameter down
+            # every ingress entrypoint. Unclassifiable ⇒ neutral text (#1869).
+            hint_surface = remediation.hint_surface_for(surface)
+            hint = (
+                remediation.action_hint(remediation.GATE_A_PROJECT_SHARED_ABORT, hint_surface)
+                if hint_surface is not None
+                else ""
+            )
             raise click.ClickException(
                 format_project_shared_block_message(
                     src,
@@ -194,6 +215,7 @@ def apply_gate_a(
                     scope=scope,
                     kind=message_kind,
                     imported_so_far=imported_so_far,
+                    remediation_hint=hint or None,
                 )
             )
         code: skip_codes.SkipCode = (
@@ -201,8 +223,7 @@ def apply_gate_a(
             if guard.decision == "blocked_project_shared"
             else skip_codes.PRIVACY_BLOCKED
         )
-        hint = " — pass --force-unsafe-import to bypass" if guard.decision == "blocked" else ""
-        return GateABlocked(code=code, hits_count=len(guard.hits), hint=hint)
+        return GateABlocked(code=code, hits_count=len(guard.hits))
     if guard.decision not in ("pass", "bypassed"):
         # Symmetric assertion — fail-loud on unknown decision so a
         # future privacy enum addition surfaces here rather than

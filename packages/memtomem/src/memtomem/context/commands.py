@@ -684,7 +684,7 @@ def extract_commands_to_canonical(
                 logger=logger,
             )
             if dst.exists() and not overwrite:
-                reason = "canonical exists (use --overwrite)"
+                reason = "canonical exists"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
                 logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                 seen[cmd_name] = gemini_label
@@ -731,7 +731,7 @@ def extract_commands_to_canonical(
                 skipped.append(
                     (
                         cmd_name,
-                        f"blocked: {outcome.hits_count} privacy pattern hit(s){outcome.hint}",
+                        f"blocked: {outcome.hits_count} privacy pattern hit(s)",
                         outcome.code,
                     )
                 )
@@ -779,7 +779,7 @@ def extract_commands_to_canonical(
                     seen[cmd_name] = gemini_label
                     continue
                 if write_outcome == "exists":
-                    reason = "canonical exists (use --overwrite)"
+                    reason = "canonical exists"
                     skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
                     logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                     seen[cmd_name] = gemini_label

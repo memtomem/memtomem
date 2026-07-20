@@ -285,7 +285,7 @@ def import_passthrough_runtime(
             logger=logger,
         )
         if dst.exists() and not overwrite:
-            reason = "canonical exists (use --overwrite)"
+            reason = "canonical exists"
             skipped.append((name, reason, skip_codes.CANONICAL_EXISTS))
             logger.warning("skip %s from %s: %s", name, runtime_label, reason)
             seen[name] = runtime_label
@@ -327,7 +327,7 @@ def import_passthrough_runtime(
             skipped.append(
                 (
                     name,
-                    f"blocked: {outcome.hits_count} privacy pattern hit(s){outcome.hint}",
+                    f"blocked: {outcome.hits_count} privacy pattern hit(s)",
                     outcome.code,
                 )
             )
@@ -381,7 +381,7 @@ def import_passthrough_runtime(
             if write_outcome == "exists":
                 # Under-lock re-check: a parallel importer landed dst between
                 # our lock-free preflight and the lock acquisition.
-                reason = "canonical exists (use --overwrite)"
+                reason = "canonical exists"
                 skipped.append((name, reason, skip_codes.CANONICAL_EXISTS))
                 logger.warning("skip %s from %s: %s", name, runtime_label, reason)
                 seen[name] = runtime_label

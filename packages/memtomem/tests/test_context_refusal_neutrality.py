@@ -1,0 +1,246 @@
+"""Architectural guard — engine refusals never spell a surface's vocabulary (#1869).
+
+The engine states the CONDITION; the CLI, MCP and web surfaces each append
+their own remediation (:mod:`memtomem.context.remediation`). Before this
+contract, ``pull_apply`` told every caller to ``pass --from <runtime>`` — a flag
+an MCP client cannot pass (its parameter is ``from_runtime``) and the browser
+has no notion of at all.
+
+Why a sweep rather than a list of today's sites: the enumeration in #1869 was
+built by grep and still missed two ``skills.py`` copies. A per-site test would
+have shipped green with those two intact. This walks EVERY string literal in the
+``context`` package instead, so the next refusal that hard-codes a flag fails
+here whether or not anyone remembered to extend a list.
+
+Docstrings are exempt — they document the CLI flag as an API concept
+(``force_unsafe_import: the value of the CLI's --force-unsafe-import flag``),
+which is prose about the parameter, not remediation shown to a user.
+"""
+
+from __future__ import annotations
+
+import ast
+import pathlib
+import re
+
+import pytest
+
+CONTEXT_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem" / "context"
+
+#: Vocabulary that belongs to exactly one surface. ``--from`` is word-bounded
+#: so ``--force-unsafe-import`` is not double-reported.
+#:
+#: ``--to`` is deliberately absent: every occurrence in this package is part of
+#: a runnable ``mm context migrate … --to project_local`` command (the "keep
+#: as-is" class in #1869), and it never appears as a remediation clause on its
+#: own. ``--from`` is kept because it DID: ``pass --from <runtime>`` was the
+#: headline defect.
+SURFACE_VOCABULARY = re.compile(
+    r"--overwrite|--from\b|--force-unsafe-import|--scope=|"
+    r"from_runtime=|force_unsafe_import=|overwrite=True"
+)
+
+#: Deliberate exceptions, each with the reason it is NOT a per-surface hint.
+#: ``(module, substring)`` — the substring must appear in the offending literal.
+ALLOWED: frozenset[tuple[str, str]] = frozenset(
+    {
+        # The hint table itself — every surface's spelling lives here by design.
+        ("remediation.py", "--overwrite"),
+        ("remediation.py", "--from <runtime>"),
+        ("remediation.py", "--force-unsafe-import"),
+        ("remediation.py", "--scope=user"),
+        ("remediation.py", "overwrite=True"),
+        ("remediation.py", "from_runtime="),
+        ("remediation.py", "force_unsafe_import=True"),
+        # Runnable shell commands, not remediation clauses: these are meant to
+        # be copy-pasted verbatim into a terminal (#1869 "keep as-is").
+        ("settings_doctor.py", "mm context settings-migrate --from="),
+        # ``migrate_scope`` has exactly one consumer — the CLI ``mm context
+        # migrate`` verb (no web route, no MCP action calls it), so its
+        # ``--from``/``--to`` ARE this path's parameter names. If a second
+        # surface ever calls it, this entry must be revisited.
+        ("migrate.py", "Pass --from <scope> to disambiguate."),
+        ("migrate.py", "--from and --to must differ."),
+    }
+)
+
+
+def _string_literals(path: pathlib.Path) -> list[tuple[int, str]]:
+    """Every non-docstring string constant in *path* as ``(lineno, value)``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    # Any bare string EXPRESSION is documentation: module/class/function
+    # docstrings and the attribute-docstring convention this package uses under
+    # module-level constants (``migrate.py`` documents its Literal aliases that
+    # way). Only strings that are actually USED — arguments, assignments,
+    # f-string parts — can reach a user as a refusal.
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            docstrings.add(id(node.value))
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        ):
+            out.append((node.lineno, node.value))
+    return out
+
+
+def test_engine_strings_never_name_a_surfaces_vocabulary() -> None:
+    offenders: list[str] = []
+    for path in sorted(CONTEXT_DIR.rglob("*.py")):
+        for lineno, value in _string_literals(path):
+            if not SURFACE_VOCABULARY.search(value):
+                continue
+            if any(path.name == mod and frag in value for mod, frag in ALLOWED):
+                continue
+            offenders.append(f"{path.name}:{lineno}: {value[:120]!r}")
+    assert not offenders, (
+        "engine strings must state the condition only; per-surface remediation "
+        "belongs in memtomem.context.remediation (#1869):\n" + "\n".join(offenders)
+    )
+
+
+def test_allowlist_entries_still_exist() -> None:
+    """A stale exemption is a hole — every ALLOWED entry must still match.
+
+    Without this, deleting the site an exemption covers leaves a permanent
+    licence for that module to reintroduce the flag.
+    """
+    seen = {
+        (path.name, value)
+        for path in sorted(CONTEXT_DIR.rglob("*.py"))
+        for _, value in _string_literals(path)
+    }
+    stale = [
+        f"{mod}: {frag!r}"
+        for mod, frag in sorted(ALLOWED)
+        if not any(name == mod and frag in value for name, value in seen)
+    ]
+    assert not stale, "ALLOWED entries no longer present — drop them:\n" + "\n".join(stale)
+
+
+@pytest.mark.parametrize("surface", ["cli", "mcp"])
+def test_actionable_codes_have_a_clause_on_every_writing_surface(surface: str) -> None:
+    """Both text surfaces answer for every key — a half-filled row is a silent
+    downgrade for whichever surface was forgotten."""
+    from memtomem.context import remediation
+
+    missing = [key for key in remediation._HINTS if not remediation.action_hint(key, surface)]
+    assert not missing, f"no {surface} remediation for: {missing}"
+
+
+def test_unknown_code_yields_no_hint() -> None:
+    """Fail open to the neutral reason — never guess a remediation."""
+    from memtomem.context import remediation
+
+    assert remediation.action_hint("no_such_code", "cli") == ""
+    assert remediation.action_hint(None, "cli") == ""
+    assert remediation.append_hint("something failed", None, "cli") == "something failed"
+
+
+def test_web_hints_are_localized_client_side_not_baked_into_python() -> None:
+    """The browser owns its own copy; an English clause on the wire would
+    bypass i18n entirely (and ship untranslated text to a ko user)."""
+    from memtomem.context import remediation
+
+    for key in remediation._HINTS:
+        assert remediation.action_hint(key, "web") == ""
+
+
+def test_hint_surface_classification_is_fail_closed() -> None:
+    from memtomem.context import remediation
+
+    assert remediation.hint_surface_for("cli_context_pull") == "cli"
+    assert remediation.hint_surface_for("mcp_context_pull") == "mcp"
+    assert remediation.hint_surface_for("web_context_skills_import") == "web"
+    # Unprefixed attribution literals exist (e.g. ``memory_migrate``) — they
+    # must cost a hint, never inherit the wrong surface's flags.
+    assert remediation.hint_surface_for("memory_migrate") is None
+
+
+def test_every_ingress_surface_literal_is_classifiable() -> None:
+    """Any ``surface="..."`` literal that reaches Gate A should classify.
+
+    Gate A's ``project_shared`` abort builds a COMPLETE message and raises it,
+    so the hint has to be chosen from this attribution string — an unclassified
+    literal silently drops the remediation for that whole surface.
+    """
+    from memtomem.context import remediation
+
+    # The three CONTEXT surfaces only: memory-side ingress (``mem_add``,
+    # ``mem_import``, the LangGraph adapters) shares the privacy counter
+    # namespace but never reaches ``context._gate_a``, so its unprefixed
+    # attribution literals are not this contract's business.
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem"
+    surface_files = [
+        src / "cli" / "context_cmd.py",
+        src / "server" / "tools" / "context.py",
+        *sorted((src / "web" / "routes").glob("context_*.py")),
+    ]
+    literals: set[str] = set()
+    for path in surface_files:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.keyword) and node.arg in ("surface", "import_surface"):
+                if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    literals.add(node.value.value)
+    unclassified = sorted(
+        s
+        for s in literals
+        if remediation.hint_surface_for(s) is None
+        # Known unprefixed legacy literals — memory-tier migration, which has
+        # no Gate A remediation of its own.
+        and s not in {"memory_migrate"}
+    )
+    assert not unclassified, f"unclassifiable ingress surface literals: {unclassified}"
+
+
+# ── Gate A hard-abort: the one message the engine RAISES fully formed ────────
+
+
+def _gate_a_message(surface: str, tmp_path: pathlib.Path) -> str:
+    import click
+
+    from memtomem.context._gate_a import apply_gate_a
+
+    src = tmp_path / "agent.md"
+    src.write_text("tok " + "AKIA" + "IOSFODNN7EXAMPLE", encoding="utf-8")
+    with pytest.raises(click.ClickException) as exc:
+        apply_gate_a(
+            content_text=src.read_text(encoding="utf-8"),
+            src=src,
+            scope="project_shared",
+            force_unsafe_import=False,
+            audit_context={},
+            message_kind="agent",
+            imported_so_far=0,
+            surface=surface,
+        )
+    return str(exc.value)
+
+
+def test_gate_a_abort_speaks_each_surfaces_own_vocabulary(tmp_path: pathlib.Path) -> None:
+    """This message is built and raised inside the engine, so no downstream
+    surface can decorate it — the hint has to be selected here, from the
+    attribution string the caller already passes (#1869)."""
+    cli = _gate_a_message("cli_context_init", tmp_path)
+    mcp = _gate_a_message("mcp_context_init", tmp_path)
+
+    assert "Retry with --scope=user or --scope=project_local." in cli
+    assert 'Re-call with scope="user" or scope="project_local".' in mcp
+    assert "--scope=" not in mcp  # never the other surface's spelling
+
+
+def test_gate_a_abort_stays_neutral_for_the_browser_and_the_unclassifiable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The web route replaces this message wholesale (it embeds the source
+    path), and an unclassifiable attribution must cost a hint rather than
+    inherit one."""
+    for surface in ("web_context_agents_import", "some_future_surface"):
+        message = _gate_a_message(surface, tmp_path)
+        assert "or retry in the user or project_local scope." in message
+        assert "--scope=" not in message
+        assert 'scope="user"' not in message
