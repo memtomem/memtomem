@@ -51,6 +51,16 @@ class TestRenameMessage:
         out = await mem_ns_rename(old="src-ns", new="dst-ns", merge=True, ctx=ctx)
         assert "merged into existing 'dst-ns'" in out
 
+    async def test_dropped_duplicates_are_reported(self, ctx, storage):
+        """A merge that deletes rows must say so — silent deletion is the bug class."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+
+        out = await mem_ns_rename(old="src-ns", new="dst-ns", merge=True, ctx=ctx)
+        assert "1 duplicate chunk(s) dropped" in out
+
 
 class TestRenameConflict:
     async def test_existing_target_is_refused(self, ctx, storage):
