@@ -141,6 +141,11 @@ async def mem_ns_rename(
     result = await app.storage.rename_namespace(old, new, merge=merge)
     if result.merged:
         detail = f"merged into existing '{new}'"
+        if result.duplicates_dropped:
+            detail += (
+                f", {result.duplicates_dropped} duplicate chunk(s) dropped "
+                f"(already present in '{new}')"
+            )
     elif result.metadata_renamed:
         detail = "metadata row renamed"
     else:

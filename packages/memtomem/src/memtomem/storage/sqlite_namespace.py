@@ -171,9 +171,11 @@ class NamespaceOps:
         with :class:`NamespaceConflictError` **before any write**.
         ``merge=True`` opts into consolidation; the target's metadata row
         then wins (its description / color survive, only ``updated_at``
-        moves) and the source's row is dropped. Renaming a namespace onto
-        itself is always refused — under the merge branch it would delete
-        the sole metadata row.
+        moves) and the source's row is dropped. Chunks the target already
+        holds are dropped the same way — see
+        :meth:`_drop_duplicate_chunks` — and counted separately from the
+        moved ones. Renaming a namespace onto itself is always refused —
+        under the merge branch it would delete the sole metadata row.
 
         Returns a :class:`NamespaceRenameResult`; ``chunks_moved == 0``
         does not mean nothing changed (see that class).
@@ -227,6 +229,7 @@ class NamespaceOps:
                     )
 
                 now = now_iso()
+                duplicates_dropped = self._drop_duplicate_chunks(db, old, new) if merged else 0
                 chunks_moved = db.execute(
                     "UPDATE chunks SET namespace=? WHERE namespace=?", (new, old)
                 ).rowcount
@@ -257,6 +260,7 @@ class NamespaceOps:
                     chunks_moved=chunks_moved,
                     metadata_renamed=metadata_renamed,
                     merged=merged,
+                    duplicates_dropped=duplicates_dropped,
                 )
 
             db.execute(f"RELEASE {_RENAME_SAVEPOINT}")
@@ -282,6 +286,48 @@ class NamespaceOps:
             # Also ends the transaction opened above, releasing the RESERVED
             # lock instead of leaving it for the next unrelated commit.
             db.rollback()
+
+    def _drop_duplicate_chunks(self, db: sqlite3.Connection, old: str, new: str) -> int:
+        """Delete source chunks the target already holds. Returns how many.
+
+        ``chunks`` carries a UNIQUE index on
+        ``(namespace, source_file, content_hash, start_line)`` (#691), so a
+        merge whose two namespaces indexed the *same* file — the common case
+        for ``mm agent migrate``, where a legacy and a canonical namespace
+        cover one agent — would otherwise trip that index and turn an
+        explicitly requested consolidation into a failure.
+
+        The target's copy wins, matching the metadata rule: it keeps its
+        accumulated access/use counters, and the source duplicate is removed
+        with its FTS / vector sidecar rows (same shape as
+        ``delete_by_namespace``). The count is reported back so the caller
+        can say that rows were dropped rather than moved.
+        """
+        rows = db.execute(
+            """
+            SELECT c.id, c.rowid FROM chunks c
+            WHERE c.namespace = ?
+              AND EXISTS (
+                  SELECT 1 FROM chunks t
+                  WHERE t.namespace = ?
+                    AND t.source_file = c.source_file
+                    AND t.content_hash = c.content_hash
+                    AND t.start_line IS c.start_line
+              )
+            """,
+            (old, new),
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [row[0] for row in rows]
+        rowids = [row[1] for row in rows]
+        db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
+        db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids)
+        if self._has_vec_table():
+            db.execute(
+                f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+            )
+        return len(rows)
 
     @staticmethod
     def _has_namespace_meta(db: sqlite3.Connection, namespace: str) -> bool:

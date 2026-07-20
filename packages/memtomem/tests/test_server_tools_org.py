@@ -268,6 +268,34 @@ class TestRenameNamespaceAtomicity:
         assert ns.get("src-ns") == 1
         assert "dst-ns" not in ns
 
+    async def test_failed_rename_keeps_the_callers_earlier_writes(
+        self, storage, fail_on_metadata_update
+    ):
+        """Undo *our* writes only — a connection-level rollback would take the caller's too."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("src-ns", description="d")
+        fail_on_metadata_update("src-ns")
+
+        async with storage.transaction():
+            await storage.upsert_chunks([make_chunk(content="earlier", namespace="caller-ns")])
+            with pytest.raises(StorageError):
+                await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert dict(await storage.list_namespaces()).get("caller-ns") == 1
+
+    async def test_successful_rename_is_undone_when_the_caller_aborts(self, storage):
+        """Rename must not commit inside a transaction it does not own."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.rename_namespace("src-ns", "dst-ns")
+                raise RuntimeError("caller aborts")
+
+        ns = dict(await storage.list_namespaces())
+        assert ns.get("src-ns") == 1
+        assert "dst-ns" not in ns
+
     async def test_write_lock_is_taken_before_the_existence_checks(self, storage):
         """``BEGIN IMMEDIATE`` precedes the preflight SELECTs.
 
@@ -305,8 +333,16 @@ class TestRenameNamespaceAtomicity:
             finally:
                 db.set_trace_callback(None)
 
-        assert any("BEGIN IMMEDIATE" in s.upper() for s in trace), (
+        begin_idx = next(
+            (i for i, s in enumerate(trace) if "BEGIN IMMEDIATE" in s.upper()),
+            None,
+        )
+        select_idx = next((i for i, s in enumerate(trace) if s.upper().startswith("SELECT")), None)
+        assert begin_idx is not None, (
             f"rename must take the write lock even inside transaction(), trace: {trace}"
+        )
+        assert select_idx is None or begin_idx < select_idx, (
+            f"lock must still precede the preflight, trace: {trace}"
         )
 
     async def test_no_op_rename_leaves_no_open_transaction(self, storage):
@@ -427,6 +463,54 @@ class TestRenameNamespaceMerge:
 
     async def test_source_metadata_row_is_dropped(self, merged, storage):
         assert await storage.get_namespace_meta("src-ns") is None
+
+    @pytest.fixture
+    async def overlapping(self, storage):
+        """Both namespaces hold the same indexed chunk (same file + hash + line).
+
+        ``chunks`` is UNIQUE on that key, so a naive namespace UPDATE would
+        fail the merge outright. This is not exotic: it is what
+        ``mm agent migrate`` hits when one agent's memory was indexed under
+        both the legacy and the canonical namespace.
+        """
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        only_in_source = make_chunk(content="unique", namespace="src-ns", source="other.md")
+        await storage.upsert_chunks([src, dup, only_in_source])
+        return await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+    async def test_overlapping_merge_succeeds(self, overlapping):
+        assert overlapping.merged is True
+
+    async def test_overlapping_merge_reports_dropped_duplicates(self, overlapping):
+        assert overlapping.duplicates_dropped == 1
+
+    async def test_overlapping_merge_moves_only_the_new_chunk(self, overlapping):
+        assert overlapping.chunks_moved == 1
+
+    async def test_overlapping_merge_leaves_one_copy(self, overlapping, storage):
+        assert dict(await storage.list_namespaces())["dst-ns"] == 2
+
+    async def test_overlapping_merge_empties_the_source(self, overlapping, storage):
+        assert "src-ns" not in dict(await storage.list_namespaces())
+
+    async def test_overlapping_merge_keeps_the_targets_copy(self, storage):
+        """Target wins, matching the metadata rule — its row (and counters) survive."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_chunk(src.id) is None
+        assert await storage.get_chunk(dup.id) is not None
+
+    async def test_no_duplicates_dropped_on_a_plain_rename(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        result = await storage.rename_namespace("src-ns", "dst-ns")
+        assert result.duplicates_dropped == 0
 
     async def test_metadata_only_source_merges_into_metadata_target(self, storage):
         await storage.set_namespace_meta("src-ns", description="source")

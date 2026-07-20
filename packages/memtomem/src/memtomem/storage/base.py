@@ -51,6 +51,10 @@ class NamespaceRenameResult:
     metadata_renamed: bool
     #: The target already existed and ``merge=True`` consolidated into it.
     merged: bool
+    #: Source chunks the target already held (same file, content hash and
+    #: start line) and which were therefore deleted rather than moved —
+    #: ``chunks`` is UNIQUE on that key. Only ever non-zero on a merge.
+    duplicates_dropped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
