@@ -7,6 +7,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Interrupted skill updates are now recovered before the next write**
+  (ADR-0030 §10, PR-G4a-3) — PR-G4a-2 shipped the crash-safe directory swap and
+  its recovery machine with no caller. Every gateway writer that takes a
+  skill's canonical lock now runs recovery *first*, as a single prelude: a
+  leftover transaction is completed, rolled back, or — when two candidate trees
+  survive and which one is the original is genuinely ambiguous — refused with
+  both paths named and nothing changed. Crash leftovers are still collected
+  afterwards, but a tree the marker still claims is now left alone; deleting
+  one turned a recoverable state into one whose next recovery would have
+  removed the only copy of the skill.
+  The refusal reaches each surface as its own condition rather than a generic
+  failure: a typed per-item skip that lets the rest of a push or import
+  proceed, `swap_recovery_pending` on a Pull, and HTTP **409** on the web API.
+  Wedged means wedged — nothing is written and nothing is deleted until an
+  operator looks.
+
 - **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
   primitive that replaces a whole artifact tree and can recover from an
   interruption. A non-empty directory cannot be replaced atomically on POSIX,

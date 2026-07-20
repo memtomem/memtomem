@@ -685,6 +685,7 @@
   "settings.ctx.import_skip_skills_overwrite_unsupported": "Overwriting an existing skill isn't supported yet — delete the stored skill first, then re-pull.",
   "settings.ctx.import_skip_snapshot_requires_dir_layout": "This stored item uses the old flat layout and can't be snapshotted before overwrite — run `mm context migrate` to convert it first.",
   "settings.ctx.import_skip_snapshot_failed": "The stored copy could not be snapshotted before overwrite, so it was left unchanged.",
+  "settings.ctx.import_skip_swap_recovery_pending": "An interrupted update left this item in a state that can't be resolved automatically — nothing was changed. Inspect it on disk before retrying.",
   "settings.ctx.delete_success": "\"{name}\" deleted",
   "settings.ctx.delete_partial": "Delete incomplete — {count} path(s) not removed. {path}: {reason}",
   "settings.ctx.save_success": "\"{name}\" saved",

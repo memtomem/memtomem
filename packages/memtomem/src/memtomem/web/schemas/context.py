@@ -535,11 +535,11 @@ class ContextPullApplyResponse(BaseModel):
     it is absent from ``status`` here.
 
     ``status`` is a CLOSED ``Literal`` — the *domain-decision* subset of the
-    engine's ``PullApplyStatus`` the route returns on a 200. The four statuses
+    engine's ``PullApplyStatus`` the route returns on a 200. The five statuses
     that carry HTTP semantics are mapped to error codes and never appear in this
-    body: ``lock_timeout`` → 503, ``plan_stale`` → 409, and the two
-    infrastructural write failures (``snapshot_failed`` / ``write_failed``) →
-    500. ``test_web_routes_context_pull_apply.py`` pins that partition against
+    body: ``lock_timeout`` → 503, ``plan_stale`` and ``swap_recovery_pending``
+    → 409, and the two infrastructural write failures (``snapshot_failed`` /
+    ``write_failed``) → 500. ``test_web_routes_context_pull_apply.py`` pins that partition against
     the engine enum, exactly as ``ContextPullPreviewCandidate`` pins
     ``content_status``. Every ``reason`` (top-level and per-candidate) is
     display-sanitized at the route; ``gate_blocked`` carries a fixed path-free

@@ -987,11 +987,13 @@ def _finalize_pull(result: PullApplyResult, project_root: Path) -> dict:
     Domain decisions — the ``applied`` write and every refusal that hands the
     picker something to act on (``source_conflict`` with its candidate rows,
     ``gate_blocked`` with ``force_bypassable``, ``canonical_exists`` →
-    ``overwrite``, …) — are result-coded 200 bodies. The four statuses with
+    ``overwrite``, …) — are result-coded 200 bodies. The five statuses with
     genuine HTTP meaning become error envelopes instead (the client ``api()``
     helper drops structured detail on non-2xx, but these carry none the picker
     needs): ``lock_timeout`` → 503 (transient, retry), ``plan_stale`` → 409
-    (destination changed under the lock — re-preview), and the two fail-closed
+    (destination changed under the lock — re-preview),
+    ``swap_recovery_pending`` → 409 (an interrupted directory swap the engine
+    refuses to resolve on its own, ADR-0030 §10), and the two fail-closed
     write failures ``snapshot_failed`` / ``write_failed`` → 500. Every message
     is display-sanitized (an OSError reason may embed a path)."""
     status = result.status
@@ -1008,6 +1010,20 @@ def _finalize_pull(result: PullApplyResult, project_root: Path) -> dict:
             "conflict",
             _redact_pull_reason(result.reason, project_root)
             or "the Store changed since the preview; re-preview and retry.",
+            reason_code=result.reason_code,
+        )
+    if status == "swap_recovery_pending":
+        # 409, not 500: nothing failed infrastructurally and nothing was
+        # written — the artifact is wedged in a state only an operator can
+        # adjudicate, which is a conflict about the resource, not a server
+        # fault. The reason names the paths to inspect and is redacted like
+        # every other one here.
+        raise _error(
+            409,
+            "conflict",
+            _redact_pull_reason(result.reason, project_root)
+            or "an interrupted directory swap left this artifact in a state "
+            "that needs manual inspection.",
             reason_code=result.reason_code,
         )
     if status in ("snapshot_failed", "write_failed"):

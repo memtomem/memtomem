@@ -2659,8 +2659,21 @@ _PULL_LOCK_BUDGET_S = 30.0
 #: a new engine status must be classified deliberately, not inherit a prefix
 #: that could understate it (e.g. a future data-loss status rendering as a
 #: benign refusal).
-#: The four the web route maps to non-200 (503/409/500/500) → ``error:``.
-_PULL_ERROR_STATUSES = frozenset({"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"})
+#: The five the web route maps to non-200 (503/409/409/500/500) → ``error:``.
+#: ``swap_recovery_pending`` belongs here rather than with the refusals: the
+#: refusal bucket is defined as "what the web route returns as a typed 200",
+#: and this one is a 409. It is also not an *actionable* refusal — the
+#: remediation is an operator inspecting two paths, not a parameter the caller
+#: can change and retry (which is why it carries no ``remediation`` entry).
+_PULL_ERROR_STATUSES = frozenset(
+    {
+        "lock_timeout",
+        "plan_stale",
+        "snapshot_failed",
+        "write_failed",
+        "swap_recovery_pending",
+    }
+)
 #: Actionable domain refusals the web route returns as a typed HTTP 200.
 _PULL_REFUSAL_STATUSES = frozenset(
     {

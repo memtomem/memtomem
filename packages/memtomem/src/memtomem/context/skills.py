@@ -43,6 +43,11 @@ from memtomem.context._atomic import (
     copy_tree_atomic,
     rename_no_replace,
 )
+from memtomem.context._dir_swap import (
+    SwapRecoveryError,
+    marker_owns_transient,
+    recover_pending_swaps,
+)
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import (
@@ -406,7 +411,7 @@ def _remove_internal_artifact(path: Path) -> None:
 def _iter_own_internal_dirs(
     dst: Path, *, kinds: tuple[str, ...] = INTERNAL_ARTIFACT_KINDS
 ) -> Iterator[tuple[str, Path]]:
-    """Yield ``(kind, path)`` for the internal trees that belong to ``dst``.
+    """Yield ``(kind, path)`` for the REAPABLE internal trees belonging to ``dst``.
 
     ``kind`` is one of :data:`memtomem.context._names.INTERNAL_ARTIFACT_KINDS`;
     the two are not interchangeable (see
@@ -431,13 +436,33 @@ def _iter_own_internal_dirs(
     A name that is not internal-shaped at all — a user skill like
     ``.staging-<dst>-notes.tmp`` — parses to no owner and is skipped, which is
     the #1229 rule this preserves.
+
+    **A transient a live swap marker still claims is never yielded**
+    (ADR-0030 §10 / :func:`memtomem.context._dir_swap.marker_owns_transient`).
+    The filter lives HERE, at the one place both reaping sites enumerate
+    through, rather than being repeated in each of them: the sites are reaps,
+    the rule applies to every reap, and a third one added later would otherwise
+    have to remember it. Deleting a claimed transient is how the fail-closed
+    "all three present" recovery row collapses into the "``dst`` + ``old``"
+    row, whose action then deletes ``old`` — the only copy of the artifact.
+
+    This filter is NOT a substitute for running
+    :func:`memtomem.context._dir_swap.recover_pending_swaps` first: it keeps a
+    marked transient alive, it does not resolve the transaction. Ordering is
+    the prelude's job.
     """
     parent = dst.parent
     safe = glob.escape(dst.name)
     for kind in kinds:
         for candidate in parent.glob(f".{kind}-{safe}-*.tmp"):
-            if internal_artifact_owner(candidate.name) == dst.name:
-                yield kind, candidate
+            if internal_artifact_owner(candidate.name) != dst.name:
+                continue
+            if marker_owns_transient(candidate):
+                logger.debug(
+                    "keeping internal artifact %s: a live swap marker still claims it", candidate
+                )
+                continue
+            yield kind, candidate
 
 
 def _canonical_is_present(dst: Path) -> bool:
@@ -472,6 +497,13 @@ def _reap_move_aside(dst: Path) -> None:
     it something every future writer has to remember. Deliberately narrow — it
     never recovers, only reaps — so it stays safe to call from inside the
     promote primitive.
+
+    Deliberately does NOT recover: it runs after a promote that already
+    succeeded, and recovery belongs to the prelude that runs before the write.
+    It is still bound by §4.1 — a marker-owned ``.old-*`` is not ours to
+    delete — which it inherits from :func:`_iter_own_internal_dirs`, the one
+    enumeration both reaping sites go through. The ``.old-*`` half is the
+    dangerous one: it holds the pre-image.
 
     It re-checks presence rather than trusting the rename it follows. "We just
     created ``dst``" is not the same claim as "``dst`` is there now": the lock
@@ -518,7 +550,7 @@ def _reap_move_aside(dst: Path) -> None:
 
 
 def _recover_and_reap_internal_dirs(dst: Path) -> None:
-    """Remove crash-leftover staging/move-aside trees for ``dst``.
+    """Resolve a pending swap for ``dst``, then remove crash leftovers.
 
     A SIGKILL between :func:`_stage_skill` and the cleanup in
     :func:`_promote_staging` leaves ``.staging-<name>-*.tmp`` /
@@ -552,12 +584,42 @@ def _recover_and_reap_internal_dirs(dst: Path) -> None:
     paths; :func:`_reap_move_aside` clears it once the promote makes ``dst``
     present again. A leaked directory is cheap, a deleted canonical is not.
 
-    The name is deliberate — this is the single prelude every canonical writer
-    runs under the lock, not merely a garbage collector.
+    **Recovery runs FIRST, and a refusal aborts** (ADR-0030 §10, stated in
+    :mod:`memtomem.context._dir_swap`'s module docstring):
+    :func:`~memtomem.context._dir_swap.recover_pending_swaps` resolves every
+    *marked* transaction before anything is reaped, and only then does the
+    unmarked debris get collected. The order is load-bearing in both
+    directions. Reaping first would delete a transient the marker still
+    describes, so recovery would then classify a state that no longer exists.
+    And falling through to a reap after recovery *refused* would do the same to
+    the one state that is deliberately left intact — so the refusal propagates
+    rather than being logged and swallowed.
+
+    That is also why this function is the prelude rather than a second helper
+    every writer must remember to call alongside a reaper: a rule spread over
+    two calls is a rule that gets half-applied.
+
+    :raises SwapRecoveryError: recovery could not converge (ambiguous
+        provenance, a destination recreated by a non-gateway writer, a tampered
+        marker, a wrong-type transient). An ``OSError`` subclass, so a caller
+        that already funnels ``OSError`` into a typed per-item skip degrades
+        safely — but every call site translates it explicitly.
+    :raises InvalidNameError: ``dst.name`` is not a valid artifact identifier.
+        A ``ValueError``, **not** an ``OSError``, so it deliberately does NOT
+        ride the funnel above. Every call site derives ``dst`` from an artifact
+        that was already resolved and validated (a Store listing, a validated
+        Pull plan, a runtime fan-out target), so an invalid name here is a
+        programming error and must crash loudly rather than degrade into a
+        per-item skip. A future caller that iterates raw directory entries has
+        to make that choice explicitly instead of inheriting this one.
     """
     parent = dst.parent
     if not parent.is_dir():
         return
+    recover_pending_swaps(parent, dst.name)
+    # Presence is re-read AFTER recovery: a forwarding/rollback row may have
+    # just restored ``dst``, which is exactly when the ``.old-*`` rule below
+    # starts permitting a reap.
     dst_is_dir = _canonical_is_present(dst)
     for kind, stale in _iter_own_internal_dirs(dst):
         if kind == "old" and not dst_is_dir:
@@ -913,11 +975,28 @@ def generate_all_skills(
                         )
                     )
                     return SkillSyncResult(generated=generated, skipped=skipped)
-                # All destination locks held — safe point to reap crash
-                # leftovers before they collide with fresh staging work.
+                # All destination locks held — safe point to recover any
+                # interrupted swap and reap crash leftovers before they collide
+                # with fresh staging work.
+                #
+                # Caught PER DESTINATION, not around the loop: an escaping
+                # raise would abort a batch whose other destinations are
+                # perfectly fine, and the #1229 all-or-nothing contract is
+                # per-destination, not per-run. A wedged destination is
+                # recorded AND added to ``blocked_dsts`` — recording a skip
+                # while still staging into that destination would contradict
+                # the fail-closed recovery result it came from.
+                blocked_dsts: set[Path] = set()
                 for stale_dst in sorted({dst for _, _, _, dst in work}, key=str):
-                    _recover_and_reap_internal_dirs(stale_dst)
+                    try:
+                        _recover_and_reap_internal_dirs(stale_dst)
+                    except SwapRecoveryError as exc:
+                        blocked_dsts.add(stale_dst)
+                        skipped.append((stale_dst.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        logger.warning("skip %s: %s", stale_dst, exc)
                 for target, _gen, skill_dir, dst in work:
+                    if dst in blocked_dsts:
+                        continue
                     # Preflight the promote refusal predicate while the
                     # destination locks are held, BEFORE anything stages: a
                     # pre-existing non-skill dst would otherwise make the
@@ -1074,8 +1153,16 @@ def generate_all_skills(
                 )
                 continue
             with dst_lock:
-                # Lock held — safe point to reap crash leftovers for this dst.
-                _recover_and_reap_internal_dirs(dst)
+                # Lock held — safe point to recover an interrupted swap and
+                # reap crash leftovers for this dst. A refusal is a typed
+                # per-item skip, exactly like the `_target_conflict` one below:
+                # the batch continues, this destination does not.
+                try:
+                    _recover_and_reap_internal_dirs(dst)
+                except SwapRecoveryError as exc:
+                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    logger.warning("skip %s: %s", skill_dir.name, exc)
+                    continue
                 # Preflight the promote refusal predicate (same conversion to
                 # a typed skip as the project_shared batch above, #1229) —
                 # before staging so a conflicted destination wastes no
@@ -1511,10 +1598,23 @@ def extract_skills_to_canonical(
                     logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                     continue
                 with dst_lock:
-                    # Lock held — safe point to reap crash leftovers for this
-                    # canonical dst (previously unreachable for the import
-                    # path, which relied on discovery filtering alone).
-                    _recover_and_reap_internal_dirs(dst)
+                    # Lock held — safe point to recover an interrupted swap and
+                    # reap crash leftovers for this canonical dst (previously
+                    # unreachable for the import path, which relied on discovery
+                    # filtering alone).
+                    try:
+                        _recover_and_reap_internal_dirs(dst)
+                    except SwapRecoveryError as exc:
+                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
+                        # Marked ``seen`` — the wedge is on the DESTINATION, so
+                        # the same name from another runtime would hit the same
+                        # state and add a duplicate row. This is the
+                        # ``canonical_exists`` posture, not the ``lock_timeout``
+                        # one (contention is transient and worth a retry from
+                        # another source; a fail-closed recovery state is not).
+                        seen[skill_name] = runtime_label
+                        continue
                     # Re-check the existence contract under the lock: a parallel
                     # importer can land dst between the lock-free preflight above
                     # and our acquisition. Mirrors the pre-lock branch exactly so

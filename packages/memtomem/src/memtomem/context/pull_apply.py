@@ -58,7 +58,8 @@ from memtomem.context._canonical_txn import (
     write_canonical_locked,
 )
 from memtomem.context._gate_a import GateStatus
-from memtomem.context._names import Layout
+from memtomem.context._dir_swap import SwapRecoveryError, marker_owns_transient
+from memtomem.context._names import Layout, validate_name
 from memtomem.context._runtime_targets import resolve_import_runtimes
 from memtomem.context.pull_preview import (
     PullCandidate,
@@ -93,6 +94,7 @@ PullApplyStatus = Literal[
     "snapshot_failed",  # pre-overwrite snapshot failed (fail-closed)
     "write_failed",  # unexpected OSError writing the captured bytes (e.g. ENOTSUP promote)
     "plan_stale",  # destination changed between prepare and commit
+    "swap_recovery_pending",  # an interrupted directory swap needs an operator (ADR-0030 §10)
 ]
 
 
@@ -333,7 +335,19 @@ def prepare_pull(
     :class:`PullPlan` to confirm-and-commit, or a :class:`PullApplyResult`
     (a refusal, or the ``applied``/``identical`` no-op when the Store already
     holds the selected content).
+
+    ``name`` is validated HERE rather than being assumed validated by the
+    caller. Every shipping surface does validate (``context_gateway`` routes,
+    ``mem_context_pull``, the CLI), but this engine builds destination paths as
+    ``canonical_root / name`` — and a separator-carrying name like
+    ``../other/x`` yields a perfectly ordinary *basename* while pointing the
+    parent somewhere else entirely, so a downstream basename check cannot catch
+    it. The commit path recovers interrupted swaps, which renames and deletes
+    trees; a defense that only holds while every caller remembers to validate
+    is not a defense for that. :func:`commit_pull` re-checks for the same
+    reason (a :class:`PullPlan` is constructible directly).
     """
+    validate_name(name, kind=f"{kind[:-1]} name")
     resolved_root = project_root.resolve() if project_root is not None else None
     if source_runtime is not None:
         # Validate eligibility up front (export-only / unknown → ValueError).
@@ -572,7 +586,15 @@ def commit_pull(
     lands. ``lock_timeout=None`` blocks (the CLI default, Ctrl-C-able); the
     async Web/MCP surfaces pass a bound and map the ``lock_timeout`` result to a
     503.
+
+    Re-validates ``plan.name`` before either branch derives a path from it.
+    ``prepare_pull`` already did, but a :class:`PullPlan` is a plain frozen
+    dataclass a caller can build directly, and everything below joins the name
+    onto a canonical root — including the swap recovery the skills branch runs,
+    which renames and removes directories. The check is cheap and it is the
+    last point where an escaping name is still only a string.
     """
+    validate_name(plan.name, kind=f"{plan.kind[:-1]} name")
     if plan.kind == "skills":
         return _commit_skills(plan, lock_timeout=lock_timeout)
     return _commit_atomic(plan, lock_timeout=lock_timeout)
@@ -687,12 +709,34 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             finally:
                 # No .staging-* leak on any promote error (R3 Major 4). On the
                 # success path the tree was renamed into dst, so this is a no-op.
-                if staging is not None and staging.exists():
+                #
+                # ADR-0030 §10 / _dir_swap §4.1: a transient a live swap marker
+                # claims is removed only by the successful forward path or by
+                # recovery — never by a caller's cleanup. This staging tree uses
+                # the same ``.staging-<name>-<pid>-<hex>.tmp`` grammar the swap
+                # does, so once a swap is in flight here, deleting it would
+                # collapse the fail-closed "all three present" recovery row into
+                # the "dst + old" row, whose action then deletes ``old`` — the
+                # only copy of the artifact. Unreachable until the overwrite
+                # transaction lands (nothing writes a marker yet); wired now
+                # because the failure it prevents is silent and permanent.
+                if staging is not None and staging.exists() and not marker_owns_transient(staging):
                     shutil.rmtree(staging, ignore_errors=True)
 
             # Write landed — record the passed/bypassed privacy counter once.
             if plan.gate is not None:
                 _record_gate_success(plan.gate, plan.surface)
+    except SwapRecoveryError as exc:
+        # The prelude refused to resolve an interrupted directory swap
+        # (ADR-0030 §10). Its own status, deliberately NOT ``target_conflict``
+        # (nothing the user put at the destination caused this, and "remove it
+        # and re-run" is the wrong advice) and not ``write_failed`` (nothing
+        # was written — the artifact is wedged, and a 500 would report an
+        # infrastructure failure for a state that needs an operator's eyes).
+        # Must precede any broad ``OSError`` clause added later: this is one.
+        return _refusal_for(
+            plan, "swap_recovery_pending", skip_codes.SWAP_RECOVERY_PENDING, str(exc)
+        )
     except TimeoutError:
         return _lock_timeout_result(plan)
 
