@@ -47,6 +47,7 @@ from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import (
     GENERATOR_VENDOR,
+    INTERNAL_ARTIFACT_KINDS,
     InvalidNameError,
     Layout,
     internal_artifact_owner,
@@ -403,13 +404,16 @@ def _remove_internal_artifact(path: Path) -> None:
 
 
 def _iter_own_internal_dirs(
-    dst: Path, *, kinds: tuple[str, ...] = ("staging", "old")
+    dst: Path, *, kinds: tuple[str, ...] = INTERNAL_ARTIFACT_KINDS
 ) -> Iterator[tuple[str, Path]]:
     """Yield ``(kind, path)`` for the internal trees that belong to ``dst``.
 
-    ``kind`` is ``"staging"`` or ``"old"``; the two are not interchangeable
-    (see :func:`_recover_and_reap_internal_dirs`), so callers get it rather
-    than re-deriving it from the name.
+    ``kind`` is one of :data:`memtomem.context._names.INTERNAL_ARTIFACT_KINDS`;
+    the two are not interchangeable (see
+    :func:`_recover_and_reap_internal_dirs`), so callers get it rather than
+    re-deriving it from the name. The default scans them all, and comes from
+    the same constant the name pattern is built from so a future third
+    transient cannot be classifiable but unscannable.
 
     **The owner equality is the guarantee.** A glob cannot express "this
     destination and no other": ``.old-foo-*.tmp`` matches
@@ -483,12 +487,25 @@ def _reap_move_aside(dst: Path) -> None:
     (editors, shells) are outside the guarantee. Closing it for real needs
     descriptor-relative traversal across every walker here, which is a separate
     change (tracked in the PR-G4 design note, §2.3).
+
+    **Never raises.** It runs AFTER the rename has committed, so a failure here
+    is a failure to collect garbage, not a failure to write. Letting one out
+    would make the promote report the write it already performed as an error —
+    in :func:`~memtomem.context.pull_apply._commit_skills` a raw ``OSError``
+    becomes a ``write_failed`` refusal while ``dst`` is installed, and the
+    privacy gate's success is never recorded. The individual removals were
+    already best-effort; the enumeration around them (``Path.glob`` can raise
+    mid-iteration) was not, so the whole body is wrapped and logged (Codex
+    review).
     """
-    if not dst.parent.is_dir() or not _canonical_is_present(dst):
-        return
-    for _, stale in _iter_own_internal_dirs(dst, kinds=("old",)):
-        logger.debug("reaping move-aside tree %s after promote", stale)
-        _remove_internal_artifact(stale)
+    try:
+        if not dst.parent.is_dir() or not _canonical_is_present(dst):
+            return
+        for _, stale in _iter_own_internal_dirs(dst, kinds=("old",)):
+            logger.debug("reaping move-aside tree %s after promote", stale)
+            _remove_internal_artifact(stale)
+    except OSError as exc:
+        logger.warning("could not reap move-aside trees for %s: %s", dst, exc)
 
 
 def _recover_and_reap_internal_dirs(dst: Path) -> None:
@@ -615,9 +632,16 @@ def _promote_staging(
 
     ``reap_move_aside=True`` clears stale ``.old-*`` trees on the success
     paths, where the destination has just become present — the condition
-    ADR-0030 §10 requires before one may be deleted, and the only thing that
-    frees the tree :func:`_recover_and_reap_internal_dirs` had to keep on the
-    way in.
+    ADR-0030 §10 requires before one may be deleted, and what frees the tree
+    :func:`_recover_and_reap_internal_dirs` had to keep on the way in.
+
+    It runs only where the promote SUCCEEDS, so the keep is not guaranteed to
+    be temporary. The ``replace_existing=False`` branch losing its exclusive
+    rename to a non-gateway writer is the concrete case: ``dst`` exists but is
+    foreign, the reap never runs, and the reverse-import path refuses on later
+    runs before it re-acquires the lock. That outcome is the right one —
+    ``.old-*`` may still be the only copy of what we put there — but it means
+    "the next promote clears it" describes the common path, not a guarantee.
 
     **It defaults to False because it is safe only under the destination
     sidecar lock**, and this primitive cannot see whether its caller holds one.

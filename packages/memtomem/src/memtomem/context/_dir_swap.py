@@ -18,15 +18,19 @@ user's only copy.
 the only copy dies.** Under C0, :func:`recover_pending_swaps` runs FIRST, and
 only then may anything reap crash leftovers — and a reap must skip any
 transient :func:`marker_owns_transient` still claims. A refusal from recovery
-aborts; it must never fall through to a reap. The reason is concrete:
-``skills._recover_and_reap_internal_dirs`` sweeps ``.staging-*`` and ``.old-*``
-under the same C0 lock with no notion of a marker. It no longer deletes the
-only copy — an ``.old-*`` is kept while ``dst`` is absent (ADR-0030 §10), which
-is exactly the mid-swap shape — but the transient side is still unguarded: a
-reap that removes ``staging`` between the renames turns row 2 into row 5, so
-recovery rolls back a swap whose replacement tree was complete. Wiring the
-ordering into the writers is PR-G4a-3's fan-out; this module supplies the
-predicate and states the contract so the sequence is not left implicit.
+aborts; it must never fall through to a reap. The reason is concrete: today
+``skills`` deletes crash leftovers from **two** marker-blind sites under the
+same C0 lock — ``_recover_and_reap_internal_dirs``, the pre-write prelude that
+sweeps both ``.staging-*`` and ``.old-*``, and ``_reap_move_aside``, the
+post-promote collector that sweeps ``.old-*``. Both are G4a-3's fan-out; a
+list that names only the prelude leaves the other one wired the old way.
+
+Neither deletes the only copy any more — an ``.old-*`` is kept while ``dst``
+is absent (ADR-0030 §10), which is exactly the mid-swap shape. The transient
+side is what is still unguarded: a reap that removes ``staging`` between the
+renames turns row 2 into row 5, so recovery rolls back a swap whose
+replacement tree was complete. This module supplies the predicate and states
+the contract so the sequence is not left implicit.
 
 Four names, all direct children of the canonical root, sharing one artifact
 ``<name>`` and one transaction suffix ``S = "<pid>-<6 hex>"``::

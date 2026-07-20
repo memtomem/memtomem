@@ -20,9 +20,11 @@ that replaced the inline ``shutil.rmtree(dst); copy_tree_atomic`` in
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -837,6 +839,38 @@ class TestMoveAsideReapingIsStateAware:
 
         assert not own.exists()
         assert neighbor.is_dir(), "post-promote reap crossed into another destination"
+
+    def test_post_promote_reap_failure_does_not_fail_the_promote(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A collector that runs after the commit must not be able to report a
+        committed write as an error.
+
+        ``Path.glob`` can raise mid-iteration (ENOTDIR, EIO, EACCES), and the
+        individual removals were already best-effort while the enumeration
+        around them was not. Escaping here reaches
+        ``pull_apply._commit_skills``'s ``except OSError`` and turns an
+        installed skill into a ``write_failed`` refusal with the privacy gate's
+        success unrecorded (Codex review).
+        """
+        import memtomem.context.skills as skills_mod
+
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        def exploding_scan(*args: object, **kwargs: object) -> Iterator[tuple[str, Path]]:
+            raise OSError(errno.EIO, "Input/output error", str(root))
+            yield  # pragma: no cover — generator marker
+
+        monkeypatch.setattr(skills_mod, "_iter_own_internal_dirs", exploding_scan)
+
+        _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
+
+        assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "new\n"
 
 
 class TestGenerateAllSkillsStagingFlow:
@@ -1799,7 +1833,7 @@ class TestSyncPromoteRaceClassification:
         def racing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             if dst.name == "foo":
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
-            orig_promote(staging, dst)
+            orig_promote(staging, dst, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
         result = generate_all_skills(tmp_path, runtimes=["claude_skills"])
@@ -1845,7 +1879,7 @@ class TestSyncPromoteRaceClassification:
         def racing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             if dst == claude_dst:
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
-            orig_promote(staging, dst)
+            orig_promote(staging, dst, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
         result = generate_all_skills(tmp_path, scope="user")  # must not raise
