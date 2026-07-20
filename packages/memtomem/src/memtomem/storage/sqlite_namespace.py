@@ -326,8 +326,7 @@ class NamespaceOps:
             return 0
         ids = [row[0] for row in rows]
         rowids = [row[1] for row in rows]
-        for dropped_id, _rowid, survivor_id in rows:
-            self._remap_chunk_references(db, dropped_id, survivor_id)
+        self._remap_chunk_references(db, [(row[2], row[0]) for row in rows])
         db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
         db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids)
         if self._has_vec_table():
@@ -367,23 +366,29 @@ class NamespaceOps:
         return out
 
     def _remap_chunk_references(
-        self, db: sqlite3.Connection, dropped_id: str, survivor_id: str
+        self, db: sqlite3.Connection, pairs: Sequence[tuple[str, str]]
     ) -> None:
-        """Re-point everything that referenced *dropped_id* at *survivor_id*.
+        """Re-point references from each dropped chunk to its surviving twin.
 
-        The two rows are the same content indexed twice, so a relation or an
-        entity mention recorded against one is equally true of the other —
-        letting the cascade delete them instead would quietly lose provenance
-        that has no other copy. ``UPDATE OR IGNORE`` handles the case where
-        the survivor already carries the same row (a relation to the same
-        target, say): the source's copy is left to be cascaded away, which is
-        the target-wins rule again.
+        *pairs* is ``[(survivor_id, dropped_id), …]``. The two rows in a pair
+        are the same content indexed twice, so a relation or an entity
+        mention recorded against one is equally true of the other — letting
+        the cascade delete them instead would quietly lose provenance that
+        has no other copy. ``UPDATE OR IGNORE`` handles the case where the
+        survivor already carries the same row (a relation to the same target,
+        say): the source's copy is left to be cascaded away, which is the
+        target-wins rule again.
+
+        Schema discovery runs once and each column is remapped in a single
+        ``executemany`` — a per-duplicate ``PRAGMA`` sweep would put
+        ``O(duplicates × tables)`` metadata queries inside the write lock,
+        which a large ``mm agent migrate`` would feel.
         """
         for table, column in self._chunk_reference_columns(db):
-            db.execute(
+            db.executemany(
                 f"UPDATE OR IGNORE {quote_ident(table)} SET {quote_ident(column)}=? "
                 f"WHERE {quote_ident(column)}=?",
-                (survivor_id, dropped_id),
+                pairs,
             )
 
     @staticmethod

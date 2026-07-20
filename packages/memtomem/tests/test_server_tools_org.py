@@ -533,6 +533,33 @@ class TestRenameNamespaceMerge:
         link = await storage.get_chunk_link(shared_copy.id, "shared")
         assert link.source_id == dup.id
 
+    async def test_schema_discovery_does_not_scale_with_duplicates(self, storage):
+        """FK discovery runs once per merge, not once per dropped chunk.
+
+        Otherwise a large migration puts O(duplicates × tables) PRAGMA
+        queries inside the write lock.
+        """
+
+        async def _merge_with(n: int) -> int:
+            for i in range(n):
+                src = make_chunk(content=f"same{i}", namespace="src-ns", source=f"s{i}.md")
+                dup = make_chunk(content=f"same{i}", namespace="dst-ns", source=f"s{i}.md")
+                dup.content_hash = src.content_hash
+                await storage.upsert_chunks([src, dup])
+            db = storage._get_db()
+            trace: list[str] = []
+            db.set_trace_callback(lambda sql: trace.append(sql.strip()))
+            try:
+                await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+            finally:
+                db.set_trace_callback(None)
+            return sum(1 for s in trace if s.upper().startswith("PRAGMA FOREIGN_KEY_LIST"))
+
+        one = await _merge_with(1)
+        await storage.delete_by_namespace("dst-ns")
+        many = await _merge_with(4)
+        assert one == many
+
     async def test_no_duplicates_dropped_on_a_plain_rename(self, storage):
         await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
         result = await storage.rename_namespace("src-ns", "dst-ns")
