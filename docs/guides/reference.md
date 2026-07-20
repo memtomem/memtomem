@@ -107,7 +107,7 @@ registered names total):
 | **Pinned Context** | `mem_pinned_list/get/set/delete`, `mem_context_compose` | Keep bounded instructions ahead of retrieved memory |
 | **Formation** | `mem_formation_scan`, `mem_candidate_propose/list/review/recover` | Submit and review proposed memories and recover interrupted approvals |
 
-\* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions themselves stay reachable in `core` and `standard` mode via `mem_do(action="config" | "embedding_reset" | "reset", params={...})`; `mm config` (CLI) and the Web UI Settings tab are the non-MCP equivalents.
+\* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
 ### `mem_do` action naming convention
 

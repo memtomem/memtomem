@@ -42,10 +42,16 @@ _ALIAS_EXEMPT = frozenset({"mem_context_migrate"})
 
 
 def _decorated_tools() -> tuple[set[str], set[str]]:
-    """Return (``@mcp.tool()`` names, ``@register(...)`` names) found by AST."""
+    """Return (``@mcp.tool()`` names, ``@register(...)`` names) found by AST.
+
+    Decorator *spelling* is matched, not identity: a module that imported the
+    decorators under another name (``from memtomem.server import mcp as m``)
+    would be invisible here. That is exactly why the comparisons below are
+    two-way — an AST miss shows up as an unexplained runtime entry.
+    """
     direct: set[str] = set()
     registered: set[str] = set()
-    for path in sorted(_TOOLS_DIR.glob("*.py")):
+    for path in sorted(_TOOLS_DIR.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -72,31 +78,38 @@ def test_every_non_core_tool_is_registered() -> None:
 
 
 def test_ast_registered_set_matches_runtime_actions() -> None:
-    """Every ``@register``-ed function reaches ``ACTIONS`` at runtime.
+    """The ``@register`` sweep and ``ACTIONS`` must agree **exactly**.
 
-    Catches a module that is never imported by ``server/__init__.py``: its
-    decorators look right to the AST half above, but the registry stays empty.
+    Missing at runtime = a module ``server/__init__.py`` never imports, so the
+    decorators are right but the registry is empty. Extra at runtime = the AST
+    sweep did not recognise the decorator (aliased import, dynamic
+    registration), which would let the first test pass vacuously. Equality is
+    what makes both halves fail closed.
     """
     _, registered = _decorated_tools()
-    expected = {name.removeprefix("mem_") for name in registered}
-    missing = expected - set(ACTIONS)
-    assert not missing, (
-        f"{sorted(missing)} carry @register but are absent from ACTIONS — "
-        "add the module import to server/__init__.py."
+    from_ast = {name.removeprefix("mem_") for name in registered}
+    assert from_ast == set(ACTIONS), (
+        f"registered-but-not-in-ACTIONS: {sorted(from_ast - set(ACTIONS))} "
+        "(add the module import to server/__init__.py); "
+        f"in-ACTIONS-but-not-found-by-AST: {sorted(set(ACTIONS) - from_ast)} "
+        "(the decorator sweep in this file no longer recognises how that tool "
+        "registers — fix the sweep, do not delete the assertion)."
     )
 
 
 def test_ast_direct_set_matches_registered_tool_names() -> None:
-    """Every ``@mcp.tool()`` function reaches the FastMCP tool manager.
+    """The ``@mcp.tool()`` sweep and the FastMCP tool manager must agree.
 
     ``_ALL_REGISTERED_TOOLS`` is the pre-pruning snapshot, so this holds in
-    every mode.
+    every mode. Equality again, for the same fail-closed reason.
     """
     direct, _ = _decorated_tools()
-    missing = direct - set(_ALL_REGISTERED_TOOLS)
-    assert not missing, (
-        f"{sorted(missing)} carry @mcp.tool() but never reached FastMCP — "
-        "add the module import to server/__init__.py."
+    assert direct == set(_ALL_REGISTERED_TOOLS), (
+        f"decorated-but-unregistered: {sorted(direct - set(_ALL_REGISTERED_TOOLS))} "
+        "(add the module import to server/__init__.py); "
+        f"registered-but-not-found-by-AST: {sorted(set(_ALL_REGISTERED_TOOLS) - direct)} "
+        "(the decorator sweep no longer sees how that tool is exposed — fix "
+        "the sweep, do not delete the assertion)."
     )
 
 

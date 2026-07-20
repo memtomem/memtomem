@@ -181,6 +181,33 @@ class TestToolModeFootnoteParity:
             "in sync across the two Config-table entry points."
         )
 
+    def test_no_public_doc_gates_the_capability_on_full_mode(self) -> None:
+        """No public doc may pair an asterisk tool with ``full`` mode without
+        saying the action still runs through ``mem_do``.
+
+        The two Config tables were not the only place claiming these features
+        need ``full`` — ``reference/data-config-cli.md`` and
+        ``configuration.md`` said it too. Scoping the guard to the tables would
+        have left the misconception in print, so scan every public markdown
+        file instead of enumerating the known ones.
+        """
+        offenders: list[str] = []
+        for path in _public_markdown():
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "MEMTOMEM_TOOL_MODE=full" not in line:
+                    continue
+                if not any(name in line for name in _ASTERISK_TOOLS):
+                    continue
+                if "mem_do(" in line:
+                    continue
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
+        assert not offenders, (
+            "these lines gate mem_config / mem_embedding_reset / mem_reset on "
+            f"MEMTOMEM_TOOL_MODE=full without noting the mem_do route: {offenders}. "
+            "Only the individual tool name requires full mode; the actions are "
+            "@register-ed and reachable in core/standard via mem_do."
+        )
+
     def test_footnote_states_mem_do_remains_available(self, canonical_footnote: str) -> None:
         """The asterisk gates the individual *tool name*, not the capability.
 
