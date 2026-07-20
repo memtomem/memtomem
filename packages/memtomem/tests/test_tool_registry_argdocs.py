@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 from memtomem.server.tool_registry import ACTIONS, _parse_arg_docs
 
 _NESTED_JSON_DOC = """Create a memory lifecycle policy.
@@ -50,40 +52,83 @@ _CONTINUATION_DOC = """Do a thing.
     """
 
 
-def test_nested_keys_are_not_parameters() -> None:
+#: Docstrings do not reach ``register()`` in one uniform shape — some keep the
+#: source indentation, some arrive dedented. Every parser case runs against
+#: both forms so the indent rules can't be correct for only one of them.
+_FORMS = pytest.mark.parametrize("form", [lambda s: s, inspect.cleandoc], ids=["raw", "cleandoc"])
+
+
+@_FORMS
+def test_nested_keys_are_not_parameters(form) -> None:
     """Keys indented deeper than the first parameter stay continuation text."""
-    docs = _parse_arg_docs(_NESTED_JSON_DOC)
+    docs = _parse_arg_docs(form(_NESTED_JSON_DOC))
     assert set(docs) == {"name", "config", "namespace_filter"}
 
 
-def test_nested_keys_stay_in_the_owning_description() -> None:
+@_FORMS
+def test_nested_keys_stay_in_the_owning_description(form) -> None:
     """The nested content is not dropped — it belongs to ``config``."""
-    docs = _parse_arg_docs(_NESTED_JSON_DOC)
+    docs = _parse_arg_docs(form(_NESTED_JSON_DOC))
     assert "auto_expire" in docs["config"]
 
 
-def test_trailing_prose_does_not_extend_the_last_parameter() -> None:
+@_FORMS
+def test_trailing_prose_does_not_extend_the_last_parameter(form) -> None:
     """Prose after the block ends the section instead of gluing onto it.
 
     Before the fix this text was appended to whichever parameter came last,
     producing multi-KB "parameter descriptions" in the help catalog.
     """
-    docs = _parse_arg_docs(_TRAILING_PROSE_DOC)
+    docs = _parse_arg_docs(form(_TRAILING_PROSE_DOC))
     assert "flat-layout" not in docs["scope"]
 
 
-def test_trailing_prose_docstring_still_parses_every_parameter() -> None:
-    docs = _parse_arg_docs(_TRAILING_PROSE_DOC)
+@_FORMS
+def test_trailing_prose_docstring_still_parses_every_parameter(form) -> None:
+    docs = _parse_arg_docs(form(_TRAILING_PROSE_DOC))
     assert set(docs) == {"name", "scope"}
 
 
-def test_wrapped_description_lines_are_joined() -> None:
-    docs = _parse_arg_docs(_CONTINUATION_DOC)
+@_FORMS
+def test_wrapped_description_lines_are_joined(form) -> None:
+    docs = _parse_arg_docs(form(_CONTINUATION_DOC))
     assert docs["scope"].endswith("the default merge applies.")
 
 
 def test_no_args_section_yields_nothing() -> None:
     assert _parse_arg_docs("Just a summary line.\n\n    More prose.\n") == {}
+
+
+def test_register_filters_a_phantom_parameter_out_of_the_catalog() -> None:
+    """The signature filter must hold even when the parser is fooled.
+
+    The registry-wide check below cannot pin it: no current docstring
+    produces a ghost, so deleting the filter keeps that test green. Register
+    a throwaway action whose docstring declares a parameter at the SAME
+    indent as the real ones — the shape the parser is required to accept —
+    and assert it never reaches the catalog.
+    """
+    from memtomem.server.tool_registry import register
+
+    @register("advanced")
+    async def mem_argdocs_probe(real: str = "", ctx: object = None) -> str:
+        """Probe.
+
+        Args:
+            real: A parameter that exists.
+            phantom: A parameter that does not exist.
+        """
+        return ""
+
+    try:
+        info = ACTIONS["argdocs_probe"]
+        assert _parse_arg_docs(mem_argdocs_probe.__doc__ or "").get("phantom"), (
+            "fixture no longer exercises the filter: the parser already drops "
+            "'phantom', so this test would pass without register()'s filter"
+        )
+        assert set(info.param_docs) == {"real"}
+    finally:
+        ACTIONS.pop("argdocs_probe", None)
 
 
 def test_every_documented_key_is_a_real_parameter() -> None:
@@ -102,24 +147,46 @@ def test_every_documented_key_is_a_real_parameter() -> None:
     assert not offenders, f"help catalog documents non-existent parameters: {offenders}"
 
 
-def test_no_parameter_description_is_a_wall_of_text() -> None:
-    """A parameter description is a description, not an embedded manual.
+def test_policy_add_config_help_is_a_summary_not_the_schema_catalog() -> None:
+    """The specific regression: a 2.1 KB JSON catalog inside one ``Args:`` entry.
 
-    ``mem_policy_add.config`` used to carry a 2.1 KB JSON schema catalog
-    inside ``Args:``; it now lives in a "Config schemas" section below the
-    block, where it documents the tool without bloating one help entry. The
-    ceiling is set just above the current maximum
-    (``agent_share.idempotency_key``) so the next wall of text has to justify
-    itself.
+    ``mem_policy_add.config`` embedded every per-type schema, so the policy
+    help output was mostly one parameter. The schemas now live in a "Config
+    schemas" section below the block; the parameter keeps a key list and a
+    pointer. Assert the shape, not a byte count: no JSON braces, no bullet
+    list, and the pointer an agent needs.
     """
-    ceiling = 600
+    doc = ACTIONS["policy_add"].param_docs["config"]
+    assert "{" not in doc.replace("``{}``", ""), (
+        "config help is carrying JSON schema bodies again — keep them in the "
+        "Config schemas section below the Args block"
+    )
+    assert "automation.md" in doc, (
+        "config help must point somewhere a core-mode agent can actually "
+        "read; it cannot see the tool description's prose sections"
+    )
+
+
+def test_category_help_output_stays_readable() -> None:
+    """The real contract is the size of what ``mem_do help`` returns.
+
+    A per-parameter ceiling would allow unbounded aggregate growth (many
+    just-under-the-limit entries) while rejecting one legitimately long
+    description, so budget the rendered category instead. ``context`` is the
+    outlier by design — 11 actions with the ADR-0030 scope/consent surface —
+    and gets its own line rather than pulling the general budget up to meet
+    it.
+    """
+    from memtomem.server.tools.meta import _help
+
+    budgets = {"context": 14_000}
+    default_budget = 4_000
     offenders = {
-        f"{action}.{param}": len(text)
-        for action, info in ACTIONS.items()
-        for param, text in info.param_docs.items()
-        if len(text) > ceiling
+        category: size
+        for category in sorted({info.category for info in ACTIONS.values()})
+        if (size := len(_help(category))) > budgets.get(category, default_budget)
     }
     assert not offenders, (
-        f"parameter descriptions over {ceiling} chars: {offenders}. Move the "
-        "detail into prose below the Args block instead."
+        f"category help outgrew its budget: {offenders}. Move detail into the "
+        "tool description's prose sections, which full-mode clients still get."
     )
