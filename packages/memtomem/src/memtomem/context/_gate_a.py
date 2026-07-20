@@ -81,8 +81,8 @@ def format_project_shared_block_message(
         f"Gate A: {src.name} contains {hits_count} privacy pattern hit(s); "
         f"pull to scope='{scope}' was rejected. git history is forever — "
         f"no force bypass available for project_shared (ADR-0011 §5).\n"
-        f"  Remove the secret from {src} first, or retry in the user or "
-        f"project_local scope.{hint}{tail}"
+        f"  Remove the secret from {src} first, or retry in the user "
+        f"scope.{hint}{tail}"
     )
 
 

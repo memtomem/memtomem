@@ -85,7 +85,40 @@ def _string_literals(path: pathlib.Path) -> list[tuple[int, str]]:
             and id(node) not in docstrings
         ):
             out.append((node.lineno, node.value))
+        # A flag split across a join is the same defect spelled differently:
+        # ``"pass --" "overwrite"`` and ``"--" + "overwrite"`` both reach the
+        # user whole, but neither Constant matches on its own. Fold the static
+        # forms so the sweep sees what the user sees (Codex review).
+        #
+        # A flag assembled from a VARIABLE (``f"--{flag}"``) is out of reach for
+        # any static check — the sweep bounds the accidental regression, not a
+        # determined one.
+        elif isinstance(node, ast.JoinedStr | ast.BinOp):
+            folded = _fold_static_parts(node)
+            if folded is not None and id(node) not in docstrings:
+                out.append((node.lineno, folded))
     return out
+
+
+def _fold_static_parts(node: ast.AST) -> str | None:
+    """Concatenate the literal parts of an f-string / ``+`` chain, or ``None``.
+
+    Non-literal parts collapse to a single space rather than being dropped, so
+    ``f"--{x}overwrite"`` does NOT fold into the flag it never spelled.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else " "
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_fold_static_parts(v) or " " for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_static_parts(node.left)
+        right = _fold_static_parts(node.right)
+        if left is None and right is None:
+            return None
+        return (left or " ") + (right or " ")
+    if isinstance(node, ast.FormattedValue):
+        return " "
+    return None
 
 
 def test_engine_strings_never_name_a_surfaces_vocabulary() -> None:
@@ -228,8 +261,8 @@ def test_gate_a_abort_speaks_each_surfaces_own_vocabulary(tmp_path: pathlib.Path
     cli = _gate_a_message("cli_context_init", tmp_path)
     mcp = _gate_a_message("mcp_context_init", tmp_path)
 
-    assert "Retry with --scope=user or --scope=project_local." in cli
-    assert 'Re-call with scope="user" or scope="project_local".' in mcp
+    assert "Retry with --scope=user." in cli
+    assert 'Re-call with scope="user".' in mcp
     assert "--scope=" not in mcp  # never the other surface's spelling
 
 
@@ -241,6 +274,25 @@ def test_gate_a_abort_stays_neutral_for_the_browser_and_the_unclassifiable(
     inherit one."""
     for surface in ("web_context_agents_import", "some_future_surface"):
         message = _gate_a_message(surface, tmp_path)
-        assert "or retry in the user or project_local scope." in message
+        assert "or retry in the user scope." in message
         assert "--scope=" not in message
         assert 'scope="user"' not in message
+
+
+def test_remediation_never_names_a_tier_that_cannot_be_pulled_into() -> None:
+    """``project_local`` has no runtime fan-out (ADR-0011 §3), so every Pull
+    surface refuses it and the extract engines short-circuit. A remediation that
+    names it costs the user a second refusal — the exact failure #1869 exists to
+    stop, one layer down (Codex review).
+    """
+    from memtomem.context import remediation
+
+    for key, row in remediation._HINTS.items():
+        for surface, clause in row.items():
+            assert "project_local" not in clause, f"{key}/{surface} names a dead tier"
+
+
+def test_gate_a_and_pull_refusals_do_not_route_users_to_project_local(
+    tmp_path: pathlib.Path,
+) -> None:
+    assert "project_local" not in _gate_a_message("cli_context_init", tmp_path)

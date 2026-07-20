@@ -469,9 +469,12 @@ def prepare_pull(
             )
         else:
             reason = (
+                # ``user`` only: ``project_local`` has no runtime fan-out to pull
+                # from (ADR-0011 §3) — every Pull surface refuses that tier, so
+                # naming it here sends the user into a second refusal.
                 f"Gate A blocked the pull into scope='{scope}' — no force bypass for "
                 f"project_shared (ADR-0011 §5). Remove the secret or pull into "
-                f"user / project_local."
+                f"the user tier."
             )
         return _refuse(
             "gate_blocked",

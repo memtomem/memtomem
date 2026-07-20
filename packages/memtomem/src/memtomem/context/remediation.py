@@ -73,9 +73,14 @@ _HINTS: dict[HintKey, dict[HintSurface, str]] = {
         "false positive (user tier only).",
         "web": "",  # settings.ctx.pull_hint_privacy_blocked
     },
+    # ``user`` ONLY. The pre-#1869 wording offered ``project_local`` too, but
+    # that tier has no runtime fan-out (ADR-0011 §3): every Pull surface refuses
+    # it outright and the extract engines short-circuit with
+    # ``no_project_fanout_for_runtime``. Following that remediation landed the
+    # user in a second refusal (Codex review).
     GATE_A_PROJECT_SHARED_ABORT: {
-        "cli": "Retry with --scope=user or --scope=project_local.",
-        "mcp": 'Re-call with scope="user" or scope="project_local".',
+        "cli": "Retry with --scope=user.",
+        "mcp": 'Re-call with scope="user".',
         "web": "",  # the route replaces the message entirely (path disclosure)
     },
 }
@@ -86,6 +91,17 @@ _HINTS: dict[HintKey, dict[HintSurface, str]] = {
 #: …), reused rather than threading a second surface parameter through the
 #: engines. Anything unprefixed (e.g. ``memory_migrate``) classifies as
 #: ``None`` — fail-closed to neutral text.
+#:
+#: **The hint inherits an existing contract, it does not create one.** The
+#: extract engines default ``surface`` to ``"cli_context_init"``, so a non-CLI
+#: caller that omits it gets CLI-flavored remediation — but that same caller is
+#: already misfiling its privacy counters and its force-unsafe audit lines under
+#: the CLI, which is the louder pre-existing bug (#1229 fixed exactly that class
+#: for the web and MCP surfaces). Passing an accurate ``surface`` was mandatory
+#: before this module existed; it is the same obligation, now visible in the
+#: user-facing text as well.
+#: ``test_context_refusal_neutrality.py`` pins that every literal actually
+#: passed by the three context surfaces classifies.
 _SURFACE_PREFIXES: dict[str, HintSurface] = {
     "cli_": "cli",
     "mcp_": "mcp",
