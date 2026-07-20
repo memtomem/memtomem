@@ -165,10 +165,15 @@ class InvalidNameError(ValueError):
 # a third transient added to the regex alone becomes invisible to discovery
 # and immortal on disk, and one added to the scan alone is deleted by a reaper
 # that cannot prove it owns it.
+#
+# ``re.escape`` on each kind rather than raw interpolation: the whole point of
+# the constant is that a third kind is safe to add in one place, and a raw join
+# would make that true only for the alphanumeric ones.
 INTERNAL_ARTIFACT_KINDS: tuple[str, ...] = ("staging", "old")
 
 _INTERNAL_DIR_RE = re.compile(
-    rf"^\.(?:{'|'.join(INTERNAL_ARTIFACT_KINDS)})-(?P<owner>.+)-\d+-[0-9a-f]{{6}}\.tmp\Z"
+    rf"^\.(?:{'|'.join(re.escape(k) for k in INTERNAL_ARTIFACT_KINDS)})"
+    rf"-(?P<owner>.+)-\d+-[0-9a-f]{{6}}\.tmp\Z"
 )
 
 

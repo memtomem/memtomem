@@ -841,7 +841,7 @@ class TestMoveAsideReapingIsStateAware:
         assert neighbor.is_dir(), "post-promote reap crossed into another destination"
 
     def test_post_promote_reap_failure_does_not_fail_the_promote(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A collector that runs after the commit must not be able to report a
         committed write as an error.
@@ -852,6 +852,11 @@ class TestMoveAsideReapingIsStateAware:
         ``pull_apply._commit_skills``'s ``except OSError`` and turns an
         installed skill into a ``write_failed`` refusal with the privacy gate's
         success unrecorded (Codex review).
+
+        The WARNING is pinned for the same reason the keep-branch's is: a
+        swallowed failure that says nothing is indistinguishable from one that
+        never happened, and the new ``except`` is exactly where a later edit
+        would drop the log.
         """
         import memtomem.context.skills as skills_mod
 
@@ -868,9 +873,14 @@ class TestMoveAsideReapingIsStateAware:
 
         monkeypatch.setattr(skills_mod, "_iter_own_internal_dirs", exploding_scan)
 
-        _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
+        with caplog.at_level("WARNING", logger="memtomem.context.skills"):
+            _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
 
         assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "new\n"
+        assert any(
+            "could not reap move-aside trees" in r.getMessage() and str(dst) in r.getMessage()
+            for r in caplog.records
+        ), "the swallowed failure left no breadcrumb"
 
 
 class TestGenerateAllSkillsStagingFlow:
