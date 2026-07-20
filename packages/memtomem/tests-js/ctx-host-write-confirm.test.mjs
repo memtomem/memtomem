@@ -28,7 +28,7 @@ const SYNC_ENVELOPE = {
   status: 'needs_confirmation',
   confirm: 'allow_host_writes',
   reason:
-    'Sync skills targets the user tier — host paths outside any project '
+    'Push skills targets the user tier — host paths outside any project '
     + 'root. Re-send the request with allow_host_writes=true after '
     + 'confirming with the user.',
   host_targets: ['/home/u/.claude/skills/a', '/home/u/.gemini/skills/a'],

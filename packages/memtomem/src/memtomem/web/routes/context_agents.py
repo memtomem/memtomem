@@ -342,7 +342,7 @@ async def import_agents(
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
-            "Canonical-residency tier to import into. user requires the "
+            "Canonical-residency tier to pull into. user requires the "
             "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
         ),
     ),
@@ -371,12 +371,12 @@ async def import_agent(
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
-            "Canonical-residency tier to import into. user requires the "
+            "Canonical-residency tier to pull into. user requires the "
             "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
         ),
     ),
 ) -> dict:
-    """Import a single runtime agent into the scoped canonical dir.
+    """Pull a single runtime agent into the scoped canonical dir.
 
     Same response shape as the section-level import so the web UI can reuse
     its rendering. 404 when no runtime file matches the name (the section

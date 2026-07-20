@@ -324,7 +324,7 @@ async def sync_all_context(
         raise _error(
             503,
             "busy",
-            "Sync all timed out — another sync may be in progress. Phases "
+            "Push All timed out — another sync may be in progress. Phases "
             "that completed before the timeout have already written their "
             "runtime files; re-run to converge.",
         )
@@ -466,7 +466,7 @@ async def sync_all_projects_context(
                         "error_kind": "busy",
                         "http_status": 503,
                         "message": (
-                            "sync timed out for this project — another sync may "
+                            "push timed out for this project — another sync may "
                             "be in progress. Phases that completed before the "
                             "timeout have already written their runtime files; "
                             "re-run to converge."

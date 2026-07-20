@@ -208,7 +208,7 @@ async def mem_context_init(
     """Seed canonical context artifact directories.
 
     Args:
-        include: Comma-separated runtime artifact kinds to import into
+        include: Comma-separated runtime artifact kinds to pull into
             canonical storage (``skills``, ``agents``, ``commands``).
             ``settings`` is accepted for parity with other context tools
             but has no init-time pull action.

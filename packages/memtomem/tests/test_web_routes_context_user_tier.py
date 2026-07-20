@@ -620,7 +620,7 @@ class TestUserTierImport:
         body = r.json()
         assert body["status"] == "needs_confirmation"
         assert body["confirm"] == "allow_host_writes"
-        assert body["reason"] == _HOST_REASON.format(action="Import skills")
+        assert body["reason"] == _HOST_REASON.format(action="Pull skills")
         assert body["host_targets"] == [str(home / ".memtomem" / "skills" / "imp1")]
         assert body["plan"]["dry_run"] is True
         assert [i["name"] for i in body["plan"]["imported"]] == ["imp1"]

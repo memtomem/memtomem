@@ -58,15 +58,15 @@ _SECRET_REDACTED_MARKER = "<redacted: secret-shape>"
 #: survives only in the server-side traceback. Mirrors the path-free
 #: ``context_mutations._privacy_blocked()`` precedent.
 PRIVACY_BLOCK_DETAIL = (
-    "Privacy scan blocked this sync: a secret was detected in the canonical bytes. "
+    "Privacy scan blocked this push: a secret was detected in the canonical bytes. "
     "git history is forever — project_shared has no force bypass (ADR-0011 §5). "
     "Remove the secret, or migrate the artifact to a writable tier (project_local), "
-    "then re-run sync."
+    "then re-run the push."
 )
 PRIVACY_BLOCK_IMPORT_DETAIL = (
-    "Privacy scan blocked this import: a secret was detected in the source bytes. "
+    "Privacy scan blocked this pull: a secret was detected in the source bytes. "
     "git history is forever — project_shared has no force bypass (ADR-0011 §5). "
-    "Import into the user or project_local tier instead, or remove the secret "
+    "Pull into the user or project_local tier instead, or remove the secret "
     "from the source first."
 )
 

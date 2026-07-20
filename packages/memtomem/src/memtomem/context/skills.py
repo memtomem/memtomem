@@ -657,7 +657,7 @@ def generate_all_skills(
                             "<all>",
                             "another process held a destination lock past the "
                             f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
-                            "re-run sync to retry",
+                            "re-run the push to retry",
                             skip_codes.LOCK_TIMEOUT,
                         )
                     )
@@ -817,7 +817,7 @@ def generate_all_skills(
                         skill_dir.name,
                         "another process held the destination lock past the "
                         f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
-                        "re-run sync to retry",
+                        "re-run the push to retry",
                         skip_codes.LOCK_TIMEOUT,
                     )
                 )

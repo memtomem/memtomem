@@ -514,4 +514,4 @@ async def sync_mcp_servers(
             async with _gateway_lock:
                 return await _sync_mcp_servers_core(project_root)
     except TimeoutError:
-        raise _error(503, "busy", "MCP server sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "MCP server push timed out — another sync may be in progress")
