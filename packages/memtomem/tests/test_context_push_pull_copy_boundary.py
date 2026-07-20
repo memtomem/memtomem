@@ -6,7 +6,7 @@ for engine / route / MCP **output copy**. The risk a rename PR carries is not
 that it renames too little — it is that a later sweep renames one string too
 many. Three classes must never move together, so they are pinned here:
 
-1. **Human-facing action copy** — moved to Push/Pull (asserted via behavior).
+1. **Human-facing action copy** — moved to Push/Pull.
 2. **Frozen wire identifiers** — reason codes, surface ids, route paths, CLI
    command strings. Their human text changed *around* them; they did not.
 3. **Shared vocabulary** — project enrollment / pause / resume is one mechanism
@@ -15,6 +15,17 @@ many. Three classes must never move together, so they are pinned here:
    Renaming either leaks into a sibling feature — the concrete failure PR-E hit
    (``test_settings_hooks_sync_409``), which is why those two live-fire tests
    remain the primary guard and this file only pins the vocabulary itself.
+
+**Scope, stated honestly.** This guard covers the surface PR-H2 swept; it does
+NOT prove the trees are free of Sync/Import copy. It is line-based over a
+hand-maintained module tuple, so it cannot see hyphenated forms (``re-import``,
+``reverse-sync``), implicitly-concatenated literals split across lines, or a
+module absent from :data:`_SWEPT`. A known tail remains — persisted
+``snapshot_note`` version-history text, the ``mem_context_init`` MCP tool
+description, and several published OpenAPI descriptions — tracked as follow-up
+along with replacing this scanner with a real ``ast`` walk that classifies
+FastAPI endpoint and MCP tool docstrings as public. Read a green run as "the
+swept surface has not regressed", never as "the sweep is complete".
 """
 
 from __future__ import annotations
