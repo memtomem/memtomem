@@ -23,6 +23,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import shutil
 import sys
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -701,6 +702,50 @@ class TestMoveAsideReapingIsStateAware:
         _recover_and_reap_internal_dirs(dst)
 
         assert not staging.exists()
+
+    def test_promote_keeps_its_own_move_aside_when_dst_vanishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The §10 rule binds the promote's own cleanup, not only the reaper.
+
+        ``replace_existing=True`` parks the original aside and deletes it once
+        the second rename lands. A writer outside the lock that removes ``dst``
+        in that window leaves the parked tree as the only remaining copy, so
+        deleting it unconditionally is the §10 data loss reached through the
+        transaction's own cleanup rather than through the reaper (Codex
+        re-gate). Driving it through ``_promote_staging`` is the point: the
+        other pins call ``_reap_move_aside`` directly and cannot see this path.
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        dst.mkdir()
+        (dst / SKILL_MANIFEST).write_text("the only copy\n", encoding="utf-8")
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        real_replace = os.replace
+
+        def replace_then_race(src: object, target: object) -> None:
+            real_replace(src, target)  # type: ignore[arg-type]
+            if Path(str(src)) == staging:
+                # The racing non-gateway writer, between the rename and the
+                # cleanup that follows it.
+                shutil.rmtree(dst)
+
+        monkeypatch.setattr(os, "replace", replace_then_race)
+
+        with caplog.at_level("WARNING", logger="memtomem.context.skills"):
+            _promote_staging(staging, dst, reap_move_aside=True)
+
+        survivors = list(root.glob(".old-foo-*.tmp"))
+        assert len(survivors) == 1, "the promote deleted the only remaining copy"
+        assert (survivors[0] / SKILL_MANIFEST).read_text(encoding="utf-8") == "the only copy\n"
+        assert any(
+            "keeping move-aside tree" in r.getMessage() and str(dst) in r.getMessage()
+            for r in caplog.records
+        ), "the kept tree left no breadcrumb"
 
     @pytest.mark.requires_symlinks
     def test_symlinked_dst_does_not_license_reaping(self, tmp_path: Path) -> None:

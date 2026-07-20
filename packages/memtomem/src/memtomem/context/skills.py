@@ -659,6 +659,16 @@ def _promote_staging(
     on, and that rollback's breadcrumb would point at nothing. Every current
     caller holds the lock and opts in; the default is chosen so that a future
     one who forgets leaks a directory rather than losing a tree.
+
+    **The §10 rule binds this function's own cleanup too**, independently of
+    that flag. The ``replace_existing=True`` path deletes the tree it parked
+    aside a moment earlier, and it checks presence first for the same reason
+    the reaper does: a writer outside the lock can remove ``dst`` between the
+    second rename and the cleanup, and an unconditional delete there destroys
+    the only remaining copy. This was declined once as "the transaction's own
+    completion, which the swap marker handles" — but the marker resolves a
+    CRASH between the renames, and this is a live process losing a live
+    destination, which no marker sees (Codex re-gate).
     """
     if not replace_existing:
         _rename_no_replace(staging, dst)
@@ -698,7 +708,25 @@ def _promote_staging(
                 )
                 raise promote_exc from rollback_exc
             raise
-        _remove_internal_artifact(old)
+        # The transaction's own move-aside is subject to the same ADR-0030 §10
+        # rule as anybody else's. "We just renamed staging onto dst" is not
+        # "dst is there now": the lock does not serialize editors and shells,
+        # and one that removes dst in this window turns an unconditional
+        # delete here into the loss of the only remaining copy — the exact
+        # failure the guarded reaper below exists to prevent, reached through
+        # the promote's own cleanup instead (Codex re-gate). Keeping it is the
+        # same outcome as the prelude's keep-branch: the next promote that
+        # restores dst collects it.
+        if _canonical_is_present(dst):
+            _remove_internal_artifact(old)
+        else:
+            logger.warning(
+                "keeping move-aside tree %s: canonical %s vanished between the "
+                "promote and its cleanup, so this may be its only copy — it "
+                "will be cleared by the next promote that restores the canonical",
+                old,
+                dst,
+            )
         if reap_move_aside:
             _reap_move_aside(dst)
     else:

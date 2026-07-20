@@ -256,7 +256,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   skill to be destroyed by the next push or import. A move-aside tree is now
   reaped **only while its destination is present**; when the destination is
   missing it is kept and logged at WARNING with both paths, since it may be the
-  original. Staging trees, which are always copies of something still on disk,
+  original. The same rule now governs the promote's own cleanup of the tree it
+  parked: a writer outside the lock that removes the destination between the
+  second rename and that cleanup used to leave it deleting the only remaining
+  copy. Staging trees, which are always copies of something still on disk,
   are reaped as before. The kept tree is cleared by the promote that recreates
   the destination — where that promote succeeds; a destination taken over by a
   non-gateway writer is left alone, since the kept tree may still be the only
