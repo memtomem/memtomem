@@ -7,6 +7,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Skill version history — tree snapshots + a read-only `version list`**
+  (ADR-0030 §10, PR-G3) — the version store learns a second storage shape.
+  Agents and commands version a single file (`versions/vN.md`); a skill is a
+  directory, so its version is a `versions/vN/` **tree snapshot**, marked
+  `layout: "tree"` on its manifest entry. Snapshots copy bytes into new inodes
+  from a captured pre-image (never hardlinking live payload, which an editor
+  could mutate through the shared inode), are promoted by an exclusive rename
+  with `fsync` barriers on both the tree and its parent, and are write-once.
+  A crash leaves either a complete entry or an orphan `vN/` — which is
+  **preserved, never reaped**: it is real snapshot bytes whose manifest row we
+  merely failed to record, so tag allocation skips past it instead of deleting
+  it, across both shapes.
+  `mm context version list skills <name>`, the web detail panel, and
+  `mem_context_version(action='list')` now read that history. It is
+  **read-only**: `create` / `promote` / `delete-label` are refused for skills
+  with a message distinct from the unsupported-type one, because a skill
+  version is created only internally by an overwrite Pull (PR-G4) and labeled
+  skill fan-out is deferred. `enable` reports a no-op — skills are always
+  directory layout.
+  `schema_version` becomes 2, but writers emit the **minimum** a reader needs:
+  a manifest holding only file entries keeps declaring 1, so the existing
+  agents/commands fleet stays readable by builds that predate this release
+  rather than being locked out by an unrelated label move.
+
 - **`versions.json` forward-compatibility** (ADR-0030 §10, PR-G1) — the version
   manifest now carries a `schema_version` and preserves fields it does not
   recognize. Readers refuse a manifest written by a **newer** build loudly

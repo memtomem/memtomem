@@ -11,8 +11,8 @@ sibling ``mem_context_artifact_migrate`` tests use, and pin:
 * list / create roundtrip across agents + commands, newest-first ordering;
 * flat-layout: ``list`` returns a benign migrate hint, ``create`` / ``promote``
   refuse (ADR-0022 invariant 3);
-* unsupported type (``skills``) / unknown action / invalid name / missing
-  artifact;
+* unsupported type / unknown action / invalid name / missing artifact, plus
+  the READ-ONLY ``skills`` version surface (ADR-0030 §10);
 * the ``project_shared`` explicit-scope confirmation gate (the implicit default
   scope stays frictionless — mirrors ``mem_context_init``);
 * Gate A privacy scan on ``create`` — ``project_shared`` hard-refuses and
@@ -101,9 +101,9 @@ async def test_list_missing_artifact_errors(layout):
 
 
 @pytest.mark.anyio
-async def test_unsupported_type_skills(layout):
-    out = await mem_context_version(artifact_type="skills", name="foo", action="create")
-    assert out.startswith("error:") and "agents and commands only" in out
+async def test_unsupported_type(layout):
+    out = await mem_context_version(artifact_type="dogs", name="foo", action="create")
+    assert out.startswith("error:") and "agents, commands, skills only" in out
 
 
 @pytest.mark.anyio
@@ -561,3 +561,134 @@ async def test_generate_label_note_survives_nothing_to_do_exit(layout):
 
     out = await mem_context_generate(include="", scope="user", label="production")
     assert "had no effect" in out and "not found" in out
+
+
+# ── Skills: read-only version surface (ADR-0030 §10, PR-G3) ──────────
+
+
+def _seed_skill(layout, name="demo", *, scope="project_shared"):
+    from memtomem.context.skills import SKILL_MANIFEST
+
+    skill_dir = _canonical_root(layout, "skills", scope) / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / SKILL_MANIFEST).write_text(
+        f"---\nname: {name}\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    return skill_dir
+
+
+class TestSkillsReadOnly:
+    """Skills READ their tree-snapshot store; every mutating verb refuses with a
+    message distinct from the unsupported-type one."""
+
+    @pytest.mark.anyio
+    async def test_list_empty_store(self, layout):
+        _seed_skill(layout)
+        out = await mem_context_version(artifact_type="skills", name="demo", action="list")
+        assert "no versions yet" in out
+        assert not out.startswith("error:")
+
+    @pytest.mark.anyio
+    async def test_list_renders_tree_versions(self, layout):
+        from memtomem.context import versioning
+
+        skill_dir = _seed_skill(layout)
+        versioning.create_tree_version(skill_dir, [("SKILL.md", b"x")], note="from pull")
+
+        out = await mem_context_version(artifact_type="skills", name="demo", action="list")
+        assert "v1" in out and "(tree)" in out and "from pull" in out
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("action", ["create"])
+    async def test_write_actions_refuse_without_mutating(self, layout, action):
+        skill_dir = _seed_skill(layout)
+        out = await mem_context_version(artifact_type="skills", name="demo", action=action)
+        assert out.startswith("error:")
+        assert "read-only" in out
+        # No remediation pointing at a path that is itself refused (PR-G4).
+        assert "overwrite=True" not in out
+        assert not (skill_dir / "versions").exists()
+        assert not (skill_dir / "versions.json").exists()
+
+    @pytest.mark.anyio
+    async def test_enable_is_a_noop_not_a_refusal(self, layout):
+        """Skills are always dir layout, so the end state already holds."""
+        skill_dir = _seed_skill(layout)
+        before = sorted(p.name for p in skill_dir.iterdir())
+        out = await mem_context_version(artifact_type="skills", name="demo", action="enable")
+        assert not out.startswith("error:")
+        assert "nothing to do" in out
+        assert sorted(p.name for p in skill_dir.iterdir()) == before
+
+    @pytest.mark.anyio
+    async def test_promote_refuses_without_mutating(self, layout):
+        from memtomem.context import versioning
+
+        skill_dir = _seed_skill(layout)
+        versioning.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+        before = (skill_dir / "versions.json").read_bytes()
+
+        out = await mem_context_promote(
+            artifact_type="skills", name="demo", label="production", version="v1"
+        )
+        assert out.startswith("error:") and "read-only" in out
+        assert (skill_dir / "versions.json").read_bytes() == before
+
+    @pytest.mark.anyio
+    async def test_delete_label_refuses_without_mutating(self, layout):
+        from memtomem.context import versioning
+
+        skill_dir = _seed_skill(layout)
+        versioning.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+        before = (skill_dir / "versions.json").read_bytes()
+
+        out = await mem_context_promote(
+            artifact_type="skills", name="demo", label="production", delete=True
+        )
+        assert out.startswith("error:") and "read-only" in out
+        assert (skill_dir / "versions.json").read_bytes() == before
+
+    @pytest.mark.anyio
+    async def test_read_only_message_is_distinct_from_unsupported_type(self, layout):
+        _seed_skill(layout)
+        read_only = await mem_context_version(artifact_type="skills", name="demo", action="create")
+        unsupported = await mem_context_version(artifact_type="dogs", name="demo", action="create")
+        assert "read-only" in read_only and "read-only" not in unsupported
+        assert "not supported" in unsupported and "not supported" not in read_only
+
+    @pytest.mark.anyio
+    async def test_missing_skill_resolves_before_the_write_gate(self, layout):
+        """A typo'd name must report "not found", not "read-only".
+
+        Deliberately the opposite order from the web router, where the
+        read-only gate is type-level and sits alongside the tier gate ahead of
+        resolution. MCP resolves first because its resolver is also its name
+        validator, so it can afford the more precise message. Both orders are
+        pinned; the divergence is intentional, not drift.
+        """
+        out = await mem_context_version(artifact_type="skills", name="ghost", action="create")
+        assert "not found" in out and "read-only" not in out
+
+    @pytest.mark.anyio
+    async def test_refusal_precedes_the_confirm_prompt(self, layout):
+        """Never ask a user to confirm a write that cannot land."""
+        _seed_skill(layout)
+        out = await mem_context_version(
+            artifact_type="skills", name="demo", action="create", scope="project_shared"
+        )
+        assert out.startswith("error:")
+        assert "needs confirmation" not in out
+
+    @pytest.mark.anyio
+    async def test_refusals_carry_no_filesystem_paths(self, layout):
+        """Privacy boundary: MCP messages never echo absolute canonical paths."""
+        _seed_skill(layout)
+        outs = [
+            await mem_context_version(artifact_type="skills", name="demo", action="create"),
+            await mem_context_promote(
+                artifact_type="skills", name="demo", label="production", version="v1"
+            ),
+        ]
+        for out in outs:
+            assert str(layout["project_root"]) not in out
+            assert str(layout["user_home"]) not in out
