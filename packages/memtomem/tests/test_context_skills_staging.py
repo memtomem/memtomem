@@ -20,7 +20,9 @@ that replaced the inline ``shutil.rmtree(dst); copy_tree_atomic`` in
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -34,6 +36,7 @@ from memtomem.context.skills import (
     SKILL_MANIFEST,
     _iter_scannable_skill_files,
     _promote_staging,
+    _reap_stale_internal_dirs,
     _stage_skill,
     canonical_skills_root,
     copy_skill,
@@ -298,6 +301,41 @@ class TestStaleLeftoverReaping:
         assert not is_internal_artifact_dir(".staging-parity-notes.tmp")
         assert not is_internal_artifact_dir(".staging-parity-12345-xyz.tmp")
 
+    def test_owner_parse_splits_at_the_anchored_suffix(self) -> None:
+        """Pins the owner/suffix split itself, not just its consequences.
+
+        `internal_artifact_owner` is what makes reaping exact. The interesting
+        input is a name carrying a second suffix-shaped run, which is where a
+        weaker pattern would pick the wrong owner and reap a neighbour.
+
+        This pins the OUTCOME, and deliberately does not name a mechanism.
+        Measured against `.old-foo-123-abc123-456-def789.tmp`, the anchor and
+        the greedy quantifier are **independently sufficient** — only dropping
+        the trailing `.tmp$` *and* making `.+` lazy flips the parse to `foo`,
+        and either single mutation leaves this green. Two earlier versions of
+        this docstring each credited one of them; the first was wrong, and the
+        second "verified" its claim with a mutation that changed both at once.
+        """
+        from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
+
+        assert internal_artifact_owner(".old-foo-999999-abc123.tmp") == "foo"
+        assert internal_artifact_owner(".staging-foo-bar-999999-abc123.tmp") == "foo-bar"
+        # Two suffix-shaped runs: the LAST one is the suffix, the rest is the
+        # owner. A leftover carries exactly one pid+rand, so a skill genuinely
+        # named `foo-123-abc123` is the only way to produce this.
+        assert internal_artifact_owner(".old-foo-123-abc123-456-def789.tmp") == "foo-123-abc123"
+        # Not internal-shaped at all -> no owner (the #1229 rule).
+        assert internal_artifact_owner(".staging-parity-notes.tmp") is None
+        assert internal_artifact_owner("parity") is None
+        # The two predicates are one match, so they cannot disagree.
+        for name in (
+            ".old-foo-999999-abc123.tmp",
+            ".staging-parity-notes.tmp",
+            "parity",
+            ".old-archive.tmp",
+        ):
+            assert is_internal_artifact_dir(name) == (internal_artifact_owner(name) is not None)
+
     def test_reap_spares_user_dirs_matching_glob_but_not_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -328,6 +366,231 @@ class TestStaleLeftoverReaping:
         d.mkdir(parents=True)
         (d / SKILL_MANIFEST).write_text("user content\n", encoding="utf-8")
         assert [s.name for s in list_canonical_skills(tmp_path)] == [".staging-notes.tmp"]
+
+    def test_reaping_is_scoped_to_the_destination_it_holds_the_lock_for(
+        self, tmp_path: Path
+    ) -> None:
+        """The lock covers one destination, so the reaper must only delete
+        trees that provably belong to it.
+
+        A prefix glob does not prove it: with ``dst.name == "foo"``,
+        ``.old-foo-*.tmp`` also matches ``.old-foo-bar-<pid>-<rand>.tmp``,
+        which belongs to the valid skill ``foo-bar``. Syncing ``foo`` therefore
+        deleted ``foo-bar``'s in-flight rollback and staging trees while
+        holding the wrong lock (Codex review; live since #1229). Hyphenated
+        skill names are the norm, so this is an ordinary-input bug, not an
+        adversarial one.
+        """
+        from memtomem.context._names import is_internal_artifact_dir
+
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        dst.mkdir()
+        (dst / SKILL_MANIFEST).write_text("foo\n", encoding="utf-8")
+        neighbor_old = root / ".old-foo-bar-999999-abc123.tmp"
+        neighbor_old.mkdir()
+        (neighbor_old / SKILL_MANIFEST).write_text("foo-bar's only copy\n", encoding="utf-8")
+        neighbor_staging = root / ".staging-foo-bar-999999-abc123.tmp"
+        neighbor_staging.mkdir()
+        own = root / ".old-foo-999999-abc123.tmp"
+        own.mkdir()
+        # Both leftovers are internal-shaped; shape alone cannot separate them.
+        assert is_internal_artifact_dir(neighbor_old.name)
+        assert is_internal_artifact_dir(own.name)
+
+        _reap_stale_internal_dirs(dst)
+
+        assert not own.exists(), "own leftover not reaped"
+        assert neighbor_old.is_dir(), "reaped a neighbouring skill's move-aside tree"
+        assert neighbor_staging.is_dir(), "reaped a neighbouring skill's staging tree"
+        assert (neighbor_old / SKILL_MANIFEST).read_text(encoding="utf-8") == (
+            "foo-bar's only copy\n"
+        )
+
+    # Each victim is chosen to actually MATCH its metacharacter — a victim the
+    # pattern could never reach would pass with or without escaping and pin
+    # nothing (mutation-verified).
+    @pytest.mark.parametrize(
+        ("weird", "victim_name"),
+        [
+            # ``*`` and ``?`` are reserved on Windows — the destination cannot
+            # be created there at all, so the case does not exist. ``[`` is
+            # legal, so that parameter still runs on every OS.
+            pytest.param(
+                "foo*",
+                "foobar",
+                marks=pytest.mark.skipif(
+                    sys.platform == "win32", reason="'*' is a reserved Windows filename character"
+                ),
+            ),
+            pytest.param(
+                "foo?",
+                "foox",
+                marks=pytest.mark.skipif(
+                    sys.platform == "win32", reason="'?' is a reserved Windows filename character"
+                ),
+            ),
+            pytest.param("foo[a]", "fooa"),
+        ],
+    )
+    def test_glob_metacharacters_in_dst_cannot_reach_another_destination(
+        self, tmp_path: Path, weird: str, victim_name: str
+    ) -> None:
+        """A destination whose own name contains a glob metacharacter must not
+        reach another destination's leftovers either: unescaped, ``foo*``
+        matched — and deleted — ``foobar``'s trees.
+
+        This pins the OUTCOME, not one mechanism. Removing ``glob.escape``
+        alone does not fail it (mutation-verified), because the owner equality
+        above already rejects the widened matches; escaping is scan narrowing.
+        The assertion is still worth keeping — metacharacter names are a real
+        input class, and this is the test that would catch it if the owner
+        check were ever loosened for them.
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        victim = root / f".old-{victim_name}-999999-abc123.tmp"
+        victim.mkdir()
+        (victim / SKILL_MANIFEST).write_text("victim\n", encoding="utf-8")
+        victim_staging = root / f".staging-{victim_name}-999999-abc123.tmp"
+        victim_staging.mkdir()
+        dst = root / weird
+        dst.mkdir()
+        (dst / SKILL_MANIFEST).write_text("canonical\n", encoding="utf-8")
+
+        _reap_stale_internal_dirs(dst)
+
+        assert victim.is_dir(), f"{weird!r} reached another destination's move-aside tree"
+        assert victim_staging.is_dir(), f"{weird!r} reached another destination's staging tree"
+
+    @pytest.mark.requires_symlinks
+    def test_symlink_leftover_is_unlinked_not_silently_kept(self, tmp_path: Path) -> None:
+        """``shutil.rmtree`` refuses a symlink, and ``ignore_errors=True``
+        refuses *silently*. A destination that was a symlink therefore left a
+        dead ``.old-…`` link nothing ever removed — one per run, forever, for a
+        setup that recreates a managed symlink before each push. Removal
+        dispatches on ``lstat`` instead.
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / SKILL_MANIFEST).write_text("linked\n", encoding="utf-8")
+        dst = root / "foo"
+        dst.mkdir()
+        old = root / ".old-foo-999999-abc123.tmp"
+        old.symlink_to(elsewhere, target_is_directory=True)
+
+        _reap_stale_internal_dirs(dst)
+
+        assert not old.is_symlink(), "dead move-aside symlink survived the reaper"
+        assert not old.exists()
+        # The link's target is user data one directory over — never followed.
+        assert (elsewhere / SKILL_MANIFEST).read_text(encoding="utf-8") == "linked\n"
+
+    def test_regular_file_leftover_is_preserved_not_unlinked(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The symlink fix must not widen into "unlink every non-directory".
+
+        A regular file at an artifact-shaped path survives today (``rmtree``
+        refuses it), and it can be an out-of-band writer's file that the
+        promote moved aside between its conflict check and its rename. Deleting
+        it would be unrecoverable, so an unexpected type is preserved and
+        logged instead (Codex review).
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        dst.mkdir()
+        stray = root / ".old-foo-999999-abc123.tmp"
+        stray.write_text("someone else's bytes\n", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.context.skills"):
+            _reap_stale_internal_dirs(dst)
+
+        assert stray.is_file(), "a regular leftover was unlinked"
+        assert stray.read_text(encoding="utf-8") == "someone else's bytes\n"
+        assert any(str(stray) in r.getMessage() for r in caplog.records), caplog.text
+
+    @pytest.mark.requires_symlinks
+    def test_symlink_dst_promote_leaves_no_residue(self, tmp_path: Path) -> None:
+        """End-to-end: a symlinked destination survives ``_target_conflict``
+        (whose checks all follow links), so the promote genuinely moves a
+        *symlink* aside and must clean that up too."""
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / SKILL_MANIFEST).write_text("linked\n", encoding="utf-8")
+        dst = root / "foo"
+        dst.symlink_to(elsewhere, target_is_directory=True)
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        _promote_staging(staging, dst, replace_existing=True)
+
+        assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "new\n"
+        assert not dst.is_symlink()
+        residue = [p.name for p in root.iterdir() if p.name.startswith((".old-", ".staging-"))]
+        assert residue == [], residue
+        assert (elsewhere / SKILL_MANIFEST).read_text(encoding="utf-8") == "linked\n"
+
+    def test_copy_skill_holds_the_destination_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``copy_skill`` creates ``.old-*`` trees like every other writer, so
+        it has to contend on the same lock they do (ADR-0030 §6).
+
+        It used to skip the lock, making it the one path able to park a
+        move-aside no other writer knew about — and a concurrent gateway flow
+        reaping that destination would delete the tree this copy was about to
+        roll back onto (Codex review). Probed from inside the promote, where
+        the lock must already be held.
+        """
+        import memtomem.context.skills as skills_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        src = _seed_canonical_skill(tmp_path, name="hello")
+        dst = tmp_path / ".claude/skills/hello"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        contended: list[bool] = []
+        orig_promote = skills_mod._promote_staging
+
+        def probing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
+            try:
+                with _file_lock(_lock_path_for(dst), timeout=0):
+                    contended.append(False)
+            except TimeoutError:
+                contended.append(True)
+            orig_promote(staging, dst, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", probing_promote)
+        skills_mod.copy_skill(src, dst)
+
+        assert contended == [True], "copy_skill promoted without holding the destination lock"
+        assert (dst / SKILL_MANIFEST).is_file()
+
+    def test_copy_skill_rejects_a_bad_source_without_touching_the_destination(
+        self, tmp_path: Path
+    ) -> None:
+        """Acquiring the lock has side effects — it creates `dst.parent` and a
+        `.{name}.lock` sidecar there — so the source is preflighted first.
+
+        Otherwise a call that previously created nothing at all would start
+        leaving a directory and a lock file behind whenever `src` was wrong.
+        """
+        root = tmp_path / "workspace"
+        src = root / "nonexistent"
+        dst = root / "runtime" / "skills" / "hello"
+
+        with pytest.raises(FileNotFoundError):
+            copy_skill(src, dst)
+
+        assert not dst.parent.exists(), "a rejected copy created the destination directory"
+        assert not root.exists(), "a rejected copy left artifacts behind"
 
     @pytest.mark.parametrize("scope", ["project_shared", "user"])
     def test_generate_reaps_stale_leftovers(

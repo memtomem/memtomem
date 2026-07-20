@@ -20,10 +20,12 @@ frontmatter rewriting without touching callers.
 from __future__ import annotations
 
 import errno
+import glob
 import logging
 import os
 import secrets
 import shutil
+import stat
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -47,6 +49,7 @@ from memtomem.context._names import (
     GENERATOR_VENDOR,
     InvalidNameError,
     Layout,
+    internal_artifact_owner,
     is_internal_artifact_dir,
     validate_name,
 )
@@ -344,6 +347,89 @@ def _stage_skill(src: Path, dst: Path, *, payload_only: bool = False) -> Path:
     return staging
 
 
+def _remove_internal_artifact(path: Path) -> None:
+    """Delete one of our own crash artifacts, whatever type it turned out to be.
+
+    ``shutil.rmtree`` refuses a symlink, and with ``ignore_errors=True`` it
+    refuses *silently* — so a move-aside that captured a symlinked destination
+    was never actually removed. Nothing reports it and nothing retries it, so
+    a setup that recreates a managed symlink before each push accumulates one
+    dead ``.old-…`` link per run, forever.
+
+    Dispatch on ``lstat``, and only for the two types we ourselves create:
+    directories are removed as trees, symlinks are unlinked. **Anything else
+    is preserved and logged**, deliberately. Widening this to "unlink every
+    non-directory" would delete a regular file that an out-of-band writer had
+    dropped at the destination between the promote's conflict check and its
+    move-aside, and a file that merely happens to carry the reserved name —
+    both of which survive today, because ``rmtree`` refuses them (Codex
+    review). The leak this fixes is one dead symlink; the cure must not be
+    broader than that.
+
+    The classification is **best-effort against an out-of-band writer**: the
+    entry can change type between the ``lstat`` and the removal. Closing that
+    would need a portable compare-and-unlink, which does not exist (``O_PATH``
+    is Linux-only and Windows is supported here); a quarantine-rename dance
+    relocates the race rather than removing it. Reaching harm also requires
+    guessing the randomized reserved pathname while inside the destination
+    sidecar lock, so the residual is accepted.
+
+    On Windows, ``Path.unlink`` on a *directory* symlink is routed to
+    ``RemoveDirectoryW`` by CPython and works; it is nonetheless unexercised in
+    CI, since the symlink tests are ``requires_symlinks``-marked and skip
+    without Developer Mode. The failure mode if that ever changed is a logged
+    warning plus the pre-existing leak — no worse than before.
+
+    Callers have already established ownership; this only decides *how*.
+    """
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return
+    if stat.S_ISDIR(mode):
+        shutil.rmtree(path, ignore_errors=True)
+        return
+    if not stat.S_ISLNK(mode):
+        logger.warning(
+            "keeping internal artifact %s: expected a directory or a symlink, "
+            "found neither — inspect and remove it manually",
+            path,
+        )
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        logger.warning("could not remove internal artifact %s: %s", path, exc)
+
+
+def _iter_own_internal_dirs(dst: Path) -> Iterator[Path]:
+    """Yield the internal staging/move-aside trees that belong to ``dst``.
+
+    **The owner equality is the guarantee.** A glob cannot express "this
+    destination and no other": ``.old-foo-*.tmp`` matches
+    ``.old-foo-bar-<pid>-<rand>.tmp``, which belongs to the valid skill
+    ``foo-bar``, and a hyphen is not a metacharacter so no amount of escaping
+    helps. Parsing each candidate's owner and comparing it to ``dst.name`` is
+    what makes the match exact.
+
+    :func:`glob.escape` on the interpolated name is **scan narrowing, not
+    correctness** — the owner check already rejects what an unescaped ``foo*``
+    would sweep in. It stays because a pattern that walks half the directory
+    on every push is its own hazard, and because the two defenses fail
+    independently.
+
+    A name that is not internal-shaped at all — a user skill like
+    ``.staging-<dst>-notes.tmp`` — parses to no owner and is skipped, which is
+    the #1229 rule this preserves.
+    """
+    parent = dst.parent
+    safe = glob.escape(dst.name)
+    for pattern in (f".staging-{safe}-*.tmp", f".old-{safe}-*.tmp"):
+        for candidate in parent.glob(pattern):
+            if internal_artifact_owner(candidate.name) == dst.name:
+                yield candidate
+
+
 def _reap_stale_internal_dirs(dst: Path) -> None:
     """Remove crash-leftover staging/move-aside trees for ``dst``.
 
@@ -358,20 +444,22 @@ def _reap_stale_internal_dirs(dst: Path) -> None:
     Both the sync fan-out paths and the reverse-import path
     (:func:`extract_skills_to_canonical`, #1247 id 18) hold that lock, so
     runtime-side AND canonical-side leftovers get reaped.
+
+    **Ownership is decided by parsing the leftover, not by matching a
+    prefix.** The lock covers exactly one destination, so anything reaped must
+    provably belong to that destination. A prefix glob does not prove it: with
+    ``dst.name == "foo"``, ``.old-foo-*.tmp`` also matches
+    ``.old-foo-bar-<pid>-<rand>.tmp``, which belongs to the perfectly valid
+    skill ``foo-bar`` — so syncing ``foo`` deleted another skill's in-flight
+    rollback tree while holding the wrong lock, and hyphenated skill names are
+    the norm here (Codex review; live since #1229).
     """
     parent = dst.parent
     if not parent.is_dir():
         return
-    for pattern in (f".staging-{dst.name}-*.tmp", f".old-{dst.name}-*.tmp"):
-        for stale in parent.glob(pattern):
-            # The glob narrows by destination name; the shared predicate makes
-            # the kill decision — a user skill named e.g.
-            # ``.staging-<dst>-notes.tmp`` matches the glob but not the
-            # pid+rand shape and must never be deleted (Codex review, #1229).
-            if not is_internal_artifact_dir(stale.name):
-                continue
-            logger.debug("reaping stale internal artifact dir %s", stale)
-            shutil.rmtree(stale, ignore_errors=True)
+    for stale in _iter_own_internal_dirs(dst):
+        logger.debug("reaping stale internal artifact dir %s", stale)
+        _remove_internal_artifact(stale)
 
 
 def _target_conflict(dst: Path) -> OSError | None:
@@ -475,7 +563,7 @@ def _promote_staging(
                 )
                 raise promote_exc from rollback_exc
             raise
-        shutil.rmtree(old, ignore_errors=True)
+        _remove_internal_artifact(old)
     else:
         os.replace(staging, dst)
 
@@ -484,23 +572,49 @@ def copy_skill(src: Path, dst: Path) -> None:
     """Mirror a skill directory from ``src`` to ``dst`` via staging-then-promote.
 
     Thin public wrapper (``__all__``) kept for external callers that don't
-    care about the staging step (no privacy scan, no override merge, no
-    destination lock — pure file copy). The gateway's own flows use
-    :func:`_stage_skill` + :func:`_promote_staging` directly: sync scans +
-    override-applies between the two halves, and the reverse import
-    (#1247 id 18) converts each half's failure into its own typed skip
-    while holding the destination sidecar lock.
+    care about the staging step (no privacy scan, no override merge — pure
+    file copy). The gateway's own flows use :func:`_stage_skill` +
+    :func:`_promote_staging` directly: sync scans + override-applies between
+    the two halves, and the reverse import (#1247 id 18) converts each half's
+    failure into its own typed skip.
 
     Individual files are written atomically via
     :func:`memtomem.context._atomic.atomic_write_bytes`. Directory-level
     atomicity is now provided by the staging+promote pair.
+
+    It holds the destination sidecar lock across stage→promote, like every
+    other first-party writer (ADR-0030 §6). It used to skip the lock, which
+    made it the one path that could park a ``.old-*`` tree no other writer
+    knew about — a concurrent gateway flow reaping that destination could
+    delete the tree this copy was about to roll back onto, leaving the
+    rollback with nothing to restore (Codex review). Reaping cannot tell an
+    in-flight move-aside from an abandoned one; the lock is what makes the
+    distinction unnecessary.
+
+    Two consequences of taking that lock, both deliberate:
+
+    * The source is preflighted **before** acquiring it. Locking creates
+      ``dst.parent`` and a ``.{name}.lock`` sidecar there, so a bad ``src``
+      would otherwise leave both behind on a call that previously touched
+      nothing at all. :func:`_stage_skill` re-checks under the lock, so this
+      is a cheap early exit rather than the authoritative check: a source that
+      disappears before we lock still fails there, and one that disappears
+      mid-copy is already handled by staging cleanup.
+    * It can now raise ``TimeoutError`` after ``_SKILLS_LOCK_BUDGET_S``, when
+      another writer holds the destination past the budget. That is a new
+      failure mode for a public entry point; retry, or wait for the competing
+      push or import to finish.
     """
-    staging = _stage_skill(src, dst)
-    try:
-        _promote_staging(staging, dst)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    manifest = src / SKILL_MANIFEST
+    if not manifest.is_file():
+        raise FileNotFoundError(f"source skill missing {SKILL_MANIFEST}: {src}")
+    with _file_lock(_lock_path_for(dst), timeout=_SKILLS_LOCK_BUDGET_S):
+        staging = _stage_skill(src, dst)
+        try:
+            _promote_staging(staging, dst)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
 
 # ── Fan-out: canonical → runtimes ─────────────────────────────────────
