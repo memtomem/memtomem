@@ -17,15 +17,20 @@ many. Three classes must never move together, so they are pinned here:
    remain the primary guard and this file only pins the vocabulary itself.
 
 **Scope, stated honestly.** This guard covers the surface PR-H2 swept; it does
-NOT prove the trees are free of Sync/Import copy. It is line-based over a
-hand-maintained module tuple, so it cannot see hyphenated forms (``re-import``,
-``reverse-sync``), implicitly-concatenated literals split across lines, or a
-module absent from :data:`_SWEPT`. A known tail remains — persisted
-``snapshot_note`` version-history text, the ``mem_context_init`` MCP tool
-description, and several published OpenAPI descriptions — tracked as follow-up
-along with replacing this scanner with a real ``ast`` walk that classifies
-FastAPI endpoint and MCP tool docstrings as public. Read a green run as "the
-swept surface has not regressed", never as "the sweep is complete".
+NOT prove the trees are free of Sync/Import copy. Scanning is line-based over a
+hand-maintained module tuple, so it cannot see a literal implicitly concatenated
+across lines, an unlisted module, or a hyphenated form no pattern names. A known
+tail remains — persisted ``snapshot_note`` version-history text, the
+``mem_context_init`` MCP tool description, several published OpenAPI
+descriptions, and ``reverse-sync`` — tracked in the follow-up issue along with
+replacing this scanner with a full ``ast`` walk. Read a green run as "the swept
+surface has not regressed", never as "the sweep is complete".
+
+Exemptions are deliberately narrow, because each one is a place a regression
+could hide: ``#`` comments (never user-facing), docstrings in non-route modules
+(developer documentation — resolved through ``ast`` so the whole span is
+exempt, not just the opening line), and §-citations whose section title is
+QUOTED (the words are the identifier).
 """
 
 from __future__ import annotations
@@ -154,8 +159,31 @@ _DOCSTRING_IS_USER_FACING = (
 )
 
 
-def _is_docstring_line(line: str) -> bool:
-    return line.lstrip().startswith(('"""', "'''", 'r"""'))
+def _docstring_line_numbers(mod: object) -> frozenset[int]:
+    """Every line occupied by a docstring in *mod*, via ``ast``.
+
+    Matching only lines that *start* with ``\"\"\"`` would exempt a multi-line
+    docstring's opening line and then scan its body — so an engine docstring
+    whose second line said "to import" would fail an unrelated pattern with a
+    confusing message. Walking the AST gives the true span.
+    """
+    import ast
+
+    src = _src(mod)
+    tree = ast.parse(src)
+    lines: set[int] = set()
+    targets = [tree] + [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    for node in targets:
+        doc = ast.get_docstring(node, clean=False)
+        if doc is None:
+            continue
+        body = node.body[0]  # the docstring Expr — get_docstring guarantees it
+        lines.update(range(body.lineno, (body.end_lineno or body.lineno) + 1))
+    return frozenset(lines)
 
 
 def _is_comment_line(line: str) -> bool:
@@ -169,15 +197,21 @@ def _is_comment_line(line: str) -> bool:
 
 
 def _is_document_citation(line: str) -> bool:
-    """A reference to an ADR / issue section TITLE is a proper noun, not copy.
+    """A reference to a QUOTED ADR / issue section title is a proper noun.
 
     ``ADR-0021 §"Sync orchestration"`` names a section that exists under that
-    title; renaming it would break the citation. Same reason the frozen wire
-    ids are exempt — this is an identifier, not prose the user acts on.
+    title; renaming it would break the citation. Same reason the frozen wire ids
+    are exempt — an identifier, not prose the user acts on.
+
+    Deliberately narrow: an earlier version exempted the whole line for ANY
+    ``ADR-NNNN §`` citation, which would have let a real regression like
+    ``"… tier to import into (ADR-0011 §3)"`` through. Only a §-citation whose
+    section is QUOTED counts, since that is the case where the words themselves
+    are the identifier.
     """
     import re
 
-    return bool(re.search(r"ADR-\d+\s*§|#\d{3,}\s*§", line))
+    return bool(re.search(r"§\s*\"", line))
 
 
 @pytest.mark.parametrize("pattern", _STALE_ACTION_COPY)
@@ -193,15 +227,15 @@ def test_no_stale_sync_import_action_copy_remains(pattern: str) -> None:
     offenders = []
     for mod in _SWEPT:
         policed_docstrings = mod in _DOCSTRING_IS_USER_FACING
+        exempt_lines = frozenset() if policed_docstrings else _docstring_line_numbers(mod)
+        name = Path(inspect.getfile(mod)).name  # type: ignore[arg-type]
         for i, line in enumerate(_src(mod).splitlines(), 1):
-            if _is_comment_line(line):
-                continue
-            if _is_docstring_line(line) and not policed_docstrings:
+            if _is_comment_line(line) or i in exempt_lines:
                 continue
             if _is_document_citation(line):
                 continue
             if re.search(pattern, line):
-                offenders.append(f"{Path(inspect.getfile(mod)).name}:{i}: {line.strip()[:70]}")  # type: ignore[arg-type]
+                offenders.append(f"{name}:{i}: {line.strip()[:70]}")
     assert not offenders, "stale action copy:\n" + "\n".join(offenders)
 
 

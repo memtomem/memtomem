@@ -1137,10 +1137,10 @@ def extract_skills_to_canonical(
                 # (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G) — until
                 # that ships, only a ``new`` skills Pull is allowed; refuse
                 # rather than clobber unsnapshotted. Remediation: delete the
-                # canonical skill first, then re-import. Fires for dry-run too.
+                # canonical skill first, then pull again. Fires for dry-run too.
                 reason = (
                     "overwriting an existing skill needs directory-tree snapshots "
-                    "(a future release) — delete the canonical skill first to re-import"
+                    "(a future release) — delete the canonical skill first, then pull again"
                 )
                 skipped.append((skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
@@ -1289,7 +1289,7 @@ def extract_skills_to_canonical(
                         reason = (
                             "overwriting an existing skill needs directory-tree "
                             "snapshots (a future release) — delete the canonical "
-                            "skill first to re-import"
+                            "skill first, then pull again"
                         )
                         skipped.append(
                             (skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED)
