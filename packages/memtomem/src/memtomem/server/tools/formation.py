@@ -57,12 +57,15 @@ async def mem_candidate_propose(
         content: Candidate text (max 2,000 chars, non-empty). Rejected
             outright if it matches a privacy pattern — there is no
             force_unsafe valve on this path.
-        source: Short origin identifier for the proposal (max 128 chars).
+        source: Short origin identifier for the proposal — required,
+            non-whitespace, max 128 chars.
         source_ref: Pointer back to the origin — URL, file path, message id
             (max 512 chars). Also privacy-scanned.
-        idempotency_key: Caller-chosen key (max 256 chars) that makes a
-            retry safe: a repeat returns the original candidate with
-            ``duplicate: true`` instead of queueing a second one.
+        idempotency_key: Caller-chosen key — required, non-whitespace, max
+            256 chars — that makes a retry safe: a repeat with the SAME
+            content returns the original candidate with ``duplicate: true``
+            instead of queueing a second one. Reusing the key with
+            different content is an error, not a second candidate.
     """
     app = await _get_app_initialized(ctx)
     candidate, duplicate = await propose_memory_candidate(
@@ -95,8 +98,8 @@ async def mem_candidate_list(status: str = "pending", limit: int = 100, ctx: Ctx
 
     Args:
         status: Status to list — ``pending`` (default), ``approved``,
-            ``rejected``, ``expired``, ``superseded``, ``writing``, or
-            ``write_uncertain``.
+            ``rejected``, ``expired``, ``writing``, or ``write_uncertain``.
+            An unknown status is not an error; it returns an empty list.
         limit: Maximum candidates to return, oldest first (default 100).
     """
     app = await _get_app_initialized(ctx)

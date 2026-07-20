@@ -41,22 +41,43 @@ def _tool_functions() -> list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]
 
 
 def _params(node: ast.AsyncFunctionDef | ast.FunctionDef) -> list[str]:
-    return [a.arg for a in node.args.args + node.args.kwonlyargs if a.arg != "ctx"]
+    args = node.args
+    return [
+        a.arg
+        for a in args.posonlyargs + args.args + args.kwonlyargs
+        if a.arg not in ("ctx", "self")
+    ]
 
 
-def _documented(node: ast.AsyncFunctionDef | ast.FunctionDef) -> set[str]:
-    """Parameter names that appear as ``name:`` entries in the docstring.
+def test_no_tool_takes_variadic_arguments() -> None:
+    """``*args`` / ``**kwargs`` would publish an empty MCP parameter schema.
 
-    Matched textually rather than through ``_parse_arg_docs`` on purpose: this
-    guard asks whether a human wrote the documentation, and should keep failing
-    for an undocumented parameter even if the parser changes shape.
+    ``_params`` cannot name what it cannot see, so reject the shape outright
+    rather than let a variadic tool pass the coverage check vacuously. The
+    deprecated ``mem_context_migrate`` alias repeats its signature explicitly
+    for exactly this reason.
     """
-    doc = ast.get_docstring(node) or ""
-    return {
-        line.strip().split(":", 1)[0]
-        for line in doc.splitlines()
-        if ":" in line and line.startswith(" ")
-    }
+    offenders = [
+        f"{filename}::{node.name}"
+        for filename, node in _tool_functions()
+        if node.args.vararg is not None or node.args.kwarg is not None
+    ]
+    assert not offenders, f"tools must declare explicit parameters: {offenders}"
+
+
+def _arg_docs(node: ast.AsyncFunctionDef | ast.FunctionDef) -> dict[str, str]:
+    """Parsed ``Args:`` entries, using the parser the help catalog uses.
+
+    Going through ``_parse_arg_docs`` rather than a private regex is
+    deliberate: the claim being guarded is "this parameter is documented
+    *where an agent can read it*", and ``mem_do(action="help")`` renders
+    exactly what this parser returns. A textual scan would accept a
+    ``name:`` line sitting in an Examples block and stay green while the
+    help entry was empty.
+    """
+    from memtomem.server.tool_registry import _parse_arg_docs
+
+    return _parse_arg_docs(ast.get_docstring(node, clean=False) or "")
 
 
 def test_sweep_finds_the_tool_surface() -> None:
@@ -68,7 +89,7 @@ def test_every_tool_parameter_is_documented() -> None:
     offenders = {
         f"{filename}::{node.name}": missing
         for filename, node in _tool_functions()
-        if (missing := sorted(set(_params(node)) - _documented(node)))
+        if (missing := sorted(set(_params(node)) - set(_arg_docs(node))))
     }
     assert not offenders, (
         f"tool parameters with no Args: entry: {offenders}. In core mode "
@@ -118,7 +139,7 @@ def test_force_unsafe_documentation_states_the_contract(markers: tuple[str, ...]
     offenders = [
         f"{filename}::{node.name}"
         for filename, node in _force_unsafe_tools()
-        if not any(marker in (ast.get_docstring(node) or "") for marker in markers)
+        if not any(marker in _arg_docs(node).get("force_unsafe", "") for marker in markers)
     ]
     assert not offenders, f"force_unsafe docs must state {why}: missing in {offenders}"
 
@@ -135,7 +156,7 @@ def test_force_unsafe_documentation_states_the_project_shared_refusal() -> None:
         f"{filename}::{node.name}"
         for filename, node in _force_unsafe_tools()
         if node.name not in _NO_PROJECT_SHARED_PATH
-        and "project_shared" not in (ast.get_docstring(node) or "")
+        and "project_shared" not in _arg_docs(node).get("force_unsafe", "")
     ]
     assert not offenders, (
         "force_unsafe docs must state that project_shared is never bypassable: "

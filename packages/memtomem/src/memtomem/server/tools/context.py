@@ -472,9 +472,11 @@ async def mem_context_detect(
     directories, sub-agent files, and slash-command files.
 
     Args:
-        include: Comma list of extra canonical kinds to report —
-            ``skills``, ``agents``, ``commands``. Empty (default) reports
-            agent files only.
+        include: Comma list of extra kinds to report — ``skills``,
+            ``agents``, ``commands``, ``settings``. ``settings`` lists the
+            resolved-scope settings file of each available runtime (Claude,
+            Codex, Gemini, Kimi), including ones not yet created. Empty
+            (default) reports agent files only.
         include_runtimes: Also report read-only provider-client registration
             status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B). A
             separate boolean on purpose — it is NOT part of the ``include``
@@ -934,24 +936,31 @@ async def mem_context_sync(
     """Push .memtomem/context.md to all detected agent files.
 
     Args:
-        include: Comma list of extra kinds to fan out alongside context.md —
-            ``skills``, ``agents``, ``commands``, ``settings`` — from
-            ``.memtomem/<kind>/`` to their runtime targets (Claude Code,
-            Gemini CLI, Codex CLI). Empty (default) syncs context.md only.
+        include: Comma list of extra kinds to fan out alongside context.md.
+            ``skills`` / ``agents`` / ``commands`` come from
+            ``.memtomem/skills/``, ``.memtomem/agents/``,
+            ``.memtomem/commands/``; ``settings`` comes from the single file
+            ``.memtomem/settings.json``. Targets are the runtimes registered
+            for that kind (Claude Code, Gemini CLI, Codex CLI, Kimi CLI for
+            settings). Empty (default) syncs context.md only.
         strict: Legacy alias for ``on_drop="error"``. When both are given,
             ``on_drop`` wins unless it is still at its default.
         on_drop: Severity when sub-agent / command fields are dropped during
             conversion — ``ignore`` (default), ``warn`` (report but still
             write), or ``error`` (abort that kind).
-        scope: ADR-0011 canonical artifact tier for ``skills`` / ``agents`` /
-            ``commands`` — ``project_shared`` (default), ``user``, or
-            ``project_local``. For ``settings`` the same value is the
-            ADR-0010 host-write target-scope override.
+        scope: One value, two meanings, and two different defaults. For
+            ``skills`` / ``agents`` / ``commands`` it is the ADR-0011
+            canonical artifact tier and defaults to ``project_shared``. For
+            ``settings`` it overrides the ADR-0010 host-write target scope,
+            which otherwise comes from ``hooks.target_scope`` in config
+            (default ``user``). Vocabulary is the same either way:
+            ``user``, ``project_shared``, ``project_local``.
         allow_host_writes: Consent for writing outside the project root.
-            With ``include="settings"`` a host-scoped target (today only
-            ``~/.claude/settings.json``) returns a ``needs confirmation``
-            line naming the path instead of writing; surface it to the user,
-            then re-call with ``True``.
+            With ``include="settings"`` a target that resolves to a host
+            path (``~/.claude/settings.json`` and the Codex / Gemini / Kimi
+            equivalents, depending on the effective scope) returns a
+            ``needs confirmation`` line naming the path instead of writing;
+            surface it to the user, then re-call with ``True``.
         label: ADR-0022 — deploy a frozen version instead of the working
             canonical for the versioned kinds (``agents`` / ``commands``).
             Pass a label (``"production"``) or a bare version tag (``"v2"``)

@@ -114,10 +114,15 @@ async def mem_ns_rename(
     namespace_metadata rows via the rename path. See issue #500.
 
     Args:
-        old: Existing namespace to rename. No chunks match, no rows change —
-            the call reports 0 updated rather than failing.
-        new: Target namespace. Validated; merging into an existing namespace
-            is allowed, so a typo here silently pools two namespaces.
+        old: Existing namespace to rename. The reported count covers chunk
+            rows only — a namespace that exists as metadata but holds no
+            chunks still gets its metadata row renamed while reporting 0.
+        new: Target namespace, validated before the write. If it holds
+            chunks but has no metadata row, the two namespaces are silently
+            merged; if it has a metadata row, the call fails on the
+            metadata primary key AFTER the chunk rows were already
+            rewritten (#1874 — do not rely on the failure
+            meaning "nothing happened").
 
     Examples::
         mem_ns_rename(old="project:v1", new="project:v2")
