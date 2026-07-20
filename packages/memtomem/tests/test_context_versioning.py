@@ -20,6 +20,8 @@ from memtomem.context import versioning as v
 from memtomem.context.agents import CANONICAL_AGENT_ROOT, generate_all_agents
 from memtomem.context.commands import CANONICAL_COMMAND_ROOT, generate_all_commands
 
+_MANIFEST_NAME = "versions.json"
+
 # A dir-layout canonical agent whose rendered body carries a distinctive marker
 # so we can tell which version's bytes reached the runtime.
 _AGENT_TEMPLATE = """---
@@ -1235,16 +1237,29 @@ class TestCodexReviewRegressions:
         with pytest.raises(v.VersionError, match="case-insensitive"):
             v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
 
-    def test_manifest_alias_appearing_mid_transaction_fails_closed(self, tmp_path, monkeypatch):
+    def test_manifest_alias_appearing_mid_transaction_never_lands_as_payload(
+        self, tmp_path, monkeypatch
+    ):
         """Both collision checks run before the manifest exists, so a
-        ``Versions.JSON`` created later still claims the directory entry on a
-        case-insensitive filesystem — ``os.replace`` writes our bytes under the
-        FOREIGN spelling, which the case-sensitive payload iterator then reads
-        as skill content and fans out.
+        ``Versions.JSON`` created later can still claim the directory entry.
 
-        Must fail loudly, and must leave the promoted ``vN/`` behind as the
-        deliberately preserved orphan so a retry allocates cleanly.
+        The INVARIANT is platform-independent — the manifest must never end up
+        spelled as something the case-sensitive payload iterator would fan out —
+        but the two case-insensitive filesystems reach it differently, so this
+        asserts the OUTCOME rather than a specific exception:
+
+        - APFS keeps the EXISTING entry's spelling through ``os.replace``, so
+          our bytes land under ``Versions.JSON`` and the guard repairs the
+          spelling with a same-file rename.
+        - NTFS adopts the SOURCE spelling, so the entry is already canonical
+          and there is nothing to repair.
+
+        An earlier version asserted ``pytest.raises`` unconditionally — that
+        pinned the macOS path as universal and failed on Windows CI while the
+        invariant itself held perfectly.
         """
+        from memtomem.context.skill_payload import is_payload_top_name
+
         skill_dir = _make_skill(tmp_path)
         probe = skill_dir / "CaseProbe"
         probe.mkdir()
@@ -1261,12 +1276,19 @@ class TestCodexReviewRegressions:
             real_save(artifact_dir, manifest)
 
         monkeypatch.setattr(v, "_save_manifest", _racing)
-        with pytest.raises(v.VersionError, match="canonical name"):
-            v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
-
+        v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
         monkeypatch.undo()
-        # The snapshot survives as an orphan, and the retry (after the user
-        # renames the stray file) allocates the NEXT tag rather than wedging.
-        assert (skill_dir / "versions" / "v1" / "SKILL.md").read_bytes() == b"x"
-        (skill_dir / "Versions.JSON").unlink()
+
+        # THE invariant: no manifest-shaped entry is left sitting in the
+        # payload surface, where fan-out would ship version metadata.
+        leaked = [
+            e.name
+            for e in skill_dir.iterdir()
+            if e.name.lower() == _MANIFEST_NAME and is_payload_top_name(e.name)
+        ]
+        assert not leaked, f"version metadata would fan out as payload: {leaked}"
+
+        # …and the store is intact and usable under the canonical name.
+        assert (skill_dir / _MANIFEST_NAME).is_file()
+        assert set(v.load_manifest(skill_dir).versions) == {"v1"}
         assert v.create_tree_version(skill_dir, [("SKILL.md", b"y")]).tag == "v2"

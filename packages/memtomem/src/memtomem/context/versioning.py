@@ -781,30 +781,57 @@ def create_tree_version(
 
 
 def _verify_manifest_spelling(artifact_dir: Path) -> None:
-    """Fail closed if the manifest did not land under its canonical name.
+    """Ensure the manifest ended up under its canonical name, repairing if not.
 
     The last gap in the case-alias story. Both collision checks run before the
     manifest exists, so an out-of-band ``Versions.JSON`` created later in the
-    transaction is still adopted: on a case-insensitive filesystem
-    ``os.replace`` writes our bytes but the directory ENTRY keeps the foreign
-    spelling. ``is_payload_top_name`` is case-sensitive, so the manifest would
-    then read as ordinary skill content and fan version metadata out to every
-    runtime — the one outcome ADR-0030 §10 exists to prevent.
+    transaction is still adopted — and the two case-insensitive filesystems
+    disagree about what happens next:
 
-    Detecting it after the fact is enough because the failure is loud and the
-    on-disk state is safe: the promoted ``vN/`` stays behind as a deliberately
-    preserved orphan (:func:`_next_version_tag_reconciled` skips its tag), so
-    the retry after the user renames the stray file allocates cleanly.
+    - **APFS** keeps the EXISTING entry's spelling through ``os.replace``, so
+      our bytes land under ``Versions.JSON``. ``is_payload_top_name`` is
+      case-sensitive, so the manifest would then read as ordinary skill content
+      and fan version metadata out to every runtime — the one outcome §10
+      exists to prevent.
+    - **NTFS** adopts the source spelling, so the entry is already canonical.
+
+    Repair rather than merely refuse. By the time we get here ``os.replace``
+    has already overwritten whatever was in that entry with OUR manifest, so a
+    same-file rename to the canonical spelling destroys no user data — it
+    finishes our own write. Refusing instead would leave the store functional
+    but permanently mis-spelled, which is the leak we are trying to close.
+
+    Still fails closed if the rename cannot be made to stick: a loud error with
+    the promoted ``vN/`` preserved as an orphan (:func:`_next_version_tag_reconciled`
+    skips its tag) beats a silent metadata leak.
     """
-    try:
-        entries = {entry.name for entry in artifact_dir.iterdir()}
-    except OSError as exc:
-        raise VersionError(f"cannot read artifact directory {artifact_dir}: {exc}") from exc
-    if _MANIFEST_FILENAME not in entries:
+
+    def _entries() -> set[str]:
+        try:
+            return {entry.name for entry in artifact_dir.iterdir()}
+        except OSError as exc:
+            raise VersionError(f"cannot read artifact directory {artifact_dir}: {exc}") from exc
+
+    if _MANIFEST_FILENAME in _entries():
+        return
+    canonical = versions_json_path(artifact_dir)
+    for name in sorted(_entries()):
+        if name.lower() != _MANIFEST_FILENAME:
+            continue
+        try:
+            os.replace(artifact_dir / name, canonical)
+        except OSError as exc:
+            raise VersionError(
+                f"{canonical} did not land under its canonical name and could not be "
+                f"repaired ({exc}) — a case-variant of {_MANIFEST_FILENAME!r} claimed the "
+                f"directory entry. Rename it manually; the snapshot is preserved."
+            ) from exc
+        break
+    if _MANIFEST_FILENAME not in _entries():
         raise VersionError(
-            f"{versions_json_path(artifact_dir)} did not land under its canonical name — a "
-            f"case-variant of {_MANIFEST_FILENAME!r} appeared during the transaction and "
-            f"claimed the directory entry. Rename it and retry; the snapshot is preserved."
+            f"{canonical} did not land under its canonical name — a case-variant of "
+            f"{_MANIFEST_FILENAME!r} claimed the directory entry. Rename it manually; "
+            f"the snapshot is preserved."
         )
 
 
