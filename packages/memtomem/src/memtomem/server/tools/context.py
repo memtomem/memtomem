@@ -1311,7 +1311,7 @@ async def mem_context_migrate(
     confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
-    """DEPRECATED alias for ``mem_context_memory_migrate``.
+    """DEPRECATED alias for mem_context_memory_migrate.
 
     Renamed in #1147 (B5-2): ``mem_context_migrate`` only ever covered
     *memory*-tier migration, but its bare name implied parity with the
