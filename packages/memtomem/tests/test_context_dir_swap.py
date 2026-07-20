@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import stat
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,10 +21,11 @@ from pathlib import Path
 import pytest
 
 from memtomem.context import _dir_swap
+from memtomem.context._names import InvalidNameError
 from memtomem.context._dir_swap import (
     SwapForeignDestination,
     SwapRecoveryError,
-    marker_owns_staging,
+    marker_owns_transient,
     new_swap_suffix,
     recover_pending_swaps,
     staging_path_for,
@@ -37,6 +39,31 @@ from memtomem.context._dir_swap import (
 _HAS_MKFIFO = hasattr(os, "mkfifo")
 _HAS_SIGALRM = hasattr(signal, "SIGALRM")
 _requires_fifo = pytest.mark.skipif(not _HAS_MKFIFO, reason="mkfifo is POSIX-only")
+
+
+def _fs_allows_newline_in_names() -> bool:
+    """Whether this filesystem can hold a name ending in a newline.
+
+    PROBED, not assumed from ``sys.platform``: the question is what the
+    filesystem accepts, and a platform check would be a guess that happens to
+    be right today. Windows rejects such a name outright (``WinError 123``), so
+    the class of confusion the ``\\Z`` anchors close is unreachable there and
+    the tests that must CREATE such a name have nothing to assert. The anchors
+    themselves stay pinned everywhere by the pure-string cases, which need no
+    filesystem at all.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            (Path(tmp) / "probe\n").touch()
+        except OSError:
+            return False
+        return True
+
+
+_requires_newline_names = pytest.mark.skipif(
+    not _fs_allows_newline_in_names(),
+    reason="this filesystem rejects a newline in a filename",
+)
 
 SUFFIX = "999999-abc123"
 
@@ -171,6 +198,168 @@ class TestSwapNames:
         with pytest.raises(ValueError):
             swap_dir_tree(staging, dst)
         assert _read_tree(dst)["SKILL.md"] == "old"
+
+    def test_refuses_a_destination_that_is_a_regular_file(self, tmp_path: Path) -> None:
+        """The forward path must agree with recovery about what a transaction
+        operates on: recovery refuses every wrong type, so accepting one here
+        would let the swap report success for something that is not the
+        directory replacement its contract describes."""
+        dst = tmp_path / "skill"
+        dst.write_text("not a tree", encoding="utf-8")
+        staging = _mkdir_tree(staging_path_for(dst, SUFFIX), "new")
+
+        with pytest.raises(ValueError):
+            swap_dir_tree(staging, dst)
+        assert dst.read_text(encoding="utf-8") == "not a tree"
+        assert _residue(tmp_path) == [staging.name]
+
+    @pytest.mark.requires_symlinks
+    def test_refuses_a_symlinked_destination(self, tmp_path: Path) -> None:
+        """A symlinked destination would move the LINK aside and leave the tree
+        it points at silently untouched — the replacement would appear to
+        succeed while the real content was never replaced."""
+        target = _mkdir_tree(tmp_path / "elsewhere", "linked")
+        dst = tmp_path / "skill"
+        dst.symlink_to(target, target_is_directory=True)
+        staging = _mkdir_tree(staging_path_for(dst, SUFFIX), "new")
+
+        with pytest.raises(ValueError):
+            swap_dir_tree(staging, dst)
+        assert dst.is_symlink()
+        assert _read_tree(target)["SKILL.md"] == "linked"
+
+    @_requires_fifo
+    def test_refuses_a_fifo_destination(self, tmp_path: Path) -> None:
+        dst = tmp_path / "skill"
+        os.mkfifo(dst)
+        staging = _mkdir_tree(staging_path_for(dst, SUFFIX), "new")
+
+        with _deadline(5):
+            with pytest.raises(ValueError):
+                swap_dir_tree(staging, dst)
+        assert stat.S_ISFIFO(os.lstat(dst).st_mode)
+
+
+class TestTrailingNewlineAnchoring:
+    """Python's ``$`` also matches immediately before a final newline, and a
+    newline is a legal POSIX filename character. Every pattern here therefore
+    anchors with ``\\Z``.
+
+    The consequence of getting this wrong is not cosmetic: a marker named
+    ``.swap-skill-<S>.json\\n`` would satisfy the "anchored, exact name" check,
+    but the paths derived from it name the newline-FREE file — so recovery
+    would act on the real transients, unlink a marker that never existed, and
+    report the transaction resolved while the true marker stayed live.
+    """
+
+    @_requires_newline_names
+    def test_a_newline_named_marker_is_not_ours(self, tmp_path: Path) -> None:
+        _mkdir_tree(tmp_path / "skill", "canonical")
+        _mkdir_tree(_paths(tmp_path)["old"], "original")
+        stray = tmp_path / f".swap-skill-{SUFFIX}.json\n"
+        stray.write_text("{}", encoding="utf-8")
+
+        assert recover_pending_swaps(tmp_path, "skill") is False
+        assert stray.exists()
+        assert _read_tree(_paths(tmp_path)["old"])["SKILL.md"] == "original"
+
+    @_requires_newline_names
+    def test_a_newline_named_staging_is_refused(self, tmp_path: Path) -> None:
+        dst = _mkdir_tree(tmp_path / "skill", "canonical")
+        staging = _mkdir_tree(tmp_path / f".staging-skill-{SUFFIX}.tmp\n", "candidate")
+
+        with pytest.raises(ValueError):
+            swap_dir_tree(staging, dst)
+        assert _read_tree(dst)["SKILL.md"] == "canonical"
+
+    @_requires_newline_names
+    def test_a_newline_named_transient_is_never_claimed(self, tmp_path: Path) -> None:
+        _write_marker(tmp_path)
+        stray = tmp_path / f".staging-skill-{SUFFIX}.tmp\n"
+        stray.mkdir()
+        assert marker_owns_transient(stray) is False
+
+    def test_a_newline_terminated_suffix_is_refused(self, tmp_path: Path) -> None:
+        """Otherwise ``staging_path_for`` breaks its own round-trip promise:
+        it would hand back a path ``swap_dir_tree`` then rejects."""
+        with pytest.raises(ValueError):
+            staging_path_for(tmp_path / "skill", f"{SUFFIX}\n")
+
+
+class TestNameIsValidatedAtTheBoundary:
+    """Every path this module derives is ``root / name`` over a *literal*
+    template, which is what makes the payload-equality check a containment
+    proof. That argument holds only for a real basename: ``""`` and ``"."``
+    collapse `dst` onto the root, and ``".."`` aims it at the PARENT — after
+    which a recovery row would rename or remove a tree outside the canonical
+    root entirely. So the name is validated before anything is derived.
+    """
+
+    @pytest.mark.parametrize("name", ["..", ".", "", "a/b", "sub/../x", "skill\n"])
+    def test_recovery_refuses_a_name_that_is_not_a_basename(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        with pytest.raises(InvalidNameError):
+            recover_pending_swaps(tmp_path, name)
+
+    def test_the_name_refusal_is_not_an_oserror(self, tmp_path: Path) -> None:
+        """Pinned because a caller sweeping many artifacts funnels this
+        module's failures into per-item skips via ``OSError``. A bad name is a
+        programming error — the name comes from an artifact the caller already
+        resolved, not from a raw directory listing — so it must NOT ride that
+        path and be silently swallowed as one skipped item."""
+        with pytest.raises(InvalidNameError) as exc:
+            recover_pending_swaps(tmp_path, "..")
+        assert isinstance(exc.value, ValueError)
+        assert not isinstance(exc.value, OSError)
+
+    def test_a_pending_swap_outranks_an_absent_destination(self, tmp_path: Path) -> None:
+        """Rows 2, 5 and 6 leave ``dst`` absent, so a caller who skipped
+        recovery would otherwise be told the destination is unusable when the
+        actionable diagnosis is that a swap is pending. The misleading message
+        is exactly the one that caller would hit."""
+        p = _paths(tmp_path)
+        staging = _mkdir_tree(p["staging"], "candidate")
+        _mkdir_tree(p["old"], "original")
+        _write_marker(tmp_path)  # row 2: dst absent, old + staging present
+
+        with pytest.raises(SwapRecoveryError) as exc:
+            swap_dir_tree(staging, p["dst"])
+        assert "already pending" in str(exc.value)
+
+    def test_a_dotdot_marker_cannot_reach_the_parent_directory(self, tmp_path: Path) -> None:
+        """The attack the validation closes, spelled out: a marker named for
+        ``..`` would otherwise derive ``dst`` as the root's own parent."""
+        root = tmp_path / "skills"
+        root.mkdir()
+        sibling = _mkdir_tree(tmp_path / "not-a-skill", "innocent")
+        (root / ".swap-..-999999-abc123.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "name": "..",
+                    "suffix": SUFFIX,
+                    "dst": "..",
+                    "old": f".old-..-{SUFFIX}.tmp",
+                    "staging": f".staging-..-{SUFFIX}.tmp",
+                    "created_at": "2026-07-20T00:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(InvalidNameError):
+            recover_pending_swaps(root, "..")
+        assert _read_tree(sibling)["SKILL.md"] == "innocent"
+        assert tmp_path.is_dir()
+
+    def test_swap_refuses_a_destination_whose_name_is_not_a_basename(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        root.mkdir()
+        staging = _mkdir_tree(root / f".staging-..-{SUFFIX}.tmp", "candidate")
+        with pytest.raises(InvalidNameError):
+            swap_dir_tree(staging, root / "..")
+        assert _read_tree(staging)["SKILL.md"] == "candidate"
 
 
 class TestMarkerPayload:
@@ -575,7 +764,7 @@ class TestUnwindRetainsWhatItCannotProve:
         pending = _write_marker(tmp_path, suffix="111111-ffffff")
         stranded = _mkdir_tree(tmp_path / ".old-skill-111111-ffffff.tmp", "original")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(SwapRecoveryError):
             swap_dir_tree(staging, dst)
 
         assert pending.is_file()
@@ -639,7 +828,7 @@ class TestSwapNestedUnwindRow4:
         """The signal a caller's ``finally`` must consult — a disk fact, so it
         also holds for a SIGKILL that leaves no exception at all."""
         self._run(tmp_path, monkeypatch)
-        assert marker_owns_staging(_paths(tmp_path)["staging"]) is True
+        assert marker_owns_transient(_paths(tmp_path)["staging"]) is True
 
     def test_recovery_leaves_it_at_row_4(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -869,22 +1058,26 @@ class TestRecoveryTypeGate:
         assert stat.S_ISFIFO(os.lstat(p[slot]).st_mode)
 
 
-class TestMarkerOwnsStaging:
-    def test_true_only_while_the_marker_is_live(self, tmp_path: Path) -> None:
+class TestMarkerOwnsTransient:
+    @pytest.mark.parametrize("slot", ["staging", "old"])
+    def test_true_only_while_the_marker_is_live(self, tmp_path: Path, slot: str) -> None:
+        """Both transients, not just staging. The ``.old-*`` half is the one
+        that matters most: it holds the pre-image, and after a crash between
+        the renames it is the only copy of the artifact in existence."""
         p = _paths(tmp_path)
-        _mkdir_tree(p["staging"], "candidate")
-        assert marker_owns_staging(p["staging"]) is False
+        _mkdir_tree(p[slot], "candidate")
+        assert marker_owns_transient(p[slot]) is False
 
         _write_marker(tmp_path)
-        assert marker_owns_staging(p["staging"]) is True
+        assert marker_owns_transient(p[slot]) is True
 
         p["marker"].unlink()
-        assert marker_owns_staging(p["staging"]) is False
+        assert marker_owns_transient(p[slot]) is False
 
     def test_a_non_conforming_staging_name_is_never_claimed(self, tmp_path: Path) -> None:
         stray = tmp_path / ".staging-notes.tmp"
         stray.mkdir()
-        assert marker_owns_staging(stray) is False
+        assert marker_owns_transient(stray) is False
 
     @pytest.mark.requires_symlinks
     def test_a_symlinked_marker_does_not_count_as_a_claim(self, tmp_path: Path) -> None:
@@ -896,7 +1089,7 @@ class TestMarkerOwnsStaging:
         target.write_text("{}", encoding="utf-8")
         p["marker"].symlink_to(target)
 
-        assert marker_owns_staging(p["staging"]) is False
+        assert marker_owns_transient(p["staging"]) is False
 
 
 class TestNoCallerYet:

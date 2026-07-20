@@ -14,6 +14,18 @@ converge (:func:`recover_pending_swaps`). Without the marker, the leftovers
 are indistinguishable from ordinary crash debris and a reaper would delete the
 user's only copy.
 
+**Precondition for every writer, stated here because getting it wrong is how
+the only copy dies.** Under C0, :func:`recover_pending_swaps` runs FIRST, and
+only then may anything reap crash leftovers — and a reap must skip any
+transient :func:`marker_owns_transient` still claims. A refusal from recovery
+aborts; it must never fall through to a reap. The reason is concrete:
+``skills._reap_stale_internal_dirs`` today globs ``.staging-*`` and ``.old-*``
+under the same C0 lock with no notion of a marker, so after a crash between
+the renames it would delete ``old`` — the only copy — and the marker would
+then classify the emptied state as "nothing to recover". Wiring that ordering
+into the writers is PR-G4a-3's fan-out; this module supplies the predicate and
+states the contract so the sequence is not left implicit.
+
 Four names, all direct children of the canonical root, sharing one artifact
 ``<name>`` and one transaction suffix ``S = "<pid>-<6 hex>"``::
 
@@ -75,13 +87,14 @@ from pathlib import Path
 from typing import Final
 
 from memtomem.context._atomic import atomic_write_bytes, fsync_dir, rename_no_replace
+from memtomem.context._names import validate_name
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "SwapForeignDestination",
     "SwapRecoveryError",
-    "marker_owns_staging",
+    "marker_owns_transient",
     "new_swap_suffix",
     "recover_pending_swaps",
     "staging_path_for",
@@ -105,18 +118,29 @@ _MARKER_MAX_BYTES: Final = 4096
 _NOFOLLOW: Final[int] = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK: Final[int] = getattr(os, "O_NONBLOCK", 0)
 
+#: Every pattern in this module ends in ``\Z``, never ``$``, and that is a
+#: containment rule rather than a style choice: Python's ``$`` ALSO matches
+#: immediately before a trailing newline, and a newline is a legal POSIX
+#: filename character. With ``$``, ``.swap-<name>-<S>.json\n`` would satisfy
+#: the "anchored, exact name" check the rest of the module leans on, and the
+#: paths derived from it would name a DIFFERENT (newline-free) file — so
+#: recovery would act on the real transients, unlink a marker that was never
+#: there, and report the transaction resolved while the true marker stayed
+#: live.
+#:
 #: Transaction suffix: the same ``<pid>-<6 hex>`` discipline
 #: ``skills._stage_skill`` already uses, so the transients this module creates
 #: are recognized by ``_names.is_internal_artifact_dir`` and reaped like any
 #: other crash debris once they are no longer marker-owned.
-_SUFFIX_RE: Final = re.compile(r"^\d+-[0-9a-f]{6}$")
+_SUFFIX_RE: Final = re.compile(r"^\d+-[0-9a-f]{6}\Z")
 
-#: Splits ``.staging-<name>-<pid>-<rand>.tmp`` into the ``<name>-<pid>-<rand>``
-#: BODY, which is transplanted verbatim into ``.swap-<body>.json``. Deriving
-#: the marker from the body rather than from a parsed ``(name, suffix)`` pair
-#: sidesteps the split ambiguity entirely: ``.staging-foo-1-abcdef-2-bcdefa.tmp``
-#: has two readings, and both produce the SAME body, hence the same marker.
-_STAGING_BODY_RE: Final = re.compile(r"^\.staging-(?P<body>.+-\d+-[0-9a-f]{6})\.tmp$")
+#: Splits ``.staging-<name>-<pid>-<rand>.tmp`` / ``.old-<name>-<pid>-<rand>.tmp``
+#: into the ``<name>-<pid>-<rand>`` BODY, which is transplanted verbatim into
+#: ``.swap-<body>.json``. Deriving the marker from the body rather than from a
+#: parsed ``(name, suffix)`` pair sidesteps the split ambiguity entirely:
+#: ``.staging-foo-1-abcdef-2-bcdefa.tmp`` has two readings, and both produce
+#: the SAME body, hence the same marker.
+_TRANSIENT_BODY_RE: Final = re.compile(r"^\.(?:staging|old)-(?P<body>.+-\d+-[0-9a-f]{6})\.tmp\Z")
 
 
 class SwapRecoveryError(OSError):
@@ -160,7 +184,7 @@ class SwapRecoveryError(OSError):
         #: Paths deliberately left on disk. **Informational only** — for the
         #: log line and the operator-facing message. It is NOT the signal for
         #: "may I delete the staging tree": that question is answered by
-        #: :func:`marker_owns_staging` reading the disk, because a SIGKILL
+        #: :func:`marker_owns_transient` reading the disk, because a SIGKILL
         #: between the marker write and the unwind produces the same retained
         #: state with no exception to carry an attribute at all.
         self.retained = tuple(retained)
@@ -204,6 +228,16 @@ class _SwapPaths:
 
 
 def _swap_paths(root: Path, name: str, suffix: str) -> _SwapPaths:
+    """Derive the four names. *name* must already be a validated identifier.
+
+    That precondition is what makes ``root / name`` a direct CHILD, and every
+    containment argument in this module rests on it: ``""`` and ``"."`` would
+    collapse ``dst`` onto *root* itself, and ``".."`` would aim it at the
+    parent — after which a recovery row would happily rename or remove a tree
+    outside the canonical root. The public entry points call
+    :func:`~memtomem.context._names.validate_name` before they get here, which
+    rejects those three along with separators and control characters.
+    """
     return _SwapPaths(
         root=root,
         name=name,
@@ -224,12 +258,12 @@ def _marker_re_for(name: str) -> re.Pattern[str]:
     artifact ``foo-bar`` — the cross-destination bug #1871 fixed for the
     ``.staging``/``.old`` reaper, in the one other place the same shape occurs.
     """
-    return re.compile(rf"^\.swap-{re.escape(name)}-(?P<pid>\d+)-(?P<rand>[0-9a-f]{{6}})\.json$")
+    return re.compile(rf"^\.swap-{re.escape(name)}-(?P<pid>\d+)-(?P<rand>[0-9a-f]{{6}})\.json\Z")
 
 
 def _staging_re_for(name: str) -> re.Pattern[str]:
     """Anchored, exact-``name`` staging matcher for *name* (see :func:`_marker_re_for`)."""
-    return re.compile(rf"^\.staging-{re.escape(name)}-(?P<pid>\d+)-(?P<rand>[0-9a-f]{{6}})\.tmp$")
+    return re.compile(rf"^\.staging-{re.escape(name)}-(?P<pid>\d+)-(?P<rand>[0-9a-f]{{6}})\.tmp\Z")
 
 
 def _now_iso() -> str:
@@ -258,29 +292,36 @@ def staging_path_for(dst: Path, suffix: str) -> Path:
     return dst.parent / f".staging-{dst.name}-{suffix}.tmp"
 
 
-def marker_owns_staging(staging: Path) -> bool:
-    """True when a live swap marker claims *staging*, so it is not ours to delete.
+def marker_owns_transient(transient: Path) -> bool:
+    """True when a live swap marker claims *transient*, so it is not ours to delete.
 
-    The §4.1 invariant: **a staging tree claimed by a live marker is removed
-    only by the successful forward path or by :func:`recover_pending_swaps` —
-    never by a caller's cleanup.** A caller whose ``finally`` deletes it turns
-    the fail-closed "all three present" recovery row into the "``dst`` +
-    ``old``" row, whose recovery deletes ``old`` — the original tree.
+    The §4.1 invariant: **a transient claimed by a live marker is removed only
+    by the successful forward path or by :func:`recover_pending_swaps` — never
+    by a caller's cleanup, and never by the crash-leftover reaper.** Delete one
+    out from under a surviving marker and the next recovery run classifies a
+    state that marker no longer describes: dropping a claimed ``.staging-*``
+    turns the fail-closed "all three present" row into the "``dst`` + ``old``"
+    row, whose action then deletes ``old``.
+
+    Answers for BOTH transients, not just staging. The ``.old-*`` half is the
+    dangerous one — it holds the **pre-image**, and after a crash between the
+    renames it is the only copy of the artifact in existence, while a staging
+    tree is at worst a rebuildable replacement.
 
     This is a DISK probe rather than a return value or an exception attribute
     on purpose. The invariant is a property of what is on disk, not of how
     control left the swap: a ``SIGKILL`` between the marker write and the
-    unwind leaves marker-owned staging behind with no exception in flight at
+    unwind leaves marker-owned transients behind with no exception in flight at
     all, and a control-flow signal would miss exactly that case.
 
-    Never raises; a path that is not a conforming staging basename, or whose
+    Never raises; a path that is not a conforming transient basename, or whose
     marker is absent or not a regular file, is simply not claimed. Meaningful
     only while holding C0 for the artifact.
     """
-    match = _STAGING_BODY_RE.match(staging.name)
+    match = _TRANSIENT_BODY_RE.match(transient.name)
     if match is None:
         return False
-    marker = staging.parent / f".swap-{match.group('body')}.json"
+    marker = transient.parent / f".swap-{match.group('body')}.json"
     try:
         return stat.S_ISREG(os.lstat(marker).st_mode)
     except OSError:
@@ -402,9 +443,25 @@ def _load_marker(marker: Path, root: Path, name: str) -> _SwapPaths:
 
     * the basename matches ``.swap-<name>-<pid>-<6 hex>.json`` for THIS name;
     * the JSON's ``name`` / ``suffix`` equal the ones parsed from the basename;
-    * ``dst`` / ``old`` / ``staging`` equal the three derived basenames exactly;
-    * none of them contains a path separator or is ``.`` / ``..``;
-    * each resolves to a direct child of *root*, and none is a symlink.
+    * ``dst`` / ``old`` / ``staging`` equal the three derived basenames exactly.
+
+    **That last equality IS the containment proof, given a validated name**,
+    and it is worth being precise about why, because it is tempting to add a
+    second, weaker one on top. The returned paths are never built from the
+    marker's strings: they are :func:`_swap_paths`'s ``root / f"<literal>"``
+    over a *name the public entry point already validated*, so they are direct
+    children of *root* by construction, and the payload is only ever compared
+    against them. A field carrying ``../escape`` or an absolute path therefore
+    fails the comparison rather than being sanitized — there is no separator
+    check to write here, because no marker string ever reaches a path join.
+    (Re-checking ``expected.*`` for separators or a resolved parent can only
+    re-assert what the constructor guarantees; the check that actually has
+    something to reject is ``validate_name`` at the boundary.)
+
+    The remaining refusals are elsewhere by design: the marker file's own type
+    is proven on its descriptor in :func:`_read_marker_bytes`, and each
+    transient's type — including "not a symlink" — in :func:`_present_dir`,
+    immediately before it could be renamed or removed.
 
     Any mismatch, an unsupported ``version``, or unparseable JSON raises and
     **deletes nothing**.
@@ -445,21 +502,6 @@ def _load_marker(marker: Path, root: Path, name: str) -> _SwapPaths:
                 str(marker),
             )
 
-    resolved_root = root.resolve()
-    for candidate in (expected.dst, expected.old, expected.staging):
-        # Belt-and-braces against a field that satisfied the equality checks on
-        # a platform where the separator differs: the value must still be a
-        # bare name that lands directly under the root we were given.
-        if candidate.name in (".", "..") or os.sep in candidate.name:
-            raise SwapRecoveryError(
-                errno.EBUSY, f"swap marker names a non-child path {candidate.name!r}", str(marker)
-            )
-        if candidate.parent.resolve() != resolved_root:
-            raise SwapRecoveryError(
-                errno.EBUSY,
-                f"swap marker path {candidate.name!r} escapes the canonical root",
-                str(marker),
-            )
     return expected
 
 
@@ -599,6 +641,24 @@ def _rmtree_quietly(path: Path, what: str) -> None:
         logger.error("swap: could not remove %s %s (%s)", what, path, exc)
 
 
+def _require_dir(path: Path, what: str) -> None:
+    """Refuse anything that is not a real, non-symlink directory.
+
+    ``ValueError`` rather than :class:`SwapRecoveryError`: this runs before the
+    marker exists, so there is no transaction to be pending — it is a caller
+    handing the primitive the wrong kind of thing.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise ValueError(f"{what} {path} is unusable ({exc})") from exc
+    if not stat.S_ISDIR(mode):
+        raise ValueError(
+            f"{what} {path} is not a directory "
+            "(symlinks and special files are refused, as they are during recovery)"
+        )
+
+
 def swap_dir_tree(staging: Path, dst: Path) -> None:
     """Replace the directory *dst* with the already-built tree *staging*.
 
@@ -631,11 +691,24 @@ def swap_dir_tree(staging: Path, dst: Path) -> None:
     Failures AFTER rename 2 are logged and swallowed — see
     :func:`_post_commit_cleanup`.
 
+    *dst* must EXIST as a non-symlink directory — this is a replacement, not a
+    create. ``rename_no_replace`` into an absent destination is the ordinary
+    promote and belongs in the caller.
+
+    :raises InvalidNameError: *dst*'s name is not a valid identifier. A
+        ``ValueError``, deliberately NOT an :class:`OSError` — see
+        :func:`recover_pending_swaps` for why the distinction matters to a
+        caller sweeping many artifacts.
     :raises ValueError: *staging* is not a conforming sibling staging path for
-        *dst*, or is not a directory, or a swap for *dst* is already pending.
+        *dst*, or either end is not a real directory.
+    :raises SwapRecoveryError: a swap for *dst* is already pending and was not
+        recovered first, or the unwind itself failed and state is retained.
     :raises OSError: the swap failed at a known point and was unwound.
-    :raises SwapRecoveryError: the unwind itself failed; state is retained.
     """
+    # Validated FIRST: every path this function derives is ``dst.parent / f"…
+    # {dst.name}…"``, so a name of "", "." or ".." would aim the transaction at
+    # the root itself or at its parent. See :func:`_swap_paths`.
+    validate_name(dst.name, kind="artifact name")
     if staging.parent != dst.parent:
         raise ValueError(f"staging {staging} must be a sibling of {dst}")
     match = _staging_re_for(dst.name).match(staging.name)
@@ -643,24 +716,41 @@ def swap_dir_tree(staging: Path, dst: Path) -> None:
         raise ValueError(
             f"staging basename {staging.name!r} is not '.staging-{dst.name}-<pid>-<rand>.tmp'"
         )
-    try:
-        staging_is_dir = stat.S_ISDIR(os.lstat(staging).st_mode)
-    except OSError as exc:
-        raise ValueError(f"staging {staging} is unusable ({exc})") from exc
-    if not staging_is_dir:
-        raise ValueError(f"staging {staging} is not a directory")
-
     # An existing marker means an unresolved transaction owns these names, and
     # the write below would REPLACE it — losing the record of a pending swap
     # and letting this one unwind over the other's transients. Recovery is a
     # precondition, not something to race: the caller runs it (under the same
     # C0) before it gets here.
+    #
+    # Probed BEFORE the destination type gate on purpose. Rows 2, 5 and 6 of
+    # an interrupted swap leave ``dst`` ABSENT, so a caller who skipped
+    # recovery would otherwise be told the destination is unusable (ENOENT)
+    # when the accurate diagnosis — and the actionable one — is that a swap
+    # is pending. The misleading message is exactly the one a caller who got
+    # the order wrong would have hit.
     pending = _find_marker(dst.parent, dst.name)
     if pending is not None:
-        raise ValueError(
+        # SwapRecoveryError rather than ValueError: this is not a caller
+        # mistake to fix in code, it is the recovery-pending condition every
+        # surface already knows how to report — and it is the same type
+        # ``_find_marker`` raises when it finds two.
+        raise SwapRecoveryError(
+            errno.EBUSY,
             f"a swap for {dst.name!r} is already pending ({pending.name}); "
-            "recover it before starting another"
+            "recover it before starting another",
+            str(dst),
+            retained=(pending,),
         )
+
+    # BOTH ends, not just staging. A regular file, symlink or device node at
+    # ``dst`` would otherwise be moved aside and replaced, and the function
+    # would report success for an operation its own contract calls a directory
+    # replacement — with a symlink, it would move the LINK and leave the tree
+    # it pointed at silently untouched. The recovery machine already refuses
+    # every wrong type (:func:`_present_dir`); the forward path must agree, or
+    # the two disagree about what this transaction is even operating on.
+    _require_dir(staging, "staging")
+    _require_dir(dst, "destination")
 
     suffix = f"{match.group('pid')}-{match.group('rand')}"
     paths = _swap_paths(dst.parent, dst.name, suffix)
@@ -794,12 +884,22 @@ def recover_pending_swaps(root: Path, name: str) -> bool:
     both paths are named and neither is claimed to be authoritative — asserting
     one would talk an operator into deleting the good tree.
 
+    :raises InvalidNameError: *name* is not a valid artifact identifier. This
+        is a ``ValueError``, **not** an ``OSError``, so it does not travel the
+        path a caller uses to funnel this module's failures into a typed
+        per-item skip — and that is deliberate. *name* is expected to come from
+        an artifact the caller already resolved, not from a raw directory
+        listing, so an invalid one is a programming error rather than a
+        per-item outcome. A future caller that does iterate on-disk entries
+        must decide explicitly whether to skip such an entry; it must not
+        inherit that decision by accident.
     :raises SwapRecoveryError: a tampered/ambiguous marker or a wrong-type
         transient — nothing is mutated; or a failed recovery rename or marker
         removal — the row's own action may have completed, leaving a safe,
         still-marked state a later run resolves.
     :raises SwapForeignDestination: row 4, or a destination recreated mid-recovery.
     """
+    validate_name(name, kind="artifact name")  # see :func:`_swap_paths`
     if not root.is_dir():
         return False
     marker = _find_marker(root, name)
@@ -814,6 +914,12 @@ def recover_pending_swaps(root: Path, name: str) -> bool:
     match state:
         case (True, False, True):  # row 1 — crashed before rename 1
             logger.warning("swap recovery %s: discarding staging tree %s", name, paths.staging)
+            # Deliberately the reverse of rows 2/3, which clear the marker
+            # first: here the marker must outlive the deletion, because a crash
+            # in between leaves ``dst`` alone with a live marker — row 7, which
+            # simply drops it. Clearing first would leave an UNMARKED staging
+            # tree instead. Nothing irreplaceable is at stake either way (``dst``
+            # is the original), but the ordering is chosen, not accidental.
             _rmtree_quietly(paths.staging, "staging tree")
             _clear_marker_or_refuse(paths)
         case (False, True, True):  # row 2 — crashed between the renames

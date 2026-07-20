@@ -239,6 +239,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The crash-leftover reaper no longer claims a newline-terminated name** —
+  Python's `$` also matches immediately before a trailing newline, and a
+  newline is a legal POSIX filename character, so
+  `.old-<name>-<pid>-<rand>.tmp\n` classified as one of our own leftovers and
+  became eligible for deletion. The gateway never generates such a name, so
+  anything wearing one belongs to someone else. Practical reachability is close
+  to nil; it is listed because it changes what an already-released reaper will
+  delete.
+
 - **Syncing a skill no longer deletes a similarly-named skill's crash
   leftovers** — the crash-leftover reaper selected trees with a prefix glob on
   the destination name, so pushing or importing `foo` matched `foo-bar`'s
