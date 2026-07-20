@@ -260,8 +260,11 @@ async def mem_context_init(
     # warning + seed-here path below, the same way the CLI does.
     if scope_explicit and artifact_scope != "user" and not has_project_signal:
         return (
-            f"--scope={artifact_scope} requires a project root "
-            "(with .git or pyproject.toml). Use scope='user' from outside a project."
+            # THIS surface's parameter, not the CLI's ``--scope=`` flag (#1869)
+            # — the pre-fix sentence carried both spellings for one argument.
+            f"scope='{artifact_scope}' requires a project root "
+            "(with .git or pyproject.toml). Re-call with scope='user' from "
+            "outside a project."
         )
 
     if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:

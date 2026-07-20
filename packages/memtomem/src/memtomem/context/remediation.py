@@ -107,6 +107,11 @@ def append_hint(reason: str, code: str | None, surface: HintSurface) -> str:
     if not hint:
         return reason
     body = reason.rstrip()
-    if body and body[-1] not in ".!?:":
+    if not body:
+        # An empty reason is reachable — ``_redact_pull_reason`` can coalesce to
+        # "" — and joining onto it would render ``refused:  Pass --overwrite …``
+        # with a doubled space (PR review nit 3).
+        return hint
+    if body[-1] not in ".!?:":
         body += "."
     return f"{body} {hint}"

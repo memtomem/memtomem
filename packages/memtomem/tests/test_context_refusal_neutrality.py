@@ -25,43 +25,66 @@ import re
 
 import pytest
 
-CONTEXT_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem" / "context"
+SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem"
+CONTEXT_DIR = SRC / "context"
 
-#: Vocabulary that belongs to exactly one surface. ``--from`` is word-bounded
-#: so ``--force-unsafe-import`` is not double-reported.
+#: CLI flag spellings. Forbidden in the engine AND on the two surfaces that
+#: cannot type them — an MCP client and a browser have no flags at all.
 #:
+#: ``--from`` is word-bounded so ``--force-unsafe-import`` is not double-reported.
 #: ``--to`` is deliberately absent: every occurrence in this package is part of
 #: a runnable ``mm context migrate … --to project_local`` command (the "keep
 #: as-is" class in #1869), and it never appears as a remediation clause on its
 #: own. ``--from`` is kept because it DID: ``pass --from <runtime>`` was the
 #: headline defect.
-SURFACE_VOCABULARY = re.compile(
-    r"--overwrite|--from\b|--force-unsafe-import|--scope=|"
-    r"from_runtime=|force_unsafe_import=|overwrite=True"
+CLI_VOCABULARY = r"--overwrite|--from\b|--force-unsafe-import|--scope="
+
+#: MCP/web parameter spellings. Forbidden in the ENGINE only — naming them is
+#: exactly right inside the MCP tool module, which is where they are typed.
+NON_CLI_VOCABULARY = r"from_runtime=|force_unsafe_import=|overwrite=True"
+
+SURFACE_VOCABULARY = re.compile(CLI_VOCABULARY + "|" + NON_CLI_VOCABULARY)
+
+#: The areas swept, and what each may not say. The engine may name NO surface's
+#: vocabulary; a surface may name its own but not another's — which is the
+#: defect this PR fixed twice outside the engine (``mem_context_memory_migrate``
+#: saying ``--from and --to``, ``mem_context_init`` saying ``--scope=``), and
+#: which a ``context/``-only sweep could not have caught (PR review finding 2).
+SWEPT_AREAS: tuple[tuple[str, list[pathlib.Path], re.Pattern[str]], ...] = (
+    ("engine", sorted(CONTEXT_DIR.rglob("*.py")), SURFACE_VOCABULARY),
+    ("mcp", [SRC / "server" / "tools" / "context.py"], re.compile(CLI_VOCABULARY)),
+    ("web", sorted((SRC / "web" / "routes").glob("context*.py")), re.compile(CLI_VOCABULARY)),
 )
 
 #: Deliberate exceptions, each with the reason it is NOT a per-surface hint.
-#: ``(module, substring)`` — the substring must appear in the offending literal.
+#: ``(path relative to src/memtomem, substring)`` — the substring must appear in
+#: the offending literal. Relative, not ``path.name``: a future
+#: ``context/<subpkg>/migrate.py`` must not silently inherit ``migrate.py``'s
+#: exemptions (PR review nit 5).
 ALLOWED: frozenset[tuple[str, str]] = frozenset(
     {
         # The hint table itself — every surface's spelling lives here by design.
-        ("remediation.py", "--overwrite"),
-        ("remediation.py", "--from <runtime>"),
-        ("remediation.py", "--force-unsafe-import"),
-        ("remediation.py", "overwrite=True"),
-        ("remediation.py", "from_runtime="),
-        ("remediation.py", "force_unsafe_import=True"),
+        ("context/remediation.py", "--overwrite"),
+        ("context/remediation.py", "--from <runtime>"),
+        ("context/remediation.py", "--force-unsafe-import"),
+        ("context/remediation.py", "overwrite=True"),
+        ("context/remediation.py", "from_runtime="),
+        ("context/remediation.py", "force_unsafe_import=True"),
         # Runnable shell commands, not remediation clauses: these are meant to
         # be copy-pasted verbatim into a terminal (#1869 "keep as-is").
-        ("settings_doctor.py", "mm context settings-migrate --from="),
+        ("context/settings_doctor.py", "mm context settings-migrate --from="),
         # ``migrate_scope`` has exactly one consumer — the CLI ``mm context
         # migrate`` verb (no web route, no MCP action calls it), so its
         # ``--from``/``--to`` ARE this path's parameter names. If a second
         # surface ever calls it, this entry must be revisited.
-        ("migrate.py", "Pass --from <scope> to disambiguate."),
-        ("migrate.py", "--from and --to must differ."),
+        ("context/migrate.py", "Pass --from <scope> to disambiguate."),
+        ("context/migrate.py", "--from and --to must differ."),
     }
 )
+
+
+def _rel(path: pathlib.Path) -> str:
+    return path.relative_to(SRC).as_posix()
 
 
 def _string_literals(path: pathlib.Path) -> list[tuple[int, str]]:
@@ -93,8 +116,11 @@ def _string_literals(path: pathlib.Path) -> list[tuple[int, str]]:
         # any static check — the sweep bounds the accidental regression, not a
         # determined one.
         elif isinstance(node, ast.JoinedStr | ast.BinOp):
+            # No docstring check here: ``docstrings`` only ever holds Constant
+            # ids, and a docstring cannot be an f-string or a concatenation
+            # (PR review nit 4 — the guard read as protection that wasn't).
             folded = _fold_static_parts(node)
-            if folded is not None and id(node) not in docstrings:
+            if folded is not None:
                 out.append((node.lineno, folded))
     return out
 
@@ -120,18 +146,20 @@ def _fold_static_parts(node: ast.AST) -> str | None:
     return None
 
 
-def test_engine_strings_never_name_a_surfaces_vocabulary() -> None:
+def test_refusal_strings_never_name_another_surfaces_vocabulary() -> None:
     offenders: list[str] = []
-    for path in sorted(CONTEXT_DIR.rglob("*.py")):
-        for lineno, value in _string_literals(path):
-            if not SURFACE_VOCABULARY.search(value):
-                continue
-            if any(path.name == mod and frag in value for mod, frag in ALLOWED):
-                continue
-            offenders.append(f"{path.name}:{lineno}: {value[:120]!r}")
+    for area, paths, pattern in SWEPT_AREAS:
+        for path in paths:
+            for lineno, value in _string_literals(path):
+                if not pattern.search(value):
+                    continue
+                if any(_rel(path) == mod and frag in value for mod, frag in ALLOWED):
+                    continue
+                offenders.append(f"[{area}] {_rel(path)}:{lineno}: {value[:120]!r}")
     assert not offenders, (
-        "engine strings must state the condition only; per-surface remediation "
-        "belongs in memtomem.context.remediation (#1869):\n" + "\n".join(offenders)
+        "a refusal must state the condition in its own surface's vocabulary; "
+        "per-surface remediation belongs in memtomem.context.remediation "
+        "(#1869):\n" + "\n".join(offenders)
     )
 
 
@@ -139,11 +167,14 @@ def test_allowlist_entries_still_exist() -> None:
     """A stale exemption is a hole — every ALLOWED entry must still match.
 
     Without this, deleting the site an exemption covers leaves a permanent
-    licence for that module to reintroduce the flag.
+    licence for that module to reintroduce the flag. It earned its keep during
+    review, failing on the ``--scope=user`` entry the moment the Gate A hint was
+    dropped.
     """
     seen = {
-        (path.name, value)
-        for path in sorted(CONTEXT_DIR.rglob("*.py"))
+        (_rel(path), value)
+        for _, paths, _pattern in SWEPT_AREAS
+        for path in paths
         for _, value in _string_literals(path)
     }
     stale = [
@@ -171,6 +202,16 @@ def test_unknown_code_yields_no_hint() -> None:
     assert remediation.action_hint("no_such_code", "cli") == ""
     assert remediation.action_hint(None, "cli") == ""
     assert remediation.append_hint("something failed", None, "cli") == "something failed"
+
+
+def test_hint_stands_alone_when_the_reason_is_empty() -> None:
+    """``_redact_pull_reason`` can coalesce a reason to ``""``; joining onto it
+    would render ``refused:  Pass --overwrite …`` with a doubled space."""
+    from memtomem.context import remediation
+
+    assert remediation.append_hint("", "canonical_exists", "cli") == (
+        "Pass --overwrite to replace it."
+    )
 
 
 def test_web_hints_are_localized_client_side_not_baked_into_python() -> None:
