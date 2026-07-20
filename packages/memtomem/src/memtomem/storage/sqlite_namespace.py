@@ -210,9 +210,7 @@ class NamespaceOps:
                 # error — and not a conflict either, so this check precedes
                 # the target evaluation below. Falls through to the shared
                 # finalize path so the lock taken above is always released.
-                result = NamespaceRenameResult(
-                    chunks_moved=0, metadata_renamed=False, merged=False
-                )
+                result = NamespaceRenameResult(chunks_moved=0, metadata_renamed=False, merged=False)
             else:
                 target_chunks = db.execute(
                     "SELECT COUNT(*) FROM chunks WHERE namespace=?", (new,)
@@ -299,9 +297,7 @@ class NamespaceOps:
 
         Sessions are excluded on purpose — see ``rename_namespace``.
         """
-        row = db.execute(
-            "SELECT 1 FROM chunks WHERE namespace=? LIMIT 1", (namespace,)
-        ).fetchone()
+        row = db.execute("SELECT 1 FROM chunks WHERE namespace=? LIMIT 1", (namespace,)).fetchone()
         return row is not None or self._has_namespace_meta(db, namespace)
 
     async def get_namespace_meta(self, namespace: str) -> dict | None:

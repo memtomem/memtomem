@@ -35,9 +35,7 @@ def _mock_components(legacy_namespaces, existing_new_namespaces=(), chunk_counts
     storage = SimpleNamespace(
         list_namespace_meta=AsyncMock(return_value=rows),
         rename_namespace=AsyncMock(
-            return_value=NamespaceRenameResult(
-                chunks_moved=2, metadata_renamed=True, merged=False
-            )
+            return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=True, merged=False)
         ),
     )
     return SimpleNamespace(storage=storage)
@@ -100,9 +98,7 @@ class TestAgentMigrate:
 
     def test_dry_run_flags_existing_merge_target(self, monkeypatch):
         """A target that already exists is consolidated — say so before applying."""
-        comp = _mock_components(
-            ["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"]
-        )
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         result = CliRunner().invoke(cli, ["agent", "migrate", "--dry-run"])
         assert result.exit_code == 0

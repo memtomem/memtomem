@@ -18,7 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem.errors import NamespaceConflictError
 from memtomem.models import Chunk, ChunkMetadata
+from memtomem.storage.base import NamespaceRenameResult
 from memtomem.web.app import create_app
 from .helpers import set_home
 
@@ -1898,7 +1900,10 @@ class TestNamespaceCRUD:
         assert data["namespace"] == "default"
 
     async def test_rename_namespace(self, app, client: AsyncClient):
-        app.state.storage.rename_namespace = AsyncMock(return_value=30)
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=30, metadata_renamed=True, merged=False)
+        )
+        app.state.storage.list_namespaces.return_value = [("general", 30)]
         resp = await client.post(
             "/api/namespaces/default/rename",
             json={"new_name": "general"},
@@ -1907,6 +1912,52 @@ class TestNamespaceCRUD:
         data = resp.json()
         assert data["namespace"] == "general"
         assert data["chunk_count"] == 30
+
+    async def test_rename_merge_reports_resulting_total(self, app, client: AsyncClient):
+        """On a merge the moved count and the namespace's size differ.
+
+        Reporting the moved count would contradict the list / info endpoints
+        the UI reads right after the rename.
+        """
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=False, merged=True)
+        )
+        app.state.storage.list_namespaces.return_value = [("general", 7)]
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general", "merge": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["chunk_count"] == 7
+
+    async def test_rename_namespace_conflict_is_409(self, app, client: AsyncClient):
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError("target already exists")
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general"},
+        )
+        assert resp.status_code == 409
+
+    async def test_rename_onto_itself_is_409_not_500(self, app, client: AsyncClient):
+        """Deterministic client input — must not land on the generic 500 handler."""
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError("Cannot rename namespace onto itself")
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "default"},
+        )
+        assert resp.status_code == 409
+
+    async def test_rename_merge_rejects_stringified_bool(self, client: AsyncClient):
+        """``merge`` is StrictBool: consolidation needs literal consent."""
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general", "merge": "true"},
+        )
+        assert resp.status_code == 422
 
     async def test_rename_namespace_empty_name_rejected(self, client: AsyncClient):
         """Empty new_name is rejected by Pydantic min_length=1."""
