@@ -70,6 +70,10 @@ async def mem_ns_set(
     ``namespace=`` surface. See issue #500 for the transitive-bypass
     write-up.
 
+    Args:
+        namespace: Namespace to make the session default. Validated before
+            the write; a rejected value leaves the current default in place.
+
     Examples::
         mem_ns_set(namespace="work")
         mem_ns_set(namespace="project:myapp")
@@ -108,6 +112,12 @@ async def mem_ns_rename(
     Both ``old`` and ``new`` are run through :func:`validate_namespace`
     so a hostile-shaped string cannot land verbatim in the chunks /
     namespace_metadata rows via the rename path. See issue #500.
+
+    Args:
+        old: Existing namespace to rename. No chunks match, no rows change —
+            the call reports 0 updated rather than failing.
+        new: Target namespace. Validated; merging into an existing namespace
+            is allowed, so a typo here silently pools two namespaces.
 
     Examples::
         mem_ns_rename(old="project:v1", new="project:v2")

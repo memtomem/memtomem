@@ -179,7 +179,13 @@ def test_category_help_output_stays_readable() -> None:
     """
     from memtomem.server.tools.meta import _help
 
-    budgets = {"context": 14_000}
+    # ``context`` was raised from 14,000 when the parameter documentation for
+    # detect / sync / migrate moved into their ``Args:`` blocks: that text
+    # already existed in the tool descriptions, it just was not reachable from
+    # the help catalog that core-mode agents read. Growth of this kind is the
+    # point; the next increase should trim instead — 16 KB is about as much as
+    # a single help response should ever be.
+    budgets = {"context": 16_000}
     default_budget = 4_000
     offenders = {
         category: size
