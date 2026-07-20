@@ -56,7 +56,7 @@ _AUTOMATION_HOOKS_JSON = (
 )
 
 _ASTERISK_TOOLS = ("mem_config", "mem_embedding_reset", "mem_reset")
-_FOOTNOTE_PREFIX = r"\* Requires `MEMTOMEM_TOOL_MODE=full`"
+_FOOTNOTE_PREFIX = r"\* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`"
 
 
 def _public_markdown() -> list[Path]:
@@ -180,6 +180,24 @@ class TestToolModeFootnoteParity:
             "line verbatim so the CLI / Web UI alternate-access hint stays "
             "in sync across the two Config-table entry points."
         )
+
+    def test_footnote_states_mem_do_remains_available(self, canonical_footnote: str) -> None:
+        """The asterisk gates the individual *tool name*, not the capability.
+
+        All three tools are ``@register``-ed, so ``mem_do(action="config")``
+        works in core and standard mode — an earlier footnote read as if the
+        feature itself required ``full`` and pointed users at the CLI as the
+        only alternative.
+        """
+        assert "mem_do(" in canonical_footnote, (
+            "the tool-mode footnote must say the actions stay reachable through "
+            "mem_do in core/standard mode, not just that full mode is required"
+        )
+        for name in _ASTERISK_TOOLS:
+            action = name.removeprefix("mem_")
+            assert f'"{action}"' in canonical_footnote, (
+                f"footnote must name the mem_do action '{action}' for {name}"
+            )
 
 
 class TestWebRemoteAccessDocs:

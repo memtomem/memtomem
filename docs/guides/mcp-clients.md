@@ -472,7 +472,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Formation** | `mem_formation_scan`, `mem_candidate_propose`, `mem_candidate_list`, `mem_candidate_review`, `mem_candidate_recover` |
 
 
-\* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
+\* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions themselves stay reachable in `core` and `standard` mode via `mem_do(action="config" | "embedding_reset" | "reset", params={...})`; `mm config` (CLI) and the Web UI Settings tab are the non-MCP equivalents.
 
 > **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (99 current tools plus the deprecated `mem_context_migrate` alias, 100 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
