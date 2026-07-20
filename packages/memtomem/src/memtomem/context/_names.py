@@ -194,7 +194,7 @@ def is_internal_artifact_dir(name: str) -> bool:
     These are *our own* crash artifacts, not user content — discovery loops
     (canonical listing, runtime scans, extract, detect, status) skip them
     silently rather than warning about an invalid name, and
-    ``skills._reap_stale_internal_dirs`` deletes them under the destination
+    ``skills._recover_and_reap_internal_dirs`` deletes them under the destination
     sidecar lock. Both sides MUST use this one predicate so "hidden" and
     "deletable" can never drift apart.
 

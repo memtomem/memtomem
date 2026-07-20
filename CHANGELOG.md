@@ -248,6 +248,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   to nil; it is listed because it changes what an already-released reaper will
   delete.
 
+- **An interrupted skill promote no longer loses the skill** (ADR-0030 §10) —
+  replacing a skill directory is two renames, because POSIX cannot atomically
+  replace a non-empty directory, and between them the original tree is parked
+  under a `.old-…` name. The crash-leftover reaper deleted every such tree it
+  owned, so a crash in that window left the only surviving copy of a canonical
+  skill to be destroyed by the next push or import. A move-aside tree is now
+  reaped **only while its destination is present**; when the destination is
+  missing it is kept and logged at WARNING with both paths, since it may be the
+  original. Staging trees, which are always copies of something still on disk,
+  are reaped as before. The kept tree is cleared by the promote that recreates
+  the destination, so a normal push or import still finishes with no residue.
+
 - **Syncing a skill no longer deletes a similarly-named skill's crash
   leftovers** — the crash-leftover reaper selected trees with a prefix glob on
   the destination name, so pushing or importing `foo` matched `foo-bar`'s

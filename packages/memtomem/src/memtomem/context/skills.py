@@ -402,8 +402,14 @@ def _remove_internal_artifact(path: Path) -> None:
         logger.warning("could not remove internal artifact %s: %s", path, exc)
 
 
-def _iter_own_internal_dirs(dst: Path) -> Iterator[Path]:
-    """Yield the internal staging/move-aside trees that belong to ``dst``.
+def _iter_own_internal_dirs(
+    dst: Path, *, kinds: tuple[str, ...] = ("staging", "old")
+) -> Iterator[tuple[str, Path]]:
+    """Yield ``(kind, path)`` for the internal trees that belong to ``dst``.
+
+    ``kind`` is ``"staging"`` or ``"old"``; the two are not interchangeable
+    (see :func:`_recover_and_reap_internal_dirs`), so callers get it rather
+    than re-deriving it from the name.
 
     **The owner equality is the guarantee.** A glob cannot express "this
     destination and no other": ``.old-foo-*.tmp`` matches
@@ -424,13 +430,68 @@ def _iter_own_internal_dirs(dst: Path) -> Iterator[Path]:
     """
     parent = dst.parent
     safe = glob.escape(dst.name)
-    for pattern in (f".staging-{safe}-*.tmp", f".old-{safe}-*.tmp"):
-        for candidate in parent.glob(pattern):
+    for kind in kinds:
+        for candidate in parent.glob(f".{kind}-{safe}-*.tmp"):
             if internal_artifact_owner(candidate.name) == dst.name:
-                yield candidate
+                yield kind, candidate
 
 
-def _reap_stale_internal_dirs(dst: Path) -> None:
+def _canonical_is_present(dst: Path) -> bool:
+    """Whether ``dst`` is a real directory right now, followed links excluded.
+
+    The single expression of the ADR-0030 §10 precondition for deleting a
+    move-aside tree, so both deletion sites ask the same question at the moment
+    they delete. ``lstat`` rather than ``is_dir()``: a symlink at the canonical
+    path is not the canonical tree, and letting one stand in would license
+    deleting the real tree on the strength of a link placed by accident.
+    """
+    try:
+        return stat.S_ISDIR(dst.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _reap_move_aside(dst: Path) -> None:
+    """Reap ``.old-*`` leftovers now that ``dst`` is present.
+
+    The prelude runs *before* the promote, so on a first install it sees an
+    absent ``dst`` and keeps any ``.old-*`` it finds — at that moment
+    indistinguishable from the only surviving copy of an interrupted promote
+    (ADR-0030 §10). Something has to run on the other side of the rename or
+    that tree is kept forever: the reverse-import path in particular refuses
+    its own second pass before it ever re-acquires the lock, so "the next run
+    clears it" is false there.
+
+    Called from :func:`_promote_staging`'s success paths rather than from each
+    call site: the moment the canonical becomes present is exactly the moment
+    the ADR rule starts permitting the reap, and putting it anywhere else makes
+    it something every future writer has to remember. Deliberately narrow — it
+    never recovers, only reaps — so it stays safe to call from inside the
+    promote primitive.
+
+    It re-checks presence rather than trusting the rename it follows. "We just
+    created ``dst``" is not the same claim as "``dst`` is there now": the lock
+    does not serialize editors and shells, so one can remove or replace it in
+    the window, and the ADR precondition has to hold where the deletion
+    happens, not where it was predicted (Codex review).
+
+    The check is **once per call, not once per candidate**, and that is a
+    boundary rather than an oversight. Re-reading before every removal narrows
+    the window without closing it — the tree can still be swapped between the
+    ``lstat`` and the ``rmtree`` — so it buys no guarantee, only the appearance
+    of one. ADR-0030 §6 already draws this line: non-first-party writers
+    (editors, shells) are outside the guarantee. Closing it for real needs
+    descriptor-relative traversal across every walker here, which is a separate
+    change (tracked in the PR-G4 design note, §2.3).
+    """
+    if not dst.parent.is_dir() or not _canonical_is_present(dst):
+        return
+    for _, stale in _iter_own_internal_dirs(dst, kinds=("old",)):
+        logger.debug("reaping move-aside tree %s after promote", stale)
+        _remove_internal_artifact(stale)
+
+
+def _recover_and_reap_internal_dirs(dst: Path) -> None:
     """Remove crash-leftover staging/move-aside trees for ``dst``.
 
     A SIGKILL between :func:`_stage_skill` and the cleanup in
@@ -453,11 +514,35 @@ def _reap_stale_internal_dirs(dst: Path) -> None:
     skill ``foo-bar`` — so syncing ``foo`` deleted another skill's in-flight
     rollback tree while holding the wrong lock, and hyphenated skill names are
     the norm here (Codex review; live since #1229).
+
+    **An ``.old-*`` is reaped only while ``dst`` is a present, non-symlink
+    directory** (ADR-0030 §10). The two transients are not equivalent: a
+    staging tree is a copy whose source is still on disk, but a move-aside
+    tree is the ORIGINAL, parked there by :func:`_promote_staging` for the
+    instant between its two renames. Crash in that instant and ``.old-*``
+    holds the only copy of the canonical — reaping it unconditionally, as this
+    function used to, is what turns a recoverable crash into data loss. When
+    ``dst`` is absent the leftover is kept and logged at WARNING naming both
+    paths; :func:`_reap_move_aside` clears it once the promote makes ``dst``
+    present again. A leaked directory is cheap, a deleted canonical is not.
+
+    The name is deliberate — this is the single prelude every canonical writer
+    runs under the lock, not merely a garbage collector.
     """
     parent = dst.parent
     if not parent.is_dir():
         return
-    for stale in _iter_own_internal_dirs(dst):
+    dst_is_dir = _canonical_is_present(dst)
+    for kind, stale in _iter_own_internal_dirs(dst):
+        if kind == "old" and not dst_is_dir:
+            logger.warning(
+                "keeping move-aside tree %s: canonical %s is absent, so this "
+                "may be its only copy (interrupted promote) — it will be "
+                "cleared by the next promote that restores the canonical",
+                stale,
+                dst,
+            )
+            continue
         logger.debug("reaping stale internal artifact dir %s", stale)
         _remove_internal_artifact(stale)
 
@@ -519,6 +604,7 @@ def _promote_staging(
     dst: Path,
     *,
     replace_existing: bool = True,
+    reap_move_aside: bool = False,
 ) -> None:
     """Promote ``staging`` into ``dst`` (same-fs precondition).
 
@@ -526,9 +612,25 @@ def _promote_staging(
     skill aside, rename staging into place, and roll back on failure. With
     ``False`` (runtime→canonical imports), one native exclusive rename installs
     a new skill or raises ``EEXIST`` without touching the destination (#1839).
+
+    ``reap_move_aside=True`` clears stale ``.old-*`` trees on the success
+    paths, where the destination has just become present — the condition
+    ADR-0030 §10 requires before one may be deleted, and the only thing that
+    frees the tree :func:`_recover_and_reap_internal_dirs` had to keep on the
+    way in.
+
+    **It defaults to False because it is safe only under the destination
+    sidecar lock**, and this primitive cannot see whether its caller holds one.
+    Reaping cannot tell an in-flight move-aside from an abandoned one, so an
+    unsynchronized writer would delete a tree another writer is mid-rollback
+    on, and that rollback's breadcrumb would point at nothing. Every current
+    caller holds the lock and opts in; the default is chosen so that a future
+    one who forgets leaks a directory rather than losing a tree.
     """
     if not replace_existing:
         _rename_no_replace(staging, dst)
+        if reap_move_aside:
+            _reap_move_aside(dst)
         return
 
     conflict = _target_conflict(dst)
@@ -564,8 +666,12 @@ def _promote_staging(
                 raise promote_exc from rollback_exc
             raise
         _remove_internal_artifact(old)
+        if reap_move_aside:
+            _reap_move_aside(dst)
     else:
         os.replace(staging, dst)
+        if reap_move_aside:
+            _reap_move_aside(dst)
 
 
 def copy_skill(src: Path, dst: Path) -> None:
@@ -611,7 +717,7 @@ def copy_skill(src: Path, dst: Path) -> None:
     with _file_lock(_lock_path_for(dst), timeout=_SKILLS_LOCK_BUDGET_S):
         staging = _stage_skill(src, dst)
         try:
-            _promote_staging(staging, dst)
+            _promote_staging(staging, dst, reap_move_aside=True)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -749,7 +855,7 @@ def generate_all_skills(
                 # All destination locks held — safe point to reap crash
                 # leftovers before they collide with fresh staging work.
                 for stale_dst in sorted({dst for _, _, _, dst in work}, key=str):
-                    _reap_stale_internal_dirs(stale_dst)
+                    _recover_and_reap_internal_dirs(stale_dst)
                 for target, _gen, skill_dir, dst in work:
                     # Preflight the promote refusal predicate while the
                     # destination locks are held, BEFORE anything stages: a
@@ -818,7 +924,7 @@ def generate_all_skills(
 
                 for target, staging, dst in staged:
                     try:
-                        _promote_staging(staging, dst)
+                        _promote_staging(staging, dst, reap_move_aside=True)
                     except OSError as exc:
                         # Residual race: only a NON-gateway writer (manual
                         # shell, editor) can recreate conflicting content at
@@ -908,7 +1014,7 @@ def generate_all_skills(
                 continue
             with dst_lock:
                 # Lock held — safe point to reap crash leftovers for this dst.
-                _reap_stale_internal_dirs(dst)
+                _recover_and_reap_internal_dirs(dst)
                 # Preflight the promote refusal predicate (same conversion to
                 # a typed skip as the project_shared batch above, #1229) —
                 # before staging so a conflicted destination wastes no
@@ -978,7 +1084,7 @@ def generate_all_skills(
                         # gateway writers only) — same typed-skip conversion.
                         # Non-race OSErrors re-raise loud (#1247 id 18).
                         try:
-                            _promote_staging(staging, dst)
+                            _promote_staging(staging, dst, reap_move_aside=True)
                         except OSError as exc:
                             if not _promote_race_conflict(exc):
                                 raise
@@ -1347,7 +1453,7 @@ def extract_skills_to_canonical(
                     # Lock held — safe point to reap crash leftovers for this
                     # canonical dst (previously unreachable for the import
                     # path, which relied on discovery filtering alone).
-                    _reap_stale_internal_dirs(dst)
+                    _recover_and_reap_internal_dirs(dst)
                     # Re-check the existence contract under the lock: a parallel
                     # importer can land dst between the lock-free preflight above
                     # and our acquisition. Mirrors the pre-lock branch exactly so
@@ -1399,7 +1505,7 @@ def extract_skills_to_canonical(
                         # including when ``overwrite=True``. Use one exclusive
                         # rename so a manual writer landing dst after the
                         # under-lock re-check can never be moved aside (#1839).
-                        _promote_staging(staging, dst, replace_existing=False)
+                        _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
                     except OSError as exc:
                         # Verified destination races (refusal pair +
                         # ENOTEMPTY/EEXIST from a NON-gateway writer — the
