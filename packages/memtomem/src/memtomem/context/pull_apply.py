@@ -635,7 +635,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
     from memtomem.context.skills import (
         _promote_race_conflict,
         _promote_staging,
-        _reap_stale_internal_dirs,
+        _recover_and_reap_internal_dirs,
         _target_conflict,
     )
 
@@ -644,7 +644,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
 
     try:
         with canonical_sidecar_lock(canonical_root, plan.name, timeout=lock_timeout):
-            _reap_stale_internal_dirs(dst)
+            _recover_and_reap_internal_dirs(dst)
 
             # Destination precondition (R3/R4 Major): the state the user
             # previewed must still hold.
@@ -672,7 +672,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             staging: Path | None = None
             try:
                 staging = _stage_captured_tree(plan.captured, dst)
-                _promote_staging(staging, dst, replace_existing=False)
+                _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
             except OSError as exc:
                 if _promote_race_conflict(exc):
                     return _refusal_for(

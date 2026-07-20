@@ -20,9 +20,12 @@ that replaced the inline ``shutil.rmtree(dst); copy_tree_atomic`` in
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
+import shutil
 import sys
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -36,7 +39,8 @@ from memtomem.context.skills import (
     SKILL_MANIFEST,
     _iter_scannable_skill_files,
     _promote_staging,
-    _reap_stale_internal_dirs,
+    _reap_move_aside,
+    _recover_and_reap_internal_dirs,
     _stage_skill,
     canonical_skills_root,
     copy_skill,
@@ -410,7 +414,7 @@ class TestStaleLeftoverReaping:
         assert is_internal_artifact_dir(neighbor_old.name)
         assert is_internal_artifact_dir(own.name)
 
-        _reap_stale_internal_dirs(dst)
+        _recover_and_reap_internal_dirs(dst)
 
         assert not own.exists(), "own leftover not reaped"
         assert neighbor_old.is_dir(), "reaped a neighbouring skill's move-aside tree"
@@ -470,7 +474,7 @@ class TestStaleLeftoverReaping:
         dst.mkdir()
         (dst / SKILL_MANIFEST).write_text("canonical\n", encoding="utf-8")
 
-        _reap_stale_internal_dirs(dst)
+        _recover_and_reap_internal_dirs(dst)
 
         assert victim.is_dir(), f"{weird!r} reached another destination's move-aside tree"
         assert victim_staging.is_dir(), f"{weird!r} reached another destination's staging tree"
@@ -493,7 +497,7 @@ class TestStaleLeftoverReaping:
         old = root / ".old-foo-999999-abc123.tmp"
         old.symlink_to(elsewhere, target_is_directory=True)
 
-        _reap_stale_internal_dirs(dst)
+        _recover_and_reap_internal_dirs(dst)
 
         assert not old.is_symlink(), "dead move-aside symlink survived the reaper"
         assert not old.exists()
@@ -519,7 +523,7 @@ class TestStaleLeftoverReaping:
         stray.write_text("someone else's bytes\n", encoding="utf-8")
 
         with caplog.at_level(logging.WARNING, logger="memtomem.context.skills"):
-            _reap_stale_internal_dirs(dst)
+            _recover_and_reap_internal_dirs(dst)
 
         assert stray.is_file(), "a regular leftover was unlinked"
         assert stray.read_text(encoding="utf-8") == "someone else's bytes\n"
@@ -608,8 +612,16 @@ class TestStaleLeftoverReaping:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
     ) -> None:
         """Pre-existing stale staging/old trees next to a destination are
-        removed by the next sync (which holds the dst sidecar lock), and the
-        real skill still promotes."""
+        removed by a sync that holds the dst sidecar lock, and the real skill
+        still promotes.
+
+        Both clear in ONE operation, but by different mechanisms, and that
+        distinction is the ADR-0030 §10 rule. The prelude runs before the
+        promote, so it sees an absent ``dst`` and keeps the move-aside tree —
+        at that instant indistinguishable from the only surviving copy of an
+        interrupted promote. The promote then installs ``dst``, and its
+        success path reaps it under the same lock.
+        """
         home = tmp_path / "home"
         set_home(monkeypatch, str(home))
         _seed_canonical_skill(tmp_path, name="hello", scope=scope)
@@ -630,6 +642,292 @@ class TestStaleLeftoverReaping:
         assert not stale_staging.exists()
         assert not stale_old.exists()
         assert (dst / SKILL_MANIFEST).is_file()
+
+
+class TestMoveAsideReapingIsStateAware:
+    """ADR-0030 §10: an ``.old-*`` is reaped only while the canonical is
+    present.
+
+    The reaper used to delete every ``.old-*`` it owned, unconditionally. But
+    :func:`_promote_staging` parks the ORIGINAL tree there for the instant
+    between its two renames — POSIX cannot atomically replace a non-empty
+    directory — so a crash in that window left the only copy of a canonical
+    skill to be destroyed by the next run. A staging tree is a copy whose
+    source is still on disk; a move-aside tree is not. These pin the
+    asymmetry, and that the keep does not become a permanent leak.
+    """
+
+    @staticmethod
+    def _seed_old(parent: Path, name: str) -> Path:
+        old = parent / f".old-{name}-999999-abc123.tmp"
+        old.mkdir(parents=True)
+        (old / SKILL_MANIFEST).write_text("the only copy\n", encoding="utf-8")
+        return old
+
+    def test_old_survives_when_dst_absent(self, tmp_path: Path) -> None:
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        old = self._seed_old(root, "foo")
+
+        _recover_and_reap_internal_dirs(dst)
+
+        assert old.is_dir()
+        assert (old / SKILL_MANIFEST).read_text(encoding="utf-8") == "the only copy\n"
+
+    def test_old_is_reaped_when_dst_present(self, tmp_path: Path) -> None:
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        dst.mkdir()
+        (dst / SKILL_MANIFEST).write_text("canonical\n", encoding="utf-8")
+        old = self._seed_old(root, "foo")
+
+        _recover_and_reap_internal_dirs(dst)
+
+        assert not old.exists()
+        assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "canonical\n"
+
+    def test_staging_is_reaped_even_when_dst_absent(self, tmp_path: Path) -> None:
+        """The relaxation is scoped to ``.old-*``. A staging tree is never the
+        only copy of anything, so its reaping stays unconditional — otherwise
+        a crashed sync would leak one until the next successful sync."""
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        staging = root / ".staging-foo-999999-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("partial\n", encoding="utf-8")
+
+        _recover_and_reap_internal_dirs(dst)
+
+        assert not staging.exists()
+
+    def test_promote_keeps_its_own_move_aside_when_dst_vanishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The §10 rule binds the promote's own cleanup, not only the reaper.
+
+        ``replace_existing=True`` parks the original aside and deletes it once
+        the second rename lands. A writer outside the lock that removes ``dst``
+        in that window leaves the parked tree as the only remaining copy, so
+        deleting it unconditionally is the §10 data loss reached through the
+        transaction's own cleanup rather than through the reaper (Codex
+        re-gate). Driving it through ``_promote_staging`` is the point: the
+        other pins call ``_reap_move_aside`` directly and cannot see this path.
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        dst.mkdir()
+        (dst / SKILL_MANIFEST).write_text("the only copy\n", encoding="utf-8")
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        real_replace = os.replace
+
+        def replace_then_race(src: object, target: object) -> None:
+            real_replace(src, target)  # type: ignore[arg-type]
+            if Path(str(src)) == staging:
+                # The racing non-gateway writer, between the rename and the
+                # cleanup that follows it.
+                shutil.rmtree(dst)
+
+        monkeypatch.setattr(os, "replace", replace_then_race)
+
+        with caplog.at_level("WARNING", logger="memtomem.context.skills"):
+            _promote_staging(staging, dst, reap_move_aside=True)
+
+        survivors = list(root.glob(".old-foo-*.tmp"))
+        assert len(survivors) == 1, "the promote deleted the only remaining copy"
+        assert (survivors[0] / SKILL_MANIFEST).read_text(encoding="utf-8") == "the only copy\n"
+        assert any(
+            "keeping move-aside tree" in r.getMessage()
+            and str(dst) in r.getMessage()
+            and str(survivors[0]) in r.getMessage()
+            for r in caplog.records
+        ), "the breadcrumb must name both paths — the kept tree is what an operator restores"
+
+    @pytest.mark.requires_symlinks
+    def test_symlinked_dst_does_not_license_reaping(self, tmp_path: Path) -> None:
+        """Presence is tested with ``lstat``. A symlink at the canonical path
+        is not the canonical tree, and letting it stand in would delete the
+        real one on the strength of a link placed by accident or otherwise."""
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / SKILL_MANIFEST).write_text("decoy\n", encoding="utf-8")
+        dst = root / "foo"
+        dst.symlink_to(elsewhere, target_is_directory=True)
+        old = self._seed_old(root, "foo")
+
+        _recover_and_reap_internal_dirs(dst)
+
+        assert old.is_dir()
+
+    def test_kept_leftover_is_logged_with_both_paths(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A silent leak is indistinguishable from no leak. The breadcrumb has
+        to name the surviving tree AND the canonical it belongs to, or an
+        operator cannot act on it."""
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        old = self._seed_old(root, "foo")
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.context.skills"):
+            _recover_and_reap_internal_dirs(dst)
+
+        assert any(
+            str(old) in rec.getMessage() and str(dst) in rec.getMessage()
+            for rec in caplog.records
+            if rec.levelno >= logging.WARNING
+        ), caplog.text
+
+    def test_promote_reaps_the_tree_the_prelude_had_to_keep(self, tmp_path: Path) -> None:
+        """The keep-branch must not become a permanent leak.
+
+        For the reverse-import path nothing ever comes back: a second import
+        refuses at the pre-lock overwrite check without re-acquiring the lock.
+        So the promote's success path is the only thing standing between "kept
+        for safety" and "kept forever".
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        old = self._seed_old(root, "foo")
+
+        _recover_and_reap_internal_dirs(dst)
+        assert old.is_dir(), "prelude reaped it while dst was absent"
+
+        # Staged after the prelude, as a real writer does — the prelude reaps
+        # staging trees unconditionally, so seeding one first would be eaten.
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
+
+        assert not old.exists(), "move-aside tree outlived the promote that made dst present"
+        assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "new\n"
+
+    def test_reaping_is_off_by_default(self, tmp_path: Path) -> None:
+        """Reaping is opt-in because it is safe only under the destination
+        lock: it cannot tell an in-flight move-aside from an abandoned one, so
+        an unsynchronized writer would delete a tree another writer is
+        mid-rollback on.
+
+        Every caller holds the lock today. This pins the *default*, so a future
+        caller who forgets leaks a directory rather than losing a tree — the
+        failure direction is the point.
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        old = self._seed_old(root, "foo")
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        _promote_staging(staging, dst, replace_existing=False)  # no reap_move_aside
+
+        assert old.is_dir(), "promote reaped without being asked to"
+
+    def test_post_promote_reap_rechecks_presence_absent(self, tmp_path: Path) -> None:
+        """ "We just created ``dst``" is not "``dst`` is there now".
+
+        The lock does not serialize editors and shells, so one can remove the
+        destination between the promote's rename and this reap — and then the
+        move-aside tree is once more the only copy. The precondition has to be
+        evaluated where the deletion happens (Codex review).
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        old = self._seed_old(root, "foo")
+
+        _reap_move_aside(dst)  # dst never existed — stand-in for "removed in the window"
+
+        assert old.is_dir()
+
+    @pytest.mark.requires_symlinks
+    def test_post_promote_reap_rechecks_presence_symlink(self, tmp_path: Path) -> None:
+        """Same window, but the destination is replaced by a symlink rather
+        than removed — which ``exists()``-style probes would accept."""
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        dst = root / "foo"
+        dst.symlink_to(elsewhere, target_is_directory=True)
+        old = self._seed_old(root, "foo")
+
+        _reap_move_aside(dst)
+
+        assert old.is_dir()
+
+    def test_reaping_stays_scoped_to_its_own_destination(self, tmp_path: Path) -> None:
+        """The post-promote reap is a second deletion site, so it inherits the
+        ownership rule rather than re-deriving it: promoting ``foo`` must not
+        touch ``foo-bar``'s move-aside tree."""
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        neighbor = self._seed_old(root, "foo-bar")
+        own = self._seed_old(root, "foo")
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
+
+        assert not own.exists()
+        assert neighbor.is_dir(), "post-promote reap crossed into another destination"
+
+    def test_post_promote_reap_failure_does_not_fail_the_promote(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A collector that runs after the commit must not be able to report a
+        committed write as an error.
+
+        ``Path.glob`` can raise mid-iteration (ENOTDIR, EIO, EACCES), and the
+        individual removals were already best-effort while the enumeration
+        around them was not. Escaping here reaches
+        ``pull_apply._commit_skills``'s ``except OSError`` and turns an
+        installed skill into a ``write_failed`` refusal with the privacy gate's
+        success unrecorded (Codex review).
+
+        The WARNING is pinned for the same reason the keep-branch's is: a
+        swallowed failure that says nothing is indistinguishable from one that
+        never happened, and the new ``except`` is exactly where a later edit
+        would drop the log.
+        """
+        import memtomem.context.skills as skills_mod
+
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        staging = root / ".staging-foo-111111-abc123.tmp"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("new\n", encoding="utf-8")
+
+        def exploding_scan(*args: object, **kwargs: object) -> Iterator[tuple[str, Path]]:
+            raise OSError(errno.EIO, "Input/output error", str(root))
+            yield  # pragma: no cover — generator marker
+
+        monkeypatch.setattr(skills_mod, "_iter_own_internal_dirs", exploding_scan)
+
+        with caplog.at_level("WARNING", logger="memtomem.context.skills"):
+            _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
+
+        assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "new\n"
+        assert any(
+            "could not reap move-aside trees" in r.getMessage() and str(dst) in r.getMessage()
+            for r in caplog.records
+        ), "the swallowed failure left no breadcrumb"
 
 
 class TestGenerateAllSkillsStagingFlow:
@@ -1179,10 +1477,10 @@ class TestExtractLock:
 
         orig_promote = skills_mod._promote_staging
 
-        def racing_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
+        def racing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             if dst.name == "foo":
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
-            orig_promote(staging, dst, replace_existing=replace_existing)
+            orig_promote(staging, dst, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
         result = extract_skills_to_canonical(tmp_path)
@@ -1205,7 +1503,7 @@ class TestExtractLock:
         _seed_runtime_skill(tmp_path, name="foo")
         canonical = canonical_skills_root(tmp_path)
 
-        def failing_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
+        def failing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             raise PermissionError(_errno.EACCES, "Permission denied", str(dst))
 
         monkeypatch.setattr(skills_mod, "_promote_staging", failing_promote)
@@ -1226,7 +1524,7 @@ class TestExtractLock:
 
         _seed_runtime_skill(tmp_path, name="foo")
 
-        def stranding_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
+        def stranding_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             try:
                 raise OSError(_errno.EACCES, "rollback rename failed")
             except OSError as rollback_exc:
@@ -1397,13 +1695,13 @@ class TestExtractLock:
 
         orig_promote = skills_mod._promote_staging
 
-        def probing_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
+        def probing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             try:
                 with _file_lock(_lock_path_for(dst), timeout=0):
                     contended.append(False)
             except TimeoutError:
                 contended.append(True)
-            orig_promote(staging, dst, replace_existing=replace_existing)
+            orig_promote(staging, dst, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(skills_mod, "_promote_staging", probing_promote)
         result = extract_skills_to_canonical(tmp_path)
@@ -1589,10 +1887,10 @@ class TestSyncPromoteRaceClassification:
 
         orig_promote = skills_mod._promote_staging
 
-        def racing_promote(staging: Path, dst: Path) -> None:
+        def racing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             if dst.name == "foo":
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
-            orig_promote(staging, dst)
+            orig_promote(staging, dst, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
         result = generate_all_skills(tmp_path, runtimes=["claude_skills"])
@@ -1612,7 +1910,7 @@ class TestSyncPromoteRaceClassification:
 
         _seed_canonical_skill(tmp_path, name="foo")
 
-        def failing_promote(staging: Path, dst: Path) -> None:
+        def failing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             raise PermissionError(_errno.EACCES, "Permission denied", str(dst))
 
         monkeypatch.setattr(skills_mod, "_promote_staging", failing_promote)
@@ -1635,10 +1933,10 @@ class TestSyncPromoteRaceClassification:
 
         orig_promote = skills_mod._promote_staging
 
-        def racing_promote(staging: Path, dst: Path) -> None:
+        def racing_promote(staging: Path, dst: Path, **kwargs: object) -> None:
             if dst == claude_dst:
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
-            orig_promote(staging, dst)
+            orig_promote(staging, dst, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
         result = generate_all_skills(tmp_path, scope="user")  # must not raise

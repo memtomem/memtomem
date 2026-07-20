@@ -25,6 +25,7 @@ from typing import Literal
 
 __all__ = [
     "GENERATOR_VENDOR",
+    "INTERNAL_ARTIFACT_KINDS",
     "InvalidNameError",
     "Layout",
     "OVERRIDE_FORMATS",
@@ -156,7 +157,24 @@ class InvalidNameError(ValueError):
 # ``.tmp`` names, so a looser ``.staging-*.tmp`` match would silently hide —
 # and let the sync-time reaper delete — a legitimately named user skill like
 # ``.staging-notes.tmp`` (Codex review on #1229).
-_INTERNAL_DIR_RE = re.compile(r"^\.(?:staging|old)-(?P<owner>.+)-\d+-[0-9a-f]{6}\.tmp\Z")
+#
+# The kinds are a named constant and the pattern is built from it, because the
+# reaper scans by kind (``skills._iter_own_internal_dirs`` globs
+# ``.<kind>-<dst>-*.tmp``) while everything else classifies by this pattern.
+# Spelling the alternation twice is how "hidden" and "deletable" drift apart:
+# a third transient added to the regex alone becomes invisible to discovery
+# and immortal on disk, and one added to the scan alone is deleted by a reaper
+# that cannot prove it owns it.
+#
+# ``re.escape`` on each kind rather than raw interpolation: the whole point of
+# the constant is that a third kind is safe to add in one place, and a raw join
+# would make that true only for the alphanumeric ones.
+INTERNAL_ARTIFACT_KINDS: tuple[str, ...] = ("staging", "old")
+
+_INTERNAL_DIR_RE = re.compile(
+    rf"^\.(?:{'|'.join(re.escape(k) for k in INTERNAL_ARTIFACT_KINDS)})"
+    rf"-(?P<owner>.+)-\d+-[0-9a-f]{{6}}\.tmp\Z"
+)
 
 
 def internal_artifact_owner(name: str) -> str | None:
@@ -194,7 +212,7 @@ def is_internal_artifact_dir(name: str) -> bool:
     These are *our own* crash artifacts, not user content — discovery loops
     (canonical listing, runtime scans, extract, detect, status) skip them
     silently rather than warning about an invalid name, and
-    ``skills._reap_stale_internal_dirs`` deletes them under the destination
+    ``skills._recover_and_reap_internal_dirs`` deletes them under the destination
     sidecar lock. Both sides MUST use this one predicate so "hidden" and
     "deletable" can never drift apart.
 
