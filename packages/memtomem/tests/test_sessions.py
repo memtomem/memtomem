@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from memtomem.server.context import AppContext
+from memtomem.server.tools.indexing import mem_index
 from memtomem.server.tools.session import mem_session_end, mem_session_start
 
 
@@ -474,9 +475,16 @@ class TestSessionNamespaceDerivation:
 
     @pytest.mark.asyncio
     async def test_default_agent_id_does_not_auto_derive(self, components):
-        """Backward compat: callers that don't pass ``agent_id`` (it
-        defaults to ``"default"``) keep the legacy namespace behavior so
-        pre-multi-agent workflows are unchanged.
+        """Backward compat: callers that don't pass ``agent_id`` keep the
+        legacy namespace behavior so pre-multi-agent workflows are
+        unchanged.
+
+        Also pins the deliberate row/runtime divergence from #1875: the
+        session **row** still carries the literal ``"default"`` (the
+        column is NOT NULL, ``mem_session_list`` renders it unguarded,
+        and ``mm session start --idempotent`` compares it as a key)
+        while the **runtime binding** is ``None`` so writes are not
+        redirected into the hidden ``agent-runtime:default``.
         """
         app = AppContext.from_components(components)
         ctx = _StubCtx(app)
@@ -484,9 +492,44 @@ class TestSessionNamespaceDerivation:
         out = await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
 
         assert "- Namespace: default" in out
+        assert "- Agent: (none — no agent bound)" in out
+        assert app.current_agent_id is None
         rows = await app.storage.list_sessions()
         active = next(r for r in rows if r["id"] == app.current_session_id)
         assert active["namespace"] == "default"
+        assert active["agent_id"] == "default"
+
+    @pytest.mark.asyncio
+    async def test_explicit_default_agent_id_is_also_unbound(self, components):
+        """``agent_id="default"`` is the reserved sentinel, not an agent.
+
+        Callers that spell it out explicitly (the shipped instructions
+        taught the vocabulary for several releases) get the same unbound
+        session as callers that omit it — otherwise the fix would only
+        cover half the surface.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_session_start(agent_id="default", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "- Namespace: default" in out
+        assert app.current_agent_id is None
+        rows = await app.storage.list_sessions()
+        active = next(r for r in rows if r["id"] == app.current_session_id)
+        assert active["namespace"] == "default"
+        assert active["agent_id"] == "default"
+
+    @pytest.mark.asyncio
+    async def test_capitalized_default_is_an_ordinary_agent(self, components):
+        """The sentinel is exact-match: ``"Default"`` still binds."""
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        out = await mem_session_start(agent_id="Default", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "- Namespace: agent-runtime:Default" in out
+        assert app.current_agent_id == "Default"
 
     @pytest.mark.asyncio
     async def test_agent_id_beats_current_namespace(self, components):
@@ -718,6 +761,62 @@ class TestSessionSummaryPhaseB:
         assert "archive:session:" not in out
         assert "too large" in out
         assert not components.llm.calls, "oversize check must short-circuit before generate()"
+
+    @pytest.mark.asyncio
+    async def test_auto_summary_reaches_unbound_session_writes(self, components):
+        """#1875: an unbound session's own writes are summarizable.
+
+        ``_maybe_auto_summarize`` recalls chunks by the *session row's*
+        namespace. Before the fix a bare ``mem_session_start()`` bound
+        the literal agent ``"default"``, so ``mem_index`` routed the
+        writes into ``agent-runtime:default`` while the row said
+        ``"default"`` — the recall never matched and every unbound
+        session silently reported ``"below min_chunks"``. Routing the
+        writes through the real tool (not an explicit ``namespace=``) is
+        what makes this a regression pin rather than a tautology.
+
+        The residual mismatch when ns rules / ``auto_ns`` / a non-default
+        ``default_namespace`` redirect the write is tracked in #1876 —
+        this pins the plain case only.
+        """
+        components.llm = _FakeLLM(response="The session set up alpha beta gamma notes.")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert app.current_agent_id is None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        index_out = await mem_index(path=str(memory_dir), ctx=ctx)  # type: ignore[arg-type]
+        assert "agent-runtime:default" not in index_out
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "below min_chunks" not in out
+        assert f"archive:session:{session_id}" in out
+        assert components.llm.calls, "LLM provider should have been invoked"
+
+    @pytest.mark.asyncio
+    async def test_unbound_session_summary_chunk_has_no_agent(self, components):
+        """The archive chunk records ``agent_id: null`` and drops the
+        ``agent=<id>`` tag rather than claiming a ``default`` owner."""
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        await mem_session_end(summary="unbound run notes", ctx=ctx)  # type: ignore[arg-type]
+
+        base = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        files = list((base / "sessions").rglob(f"{session_id}.md"))
+        assert len(files) == 1
+        body = files[0].read_text(encoding="utf-8")
+        assert "agent_id: null" in body
+        assert "agent=default" not in body
 
     @pytest.mark.asyncio
     async def test_explicit_summary_skips_auto_path(self, components):

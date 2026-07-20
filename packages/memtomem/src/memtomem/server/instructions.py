@@ -83,13 +83,17 @@ Session-bound write contract:
   explicit namespace= argument automatically write to
   "agent-runtime:<id>" — the session's agent scope. Pass namespace=
   explicitly to write somewhere else (e.g. namespace="shared").
+- Without agent_id, session_start binds no agent: mem_add routes
+  exactly as it would with no session at all, instead of being
+  redirected into the hidden "agent-runtime:default".
 - mem_search still reads from current_namespace by default; use
   mem_do(action="agent_search") to read inside the agent scope.
   (Symmetric search-side support is tracked separately.)
 
 Common pitfalls:
-- session_start without agent_id falls back to the "default"
-  namespace — pass agent_id whenever you want isolation.
+- Passing agent_id opts into an isolated "agent-runtime:<id>" scope
+  that a default mem_search hides — use it when you want isolation,
+  omit it for an ordinary session in the "default" namespace.
 - agent_search needs an active session (or current_agent_id);
   run the session_start action first.
 """
@@ -130,13 +134,17 @@ Session-bound write contract:
   automatically write to "agent-runtime:<id>" — the session's
   agent scope. Pass namespace= explicitly to write somewhere
   else (e.g. namespace="shared").
+- Without agent_id, mem_session_start binds no agent: mem_add routes
+  exactly as it would with no session at all, instead of being
+  redirected into the hidden "agent-runtime:default".
 - mem_search still reads from current_namespace by default; use
   mem_do(action="agent_search") to read inside the agent scope.
   (Symmetric search-side support is tracked separately.)
 
 Common pitfalls:
-- mem_session_start() without agent_id falls back to the "default"
-  namespace — pass agent_id whenever you want isolation.
+- Passing agent_id opts into an isolated "agent-runtime:<id>" scope
+  that a default mem_search hides — use it when you want isolation,
+  omit it for an ordinary session in the "default" namespace.
 - agent_search needs an active session (or current_agent_id);
   call mem_session_start first.
 """
@@ -166,13 +174,17 @@ Session-bound write contract:
   automatically write to "agent-runtime:<id>" — the session's
   agent scope. Pass namespace= explicitly to write somewhere
   else (e.g. namespace="shared").
+- Without agent_id, mem_session_start binds no agent: mem_add routes
+  exactly as it would with no session at all, instead of being
+  redirected into the hidden "agent-runtime:default".
 - mem_search still reads from current_namespace by default;
   use mem_agent_search to read inside the agent scope.
   (Symmetric search-side support is tracked separately.)
 
 Common pitfalls:
-- mem_session_start() without agent_id falls back to the "default"
-  namespace — pass agent_id whenever you want isolation.
+- Passing agent_id opts into an isolated "agent-runtime:<id>" scope
+  that a default mem_search hides — use it when you want isolation,
+  omit it for an ordinary session in the "default" namespace.
 - mem_agent_search needs an active session (or current_agent_id);
   call mem_session_start first.
 """

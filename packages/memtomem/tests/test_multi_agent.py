@@ -24,6 +24,13 @@ imports the constant directly (per ``feedback_pin_test_constant_over_source_scan
 accumulate a chain of inherited ``shared-from=...`` tags — that's the
 dedup invariant unit-tested at the helper seam.
 
+``TestNormalizeBoundAgentId`` pins the #1875 sentinel rule at its single
+chokepoint: ``"default"`` binds no agent, malformed ids still raise, and
+the collapse is exact-match / case-sensitive. The companion pin that an
+*explicit* ``agent_id="default"`` still resolves to
+``agent-runtime:default`` lives in ``TestResolveAgentNamespace`` — the
+reservation applies to inferred bindings, not to lookup keys.
+
 ``TestResolveAgentNamespace`` pins the priority order
 ``mem_agent_search`` follows when ``agent_id`` is omitted:
 explicit arg > ``current_agent_id`` (set by the active session) >
@@ -42,8 +49,10 @@ from memtomem.config import Mem2MemConfig
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
+    InvalidNameError,
     _DEFAULT_SYSTEM_PREFIXES,
     default_system_prefixes,
+    normalize_bound_agent_id,
 )
 from memtomem.server.component_factory import close_components, create_components
 from memtomem.server.tools.multi_agent import (
@@ -370,3 +379,54 @@ class TestResolveAgentNamespace:
         their own session context for a one-off cross-agent query."""
         app = self._app(current_agent_id="planner", current_namespace="legacy:ns")
         assert _resolve_agent_namespace(app, "coder") == f"{AGENT_NAMESPACE_PREFIX}coder"
+
+    def test_explicit_default_still_resolves_to_agent_runtime_default(self):
+        """#1875 reserves ``"default"`` at *binding* surfaces only.
+
+        An explicit ``agent_id="default"`` remains a legal lookup key —
+        it is the only read path back to chunks that landed in
+        ``agent-runtime:default`` under the pre-#1875 routing, and there
+        is no namespace-rename primitive to migrate them with. Adding a
+        ``"default"`` guard here would strand that data.
+        """
+        app = self._app(current_agent_id=None, current_namespace="legacy:ns")
+        assert _resolve_agent_namespace(app, "default") == f"{AGENT_NAMESPACE_PREFIX}default"
+
+
+class TestNormalizeBoundAgentId:
+    """``normalize_bound_agent_id`` is the single chokepoint for the
+    #1875 rule: ``"default"`` means *no agent bound*.
+
+    Order matters — validate first, normalize second. If the sentinel
+    check ran first, a malformed id would still raise, but if the
+    emptiness check were folded into the sentinel branch, ``""`` would
+    silently become an unbound session instead of the
+    ``InvalidNameError`` that #492 / #493 established.
+    """
+
+    def test_none_stays_none(self):
+        assert normalize_bound_agent_id(None) is None
+
+    def test_sentinel_collapses_to_none(self):
+        assert normalize_bound_agent_id("default") is None
+
+    def test_named_agent_passes_through(self):
+        assert normalize_bound_agent_id("planner") == "planner"
+
+    def test_sentinel_match_is_case_sensitive(self):
+        """``"Default"`` is an ordinary agent id — ``validate_name`` never
+        case-folds and namespaces are case-sensitive everywhere else."""
+        assert normalize_bound_agent_id("Default") == "Default"
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "   ", "foo:bar", "../x", "-lead", "a/b", "with space", "ctrl\x00char"],
+    )
+    def test_malformed_still_raises(self, value):
+        with pytest.raises(InvalidNameError):
+            normalize_bound_agent_id(value)
+
+    @pytest.mark.parametrize("value", [123, 1.5, True, [], {}, object()])
+    def test_non_str_still_raises(self, value):
+        with pytest.raises(InvalidNameError):
+            normalize_bound_agent_id(value)

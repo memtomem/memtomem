@@ -187,6 +187,30 @@ def test_instructions_only_name_tools_exposed_in_mode(mode: str) -> None:
 
 
 @pytest.mark.parametrize("mode", VALID_TOOL_MODES)
+def test_no_stale_default_namespace_fallback_claim(mode: str) -> None:
+    """#1875 drift guard for a sentence duplicated across three modes.
+
+    The old pitfall line — "session_start without agent_id falls back to
+    the 'default' namespace" — was false about *writes*: the session row
+    said ``default`` while every subsequent ``mem_add`` was redirected
+    into the hidden ``agent-runtime:default``. Now that the routing is
+    fixed the claim must not reappear in any mode's text, and the
+    replacement must actually describe the unbound behaviour.
+    """
+    text = build_instructions(mode)
+
+    assert 'falls back to the "default"' not in text
+    assert "binds no agent" in text
+    # The replacement must describe the *routing*, not just assert the
+    # binding — and must not overclaim visibility: a namespace rule or
+    # auto_ns can still send an unbound write into a system-prefixed
+    # namespace that unpinned search hides. Pin the qualified wording so
+    # the guard cannot pass while the surrounding claim is false again.
+    assert "as it would with no session at all" in text
+    assert "stay visible to a plain mem_search" not in text
+
+
+@pytest.mark.parametrize("mode", VALID_TOOL_MODES)
 def test_shared_namespace_label_has_no_colon(mode: str) -> None:
     """The cross-agent namespace is exactly ``SHARED_NAMESPACE`` (``shared``),
     with no trailing colon — unlike the ``agent-runtime:`` *prefix*.
