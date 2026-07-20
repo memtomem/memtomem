@@ -162,6 +162,7 @@ from memtomem.context._runtime_targets import (
     resolve_import_runtimes,
 )
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context import remediation
 from memtomem.wiki.store import WikiNotFoundError, WikiStore, WikiUnbornHeadError
 from typing import Any, Literal, cast, get_args
 
@@ -385,7 +386,10 @@ def _print_artifact_init(
     else:
         click.echo(f"  (no runtime {spec.import_plural} imported into {scope})")
     for name, reason, code in result.skipped:
-        click.secho(f"    skipped {name}: {reason}", fg=_skip_color(code))
+        # The engine states the condition; the CLI adds the CLI's own spelling
+        # of the remediation (#1869). Codes with no CLI action render unchanged.
+        shown = remediation.append_hint(reason, code, "cli")
+        click.secho(f"    skipped {name}: {shown}", fg=_skip_color(code))
     return result
 
 
@@ -582,6 +586,26 @@ def _render_pull_plan(plan: PullPlan) -> None:
     )
     if plan.duplicate_runtimes:
         click.echo(f"    (byte-identical copies also in: {', '.join(plan.duplicate_runtimes)})")
+
+
+def _pull_refusal(result: PullApplyResult) -> click.ClickException:
+    """The CLI's rendering of a Pull refusal — reason + the CLI's remediation.
+
+    One helper for BOTH refusal sites (prepare and commit): the same
+    ``canonical_exists`` can arrive from either, and a preview that names
+    ``--overwrite`` while the commit stays silent is exactly the drift #1869
+    set out to remove.
+
+    A ``gate_blocked`` refusal carries ``privacy_blocked`` on BOTH tiers — the
+    force valve only exists on the non-git-tracked ones
+    (``pull_apply._evaluate_gate``). Keying the hint on the code alone would
+    advertise ``--force-unsafe-import`` for a ``project_shared`` block that
+    hard-refuses it (ADR-0011 §5), so the valve flag gates the lookup.
+    """
+    code = result.reason_code
+    if result.status == "gate_blocked" and not result.force_bypassable:
+        code = None
+    return click.ClickException(remediation.append_hint(result.reason, code, "cli"))
 
 
 def _print_pull_applied(result: PullApplyResult) -> None:
@@ -1549,7 +1573,7 @@ def pull_cmd(
         if outcome.status == "applied":
             _print_pull_applied(outcome)
             return
-        raise click.ClickException(outcome.reason)
+        raise _pull_refusal(outcome)
 
     plan = outcome
     _render_pull_plan(plan)
@@ -1568,7 +1592,7 @@ def pull_cmd(
             )
     result = commit_pull(plan)
     if result.status != "applied":
-        raise click.ClickException(result.reason)
+        raise _pull_refusal(result)
     _print_pull_applied(result)
 
 

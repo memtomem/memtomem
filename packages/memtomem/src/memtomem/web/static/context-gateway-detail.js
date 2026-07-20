@@ -1137,7 +1137,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
             body: JSON.stringify({ ...extra }),
           },
         );
-        const data = await _ctxRunRuntimeImportFlow(importOnce);
+        const data = await _ctxRunRuntimeImportFlow(importOnce, type);
         if (!data) return;
         if (data.imported && data.imported.length) {
           showToast(t('settings.ctx.import_success'));
@@ -1181,7 +1181,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
             body: JSON.stringify({ ...extra }),
           },
         );
-        const data = await _ctxRunRuntimeImportFlow(importOnce);
+        const data = await _ctxRunRuntimeImportFlow(importOnce, type);
         if (!data) return;
         if (data.imported && data.imported.length) {
           showToast(t('settings.ctx.import_to_user_success'));

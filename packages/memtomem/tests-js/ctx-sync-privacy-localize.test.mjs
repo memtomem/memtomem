@@ -105,3 +105,36 @@ describe('localized sync privacy-block toast (#1409)', () => {
     expect(reason).toBe('parse failed at line 3');
   });
 });
+
+describe('import privacy-block toast is kind-aware (#1869)', () => {
+  it('offers the user-library route to skills only — the only kind that has one', async () => {
+    const window = await boot();
+    const { I18N } = window;
+    // ``/api/context/skills/<name>/import-to-user`` exists; agents and commands
+    // have no such route and no such button, so naming it there points at a
+    // control the user cannot find.
+    expect(window._ctxImportErrToast(422, 'ignored', 'skills'))
+      .toBe(I18N.t('settings.ctx.privacy_blocked_shared_hint'));
+    for (const kind of ['agents', 'commands', undefined]) {
+      expect(window._ctxImportErrToast(422, 'ignored', kind))
+        .toBe(I18N.t('settings.ctx.privacy_blocked_shared_hint_remove_only'));
+    }
+  });
+
+  it('the remove-only copy names no tier and no cross-tier control, in both locales', async () => {
+    const window = await boot();
+    for (const lang of ['en', 'ko']) {
+      await window.I18N.setLang(lang);
+      const copy = window.I18N.t('settings.ctx.privacy_blocked_shared_hint_remove_only');
+      expect(copy).not.toContain('project_local');
+      expect(copy).not.toContain('user library');
+      expect(copy).not.toContain('사용자 라이브러리');
+    }
+    await window.I18N.setLang('en');
+  });
+
+  it('non-422 errors still fall back to the shared detail renderer', async () => {
+    const window = await boot();
+    expect(window._ctxImportErrToast(500, 'boom', 'agents')).toBe('boom');
+  });
+});

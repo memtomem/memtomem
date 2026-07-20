@@ -179,10 +179,12 @@ async def test_apply_source_conflict_refuses(proj: Path) -> None:
         kind="agents", name="a", scope="project_shared", apply=True, confirm_project_shared=True
     )
     assert out.startswith("refused:")
-    # Engine reason names the divergent sources + the disambiguation flag
-    # (verbatim, shared with the web picker — CLI-flavored "--from" wording).
+    # The engine names the divergent sources; the REMEDIATION is MCP's own
+    # parameter, never the CLI flag this reason used to hard-code (#1869).
     assert "distinct" in out
     assert "claude" in out and "gemini" in out
+    assert 'Re-call with from_runtime="<runtime>" to choose a source.' in out
+    assert "--from" not in out
     assert not _store_exists(proj, "agents", "a")
 
 
@@ -203,6 +205,8 @@ async def test_apply_overwrite_refused_without_flag(proj: Path) -> None:
         kind="agents", name="a", scope="project_shared", apply=True, confirm_project_shared=True
     )
     assert out.startswith("refused:")
+    assert "Re-call with overwrite=True to replace it." in out
+    assert "--overwrite" not in out
     assert "STORE" in _canonical_agent_text(proj, "a")  # untouched
 
 
@@ -295,6 +299,10 @@ async def test_project_shared_secret_hard_refused_even_with_force(proj: Path) ->
         force_unsafe_import=True,
     )
     assert out.startswith("privacy block:")
+    # No valve exists on the git-tracked tier (ADR-0011 §5) — and the refusal
+    # must not advertise one, even though it carries the same
+    # ``privacy_blocked`` code the bypassable tiers use.
+    assert "force_unsafe_import=True" not in out
     assert not _store_exists(proj, "agents", "a")
 
 
@@ -305,7 +313,11 @@ async def test_user_tier_secret_bypassable_with_literal_true(proj: Path) -> None
         kind="agents", name="a", scope="user", apply=True, allow_host_writes=True
     )
     assert blocked.startswith("privacy block:")
-    assert "force_unsafe_import=True" in blocked
+    # Exactly ONE valve hint: the engine reason used to carry
+    # ``--force-unsafe-import`` while this tool appended its own
+    # ``force_unsafe_import=True``, so an agent saw both spellings (#1869).
+    assert blocked.count("force_unsafe_import=True") == 1
+    assert "--force-unsafe-import" not in blocked
     assert not _store_exists(proj, "agents", "a", scope="user")
 
     # Literal True opens the valve (user tier is bypassable).

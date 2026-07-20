@@ -63,13 +63,17 @@ def test_changed_static_assets_bump_cache_versions() -> None:
     assert "/settings-harness.js?v=8" in html
     assert "/settings-config.js?v=19" in html
     # ADR-0030 PR-F: the new Global-library fragment + the pull.js bump that added
-    # its defaultTier param must carry fresh cache versions.
+    # its defaultTier param must carry fresh cache versions. v=3 adds the
+    # per-surface remediation hints on Pull refusals (#1869).
     assert "/context-gateway-global.js?v=1" in html
-    assert "/context-gateway-pull.js?v=2" in html
+    assert "/context-gateway-pull.js?v=3" in html
     # ADR-0030 PR-G3: the read-only skills version panel changed the detail JS
     # and added its notice/marker styles — a client holding the cached pair
-    # would not mount the section at all.
-    assert "/context-gateway-detail.js?v=6" in html
+    # would not mount the section at all. v=7 threads the artifact kind into the
+    # import privacy toast (#1869), which decides which remediation it shows.
+    assert "/context-gateway-detail.js?v=7" in html
+    assert "/context-gateway-controls.js?v=2" in html
+    assert "/context-gateway-actions.js?v=3" in html
 
 
 def test_theme_icon_follows_document_theme_without_duplicate_js_state() -> None:

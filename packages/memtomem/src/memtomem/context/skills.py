@@ -1084,7 +1084,7 @@ def extract_skills_to_canonical(
             dst = canonical_root / skill_name
             if dst.exists():
                 if not overwrite:
-                    reason = "canonical exists (use --overwrite)"
+                    reason = "canonical exists"
                     skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
                     logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                     seen[skill_name] = runtime_label
@@ -1194,7 +1194,7 @@ def extract_skills_to_canonical(
                         skill_name,
                         (
                             f"blocked: {blocked_file.name} hit "
-                            f"{blocked_outcome.hits_count} pattern(s){blocked_outcome.hint}"
+                            f"{blocked_outcome.hits_count} pattern(s)"
                         ),
                         blocked_outcome.code,
                     )
@@ -1241,7 +1241,7 @@ def extract_skills_to_canonical(
                     # freshly imported skill).
                     if dst.exists():
                         if not overwrite:
-                            reason = "canonical exists (use --overwrite)"
+                            reason = "canonical exists"
                             skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
                             logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                             seen[skill_name] = runtime_label

@@ -152,6 +152,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Refusals now tell you what to do on the surface you are actually using**
+  (#1869) — engine refusal reasons hard-coded CLI flag spellings, so an agent
+  that hit a source conflict over MCP was told to `pass --from <runtime>`, a
+  flag it cannot pass (its parameter is `from_runtime`), and the web Pull picker
+  showed the same CLI wording in its failure toast. A Gate A privacy block over
+  MCP was worse: the tool appended `force_unsafe_import=True` after the engine's
+  `--force-unsafe-import`, so the caller saw both spellings for one valve.
+  The engine now states the **condition** only ("the Store already has
+  agents/foo; a plain pull will not replace it"), and each surface appends its
+  own remediation — `--overwrite` on the CLI, `overwrite=True` over MCP, and a
+  localized "tick Replace the existing copy" in the browser. The CLI keeps its
+  copy-pasteable flag; nothing is downgraded to neutral prose.
+  A `project_shared` privacy block deliberately offers **no** bypass hint on any
+  surface: it carries the same reason code as the force-bypassable tiers, but
+  the valve does not exist there (ADR-0011 §5). Runnable `mm context …` command
+  strings are unchanged — those are commands to paste, not remediation clauses.
+
+- **Privacy-block refusals no longer point at a tier that cannot help** (CLI,
+  MCP and web) — the shared-tier Gate A message and its web twin offered a
+  retry in the `user` or `project_local` tier. Neither works: `project_local`
+  has no runtime fan-out at all (ADR-0011 §3), and `user` resolves its runtime
+  sources from `$HOME` regardless of the project you are in, so it inspects a
+  different copy than the one that was blocked. The remediation is now "remove
+  the secret", which is the whole truth and the same on every surface.
+  The web import toast is now **kind-aware** for the same reason: "Pull to user
+  library" is a real remediation, but only for skills — agents and commands have
+  no such route, so pointing them at it named a control that is not on their
+  pane.
+
 - **Push/Pull wording now reaches engine, route, and MCP output** (ADR-0030 §2,
   PR-H2) — the rename that landed for the UI, CLI help, and docs stopped at the
   backend, so results and refusals still said "Sync"/"import" while the surface

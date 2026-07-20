@@ -61,6 +61,14 @@ def format_project_shared_block_message(
 
     Returns:
         A multi-line string suitable for ``raise click.ClickException(...)``.
+
+    The remediation is "remove the secret", full stop — the same instruction on
+    every surface, so it needs no per-surface hint (#1869). The pre-#1869
+    wording also offered a tier retry, which was wrong twice over:
+    ``project_local`` has no runtime fan-out (ADR-0011 §3), and ``user``
+    resolves its runtime sources from ``$HOME`` regardless of ``project_root``
+    (``_runtime_targets.runtime_fanout_root``), so it would read a different
+    copy than the one blocked here.
     """
     tail = (
         f"\n  {imported_so_far} clean {kind}(s) already pulled in this run "
@@ -72,8 +80,7 @@ def format_project_shared_block_message(
         f"Gate A: {src.name} contains {hits_count} privacy pattern hit(s); "
         f"pull to scope='{scope}' was rejected. git history is forever — "
         f"no force bypass available for project_shared (ADR-0011 §5).\n"
-        f"  Retry with --scope=user or --scope=project_local, or remove the "
-        f"secret from {src} first.{tail}"
+        f"  Remove the secret from {src} first.{tail}"
     )
 
 
@@ -93,13 +100,16 @@ class GateABlocked:
         code: ``PRIVACY_BLOCKED`` or ``PRIVACY_BLOCKED_PROJECT_SHARED``.
         hits_count: Number of privacy pattern hits — count only, never
             echo bytes.
-        hint: ``" — pass --force-unsafe-import to bypass"`` for
-            ``decision == "blocked"``, otherwise ``""``.
+
+    Carries no remediation clause: the ``code`` travels with the skip row all
+    the way to CLI / web / MCP, and each renders its own bypass spelling from
+    :mod:`memtomem.context.remediation` (#1869). A ``hint`` field here used to
+    hard-code ``--force-unsafe-import``, which is not a thing an MCP client or
+    the browser can pass.
     """
 
     code: skip_codes.SkipCode
     hits_count: int
-    hint: str
 
 
 # Discriminated union — callers narrow with ``isinstance(outcome, GateABlocked)``.
@@ -129,7 +139,7 @@ def apply_gate_a(
         ``force_unsafe_import`` (ADR-0011 §5).
       * ``decision in ("blocked", "blocked_project_shared")`` AND
         ``scope != "project_shared"`` — return :class:`GateABlocked`
-        with the matching ``code`` / ``hits_count`` / ``hint``.
+        with the matching ``code`` / ``hits_count``.
       * Anything else — :class:`RuntimeError` (fail-loud on enum drift).
 
     Args:
@@ -201,8 +211,7 @@ def apply_gate_a(
             if guard.decision == "blocked_project_shared"
             else skip_codes.PRIVACY_BLOCKED
         )
-        hint = " — pass --force-unsafe-import to bypass" if guard.decision == "blocked" else ""
-        return GateABlocked(code=code, hits_count=len(guard.hits), hint=hint)
+        return GateABlocked(code=code, hits_count=len(guard.hits))
     if guard.decision not in ("pass", "bypassed"):
         # Symmetric assertion — fail-loud on unknown decision so a
         # future privacy enum addition surfaces here rather than
