@@ -132,13 +132,20 @@ async def mem_ns_rename(
 
     Examples::
         mem_ns_rename(old="project:v1", new="project:v2")
-        mem_ns_rename(old="agent/alpha", new="agent-runtime:alpha", merge=True)
+        mem_ns_rename(old="project:draft", new="project:v2", merge=True)
+
+    (Legacy ``agent/{id}`` namespaces cannot be named here — the slash fails
+    validation. Use ``mm agent migrate``, which consolidates them.)
     """
     validate_namespace(old)
     validate_namespace(new)
     merge = strict_bool(merge, "merge")
     app = await _get_app_initialized(ctx)
     result = await app.storage.rename_namespace(old, new, merge=merge)
+    if not (result.chunks_moved or result.metadata_renamed or result.merged):
+        # Nothing to move: a namespace is its chunks and its metadata row, and
+        # this one had neither. Saying "Renamed" would be a lie.
+        return f"Namespace '{old}' not found — nothing renamed."
     if result.merged:
         detail = f"merged into existing '{new}'"
         if result.duplicates_dropped:

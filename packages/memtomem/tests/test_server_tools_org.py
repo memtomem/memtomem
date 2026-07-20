@@ -507,6 +507,32 @@ class TestRenameNamespaceMerge:
         assert await storage.get_chunk(src.id) is None
         assert await storage.get_chunk(dup.id) is not None
 
+    async def test_overlapping_merge_keeps_relations_of_the_dropped_copy(self, storage):
+        """Provenance pointing at the dropped twin is re-pointed, not cascaded away."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        other = make_chunk(content="elsewhere", namespace="dst-ns", source="other.md")
+        await storage.upsert_chunks([src, dup, other])
+        await storage.add_relation(src.id, other.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(dup.id) == [(other.id, "related")]
+
+    async def test_overlapping_merge_keeps_share_lineage_of_the_dropped_copy(self, storage):
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        shared_copy = make_chunk(content="shared out", namespace="dst-ns", source="copy.md")
+        await storage.upsert_chunks([src, dup, shared_copy])
+        await storage.add_chunk_link(src.id, shared_copy.id, "shared", "dst-ns")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        link = await storage.get_chunk_link(shared_copy.id, "shared")
+        assert link.source_id == dup.id
+
     async def test_no_duplicates_dropped_on_a_plain_rename(self, storage):
         await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
         result = await storage.rename_namespace("src-ns", "dst-ns")

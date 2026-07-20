@@ -73,16 +73,25 @@ async def _run_migrate(dry_run: bool) -> None:
             return
 
         total = 0
+        dropped = 0
         for old, new in mapping:
             # merge=True: folding a legacy ``agent/{id}`` into an existing
             # ``agent-runtime:{id}`` is the point of the migration — same
             # agent, two namespace spellings.
             result = await comp.storage.rename_namespace(old, new, merge=True)
             total += result.chunks_moved
+            dropped += result.duplicates_dropped
             suffix = "  (merged)" if result.merged else ""
+            if result.duplicates_dropped:
+                # Chunks the destination already held are deleted, not moved —
+                # never let that happen without saying so.
+                suffix += f"  ({result.duplicates_dropped} duplicate(s) dropped, already in {new})"
             click.echo(f"Renamed: {old}  ->  {new}  ({result.chunks_moved} chunk(s)){suffix}")
 
-        click.echo(f"\nMigration complete. {len(mapping)} namespace(s), {total} chunk(s) updated.")
+        tail = f", {dropped} duplicate(s) dropped" if dropped else ""
+        click.echo(
+            f"\nMigration complete. {len(mapping)} namespace(s), {total} chunk(s) updated{tail}."
+        )
 
 
 async def _collect_legacy_mapping(storage: SqliteBackend) -> list[tuple[str, str]]:

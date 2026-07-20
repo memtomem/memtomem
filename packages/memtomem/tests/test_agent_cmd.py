@@ -96,6 +96,19 @@ class TestAgentMigrate:
             "agent/ghost", "agent-runtime:ghost", merge=True
         )
 
+    def test_dropped_duplicates_are_reported(self, monkeypatch):
+        """The migration deletes chunks the destination already had — say so."""
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        comp.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(
+                chunks_moved=1, metadata_renamed=False, merged=True, duplicates_dropped=3
+            )
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"])
+        assert result.exit_code == 0
+        assert "3 duplicate(s) dropped" in result.output
+
     def test_dry_run_flags_existing_merge_target(self, monkeypatch):
         """A target that already exists is consolidated — say so before applying."""
         comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])

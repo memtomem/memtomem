@@ -1930,6 +1930,20 @@ class TestNamespaceCRUD:
         assert resp.status_code == 200
         assert resp.json()["chunk_count"] == 7
 
+    async def test_rename_receipt_reports_dropped_duplicates(self, app, client: AsyncClient):
+        """A merge deletes the source's copy of chunks the target had — never silently."""
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(
+                chunks_moved=2, metadata_renamed=False, merged=True, duplicates_dropped=3
+            )
+        )
+        app.state.storage.list_namespaces.return_value = [("general", 7)]
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general", "merge": True},
+        )
+        assert resp.json()["duplicates_dropped"] == 3
+
     async def test_rename_namespace_conflict_is_409(self, app, client: AsyncClient):
         app.state.storage.rename_namespace = AsyncMock(
             side_effect=NamespaceConflictError("target already exists")

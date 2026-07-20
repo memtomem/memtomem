@@ -8,7 +8,7 @@ from typing import Callable, Sequence
 
 from memtomem.errors import NamespaceConflictError, StorageError
 from memtomem.storage.base import NamespaceRenameResult
-from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders
+from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders, quote_ident
 
 # Savepoint name for ``rename_namespace``. A savepoint (rather than a bare
 # commit/rollback pair) is what makes the method safe inside an outer
@@ -300,27 +300,34 @@ class NamespaceOps:
         The target's copy wins, matching the metadata rule: it keeps its
         accumulated access/use counters, and the source duplicate is removed
         with its FTS / vector sidecar rows (same shape as
-        ``delete_by_namespace``). The count is reported back so the caller
-        can say that rows were dropped rather than moved.
+        ``delete_by_namespace``). Everything that pointed *at* the dropped
+        row is first re-pointed at the surviving twin
+        (:meth:`_remap_chunk_references`), so relations, entity mentions,
+        share lineage and assertions survive a merge instead of being
+        cascaded away. The count is reported back so the caller can say
+        that rows were dropped rather than moved.
         """
         rows = db.execute(
             """
-            SELECT c.id, c.rowid FROM chunks c
-            WHERE c.namespace = ?
-              AND EXISTS (
-                  SELECT 1 FROM chunks t
-                  WHERE t.namespace = ?
-                    AND t.source_file = c.source_file
-                    AND t.content_hash = c.content_hash
-                    AND t.start_line IS c.start_line
-              )
+            SELECT c.id, c.rowid, (
+                SELECT t.id FROM chunks t
+                WHERE t.namespace = ?
+                  AND t.source_file = c.source_file
+                  AND t.content_hash = c.content_hash
+                  AND t.start_line IS c.start_line
+                LIMIT 1
+            ) AS survivor
+            FROM chunks c
+            WHERE c.namespace = ? AND survivor IS NOT NULL
             """,
-            (old, new),
+            (new, old),
         ).fetchall()
         if not rows:
             return 0
         ids = [row[0] for row in rows]
         rowids = [row[1] for row in rows]
+        for dropped_id, _rowid, survivor_id in rows:
+            self._remap_chunk_references(db, dropped_id, survivor_id)
         db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
         db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids)
         if self._has_vec_table():
@@ -328,6 +335,56 @@ class NamespaceOps:
                 f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
             )
         return len(rows)
+
+    @staticmethod
+    def _chunk_reference_columns(db: sqlite3.Connection) -> list[tuple[str, str]]:
+        """Return ``(table, column)`` for every FK pointing at ``chunks(id)``.
+
+        Enumerated from the live schema rather than hardcoded: the tables
+        that reference a chunk have grown over time (relations, chunk_links,
+        entity mentions, the access log, ``memory_assertions``), and a
+        hardcoded list would go stale silently — the next table would simply
+        lose its rows to ``ON DELETE CASCADE`` with no test failing. Same
+        reasoning as ``reset_all``'s ``sqlite_master`` enumeration (#1832).
+        """
+        out: list[tuple[str, str]] = []
+        tables = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        for (table,) in tables:
+            if table == "chunks":
+                continue
+            try:
+                fks = db.execute(f"PRAGMA foreign_key_list({quote_ident(table)})").fetchall()
+            except sqlite3.DatabaseError:
+                # Virtual-table shadows and modules that don't implement the
+                # pragma: nothing there references chunks(id) anyway.
+                continue
+            for fk in fks:
+                # (id, seq, table, from, to, on_update, on_delete, match)
+                if fk[2] == "chunks" and (fk[4] is None or fk[4] == "id"):
+                    out.append((table, fk[3]))
+        return out
+
+    def _remap_chunk_references(
+        self, db: sqlite3.Connection, dropped_id: str, survivor_id: str
+    ) -> None:
+        """Re-point everything that referenced *dropped_id* at *survivor_id*.
+
+        The two rows are the same content indexed twice, so a relation or an
+        entity mention recorded against one is equally true of the other —
+        letting the cascade delete them instead would quietly lose provenance
+        that has no other copy. ``UPDATE OR IGNORE`` handles the case where
+        the survivor already carries the same row (a relation to the same
+        target, say): the source's copy is left to be cascaded away, which is
+        the target-wins rule again.
+        """
+        for table, column in self._chunk_reference_columns(db):
+            db.execute(
+                f"UPDATE OR IGNORE {quote_ident(table)} SET {quote_ident(column)}=? "
+                f"WHERE {quote_ident(column)}=?",
+                (survivor_id, dropped_id),
+            )
 
     @staticmethod
     def _has_namespace_meta(db: sqlite3.Connection, namespace: str) -> bool:

@@ -23,6 +23,7 @@ from memtomem.web.schemas import (
     NamespaceInfoResponse,
     NamespaceMetaRequest,
     NamespaceOut,
+    NamespaceRenameResponse,
     NamespacesListResponse,
     RenameRequest,
 )
@@ -87,19 +88,19 @@ async def update_metadata(
     )
 
 
-@admin_router.post("/{namespace}/rename", response_model=NamespaceInfoResponse)
+@admin_router.post("/{namespace}/rename", response_model=NamespaceRenameResponse)
 async def rename_namespace(
     namespace: str,
     body: RenameRequest,
     storage=Depends(get_storage),
-) -> NamespaceInfoResponse:
+) -> NamespaceRenameResponse:
     """Rename a namespace.
 
     Refuses (409) when the target already exists, unless ``merge`` is a
     literal ``true`` — see ``NamespaceOps.rename_namespace``.
     """
     try:
-        await storage.rename_namespace(namespace, body.new_name, merge=body.merge)
+        result = await storage.rename_namespace(namespace, body.new_name, merge=body.merge)
     except NamespaceConflictError as exc:
         # Caller-resolvable collision (existing target, or old == new), not an
         # internal fault — without this it would land on the generic 500
@@ -111,11 +112,16 @@ async def rename_namespace(
     ns_list = await storage.list_namespaces()
     count = dict(ns_list).get(body.new_name, 0)
     meta = await storage.get_namespace_meta(body.new_name)
-    return NamespaceInfoResponse(
+    return NamespaceRenameResponse(
         namespace=body.new_name,
         chunk_count=count,
         description=meta.get("description", "") if meta else "",
         color=meta.get("color", "") if meta else "",
+        chunks_moved=result.chunks_moved,
+        # A merge deletes the source's copy of chunks the target already had;
+        # the receipt says how many so the deletion is never silent.
+        duplicates_dropped=result.duplicates_dropped,
+        merged=result.merged,
     )
 
 

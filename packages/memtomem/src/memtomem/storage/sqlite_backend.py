@@ -40,6 +40,7 @@ from memtomem.storage.sqlite_helpers import (
     namespace_sql,
     norm_path,
     placeholders,
+    quote_ident,
     serialize_f32,
 )
 from memtomem.storage.orphan_gc import (
@@ -85,16 +86,10 @@ _REBUILD_FTS_BATCH_SIZE = 1000
 _AI_SUMMARY_KEY_PREFIX = "ai_summary:"
 
 
-def _quote_ident(name: str) -> str:
-    """Quote a SQLite identifier for interpolation into DDL/DML.
-
-    ``reset_all`` interpolates table names discovered from ``sqlite_master``
-    (including tables an older binary has never heard of), so bracket quoting
-    (``[name]``) is unsafe — a valid identifier containing ``]`` would produce
-    invalid SQL and abort a privacy reset. Double-quote with embedded ``"``
-    doubled per the SQL standard.
-    """
-    return '"' + name.replace('"', '""') + '"'
+#: Identifier quoting for interpolated table/column names. Defined in
+#: ``sqlite_helpers`` so the ops modules can share it; the module-local name
+#: is kept because every call site here reads ``_quote_ident``.
+_quote_ident = quote_ident
 
 
 def _is_virtual_table_sql(sql: str | None) -> bool:

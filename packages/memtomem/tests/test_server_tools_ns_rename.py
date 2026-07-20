@@ -61,6 +61,10 @@ class TestRenameMessage:
         out = await mem_ns_rename(old="src-ns", new="dst-ns", merge=True, ctx=ctx)
         assert "1 duplicate chunk(s) dropped" in out
 
+    async def test_missing_source_does_not_claim_a_rename(self, ctx, storage):
+        out = await mem_ns_rename(old="ghost", new="phantom", ctx=ctx)
+        assert "not found" in out and "Renamed" not in out
+
 
 class TestRenameConflict:
     async def test_existing_target_is_refused(self, ctx, storage):
