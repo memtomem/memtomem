@@ -825,6 +825,7 @@
   "settings.ctx.force_unsafe_sync_message": "{count} file(s) look like they may contain a secret (e.g. an API key). If you've reviewed them and they're safe — for example a type annotation like 'api_key: str' — you can push them to your runtimes anyway:",
   "settings.ctx.force_unsafe_sync_btn": "Push anyway",
   "settings.ctx.privacy_blocked_shared_hint": "Shared (project) pulls can't override a flagged secret — git history is permanent. Open the skill and use 'Pull to user library' instead, or remove the flagged line.",
+  "settings.ctx.privacy_blocked_shared_hint_remove_only": "Shared (project) pulls can't override a flagged secret — git history is permanent. Remove the flagged line from the source, then pull again.",
   "settings.ctx.privacy_blocked_shared_sync_hint": "Shared (project) push can't override a flagged secret — git history is permanent. Remove the flagged line, then re-run push.",
   "settings.ctx.privacy_blocked_editor_hint": "A secret was detected in this content, so it can't be saved to the shared (project) tier — git history is permanent, with no force override. Remove the secret, or save it to your private user library instead.",
   "settings.ctx.privacy_blocked_mcp_hint": "A secret was detected in this MCP server config, so it can't be saved to the shared project .mcp.json — git history is permanent, with no force override. Remove the secret before saving.",

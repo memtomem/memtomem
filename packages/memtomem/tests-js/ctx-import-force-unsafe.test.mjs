@@ -15,10 +15,11 @@
  *     confirmed. (Consent separation: approving the privacy override is not
  *     consent to write outside the project root.) Inert for the hard
  *     ``privacy_blocked_project_shared`` code and unrelated skips.
- *   - ``_ctxImportErrToast`` — surfaces the localized "switch to the User tier"
- *     hint ALONE on the project_shared 422 (every import 422 is that one privacy
- *     block, and its server detail is fixed English — #1398 item 1), leaving
- *     every other status' detail untouched.
+ *   - ``_ctxImportErrToast`` — surfaces the localized hint ALONE on the
+ *     project_shared 422 (every import 422 is that one privacy block, and its
+ *     server detail is fixed English — #1398 item 1), leaving every other
+ *     status' detail untouched. Which hint depends on ``kind`` (#1869): the
+ *     "Pull to user library" route exists for skills only.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -69,12 +70,16 @@ describe('_ctxImportErrToast (project_shared privacy hint)', () => {
 
     // The English server detail must NOT leak into the Korean-UI toast (#1398
     // item 1): the 422 is always the privacy block, so the hint stands alone.
+    // ``kind`` is 'skills' here — the fixture detail is a SKILL.md block, and
+    // skills are the one kind whose "Pull to user library" remediation exists
+    // (#1869 made this toast kind-aware; the other kinds get the remove-only
+    // copy, pinned in ctx-sync-privacy-localize.test.mjs).
     const detail = "Gate A: SKILL.md contains 2 privacy pattern hit(s); import to scope='project_shared' rejected.";
-    const at422 = window._ctxImportErrToast(422, detail);
+    const at422 = window._ctxImportErrToast(422, detail, 'skills');
     expect(at422).toBe(hint);
     expect(at422).not.toContain(detail);
 
-    const at500 = window._ctxImportErrToast(500, 'boom');
+    const at500 = window._ctxImportErrToast(500, 'boom', 'skills');
     expect(at500).toBe('boom');
     expect(at500).not.toContain(hint);
   });

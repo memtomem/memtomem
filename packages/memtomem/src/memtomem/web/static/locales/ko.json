@@ -825,6 +825,7 @@
   "settings.ctx.force_unsafe_sync_message": "{count}개 파일이 시크릿(예: API 키)을 포함한 것처럼 보입니다. 검토 결과 안전하다면 — 예를 들어 'api_key: str' 같은 타입 어노테이션 — 런타임으로 그대로 내보낼 수 있습니다:",
   "settings.ctx.force_unsafe_sync_btn": "그대로 내보내기",
   "settings.ctx.privacy_blocked_shared_hint": "공유(프로젝트) 가져오기는 표시된 시크릿을 우회할 수 없습니다 — git 기록은 영구적입니다. 스킬을 열어 '사용자 라이브러리로 가져오기'를 쓰거나, 표시된 줄을 제거하세요.",
+  "settings.ctx.privacy_blocked_shared_hint_remove_only": "공유(프로젝트) 가져오기는 표시된 시크릿을 우회할 수 없습니다 — git 기록은 영구적입니다. 원본에서 표시된 줄을 제거한 뒤 다시 가져오세요.",
   "settings.ctx.privacy_blocked_shared_sync_hint": "공유(프로젝트) 내보내기는 표시된 시크릿을 우회할 수 없습니다 — git 기록은 영구적입니다. 표시된 줄을 제거한 뒤 다시 내보내세요.",
   "settings.ctx.privacy_blocked_editor_hint": "이 콘텐츠에서 비밀값(secret)이 감지되어 공유(프로젝트) 티어에 저장할 수 없습니다 — git 기록은 영구적이라 강제 저장할 수 없습니다. 비밀값을 제거하거나, 개인 사용자 라이브러리에 저장하세요.",
   "settings.ctx.privacy_blocked_mcp_hint": "이 MCP 서버 설정에서 비밀값(secret)이 감지되어 공유 프로젝트 .mcp.json 에 저장할 수 없습니다 — git 기록은 영구적이라 강제 저장할 수 없습니다. 저장하기 전에 비밀값을 제거하세요.",

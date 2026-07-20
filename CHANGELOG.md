@@ -176,6 +176,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   sources from `$HOME` regardless of the project you are in, so it inspects a
   different copy than the one that was blocked. The remediation is now "remove
   the secret", which is the whole truth and the same on every surface.
+  The web import toast is now **kind-aware** for the same reason: "Pull to user
+  library" is a real remediation, but only for skills — agents and commands have
+  no such route, so pointing them at it named a control that is not on their
+  pane.
 
 - **Push/Pull wording now reaches engine, route, and MCP output** (ADR-0030 §2,
   PR-H2) — the rename that landed for the UI, CLI help, and docs stopped at the
