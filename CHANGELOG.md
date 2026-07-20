@@ -128,6 +128,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Push/Pull wording now reaches engine, route, and MCP output** (ADR-0030 §2,
+  PR-H2) — the rename that landed for the UI, CLI help, and docs stopped at the
+  backend, so results and refusals still said "Sync"/"import" while the surface
+  the user was looking at said Push/Pull. `mem_context_sync` now reports
+  `Pushed:` / `Nothing to push.`, `mem_context_init` reports `Pulled skills:`
+  (etc.), the web routes speak of pushing skills / MCP servers and of "Push
+  All", and engine skip reasons read `already pulled from …` / `re-run the pull
+  to retry`. Machine-readable surfaces are deliberately untouched: reason codes
+  (`already_imported`, `sync_paused`, `in_sync`), route paths, surface ids,
+  response fields, and every `mm context sync` command string are unchanged, so
+  nothing that a script or the web client keys off moved. Vocabulary genuinely
+  shared with **Hooks Sync** — project enrollment / pause / resume — stays
+  "sync", as does relational drift state ("in sync" / "out of sync"), which
+  describes status rather than the action.
+
 - **`mm context import --overwrite` is snapshot-first and refuses unsafe
   overwrites** (ADR-0030 §6) — importing a runtime copy over an *existing*
   canonical no longer clobbers it blindly. For agents and commands in the

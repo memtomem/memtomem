@@ -137,7 +137,7 @@ def _label_ineligible_notes(label: str | None, inc: set[str]) -> list[str]:
     if ineligible:
         notes.append(
             f"  note: label does not apply to {', '.join(ineligible)} "
-            "(only agents/commands are versioned); they sync from the working file."
+            "(only agents/commands are versioned); they push from the working file."
         )
     if not (inc & _LABEL_ELIGIBLE_KINDS):
         notes.append(
@@ -208,10 +208,10 @@ async def mem_context_init(
     """Seed canonical context artifact directories.
 
     Args:
-        include: Comma-separated runtime artifact kinds to import into
+        include: Comma-separated runtime artifact kinds to pull into
             canonical storage (``skills``, ``agents``, ``commands``).
             ``settings`` is accepted for parity with other context tools
-            but has no init-time import action.
+            but has no init-time pull action.
         overwrite: Overwrite existing canonical entries during runtime
             import. Does **not** govern ``.memtomem/context.md`` rewrite
             — see ``overwrite_context_md``.
@@ -393,7 +393,7 @@ async def mem_context_init(
             # click.ClickException (_gate_a.py:171). Surface its message
             # so MCP callers see the actionable block, not "internal error".
             return f"privacy block: {exc.message}"
-        results.append(f"Imported skills: {len(skill_result.imported)}")
+        results.append(f"Pulled skills: {len(skill_result.imported)}")
         for path in skill_result.imported:
             results.append(f"  {path.name}")
         for name, reason, code in skill_result.skipped:
@@ -415,7 +415,7 @@ async def mem_context_init(
             return f"privacy block: {exc.message}"
         except click.ClickException as exc:
             return f"privacy block: {exc.message}"
-        results.append(f"Imported sub-agents: {len(agent_result.imported)}")
+        results.append(f"Pulled sub-agents: {len(agent_result.imported)}")
         for path, layout in agent_result.imported:
             results.append(f"  {canonical_agent_name(path, layout)}")
         for name, reason, code in agent_result.skipped:
@@ -435,7 +435,7 @@ async def mem_context_init(
             return f"privacy block: {exc.message}"
         except click.ClickException as exc:
             return f"privacy block: {exc.message}"
-        results.append(f"Imported commands: {len(command_result.imported)}")
+        results.append(f"Pulled commands: {len(command_result.imported)}")
         for path, layout in command_result.imported:
             display = path.parent.name if layout == "dir" else path.stem
             results.append(f"  {display}")
@@ -443,7 +443,7 @@ async def mem_context_init(
             results.append(_skip_line(name, reason, code))
 
     if "settings" in inc:
-        results.append("settings: no init-time import action")
+        results.append("settings: no init-time pull action")
 
     return "Initialized:\n" + "\n".join(results)
 
@@ -918,7 +918,7 @@ async def mem_context_sync(
     label: str = "",
     ctx: CtxType = None,
 ) -> str:
-    """Sync .memtomem/context.md to all detected agent files.
+    """Push .memtomem/context.md to all detected agent files.
 
     Pass ``include="skills,agents,commands,settings"`` to also fan out
     ``.memtomem/skills/``, ``.memtomem/agents/``, ``.memtomem/commands/``,
@@ -1121,7 +1121,7 @@ async def mem_context_sync(
             elif sr.status in ("error", "aborted"):
                 results.append(f"  {sr.status} {sname}: {_redact_reason(sr.reason, root)}")
 
-    return "Synced:\n" + "\n".join(results) if results else "Nothing to sync."
+    return "Pushed:\n" + "\n".join(results) if results else "Nothing to push."
 
 
 _KNOWN_MEMORY_SCOPES: frozenset[str] = frozenset({"user", "project_shared", "project_local"})

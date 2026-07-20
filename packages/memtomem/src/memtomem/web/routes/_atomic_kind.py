@@ -836,12 +836,12 @@ async def sync_artifacts(
     project_root: Path,
     target_scope: TargetScope,
 ) -> dict:
-    reject_project_local_write(target_scope, f"Sync {spec.kind_plural}")
+    reject_project_local_write(target_scope, f"Push {spec.kind_plural}")
     on_drop = body.on_drop if body else "warn"
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes if body else False,
-        action=f"Sync {spec.kind_plural}",
+        action=f"Push {spec.kind_plural}",
         host_targets=user_sync_host_targets(spec, project_root),
     )
     if gate is not None:
@@ -857,7 +857,7 @@ async def sync_artifacts(
         raise _error(
             503,
             "busy",
-            f"{spec.kind_plural.capitalize()} sync timed out — another sync may be in progress",
+            f"{spec.kind_plural.capitalize()} push timed out — another sync may be in progress",
         )
 
 
@@ -871,7 +871,7 @@ async def import_artifacts(
     target_scope: TargetScope,
     dry_run: bool,
 ) -> dict:
-    reject_project_local_write(target_scope, f"Import {spec.kind_plural}")
+    reject_project_local_write(target_scope, f"Pull {spec.kind_plural}")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
     force_unsafe_import = body.force_unsafe_import if body else False
@@ -902,7 +902,7 @@ async def import_artifacts(
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
-                action=f"Import {spec.kind_plural}",
+                action=f"Pull {spec.kind_plural}",
                 host_targets=[str(p) for p, _layout in preview.imported],
                 plan=_import_payload(spec, preview, project_root, target_scope, dry_run=True),
             )
@@ -913,7 +913,7 @@ async def import_artifacts(
         raise _error(
             503,
             "busy",
-            f"{spec.kind_plural.capitalize()} import timed out — another sync may be in progress",
+            f"{spec.kind_plural.capitalize()} pull timed out — another sync may be in progress",
         )
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see context_skills.import_skills).
@@ -928,7 +928,7 @@ async def import_artifact(
     project_root: Path,
     target_scope: TargetScope,
 ) -> dict:
-    reject_project_local_write(target_scope, f"Import {spec.kind}")
+    reject_project_local_write(target_scope, f"Pull {spec.kind}")
     try:
         validate_name(name, kind=f"{spec.kind} name")
     except InvalidNameError as exc:
@@ -957,11 +957,11 @@ async def import_artifact(
         if target_scope == "user" and not allow_host_writes:
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise _error(404, "missing", f"No runtime {spec.kind} named {name!r} to import")
+                raise _error(404, "missing", f"No runtime {spec.kind} named {name!r} to pull")
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
-                action=f"Import {spec.kind}",
+                action=f"Pull {spec.kind}",
                 host_targets=[str(p) for p, _layout in preview.imported],
                 plan=_import_payload(spec, preview, project_root, target_scope, dry_run=None),
             )
@@ -972,11 +972,11 @@ async def import_artifact(
         raise _error(
             503,
             "busy",
-            f"{spec.kind.capitalize()} import timed out — another sync may be in progress",
+            f"{spec.kind.capitalize()} pull timed out — another sync may be in progress",
         )
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see context_skills.import_skills).
         raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
-        raise _error(404, "missing", f"No runtime {spec.kind} named {name!r} to import")
+        raise _error(404, "missing", f"No runtime {spec.kind} named {name!r} to pull")
     return _import_payload(spec, result, project_root, target_scope, dry_run=None)

@@ -657,7 +657,7 @@ def generate_all_skills(
                             "<all>",
                             "another process held a destination lock past the "
                             f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
-                            "re-run sync to retry",
+                            "re-run the push to retry",
                             skip_codes.LOCK_TIMEOUT,
                         )
                     )
@@ -817,7 +817,7 @@ def generate_all_skills(
                         skill_dir.name,
                         "another process held the destination lock past the "
                         f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
-                        "re-run sync to retry",
+                        "re-run the push to retry",
                         skip_codes.LOCK_TIMEOUT,
                     )
                 )
@@ -1107,7 +1107,7 @@ def extract_skills_to_canonical(
                 logger.warning("skip %r from %s: invalid name", skill_name, runtime_label)
                 continue
             if skill_name in seen:
-                reason = f"already imported from {seen[skill_name]}"
+                reason = f"already pulled from {seen[skill_name]}"
                 skipped.append((skill_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                 continue
@@ -1137,10 +1137,10 @@ def extract_skills_to_canonical(
                 # (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G) — until
                 # that ships, only a ``new`` skills Pull is allowed; refuse
                 # rather than clobber unsnapshotted. Remediation: delete the
-                # canonical skill first, then re-import. Fires for dry-run too.
+                # canonical skill first, then pull again. Fires for dry-run too.
                 reason = (
                     "overwriting an existing skill needs directory-tree snapshots "
-                    "(a future release) — delete the canonical skill first to re-import"
+                    "(a future release) — delete the canonical skill first, then pull again"
                 )
                 skipped.append((skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
@@ -1249,7 +1249,7 @@ def extract_skills_to_canonical(
                     reason = (
                         "another process held the canonical destination lock "
                         f"past the {_SKILLS_LOCK_BUDGET_S:g}s acquisition "
-                        "budget — re-run the import to retry"
+                        "budget — re-run the pull to retry"
                     )
                     # No ``seen`` mark: contention is transient and
                     # destination-lock-specific, so a later runtime's copy of
@@ -1289,7 +1289,7 @@ def extract_skills_to_canonical(
                         reason = (
                             "overwriting an existing skill needs directory-tree "
                             "snapshots (a future release) — delete the canonical "
-                            "skill first to re-import"
+                            "skill first, then pull again"
                         )
                         skipped.append(
                             (skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED)

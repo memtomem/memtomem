@@ -410,7 +410,7 @@ class TestExtractSkills:
         assert len(result.imported) == 1
         assert len(result.skipped) == 1
         assert result.skipped[0][0] == "shared"
-        assert "already imported" in result.skipped[0][1]
+        assert "already pulled" in result.skipped[0][1]
         assert result.source_runtimes == {"shared": "claude"}
         assert result.runtime_candidates == {"shared": ["claude", "gemini"]}
 
@@ -438,7 +438,7 @@ class TestExtractSkills:
         canonical = tmp_path / CANONICAL_SKILL_ROOT / "shared/SKILL.md"
         assert canonical.read_text(encoding="utf-8") == "claude wins\n"
         assert len(result.skipped) == 1
-        assert "already imported" in result.skipped[0][1]
+        assert "already pulled" in result.skipped[0][1]
 
     def test_kimi_missing_canonical_diff_row_is_importable(self, tmp_path):
         """Diff↔extract parity: a 'missing canonical' row for a kimi-only

@@ -273,7 +273,7 @@ def import_passthrough_runtime(
             logger.warning("skip %r from %s: invalid name", name, runtime_label)
             continue
         if name in seen:
-            reason = f"already imported from {seen[name]}"
+            reason = f"already pulled from {seen[name]}"
             skipped.append((name, reason, skip_codes.ALREADY_IMPORTED))
             logger.warning("skip %s from %s: %s", name, runtime_label, reason)
             continue
@@ -363,7 +363,7 @@ def import_passthrough_runtime(
                 reason = (
                     "another process held the canonical destination lock (or its "
                     f"version store) past the {_CANONICAL_LOCK_BUDGET_S:g}s "
-                    "acquisition budget — re-run the import to retry"
+                    "acquisition budget — re-run the pull to retry"
                 )
                 skipped.append((name, reason, skip_codes.LOCK_TIMEOUT))
                 logger.warning("skip %s from %s: %s", name, runtime_label, reason)

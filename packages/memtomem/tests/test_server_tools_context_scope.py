@@ -401,7 +401,7 @@ async def test_mem_context_init_uses_mcp_surface(
 
     out = await mem_context_init(include="skills,agents,commands", scope="user")
 
-    assert out.startswith("Imported") or "Imported" in out
+    assert out.startswith("Pulled") or "Pulled" in out
     assert surfaces, "Gate A never ran"
     assert set(surfaces) == {"mcp_context_init"}
 

@@ -38,7 +38,7 @@ _FAKE_BLOCKED = FileScan(Path(_LEAK_PATH), "blocked", 1)
 # exactly which file to fix.
 _FAKE_MSG = (
     "Gate A: leak.md contains 1 privacy pattern hit(s); fan-out rejected. "
-    f"Or remove the secret from {_LEAK_PATH} before re-running sync."
+    f"Or remove the secret from {_LEAK_PATH} before re-running the push."
 )
 
 

@@ -63,14 +63,14 @@ def format_project_shared_block_message(
         A multi-line string suitable for ``raise click.ClickException(...)``.
     """
     tail = (
-        f"\n  {imported_so_far} clean {kind}(s) already imported in this run "
+        f"\n  {imported_so_far} clean {kind}(s) already pulled in this run "
         f"remain in canonical — review or remove manually."
         if imported_so_far > 0
         else ""
     )
     return (
         f"Gate A: {src.name} contains {hits_count} privacy pattern hit(s); "
-        f"import to scope='{scope}' rejected. git history is forever — "
+        f"pull to scope='{scope}' was rejected. git history is forever — "
         f"no force bypass available for project_shared (ADR-0011 §5).\n"
         f"  Retry with --scope=user or --scope=project_local, or remove the "
         f"secret from {src} first.{tail}"
