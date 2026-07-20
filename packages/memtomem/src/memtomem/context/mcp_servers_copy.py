@@ -169,7 +169,7 @@ def _sync_hint(dst_root: Path) -> str:
     return (
         f"run `mm context sync --include=mcp-servers --scope project_shared` in "
         f"the destination project, or fan out from its web panel (mm web → "
-        f"Context Gateway → MCP Servers → Sync) / `POST /api/context/mcp-servers/"
+        f"Context Gateway → MCP Servers → Push) / `POST /api/context/mcp-servers/"
         f"sync?project_scope_id={compute_scope_id(dst_root)}`."
     )
 

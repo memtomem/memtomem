@@ -819,8 +819,8 @@ async def import_skills(
     dry_run: bool = Query(
         False,
         description=(
-            "Preview the import without writing to canonical (rank-10): runs the "
-            "full scan + privacy walk + dedup and returns the would-import / would-"
+            "Preview the pull without writing to canonical (rank-10): runs the "
+            "full scan + privacy walk + dedup and returns the would-pull / would-"
             "skip counts, leaving disk untouched. Returned regardless of "
             "confirmation flags (mirrors the transfer route's dry_run)."
         ),
@@ -869,7 +869,7 @@ async def import_skills(
                 return gate
         result = await _run(dry=dry_run)
     except TimeoutError:
-        raise _error(503, "busy", "Skills import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skills pull timed out — another sync may be in progress")
     except click.ClickException as exc:
         # The import engine's only ClickException is the project_shared Gate A
         # privacy hard-abort (ADR-0011 §5 — no force bypass; _gate_a.py). Render
@@ -947,7 +947,7 @@ async def import_skill(
                 return gate
         result = await _run(dry=False)
     except TimeoutError:
-        raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill pull timed out — another sync may be in progress")
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see import_skills).
         raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
@@ -1036,7 +1036,7 @@ async def import_skill_to_user(
                 return gate
         result = await _run(dry=False)
     except TimeoutError:
-        raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill pull timed out — another sync may be in progress")
     except click.ClickException as exc:
         # Defensive: the user dest is force-bypassable, so Gate A raises a
         # ClickException only on a project_shared dest — which this route never

@@ -347,8 +347,8 @@ async def import_commands(
     dry_run: bool = Query(
         False,
         description=(
-            "Preview the import without writing to canonical (rank-10): runs the "
-            "full scan + privacy walk + dedup and returns the would-import / would-"
+            "Preview the pull without writing to canonical (rank-10): runs the "
+            "full scan + privacy walk + dedup and returns the would-pull / would-"
             "skip counts, leaving disk untouched. Returned regardless of "
             "confirmation flags (mirrors the transfer route's dry_run)."
         ),

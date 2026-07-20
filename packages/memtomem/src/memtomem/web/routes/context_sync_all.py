@@ -303,7 +303,7 @@ async def sync_all_context(
         ),
     ),
 ) -> dict:
-    """Run every per-type sync phase under one gateway-lock window.
+    """Run every per-type push phase under one gateway-lock window.
 
     Returns HTTP 200 with ``{phases: [...], summary: {...}}`` whenever the
     phases ran — mixed results cannot map to one HTTP code, so per-phase
@@ -413,7 +413,7 @@ async def sync_all_projects_context(
         ),
     ),
 ) -> dict:
-    """Run the five-phase sync for every eligible discovered project.
+    """Run the five-phase push for every eligible discovered project.
 
     Returns HTTP 200 with ``{projects: [...], summary: {...}}`` whenever
     the loop ran; non-2xx only for the pre-run tier gate (400) and CSRF

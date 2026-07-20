@@ -857,7 +857,7 @@ async def sync_artifacts(
         raise _error(
             503,
             "busy",
-            f"{spec.kind_plural.capitalize()} sync timed out — another sync may be in progress",
+            f"{spec.kind_plural.capitalize()} push timed out — another sync may be in progress",
         )
 
 
@@ -913,7 +913,7 @@ async def import_artifacts(
         raise _error(
             503,
             "busy",
-            f"{spec.kind_plural.capitalize()} import timed out — another sync may be in progress",
+            f"{spec.kind_plural.capitalize()} pull timed out — another sync may be in progress",
         )
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see context_skills.import_skills).
@@ -972,7 +972,7 @@ async def import_artifact(
         raise _error(
             503,
             "busy",
-            f"{spec.kind.capitalize()} import timed out — another sync may be in progress",
+            f"{spec.kind.capitalize()} pull timed out — another sync may be in progress",
         )
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see context_skills.import_skills).

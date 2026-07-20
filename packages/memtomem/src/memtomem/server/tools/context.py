@@ -137,7 +137,7 @@ def _label_ineligible_notes(label: str | None, inc: set[str]) -> list[str]:
     if ineligible:
         notes.append(
             f"  note: label does not apply to {', '.join(ineligible)} "
-            "(only agents/commands are versioned); they sync from the working file."
+            "(only agents/commands are versioned); they push from the working file."
         )
     if not (inc & _LABEL_ELIGIBLE_KINDS):
         notes.append(

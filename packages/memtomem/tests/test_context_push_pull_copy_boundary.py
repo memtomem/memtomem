@@ -24,7 +24,15 @@ from pathlib import Path
 
 import pytest
 
-from memtomem.context import _atomic_reverse, _gate_a, commands, privacy_scan, skills
+from memtomem.context import (
+    _atomic_reverse,
+    _gate_a,
+    _validation_seed,
+    commands,
+    mcp_servers_copy,
+    privacy_scan,
+    skills,
+)
 from memtomem.server.tools import context as mcp_context
 from memtomem.web.routes import (
     _atomic_kind,
@@ -56,6 +64,8 @@ _SWEPT = (
     context_agents,
     context_commands,
     _errors,
+    mcp_servers_copy,
+    _validation_seed,
 )
 
 
@@ -101,6 +111,20 @@ _STALE_ACTION_COPY = (
     r"before re-running sync\.",
     r"blocked this (sync|import):",
     r"tier to import into",
+    # Case-insensitive shapes the first guard missed because every pattern was
+    # anchored on a capitalised word: the timeout messages interpolate the kind
+    # (``f"{spec.kind.capitalize()} import timed out …"``), so the literal in
+    # source is lowercase.
+    r"(?i)\b(sync|import) timed out",
+    # OpenAPI descriptions — published as the endpoint's docs.
+    r"(?i)preview the import\b",
+    r"would-import\b",
+    r"(?i)per-type sync phase|five-phase sync\b",
+    # UI breadcrumbs naming a button whose label is now Push/Pull.
+    r"→ Sync\)",
+    # Validation-manifest action labels mirroring the UI.
+    r'"action": "(Sync|Import)"',
+    r"they sync from the working file",
 )
 
 
@@ -121,6 +145,16 @@ _DOCSTRING_IS_USER_FACING = (
 
 def _is_docstring_line(line: str) -> bool:
     return line.lstrip().startswith(('"""', "'''", 'r"""'))
+
+
+def _is_comment_line(line: str) -> bool:
+    """A ``#`` comment is developer text and never reaches a user.
+
+    ``# ``dry_run`` records the would-import target`` correctly describes the
+    reverse-import mechanism to the next maintainer; only string literals and
+    route docstrings (which FastAPI publishes) are user-facing copy.
+    """
+    return line.lstrip().startswith("#")
 
 
 def _is_document_citation(line: str) -> bool:
@@ -149,6 +183,8 @@ def test_no_stale_sync_import_action_copy_remains(pattern: str) -> None:
     for mod in _SWEPT:
         policed_docstrings = mod in _DOCSTRING_IS_USER_FACING
         for i, line in enumerate(_src(mod).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
             if _is_docstring_line(line) and not policed_docstrings:
                 continue
             if _is_document_citation(line):
