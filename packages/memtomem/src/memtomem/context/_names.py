@@ -28,6 +28,7 @@ __all__ = [
     "InvalidNameError",
     "Layout",
     "OVERRIDE_FORMATS",
+    "internal_artifact_owner",
     "is_internal_artifact_dir",
     "override_vendors",
     "renderable_vendors",
@@ -153,15 +154,20 @@ def internal_artifact_owner(name: str) -> str | None:
     deletes the skill ``foo-bar``'s in-flight trees while holding only
     ``foo``'s lock, and hyphenated skill names are the norm.
 
-    The split is unambiguous because the suffix is **anchored to the end**
-    (``-<decimal pid>-<6 hex>`` followed by a literal ``.tmp`` and ``$``): the
-    match must consume the whole name, so the suffix is necessarily the LAST
-    pid+rand run and everything before it is the owner. That is what the
-    anchor buys, not the greediness of ``.+`` — both quantifiers agree here.
-    ``.old-foo-bar-123-abc123.tmp`` therefore parses as ``foo-bar``, never as
-    ``foo``, and ``.old-foo-123-abc123-456-def789.tmp`` as ``foo-123-abc123``,
-    which is only producible by a skill genuinely named that (a leftover
-    carries exactly one pid+rand).
+    The split is unambiguous because the suffix is both **anchored to the end**
+    (``-<decimal pid>-<6 hex>`` then a literal ``.tmp`` and ``$``) and matched
+    after a **greedy** ``.+``: the match must consume the whole name and the
+    owner takes as much of it as it can, so the suffix is necessarily the LAST
+    pid+rand run. So ``.old-foo-bar-123-abc123.tmp`` parses as ``foo-bar``,
+    never as ``foo``, and ``.old-foo-123-abc123-456-def789.tmp`` as
+    ``foo-123-abc123`` — only producible by a skill genuinely named that, since
+    a leftover carries exactly one pid+rand.
+
+    The two properties are **independently sufficient** on that input (dropping
+    either alone still parses it correctly; dropping both yields ``foo``), so
+    neither is "the" reason on its own. Keep both: the anchor is what rejects
+    non-leftover names outright, and greediness is what keeps the parse correct
+    if the anchor is ever loosened.
     """
     match = _INTERNAL_DIR_RE.match(name)
     return match.group("owner") if match else None

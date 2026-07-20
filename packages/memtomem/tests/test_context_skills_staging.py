@@ -304,17 +304,17 @@ class TestStaleLeftoverReaping:
     def test_owner_parse_splits_at_the_anchored_suffix(self) -> None:
         """Pins the owner/suffix split itself, not just its consequences.
 
-        `internal_artifact_owner` is what makes reaping exact, and it is
-        unambiguous because the suffix is anchored to the end of the name: the
-        match must consume everything, so the suffix is necessarily the LAST
-        pid+rand run. (Measured, not assumed: the quantifier is irrelevant
-        here — greedy and non-greedy give identical results — and it is the
-        trailing `.tmp$` that does the work. An earlier version of this
-        docstring credited greediness and was wrong.)
+        `internal_artifact_owner` is what makes reaping exact. The interesting
+        input is a name carrying a second suffix-shaped run, which is where a
+        weaker pattern would pick the wrong owner and reap a neighbour.
 
-        The interesting input is a name carrying a second suffix-shaped run,
-        which is where an unanchored pattern would pick the wrong owner and
-        reap a neighbour.
+        This pins the OUTCOME, and deliberately does not name a mechanism.
+        Measured against `.old-foo-123-abc123-456-def789.tmp`, the anchor and
+        the greedy quantifier are **independently sufficient** — only dropping
+        the trailing `.tmp$` *and* making `.+` lazy flips the parse to `foo`,
+        and either single mutation leaves this green. Two earlier versions of
+        this docstring each credited one of them; the first was wrong, and the
+        second "verified" its claim with a mutation that changed both at once.
         """
         from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
 
@@ -322,8 +322,7 @@ class TestStaleLeftoverReaping:
         assert internal_artifact_owner(".staging-foo-bar-999999-abc123.tmp") == "foo-bar"
         # Two suffix-shaped runs: the LAST one is the suffix, the rest is the
         # owner. A leftover carries exactly one pid+rand, so a skill genuinely
-        # named `foo-123-abc123` is the only way to produce this. Dropping the
-        # trailing `.tmp$` anchor is the mutation that flips this to "foo".
+        # named `foo-123-abc123` is the only way to produce this.
         assert internal_artifact_owner(".old-foo-123-abc123-456-def789.tmp") == "foo-123-abc123"
         # Not internal-shaped at all -> no owner (the #1229 rule).
         assert internal_artifact_owner(".staging-parity-notes.tmp") is None
