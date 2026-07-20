@@ -379,17 +379,23 @@ class NamespaceOps:
         say): the source's copy is left to be cascaded away, which is the
         target-wins rule again.
 
-        Schema discovery runs once and each column is remapped in a single
-        ``executemany`` — a per-duplicate ``PRAGMA`` sweep would put
-        ``O(duplicates × tables)`` metadata queries inside the write lock,
-        which a large ``mm agent migrate`` would feel.
+        Schema discovery runs once for the whole merge — a per-duplicate
+        ``PRAGMA`` sweep would put ``O(duplicates × tables)`` metadata
+        queries inside the write lock, which a large ``mm agent migrate``
+        would feel. The updates stay **pair-major** (all of one duplicate's
+        references, then the next) rather than column-major: when two
+        remapped rows collapse onto the same key, ``OR IGNORE`` keeps
+        whichever landed first, and pair order is the one a reader can
+        reason about — column order is an artifact of the FK declaration.
         """
-        for table, column in self._chunk_reference_columns(db):
-            db.executemany(
-                f"UPDATE OR IGNORE {quote_ident(table)} SET {quote_ident(column)}=? "
-                f"WHERE {quote_ident(column)}=?",
-                pairs,
-            )
+        columns = self._chunk_reference_columns(db)
+        for pair in pairs:
+            for table, column in columns:
+                db.execute(
+                    f"UPDATE OR IGNORE {quote_ident(table)} SET {quote_ident(column)}=? "
+                    f"WHERE {quote_ident(column)}=?",
+                    pair,
+                )
 
     @staticmethod
     def _has_namespace_meta(db: sqlite3.Connection, namespace: str) -> bool:
