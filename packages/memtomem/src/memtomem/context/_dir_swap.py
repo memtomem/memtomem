@@ -25,12 +25,16 @@ sweeps both ``.staging-*`` and ``.old-*``, and ``_reap_move_aside``, the
 post-promote collector that sweeps ``.old-*``. Both are G4a-3's fan-out; a
 list that names only the prelude leaves the other one wired the old way.
 
-Neither deletes the only copy any more — an ``.old-*`` is kept while ``dst``
-is absent (ADR-0030 §10), which is exactly the mid-swap shape. The transient
-side is what is still unguarded: a reap that removes ``staging`` between the
-renames turns row 2 into row 5, so recovery rolls back a swap whose
-replacement tree was complete. This module supplies the predicate and states
-the contract so the sequence is not left implicit.
+Presence alone already saves the common case: an ``.old-*`` is kept while
+``dst`` is absent (ADR-0030 §10), which is exactly the mid-swap shape. It is
+not a substitute for the marker, because presence cannot see ownership. Row 4
+is the counterexample — a foreign ``dst`` present alongside our original under
+``.old-*`` reads as "present, therefore collectable", and a marker-blind reap
+deletes it. The transient side is unguarded for the same reason from the other
+direction: a reap that removes ``staging`` between the renames turns row 2 into
+row 5, so recovery rolls back a swap whose replacement tree was complete. This
+module supplies the predicate and states the contract so the sequence is not
+left implicit.
 
 Four names, all direct children of the canonical root, sharing one artifact
 ``<name>`` and one transaction suffix ``S = "<pid>-<6 hex>"``::

@@ -743,9 +743,11 @@ class TestMoveAsideReapingIsStateAware:
         assert len(survivors) == 1, "the promote deleted the only remaining copy"
         assert (survivors[0] / SKILL_MANIFEST).read_text(encoding="utf-8") == "the only copy\n"
         assert any(
-            "keeping move-aside tree" in r.getMessage() and str(dst) in r.getMessage()
+            "keeping move-aside tree" in r.getMessage()
+            and str(dst) in r.getMessage()
+            and str(survivors[0]) in r.getMessage()
             for r in caplog.records
-        ), "the kept tree left no breadcrumb"
+        ), "the breadcrumb must name both paths — the kept tree is what an operator restores"
 
     @pytest.mark.requires_symlinks
     def test_symlinked_dst_does_not_license_reaping(self, tmp_path: Path) -> None:
