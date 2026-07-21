@@ -20,6 +20,7 @@ from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._provenance import PROVENANCE_KIND
 from memtomem.summarization import SessionTooLargeError, summarize_session
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,9 @@ logger = logging.getLogger(__name__)
 _WRITE_DRAIN_TIMEOUT_S = 2.0
 
 
-async def _end_active_session_inline(app: AppContext, session_id: str, reason: str) -> str:
+async def _end_active_session_inline(
+    app: AppContext, session_id: str, reason: str, *, drained: bool = True
+) -> str:
     """End a superseded session without resetting ``current_*`` state.
 
     Returns a one-line warning describing what was rolled forward. The
@@ -47,6 +50,11 @@ async def _end_active_session_inline(app: AppContext, session_id: str, reason: s
     runs outside ``_session_lock`` (it awaits the DB, and reading a
     session's events must not happen under a lock its writers need), so
     the handle could change underfoot.
+
+    ``drained=False`` says the caller's drain timed out, so the event
+    snapshot below may be short. It is recorded on the row rather than
+    only in the caller's notice, because the consumer of a superseded
+    session reads the row and never sees the notice.
     """
 
     events = await app.storage.get_session_events(session_id)
@@ -54,11 +62,11 @@ async def _end_active_session_inline(app: AppContext, session_id: str, reason: s
     for e in events:
         event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
-    await app.storage.end_session(
-        session_id,
-        f"[auto-ended: {reason}]",
-        {"event_counts": event_counts, "auto_ended": True},
-    )
+    end_metadata: dict[str, object] = {"event_counts": event_counts, "auto_ended": True}
+    if not drained:
+        end_metadata["provenance_incomplete"] = True
+
+    await app.storage.end_session(session_id, f"[auto-ended: {reason}]", end_metadata)
     await app.storage.scratch_cleanup(session_id)
     logger.warning(
         "mem_session_start auto-ended previous session %s (%s events) — %s",
@@ -197,16 +205,30 @@ async def mem_session_start(
                 # write admitted before this transition may still be
                 # persisting, and its record has to be in the snapshot that
                 # closes the session out.
-                if not await app.wait_writes_drained(_WRITE_DRAIN_TIMEOUT_S):
+                superseded_drained = await app.wait_writes_drained(_WRITE_DRAIN_TIMEOUT_S)
+                if not superseded_drained:
                     drain_notice = (
                         "(warning: writes still in flight — the superseded "
                         "session's event counts may be short)"
                     )
                 auto_end_notice = await _end_active_session_inline(
-                    app, superseded_id, reason="superseded by new mem_session_start"
+                    app,
+                    superseded_id,
+                    reason="superseded by new mem_session_start",
+                    drained=superseded_drained,
                 )
 
-            metadata = {"title": title} if title else {}
+            # The provenance marker says "this session records what its
+            # writes created" — the seven MCP write surfaces log a
+            # provenance event, so a consumer can read the session's real
+            # inputs instead of inferring them from the namespace. It does
+            # NOT say the record is complete; that is
+            # ``provenance_incomplete``, set separately when something was
+            # lost. Sessions created elsewhere (the CLI, the LangGraph
+            # adapter) carry no marker and stay on the namespace path.
+            metadata: dict[str, object] = {"provenance": PROVENANCE_KIND}
+            if title:
+                metadata["title"] = title
             await app.storage.create_session(
                 session_id, stored_agent_id, effective_ns, metadata=metadata
             )
@@ -276,6 +298,26 @@ async def mem_session_end(
     blocking writes during teardown, which is exactly what keeping the
     handle live is meant to avoid. A wait that times out is reported in
     the return string rather than presented as a complete count.
+
+    Both of those gaps are additionally recorded as
+    ``provenance_incomplete`` on the session row. The response string is
+    for the caller; a consumer reading the stored session — the
+    auto-summary, ``mm session show`` — never sees it, and a session that
+    advertises provenance must not present a short input set as the whole
+    story. The straggler write marks the row itself when it lands.
+
+    ``- Events: N (add:M, index:K)`` counts the provenance events the
+    seven chunk-creating write tools record, so it reflects what the
+    session actually wrote. ``mem_index`` over a large tree can outlast
+    the drain budget; the resulting "writes still in flight" line is
+    expected rather than a fault.
+
+    Tools that change the session's chunk set without being summarizable
+    from it appear in no count and instead mark the session incomplete:
+    the mutations (``mem_edit``, ``mem_delete``), the bulk deletes
+    (``mem_ns_delete``, ``mem_cleanup_orphans``) and the bulk importers.
+    Their effect on the input set is real and undescribed, which is
+    exactly what the flag is for.
 
     When ``summary`` is provided, the text is also promoted to a
     first-class chunk under ``archive:session:<session_id>`` (Phase A
@@ -396,7 +438,15 @@ async def _end_session_phase(
     # auto-summary rather than crashing the close path).
     session_row = await app.storage.get_session(session_id)
 
-    await app.storage.end_session(session_id, summary, {"event_counts": event_counts})
+    # A drain that timed out means the snapshot above may be short. The
+    # response line below says so, but a consumer of the stored row never
+    # sees the response — so record it where the row is read, or a marked
+    # session presents a partial input set as the whole story.
+    end_metadata: dict[str, object] = {"event_counts": event_counts}
+    if not drained:
+        end_metadata["provenance_incomplete"] = True
+
+    await app.storage.end_session(session_id, summary, end_metadata)
 
     effective_summary = summary
     auto_summary_skip_reason: str | None = None

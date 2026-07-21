@@ -51,6 +51,7 @@ from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._atomic import _file_lock, _lock_path_for
 from memtomem.context._canonical_txn import canonical_sidecar_lock
+from memtomem.context._dir_swap import has_pending_swap
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context.agents import (
@@ -1190,6 +1191,8 @@ def _detect_source_scope(
     name: str,
     project_root: Path | None,
     explicit_from: TargetScope | None,
+    *,
+    marker_counts_as_presence: bool = False,
 ) -> tuple[TargetScope, Path, Literal["dir", "flat"]]:
     """Locate the unique scope where *name*'s canonical lives.
 
@@ -1217,6 +1220,23 @@ def _detect_source_scope(
     raises with a scope-specific message. Otherwise all three scopes are
     checked and ambiguity (>1 match) raises with the candidate list so
     the user can disambiguate via ``--from``.
+
+    ``marker_counts_as_presence`` (ADR-0030 §10, opt-in, **transfer only**): a
+    skills root carrying a live swap marker for *name* counts as a ``"dir"``
+    candidate even while the ``<root>/<name>/`` tree is absent — the window
+    between a swap's two renames. Without it the artifact is unreachable by the
+    one operation able to repair it: discovery raises
+    :class:`ArtifactNotFoundError` before any lock is taken, so the recovery
+    prelude never runs.
+
+    It stays **off by default** because presence that outruns the tree changes
+    what every downstream caller may assume. Transfer opts in *and* re-verifies
+    the full layout+manifest contract under its canonical locks, after the
+    prelude; :func:`migrate_scope` and the other callers have no such re-check,
+    so for them a marker-only hit would be a "found" that later code reads as a
+    real directory. The probe itself is read-only
+    (:func:`~memtomem.context._dir_swap.has_pending_swap`), so a dry-run stays
+    side-effect free.
     """
     candidates: list[tuple[TargetScope, Path, Literal["dir", "flat"]]] = []
     scopes_to_check: tuple[TargetScope, ...]
@@ -1237,7 +1257,11 @@ def _detect_source_scope(
             candidates.append((s, dir_candidate, "dir"))
             continue  # dir wins over flat — same convention as list_canonical_*
         if kind == "skills":
-            # Skills have no flat layout; probe stops here.
+            # Skills have no flat layout; probe stops here — except that an
+            # interrupted swap can leave the tree absent while the marker still
+            # proves the artifact belongs to this scope (see the docstring).
+            if marker_counts_as_presence and has_pending_swap(root, name):
+                candidates.append((s, dir_candidate, "dir"))
             continue
         flat_candidate = root / f"{name}.md"
         if flat_candidate.is_file():

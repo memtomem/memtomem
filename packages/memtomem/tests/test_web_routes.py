@@ -164,6 +164,7 @@ def app():
     storage.get_stats = AsyncMock(return_value={"total_chunks": 42, "total_sources": 3})
     storage.get_chunk_size_distribution = AsyncMock(return_value=[])
     storage.get_chunk = AsyncMock(return_value=_make_test_chunk())
+    storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
     storage.get_all_source_files = AsyncMock(return_value=[Path("/tmp/test.md")])
     storage.search_source_files_by_content = AsyncMock(return_value=[Path("/tmp/test.md")])
     storage.list_chunks_by_source = AsyncMock(return_value=[_make_test_chunk()])
@@ -1679,7 +1680,7 @@ class TestChunksList:
 
 
 class TestGetChunk:
-    async def test_get_chunk_by_id(self, client: AsyncClient):
+    async def test_get_chunk_by_id(self, app, client: AsyncClient):
         resp = await client.get(f"/api/chunks/{CHUNK_ID}")
         assert resp.status_code == 200
         data = resp.json()
@@ -1687,12 +1688,44 @@ class TestGetChunk:
         assert data["content"] == "test chunk content"
         assert data["tags"] == ["tag1"]
         assert data["heading_hierarchy"] == ["Overview"]
+        app.state.storage.recall_chunks.assert_awaited_once_with(
+            chunk_ids=(CHUNK_ID,),
+            limit=1,
+            project_context_root=None,
+        )
+        app.state.storage.get_chunk.assert_not_awaited()
+
+    async def test_get_chunk_threads_registered_project_context(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        project_root = tmp_path / "project"
+        shared_dir = project_root / ".memtomem" / "memories"
+        cwd = project_root / "src"
+        shared_dir.mkdir(parents=True)
+        cwd.mkdir()
+        app.state.config.indexing.project_memory_dirs = [shared_dir]
+        monkeypatch.chdir(cwd)
+
+        resp = await client.get(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 200
+        app.state.storage.recall_chunks.assert_awaited_once_with(
+            chunk_ids=(CHUNK_ID,),
+            limit=1,
+            project_context_root=project_root.resolve(),
+        )
 
     async def test_get_chunk_not_found(self, app, client: AsyncClient):
-        app.state.storage.get_chunk.return_value = None
+        app.state.storage.recall_chunks.return_value = []
         fake_id = uuid.uuid4()
         resp = await client.get(f"/api/chunks/{fake_id}")
         assert resp.status_code == 404
+        assert resp.json() == {"detail": "Chunk not found"}
+        app.state.storage.get_chunk.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -2021,7 +2054,7 @@ class TestChunkValidityFields:
             created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
-        app.state.storage.get_chunk.return_value = chunk
+        app.state.storage.recall_chunks.return_value = [chunk]
 
         resp = await client.get(f"/api/chunks/{CHUNK_ID}")
         assert resp.status_code == 200
@@ -2233,6 +2266,11 @@ class TestSessions:
         assert data["total"] == 0
 
     async def test_list_sessions_with_data(self, app, client: AsyncClient):
+        metadata = {
+            "title": "Sprint",
+            "provenance": "write-v1",
+            "provenance_incomplete": True,
+        }
         app.state.storage.list_sessions.return_value = [
             {
                 "id": "sess-1",
@@ -2241,6 +2279,7 @@ class TestSessions:
                 "ended_at": None,
                 "summary": None,
                 "namespace": "default",
+                "metadata": metadata,
             }
         ]
         resp = await client.get("/api/sessions")
@@ -2248,6 +2287,26 @@ class TestSessions:
         data = resp.json()
         assert data["total"] == 1
         assert data["sessions"][0]["id"] == "sess-1"
+        assert data["sessions"][0]["metadata"] == metadata
+
+    async def test_list_sessions_defaults_missing_metadata_to_object(
+        self, app, client: AsyncClient
+    ):
+        app.state.storage.list_sessions.return_value = [
+            {
+                "id": "sess-legacy",
+                "agent_id": "agent-a",
+                "started_at": "2026-01-01T00:00:00Z",
+                "ended_at": None,
+                "summary": None,
+                "namespace": "default",
+            }
+        ]
+
+        resp = await client.get("/api/sessions")
+
+        assert resp.status_code == 200
+        assert resp.json()["sessions"][0]["metadata"] == {}
 
 
 # ---------------------------------------------------------------------------

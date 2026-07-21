@@ -178,11 +178,18 @@ class TestSessionMetadataDurability:
 
     @pytest.mark.asyncio
     async def test_get_session_decodes_metadata_to_a_dict(self, storage):
-        await storage.create_session("m1", "agent", "default", metadata={"title": "Sprint"})
+        metadata = {
+            "title": "Sprint",
+            "provenance": "write-v1",
+            "provenance_incomplete": True,
+        }
+        await storage.create_session("m1", "agent", "default", metadata=metadata)
 
         row = await storage.get_session("m1")
+        listed = await storage.list_sessions(agent_id="agent")
 
-        assert row["metadata"] == {"title": "Sprint"}
+        assert row["metadata"] == metadata
+        assert listed[0]["metadata"] == metadata
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -202,8 +209,10 @@ class TestSessionMetadataDurability:
         db.commit()
 
         row = await storage.get_session("m2")
+        listed = await storage.list_sessions(agent_id="agent")
 
         assert row["metadata"] == {}
+        assert listed[0]["metadata"] == {}
 
     @pytest.mark.asyncio
     async def test_end_session_keeps_keys_it_was_not_given(self, storage):
@@ -286,6 +295,127 @@ class TestSessionMetadataDurability:
         assert row["ended_at"] is None
         assert row["summary"] is None
         assert row["metadata"] == {"title": "Sprint"}
+
+    @pytest.mark.asyncio
+    async def test_add_session_event_inside_a_transaction_defers_its_commit(self, storage):
+        """``add_session_event`` was the one session write that committed
+        unconditionally, so a caller's transaction was flushed here and
+        put beyond the rollback its own failure should have triggered."""
+        await storage.create_session("m8", "agent", "default")
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.add_session_event("m8", "add", "write-v1 add chunks=1", ["c1"])
+                raise RuntimeError("caller fails after logging the event")
+
+        assert await storage.get_session_events("m8") == []
+
+
+class TestUpdateSessionMetadata:
+    """``update_session_metadata`` patches a session's metadata without
+    closing it.
+
+    ``end_session`` was the only writer of the column, and it also stamps
+    ``ended_at`` and ``summary`` — unusable for bookkeeping that has to
+    land while a session is still live, or after it closed without
+    re-closing it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_patch_merges_shallowly_and_keeps_other_keys(self, storage):
+        await storage.create_session("u1", "agent", "default", metadata={"title": "Sprint"})
+
+        assert await storage.update_session_metadata("u1", {"provenance_incomplete": True}) is True
+
+        row = await storage.get_session("u1")
+        assert row["metadata"] == {"title": "Sprint", "provenance_incomplete": True}
+
+    @pytest.mark.asyncio
+    async def test_patch_never_touches_ended_at_or_summary(self, storage):
+        """The whole reason this is not ``end_session``: it must be able
+        to annotate a session without changing its lifecycle state."""
+        await storage.create_session("u2", "agent", "default")
+        await storage.end_session("u2", "the summary", {"event_counts": {"add": 1}})
+        before = await storage.get_session("u2")
+
+        await storage.update_session_metadata("u2", {"provenance_incomplete": True})
+
+        after = await storage.get_session("u2")
+        assert after["ended_at"] == before["ended_at"]
+        assert after["summary"] == "the summary"
+        assert after["metadata"]["event_counts"] == {"add": 1}
+
+    @pytest.mark.asyncio
+    async def test_patch_lands_on_an_already_ended_session(self, storage):
+        """The flag this method exists to set records a write that
+        outran session teardown — which by construction happens after
+        ``ended_at`` was stamped. Refusing ended rows would drop the
+        signal in exactly the case it is for.
+        """
+        await storage.create_session("u3", "agent", "default")
+        await storage.end_session("u3", "done", {"event_counts": {"add": 1}})
+
+        assert await storage.update_session_metadata("u3", {"provenance_incomplete": True}) is True
+
+        row = await storage.get_session("u3")
+        assert row["metadata"]["provenance_incomplete"] is True
+
+    @pytest.mark.asyncio
+    async def test_patch_on_a_missing_session_returns_false(self, storage):
+        """Best-effort bookkeeping on the write path: a vanished session
+        must not raise into a memory write that already landed."""
+        assert await storage.update_session_metadata("no-such-id", {"x": 1}) is False
+        assert await storage.get_session("no-such-id") is None
+
+    @pytest.mark.asyncio
+    async def test_empty_patch_is_a_noop(self, storage):
+        await storage.create_session("u4", "agent", "default", metadata={"title": "Sprint"})
+
+        assert await storage.update_session_metadata("u4", {}) is False
+
+        row = await storage.get_session("u4")
+        assert row["metadata"] == {"title": "Sprint"}
+
+    @pytest.mark.asyncio
+    async def test_patch_inside_a_transaction_defers_its_commit(self, storage):
+        await storage.create_session("u5", "agent", "default", metadata={"title": "Sprint"})
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.update_session_metadata("u5", {"provenance_incomplete": True})
+                raise RuntimeError("caller fails after patching")
+
+        row = await storage.get_session("u5")
+        assert row["metadata"] == {"title": "Sprint"}
+
+    @pytest.mark.asyncio
+    async def test_patch_survives_unusable_stored_metadata(self, storage):
+        """``get_session`` tolerates a malformed row, so patching one
+        must too rather than raising on the write path."""
+        await storage.create_session("u6", "agent", "default")
+        db = storage._get_db()
+        db.execute("UPDATE sessions SET metadata = ? WHERE id = ?", ("not json", "u6"))
+        db.commit()
+
+        assert await storage.update_session_metadata("u6", {"provenance_incomplete": True}) is True
+
+        row = await storage.get_session("u6")
+        assert row["metadata"] == {"provenance_incomplete": True}
+
+    @pytest.mark.asyncio
+    async def test_patch_does_not_echo_metadata_into_logs(self, storage, caplog):
+        await storage.create_session("u7", "agent", "default")
+        db = storage._get_db()
+        db.execute(
+            "UPDATE sessions SET metadata = ? WHERE id = ?",
+            ("{broken sk-live-not-a-real-key-000", "u7"),
+        )
+        db.commit()
+
+        with caplog.at_level("WARNING"):
+            await storage.update_session_metadata("u7", {"provenance_incomplete": True})
+
+        assert "sk-live-not-a-real-key-000" not in caplog.text
 
 
 class TestSessionAgentInheritance:

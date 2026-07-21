@@ -79,6 +79,11 @@ Move existing chunks to a namespace without re-indexing:
 ```
 mem_do(action="ns_assign", params={"namespace": "infra", "source_filter": "k8s"})
 mem_do(action="ns_assign", params={"namespace": "archive", "old_namespace": "default"})
+mem_do(action="ns_assign", params={
+  "namespace": "archive",
+  "old_namespace": "draft",
+  "merge": true
+})
 ```
 
 | Parameter | Description |
@@ -86,6 +91,14 @@ mem_do(action="ns_assign", params={"namespace": "archive", "old_namespace": "def
 | `namespace` | Target namespace to assign to |
 | `source_filter` | Only chunks from paths containing this substring |
 | `old_namespace` | Only chunks currently in this namespace |
+| `merge` | Keep one copy of overlapping chunks and drop redundant selected copies (literal boolean, default `false`) |
+
+Assignment is chunks-only: namespace metadata and live sessions do not follow
+the moved rows. By default an overlap is refused before anything changes. With
+`merge=true`, an existing target copy wins; if a path filter selects equivalent
+chunks from several source namespaces and the target has no copy, the most-used
+source copy wins. The result reports moved and dropped rows separately. As with
+namespace rename, quoted `"true"` is rejected rather than coerced into consent.
 
 ### Auto-namespace
 

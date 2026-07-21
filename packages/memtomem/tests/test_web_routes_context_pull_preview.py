@@ -114,15 +114,23 @@ async def test_no_absolute_path_in_response(client, proj: Path) -> None:
     assert str(proj) not in resp.text
 
 
-def test_redact_pull_reason_strips_external_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("path", "leaked"),
+    [
+        ("/Volumes/shared/rt/skills/demo/SKILL.md", "/Volumes/shared"),
+        ("/secretmount", "/secretmount"),
+        (r"C:\secretmount", r"C:\secretmount"),
+    ],
+)
+def test_redact_pull_reason_strips_external_path(tmp_path: Path, path: str, leaked: str) -> None:
     """A runtime symlinked outside project_root/HOME can embed its resolved
     absolute path in an OSError reason; the backstop strips it (Codex Major)."""
     from memtomem.web.routes.context_gateway import _redact_pull_reason
 
-    reason = "[Errno 13] Permission denied: '/Volumes/shared/rt/skills/demo/SKILL.md'"
+    reason = f"[Errno 13] Permission denied: '{path}'"
     out = _redact_pull_reason(reason, tmp_path)
     assert out is not None
-    assert "/Volumes/shared" not in out
+    assert leaked not in out
     assert "<path>" in out
 
 
