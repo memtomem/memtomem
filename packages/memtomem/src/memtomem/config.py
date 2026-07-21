@@ -767,11 +767,12 @@ class SessionSummaryConfig(ConfigModel):
     """Auto LLM summary on ``mem_session_end`` (RFC P1 Phase B).
 
     When ``auto`` is True and the closing session has at least
-    ``min_chunks`` chunks added during its lifetime, the server
-    generates an LLM summary and Phase A's persistence helper promotes
-    it to ``archive:session:<id>``. Sessions whose serialized chunk
-    body would exceed ``max_input_chars`` are skipped (the caller can
-    pass an explicit ``summary=`` instead).
+    ``min_chunks`` recorded write chunks, the server generates an LLM
+    summary and Phase A's persistence helper promotes it to
+    ``archive:session:<id>``. Unmarked or incomplete sessions retain the
+    legacy namespace/time-window selection. Sessions whose serialized
+    chunk body would exceed ``max_input_chars`` are skipped (the caller
+    can pass an explicit ``summary=`` instead).
     """
 
     auto: bool = True
