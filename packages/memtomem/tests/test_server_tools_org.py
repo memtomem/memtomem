@@ -569,6 +569,57 @@ class TestRenameNamespaceMerge:
 
         assert await storage.get_related(loop.id) == [(loop.id, "related")]
 
+    async def test_a_survivors_own_self_edge_is_left_alone(self, storage):
+        """The cleanup targets the twin pair, not "any self-edge on the survivor"."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+        await storage.add_relation(dup.id, dup.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(dup.id) == [(dup.id, "related")]
+
+    async def test_duplicate_deletes_are_split_into_batches(self, storage, monkeypatch):
+        """The id list is chunked — SQLite's host-parameter limit is finite (999 pre-3.32).
+
+        Asserted on the statement count rather than the outcome: a single
+        unbounded ``IN`` list produces the same rows for five duplicates and
+        only breaks at a scale no test wants to seed.
+        """
+        monkeypatch.setattr("memtomem.storage.sqlite_namespace._DELETE_BATCH", 2)
+        for i in range(5):
+            src = make_chunk(content=f"same{i}", namespace="src-ns", source=f"s{i}.md")
+            dup = make_chunk(content=f"same{i}", namespace="dst-ns", source=f"s{i}.md")
+            dup.content_hash = src.content_hash
+            await storage.upsert_chunks([src, dup])
+
+        db = storage._get_db()
+        trace: list[str] = []
+        db.set_trace_callback(lambda sql: trace.append(" ".join(sql.split())))
+        try:
+            await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+        finally:
+            db.set_trace_callback(None)
+
+        # Distinct statements: sqlite's tracer re-reports a statement for each
+        # row a trigger fires on, so the raw count is not the batch count.
+        deletes = {s for s in trace if s.upper().startswith("DELETE FROM CHUNKS WHERE ID IN")}
+        assert len(deletes) == 3, f"5 duplicates at batch 2 → 3 statements, got: {deletes}"
+
+    async def test_multi_batch_delete_leaves_one_copy_of_each(self, storage, monkeypatch):
+        monkeypatch.setattr("memtomem.storage.sqlite_namespace._DELETE_BATCH", 2)
+        for i in range(5):
+            src = make_chunk(content=f"same{i}", namespace="src-ns", source=f"s{i}.md")
+            dup = make_chunk(content=f"same{i}", namespace="dst-ns", source=f"s{i}.md")
+            dup.content_hash = src.content_hash
+            await storage.upsert_chunks([src, dup])
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert dict(await storage.list_namespaces()) == {"dst-ns": 5}
+
     async def test_schema_discovery_does_not_scale_with_duplicates(self, storage):
         """FK discovery runs once per merge, not once per dropped chunk.
 

@@ -406,6 +406,7 @@ class NamespaceOps:
         reason about — column order is an artifact of the FK declaration.
         """
         columns = self._chunk_reference_columns(db)
+        self._drop_edges_between_twins(db, columns, pairs)
         for pair in pairs:
             for table, column in columns:
                 db.execute(
@@ -413,28 +414,26 @@ class NamespaceOps:
                     f"WHERE {quote_ident(column)}=?",
                     pair,
                 )
-        self._drop_collapsed_self_edges(db, columns, [survivor for survivor, _ in pairs])
 
     @staticmethod
-    def _drop_collapsed_self_edges(
+    def _drop_edges_between_twins(
         db: sqlite3.Connection,
         columns: Sequence[tuple[str, str]],
-        survivors: Sequence[str],
+        pairs: Sequence[tuple[str, str]],
     ) -> None:
-        """Delete edge rows whose two endpoints became the same chunk.
+        """Delete edges that run *between* a duplicate and its surviving twin.
 
         A table with two FKs to ``chunks`` (``chunk_relations``,
-        ``chunk_links``) can hold an edge *between* a duplicate and the twin
-        it is merging into — "this chunk relates to / was shared from that
-        one". Remapping turns that into a row pointing at itself, which no
-        reader expects: a self-relation shows a chunk as related to itself,
-        and a self share-link claims a chunk was copied from itself. The edge
-        described two rows that turned out to be one, so it no longer says
-        anything; drop it rather than persist a nonsense pointer.
+        ``chunk_links``) can hold an edge saying "this chunk relates to /
+        was shared from that one" where the two chunks turn out to be the
+        same content indexed twice. Remapping such a row would point it at
+        itself — a chunk shown as related to itself, or as shared from
+        itself. The statement described two rows that turned out to be one,
+        so it no longer says anything.
 
-        Scoped to the chunks this merge actually remapped onto: a
-        self-referencing row that was already there is somebody else's row
-        and none of this method's business.
+        Run *before* the remap and matched on the exact endpoint pair, so a
+        self-edge the surviving chunk already carried — someone else's row,
+        with its own meaning — is left untouched.
         """
         by_table: dict[str, list[str]] = {}
         for table, column in columns:
@@ -444,13 +443,12 @@ class NamespaceOps:
                 continue
             for i, left in enumerate(cols):
                 for right in cols[i + 1 :]:
-                    for start in range(0, len(survivors), _DELETE_BATCH):
-                        batch = survivors[start : start + _DELETE_BATCH]
+                    for survivor, dropped in pairs:
                         db.execute(
                             f"DELETE FROM {quote_ident(table)} "
-                            f"WHERE {quote_ident(left)} = {quote_ident(right)} "
-                            f"AND {quote_ident(left)} IN ({placeholders(len(batch))})",
-                            batch,
+                            f"WHERE ({quote_ident(left)}=? AND {quote_ident(right)}=?) "
+                            f"OR ({quote_ident(left)}=? AND {quote_ident(right)}=?)",
+                            (dropped, survivor, survivor, dropped),
                         )
 
     @staticmethod
