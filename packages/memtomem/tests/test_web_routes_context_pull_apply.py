@@ -295,7 +295,7 @@ async def test_gate_blocked_project_shared_hard(client, proj: Path) -> None:
     assert _SECRET not in resp.text
 
 
-# ── the four HTTP-mapped statuses ────────────────────────────────────────────
+# ── the five HTTP-mapped statuses ────────────────────────────────────────────
 
 
 def _commit_returning(status: str):

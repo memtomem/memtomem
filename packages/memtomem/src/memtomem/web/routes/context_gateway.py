@@ -1064,7 +1064,7 @@ async def context_pull_apply(
     decision — the ``applied`` write and every refusal (``source_conflict``
     carrying its candidate rows, ``gate_blocked`` carrying ``force_bypassable``,
     …) — returns HTTP 200 with a :class:`ContextPullApplyResponse` the picker
-    branches on; only the four HTTP-semantic statuses escape as error codes (see
+    branches on; only the five HTTP-semantic statuses escape as error codes (see
     :func:`_finalize_pull`).
 
     Destination consent runs ONLY once ``prepare_pull`` yields a committable

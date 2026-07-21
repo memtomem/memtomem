@@ -20,8 +20,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   The refusal reaches each surface as its own condition rather than a generic
   failure: a typed per-item skip that lets the rest of a push or import
   proceed, `swap_recovery_pending` on a Pull, and HTTP **409** on the web API.
-  Wedged means wedged — nothing is written and nothing is deleted until an
-  operator looks.
+  In every case the operation you asked for did **not** run — recovery may have
+  safely advanced the leftover transaction first, but it never half-applies
+  your request and never leaves the artifact worse than it found it.
   **Not yet every writer.** Skill create/edit/delete in the web UI, wiki
   install/update, cross-scope transfer and `copy_skill` still take the lock
   without recovering, so those paths can still overwrite a pending transaction
@@ -119,9 +120,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `commit_pull`). Domain decisions are delivered as a stable typed envelope the
   UI branches on — the applied write and every refusal (`source_conflict`
   carrying its candidate rows, `gate_blocked` carrying `force_bypassable`,
-  `canonical_exists` → overwrite, …) return HTTP 200; only the four statuses
+  `canonical_exists` → overwrite, …) return HTTP 200; only the five statuses
   with genuine HTTP meaning become error codes (lock-timeout → 503, stale plan
-  → 409, write failure → 500). Destination consent mirrors the CLI and the
+  → 409, pending swap recovery → 409, write failure → 500). Destination consent mirrors the CLI and the
   dashboard's existing host-write gate: a `project_shared` landing (git-tracked)
   requires `confirm_project_shared`, a `user` landing requires `allow_host_writes`
   (disclosing the host paths), and `target_scope` is explicit (no silent

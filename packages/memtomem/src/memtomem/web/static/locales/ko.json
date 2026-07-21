@@ -685,7 +685,7 @@
   "settings.ctx.import_skip_skills_overwrite_unsupported": "기존 스킬 덮어쓰기는 아직 지원하지 않습니다 — 저장된 스킬을 먼저 삭제한 뒤 다시 가져오세요.",
   "settings.ctx.import_skip_snapshot_requires_dir_layout": "저장된 항목이 예전 flat 레이아웃이라 덮어쓰기 전에 스냅샷할 수 없습니다 — `mm context migrate` 로 먼저 변환하세요.",
   "settings.ctx.import_skip_snapshot_failed": "저장된 사본을 덮어쓰기 전에 스냅샷하지 못해 변경하지 않았습니다.",
-  "settings.ctx.import_skip_swap_recovery_pending": "중단된 업데이트가 이 항목을 자동으로 해결할 수 없는 상태로 남겼습니다 — 아무것도 변경하지 않았습니다. 디스크에서 직접 확인한 뒤 다시 시도하세요.",
+  "settings.ctx.import_skip_swap_recovery_pending": "중단된 업데이트가 이 항목을 자동으로 해결할 수 없는 상태로 남겨, 이 작업은 실행되지 않았습니다. 디스크에서 직접 확인한 뒤 다시 시도하세요.",
   "settings.ctx.delete_success": "\"{name}\" 삭제됨",
   "settings.ctx.delete_partial": "삭제 미완료 — 경로 {count}개를 제거하지 못했습니다. {path}: {reason}",
   "settings.ctx.save_success": "\"{name}\" 저장됨",
