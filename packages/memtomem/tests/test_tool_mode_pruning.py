@@ -86,6 +86,7 @@ def _tools_list_under_mode(mode: str, tmp_path: Path) -> set[str]:
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
     env["MEMTOMEM_TOOL_MODE"] = mode
 

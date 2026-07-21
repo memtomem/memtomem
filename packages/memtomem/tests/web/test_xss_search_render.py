@@ -61,6 +61,7 @@ def xss_dev_server() -> Iterator[str]:
     with tempfile.TemporaryDirectory(prefix="memtomem-xss-") as home:
         env = os.environ.copy()
         env["HOME"] = home
+        env["USERPROFILE"] = home
         env["TMPDIR"] = str(Path(home) / "tmp")
         env["MEMTOMEM_WEB__CSRF_ENFORCE"] = "0"
         (Path(home) / "tmp").mkdir(parents=True, exist_ok=True)
