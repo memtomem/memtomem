@@ -103,6 +103,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **SQLite transaction contexts now own a real, task-affine write
+  transaction** (#1896) — `transaction()` takes `BEGIN IMMEDIATE` before its
+  first read or write, so borrowed read-modify-write operations cannot merge a
+  stale snapshot. The shared writer connection now rejects access from another
+  asyncio task instead of letting that task silently join, commit, or roll back
+  the owner's work; callers can retry after the context exits. Cancellation and
+  other `BaseException` exits roll back before releasing ownership, and pooled
+  readers continue to see only committed state.
+
+- **Namespace bulk assignment now handles overlapping chunks explicitly**
+  (#1886) — `ns_assign` used to discover a duplicate only when SQLite rejected
+  its bare `UPDATE` against the unique content index, leaving callers with an
+  internal `IntegrityError`. It now preflights the exact filtered row set under
+  a write lock and refuses with the overlap count before changing anything.
+  Literal `merge=true` opts into target-wins consolidation, preserves/remaps
+  references, removes redundant FTS/vector sidecars, and reports moved versus
+  dropped rows separately. A merge that drops recorded chunk IDs marks the
+  active session's write provenance incomplete instead of leaving dangling IDs
+  under a completeness claim. The operation is savepoint-backed and no longer
+  commits or rolls back a caller-owned transaction.
+
+- **Namespace delete and metadata upsert now respect transaction ownership**
+  (#1888) — `delete_by_namespace` and `set_namespace_meta` previously committed
+  or rolled back the shared SQLite connection unconditionally, so they could
+  flush or discard a caller's earlier writes. Both now take the write lock up
+  front, isolate their own statements in dedicated savepoints, and commit or
+  roll back the connection only when they opened the transaction. A pending
+  transaction not owned by `SqliteBackend.transaction()` is refused without
+  modification; failures restore deleted chunks and index sidecars or remove a
+  partially inserted metadata row while preserving the caller's prior work.
+
 - `add_session_event` was the only write in the session storage mixin that
   committed unconditionally and had no rollback arm, so a caller's enclosing
   transaction was flushed early — beyond the reach of its own later rollback

@@ -188,9 +188,8 @@ class HistoryMixin:
                 f"judgment must be one of {sorted(FEEDBACK_JUDGMENTS)}, got {judgment!r}"
             )
         if getattr(self, "_in_transaction", False):
-            # transaction() only suppresses commits — it takes no lock, so
-            # running here would drop the BEGIN IMMEDIATE serialization
-            # this read-modify-write depends on.
+            # This method owns its full BEGIN/commit/rollback contract and is
+            # not composable inside an outer transaction.
             raise StorageError("save_search_feedback cannot run inside a transaction block")
         db = self._get_db()
         # Serialize validate→insert/update across connections and processes
