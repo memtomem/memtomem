@@ -146,9 +146,9 @@ def _collect_files(paths: list[Path], supported: set[str]) -> list[Path]:
         if not p.exists():
             print(f"WARN: path not found: {p}", file=sys.stderr)
             continue
-        if p.is_file():
+        if p.is_file() and p.suffix in supported:
             out.append(p)
-        else:
+        elif p.is_dir():
             for child in sorted(p.rglob("*")):
                 if child.is_file() and child.suffix in supported:
                     out.append(child)
@@ -188,6 +188,8 @@ def run(paths: list[Path], out: Path | None) -> dict[str, Any]:
     metrics = Metrics()
 
     for f in files:
+        if not f.is_file():
+            continue
         try:
             content = f.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError) as exc:
