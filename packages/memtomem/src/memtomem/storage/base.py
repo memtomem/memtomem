@@ -58,6 +58,20 @@ class NamespaceRenameResult:
 
 
 @dataclass(frozen=True, slots=True)
+class NamespaceAssignResult:
+    """Outcome of :meth:`StorageBackend.assign_namespace`.
+
+    Assignment can explicitly consolidate duplicate chunks instead of moving
+    them, so one integer cannot distinguish rows rewritten from rows deleted.
+    """
+
+    #: Selected non-target rows whose namespace was rewritten.
+    chunks_moved: int
+    #: Selected duplicate rows removed during an explicit merge.
+    duplicates_dropped: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class SearchMetadataFilter:
     """Exact metadata constraints applied before retrieval limits."""
 
@@ -338,4 +352,6 @@ class StorageBackend(Protocol):
         namespace: str,
         source_filter: str | None = None,
         old_namespace: str | None = None,
-    ) -> int: ...
+        *,
+        merge: bool = False,
+    ) -> NamespaceAssignResult: ...
