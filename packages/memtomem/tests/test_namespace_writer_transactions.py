@@ -57,7 +57,9 @@ class TestDeleteByNamespaceTransactions:
 
         assert dict(await storage.list_namespaces()) == {"caller-ns": 1, "doomed": 1}
         assert await storage.get_namespace_meta("doomed") is not None
-        assert db.execute("SELECT COUNT(*) FROM chunks_fts WHERE rowid=?", (rowid,)).fetchone()[0] == 1
+        assert (
+            db.execute("SELECT COUNT(*) FROM chunks_fts WHERE rowid=?", (rowid,)).fetchone()[0] == 1
+        )
         if db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
         ).fetchone():
@@ -173,7 +175,8 @@ class TestSetNamespaceMetaTransactions:
         assert db.execute(
             "SELECT 1 FROM namespace_metadata WHERE namespace='foreign-ns'"
         ).fetchone()
-        assert db.execute(
-            "SELECT 1 FROM namespace_metadata WHERE namespace='meta-ns'"
-        ).fetchone() is None
+        assert (
+            db.execute("SELECT 1 FROM namespace_metadata WHERE namespace='meta-ns'").fetchone()
+            is None
+        )
         db.rollback()

@@ -188,9 +188,7 @@ class NamespaceOps:
                 owns_txn=owns_txn,
                 operation="delete_by_namespace",
             )
-            raise StorageError(
-                f"delete_by_namespace failed, operation rolled back: {exc}"
-            ) from exc
+            raise StorageError(f"delete_by_namespace failed, operation rolled back: {exc}") from exc
         return len(rows)
 
     def _begin_namespace_write(
@@ -414,8 +412,7 @@ class NamespaceOps:
             (new, old),
         ).fetchall()
         plans = [
-            _DuplicatePlan(survivor_id=row[2], losers=((row[0], int(row[1])),))
-            for row in rows
+            _DuplicatePlan(survivor_id=row[2], losers=((row[0], int(row[1])),)) for row in rows
         ]
         return self._drop_duplicate_plans(db, plans)
 
@@ -428,14 +425,9 @@ class NamespaceOps:
         losers = [loser for plan in plans for loser in plan.losers]
         if not losers:
             return 0
-        pairs = [
-            (plan.survivor_id, loser_id)
-            for plan in plans
-            for loser_id, _rowid in plan.losers
-        ]
+        pairs = [(plan.survivor_id, loser_id) for plan in plans for loser_id, _rowid in plan.losers]
         groups = [
-            (plan.survivor_id, *(loser_id for loser_id, _rowid in plan.losers))
-            for plan in plans
+            (plan.survivor_id, *(loser_id for loser_id, _rowid in plan.losers)) for plan in plans
         ]
         self._remap_chunk_references(db, pairs, duplicate_groups=groups)
         ids = [loser_id for loser_id, _rowid in losers]

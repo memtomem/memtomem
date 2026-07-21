@@ -50,9 +50,7 @@ class TestAssignNamespaceStorage:
         unique = make_chunk(content="unique", namespace="source-ns", source="unique.md")
         await storage.upsert_chunks([source, target, unique])
 
-        result = await storage.assign_namespace(
-            "target-ns", old_namespace="source-ns", merge=True
-        )
+        result = await storage.assign_namespace("target-ns", old_namespace="source-ns", merge=True)
 
         assert (result.chunks_moved, result.duplicates_dropped) == (1, 1)
         assert await storage.get_chunk(source.id) is None
@@ -65,9 +63,7 @@ class TestAssignNamespaceStorage:
         unselected = make_chunk(content="stay", namespace="other-ns", source="outside.txt")
         await storage.upsert_chunks([source, target, selected, unselected])
 
-        result = await storage.assign_namespace(
-            "target-ns", source_filter="shared", merge=True
-        )
+        result = await storage.assign_namespace("target-ns", source_filter="shared", merge=True)
 
         assert (result.chunks_moved, result.duplicates_dropped) == (1, 1)
         assert await storage.get_chunk(target.id) is not None
@@ -104,9 +100,7 @@ class TestAssignNamespaceStorage:
 
         with pytest.raises(NamespaceConflictError):
             await storage.assign_namespace("target-ns", source_filter="shared.md")
-        result = await storage.assign_namespace(
-            "target-ns", source_filter="shared.md", merge=True
-        )
+        result = await storage.assign_namespace("target-ns", source_filter="shared.md", merge=True)
 
         assert (result.chunks_moved, result.duplicates_dropped) == (1, 1)
         assert await storage.get_chunk(preferred.id) is not None
@@ -139,7 +133,10 @@ class TestAssignNamespaceStorage:
 
         assert await storage.get_related(target.id) == [(other.id, "related")]
         for table in ("chunks_fts", "chunks_vec"):
-            assert db.execute(f"SELECT 1 FROM {table} WHERE rowid=?", (source_rowid,)).fetchone() is None
+            assert (
+                db.execute(f"SELECT 1 FROM {table} WHERE rowid=?", (source_rowid,)).fetchone()
+                is None
+            )
             assert db.execute(f"SELECT 1 FROM {table} WHERE rowid=?", (target_rowid,)).fetchone()
 
     async def test_multi_loser_edges_do_not_become_self_edges(self, storage):
@@ -154,9 +151,7 @@ class TestAssignNamespaceStorage:
         db.commit()
         await storage.add_relation(loser_b.id, loser_c.id, "related")
 
-        result = await storage.assign_namespace(
-            "target-ns", source_filter="shared.md", merge=True
-        )
+        result = await storage.assign_namespace("target-ns", source_filter="shared.md", merge=True)
 
         assert (result.chunks_moved, result.duplicates_dropped) == (1, 2)
         assert await storage.get_related(survivor.id) == []
@@ -186,9 +181,7 @@ class TestAssignNamespaceAtomicity:
         assert await storage.get_chunk(target.id) is not None
         assert (await storage.get_chunk(unique.id)).metadata.namespace == "source-ns"
         assert await storage.get_related(source.id) == [(unique.id, "related")]
-        assert db.execute(
-            "SELECT 1 FROM chunks_fts WHERE rowid=?", (source_rowid,)
-        ).fetchone()
+        assert db.execute("SELECT 1 FROM chunks_fts WHERE rowid=?", (source_rowid,)).fetchone()
 
     async def test_successful_assign_follows_outer_transaction_rollback(self, storage):
         chunk = make_chunk(content="one", namespace="source-ns")
@@ -290,9 +283,7 @@ class TestAssignNamespaceTool:
         source, target = _duplicate_pair()
         await storage.upsert_chunks([source, target])
 
-        output = await mem_ns_assign(
-            namespace="target-ns", old_namespace="source-ns", ctx=ctx
-        )
+        output = await mem_ns_assign(namespace="target-ns", old_namespace="source-ns", ctx=ctx)
 
         assert output.startswith("Error:")
         assert "1 chunk(s) overlap" in output
@@ -330,9 +321,7 @@ class TestAssignNamespaceTool:
         ctx.request_context.lifespan_context.storage.assign_namespace = AsyncMock(
             return_value=type("Result", (), {"chunks_moved": 0, "duplicates_dropped": 0})()
         )
-        await mem_ns_assign(
-            namespace="target-ns", old_namespace="source-ns", merge=True, ctx=ctx
-        )
+        await mem_ns_assign(namespace="target-ns", old_namespace="source-ns", merge=True, ctx=ctx)
         ctx.request_context.lifespan_context.storage.assign_namespace.assert_awaited_once_with(
             "target-ns",
             source_filter=None,

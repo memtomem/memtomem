@@ -280,7 +280,4 @@ async def mem_ns_assign(
     detail = ""
     if result.duplicates_dropped:
         detail = f", {result.duplicates_dropped} duplicate chunk(s) dropped"
-    return (
-        f"Assigned {result.chunks_moved} chunks to namespace '{namespace}'"
-        f"{suffix}{detail}"
-    )
+    return f"Assigned {result.chunks_moved} chunks to namespace '{namespace}'{suffix}{detail}"
