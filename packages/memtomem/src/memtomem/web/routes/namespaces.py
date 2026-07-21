@@ -106,8 +106,16 @@ async def rename_namespace(
 ) -> NamespaceRenameResponse:
     """Rename a namespace.
 
-    Refuses (409) when the target already exists, unless ``merge`` is a
-    literal ``true`` — see ``NamespaceOps.rename_namespace``.
+    Refuses with 409 when the target namespace already exists (or equals the
+    source). To consolidate into an existing namespace instead, repeat the
+    request with ``"merge": true`` — a literal JSON boolean: the chunks move,
+    the *target's* description and color are kept, and chunks it already holds
+    are dropped rather than duplicated (`duplicates_dropped` in the response
+    says how many). 404 when the source namespace holds nothing.
+
+    The 409 ``detail`` is written for the settings UI, which posts renames
+    without a merge affordance; API clients get the merge option from this
+    description. See ``NamespaceOps.rename_namespace``.
     """
     try:
         result = await storage.rename_namespace(namespace, body.new_name, merge=body.merge)
@@ -117,9 +125,8 @@ async def rename_namespace(
         # handler in web/app.py. The detail is phrased for *this* surface:
         # forwarding storage's message would tell a UI user to "pass
         # merge=True" or call a tool the UI has no affordance for (#1870).
-        detail = _RENAME_CONFLICT_DETAIL.get(
-            exc.reason_code, f"Cannot rename '{namespace}' to '{body.new_name}'."
-        ).format(old=namespace, new=body.new_name)
+        template = _RENAME_CONFLICT_DETAIL.get(exc.reason_code, "Cannot rename '{old}' to '{new}'.")
+        detail = template.format(old=namespace, new=body.new_name)
         raise HTTPException(status_code=409, detail=detail) from exc
     if not (result.chunks_moved or result.metadata_renamed or result.merged):
         # Nothing moved because the source held nothing. Falling through would

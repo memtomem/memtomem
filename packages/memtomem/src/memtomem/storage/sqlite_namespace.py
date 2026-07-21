@@ -467,6 +467,18 @@ class NamespaceOps:
         say): the source's copy is left to be cascaded away, which is the
         target-wins rule again.
 
+        ``OR IGNORE`` only collapses a row the survivor already carries
+        where a uniqueness constraint says the two are the same row. Tables
+        without one — ``chunk_entities`` (three non-unique indexes),
+        ``memory_assertions`` (lookup index only) — therefore end up holding
+        *both* copies for a merged chunk: the same entity mention twice, and
+        a `GROUP BY entity_type` count that reads one too many. No
+        well-defined key exists to dedupe them on here (``created_at``
+        differs between the two indexing runs, so "identical row" is not
+        identity), and the state self-heals the next time that chunk is
+        re-indexed, since ``set_chunk_entities`` deletes before inserting.
+        Stated rather than silently inherited.
+
         One asymmetry is deliberate: ``access_log`` rows move to the survivor
         while ``chunks.access_count`` / ``last_accessed`` stay as the target
         had them (target-wins, like the metadata). The log keeps the fuller

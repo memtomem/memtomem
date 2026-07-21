@@ -9,7 +9,6 @@ from typing import cast
 import click
 
 from memtomem.cli._prompts import confirm
-from memtomem.errors import NamespaceConflictError
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
@@ -17,6 +16,7 @@ from memtomem.constants import (
     validate_agent_id,
     validate_namespace,
 )
+from memtomem.errors import NamespaceConflictError
 
 _LEGACY_PREFIX = "agent/"
 # Local alias paired with ``_LEGACY_PREFIX`` so the migration mapping reads
