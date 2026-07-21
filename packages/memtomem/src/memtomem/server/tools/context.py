@@ -10,14 +10,20 @@ import click
 from pydantic import StrictBool
 
 from memtomem.config import TargetScope
-from memtomem.context import versioning
+from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context import remediation, versioning
 from memtomem.context._canonical_txn import versioning_op_locked
-from memtomem.context.error_redact import redact_engine_reason
+from memtomem.context.error_redact import (
+    redact_engine_reason,
+    scrub_absolute_paths,
+    scrub_residual_absolute_paths,
+)
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._validation import strict_bool
 
 if TYPE_CHECKING:
     from memtomem.context._names import Layout
@@ -53,8 +59,18 @@ def _redact_reason(reason: str | None, *roots: Path) -> str:
     suffix guard on the returned string. The MCP tool result flows to the
     calling agent's transcript / model provider, so it gets the same wire-
     boundary sanitization the loopback dashboard applies.
+
+    Composes :func:`scrub_residual_absolute_paths` — the absolute-ONLY scrub,
+    NOT the web's :func:`scrub_absolute_paths`. ``redact_engine_reason`` strips
+    only the roots it is handed plus the import-frozen ``$HOME``, so a runtime
+    dir symlinked onto a shared volume kept its full path on this wire (PR
+    review, reproduced). The web twin's scrub cannot be reused: it also eats
+    the RELATIVE remainder, which here is the remediation
+    (``blocked foo: privacy hits in .claude/agents/foo.md``) and, in the
+    success-path formatters, the intended ``~``-collapsed output. Two postures,
+    two scrubs — see :mod:`memtomem.context.error_redact`.
     """
-    return redact_engine_reason(reason, *roots) or ""
+    return scrub_residual_absolute_paths(redact_engine_reason(reason, *roots) or "")
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
@@ -137,7 +153,7 @@ def _label_ineligible_notes(label: str | None, inc: set[str]) -> list[str]:
     if ineligible:
         notes.append(
             f"  note: label does not apply to {', '.join(ineligible)} "
-            "(only agents/commands are versioned); they sync from the working file."
+            "(only agents/commands are versioned); they push from the working file."
         )
     if not (inc & _LABEL_ELIGIBLE_KINDS):
         notes.append(
@@ -208,10 +224,10 @@ async def mem_context_init(
     """Seed canonical context artifact directories.
 
     Args:
-        include: Comma-separated runtime artifact kinds to import into
+        include: Comma-separated runtime artifact kinds to pull into
             canonical storage (``skills``, ``agents``, ``commands``).
             ``settings`` is accepted for parity with other context tools
-            but has no init-time import action.
+            but has no init-time pull action.
         overwrite: Overwrite existing canonical entries during runtime
             import. Does **not** govern ``.memtomem/context.md`` rewrite
             — see ``overwrite_context_md``.
@@ -230,7 +246,6 @@ async def mem_context_init(
             ``user`` / ``project_local`` imports. ``project_shared`` still
             hard-refuses unsafe imports.
     """
-    from memtomem.context import _skip_reasons as skip_codes
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import (
         canonical_agent_name,
@@ -260,8 +275,11 @@ async def mem_context_init(
     # warning + seed-here path below, the same way the CLI does.
     if scope_explicit and artifact_scope != "user" and not has_project_signal:
         return (
-            f"--scope={artifact_scope} requires a project root "
-            "(with .git or pyproject.toml). Use scope='user' from outside a project."
+            # THIS surface's parameter, not the CLI's ``--scope=`` flag (#1869)
+            # — the pre-fix sentence carried both spellings for one argument.
+            f"scope='{artifact_scope}' requires a project root "
+            "(with .git or pyproject.toml). Re-call with scope='user' from "
+            "outside a project."
         )
 
     if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
@@ -371,7 +389,12 @@ async def mem_context_init(
         # full-path channel stays the ``privacy block:`` exception returns;
         # a redacted reason keeps the project-relative remainder, so blocked
         # rows stay actionable.
-        return f"  {prefix} {name}: {_redact_reason(reason, root)}"
+        #
+        # The hint is appended AFTER redaction: it is a fixed clause built from
+        # the code alone (never from paths), so redacting it would be a no-op
+        # that only risks mangling a flag spelling.
+        shown = remediation.append_hint(_redact_reason(reason, root), code, "mcp")
+        return f"  {prefix} {name}: {shown}"
 
     if "skills" in inc:
         try:
@@ -393,7 +416,7 @@ async def mem_context_init(
             # click.ClickException (_gate_a.py:171). Surface its message
             # so MCP callers see the actionable block, not "internal error".
             return f"privacy block: {exc.message}"
-        results.append(f"Imported skills: {len(skill_result.imported)}")
+        results.append(f"Pulled skills: {len(skill_result.imported)}")
         for path in skill_result.imported:
             results.append(f"  {path.name}")
         for name, reason, code in skill_result.skipped:
@@ -415,7 +438,7 @@ async def mem_context_init(
             return f"privacy block: {exc.message}"
         except click.ClickException as exc:
             return f"privacy block: {exc.message}"
-        results.append(f"Imported sub-agents: {len(agent_result.imported)}")
+        results.append(f"Pulled sub-agents: {len(agent_result.imported)}")
         for path, layout in agent_result.imported:
             results.append(f"  {canonical_agent_name(path, layout)}")
         for name, reason, code in agent_result.skipped:
@@ -435,7 +458,7 @@ async def mem_context_init(
             return f"privacy block: {exc.message}"
         except click.ClickException as exc:
             return f"privacy block: {exc.message}"
-        results.append(f"Imported commands: {len(command_result.imported)}")
+        results.append(f"Pulled commands: {len(command_result.imported)}")
         for path, layout in command_result.imported:
             display = path.parent.name if layout == "dir" else path.stem
             results.append(f"  {display}")
@@ -443,7 +466,7 @@ async def mem_context_init(
             results.append(_skip_line(name, reason, code))
 
     if "settings" in inc:
-        results.append("settings: no init-time import action")
+        results.append("settings: no init-time pull action")
 
     return "Initialized:\n" + "\n".join(results)
 
@@ -463,11 +486,18 @@ async def mem_context_detect(
     ``include="skills,agents,commands"`` to also list runtime skill
     directories, sub-agent files, and slash-command files.
 
-    Pass ``include_runtimes=True`` to also report read-only provider-client
-    registration status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B).
-    This is a separate boolean — it is intentionally NOT part of the ``include``
-    set, so the shared sync/generate/init/diff include contract is never
-    widened (``mem_context_sync(include="runtimes")`` still rejects).
+    Args:
+        include: Comma list of extra kinds to report — ``skills``,
+            ``agents``, ``commands``, ``settings``. ``settings`` lists the
+            resolved-scope settings file of each available runtime (Claude,
+            Codex, Gemini, Kimi), including ones not yet created. Empty
+            (default) reports agent files only.
+        include_runtimes: Also report read-only provider-client registration
+            status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B). A
+            separate boolean on purpose — it is NOT part of the ``include``
+            set, so the shared sync/generate/init/diff include contract is
+            never widened (``mem_context_sync(include="runtimes")`` still
+            rejects).
     """
     from memtomem.context.detector import (
         detect_agent_dirs,
@@ -604,12 +634,14 @@ async def mem_context_generate(
             ``project_local``. The same value is also forwarded as the
             ADR-0010 host-write target-scope override for ``settings``
             (mirrors the CLI at ``cli/context_cmd.py:963-987``).
-        allow_host_writes: When ``include="settings"`` writes a settings
-            file outside the project root (today only
-            ``~/.claude/settings.json``), refuse with a
-            ``needs confirmation`` line unless this is ``True``. Re-call
-            with ``allow_host_writes=True`` after surfacing the host
-            paths to the user.
+        allow_host_writes: When ``include="settings"`` resolves to a path
+            outside the project root (``~/.claude/settings.json`` and the
+            Codex / Gemini / Kimi equivalents, depending on the effective
+            scope), refuse with a ``needs confirmation`` line unless this
+            is ``True``. Re-call with ``allow_host_writes=True`` after
+            surfacing the host paths to the user. Same boundary as
+            ``mem_context_sync``; both fan out through the settings
+            generators.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
@@ -918,37 +950,43 @@ async def mem_context_sync(
     label: str = "",
     ctx: CtxType = None,
 ) -> str:
-    """Sync .memtomem/context.md to all detected agent files.
+    """Push .memtomem/context.md to all detected agent files.
 
-    Pass ``include="skills,agents,commands,settings"`` to also fan out
-    ``.memtomem/skills/``, ``.memtomem/agents/``, ``.memtomem/commands/``,
-    and ``.memtomem/settings.json`` to their runtime targets (Claude Code,
-    Gemini CLI, Codex CLI).  ``on_drop`` controls the severity when
-    sub-agent / command fields are dropped during conversion: ``ignore``
-    (default), ``warn`` (report but still write), or ``error`` (abort the
-    kind). ``strict=True`` is a legacy alias for ``on_drop="error"``; when
-    both are supplied ``on_drop`` wins unless it is still the default.
-
-    ``scope`` selects the ADR-0011 canonical artifact tier for
-    ``skills``, ``agents``, and ``commands``: ``project_shared``
-    (default), ``user``, or ``project_local``. For ``settings`` the same
-    value is treated as the ADR-0010 host-write target-scope override.
-
-    ``allow_host_writes`` defaults to ``False``: when ``include="settings"``
-    would write to a file outside the project root (today only
-    ``~/.claude/settings.json``), the tool returns a ``needs confirmation``
-    line listing the host path instead of writing. Surface that to the
-    user, then re-call with ``allow_host_writes=True`` to proceed.
-
-    ``label`` (ADR-0022) deploys a frozen version instead of the working
-    canonical for the versioned kinds (``agents`` / ``commands``): pass a label
-    (e.g. ``"production"``) or a bare version tag (``"v2"``) created via
-    ``mem_context_version`` / ``mem_context_promote``. ``""`` (default) /
-    ``"latest"`` fans out the working file (byte-for-byte today's behavior).
-    The label applies only to agents/commands — ineligible included kinds run
-    label-less with a note (invariant 10) — and an unknown/dangling label or a
-    flat-layout artifact is isolated as a per-artifact ``skipped`` row, never a
-    whole-run error. Mirrors the CLI ``mm context sync --label``.
+    Args:
+        include: Comma list of extra kinds to fan out alongside context.md.
+            ``skills`` / ``agents`` / ``commands`` come from
+            ``.memtomem/skills/``, ``.memtomem/agents/``,
+            ``.memtomem/commands/``; ``settings`` comes from the single file
+            ``.memtomem/settings.json``. Targets are the runtimes registered
+            for that kind (Claude Code, Gemini CLI, Codex CLI, Kimi CLI for
+            settings). Empty (default) syncs context.md only.
+        strict: Legacy alias for ``on_drop="error"``. When both are given,
+            ``on_drop`` wins unless it is still at its default.
+        on_drop: Severity when sub-agent / command fields are dropped during
+            conversion — ``ignore`` (default), ``warn`` (report but still
+            write), or ``error`` (abort that kind).
+        scope: One value, two meanings, and two different defaults. For
+            ``skills`` / ``agents`` / ``commands`` it is the ADR-0011
+            canonical artifact tier and defaults to ``project_shared``. For
+            ``settings`` it overrides the ADR-0010 host-write target scope,
+            which otherwise comes from ``hooks.target_scope`` in config
+            (default ``user``). Vocabulary is the same either way:
+            ``user``, ``project_shared``, ``project_local``.
+        allow_host_writes: Consent for writing outside the project root.
+            With ``include="settings"`` a target that resolves to a host
+            path (``~/.claude/settings.json`` and the Codex / Gemini / Kimi
+            equivalents, depending on the effective scope) returns a
+            ``needs confirmation`` line naming the path instead of writing;
+            surface it to the user, then re-call with ``True``.
+        label: ADR-0022 — deploy a frozen version instead of the working
+            canonical for the versioned kinds (``agents`` / ``commands``).
+            Pass a label (``"production"``) or a bare version tag (``"v2"``)
+            created via ``mem_context_version`` / ``mem_context_promote``.
+            ``""`` (default) / ``"latest"`` fans out the working file.
+            Ineligible included kinds run label-less with a note (invariant
+            10); an unknown/dangling label or a flat-layout artifact is
+            isolated as a per-artifact ``skipped`` row, never a whole-run
+            error. Mirrors the CLI ``mm context sync --label``.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
@@ -1121,7 +1159,7 @@ async def mem_context_sync(
             elif sr.status in ("error", "aborted"):
                 results.append(f"  {sr.status} {sname}: {_redact_reason(sr.reason, root)}")
 
-    return "Synced:\n" + "\n".join(results) if results else "Nothing to sync."
+    return "Pushed:\n" + "\n".join(results) if results else "Nothing to push."
 
 
 _KNOWN_MEMORY_SCOPES: frozenset[str] = frozenset({"user", "project_shared", "project_local"})
@@ -1197,7 +1235,9 @@ async def mem_context_memory_migrate(
             return f"error: Unknown {label}='{value}'. Supported: {sorted(_KNOWN_MEMORY_SCOPES)}"
 
     if from_scope == to_scope:
-        return "error: --from and --to must differ."
+        # Name THIS surface's parameters (#1869) — ``--from`` / ``--to`` are the
+        # CLI spellings of the two arguments validated three lines above.
+        return "error: from_scope and to_scope must differ."
 
     # Gate B: project_shared writes go to the git-tracked memory tier.
     # MCP has no interactive prompt, so refuse early and tell the caller
@@ -1286,7 +1326,7 @@ async def mem_context_migrate(
     confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
-    """DEPRECATED alias for ``mem_context_memory_migrate``.
+    """DEPRECATED alias for mem_context_memory_migrate.
 
     Renamed in #1147 (B5-2): ``mem_context_migrate`` only ever covered
     *memory*-tier migration, but its bare name implied parity with the
@@ -1302,6 +1342,19 @@ async def mem_context_migrate(
     routed through ``mem_do`` directly: the registry alias
     ``"context_migrate" → "context_memory_migrate"`` (``tools/meta.py``)
     keeps the old ``mem_do`` action name working.
+
+    Args:
+        source: Single markdown file path OR a glob pattern. Forwarded
+            unchanged to ``mem_context_memory_migrate``.
+        from_scope: Source memory tier — ``user``, ``project_shared``, or
+            ``project_local``.
+        to_scope: Target memory tier (same vocabulary); must differ from
+            ``from_scope``.
+        apply: Execute the migration. ``False`` (default) returns a dry-run
+            preview.
+        confirm_project_shared: Required when ``to_scope="project_shared"``;
+            without it the call returns a ``needs confirmation`` message
+            instead of touching disk.
     """
     return await mem_context_memory_migrate(
         source=source,
@@ -2142,8 +2195,8 @@ async def mem_context_artifact_transfer(
 # (``production`` / ``staging`` / …) is a movable pointer over versions, where a
 # promote doubles as a rollback. Both tools reuse the SAME pure-filesystem
 # ``context/versioning.py`` store the CLI and web routes use — no logic is
-# re-implemented. agents + commands only (skills are tree-snapshot artifacts,
-# deferred per ADR-0022 invariant 7).
+# re-implemented. agents + commands are writable; skills READ their
+# tree-snapshot store but every mutation is refused (ADR-0030 §10).
 
 
 def _resolve_version_artifact(
@@ -2154,25 +2207,31 @@ def _resolve_version_artifact(
 ) -> tuple[str, Path, Layout]:
     """Resolve ``(artifact_type, name, scope)`` → ``(name, working_file, layout)``.
 
-    Mirrors the web router's ``_resolve_versionable`` (agents + commands only;
-    skills / unknown types rejected — ADR-0022 invariant 7). Raises
-    ``ValueError`` with a clean, path-free message for an unsupported type, an
-    invalid name (``validate_name``'s ``InvalidNameError`` is a ``ValueError``),
-    or a missing artifact — the caller catches it and returns ``error: …``.
+    Mirrors the web router's ``_resolve_versionable``. Raises ``ValueError``
+    with a clean, path-free message for an unsupported type, an invalid name
+    (``validate_name``'s ``InvalidNameError`` is a ``ValueError``), or a missing
+    artifact — the caller catches it and returns ``error: …``.
+
+    Skills resolve to their ``SKILL.md``, whose ``.parent`` is the artifact
+    directory owning ``versions/`` — the same relationship ``agent.md`` has,
+    which is why the callers need no skill-specific path handling. Their version
+    surface is READ-ONLY (:data:`_VERSION_WRITABLE_TYPES`).
     """
     from memtomem.context._names import validate_name
     from memtomem.context.agents import resolve_canonical_agent
     from memtomem.context.commands import resolve_canonical_command
+    from memtomem.context.skills import resolve_canonical_skill
 
     resolvers = {
         "agents": (resolve_canonical_agent, "agent"),
         "commands": (resolve_canonical_command, "command"),
+        "skills": (resolve_canonical_skill, "skill"),
     }
     entry = resolvers.get(artifact_type)
     if entry is None:
         raise ValueError(
             f"Versioning is not supported for {artifact_type!r} "
-            f"(agents and commands only — skills are deferred, ADR-0022 invariant 7)."
+            f"({', '.join(sorted(resolvers))} only)."
         )
     resolver, kind = entry
     name = validate_name(raw_name, kind=kind)
@@ -2181,6 +2240,34 @@ def _resolve_version_artifact(
         raise ValueError(f"{kind} {name!r} not found")
     working_file, layout = resolved
     return name, working_file, layout
+
+
+#: Types whose version store MCP may mutate. Skills are read-only (ADR-0030
+#: §10) — mirrors the CLI ``_VERSION_WRITABLE_TYPES`` and the web ``_Eligible.writable``.
+_VERSION_WRITABLE_TYPES = frozenset({"agents", "commands"})
+
+
+def _read_only_version_refusal(artifact_type: str, name: str, verb: str) -> str | None:
+    """The ``error: …`` line for a mutating verb on a read-only type, else ``None``.
+
+    Deliberately distinct wording from the unsupported-type message: the store
+    exists and lists fine, so "not supported" would misdirect. Callers run this
+    AFTER resolution (a missing skill keeps its "not found") and BEFORE the
+    Gate-B confirm prompt — never ask a user to confirm a write that cannot land.
+
+    The remediation must not name a command that would itself refuse. An
+    overwrite pull is what will eventually write these snapshots, but it is
+    still refused today, so pointing an agent at it would just cost it a
+    round-trip into a second refusal.
+    """
+    if artifact_type in _VERSION_WRITABLE_TYPES:
+        return None
+    return (
+        f"error: the {artifact_type} version surface is read-only, so {verb} is not "
+        f"available: a {artifact_type} version is written only by the Store itself, and "
+        f"that path is not exposed yet. Use mem_context_version(artifact_type="
+        f"'{artifact_type}', name='{name}', action='list') to read the history."
+    )
 
 
 def _flat_layout_hint(artifact_type: str, name: str) -> str:
@@ -2218,7 +2305,10 @@ def _format_version_list(
         pointers = labels_by_tag.get(tag, [])
         suffix = f"  [{', '.join(sorted(pointers))}]" if pointers else ""
         note = f"  — {rec.note}" if rec.note else ""
-        lines.append(f"  {tag:6s} {rec.created_at}{suffix}{note}")
+        # Mark a tree snapshot (versions/vN/) so it is not read as a single
+        # .md copy — skills version this way (ADR-0030 §10).
+        shape = "  (tree)" if rec.layout == "tree" else ""
+        lines.append(f"  {tag:6s} {rec.created_at}{shape}{suffix}{note}")
     return "\n".join(lines)
 
 
@@ -2251,12 +2341,14 @@ async def mem_context_version(
     freeze a known-good working canonical into an immutable ``versions/vN.md``
     snapshot, then point a label at it with ``mem_context_promote`` — so
     editing the canonical and deploying it become two acts with instant
-    rollback. Covers ``agents`` and ``commands`` only (skills are directory-tree
-    artifacts, deferred per ADR-0022 invariant 7).
+    rollback. Writable for ``agents`` and ``commands``; ``skills`` are
+    READ-ONLY here (``action="list"`` only, ADR-0030 §10) because a skill
+    version is a ``versions/vN/`` directory-tree snapshot created only by an
+    overwrite pull.
 
     Args:
-        artifact_type: ``agents`` or ``commands``. Any other type (including
-            ``skills``) is rejected.
+        artifact_type: ``agents``, ``commands`` or ``skills`` (``list`` only).
+            Any other type is rejected.
         name: Canonical artifact name (the directory under
             ``.memtomem/<type>/``).
         action: ``list`` (default, read-only) to show versions + label
@@ -2318,6 +2410,15 @@ async def mem_context_version(
         return _format_version_list(artifact_type, name, artifact_scope, manifest)
 
     if action == "enable":
+        if artifact_type not in _VERSION_WRITABLE_TYPES:
+            # ADR-0030 §10: enable is flat→dir adoption, and a read-only type is
+            # always dir layout — the requested end state already holds. Report
+            # the no-op rather than the read-only refusal, and do so BEFORE Gate
+            # B: there is nothing to confirm. Mirrors the web/CLI enable.
+            return (
+                f"{artifact_type}/{name} [{artifact_scope}] always uses directory layout; "
+                f"nothing to do."
+            )
         # Adopt a flat-layout artifact into directory layout so it can be
         # versioned — the MCP twin of ``mm context version enable`` and the web
         # ``POST …/versions/enable`` route. The adopt itself is a byte-identical,
@@ -2384,6 +2485,9 @@ async def mem_context_version(
         )
 
     # ── action == "create" ──
+    refusal = _read_only_version_refusal(artifact_type, name, "create")
+    if refusal is not None:
+        return refusal
     # Gate B: an explicit project_shared write into the git-tracked tree needs
     # confirmation MCP cannot prompt for (mirrors mem_context_init / migrate).
     if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
@@ -2523,6 +2627,12 @@ async def mem_context_promote(
     except ValueError as exc:
         return f"error: {exc}"
 
+    refusal = _read_only_version_refusal(
+        artifact_type, name, "deleting a label" if delete else "moving a label"
+    )
+    if refusal is not None:
+        return refusal
+
     # Gate B: explicit project_shared write into the git-tracked label map.
     if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
         return (
@@ -2592,8 +2702,23 @@ _PULL_LOCK_BUDGET_S = 30.0
 #: a new engine status must be classified deliberately, not inherit a prefix
 #: that could understate it (e.g. a future data-loss status rendering as a
 #: benign refusal).
-#: The four the web route maps to non-200 (503/409/500/500) → ``error:``.
-_PULL_ERROR_STATUSES = frozenset({"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"})
+#: The five the web route maps to non-200 (503/409/409/500/500) → ``error:``.
+#: ``swap_recovery_pending`` belongs here rather than with the refusals: the
+#: refusal bucket is defined as "what the web route returns as a typed 200",
+#: and this one is a 409. It is also not an *actionable* refusal — the
+#: remediation is an operator inspecting the artifact on disk, not a parameter
+#: the caller can change and retry (which is why it carries no ``remediation``
+#: entry). Under a known root the reason still names the trees relatively;
+#: outside one it says ``'<path>'`` and the CLI is where the locations survive.
+_PULL_ERROR_STATUSES = frozenset(
+    {
+        "lock_timeout",
+        "plan_stale",
+        "snapshot_failed",
+        "write_failed",
+        "swap_recovery_pending",
+    }
+)
 #: Actionable domain refusals the web route returns as a typed HTTP 200.
 _PULL_REFUSAL_STATUSES = frozenset(
     {
@@ -2625,24 +2750,11 @@ _PULL_BOOL_FLAGS = (
 )
 
 
-def _strict_bool(value: object, field: str) -> bool:
-    """Accept ONLY a literal ``True`` / ``False``; reject anything else.
-
-    The MCP twin of the web ``_only_literal_true`` validator, generalized to
-    both polarities because a *falsy-looking* string is the dangerous direction
-    here: ``"false"`` is truthy in Python, so a coercing implementation would
-    turn a declined consent into a write. Fails closed with a crisp message
-    instead of silently normalizing, so a malformed agent call is corrected
-    rather than acted on. ``1`` / ``0`` are rejected too (``1 is True`` is
-    ``False`` — ints are not booleans).
-    """
-    if value is True or value is False:
-        return value
-    raise ValueError(
-        f"{field} must be a literal boolean (true/false), got "
-        f"{type(value).__name__} {value!r} — a stringified boolean is refused "
-        "because 'false' would read as true."
-    )
+#: Literal-boolean gate for consent-shaped flags. Lives in
+#: ``tools/_validation.py`` since ``mem_ns_rename(merge=…)`` needs the same
+#: guarantee; the module-local name is kept so the call sites and the
+#: comments that reference ``_strict_bool`` below still read as before.
+_strict_bool = strict_bool
 
 
 def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
@@ -2651,9 +2763,13 @@ def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
     ``_redact_reason`` strips the roots it is handed plus the import-frozen
     ``$HOME``; :func:`scrub_absolute_paths` then removes any residual absolute
     path under neither (mirrors the web ``_redact_pull_reason`` composition).
-    """
-    from memtomem.context.error_redact import scrub_absolute_paths
 
+    Pull opts INTO the scrub while the shared ``_redact_reason`` stays out of
+    it — see that function for why the two are not the same decision. Pull
+    reasons carry no actionable relative remainder to protect: they name
+    runtimes and scopes, and after G4a-3a a swap refusal names two canonical
+    trees, which is disclosure rather than remediation.
+    """
     return scrub_absolute_paths(_redact_reason(reason, *roots))
 
 
@@ -2715,12 +2831,19 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     prefix-coded MCP line (``error:`` / ``refused:`` / ``privacy block:`` /
     success), mirroring the web ``_finalize_pull`` status routing.
 
-    The four HTTP-semantic statuses the web route maps to non-200
-    (``lock_timeout`` 503, ``plan_stale`` 409, ``snapshot_failed`` /
-    ``write_failed`` 500) have no status channel over MCP, so they surface as
-    ``error:`` text; ``gate_blocked`` is ``privacy block:``; the actionable
-    domain refusals are ``refused:``; ``applied`` (incl. the byte-identical
-    no-op) is a success line.
+    The five HTTP-semantic statuses the web route maps to non-200
+    (``lock_timeout`` 503, ``plan_stale`` / ``swap_recovery_pending`` 409,
+    ``snapshot_failed`` / ``write_failed`` 500) have no status channel over
+    MCP, so they surface as ``error:`` text; ``gate_blocked`` is
+    ``privacy block:``; the actionable domain refusals are ``refused:``;
+    ``applied`` (incl. the byte-identical no-op) is a success line.
+
+    ``swap_recovery_pending`` sits with the errors rather than the refusals on
+    purpose: ``refused:`` reads as "your request was declined, adjust and
+    retry", and there is no parameter to adjust — an interrupted directory swap
+    needs an operator to look at the artifact on disk. The reason carries that
+    instruction; whether it still carries the locations depends on the
+    redaction above (relative under a known root, ``'<path>'`` outside one).
 
     EVERY ``reason`` is redacted, ``gate_blocked`` included. Pull's
     ``gate_blocked`` reason is built from runtime + scope only
@@ -2749,9 +2872,11 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
             f"into {result.scope} ({result.write_outcome}).{dupes}"
         )
     if result.status == "gate_blocked":
+        # ``privacy_blocked`` arrives on BOTH tiers; only the non-git-tracked
+        # ones can force past it (``pull_apply._evaluate_gate``). The valve flag
+        # — not the code — decides whether the bypass hint is honest here.
         valve = (
-            " Re-call with force_unsafe_import=True to bypass for a reviewed "
-            "false positive (user tier only)."
+            f" {remediation.action_hint(skip_codes.PRIVACY_BLOCKED, 'mcp')}"
             if result.force_bypassable
             else ""
         )
@@ -2759,7 +2884,10 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     if result.status in _PULL_ERROR_STATUSES:
         return f"error: {_redact_pull_reason(result.reason, root)}"
     if result.status in _PULL_REFUSAL_STATUSES:
-        return f"refused: {_redact_pull_reason(result.reason, root)}"
+        shown = remediation.append_hint(
+            _redact_pull_reason(result.reason, root) or "", result.reason_code, "mcp"
+        )
+        return f"refused: {shown}"
     # Fail closed: an engine status this tool has not classified must not
     # inherit a benign prefix. Surface it as an error naming the status so the
     # gap is visible (and the parity test fails first).

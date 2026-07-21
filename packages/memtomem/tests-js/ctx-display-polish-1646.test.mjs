@@ -76,7 +76,7 @@ describe('_ctxImportSkipText (#1646 item 2)', () => {
   it('maps known reason codes to localized copy', async () => {
     const window = await boot();
     const text = window._ctxImportSkipText(
-      { reason: 'canonical exists (use --overwrite)', reason_code: 'canonical_exists' });
+      { reason: 'canonical exists', reason_code: 'canonical_exists' });
     expect(text).toContain('stored copy already exists');
     expect(text).not.toContain('--overwrite');
   });
@@ -105,7 +105,7 @@ describe('_ctxImportSkipText (#1646 item 2)', () => {
     const window = await boot();
     await window.I18N.setLang('ko');
     const text = window._ctxImportSkipText(
-      { reason: 'canonical exists (use --overwrite)', reason_code: 'canonical_exists' });
+      { reason: 'canonical exists', reason_code: 'canonical_exists' });
     expect(text).toContain('저장된 사본');
     await window.I18N.setLang('en');
   });

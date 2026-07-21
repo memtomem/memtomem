@@ -47,6 +47,7 @@ from memtomem.web.routes.context_gateway import (
     _safe_rel,
     delete_skip_entry,
     read_text_lenient,
+    redact_wire_reason,
     sanitize_diff_reason,
 )
 from memtomem.web.routes.context_projects import (
@@ -708,8 +709,24 @@ async def _sync_skills_core(
         "generated": [
             {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
         ],
+        # Engine skip reasons embed absolute paths — the destination for a
+        # target conflict, the transients for a pending swap recovery, an
+        # OSError's filename for an unreadable canonical. Sanitized here, at
+        # the wire (#1385/#1412): the canonical-path disclosure rule is that
+        # CLI gets the path verbatim and the web/MCP surfaces do not.
+        #
+        # ``redact_wire_reason``, not bare ``sanitize_diff_reason``: these
+        # are raw engine exception strings, and root-relative stripping alone
+        # leaves an absolute path whenever the target resolves OUTSIDE both the
+        # project root and ``$HOME`` — a runtime dir symlinked onto a shared
+        # volume, which ``_runtime_targets`` resolves before the OSError is
+        # raised. Same two-stage form the Pull reasons use.
         "skipped": [
-            {"runtime": rt, "reason": reason, "reason_code": code}
+            {
+                "runtime": rt,
+                "reason": redact_wire_reason(reason, project_root),
+                "reason_code": code,
+            }
             for rt, reason, code in result.skipped
         ],
         "canonical_root": CANONICAL_SKILL_ROOT,
@@ -731,11 +748,11 @@ async def sync_skills(
     ),
 ) -> dict:
     """Fan out canonical skills to all runtimes."""
-    reject_project_local_write(target_scope, "Sync skills")
+    reject_project_local_write(target_scope, "Push skills")
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes if body else False,
-        action="Sync skills",
+        action="Push skills",
         host_targets=_user_sync_host_targets(project_root),
     )
     if gate is not None:
@@ -748,7 +765,7 @@ async def sync_skills(
                     project_root, target_scope, force_unsafe=force_unsafe
                 )
     except TimeoutError:
-        raise _error(503, "busy", "Skills sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skills push timed out — another sync may be in progress")
 
 
 # ── Import (reverse sync) ───────────────────────────────────────────────
@@ -784,8 +801,14 @@ def _import_payload(
             }
             for p in result.imported
         ],
+        # Same wire-boundary redaction as the sync report above — an import
+        # skip carries the same path-bearing engine reasons.
         "skipped": [
-            {"name": name, "reason": reason, "reason_code": code}
+            {
+                "name": name,
+                "reason": redact_wire_reason(reason, project_root),
+                "reason_code": code,
+            }
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
@@ -812,22 +835,22 @@ async def import_skills(
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
-            "Canonical-residency tier to import into. user requires the "
+            "Canonical-residency tier to pull into. user requires the "
             "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
         ),
     ),
     dry_run: bool = Query(
         False,
         description=(
-            "Preview the import without writing to canonical (rank-10): runs the "
-            "full scan + privacy walk + dedup and returns the would-import / would-"
+            "Preview the pull without writing to canonical (rank-10): runs the "
+            "full scan + privacy walk + dedup and returns the would-pull / would-"
             "skip counts, leaving disk untouched. Returned regardless of "
             "confirmation flags (mirrors the transfer route's dry_run)."
         ),
     ),
 ) -> dict:
-    """Import runtime skills into the scoped canonical directory."""
-    reject_project_local_write(target_scope, "Import skills")
+    """Pull runtime skills into the scoped canonical directory."""
+    reject_project_local_write(target_scope, "Pull skills")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
     force_unsafe_import = body.force_unsafe_import if body else False
@@ -861,7 +884,7 @@ async def import_skills(
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
-                action="Import skills",
+                action="Pull skills",
                 host_targets=[str(p) for p in preview.imported],
                 plan=_import_payload(preview, project_root, target_scope, dry_run=True),
             )
@@ -869,7 +892,7 @@ async def import_skills(
                 return gate
         result = await _run(dry=dry_run)
     except TimeoutError:
-        raise _error(503, "busy", "Skills import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skills pull timed out — another sync may be in progress")
     except click.ClickException as exc:
         # The import engine's only ClickException is the project_shared Gate A
         # privacy hard-abort (ADR-0011 §5 — no force bypass; _gate_a.py). Render
@@ -893,12 +916,12 @@ async def import_skill(
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
-            "Canonical-residency tier to import into. user requires the "
+            "Canonical-residency tier to pull into. user requires the "
             "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
         ),
     ),
 ) -> dict:
-    """Import a single runtime skill into the scoped canonical directory.
+    """Pull a single runtime skill into the scoped canonical directory.
 
     Same response shape as the section-level import so the web UI can reuse
     its rendering. 404 when no runtime directory matches the name (the
@@ -907,7 +930,7 @@ async def import_skill(
     — pinned on the gate's dry-run preview too, so a misnamed user-tier
     import 404s instead of asking for confirmation.
     """
-    reject_project_local_write(target_scope, "Import skill")
+    reject_project_local_write(target_scope, "Pull skill")
     try:
         validate_name(name, kind="skill name")
     except InvalidNameError as exc:
@@ -935,11 +958,11 @@ async def import_skill(
         if target_scope == "user" and not allow_host_writes:
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise _error(404, "missing", f"No runtime skill named {name!r} to import")
+                raise _error(404, "missing", f"No runtime skill named {name!r} to pull")
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
-                action="Import skill",
+                action="Pull skill",
                 host_targets=[str(p) for p in preview.imported],
                 plan=_import_payload(preview, project_root, target_scope, dry_run=None),
             )
@@ -947,12 +970,12 @@ async def import_skill(
                 return gate
         result = await _run(dry=False)
     except TimeoutError:
-        raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill pull timed out — another sync may be in progress")
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see import_skills).
         raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
-        raise _error(404, "missing", f"No runtime skill named {name!r} to import")
+        raise _error(404, "missing", f"No runtime skill named {name!r} to pull")
     return _import_payload(result, project_root, target_scope, dry_run=None)
 
 
@@ -966,7 +989,7 @@ async def import_skill_to_user(
     body: ImportRequest | None = None,
     project_root: Path = Depends(resolve_scope_root),
 ) -> dict:
-    """Import a PROJECT-runtime skill into the USER library (~/.memtomem/skills).
+    """Pull a PROJECT-runtime skill into the USER library (~/.memtomem/skills).
 
     The one web path for a project-runtime skill that trips Gate A's
     false-positive secret heuristic. ``/import`` to ``project_shared`` is a
@@ -1022,11 +1045,11 @@ async def import_skill_to_user(
             # reviewed force surfaces the would-import target (see #1379).
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise _error(404, "missing", f"No project runtime skill named {name!r} to import")
+                raise _error(404, "missing", f"No project runtime skill named {name!r} to pull")
             gate = host_write_gate(
                 "user",
                 allow_host_writes,
-                action="Import skill to user library",
+                action="Pull skill to user library",
                 host_targets=[str(p) for p in preview.imported],
                 plan=_import_payload(
                     preview, project_root, "user", dry_run=None, source_scope="project_shared"
@@ -1036,14 +1059,14 @@ async def import_skill_to_user(
                 return gate
         result = await _run(dry=False)
     except TimeoutError:
-        raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill pull timed out — another sync may be in progress")
     except click.ClickException as exc:
         # Defensive: the user dest is force-bypassable, so Gate A raises a
         # ClickException only on a project_shared dest — which this route never
         # uses. Translate to 422 anyway rather than risk a generic 500 (#1378).
         raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
-        raise _error(404, "missing", f"No project runtime skill named {name!r} to import")
+        raise _error(404, "missing", f"No project runtime skill named {name!r} to pull")
     return _import_payload(
         result, project_root, "user", dry_run=None, source_scope="project_shared"
     )

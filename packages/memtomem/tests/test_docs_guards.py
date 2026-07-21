@@ -56,7 +56,7 @@ _AUTOMATION_HOOKS_JSON = (
 )
 
 _ASTERISK_TOOLS = ("mem_config", "mem_embedding_reset", "mem_reset")
-_FOOTNOTE_PREFIX = r"\* Requires `MEMTOMEM_TOOL_MODE=full`"
+_FOOTNOTE_PREFIX = r"\* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`"
 
 
 def _public_markdown() -> list[Path]:
@@ -180,6 +180,65 @@ class TestToolModeFootnoteParity:
             "line verbatim so the CLI / Web UI alternate-access hint stays "
             "in sync across the two Config-table entry points."
         )
+
+    def test_no_public_doc_gates_the_capability_on_full_mode(self) -> None:
+        """No public doc may pair an asterisk tool with ``full`` mode without
+        saying the action still runs through ``mem_do``.
+
+        The two Config tables were not the only place claiming these features
+        need ``full`` — ``reference/data-config-cli.md`` and
+        ``configuration.md`` said it too. Scoping the guard to the tables would
+        have left the misconception in print, so scan every public markdown
+        file instead of enumerating the known ones.
+
+        Matching is per **paragraph**, not per line. A line-scoped version of
+        this check inspected zero lines in this repo: the claim wraps across
+        lines in both prose passages, and the two Config-table footnotes carry
+        no tool name at all (the asterisk does that job). It would only have
+        caught the exact single-line phrasing it replaced — the sweep scoped by
+        one enumeration and then guarded by the same enumeration.
+
+        Note for whoever edits the footnotes: ``canonical_footnote`` extracts a
+        single *line*, so the reference.md / mcp-clients.md footnotes must stay
+        on one line for the parity test above.
+        """
+        offenders: list[str] = []
+        for path in _public_markdown():
+            text = path.read_text(encoding="utf-8")
+            for block in re.split(r"\n\s*\n", text):
+                flat = " ".join(block.split())
+                if "MEMTOMEM_TOOL_MODE=full" not in flat:
+                    continue
+                if not any(name in flat for name in _ASTERISK_TOOLS):
+                    continue
+                if "mem_do(" in flat:
+                    continue
+                lineno = text[: text.index(block)].count("\n") + 1
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
+        assert not offenders, (
+            "these lines gate mem_config / mem_embedding_reset / mem_reset on "
+            f"MEMTOMEM_TOOL_MODE=full without noting the mem_do route: {offenders}. "
+            "Only the individual tool name requires full mode; the actions are "
+            "@register-ed and reachable in core/standard via mem_do."
+        )
+
+    def test_footnote_states_mem_do_remains_available(self, canonical_footnote: str) -> None:
+        """The asterisk gates the individual *tool name*, not the capability.
+
+        All three tools are ``@register``-ed, so ``mem_do(action="config")``
+        works in core and standard mode — an earlier footnote read as if the
+        feature itself required ``full`` and pointed users at the CLI as the
+        only alternative.
+        """
+        assert "mem_do(" in canonical_footnote, (
+            "the tool-mode footnote must say the actions stay reachable through "
+            "mem_do in core/standard mode, not just that full mode is required"
+        )
+        for name in _ASTERISK_TOOLS:
+            action = name.removeprefix("mem_")
+            assert f'"{action}"' in canonical_footnote, (
+                f"footnote must name the mem_do action '{action}' for {name}"
+            )
 
 
 class TestWebRemoteAccessDocs:

@@ -184,7 +184,7 @@ def test_import_confirm_names_destination_and_dry_run_preview(page, mm_web_url: 
 _IMPORT_PREVIEW_DEDUP_ONLY = {
     "imported": [{"name": "from-claude"}],
     "skipped": [
-        {"name": "dup", "reason": "already imported from claude", "reason_code": "already_imported"}
+        {"name": "dup", "reason": "already pulled from claude", "reason_code": "already_imported"}
     ],
     "project_root": "/srv/cwd",
     "scanned_dirs": ["/srv/cwd/.claude/skills/"],

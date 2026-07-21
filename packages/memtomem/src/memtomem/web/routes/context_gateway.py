@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +16,7 @@ from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 from memtomem.context._runtime_targets import IMPORT_SOURCE_RUNTIMES, resolve_import_runtimes
+from memtomem.context.error_redact import scrub_absolute_paths
 from memtomem.context.projects import sync_skip_reason
 from memtomem.context.pull_apply import PullApplyResult, PullPlan, commit_pull, prepare_pull
 from memtomem.context.pull_preview import preview_pull, probe_pull_drift
@@ -721,25 +721,39 @@ async def context_status_all(
     }
 
 
-# Absolute-path run (POSIX or Windows), ≥2 segments. ``sanitize_diff_reason``
-# only strips the project root + ``$HOME``; a runtime dir symlinked OUTSIDE both
-# (e.g. a shared volume) can still embed its resolved absolute path in an
-# OSError reason, so this backstop replaces any residual absolute path before
-# the reason hits the wire (Codex + PR review — the canonical-path redaction
-# rule, MCP/web redact). Each segment is anything up to the next separator,
-# quote, or newline — spaces INCLUDED so a mount like ``/Volumes/My Drive/x`` is
-# scrubbed whole rather than leaving `` Drive/x`` on the wire (the app-level
-# ``[\w.\-]`` scrub stops at the first space). OSError paths are quoted, so
-# matching through spaces cannot bleed into surrounding prose in practice.
-_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
+def redact_wire_reason(reason: str | None, project_root: Path) -> str | None:
+    """``sanitize_diff_reason`` plus the residual absolute-path backstop.
+
+    The two-stage form for any wire field carrying **raw engine exception
+    text**, as opposed to a path the route itself resolved. Root-relative
+    stripping is the readable half — a reason under the project keeps its
+    familiar short form — and the scrub is the fail-safe half for everything
+    that lands outside both roots, which is exactly what an ``OSError`` from a
+    runtime dir symlinked onto a shared volume produces.
+
+    The backstop is :func:`memtomem.context.error_redact.scrub_absolute_paths`
+    rather than a local regex. This module used to carry its own copy with its
+    own "keep in sync" comment; they were byte-identical, and one shared
+    function is the only version of "in sync" that cannot drift. Note the scrub
+    also eats a root-stripped RELATIVE remainder, which is deliberate — see
+    that function, and ``test_context_status_global.py::
+    test_route_redacts_error_reason``, which pins it.
+
+    Deliberately NOT named ``redact_engine_reason``: ``error_redact`` already
+    exports a function by that name with a different signature
+    (``*project_roots``), so two import sites would mean two different things
+    (PR review). This one is the web wire boundary; that one is the neutral
+    engine-side twin.
+    """
+    cleaned = sanitize_diff_reason(reason, project_root)
+    if cleaned is None:
+        return None
+    return scrub_absolute_paths(cleaned)
 
 
 def _redact_pull_reason(reason: str | None, project_root: Path) -> str | None:
     """Redact a pull-preview candidate ``reason`` for the wire (defense in depth)."""
-    cleaned = sanitize_diff_reason(reason, project_root)
-    if cleaned is None:
-        return None
-    return _ABS_PATH_RE.sub("<path>", cleaned)
+    return redact_wire_reason(reason, project_root)
 
 
 @router.get(
@@ -987,11 +1001,13 @@ def _finalize_pull(result: PullApplyResult, project_root: Path) -> dict:
     Domain decisions — the ``applied`` write and every refusal that hands the
     picker something to act on (``source_conflict`` with its candidate rows,
     ``gate_blocked`` with ``force_bypassable``, ``canonical_exists`` →
-    ``overwrite``, …) — are result-coded 200 bodies. The four statuses with
+    ``overwrite``, …) — are result-coded 200 bodies. The five statuses with
     genuine HTTP meaning become error envelopes instead (the client ``api()``
     helper drops structured detail on non-2xx, but these carry none the picker
     needs): ``lock_timeout`` → 503 (transient, retry), ``plan_stale`` → 409
-    (destination changed under the lock — re-preview), and the two fail-closed
+    (destination changed under the lock — re-preview),
+    ``swap_recovery_pending`` → 409 (an interrupted directory swap the engine
+    refuses to resolve on its own, ADR-0030 §10), and the two fail-closed
     write failures ``snapshot_failed`` / ``write_failed`` → 500. Every message
     is display-sanitized (an OSError reason may embed a path)."""
     status = result.status
@@ -1008,6 +1024,23 @@ def _finalize_pull(result: PullApplyResult, project_root: Path) -> dict:
             "conflict",
             _redact_pull_reason(result.reason, project_root)
             or "the Store changed since the preview; re-preview and retry.",
+            reason_code=result.reason_code,
+        )
+    if status == "swap_recovery_pending":
+        # 409, not 500: nothing failed infrastructurally and the requested
+        # operation did not run — the artifact is wedged in a state only an
+        # operator can adjudicate, which is a conflict about the resource, not
+        # a server fault. The reason carries the CONDITION and the instruction
+        # to inspect; the paths themselves are redacted to ``'<path>'`` here as
+        # on every other wire field, and the CLI is where they survive verbatim
+        # (PR review — an earlier version of this comment promised paths this
+        # surface deliberately does not emit).
+        raise _error(
+            409,
+            "conflict",
+            _redact_pull_reason(result.reason, project_root)
+            or "an interrupted directory swap left this artifact in a state "
+            "that needs manual inspection.",
             reason_code=result.reason_code,
         )
     if status in ("snapshot_failed", "write_failed"):
@@ -1048,7 +1081,7 @@ async def context_pull_apply(
     decision — the ``applied`` write and every refusal (``source_conflict``
     carrying its candidate rows, ``gate_blocked`` carrying ``force_bypassable``,
     …) — returns HTTP 200 with a :class:`ContextPullApplyResponse` the picker
-    branches on; only the four HTTP-semantic statuses escape as error codes (see
+    branches on; only the five HTTP-semantic statuses escape as error codes (see
     :func:`_finalize_pull`).
 
     Destination consent runs ONLY once ``prepare_pull`` yields a committable

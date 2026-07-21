@@ -7,6 +7,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Interrupted skill updates are now recovered before the next write**
+  (ADR-0030 §10, PR-G4a-3a) — PR-G4a-2 shipped the crash-safe directory swap
+  and its recovery machine with no caller. **Push, reverse import and Pull**
+  now run recovery *first* whenever they take a skill's canonical lock: a
+  leftover transaction is completed, rolled back, or — when two candidate trees
+  survive and which one is the original is genuinely ambiguous — refused with
+  both paths named and nothing changed. Crash leftovers are still collected
+  afterwards, but a tree the marker still claims is now left alone; deleting
+  one turned a recoverable state into one whose next recovery would have
+  removed the only copy of the skill.
+  The refusal reaches each surface as its own condition rather than a generic
+  failure: a typed per-item skip that lets the rest of a push or import
+  proceed, `swap_recovery_pending` on a Pull, and HTTP **409** on the web API.
+  In every case the operation you asked for did **not** run — recovery may have
+  safely advanced the leftover transaction first, but it never half-applies
+  your request and never leaves the artifact worse than it found it.
+  **Not yet every writer.** Skill create/edit/delete in the web UI, wiki
+  install/update, cross-scope transfer and `copy_skill` still take the lock
+  without recovering, so those paths can still overwrite a pending transaction
+  — the pre-existing behavior, unchanged here. Wiring them is a follow-up, and
+  it ships with a build-time guard that finds such writers by analyzing the
+  tree rather than from a hand-written list, because the list is exactly what
+  missed them.
+
+- **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
+  primitive that replaces a whole artifact tree and can recover from an
+  interruption. A non-empty directory cannot be replaced atomically on POSIX,
+  so the replacement is inherently two renames, and a crash between them leaves
+  the canonical position empty with the only copy of the original under an
+  `.old-*` name. The swap now writes a **durable intent marker** before the
+  first rename and unlinks it after the second, so a later run can tell
+  "mid-swap" from "nothing happened" and converge: complete the promotion, roll
+  back to the pre-image, or — when two candidate trees survive and which one is
+  the original is genuinely ambiguous — **fail closed**, name both paths and
+  change nothing. Both renames are exclusive, so a destination recreated by an
+  editor or shell during the window is never clobbered. Durability degrades to
+  process-crash consistency on filesystems that reject directory `fsync`
+  (Windows, some network/tmpfs mounts) rather than failing the operation.
+  Ships **with no caller** — the skills overwrite Pull that will use it is
+  still refused (PR-G4b) — so nothing changes for users yet.
+
+- **Skill version history — tree snapshots + a read-only `version list`**
+  (ADR-0030 §10, PR-G3) — the version store learns a second storage shape.
+  Agents and commands version a single file (`versions/vN.md`); a skill is a
+  directory, so its version is a `versions/vN/` **tree snapshot**, marked
+  `layout: "tree"` on its manifest entry. Snapshots copy bytes into new inodes
+  from a captured pre-image (never hardlinking live payload, which an editor
+  could mutate through the shared inode), are promoted by an exclusive rename
+  with `fsync` barriers on both the tree and its parent, and are write-once.
+  A crash leaves either a complete entry or an orphan `vN/` — which is
+  **preserved, never reaped**: it is real snapshot bytes whose manifest row we
+  merely failed to record, so tag allocation skips past it instead of deleting
+  it, across both shapes.
+  `mm context version list skills <name>`, the web detail panel, and
+  `mem_context_version(action='list')` now read that history. It is
+  **read-only**: `create` / `promote` / `delete-label` are refused for skills
+  with a message distinct from the unsupported-type one, because a skill
+  version is created only internally by an overwrite Pull (PR-G4) and labeled
+  skill fan-out is deferred. `enable` reports a no-op — skills are always
+  directory layout.
+  `schema_version` becomes 2, but writers emit the **minimum** a reader needs:
+  a manifest holding only file entries keeps declaring 1, so the existing
+  agents/commands fleet stays readable by builds that predate this release
+  rather than being locked out by an unrelated label move.
+
 - **`versions.json` forward-compatibility** (ADR-0030 §10, PR-G1) — the version
   manifest now carries a `schema_version` and preserves fields it does not
   recognize. Readers refuse a manifest written by a **newer** build loudly
@@ -55,9 +120,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `commit_pull`). Domain decisions are delivered as a stable typed envelope the
   UI branches on — the applied write and every refusal (`source_conflict`
   carrying its candidate rows, `gate_blocked` carrying `force_bypassable`,
-  `canonical_exists` → overwrite, …) return HTTP 200; only the four statuses
+  `canonical_exists` → overwrite, …) return HTTP 200; only the five statuses
   with genuine HTTP meaning become error codes (lock-timeout → 503, stale plan
-  → 409, write failure → 500). Destination consent mirrors the CLI and the
+  → 409, pending swap recovery → 409, write failure → 500). Destination consent
+  mirrors the CLI and the
   dashboard's existing host-write gate: a `project_shared` landing (git-tracked)
   requires `confirm_project_shared`, a `user` landing requires `allow_host_writes`
   (disclosing the host paths), and `target_scope` is explicit (no silent
@@ -126,7 +192,136 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Omitted/`true` follows `rerank.enabled`; `true` cannot force-enable
   reranking on a server that has it disabled.
 
+### Changed (BREAKING)
+
+- **A session that names no agent no longer hijacks where your writes land**
+  (#1875) — `mem_session_start` defaulted `agent_id` to the literal `"default"`
+  and bound it unconditionally, while the namespace resolver only tested that
+  field for truthiness. So `mem_session_start()` with no arguments silently
+  redirected every subsequent `mem_add` / `mem_batch_add` / `mem_index` /
+  `mem_fetch` into `agent-runtime:default` — a *hidden* system namespace, which
+  meant a plain `mem_search` could not find the entry the caller had just
+  written. The session **record** said `default` the whole time, so nothing in
+  the output revealed the redirection. `"default"` is now a reserved sentinel
+  meaning *no agent bound*, applied through one chokepoint at both surfaces that
+  bind a runtime agent: `mem_session_start` (MCP) and the LangGraph adapter's
+  `start_agent_session`. Omitting `agent_id` — or passing `"default"`
+  explicitly — binds nothing, so writes go where they would with no session at
+  all. (`mm session start` routes through the same helper, but the CLI is a
+  fresh process per invocation and never bound a runtime agent, so its behaviour
+  is unchanged — that edit only removes a duplicated literal.)
+
+  Who is affected, and how:
+
+  - **Callers who started a session without `agent_id`.** New writes move out of
+    `agent-runtime:default` and land wherever they would with no session at all
+    — `current_namespace` if you set one, otherwise whatever your namespace
+    rules / `auto_ns` / `default_namespace` resolve to. Visibility then follows
+    the ordinary search filters, so in the usual configuration the entry you
+    just wrote is **findable** by a default `mem_search` instead of hidden. (If
+    your own rules route writes into a system-prefixed namespace such as
+    `archive:`, unpinned search still hides them — that part is unchanged.) If
+    you were relying on that accidental hiding for isolation, pass a real
+    `agent_id` to opt into `agent-runtime:<id>` deliberately.
+  - **`mem_agent_search` reads wider under an unbound session.** With nothing
+    bound it now runs unpinned instead of scoping to
+    `agent-runtime:default,shared` — i.e. the same scope a plain `mem_search`
+    has. Other agents' private chunks stay hidden (that is the system-prefix
+    filter, not the binding), but pass `agent_id=` if you want a pinned read.
+  - **LangGraph `search(include_shared=True)` after `start_agent_session("default")`
+    now raises.** It asks for "my agent scope plus shared" and there is no *my
+    scope* on an unbound session, so it fails loudly instead of quietly
+    searching `agent-runtime:default`. Use `start_agent_session("<real-id>")`,
+    or `include_shared=False`.
+  - **Callers who passed `agent_id="default"` explicitly.** Same change; the
+    reservation does not distinguish the two spellings.
+  - **Existing chunks are not migrated.** There is no namespace-rename
+    primitive, so anything already in `agent-runtime:default` stays there. It
+    remains reachable — `mem_agent_search(agent_id="default")` or
+    `mem_search(namespace="agent-runtime:default")` — because the reservation
+    applies to *inferred* bindings only, never to an explicit lookup key.
+    Re-add the content if you want it in your default namespace.
+  - **Named-agent workflows are unchanged.** `mem_session_start(agent_id="planner")`
+    still binds `agent-runtime:planner` for reads and writes. `"Default"` (any
+    other casing) is an ordinary agent id — the sentinel is exact-match.
+
+  Side effect worth knowing: an unbound session's own writes are now
+  summarizable. `mem_session_end()`'s auto-summary recalls chunks by the
+  session row's namespace, which previously never matched where the writes had
+  actually gone, so every unbound session reported `below min_chunks` and
+  silently produced no summary. The two now agree in the ordinary case; they
+  can still diverge where a namespace rule, `auto_ns`, or a non-default
+  `default_namespace` sends the write somewhere the session row does not name.
+  That residual is pre-existing and tracked in #1876.
+
 ### Changed
+
+- **The server instructions now fit in the client's prompt, and the detail moved
+  somewhere it can't be cut** (#1881) — the `instructions` string returned on
+  `initialize` is the only workflow-level text most clients put in front of the
+  model, and it was 3,364 / 3,219 / 2,673 characters for core / standard / full.
+  A Claude Code system prompt carrying it ended mid-word at ~2,048 characters,
+  and because the namespace table and the closing "when in doubt, default to
+  `mem_add` / `mem_search`" line were appended **last**, the part every mode lost
+  was the generic guidance — the mode-specific narrative it was cut for survived.
+  Each mode is now a recipe plus a pointer (1,694 / 1,660 / 1,555), the generic
+  sections come before the mode block, and the core-tool count is rendered from
+  the exposed set instead of typed. The narrative it displaced — the
+  session-bound write contract, the per-project team buckets (ADR-0028), and the
+  scope `mem_agent_search` actually resolves — moved to
+  `mem_do(action="help", params={"category": "sessions"})` and
+  `params={"category": "multi_agent"}`, which are fetched on demand rather than
+  paid on every prompt, and are budgeted in their own right.
+  Two things the old text said imprecisely are now stated in full: an unbound
+  session does **not** by itself make `mem_agent_search` unpinned (it drops one
+  step of `explicit agent_id → session's bound agent → current namespace →
+  unpinned`), and `namespace=` has to be passed **on the write** — passing it to
+  `mem_session_start` re-points the session record only, which is now pinned as
+  behaviour and not just prose.
+
+- **Refusals now tell you what to do on the surface you are actually using**
+  (#1869) — engine refusal reasons hard-coded CLI flag spellings, so an agent
+  that hit a source conflict over MCP was told to `pass --from <runtime>`, a
+  flag it cannot pass (its parameter is `from_runtime`), and the web Pull picker
+  showed the same CLI wording in its failure toast. A Gate A privacy block over
+  MCP was worse: the tool appended `force_unsafe_import=True` after the engine's
+  `--force-unsafe-import`, so the caller saw both spellings for one valve.
+  The engine now states the **condition** only ("the Store already has
+  agents/foo; a plain pull will not replace it"), and each surface appends its
+  own remediation — `--overwrite` on the CLI, `overwrite=True` over MCP, and a
+  localized "tick Replace the existing copy" in the browser. The CLI keeps its
+  copy-pasteable flag; nothing is downgraded to neutral prose.
+  A `project_shared` privacy block deliberately offers **no** bypass hint on any
+  surface: it carries the same reason code as the force-bypassable tiers, but
+  the valve does not exist there (ADR-0011 §5). Runnable `mm context …` command
+  strings are unchanged — those are commands to paste, not remediation clauses.
+
+- **Privacy-block refusals no longer point at a tier that cannot help** (CLI,
+  MCP and web) — the shared-tier Gate A message and its web twin offered a
+  retry in the `user` or `project_local` tier. Neither works: `project_local`
+  has no runtime fan-out at all (ADR-0011 §3), and `user` resolves its runtime
+  sources from `$HOME` regardless of the project you are in, so it inspects a
+  different copy than the one that was blocked. The remediation is now "remove
+  the secret", which is the whole truth and the same on every surface.
+  The web import toast is now **kind-aware** for the same reason: "Pull to user
+  library" is a real remediation, but only for skills — agents and commands have
+  no such route, so pointing them at it named a control that is not on their
+  pane.
+
+- **Push/Pull wording now reaches engine, route, and MCP output** (ADR-0030 §2,
+  PR-H2) — the rename that landed for the UI, CLI help, and docs stopped at the
+  backend, so results and refusals still said "Sync"/"import" while the surface
+  the user was looking at said Push/Pull. `mem_context_sync` now reports
+  `Pushed:` / `Nothing to push.`, `mem_context_init` reports `Pulled skills:`
+  (etc.), the web routes speak of pushing skills / MCP servers and of "Push
+  All", and engine skip reasons read `already pulled from …` / `re-run the pull
+  to retry`. Machine-readable surfaces are deliberately untouched: reason codes
+  (`already_imported`, `sync_paused`, `in_sync`), route paths, surface ids,
+  response fields, and every `mm context sync` command string are unchanged, so
+  nothing that a script or the web client keys off moved. Vocabulary genuinely
+  shared with **Hooks Sync** — project enrollment / pause / resume — stays
+  "sync", as does relational drift state ("in sync" / "out of sync"), which
+  describes status rather than the action.
 
 - **`mm context import --overwrite` is snapshot-first and refuses unsafe
   overwrites** (ADR-0030 §6) — importing a runtime copy over an *existing*
@@ -154,6 +349,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A failed namespace rename no longer half-applies** (#1874) —
+  `mem_ns_rename` rewrote the chunk rows first and renamed the namespace's
+  metadata row second. Renaming onto a namespace that already had a metadata
+  row therefore failed on the primary key *after* the chunks had been rewritten
+  and with nothing rolling them back, so a later unrelated write could commit a
+  rename the caller was told had failed. The collision is now decided before
+  any write: renaming onto an existing namespace is **refused** (409 on the web
+  admin route, `Error: …` over MCP), and `merge=True` opts into consolidating
+  into it — chunks move, the target's description/color are kept, and where
+  both namespaces hold the same chunk (same source file, content hash and start
+  line) the target's copy is kept while the source's duplicate is dropped
+  (reported, never silent), as is the source's metadata row. The whole
+  operation runs under one lock-taking transaction, so a failure anywhere
+  undoes all of it, including when it runs inside an outer transaction it does
+  not own. `mem_ns_rename` also reports *what* changed rather than a bare chunk
+  count: a namespace registered but never written to renames its metadata row
+  while moving 0 chunks, which used to read as "nothing happened". Relatedly,
+  `mm agent migrate` now finds legacy `agent/{id}` namespaces that exist only
+  as a registration (no chunks) and asks before consolidating into an existing
+  `agent-runtime:{id}` (`--yes` to skip) instead of failing.
+
+- **`mem_ask` is reachable again outside `full` tool mode** — the tool carried
+  `@mcp.tool()` but never `@register(...)`, so the default `core` mode pruned
+  it from the tool list while `mem_do` had no action to route it to: it existed
+  in no mode but `full`, even though the guides advertised it unconditionally.
+  Registered under the `search` category, so `mem_do(action="ask", ...)` now
+  works in `core` and `standard`. Per-mode direct-tool sets are unchanged. An
+  architectural guard now pins the invariant `CLAUDE.md` already stated —
+  every non-core `@mcp.tool()` must also `@register` — with a two-way runtime
+  equality so a module missing from the server's imports fails too.
+
+  The tool-mode footnote in the guides was misleading in the same area and is
+  corrected: the asterisk gates the individual *tool name*, not the capability.
+  `mem_config`, `mem_embedding_reset` and `mem_reset` are reachable through
+  `mem_do` in every mode.
+
+- **The crash-leftover reaper no longer claims a newline-terminated name** —
+  Python's `$` also matches immediately before a trailing newline, and a
+  newline is a legal POSIX filename character, so
+  `.old-<name>-<pid>-<rand>.tmp\n` classified as one of our own leftovers and
+  became eligible for deletion. The gateway never generates such a name, so
+  anything wearing one belongs to someone else. Practical reachability is close
+  to nil; it is listed because it changes what an already-released reaper will
+  delete.
+
+- **An interrupted skill promote no longer loses the skill** (ADR-0030 §10) —
+  replacing a skill directory is two renames, because POSIX cannot atomically
+  replace a non-empty directory, and between them the original tree is parked
+  under a `.old-…` name. The crash-leftover reaper deleted every such tree it
+  owned, so a crash in that window left the only surviving copy of a canonical
+  skill to be destroyed by the next push or import. A move-aside tree is now
+  reaped **only while its destination is present**; when the destination is
+  missing it is kept and logged at WARNING with both paths, since it may be the
+  original. The same rule now governs the promote's own cleanup of the tree it
+  parked: a writer outside the lock that removes the destination between the
+  second rename and that cleanup used to leave it deleting the only remaining
+  copy. Staging trees, which are always copies of something still on disk,
+  are reaped as before. The kept tree is cleared by the promote that recreates
+  the destination — where that promote succeeds; a destination taken over by a
+  non-gateway writer is left alone, since the kept tree may still be the only
+  copy of ours — so a normal push or import finishes with no residue. That is a
+  retry guarantee, not a recovery one: when the run that recreates
+  the destination installs *different* content — pulling an older Store copy,
+  say — the pre-crash tree is still destroyed, a few milliseconds after its own
+  WARNING. Recovering the interrupted swap itself, rather than surviving it,
+  needs the intent marker and state machine that land next.
+
+- **Syncing a skill no longer deletes a similarly-named skill's crash
+  leftovers** — the crash-leftover reaper selected trees with a prefix glob on
+  the destination name, so pushing or importing `foo` matched `foo-bar`'s
+  `.staging-…`/`.old-…` trees and deleted them while holding only `foo`'s lock.
+  Since a move-aside tree is the original a promote is mid-rollback onto, that
+  could destroy the only copy of a neighbouring skill — and hyphenated skill
+  names are ordinary, so this needed no unusual input. Candidates are now
+  matched by parsing the leftover's owning destination and comparing it
+  exactly; a destination whose own name contains a glob metacharacter is also
+  escaped so it cannot widen the scan.
+- **Dead `.old-…` symlinks are now removed** — a destination that was a symlink
+  passed the promote's conflict check (which follows links), so the promote
+  moved the *link* aside, and `shutil.rmtree(..., ignore_errors=True)` silently
+  refuses symlinks. Nothing reported it and nothing retried it, so a setup that
+  recreates a managed symlink before each push accumulated one dead link per
+  run. Internal-artifact removal now dispatches on `lstat`: directories are
+  removed as trees and symlinks are unlinked. Any other type is preserved and
+  logged rather than deleted — only the symlink leak is being fixed.
+- **`copy_skill` now holds the destination sidecar lock**, like every other
+  first-party skill writer (ADR-0030 §6). It was the one path that could park a
+  move-aside tree no other writer knew about, so a concurrent gateway push or
+  import could reap it and leave this copy's rollback with nothing to restore.
+  Two consequences for direct callers of this public helper: it can now raise
+  `TimeoutError` when another writer holds the destination past the 30s
+  acquisition budget, and an invalid source is rejected before the lock is
+  taken so a failed call still creates nothing.
 - **Skills Pull no longer clobbers a skill created concurrently during
   staging** (#1839) — a first-time runtime→Store import now promotes its staged
   directory with an OS-level atomic no-replace rename. If a shell, editor, or

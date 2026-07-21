@@ -3,7 +3,8 @@
  * Drives the real ``loadCtxDetail`` + ``_ctxLoadVersions`` against a stubbed
  * fetch and asserts the version section renders for dir-layout agents/commands,
  * the freeze/promote/delete buttons hit the right routes, a flat-layout artifact
- * shows the migrate hint, and skills never mount the section at all.
+ * shows the migrate hint, and skills mount the section READ-ONLY (ADR-0030 §10)
+ * — listing their tree snapshots with no write affordance.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -180,11 +181,54 @@ describe('ADR-0022 detail version manager', () => {
     expect(section.querySelector('.ctx-version-empty')).not.toBeNull();
   });
 
-  it('skills never mount the version section', async () => {
+  it('skills mount the version section READ-ONLY (ADR-0030 §10)', async () => {
+    // Was "skills never mount the version section" until PR-G3 gave skills a
+    // tree-snapshot store. They mount and list, but render no write control —
+    // a control the server would 409 is worse than no control.
     const calls = [];
-    const { window } = await bootDetail('skills', 'demo', calls);
+    const { window } = await bootDetail('skills', 'demo', calls, {
+      versionsPayload: {
+        ...VERSIONS_PAYLOAD,
+        artifact_type: 'skills',
+        writable: false,
+        versions: [
+          { tag: 'v2', created_at: '2026-07-19T11:00:00Z', note: '', layout: 'tree' },
+          { tag: 'v1', created_at: '2026-07-19T09:00:00Z', note: '', layout: 'tree' },
+        ],
+      },
+    });
     const detailEl = window.document.getElementById('ctx-skills-detail');
-    expect(detailEl.querySelector('.ctx-detail-versions')).toBeNull();
+    const section = detailEl.querySelector('.ctx-detail-versions');
+    expect(section).not.toBeNull();
+    expect(section.hidden).toBe(false);
+    expect(section.querySelectorAll('.ctx-version-row').length).toBe(2);
+    expect(section.querySelector('.ctx-version-readonly')).not.toBeNull();
+
+    // No write affordances, and none of them fired a mutating request.
+    expect(section.querySelector('.ctx-version-freeze-btn')).toBeNull();
+    expect(section.querySelector('.ctx-version-promote-btn')).toBeNull();
+    expect(section.querySelector('.ctx-version-label-select')).toBeNull();
+    expect(section.querySelector('.ctx-version-label-remove')).toBeNull();
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+  });
+
+  it('an empty read-only history does not advertise freezing', async () => {
+    const calls = [];
+    const { window } = await bootDetail('skills', 'demo', calls, {
+      versionsPayload: {
+        ...VERSIONS_PAYLOAD,
+        artifact_type: 'skills',
+        writable: false,
+        versions: [],
+        labels: {},
+        has_versions: false,
+      },
+    });
+    const empty = window.document
+      .getElementById('ctx-skills-detail')
+      .querySelector('.ctx-version-empty');
+    expect(empty.getAttribute('data-i18n')).toBe('settings.ctx.versions.empty_read_only');
+    expect(empty.textContent.toLowerCase()).not.toContain('freeze');
   });
 
   it('re-translates the freeze button text on langchange (data-i18n)', async () => {

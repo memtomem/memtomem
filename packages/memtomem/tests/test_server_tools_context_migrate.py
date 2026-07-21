@@ -158,7 +158,9 @@ async def test_mem_context_memory_migrate_from_equals_to_rejected(
         from_scope="user",
         to_scope="user",
     )
-    assert out == "error: --from and --to must differ."
+    # THIS surface's parameter names, not the CLI's ``--from`` / ``--to``:
+    # an agent cannot pass a flag (#1869).
+    assert out == "error: from_scope and to_scope must differ."
 
 
 # ---------------------------------------------------------------------------

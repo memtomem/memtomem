@@ -8,9 +8,12 @@ the manifest.
 
 Scope boundaries (ADR-0022):
 
-- **agents + commands only.** ``skills`` are directory-tree artifacts whose
-  "version" is a tree snapshot, not a single ``.md`` copy (invariant 7); any
-  other type returns 404 here.
+- **agents + commands are writable; skills are READ-ONLY.** A skill is a
+  directory tree, so its version is a ``versions/vN/`` tree snapshot rather
+  than a single ``.md`` copy (ADR-0030 §10). Reads work for all three; every
+  skill mutation is refused with 409 ``version_writes_read_only``, because a
+  skill version is created only internally by an overwrite-Pull and labeled
+  skill fan-out is deferred. Any other type returns 404.
 - **directory layout only.** A flat-layout artifact (``agents/<name>.md``) has
   no per-artifact home for a ``versions/`` store (invariant 3). Mutations on a
   flat artifact return 409 (enable versioning via ``POST .../versions/enable``,
@@ -35,6 +38,7 @@ import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -46,6 +50,7 @@ from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context.agents import resolve_canonical_agent
 from memtomem.context.commands import resolve_canonical_command
 from memtomem.context.migrate import adopt_flat_to_dir
+from memtomem.context.skills import resolve_canonical_skill
 from memtomem.context.versioning import (
     LabelNotFoundError,
     UnsupportedSchemaVersionError,
@@ -68,17 +73,39 @@ router = APIRouter(tags=["context-versions"])
 # 30s < 60s mirrors context_mutations/context_transfer/wiki-commit).
 _VERSIONS_LOCK_BUDGET_S = 30.0
 
-# Artifact types eligible for versioning → (resolver, validate_name kind).
-# Skills are excluded by design (ADR-0022 invariant 7); any other type 404s.
+# Artifact types eligible for versioning. Any other type 404s.
 _Resolver = Callable[[Path, str, TargetScope], "tuple[Path, Layout] | None"]
-_ELIGIBLE: dict[str, tuple[_Resolver, str]] = {
-    "agents": (
+
+
+class _Eligible(NamedTuple):
+    resolver: _Resolver
+    kind: str  # validate_name kind
+    #: ``False`` ⇒ READ-ONLY version surface (skills, ADR-0030 §10). Reads work;
+    #: every mutation is refused by :func:`_require_version_writes`.
+    writable: bool
+
+
+_ELIGIBLE: dict[str, _Eligible] = {
+    "agents": _Eligible(
         lambda root, name, scope: resolve_canonical_agent(root, name, scope=scope),
         "agent",
+        True,
     ),
-    "commands": (
+    "commands": _Eligible(
         lambda root, name, scope: resolve_canonical_command(root, name, scope=scope),
         "command",
+        True,
+    ),
+    # ADR-0030 §10: skills READ their tree-snapshot version store here. Writes
+    # stay refused — a skill version is created only internally by an
+    # overwrite-Pull, and labeled skill fan-out is deferred. The resolver
+    # returns ``SKILL.md``, whose ``.parent`` is the artifact directory that
+    # owns ``versions/`` — the same relationship ``agent.md`` has, which is why
+    # every route below works unchanged.
+    "skills": _Eligible(
+        lambda root, name, scope: resolve_canonical_skill(root, name, scope=scope),
+        "skill",
+        False,
     ),
 }
 
@@ -147,15 +174,54 @@ def _resolve_versionable(
         raise _error(
             404,
             "missing",
-            (f"Versioning is not supported for {artifact_type!r} (agents and commands only)."),
+            (
+                f"Versioning is not supported for {artifact_type!r} "
+                f"({', '.join(sorted(_ELIGIBLE))} only)."
+            ),
         )
-    resolver, kind = entry
-    name = validate_name(raw_name, kind=kind)
-    resolved = resolver(project_root, name, scope)
+    name = validate_name(raw_name, kind=entry.kind)
+    resolved = entry.resolver(project_root, name, scope)
     if resolved is None:
-        raise _error(404, "missing", f"{kind} {name!r} not found")
+        raise _error(404, "missing", f"{entry.kind} {name!r} not found")
     working_file, layout = resolved
     return name, working_file, layout
+
+
+def _is_read_only_version_type(artifact_type: str) -> bool:
+    """Whether *artifact_type* has a read-only version surface (skills, §10).
+
+    ``False`` for an UNKNOWN type: those must keep falling through to the
+    existing 404 (or, on the write routes, the tier gate that already ran for
+    them), not be reclassified as read-only.
+    """
+    entry = _ELIGIBLE.get(artifact_type)
+    return entry is not None and not entry.writable
+
+
+def _require_version_writes(artifact_type: str) -> None:
+    """409 when the type's version surface is read-only (skills, ADR-0030 §10).
+
+    Deliberately a DIFFERENT failure from the unsupported-type 404: the store
+    exists and is readable, so "not found" would be a lie, and the UI could not
+    tell "no such surface" from "this surface is read-only".
+
+    Read-only is a property of the TYPE, so callers invoke this BEFORE
+    resolution, alongside ``_reject_non_shared_write`` — which this router has
+    always run ahead of existence. The read route still distinguishes the two:
+    a ``GET`` on a missing skill 404s normally.
+    """
+    if not _is_read_only_version_type(artifact_type):
+        return
+    raise _error(
+        409,
+        "conflict",
+        (
+            f"Version writes are not supported for {artifact_type!r}: a {artifact_type} "
+            f"version is written only by the Store itself, and that path is not exposed "
+            f"yet (ADR-0030 §10). Reading the version history works."
+        ),
+        reason_code="version_writes_read_only",
+    )
 
 
 def _require_dir_layout(name: str, layout: Layout) -> None:
@@ -261,6 +327,8 @@ async def list_artifact_versions(
     name, working_file, layout = _resolve_versionable(
         artifact_type, project_root, name, target_scope
     )
+    # Server-driven so the UI never has to hardcode the read-only type set.
+    writable = _ELIGIBLE[artifact_type].writable
     if layout != "dir":
         return {
             "name": name,
@@ -271,6 +339,7 @@ async def list_artifact_versions(
             "labels": {},
             "has_versions": False,
             "migrate_required": True,
+            "writable": writable,
         }
 
     artifact_dir = working_file.parent
@@ -280,7 +349,9 @@ async def list_artifact_versions(
         raise _version_http(exc) from exc
 
     versions = [
-        {"tag": rec.tag, "created_at": rec.created_at, "note": rec.note}
+        # ``layout`` per row so the UI can badge a tree snapshot (skills) —
+        # the store holds both shapes (ADR-0030 §10).
+        {"tag": rec.tag, "created_at": rec.created_at, "note": rec.note, "layout": rec.layout}
         for rec in sorted(manifest.versions.values(), key=lambda r: int(r.tag[1:]), reverse=True)
     ]
     return {
@@ -292,6 +363,7 @@ async def list_artifact_versions(
         "labels": dict(manifest.labels),
         "has_versions": bool(manifest.versions),
         "migrate_required": False,
+        "writable": writable,
     }
 
 
@@ -319,6 +391,7 @@ async def create_artifact_version(
     ``versions/vN.md`` at deploy time (ADR-0022 / ``make_label_resolver``), so
     the trust boundary stays at fan-out, exactly as the working-file path does.
     """
+    _require_version_writes(artifact_type)
     _reject_non_shared_write(target_scope, "Create version")
     name, working_file, layout = _resolve_versionable(
         artifact_type, project_root, name, target_scope
@@ -411,7 +484,13 @@ async def enable_artifact_versioning(
     runtime fan-out, so it follows the canonical-write tier policy
     (``project_shared``-only this release), not the sync-eligibility gate.
     """
-    _reject_non_shared_write(target_scope, "Enable versioning")
+    if not _is_read_only_version_type(artifact_type):
+        # A read-only type's enable is a pure no-op on EVERY tier (skills are
+        # always dir layout), so the canonical-write tier policy has nothing to
+        # protect here — applying it would turn the documented cross-surface
+        # no-op into a 400 on the user / project_local tiers, where the CLI and
+        # MCP twins both still succeed.
+        _reject_non_shared_write(target_scope, "Enable versioning")
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
@@ -420,6 +499,20 @@ async def enable_artifact_versioning(
                 name, working_file, layout = _resolve_versionable(
                     artifact_type, project_root, name, target_scope
                 )
+                if not _ELIGIBLE[artifact_type].writable:
+                    # ADR-0030 §10: enable is flat→dir adoption, and skills are
+                    # ALWAYS dir layout — there is nothing to adopt. Report the
+                    # idempotent no-op rather than the read-only 409: the
+                    # requested end state (dir layout, versionable) already
+                    # holds, and the flat/dir collision checks below are
+                    # meaningless for a type with no flat form.
+                    return {
+                        "name": name,
+                        "artifact_type": artifact_type,
+                        "target_scope": target_scope,
+                        "layout": "dir",
+                        "migrated": False,
+                    }
                 # canonical ``<type>`` root: parent of the dir for dir layout,
                 # parent of the file for flat layout.
                 canonical_root = (
@@ -517,6 +610,7 @@ async def promote_artifact_label(
 ) -> dict:
     """Point *label* at *version* (create-or-move). Promote and rollback are the
     same operation — both just move the pointer to a frozen version."""
+    _require_version_writes(artifact_type)
     _reject_non_shared_write(target_scope, "Promote label")
     name, working_file, layout = _resolve_versionable(
         artifact_type, project_root, name, target_scope
@@ -569,6 +663,7 @@ async def delete_artifact_label(
 ) -> dict:
     """Remove *label* from the manifest. No-op (still 200) when the label is
     absent; rejects the reserved ``latest`` with 400."""
+    _require_version_writes(artifact_type)
     _reject_non_shared_write(target_scope, "Delete label")
     name, working_file, layout = _resolve_versionable(
         artifact_type, project_root, name, target_scope

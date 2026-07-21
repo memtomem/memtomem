@@ -242,6 +242,13 @@ def versioning_op_locked(
     ``delete_label`` need it because a bare ``versions.json`` mutation can race a
     transfer that moves the whole artifact directory out from under them
     (ADR-0030 §6 / Codex B4).
+
+    ONLY for callers OUTSIDE a canonical transaction. The canonical sidecar
+    lock is non-reentrant, so a caller that already holds it — the skills
+    overwrite-Pull commit, which snapshots via
+    :func:`memtomem.context.versioning.create_tree_version` — must call the
+    versioning op directly with its own remaining budget. Wrapping it here
+    would re-acquire the lock it is standing on and self-deadlock.
     """
     deadline = None if timeout is None else time.monotonic() + timeout
 

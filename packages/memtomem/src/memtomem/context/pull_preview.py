@@ -23,21 +23,21 @@ Two surfaces, two questions (the load-bearing distinction — Codex design
 gate):
 
 * **Gate scan + §5 landing grouping use the EXACT copier surface**
-  (:func:`~memtomem.context.skills._iter_scannable_skill_files` for skills)
-  — everything a Pull actually copies, including a runtime's top-level
+  (:func:`~memtomem.context.skill_payload.read_skill_tree` for skills) —
+  everything a Pull actually copies, including a runtime's top-level
   ``overrides/`` / ``versions/``. A secret hiding there must be scanned
   because it would be copied; two candidates whose visible skill content
   matches but whose metadata differs land *different* trees and must not be
   auto-selected.
 * **The Store content comparison uses the PAYLOAD surface**
-  (:func:`iter_skill_payload_files`) — the actual skill content, excluding
-  Store-owned ``overrides/`` / ``versions/`` / ``versions.json`` the runtime
-  legitimately lacks. Counting them would report every versioned skill as
-  ``differs`` forever. This is the seed of the ADR-0030 §10 unified payload
-  iterator; PR-G converges the tree digest / snapshot / scan / fan-out onto
-  it. PR-B intentionally introduces **no persisted SHA digest** — landing
-  grouping is in-memory structural equality, so §10's digest byte-framing
-  stays PR-G's decision.
+  (:func:`~memtomem.context.skill_payload.iter_skill_payload_files`) — the
+  actual skill content, excluding Store-owned ``overrides/`` / ``versions/`` /
+  ``versions.json`` the runtime legitimately lacks. Counting them would report
+  every versioned skill as ``differs`` forever.
+
+Both surfaces now live in :mod:`memtomem.context.skill_payload` (ADR-0030 §10,
+PR-G2) together with the canonical tree digest; this module consumes them.
+Landing grouping stays in-memory structural equality — it does not hash.
 
 Non-goals for PR-B (later PRs): writes / snapshot / lock (PR-B2), CLI
 ``mm context pull`` (PR-C), Web picker (PR-D), MCP parity (PR-H). The §5
@@ -57,14 +57,17 @@ from typing import Literal
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._gate_a import GateStatus, classify_gate_status
-from memtomem.context._names import is_internal_artifact_dir
 from memtomem.context._runtime_targets import (
     IMPORT_SOURCE_RUNTIMES,
     KNOWN_RUNTIMES,
     runtime_fanout_root,
 )
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
-from memtomem.context.versioning import _MANIFEST_FILENAME, _VERSIONS_DIRNAME
+from memtomem.context.skill_payload import (
+    is_payload_relpath,
+    iter_skill_payload_files,
+    read_skill_tree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,27 +75,6 @@ logger = logging.getLogger(__name__)
 # (``classify_gate_status`` passes ``record_outcome=False``), but a distinct
 # literal keeps the preview path identifiable if that ever changes.
 _PREVIEW_SURFACE = "context_pull_preview"
-
-# Store-owned internal metadata excluded from the *payload* surface (ADR-0030
-# §10). The runtime side never carries these; counting them in the Store
-# comparison would make every versioned / override-carrying skill read as
-# ``differs`` and would contaminate PR-G's tree digest. NOT excluded from the
-# copier/gate surface (a secret under them would still be copied by a Pull).
-# Names are pulled from the version store's own constants so the exclusion set
-# cannot drift from the writer (Codex code review — locks/temps were missing).
-_OVERRIDES_DIRNAME = "overrides"
-_PAYLOAD_EXCLUDED_TOP_DIRS = frozenset({_OVERRIDES_DIRNAME, _VERSIONS_DIRNAME})
-# ``atomic_write_bytes`` leaves ``.{name}.*.tmp`` siblings; ``_lock_path_for``
-# writes ``.{name}.lock`` — both next to ``versions.json`` at the skill root.
-_MANIFEST_LOCK_NAME = f".{_MANIFEST_FILENAME}.lock"
-_MANIFEST_TMP_PREFIX = f".{_MANIFEST_FILENAME}."
-
-
-def _is_store_internal_top_file(name: str) -> bool:
-    """Top-level version-store metadata files (manifest + its lock/temp sidecars)."""
-    if name == _MANIFEST_FILENAME or name == _MANIFEST_LOCK_NAME:
-        return True
-    return name.startswith(_MANIFEST_TMP_PREFIX) and name.endswith(".tmp")
 
 
 ContentStatus = Literal[
@@ -158,55 +140,6 @@ class PullPreview:
     # ``content_status`` used, so a ``--diff`` can never disagree with the
     # rendered status. CLI-only, never serialized on the wire.
     store_content: tuple[tuple[str, bytes], ...] | None = None
-
-
-def iter_skill_payload_files(root: Path) -> list[tuple[str, bytes]]:
-    """The skill *payload* as sorted ``(posix_relpath, bytes)`` (ADR-0030 §10 seed).
-
-    Built by filtering the copier surface
-    (:func:`~memtomem.context.skills._iter_scannable_skill_files`, which already
-    drops ``COPY_SKIP_NAMES`` and symlinks and fails CLOSED on ``OSError``) down
-    to the artifact payload: excludes top-level ``overrides/`` and ``versions/``
-    directories and a top-level ``versions.json`` — the Store-owned internal
-    metadata that must never count as skill *content*. Nested files of the same
-    name are kept (only the top level is Store-owned).
-
-    Propagates ``OSError`` (unreadable subtree or file) so callers fail closed.
-    PR-G generalizes this into the single tree-digest/snapshot/scan/fan-out
-    iterator; keep the exclusion set identical when that lands.
-    """
-    return [(rel, data) for rel, data in _read_skill_tree(root) if _is_payload_relpath(rel)]
-
-
-def _is_payload_relpath(rel: str) -> bool:
-    parts = rel.split("/")
-    top = parts[0]
-    # Store-owned top-level dirs, plus our own crash-leftover staging/move-aside
-    # trees (``is_internal_artifact_dir`` — the same predicate the extract/reap
-    # paths use so "hidden" and "excluded" can't drift).
-    if top in _PAYLOAD_EXCLUDED_TOP_DIRS or is_internal_artifact_dir(top):
-        return False
-    if len(parts) == 1 and _is_store_internal_top_file(top):
-        return False
-    return True
-
-
-def _read_skill_tree(root: Path) -> list[tuple[str, bytes]]:
-    """Full copier surface of a skill dir as sorted ``(posix_relpath, bytes)``.
-
-    Uses the copier-surface iterator so gate scanning and §5 grouping see the
-    exact bytes a Pull would land. Raises ``OSError`` (fail closed).
-    """
-    # Imported lazily to avoid import-order coupling with the large skills
-    # module (which imports the gate/override leaves this module also uses).
-    from memtomem.context.skills import _iter_scannable_skill_files
-
-    files: list[tuple[str, bytes]] = []
-    for path in _iter_scannable_skill_files(root):
-        rel = path.relative_to(root).as_posix()
-        files.append((rel, path.read_bytes()))
-    files.sort()
-    return files
 
 
 # ── internal working row (mutable; grouping needs a second pass) ──────────
@@ -304,7 +237,7 @@ def _read_landing(
     """
     if kind == "skills":
         skill_dir = path.parent
-        full = _read_skill_tree(skill_dir)
+        full = read_skill_tree(skill_dir)
         manifest_name = _skill_manifest_name()
         manifest = next((data for rel, data in full if rel == manifest_name), None)
         if manifest is None:
@@ -315,7 +248,7 @@ def _read_landing(
             # ``landing_error`` (parity with ``skills._stage_skill``, which
             # refuses a manifest-less source).
             raise FileNotFoundError(f"source skill missing {manifest_name}: {skill_dir}")
-        payload = [(rel, data) for rel, data in full if _is_payload_relpath(rel)]
+        payload = [(rel, data) for rel, data in full if is_payload_relpath(rel)]
         return full, payload, manifest
     if kind == "commands" and runtime == "gemini":
         from memtomem.context.commands import _gemini_toml_to_canonical

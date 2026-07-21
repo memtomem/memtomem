@@ -577,8 +577,18 @@ async function _ctxMaybeForceUnsafeImport(data, reimport) {
 // fully-localized user-tier hint ALONE (it already states the block AND the
 // remedy) rather than prefixing the English detail. Every other status falls
 // back to the shared error-detail renderer unchanged.
-function _ctxImportErrToast(status, detail) {
-  if (status === 422) return t('settings.ctx.privacy_blocked_shared_hint');
+// ``kind`` picks the remediation (#1869): "Pull to user library" is a REAL
+// cross-tier route, but only for skills (``/api/context/skills/<name>/
+// import-to-user``). Offering it for an agent or a command names a control
+// that does not exist on those panes — the same defect as naming a CLI flag at
+// an MCP client. Unknown/omitted kind falls back to the remove-only copy,
+// which is true for every kind.
+function _ctxImportErrToast(status, detail, kind) {
+  if (status === 422) {
+    return kind === 'skills'
+      ? t('settings.ctx.privacy_blocked_shared_hint')
+      : t('settings.ctx.privacy_blocked_shared_hint_remove_only');
+  }
   return _ctxErrDetail(detail, t('toast.request_failed'));
 }
 
@@ -666,11 +676,11 @@ async function _ctxMaybeForceUnsafeSync(data, resync) {
 // offers the #1379 reviewed Gate A force valve. Resolves to the final payload,
 // or ``null`` when the user bailed at a gate or an error was already toasted
 // (the caller owns the success/skip toast + list refresh).
-async function _ctxRunRuntimeImportFlow(importOnce) {
+async function _ctxRunRuntimeImportFlow(importOnce, kind) {
   let r = await importOnce({});
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    showToast(_ctxImportErrToast(r.status, err.detail), 'error');
+    showToast(_ctxImportErrToast(r.status, err.detail, kind), 'error');
     return null;
   }
   let data = await r.json();
@@ -679,7 +689,7 @@ async function _ctxRunRuntimeImportFlow(importOnce) {
     if (!r) return null;
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      showToast(_ctxImportErrToast(r.status, err.detail), 'error');
+      showToast(_ctxImportErrToast(r.status, err.detail, kind), 'error');
       return null;
     }
     data = await r.json();

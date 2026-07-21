@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 __all__ = [
     "NamespaceOut",
@@ -10,6 +10,7 @@ __all__ = [
     "NamespaceMetaRequest",
     "RenameRequest",
     "NamespaceInfoResponse",
+    "NamespaceRenameResponse",
 ]
 
 
@@ -32,6 +33,10 @@ class NamespaceMetaRequest(BaseModel):
 
 class RenameRequest(BaseModel):
     new_name: str = Field(..., min_length=1, max_length=200)
+    # StrictBool: consolidating two namespaces is destructive (the source's
+    # metadata row is dropped), so consent must be a literal JSON boolean —
+    # a coerced ``"false"`` would read as true.
+    merge: StrictBool = False
 
 
 class NamespaceInfoResponse(BaseModel):
@@ -39,3 +44,17 @@ class NamespaceInfoResponse(BaseModel):
     chunk_count: int
     description: str = ""
     color: str = ""
+
+
+class NamespaceRenameResponse(NamespaceInfoResponse):
+    """Rename receipt: the namespace as it now stands, plus what the rename did.
+
+    ``chunk_count`` is the target's resulting total (same meaning as on the
+    info/list endpoints); ``chunks_moved`` and ``duplicates_dropped`` describe
+    the operation. The latter is a deletion — chunks the destination already
+    held — so it is reported rather than folded into the totals.
+    """
+
+    chunks_moved: int = 0
+    duplicates_dropped: int = 0
+    merged: bool = False
