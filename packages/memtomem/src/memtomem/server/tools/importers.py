@@ -10,6 +10,10 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._provenance import (
+    capture_session_for_untracked_write,
+    flag_untracked_write,
+)
 
 
 @mcp.tool()
@@ -41,6 +45,13 @@ async def mem_import_notion(
     from memtomem.indexing.importers import import_notion
 
     app = await _get_app_initialized(ctx)
+    # A bulk import is not session work — its chunks are an ingest, and
+    # summarizing them would describe someone else's notes as this
+    # session's output. But it does change the session's chunk set, so
+    # the session must stop claiming its provenance is the whole story.
+    # Captured before the import's awaits so a session that ends midway
+    # still gets the flag.
+    provenance_session_id = await capture_session_for_untracked_write(app)
     export_path = Path(path).expanduser().resolve()
 
     if not export_path.exists():
@@ -108,6 +119,9 @@ async def mem_import_notion(
 
     app.search_pipeline.invalidate_cache()
 
+    if total_chunks:
+        await flag_untracked_write(app, provenance_session_id)
+
     return (
         f"Notion import complete:\n"
         f"- Files imported: {len(imported)}\n"
@@ -147,6 +161,13 @@ async def mem_import_obsidian(
     from memtomem.indexing.importers import import_obsidian
 
     app = await _get_app_initialized(ctx)
+    # A bulk import is not session work — its chunks are an ingest, and
+    # summarizing them would describe someone else's notes as this
+    # session's output. But it does change the session's chunk set, so
+    # the session must stop claiming its provenance is the whole story.
+    # Captured before the import's awaits so a session that ends midway
+    # still gets the flag.
+    provenance_session_id = await capture_session_for_untracked_write(app)
     vault = Path(vault_path).expanduser().resolve()
 
     if not vault.exists() or not vault.is_dir():
@@ -213,6 +234,9 @@ async def mem_import_obsidian(
                 await app.storage.upsert_chunks(chunks)
 
     app.search_pipeline.invalidate_cache()
+
+    if total_chunks:
+        await flag_untracked_write(app, provenance_session_id)
 
     return (
         f"Obsidian import complete:\n"

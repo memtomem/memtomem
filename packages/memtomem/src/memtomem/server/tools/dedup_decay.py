@@ -8,6 +8,10 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._provenance import (
+    capture_session_for_untracked_write,
+    flag_untracked_write,
+)
 from memtomem.storage.orphan_detect import scan_orphans
 
 
@@ -200,6 +204,9 @@ async def mem_cleanup_orphans(
         lines.append("\nSet dry_run=False to delete these chunks.")
         return "\n".join(lines)
 
+    # Same reason as ``mem_ns_delete``: a reaped chunk may be one an
+    # earlier provenance event named.
+    provenance_session_id = await capture_session_for_untracked_write(app)
     total_deleted = 0
     for sf in orphaned:
         deleted = await app.storage.delete_by_source(sf)
@@ -207,6 +214,7 @@ async def mem_cleanup_orphans(
 
     if total_deleted > 0:
         app.search_pipeline.invalidate_cache()
+        await flag_untracked_write(app, provenance_session_id)
 
     return (
         f"Cleanup complete:\n- Orphaned files: {len(orphaned)}\n- Chunks deleted: {total_deleted}"

@@ -50,11 +50,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   The marker says a session *records* provenance, not that the record is
   complete. `provenance_incomplete` is set separately — on truncation past
-  the per-event id cap, on a failed event write, when a write outran session
-  teardown or the teardown drain timed out, and when `mem_edit`/`mem_delete`
-  ran inside the session (they re-chunk rather than add, so recording their
-  ids would describe a rewrite as new material). Sessions created by the CLI
-  or the LangGraph adapter carry no marker and are unaffected.
+  the per-event id cap, on a failed or un-indexed write, and when a write
+  outran session teardown or the teardown drain timed out. It is also set by
+  every tool that changes a session's chunk set without being summarizable
+  from it: `mem_edit` and `mem_delete` (they re-chunk rather than add, so
+  recording their ids would describe a rewrite as new material), the bulk
+  delete paths including `mem_ns_delete` and `mem_cleanup_orphans` (they
+  remove chunks an earlier event still names), and the bulk importers
+  `mem_import`, `mem_import_notion` and `mem_import_obsidian` (their output
+  is an ingest, not session work). A test walks the tool source and fails if
+  a new surface reaches the indexing engine or deletes chunks while doing
+  neither — a hand-written list of write surfaces checked against itself is
+  how the importers and bulk deletes were missed in the first place.
+
+  Sessions created by the CLI or the LangGraph adapter carry no marker and
+  are unaffected.
 
   One visible change today: indexing a large tree inside a session can
   outlast the 2-second teardown drain, so `mem_session_end` reports

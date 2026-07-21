@@ -194,3 +194,43 @@ async def record_write_provenance(
 
     if truncated or sealed:
         await mark_provenance_incomplete(app, session_id)
+
+
+async def capture_session_for_untracked_write(app: AppContext) -> str | None:
+    """Read the active session id before an operation that changes the
+    session's inputs without recording them.
+
+    Read *before* the operation's awaits, not after: reading afterwards
+    would let a session that ended meanwhile lose the flag entirely, or a
+    session that started meanwhile inherit the previous one's mutation.
+    That is the same attribution mistake this issue exists to fix, so it
+    must not be reintroduced by the code fixing it.
+    """
+    async with app._session_lock:
+        return app.current_session_id
+
+
+async def flag_untracked_write(app: AppContext, session_id: str | None) -> None:
+    """Tell a session its provenance does not describe everything that
+    happened inside it.
+
+    Used by the surfaces that change a session's chunk set without
+    recording a provenance event: ``mem_edit`` and ``mem_delete``, whose
+    ``new_chunk_ids`` are re-chunk artifacts rather than new material
+    (summarizing them would describe a rewrite as something newly
+    written, while the ids an earlier write recorded for the same file
+    have just gone dangling); the bulk delete branches, which remove
+    chunks an earlier event still names; and the bulk importers, whose
+    output is an ingest rather than session work.
+
+    Staying silent is the one option not available for any of them. The
+    session would carry the provenance marker, report only the writes
+    that *were* tracked, and leave nothing for a consumer to trip over —
+    so a partial record would read as a complete one. The flag makes the
+    gap visible without pretending to describe it.
+
+    No write gauge on these paths on purpose: they write no session
+    *event*, and the flag lands correctly even on an already-ended row,
+    so there is nothing for session teardown to snapshot around.
+    """
+    await mark_provenance_incomplete(app, session_id)

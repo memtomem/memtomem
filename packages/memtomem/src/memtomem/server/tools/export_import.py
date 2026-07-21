@@ -9,6 +9,10 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._provenance import (
+    capture_session_for_untracked_write,
+    flag_untracked_write,
+)
 
 
 @mcp.tool()
@@ -124,6 +128,14 @@ async def mem_import(
     if mismatch_msg:
         return mismatch_msg
 
+    # A bundle import is an ingest, not session work: its chunks are
+    # someone else's notes and summarizing them would describe them as
+    # this session's output. It does change the session's chunk set, so
+    # the session stops claiming its provenance is the whole story.
+    # Captured before the import's awaits so a session that ends midway
+    # through still gets the flag.
+    provenance_session_id = await capture_session_for_untracked_write(app)
+
     # Resolved, intentionally unrestricted (ADR-0006 Axis F/G): the import trust
     # boundary is the F.3 redaction gate below, not this path.
     source = Path(input_file).expanduser().resolve()
@@ -148,6 +160,9 @@ async def mem_import(
             "pattern(s); import rejected. Retry with force_unsafe=True to "
             "bypass (audit-logged)."
         )
+
+    if stats.imported_chunks or stats.updated_chunks:
+        await flag_untracked_write(app, provenance_session_id)
 
     return (
         f"Import complete ({on_conflict=}, {preserve_ids=}):\n"

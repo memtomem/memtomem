@@ -283,6 +283,84 @@ async def _provenance_events(app, session_id):
     ]
 
 
+class TestEveryChunkCreatingSurfaceIsAccountedFor:
+    """No tool may create chunks and say nothing about it.
+
+    This guard exists because the first version of this feature was
+    scoped from a hand-written list of seven write surfaces and then
+    tested against that same list — so the three importers and the two
+    bulk delete branches, which also change a session's chunk set, were
+    invisible to both the design and its tests. A list checked against
+    itself certifies nothing.
+
+    So the source is the authority instead: any function that reaches the
+    indexing engine or deletes chunks must either record provenance or
+    flag the session. A new surface that does neither fails here rather
+    than silently shipping a session that claims a complete record.
+    """
+
+    # Chunk-mutating calls. Reaching any of these obliges a function to
+    # account for what it did.
+    _CHUNK_CALLS = frozenset(
+        {
+            "index_file",
+            "index_path",
+            "import_chunks",
+            "delete_by_source",
+            "delete_by_namespace",
+        }
+    )
+    # The two ways to account for it.
+    _ACCOUNTING_CALLS = frozenset(
+        {
+            "record_write_provenance",
+            "flag_untracked_write",
+            "mark_provenance_incomplete",
+        }
+    )
+    # Functions that create chunks but are provably not session inputs.
+    _EXEMPT = {
+        # The session's own summary is an output of teardown, not one of
+        # the inputs it summarizes. Instrumenting it would make every
+        # session record a write it performed on itself.
+        ("session.py", "_persist_session_summary_chunk"),
+        # Shared tail of mem_edit / mem_delete's chunk branch: its callers
+        # capture and flag around it, and it is covered by the
+        # ``_mutate_file_and_reindex`` accounting one frame up.
+    }
+
+    def test_no_chunk_creating_tool_is_silent(self):
+        import ast
+        from pathlib import Path
+
+        import memtomem
+
+        tools = Path(memtomem.__file__).parent / "server" / "tools"
+        offenders: list[str] = []
+        for path in sorted(tools.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if (path.name, node.name) in self._EXEMPT:
+                    continue
+                called = {
+                    c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id
+                    for c in ast.walk(node)
+                    if isinstance(c, ast.Call) and isinstance(c.func, (ast.Attribute, ast.Name))
+                }
+                if called & self._CHUNK_CALLS and not (called & self._ACCOUNTING_CALLS):
+                    offenders.append(f"{path.name}::{node.name}")
+
+        assert not offenders, (
+            "These functions create or delete chunks without recording provenance "
+            "or flagging the session, so a session containing them would report a "
+            "complete record of an incomplete one:\n  - " + "\n  - ".join(sorted(offenders))
+        )
+
+
 class TestMemAddCoreCallSiteLabels:
     """Every ``_mem_add_core`` caller names itself, and names itself
     *differently*.
@@ -786,6 +864,77 @@ class TestMutationSurfacesFlagTheSession:
 
         # No second event: an edit's chunk ids are re-chunk artifacts.
         assert [e["event_type"] for e in await _provenance_events(app, session_id)] == ["add"]
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_bulk_namespace_delete_marks_the_session_incomplete(self, bm25_only_components):
+        """``mem_delete(namespace=...)`` bypasses the chunk branch
+        entirely, so it needs its own marker — it removes chunks an
+        earlier provenance event still names."""
+        from memtomem.server.tools.memory_crud import mem_add, mem_delete
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="a fact that will be bulk-deleted", ctx=ctx)  # type: ignore[arg-type]
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+        await mem_delete(namespace="agent-runtime:planner", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_bulk_delete_that_removed_nothing_flags_nothing(self, bm25_only_components):
+        """The flag has to mean something, so it fires on an actual
+        change rather than on the attempt."""
+        from memtomem.server.tools.memory_crud import mem_add, mem_delete
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="a fact that survives", ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_delete(namespace="some-empty-namespace", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_namespace_tool_delete_marks_the_session_incomplete(self, bm25_only_components):
+        """``mem_ns_delete`` is a separate tool from ``mem_delete`` and
+        was missed by the original seven-surface list — the AST guard
+        found it."""
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.namespace import mem_ns_delete
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="a fact in the planner namespace", ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_ns_delete(namespace="agent-runtime:planner", ctx=ctx)  # type: ignore[arg-type]
+
         row = await app.storage.get_session(session_id)
         assert row["metadata"]["provenance_incomplete"] is True
 

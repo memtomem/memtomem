@@ -12,6 +12,10 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._provenance import (
+    capture_session_for_untracked_write,
+    flag_untracked_write,
+)
 from memtomem.server.tools._validation import strict_bool
 
 
@@ -51,7 +55,12 @@ async def mem_ns_delete(
     """
     validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
+    # Removing chunks an earlier provenance event still names leaves the
+    # session's record describing a chunk set that no longer exists.
+    provenance_session_id = await capture_session_for_untracked_write(app)
     deleted = await app.storage.delete_by_namespace(namespace)
+    if deleted:
+        await flag_untracked_write(app, provenance_session_id)
     return f"Deleted {deleted} chunks from namespace '{namespace}'"
 
 

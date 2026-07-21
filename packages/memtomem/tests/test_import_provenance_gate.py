@@ -19,6 +19,7 @@ Pins the trust-boundary behavior issue #1483 builds:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
@@ -315,7 +316,17 @@ async def test_mem_import_foreign_secret_rejected_then_force_unsafe(tmp_path, mo
     import memtomem.server.tools.export_import as mcp_ei
 
     storage = await _make_storage(tmp_path)
-    app = SimpleNamespace(storage=storage, embedder=_FakeEmbedder())
+    # ``_session_lock`` / ``current_session_id``: ``mem_import`` marks the
+    # active session's provenance incomplete (#1876) — a bulk import
+    # changes the session's chunk set without being summarizable from it.
+    # There is no session here, so the marker is a no-op; the stub only
+    # has to let the read happen.
+    app = SimpleNamespace(
+        storage=storage,
+        embedder=_FakeEmbedder(),
+        _session_lock=asyncio.Lock(),
+        current_session_id=None,
+    )
 
     async def _fake_get_app(ctx):
         return app

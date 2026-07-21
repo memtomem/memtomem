@@ -310,10 +310,14 @@ async def mem_session_end(
     seven chunk-creating write tools record, so it reflects what the
     session actually wrote. ``mem_index`` over a large tree can outlast
     the drain budget; the resulting "writes still in flight" line is
-    expected rather than a fault. ``mem_edit`` and ``mem_delete`` appear
-    in no count — they re-chunk rather than add — but do mark the session
-    incomplete, since their effect on the input set is real and
-    undescribed.
+    expected rather than a fault.
+
+    Tools that change the session's chunk set without being summarizable
+    from it appear in no count and instead mark the session incomplete:
+    the mutations (``mem_edit``, ``mem_delete``), the bulk deletes
+    (``mem_ns_delete``, ``mem_cleanup_orphans``) and the bulk importers.
+    Their effect on the input set is real and undescribed, which is
+    exactly what the flag is for.
 
     When ``summary`` is provided, the text is also promoted to a
     first-class chunk under ``archive:session:<session_id>`` (Phase A
