@@ -31,6 +31,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tree rather than from a hand-written list, because the list is exactly what
   missed them.
 
+- **Sessions record what they wrote** (#1876, PR-A3 of 4) — the seven
+  chunk-creating MCP write tools (`mem_add`, `mem_batch_add`, `mem_index`,
+  `mem_fetch`, `mem_agent_share`, `mem_candidate_review`,
+  `mem_consolidate_apply`) now append one session event naming the chunk ids
+  they created, and `mem_session_start` marks its session as
+  provenance-recording. `- Events: N (add:M, index:K)` in the
+  `mem_session_end` response therefore reflects real writes for the first
+  time. The auto-summary still picks its inputs by namespace — **PR-B**
+  switches it over to this record and closes #1876, at which point a session
+  whose writes were routed elsewhere by a namespace rule stops silently
+  producing no summary.
+
+  Attribution is fixed alongside: a write's session id and its namespace are
+  now read in a single lock acquisition, after the file-lock wait, so a
+  session transition landing mid-write can no longer file the chunks under
+  one session and the record under another.
+
+  The marker says a session *records* provenance, not that the record is
+  complete. `provenance_incomplete` is set separately — on truncation past
+  the per-event id cap, when a write outran session teardown or the drain
+  timed out, and when indexing failed after the content was already durable
+  (whether it raised or reported the failure in its stats). It is also set
+  when an append's own record overstates it: appending under a heading a
+  previous session wrote to re-chunks both into one chunk with a new id, so
+  this session's record would name text it did not author.
+
+  And it is set by every tool that changes a session's chunk set without
+  being summarizable from it: `mem_edit` and `mem_delete` (they re-chunk
+  rather than add), the bulk deletes `mem_ns_delete`, `mem_cleanup_orphans`,
+  `mem_dedup_merge` and `mem_decay_expire` (they remove chunks an earlier
+  event still names), and the bulk importers `mem_import`,
+  `mem_import_notion` and `mem_import_obsidian` (their output is an ingest,
+  not session work).
+
+  A test walks the tool source and fails any function that reaches the
+  indexing engine or deletes chunks — directly or through a helper — while
+  doing neither. A hand-written list of write surfaces checked against
+  itself is how the importers and the bulk deletes were missed in the first
+  place; the guard found `mem_ns_delete`, `mem_cleanup_orphans`,
+  `mem_dedup_merge` and `mem_decay_expire` on its own.
+
+  Sessions created by the CLI or the LangGraph adapter carry no marker and
+  are unaffected.
+
+  One visible change today: indexing a large tree inside a session can
+  outlast the 2-second teardown drain, so `mem_session_end` reports
+  `- Warning: writes still in flight — event counts may be short` instead of
+  presenting a short count as complete.
+
+### Fixed
+
+- `add_session_event` was the only write in the session storage mixin that
+  committed unconditionally and had no rollback arm, so a caller's enclosing
+  transaction was flushed early — beyond the reach of its own later rollback
+  — and a failing insert left the transaction open on the shared writer
+  connection for the next statement to hit "database is locked". It now
+  matches `create_session` and `end_session`.
+
 - **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
   primitive that replaces a whole artifact tree and can recover from an
   interruption. A non-empty directory cannot be replaced atomically on POSIX,
