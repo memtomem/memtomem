@@ -56,14 +56,14 @@ Claude Code 세션에서 실행합니다.
 완전히 새 환경이라면 터미널에서 사용자 저장소를 한 번 초기화합니다.
 
 ```bash
-uvx --from 'memtomem==0.3.11' mm init --preset minimal --non-interactive
+uvx --from 'memtomem==0.3.12' mm init --preset minimal --non-interactive
 ```
 
 프로젝트에만 둘 로컬 기억 계층이 필요할 때는 프로젝트 루트에서 별도로
 초기화합니다.
 
 ```bash
-uvx --from 'memtomem==0.3.11' mm mem init --scope project_local
+uvx --from 'memtomem==0.3.12' mm mem init --scope project_local
 ```
 
 ### 2. 프로젝트 파일은 자동으로 들어오지 않음

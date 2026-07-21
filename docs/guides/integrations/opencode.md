@@ -23,7 +23,7 @@ in `opencode.json`:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.11", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.12", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core"}
@@ -39,7 +39,7 @@ After the npm package is published, add it through OpenCode's singular
 `plugin` configuration key (there is no `opencode plugin add` command):
 
 ```json
-{"plugin": ["opencode-memtomem@0.1.1"]}
+{"plugin": ["opencode-memtomem@0.1.2"]}
 ```
 
 For development from this repository, build the package and point the same
@@ -56,7 +56,7 @@ Restart OpenCode, then verify:
 
 | Surface | Included behavior |
 |---|---|
-| MCP | Exact-pinned `memtomem==0.3.11`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
+| MCP | Exact-pinned `memtomem==0.3.12`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
 | Commands | `memtomem-search`, `recall`, `status`, `remember`, `index`, `setup` |
 | Skills | Read-only `search`, `recall`, and `status` |
 

@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.12] — 2026-07-22
+
 ### Added
 
 - **Every writer of a skill now recovers an interrupted update, not just three**
@@ -110,6 +112,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `- Warning: writes still in flight — event counts may be short` instead of
   presenting a short count as complete.
 
+- **`mm quality` — a local retrieval-evaluation lab** (#1802, #1833, #1837,
+  #1844) — a committed search run can now be promoted to a reusable eval case
+  and re-run against your local index. `mm quality promote <run_id>` turns a `query_run_id`
+  into a case; `cases` / `show` / `status` / `export` / `import` manage the set;
+  `mm quality replay` re-runs them with no side effects (no access counters, no
+  run observations, no cache writes) and `--as-of` pins temporal validity and
+  decay so the time-dependent stages stop moving under you; `mm quality compare <baseline>
+  <candidate>` diffs two reports on precision / recall / NDCG; `mm quality gate`
+  turns a comparison into a policy-driven pass/fail verdict (including a
+  precision-cohort-coverage rule) for CI; and `mm quality experiment` sweeps
+  several versioned retrieval-profile documents against one baseline in a single
+  run. Headless parity: `mem_quality_replay` over MCP
+  (`mem_do(action="quality_replay")`), and a dev-mode Web panel at
+  `GET/POST /api/quality/cases` and `POST /api/quality/replay`. Cases and their
+  fingerprints live in SQLite alongside your memories, and replay reads that
+  local index — but it re-runs the *configured* pipeline, so a profile whose
+  embedding, rerank, or query-expansion stage is a remote service (OpenAI,
+  Cohere, an LLM) makes the same calls an ordinary search would. Such a profile
+  still replays; its report is flagged nondeterministic and excluded from the
+  byte-determinism acceptance criterion rather than being silently compared.
+
+- **Global library — your user-tier Store, with a pull-drift badge** (ADR-0030
+  §9, PR-F1/PR-F2) — a new `GET /api/context/status-global` endpoint reports the
+  skills, subagents and commands in your user-tier Store (`~/.memtomem`)
+  together with a per-artifact pull-direction verdict (`in sync` / `differs` /
+  `check failed`), and Settings gains a **Global library** section that renders
+  it with a drift badge, and a Preview / Pull affordance on each differing
+  item whose kind can be pulled. It is a
+  read-only detection probe on its own — it never writes; reconciling is still
+  an explicit Pull. A failed check is reported as a failed check, never asserted
+  as drift.
+
+- **`mem_version` now reports a secret-free runtime profile** (#1759) — the
+  capability payload gains `runtime_profile` (advertised as
+  `capabilities.runtime_profile.schema_version: 1`) describing the *effective*
+  retrieval runtime: embedding/rerank provider and mode, and per-dependency
+  availability plus installed version. Dependencies are probed with
+  `importlib.util.find_spec`, so nothing is imported and no model or storage is
+  initialized. It carries no credentials, base URLs, or storage paths; the
+  configuration it does name is an allowlist — provider, model, dimension,
+  tokenizer, the BM25/dense enable flags, and configured vs effective mode — so
+  an external client (memtomem-stm) can discover what this server can actually
+  do before using it.
+
+- **`dangling_wikilink` — a new advisory check in `mm memory doctor`** (#1762)
+  — a `[[name]]` on an index line that names no `name.md` inside the memory
+  root, or names one outside it, is now reported with its class
+  (`missing_target` / `outside_root`). It is **info** severity and never fails
+  the command: the doctor cannot tell a forward reference (which the
+  agent-memory convention allows) from a stale link to a deleted memo. Wikilinks
+  are never pointer entries, so they feed neither `broken_link`, nor
+  `index_orphan`, nor `--fix`.
+
 ### Fixed
 
 - **SQLite transaction contexts now own a real, task-affine write
@@ -164,8 +219,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   editor or shell during the window is never clobbered. Durability degrades to
   process-crash consistency on filesystems that reject directory `fsync`
   (Windows, some network/tmpfs mounts) rather than failing the operation.
-  Ships **with no caller** — the skills overwrite Pull that will use it is
-  still refused (PR-G4b) — so nothing changes for users yet.
+  Shipped callerless — the skills overwrite Pull that will use it is still
+  refused (PR-G4b) — and given its callers later in this same release: every
+  skill writer now runs its recovery machine inside the canonical lock, before
+  any authoritative check or write (PR-G4a-3a / PR-G4a-3b, above).
 
 - **Skill version history — tree snapshots + a read-only `version list`**
   (ADR-0030 §10, PR-G3) — the version store learns a second storage shape.
@@ -250,7 +307,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is named; `project_shared` hard-refuses any secret regardless of the
   literal-`true`-only `force_unsafe_import` valve; and every reason/path is
   display-sanitized so no absolute path, secret, or raw artifact bytes cross the
-  wire. (The picker UI that drives it lands in PR-D2.)
+  wire. (The picker UI that drives it is the next entry, PR-D2.)
 - **Web Pull picker** (ADR-0030 §5/§11, PR-D2) — a "Pull" affordance on each
   skill / subagent / command in the Connections tab opens a source-selectable
   picker: it reads the read-only preview and lists every tool that has the
@@ -371,7 +428,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   silently produced no summary. The two now agree in the ordinary case; they
   can still diverge where a namespace rule, `auto_ns`, or a non-default
   `default_namespace` sends the write somewhere the session row does not name.
-  That residual is pre-existing and tracked in #1876.
+  That residual was pre-existing; it is fixed in this same release by the
+  write-provenance recording described under **Session auto-summary uses what
+  the session actually wrote** (#1876), above.
 
 ### Changed
 
@@ -466,6 +525,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   pipeline), which additionally skips access-counter increments, run
   observations, and both search caches.
 
+- **New base dependency: `markdown-it-py>=3.0,<5`** — `mm memory doctor` now
+  reads an agent index file with a CommonMark parser instead of a regex, so it
+  is a declared runtime requirement rather than a transitive one. It was already
+  present in practice (`mcp[cli]` → `rich` → `markdown-it-py`), so a normal
+  upgrade pulls nothing new; it is version-capped below 5 because memtomem
+  overrides `normalizeLink` / `validateLink` on the parser instance, and a major
+  reworking those would break at your runtime rather than in CI.
+
+- **The MCP tool catalog stopped inventing parameters, and the always-loaded
+  descriptions got smaller** (#1879, #1880, #1882) — `mem_do(action="help")`
+  parsed any indented `key: value` line inside an `Args:` block as a parameter,
+  so `mem_policy_add` advertised `auto_expire` / `auto_tag` (JSON keys from its
+  `config` example) and `mem_context_generate` grew a `conversion` argument that
+  does not exist; an agent reading the catalog passed arguments the signature
+  never had. The parser now tracks the indent of the first real parameter, and
+  `register()` drops any parsed key absent from `inspect.signature`, so the
+  worst a future docstring shape can do is omit a description. Every tool
+  parameter is now documented — `force_unsafe` included — and the core-tool
+  descriptions that every client pays for on each prompt were cut by 22%.
+
+- **Push / Pull is the vocabulary on every surface** (ADR-0030 §2, PR-E) — the
+  Context Gateway's user-facing wording moved from Sync/Import to **Push/Pull**
+  across web UI labels, CLI help and output, and the guides, adopting the
+  ADR-0026 P2 verb rename. Copy only: request/response identifiers,
+  `reason_code` values, route paths, i18n keys and every `mm context …` command
+  and flag name are unchanged. Relational drift state ("in sync" / "out of sync"
+  / "differs") is kept, and project enrollment / pause / resume stays "sync"
+  because that mechanism is shared with Hooks Sync. Korean follows
+  Push=내보내기, Pull=가져오기. (The engine/route/MCP half of the sweep landed
+  separately in PR-H2, above.)
+
+- **Every first-party mutation of a Store artifact now takes one name-keyed
+  canonical lock** (ADR-0030 §6, PR-B2a) — reverse import, web CRUD, version
+  create/promote/delete, `enable`, cross-scope transfer, flat→dir migrate, wiki
+  install/update/pin and the validation seeder previously locked *paths*
+  (`.foo.md.lock` for a flat artifact, `<name>/.file.lock` for a directory one),
+  which does not serialize two writers touching the same artifact through
+  different layouts — a Pull, a transfer and a migrate could run at once and
+  lose writes. All of them now take `<canonical_root>/.{name}.lock` first, and
+  every authoritative check (existence, wiki dirty classification, layout
+  resolution, version snapshot read, and the user-tier host-write confirmation)
+  runs *inside* it, so nothing can slip a lost write — or a bypassed host-write
+  confirmation — into the check→write window. Visible effect: these operations
+  can now report a lock timeout when another writer holds the artifact, instead
+  of silently interleaving.
+
 ### Fixed
 
 - **Context wire redaction no longer relativizes prefix-colliding siblings**
@@ -555,7 +660,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the destination installs *different* content — pulling an older Store copy,
   say — the pre-crash tree is still destroyed, a few milliseconds after its own
   WARNING. Recovering the interrupted swap itself, rather than surviving it,
-  needs the intent marker and state machine that land next.
+  needs the intent marker and state machine that land below (PR-G4a-2), and
+  the writers that call them (PR-G4a-3a / PR-G4a-3b).
 
 - **Syncing a skill no longer deletes a similarly-named skill's crash
   leftovers** — the crash-leftover reaper selected trees with a prefix glob on
@@ -639,6 +745,97 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   silent full model reload). The lazy loaders now raise `RuntimeError`
   instead; a stray call through the search pipeline degrades to the existing
   un-reranked fallback with a warning.
+
+- **`mm memory doctor` reads the index file as Markdown** (#1760, #1761, #1763,
+  #1774, #1775) — the index reader was a pattern that had to enumerate every way
+  a CommonMark link can be spelled, and it lost. It read a wikilink's trailing
+  parenthetical as a link target, treated a `]](` as an unclosed link, and could
+  not attribute a wholly-bracketed label when a genuine wikilink and an escaped
+  pointer shared a line. Since `--fix` deletes lines on the strength of that
+  read, the reader is now a real CommonMark parser with `normalizeLink` /
+  `validateLink` overridden, and anything it cannot resolve on a guess — a
+  target carrying a query, percent-escape, scheme or space; link syntax that
+  resolved to no link; a contested wikilink label — is reported as the new
+  warn-severity `ambiguous_index_line` rather than link-checked, counted as
+  listed, or offered to `--fix`. False `index_orphan`s and the `broken_link`
+  blind spot go with it.
+
+- **`mm memory doctor --fix` decides eligibility per line, and stands down where
+  it cannot read** (#1757, #1758, #1769, #1771) — `--fix` splices whole lines,
+  so an index line holding more than one entry, or an item that is more than its
+  first line, cannot be deleted without stranding text; those lines are now
+  refused instead of spliced. Eligibility is computed per line from what was
+  actually resolved, so one unreadable entry no longer disqualifies — or, worse,
+  silently authorizes — the rest of the line. An index file that cannot be read
+  at all is now an error with the exception class named (a bare `str(OSError())`
+  is the empty string, which used to render as a blank reason), rather than a
+  traceback in Tier 1 or a clean bill of health under `--fix`.
+
+- **Chunk line ranges no longer drift on headingless sections, and oversized
+  parts are split** (#1793, #1807) — `chunk_file` seeded its line accounting as
+  if every section began with a consumed heading line, so a headingless section
+  — exactly the shape of a frontmatter-plus-body memory file — shifted every
+  sub-chunk's `start_line` / `end_line` one line down, with the final range
+  pointing past the end of the file. This matters beyond cosmetics: `mem_edit`
+  and `mem_delete` rewrite the source file by exactly that range, so drift meant
+  editing the wrong lines. Separately, a prose part that is still oversized
+  after paragraph and sentence splitting is now split by character budget while
+  keeping fenced code blocks and pipe tables atomic.
+
+- **Empty `indexing.memory_dirs` is a valid state, not a crash** (#1768) — an
+  empty list passed config validation and then every path that read
+  `memory_dirs[0]` died with `IndexError`, surfaced over MCP as an opaque
+  "internal error" naming nothing. Empty now means "index nothing", deliberately
+  supported. Read surfaces degrade: `mem_context_compose` returns a normal
+  bundle with no user-tier pinned blocks, and project-tier pinned blocks keep
+  working. Writes that genuinely need the user-tier base — pinned set/delete,
+  the LangGraph store's default root, `mm review approve`'s dated-file target,
+  and the `mem_add` / `mem_batch_add` dated-file fallback that used to write
+  silently under the server's cwd — refuse with an error that names
+  `indexing.memory_dirs`, rendered as a CLI hint and as HTTP **409** with a
+  path-redacted detail on the web API.
+
+- **Local ONNX indexing no longer runs eight embeds at once** (refs #1783) — the
+  concurrent `index_path` (MCP `mem_index`, web reindex, watcher debounce drain)
+  gated each file's whole pipeline behind one `Semaphore(8)`, so up to eight
+  `embed_texts` calls ran together. For the CPU ONNX provider the intra-op
+  thread pool is the real bottleneck, so that bought no throughput and
+  multiplied peak inference memory. Embedding now queues on its own semaphore
+  sized from an optional per-provider `preferred_concurrency` hint — ONNX is 1,
+  ollama / openai / noop stay 8 — and ONNX runs inference on a dedicated
+  single-worker executor so a cancelled queued inference never runs at all.
+  Files still pipeline chunking, hash-diff and DB work in parallel; only the
+  embed call serializes. Trade-off: `embed_query` now waits behind an in-flight
+  file's inference.
+
+- **Warmup survives repeated cancellation** (#1805) — a worker thread cannot be
+  interrupted, so cancelling the task awaiting a model load would leave the load
+  running while shutdown closed components underneath it. Only the first
+  cancellation was shielded; a second one could cancel a load still queued in
+  the executor. Every settle-await is now shielded in a loop, the settled result
+  is consumed, and cancellation is preserved as the caller-visible outcome — so
+  shutdown neither hangs on nor races an in-flight warmup.
+
+- **Tied search results come back in a fixed order** (#516) — rows with equal
+  BM25 `rank` or equal dense `distance` inside the same scope priority took
+  arbitrary SQLite order, so repeating a query — or merely reopening the
+  connection — could reorder them. Both legs now append the unique chunk id as
+  the final `ORDER BY` key. Harmless for interactive search, load-bearing for
+  the byte-deterministic replay diffs `mm quality` produces. The dense fix
+  stabilizes the rows the inner KNN returned; equal-distance rows straddling
+  sqlite-vec's inner cutoff are handled by the exhaustive evaluation path used
+  in replay mode.
+
+### Security
+
+- **`mcp[cli]` floor raised to 1.28.1** (GHSA-vj7q-gjh5-988w / CVE-2026-59950,
+  High, CVSS 7.6) — the SDK's deprecated `websocket_server` transport accepted
+  handshakes without checking `Host` or `Origin`, so a web page open in your
+  browser could connect cross-origin to a local MCP server and enumerate or
+  invoke its tools. memtomem does not serve that transport, but it resolved the
+  affected SDK, so the minimum is now `mcp[cli]>=1.28.1`, up from `1.27.2`.
+  `uv tool upgrade memtomem` (or a fresh `uvx --from "memtomem[all]==0.3.12"`)
+  is enough.
 
 ## [0.3.11] — 2026-07-14
 
