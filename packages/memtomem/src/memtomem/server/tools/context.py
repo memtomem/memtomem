@@ -619,12 +619,14 @@ async def mem_context_generate(
             ``project_local``. The same value is also forwarded as the
             ADR-0010 host-write target-scope override for ``settings``
             (mirrors the CLI at ``cli/context_cmd.py:963-987``).
-        allow_host_writes: When ``include="settings"`` writes a settings
-            file outside the project root (today only
-            ``~/.claude/settings.json``), refuse with a
-            ``needs confirmation`` line unless this is ``True``. Re-call
-            with ``allow_host_writes=True`` after surfacing the host
-            paths to the user.
+        allow_host_writes: When ``include="settings"`` resolves to a path
+            outside the project root (``~/.claude/settings.json`` and the
+            Codex / Gemini / Kimi equivalents, depending on the effective
+            scope), refuse with a ``needs confirmation`` line unless this
+            is ``True``. Re-call with ``allow_host_writes=True`` after
+            surfacing the host paths to the user. Same boundary as
+            ``mem_context_sync``; both fan out through the settings
+            generators.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents

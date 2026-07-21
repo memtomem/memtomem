@@ -60,6 +60,10 @@ async def mem_ns_set(
 ) -> str:
     """Set the session-default namespace. Subsequent search/add/recall use this unless overridden.
 
+    One exception: while a session is active this is the *read* default only —
+    resolver-backed writes go to agent-runtime:<agent_id> unless the call
+    passes namespace= explicitly.
+
     ``namespace`` is run through :func:`validate_namespace` before the
     write, mirroring ``mem_session_start(namespace=...)``. Without the
     gate, an attacker who controls the value reaching ``mem_ns_set`` could
