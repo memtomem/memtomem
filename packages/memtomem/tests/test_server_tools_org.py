@@ -533,6 +533,42 @@ class TestRenameNamespaceMerge:
         link = await storage.get_chunk_link(shared_copy.id, "shared")
         assert link.source_id == dup.id
 
+    async def test_a_relation_between_the_twins_is_not_kept_as_a_self_edge(self, storage):
+        """The edge described two rows that turn out to be one — it says nothing now."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+        await storage.add_relation(src.id, dup.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(dup.id) == []
+
+    async def test_a_share_link_between_the_twins_is_not_kept_as_a_self_edge(self, storage):
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+        await storage.add_chunk_link(src.id, dup.id, "shared", "dst-ns")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_chunk_link(dup.id, "shared") is None
+
+    async def test_pre_existing_self_edges_are_left_alone(self, storage):
+        """Only rows this merge collapsed are cleaned up — not the whole table."""
+        loop = make_chunk(content="loops", namespace="dst-ns", source="loop.md")
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([loop, src, dup])
+        await storage.add_relation(loop.id, loop.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(loop.id) == [(loop.id, "related")]
+
     async def test_schema_discovery_does_not_scale_with_duplicates(self, storage):
         """FK discovery runs once per merge, not once per dropped chunk.
 

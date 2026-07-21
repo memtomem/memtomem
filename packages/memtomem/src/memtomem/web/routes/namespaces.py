@@ -106,6 +106,11 @@ async def rename_namespace(
         # internal fault — without this it would land on the generic 500
         # handler in web/app.py.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not (result.chunks_moved or result.metadata_renamed or result.merged):
+        # Nothing moved because the source held nothing. Falling through would
+        # answer 200 with the *target's* count and metadata — a rename that
+        # never happened, presented as one that did. 404 matches the info GET.
+        raise HTTPException(status_code=404, detail=f"Namespace '{namespace}' not found")
     # Report the target's resulting total, the way ``get_namespace`` does:
     # on a merge the moved-row count and the namespace's size differ, and the
     # list / info endpoints would immediately contradict a moved count.

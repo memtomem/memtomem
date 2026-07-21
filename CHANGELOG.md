@@ -248,9 +248,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   any write: renaming onto an existing namespace is **refused** (409 on the web
   admin route, `Error: …` over MCP), and `merge=True` opts into consolidating
   into it — chunks move, the target's description/color are kept, and where
-  both namespaces had indexed the same file the target's copy is kept while the
-  source's duplicate is dropped (reported, never silent), as is the source's
-  metadata row. The whole operation runs under one lock-taking
+  both namespaces hold the same chunk (same source file, content hash and start
+  line) the target's copy is kept while the source's duplicate is dropped
+  (reported, never silent), as is the source's metadata row. The whole operation runs under one lock-taking
   transaction, so a failure anywhere undoes all of it, including when it runs
   inside an outer transaction it does not own. `mem_ns_rename` also reports
   *what* changed rather than a bare chunk count: a namespace registered but

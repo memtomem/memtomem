@@ -16,6 +16,11 @@ from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders, 
 # tearing down a transaction it does not own.
 _RENAME_SAVEPOINT = "ns_rename"
 
+# Row cap per ``… IN (?, ?, …)`` delete during a merge. SQLite's
+# host-parameter limit is 999 on builds older than 3.32, and a namespace-wide
+# merge can carry more duplicates than that.
+_DELETE_BATCH = 500
+
 # Namespace names: alphanumeric, hyphens, underscores, dots, colons, @, spaces
 # (max 255). Automatic namespace generators use a ``{bucket}-{kind}:`` format
 # (``claude-memory:``, ``codex-memory:``, ``agent-runtime:``); the second
@@ -327,12 +332,24 @@ class NamespaceOps:
         ids = [row[0] for row in rows]
         rowids = [row[1] for row in rows]
         self._remap_chunk_references(db, [(row[2], row[0]) for row in rows])
-        db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
-        db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids)
-        if self._has_vec_table():
+        # Batched: a namespace-wide merge can carry more duplicates than
+        # SQLite's host-parameter limit (999 on older builds), and blowing
+        # that limit would fail the whole migration.
+        for start in range(0, len(ids), _DELETE_BATCH):
+            batch_ids = ids[start : start + _DELETE_BATCH]
+            batch_rowids = rowids[start : start + _DELETE_BATCH]
             db.execute(
-                f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                f"DELETE FROM chunks WHERE id IN ({placeholders(len(batch_ids))})", batch_ids
             )
+            db.execute(
+                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(batch_rowids))})",
+                batch_rowids,
+            )
+            if self._has_vec_table():
+                db.execute(
+                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(batch_rowids))})",
+                    batch_rowids,
+                )
         return len(rows)
 
     @staticmethod
@@ -396,6 +413,45 @@ class NamespaceOps:
                     f"WHERE {quote_ident(column)}=?",
                     pair,
                 )
+        self._drop_collapsed_self_edges(db, columns, [survivor for survivor, _ in pairs])
+
+    @staticmethod
+    def _drop_collapsed_self_edges(
+        db: sqlite3.Connection,
+        columns: Sequence[tuple[str, str]],
+        survivors: Sequence[str],
+    ) -> None:
+        """Delete edge rows whose two endpoints became the same chunk.
+
+        A table with two FKs to ``chunks`` (``chunk_relations``,
+        ``chunk_links``) can hold an edge *between* a duplicate and the twin
+        it is merging into — "this chunk relates to / was shared from that
+        one". Remapping turns that into a row pointing at itself, which no
+        reader expects: a self-relation shows a chunk as related to itself,
+        and a self share-link claims a chunk was copied from itself. The edge
+        described two rows that turned out to be one, so it no longer says
+        anything; drop it rather than persist a nonsense pointer.
+
+        Scoped to the chunks this merge actually remapped onto: a
+        self-referencing row that was already there is somebody else's row
+        and none of this method's business.
+        """
+        by_table: dict[str, list[str]] = {}
+        for table, column in columns:
+            by_table.setdefault(table, []).append(column)
+        for table, cols in by_table.items():
+            if len(cols) < 2:
+                continue
+            for i, left in enumerate(cols):
+                for right in cols[i + 1 :]:
+                    for start in range(0, len(survivors), _DELETE_BATCH):
+                        batch = survivors[start : start + _DELETE_BATCH]
+                        db.execute(
+                            f"DELETE FROM {quote_ident(table)} "
+                            f"WHERE {quote_ident(left)} = {quote_ident(right)} "
+                            f"AND {quote_ident(left)} IN ({placeholders(len(batch))})",
+                            batch,
+                        )
 
     @staticmethod
     def _has_namespace_meta(db: sqlite3.Connection, namespace: str) -> bool:

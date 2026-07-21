@@ -1944,6 +1944,18 @@ class TestNamespaceCRUD:
         )
         assert resp.json()["duplicates_dropped"] == 3
 
+    async def test_rename_missing_source_is_404(self, app, client: AsyncClient):
+        """An all-zero result means the source held nothing — not a successful rename."""
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=0, metadata_renamed=False, merged=False)
+        )
+        app.state.storage.list_namespaces.return_value = [("general", 12)]
+        resp = await client.post(
+            "/api/namespaces/ghost/rename",
+            json={"new_name": "general"},
+        )
+        assert resp.status_code == 404
+
     async def test_rename_namespace_conflict_is_409(self, app, client: AsyncClient):
         app.state.storage.rename_namespace = AsyncMock(
             side_effect=NamespaceConflictError("target already exists")
