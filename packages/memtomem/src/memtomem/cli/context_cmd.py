@@ -630,13 +630,21 @@ def _translate_to_click(*error_types: type[Exception]) -> Iterator[None]:
     instead of a raw traceback. ``PrivacyScanError`` /
     ``MigratePartialError`` surface their pre-formatted ``exc.message``
     (the secret-free remediation text — ADR-0011 §5 for Gate A
-    refusals); everything else surfaces ``str(exc)``.
+    refusals); ``SwapRecoveryError`` surfaces
+    :func:`~memtomem.context._dir_swap.swap_failure_text`, because its
+    three-argument ``OSError`` form renders ``str(exc)`` as
+    ``[Errno 16] <sentence>: '<path>'`` — listing the type here without this
+    branch would leave ``mm context install skill`` / ``update skill``, the two
+    primary single-asset commands, printing the errno form the rest of this
+    change removed (PR review); everything else surfaces ``str(exc)``.
     """
     try:
         yield
     except error_types as exc:
         if isinstance(exc, (PrivacyScanError, MigratePartialError)):
             message = exc.message
+        elif isinstance(exc, SwapRecoveryError):
+            message = swap_failure_text(exc)
         else:
             message = str(exc)
         raise click.ClickException(message) from exc

@@ -106,6 +106,21 @@ _PRE_PRELUDE_ALLOWED = frozenset(
     }
 )
 
+#: Additionally allowed before the prelude in the ``consent_first`` mode: the
+#: host-write gate itself and the read-only probes that compute what it
+#: discloses. Still no mutator, and still nothing that writes a tree.
+_CONSENT_FIRST_ALLOWED = _PRE_PRELUDE_ALLOWED | {
+    "host_write_gate",
+    "has_pending_swap",
+    "exists",
+    "is_dir",
+    "is_file",
+    "target_dir",
+    "extend",
+    "_canonical_skill_dir",
+    "reject_project_local_write",
+}
+
 # Classifications.
 RUNS_SWAP_PRELUDE = "RUNS_SWAP_PRELUDE"  # C0 over a skills-capable root
 EXEMPT = "EXEMPT"  # C0, but never over skills
@@ -340,9 +355,10 @@ def discover_sites() -> list[_Site]:
 
 #: ``key → (classification, dominance_mode, why)``. ``dominance_mode`` is read
 #: only for :data:`RUNS_SWAP_PRELUDE`: ``"first"`` (the prelude is the first
-#: executable statement of the locked body) or ``"lock_loop"`` (the one
-#: batch sites whose lock acquisition is itself a loop — see the module note on
-#: dominance). Every row states WHY in its own words; a row with no reason is
+#: executable statement of the locked body), ``"lock_loop"`` (the one
+#: batch site whose lock acquisition is itself a loop) or ``"consent_first"``
+#: (the user-tier delete, where recovery is a host write and must follow
+#: consent) — see the module note on dominance. Every row states WHY in its own words; a row with no reason is
 #: how an unexamined site sneaks in wearing a classification.
 C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
     # ── RUNS_SWAP_PRELUDE — C0 over a skills canonical ──────────────────
@@ -426,8 +442,14 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
     ),
     ("web/routes/context_skills.py", "delete_skill._delete_locked", 0, "canonical_sidecar_lock"): (
         RUNS_SWAP_PRELUDE,
-        "first",
-        "Web delete removes the canonical tree (G4a-3b).",
+        "consent_first",
+        "Web delete removes the canonical tree (G4a-3b). The ONE site where the "
+        "prelude may not lead: recovery writes under the host root, and a "
+        "user-tier delete of a mid-swap artifact discloses nothing from "
+        "presence alone, so an unconfirmed request would have its host state "
+        "mutated before the locked gate could refuse it (PR review). The gate "
+        "runs first and is marker-aware, so recovery can only produce a path "
+        "the user already consented to.",
     ),
     # ── EXEMPT — a canonical name lock that never covers a skills tree ───
     ("context/_canonical_txn.py", "write_canonical_locked", 0, "canonical_sidecar_lock"): (
@@ -773,6 +795,42 @@ def _leading_calls(body: list[ast.stmt]) -> set[str]:
     return names
 
 
+def _prelude_follows_consent(body: list[ast.stmt]) -> bool:
+    """The ``consent_first`` mode: consent is settled before recovery runs.
+
+    Recovery is itself a **mutation** — under the user tier it writes below
+    ``~/.memtomem``. A user-tier delete of a mid-swap artifact has an empty
+    presence-derived pending list, so an unconfirmed request would sail through
+    the host-write gate, and a prelude placed first would restore the tree and
+    clear the transients before the locked gate could refuse (PR review). So
+    that one site gates first and recovers second.
+
+    Two conditions, and the first is what makes the exception provable rather
+    than asserted: a ``host_write_gate`` call must appear BEFORE the prelude
+    (the site really is gating), and nothing outside
+    :data:`_CONSENT_FIRST_ALLOWED` may run before it (the gate's inputs are
+    reads; no tree is touched). Ordering the prelude after the gate stays safe
+    for the disclosure because the gate's target list is marker-aware: recovery
+    can only materialize a path the user already consented to.
+    """
+    calls = [
+        node
+        for node in ast.walk(ast.Module(body=body, type_ignores=[]))
+        if isinstance(node, ast.Call)
+    ]
+    saw_gate = False
+    for node in sorted(calls, key=lambda n: (n.lineno, n.col_offset)):
+        name = _callee_name(node.func)
+        if name in _PRELUDES:
+            return saw_gate
+        if name == "host_write_gate":
+            saw_gate = True
+            continue
+        if name not in _CONSENT_FIRST_ALLOWED:
+            return False
+    return False
+
+
 def _prelude_precedes_any_work(body: list[ast.stmt]) -> bool:
     """Whether the prelude runs before ANY call that is not lock machinery.
 
@@ -825,7 +883,9 @@ def test_classifications_are_from_the_closed_set_and_explained() -> None:
         assert classification in _CLASSIFICATIONS, f"{key}: unknown classification"
         assert why.strip(), f"{key}: classification with no written reason"
         if classification == RUNS_SWAP_PRELUDE:
-            assert mode in {"first", "lock_loop"}, f"{key}: bad dominance mode {mode!r}"
+            assert mode in {"first", "lock_loop", "consent_first"}, (
+                f"{key}: bad dominance mode {mode!r}"
+            )
         else:
             assert mode == "", f"{key}: dominance mode only applies to {RUNS_SWAP_PRELUDE}"
 
@@ -858,6 +918,12 @@ def test_skills_c0_sites_run_the_prelude_first() -> None:
                 offenders.append(
                     f"{site.module}:{site.lineno} ({site.qualname}) — the locked body does "
                     "not START with a prelude call"
+                )
+        elif mode == "consent_first":
+            if not _prelude_follows_consent(body):
+                offenders.append(
+                    f"{site.module}:{site.lineno} ({site.qualname}) — the prelude does not "
+                    "sit between the host-write gate and the first mutation"
                 )
         elif not _prelude_precedes_any_work(body):
             offenders.append(

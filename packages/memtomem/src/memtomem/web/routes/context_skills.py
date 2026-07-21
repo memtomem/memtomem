@@ -14,7 +14,11 @@ from fastapi.responses import JSONResponse
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
-from memtomem.context._dir_swap import SwapRecoveryError, swap_failure_text
+from memtomem.context._dir_swap import (
+    SwapRecoveryError,
+    has_pending_swap,
+    swap_failure_text,
+)
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import SKILL_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError, scan_text_content
@@ -536,7 +540,17 @@ async def delete_skill(
     # cascade — the runtime copies AT THIS TIER (scope= is load-bearing:
     # a user-tier cascade must resolve ~/.claude/... copies, never the
     # project's). Idempotent no-ops (nothing exists) skip the gate.
-    pending: list[Path] = [skill_dir] if skill_dir.exists() else []
+    # A pending swap counts as a pending host write (ADR-0030 §10, PR review).
+    # Recovery is itself a MUTATION under ``~/.memtomem``: in a row-2/row-5 state
+    # the canonical is absent, so a presence-only list is empty, the gate stays
+    # open for a user-tier request that never confirmed anything, and the prelude
+    # then restores the tree and clears the transients before the locked gate can
+    # refuse. Disclosing the canonical whenever a marker claims it keeps consent
+    # AHEAD of the first host write; the disclosure is an upper bound, which is
+    # the contract every gate on this surface already relies on.
+    pending: list[Path] = (
+        [skill_dir] if skill_dir.exists() or has_pending_swap(skill_dir.parent, name) else []
+    )
     if cascade:
         for gen in SKILL_GENERATORS.values():
             target = gen.target_dir(project_root, name, scope=target_scope)
@@ -566,14 +580,19 @@ async def delete_skill(
         # silently removing an unconfirmed user-tier artifact.
         cascade_targets: list[Path] = []
         with canonical_sidecar_lock(skill_dir.parent, name, timeout=new_lock_budget()()):
-            # ADR-0030 §10: recovery before the locked host-write re-gate, so
-            # the snapshot the user confirms — and the set this deletes — is the
-            # recovered tree, never a half-swapped one. Deliberately OUTSIDE the
-            # ``except OSError`` below: a wedged artifact is a refusal for the
-            # whole delete, not a ``skipped`` row that reads like a permissions
-            # problem.
-            run_swap_prelude(skill_dir.parent, name, kind="skills")
-            locked_pending: list[Path] = [skill_dir] if skill_dir.exists() else []
+            # Same marker-aware disclosure as the pre-lock list, and it runs
+            # BEFORE the prelude: recovery writes under the host root, so a
+            # user-tier request that has not confirmed must be turned away with
+            # the artifact exactly as found — including its marker and
+            # transients. Ordering the prelude after this gate is safe for the
+            # snapshot precisely because a marker-claimed canonical is disclosed
+            # whether or not it exists yet; recovery can only produce a path the
+            # user already consented to.
+            locked_pending: list[Path] = (
+                [skill_dir]
+                if skill_dir.exists() or has_pending_swap(skill_dir.parent, name)
+                else []
+            )
             if cascade:
                 for gen in SKILL_GENERATORS.values():
                     target = gen.target_dir(project_root, name, scope=target_scope)
@@ -588,6 +607,14 @@ async def delete_skill(
             )
             if locked_gate is not None:
                 return locked_gate, removed, skipped
+
+            # ADR-0030 §10: consent is settled, so recovery may run — and it
+            # must run before the delete decides what to remove, or a
+            # half-swapped tree is what gets deleted. Deliberately OUTSIDE the
+            # ``except OSError`` below: a wedged artifact is a refusal for the
+            # whole delete, not a ``skipped`` row that reads like a permissions
+            # problem.
+            run_swap_prelude(skill_dir.parent, name, kind="skills")
 
             if skill_dir.exists():
                 try:

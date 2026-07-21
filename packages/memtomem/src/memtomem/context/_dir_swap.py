@@ -455,11 +455,27 @@ def swap_failure_text(exc: SwapRecoveryError) -> str:
     redactors) behind. That is what reached the CLI, the 409 body and the MCP
     line before this existed.
 
-    ``strerror`` is the sentence as written. The fallback keeps a
-    single-argument raise (none today, but the class does not forbid one) from
-    rendering as an empty message.
+    ``strerror`` is the sentence as written — but **the filename is re-attached
+    unless the sentence already names it** (PR review). Only some raises here
+    embed their paths in the prose: the ambiguous-provenance row names both
+    trees because an operator must compare them, while ``swap marker is not a
+    JSON object`` and ``swap transient exists but is not a directory`` carry the
+    offending path in ``filename`` alone. Returning ``strerror`` flat would drop
+    it, and with a transfer holding two canonical roots the reader could not
+    tell which side needs repairing.
+
+    Quoted, because that is this package's wire contract: the web/MCP redactors
+    replace a path run with ``<path>`` and their segment class includes spaces,
+    so an unquoted path swallows the prose after it.
+
+    The fallback keeps a single-argument raise (none today, but the class does
+    not forbid one) from rendering as an empty message.
     """
-    return exc.strerror or str(exc)
+    text = exc.strerror or str(exc)
+    filename = exc.filename
+    if filename and str(filename) not in text:
+        return f"{text}: '{filename}'"
+    return text
 
 
 def has_pending_swap(root: Path, name: str) -> bool:

@@ -91,7 +91,11 @@ from memtomem.context.lockfile import (
     digests_from_entry,
 )
 from memtomem.context._canonical_txn import acquire_canonical_locks
-from memtomem.context._dir_swap import SwapRecoveryError, swap_failure_text
+from memtomem.context._dir_swap import (
+    SwapRecoveryError,
+    has_pending_swap,
+    swap_failure_text,
+)
 from memtomem.context.migrate import (
     _DIR_MANIFEST,
     SCOPE_MIGRATABLE_KINDS,
@@ -903,6 +907,23 @@ def transfer_artifact(
             return None
         return _classify_provenance_carry(kind, name, src_root, renamed=new_name is not None)
 
+    # A source discovered through its swap marker alone has no tree to read yet
+    # (ADR-0030 §10). Only the apply path recovers it, so the dry run must SAY
+    # that rather than report classifications derived from an absent directory:
+    # ``_plan_provenance`` would see a missing source, call it unprovable, and
+    # then apply — which recovers first — could legitimately classify the very
+    # same artifact clean and carry its lockfile entry. Preview and apply would
+    # disagree with nothing having changed in between (PR review).
+    source_mid_swap = (
+        layout == "dir" and not src_path.is_dir() and has_pending_swap(src_store, name)
+    )
+    mid_swap_note = (
+        "source has an interrupted directory swap; it is recovered under the "
+        "canonical lock before this transfer runs, so anything derived from the "
+        "source tree — install provenance in particular — is re-classified then "
+        "and may differ from this preview."
+    )
+
     if not apply_:
         # Dry-run: compute plan, no mutation. ``fanout_planned`` previews
         # the deletion half of a move — the same selection the apply-side
@@ -946,14 +967,19 @@ def transfer_artifact(
             # mirror, so the plan the user confirms shows every caveat the
             # apply would print (this used to be apply-only).
             notes=(
-                _rename_overrides_note(src_path, dst_path, name)
-                if mode == "copy" and new_name is not None and layout == "dir"
-                else ()
+                (
+                    _rename_overrides_note(src_path, dst_path, name)
+                    if mode == "copy" and new_name is not None and layout == "dir"
+                    else ()
+                )
+                + ((mid_swap_note,) if source_mid_swap else ())
             ),
         )
 
     # ── apply path ───────────────────────────────────────────────────
-    notes: tuple[str, ...] = ()
+    # The apply carries the same note the preview showed, so a result read on
+    # its own still says the classifications below were made after a recovery.
+    notes: tuple[str, ...] = (mid_swap_note,) if source_mid_swap else ()
     # ADR-0030 §6: name-keyed canonical locks (layout-independent), so this
     # transfer serializes with a Pull / migrate / version op on the same
     # artifact name — the path-keyed pair lock did not. ``dst_name`` may differ
@@ -1017,8 +1043,10 @@ def transfer_artifact(
                     _rewrite_staged_manifest_name(staging, kind, layout, new_name)
                     if layout == "dir":
                         # Shared derivation with the dry-run preview (probed
-                        # off src there) — see _rename_overrides_note.
-                        notes = _rename_overrides_note(staging, dst_path, name)
+                        # off src there) — see _rename_overrides_note. Appended,
+                        # not assigned: a mid-swap source already put its own
+                        # note here and both belong on the result.
+                        notes = notes + _rename_overrides_note(staging, dst_path, name)
                 if to_scope == "project_shared":
                     scan = scan_artifact_tree(
                         staging,

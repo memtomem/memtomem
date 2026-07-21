@@ -34,7 +34,12 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from memtomem.context._dir_swap import SwapForeignDestination, SwapRecoveryError, has_pending_swap
+from memtomem.context._dir_swap import (
+    SwapForeignDestination,
+    SwapRecoveryError,
+    has_pending_swap,
+    swap_failure_text,
+)
 from memtomem.context.install import (
     AlreadyInstalledError,
     StaleInstallError,
@@ -163,6 +168,39 @@ def project(tmp_path: Path) -> Path:
 @pytest.fixture
 def store(project: Path) -> Path:
     return project / ".memtomem" / "skills"
+
+
+class TestSwapFailureText:
+    """The wire sentence: errno prefix dropped, offending path KEPT."""
+
+    def test_the_path_survives_when_the_sentence_does_not_name_it(self, store: Path) -> None:
+        """Most raises carry the path in ``filename`` alone (PR review).
+
+        Dropping it leaves an operator holding "swap marker is not a JSON
+        object" with two canonical roots in play and no way to tell which side
+        needs repairing.
+        """
+        p = _paths(store)
+        p["marker"].write_text("not json at all", encoding="utf-8")
+
+        with pytest.raises(SwapRecoveryError) as exc:
+            run_swap_prelude(store, "skill", kind="skills")
+
+        text = swap_failure_text(exc.value)
+        assert not text.startswith("[Errno"), text
+        assert str(p["marker"]) in text, text
+        assert text.count(str(p["marker"])) == 1, f"path repeated: {text}"
+
+    def test_a_sentence_that_already_names_its_paths_is_not_padded(self, store: Path) -> None:
+        """Row 4 names both trees in the prose; re-appending would duplicate one."""
+        p = _row_4(store)
+
+        with pytest.raises(SwapForeignDestination) as exc:
+            run_swap_prelude(store, "skill", kind="skills")
+
+        text = swap_failure_text(exc.value)
+        assert text.count(str(p["dst"])) == 1, text
+        assert str(p["old"]) in text
 
 
 class TestKindGating:
@@ -356,6 +394,47 @@ class TestTransferApply:
         assert _residue(user_store) == before
         assert (store / "skill" / SKILL_MANIFEST).read_text(encoding="utf-8") == "source"
 
+    def test_a_marker_only_preview_says_its_classifications_are_provisional(
+        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Preview and apply must not disagree silently (PR review).
+
+        A marker-only source has no tree for the dry run to read, so
+        ``_plan_provenance`` sees a missing source and reports it unprovable —
+        while apply, which recovers first, can classify the very same artifact
+        clean and carry its lockfile entry. Nothing changed in between; the two
+        answers just came from different states. The preview therefore says so,
+        and the applied result repeats it so a result read on its own carries
+        the same caveat.
+        """
+        _isolate_home(monkeypatch, tmp_path / "home")
+        _row_2(store)
+
+        preview = transfer_artifact(
+            "skills",
+            "skill",
+            src_project_root=project,
+            from_scope="project_shared",
+            dst_project_root=None,
+            to_scope="user",
+            mode="move",
+            apply_=False,
+        )
+        assert any("interrupted directory swap" in n for n in preview.notes), preview.notes
+        assert not (store / "skill").exists(), "a preview must not recover anything"
+
+        applied = transfer_artifact(
+            "skills",
+            "skill",
+            src_project_root=project,
+            from_scope="project_shared",
+            dst_project_root=None,
+            to_scope="user",
+            mode="move",
+            apply_=True,
+        )
+        assert any("interrupted directory swap" in n for n in applied.notes), applied.notes
+
     def test_a_recovered_tree_without_its_manifest_is_not_transferred(
         self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -410,6 +489,52 @@ async def client(web_project: Path):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+
+
+class TestUserTierConsentPrecedesRecovery:
+    """Recovery is a host write, so it may not run before the user has confirmed.
+
+    The specific hole (PR review): in a row-2/row-5 state the canonical is
+    ABSENT, so a delete's presence-derived disclosure is empty, the host-write
+    gate stays open — its documented no-op behavior — and a prelude placed
+    first would restore the tree under ``~/.memtomem`` and clear the
+    transients before the locked gate could return ``needs_confirmation``. The
+    request that was never confirmed would already have changed host state.
+    """
+
+    async def test_unconfirmed_user_delete_of_a_mid_swap_skill_changes_nothing(
+        self, client: AsyncClient, web_project: Path
+    ) -> None:
+        user_store = web_project / ".memtomem" / "skills"  # HOME == web_project
+        p = _row_2(user_store)
+        before = _residue(user_store)
+
+        resp = await client.delete("/api/context/skills/skill?target_scope=user")
+
+        body = resp.json()
+        assert body.get("status") == "needs_confirmation", body
+        assert body["confirm"] == "allow_host_writes"
+        # The disclosure names the canonical even though it does not exist yet —
+        # that is what makes consent cover what recovery would materialize.
+        assert any(str(p["dst"]) in t for t in body["host_targets"]), body["host_targets"]
+        # And nothing moved: marker and both transients exactly as found.
+        assert _residue(user_store) == before
+        assert not p["dst"].exists()
+
+    async def test_confirmed_user_delete_recovers_then_deletes(
+        self, client: AsyncClient, web_project: Path
+    ) -> None:
+        user_store = web_project / ".memtomem" / "skills"
+        p = _row_2(user_store)
+
+        resp = await client.delete(
+            "/api/context/skills/skill?target_scope=user&allow_host_writes=true"
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"], resp.text
+        assert not p["dst"].exists()
+        assert _residue(user_store) == []
 
 
 class TestWebSkillRoutes:
@@ -634,6 +759,41 @@ class TestWikiInstall:
         with pytest.raises(StaleInstallError):
             update_skill(project, "foo")
         assert _residue(store) == before
+
+    def test_the_cli_prints_a_sentence_not_an_oserror_repr(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`mm context install skill` — the primary single-asset command.
+
+        Listing ``SwapRecoveryError`` in ``_translate_to_click`` alone routes it
+        through that helper's default ``str(exc)`` branch, which is exactly the
+        ``[Errno 16] …: '<path>'`` form (PR review). The translator special-cases
+        it, and this pins the user-visible result rather than the plumbing.
+        """
+        from click.testing import CliRunner
+
+        from memtomem.cli.context_cmd import context
+
+        self._wiki_with(wiki_root, "foo")
+        project = tmp_path / "proj"
+        project.mkdir()
+        install_skill(project, "foo")  # the lock.json entry update needs
+        self._wiki_commit(wiki_root, "foo", b"# newer\n")
+        store = project / ".memtomem" / "skills"
+        shutil.rmtree(store / "foo")
+        p = _row_4(store, name="foo")
+        monkeypatch.chdir(project)
+
+        # --force so the pre-lock dirty gate does not refuse before the lock.
+        result = CliRunner().invoke(
+            context, ["update", "skill", "foo", "--force"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 1
+        assert "[Errno" not in result.output, result.output
+        assert "Traceback" not in result.output
+        assert "interrupted directory swap" in result.output
+        assert str(p["old"]) in result.output, "the operator needs the path to inspect"
 
     def test_pinned_install_recovers_before_its_own_re_check(
         self, wiki_root: Path, tmp_path: Path
