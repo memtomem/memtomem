@@ -163,6 +163,7 @@ async def test_mem_add_blocked_in_degraded_mode(degraded_components):
         namespace=None,
         template=None,
         ctx=ctx,  # type: ignore[arg-type]
+        event_type="add",
     )
     assert stats is None
     assert "Embedding mismatch detected" in message
@@ -205,6 +206,7 @@ async def test_mem_embedding_reset_apply_current_repairs_mismatch(degraded_compo
         namespace=None,
         template=None,
         ctx=ctx,  # type: ignore[arg-type]
+        event_type="add",
     )
     assert "Embedding mismatch detected" not in message
     assert add_stats is not None

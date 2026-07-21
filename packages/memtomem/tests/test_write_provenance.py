@@ -6,6 +6,8 @@ of the write surfaces rather than of the session lifecycle.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from memtomem.server.context import AppContext
@@ -263,3 +265,152 @@ class TestProvenanceFailureIsolation:
     async def test_marking_a_missing_session_does_not_raise(self, components):
         app = AppContext.from_components(components)
         await mark_provenance_incomplete(app, "no-such-session")
+
+
+class _StubCtx:
+    """Minimal stand-in for the MCP ``Context`` object."""
+
+    def __init__(self, app):
+        self.request_context = SimpleNamespace(lifespan_context=app)
+
+
+async def _provenance_events(app, session_id):
+    """Only the events this module wrote — a session log may hold others."""
+    return [
+        e
+        for e in await app.storage.get_session_events(session_id)
+        if (e.get("metadata") or {}).get("provenance") == PROVENANCE_KIND
+    ]
+
+
+class TestMemAddCoreCallSiteLabels:
+    """Every ``_mem_add_core`` caller names itself, and names itself
+    *differently*.
+
+    The required ``event_type`` keyword already makes a new caller fail
+    loudly rather than skip provenance. What it cannot catch is a
+    copy-pasted label: a fifth surface arriving as ``"add"`` would report
+    its writes under another tool's name in ``event_counts``, and no
+    runtime test would notice. Read from the source so the guard covers
+    call sites no test happens to drive.
+    """
+
+    def test_each_caller_passes_a_distinct_event_type_literal(self):
+        import ast
+        from pathlib import Path
+
+        import memtomem
+
+        tools = Path(memtomem.__file__).parent / "server" / "tools"
+        labels: dict[str, str] = {}
+        for path in sorted(tools.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if not (isinstance(fn, ast.Name) and fn.id == "_mem_add_core"):
+                    continue
+                kw = next((k for k in node.keywords if k.arg == "event_type"), None)
+                assert kw is not None, f"{path.name}:{node.lineno} omits event_type"
+                assert isinstance(kw.value, ast.Constant), (
+                    f"{path.name}:{node.lineno} passes a non-literal event_type; "
+                    "the label must be readable from the call site"
+                )
+                where = f"{path.name}:{node.lineno}"
+                assert kw.value.value not in labels, (
+                    f"{where} reuses event_type={kw.value.value!r}, already used by "
+                    f"{labels[kw.value.value]} — one of the two would be misreported"
+                )
+                labels[kw.value.value] = where
+
+        assert set(labels) == {"add", "agent_share", "candidate_review", "consolidate_apply"}
+
+
+class TestMemAddCoreSurfaces:
+    """The four public tools that write through ``_mem_add_core``.
+
+    Instrumented inside the shared helper rather than at each tool, so
+    every one of them must still come out labelled with its *own* name —
+    a mislabel here is what the required ``event_type`` parameter exists
+    to prevent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mem_add_records_an_add_event(self, bm25_only_components):
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="auth flow: JWT in a cookie", ctx=ctx)  # type: ignore[arg-type]
+
+        events = await _provenance_events(app, session_id)
+        assert [e["event_type"] for e in events] == ["add"]
+        assert len(events[0]["chunk_ids"]) >= 1
+        assert all(isinstance(c, str) for c in events[0]["chunk_ids"])
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_mem_add_records_nothing_without_a_session(self, bm25_only_components):
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        await app.storage.create_session("bystander", "planner", "default")
+
+        await mem_add(content="written outside any session", ctx=ctx)  # type: ignore[arg-type]
+
+        assert await app.storage.get_session_events("bystander") == []
+
+    @pytest.mark.asyncio
+    async def test_an_idempotent_replay_records_nothing(self, bm25_only_components):
+        """A replay returns ``stats is None`` because no second write
+        happened — recording it would double-count one logical write."""
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="written once", idempotency_key="k1", ctx=ctx)  # type: ignore[arg-type]
+        replay = await mem_add(content="written once", idempotency_key="k1", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "idempotent replay" in replay
+        assert len(await _provenance_events(app, session_id)) == 1
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_mem_agent_share_records_an_agent_share_event(self, bm25_only_components):
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.multi_agent import mem_agent_register, mem_agent_share
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_agent_register(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="a fact worth sharing with the team", ctx=ctx)  # type: ignore[arg-type]
+
+        # Share the very chunk the first provenance event named — the id
+        # round-trips, which is itself part of the contract.
+        added = (await _provenance_events(app, session_id))[0]
+        await mem_agent_share(chunk_id=added["chunk_ids"][0], target="shared", ctx=ctx)  # type: ignore[arg-type]
+
+        events = await _provenance_events(app, session_id)
+        assert [e["event_type"] for e in events] == ["add", "agent_share"]
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
