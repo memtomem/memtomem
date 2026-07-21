@@ -256,6 +256,10 @@ async def mem_ns_assign(
         return "Error: at least one filter (source_filter or old_namespace) is required."
     merge = strict_bool(merge, "merge")
     app = await _get_app_initialized(ctx)
+    # ``merge=True`` can remove source chunk ids that an earlier provenance
+    # event still names. Capture before the storage await so a session switch
+    # cannot attribute that dangling id to the wrong session.
+    provenance_session_id = await capture_session_for_untracked_write(app)
     try:
         result = await app.storage.assign_namespace(
             namespace,
@@ -271,6 +275,8 @@ async def mem_ns_assign(
                 reason_code=exc.reason_code,
             ) from exc
         raise
+    if result.duplicates_dropped:
+        await flag_untracked_write(app, provenance_session_id)
     filters = []
     if source_filter:
         filters.append(f"source={source_filter!r}")

@@ -6,7 +6,6 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
-from itertools import combinations
 from typing import Callable, Sequence
 
 from memtomem.errors import NamespaceConflictError, StorageError
@@ -23,6 +22,11 @@ _RENAME_SAVEPOINT = "ns_rename"
 _ASSIGN_SAVEPOINT = "ns_assign"
 _DELETE_SAVEPOINT = "ns_delete"
 _SET_META_SAVEPOINT = "ns_set_meta"
+
+# Per-operation TEMP table used to collapse duplicate-to-survivor mappings
+# into set-based edge deletes. A linear mapping avoids materializing every
+# pair in a large equivalence group (O(k^2)) while the write lock is held.
+_DUPLICATE_MAP_TABLE = "_ns_duplicate_map"
 
 # Row cap per ``… IN (?, ?, …)`` delete during a merge. SQLite's
 # host-parameter limit is 999 on builds older than 3.32, and a namespace-wide
@@ -426,10 +430,7 @@ class NamespaceOps:
         if not losers:
             return 0
         pairs = [(plan.survivor_id, loser_id) for plan in plans for loser_id, _rowid in plan.losers]
-        groups = [
-            (plan.survivor_id, *(loser_id for loser_id, _rowid in plan.losers)) for plan in plans
-        ]
-        self._remap_chunk_references(db, pairs, duplicate_groups=groups)
+        self._remap_chunk_references(db, pairs)
         ids = [loser_id for loser_id, _rowid in losers]
         rowids = [rowid for _loser_id, rowid in losers]
         # Batched: a namespace-wide merge can carry more duplicates than
@@ -486,8 +487,6 @@ class NamespaceOps:
         self,
         db: sqlite3.Connection,
         pairs: Sequence[tuple[str, str]],
-        *,
-        duplicate_groups: Sequence[Sequence[str]] | None = None,
     ) -> None:
         """Re-point references from each dropped chunk to its surviving twin.
 
@@ -531,8 +530,7 @@ class NamespaceOps:
         reason about — column order is an artifact of the FK declaration.
         """
         columns = self._chunk_reference_columns(db)
-        groups = duplicate_groups or [(survivor, dropped) for survivor, dropped in pairs]
-        self._drop_edges_between_duplicates(db, columns, groups)
+        self._drop_edges_between_duplicates(db, columns, pairs)
         for pair in pairs:
             for table, column in columns:
                 db.execute(
@@ -545,7 +543,7 @@ class NamespaceOps:
     def _drop_edges_between_duplicates(
         db: sqlite3.Connection,
         columns: Sequence[tuple[str, str]],
-        duplicate_groups: Sequence[Sequence[str]],
+        pairs: Sequence[tuple[str, str]],
     ) -> None:
         """Delete edges whose endpoints collapse into one surviving chunk.
 
@@ -553,13 +551,35 @@ class NamespaceOps:
         ``chunk_links``) can hold an edge saying "this chunk relates to /
         was shared from that one" where the endpoints turn out to be the same
         content indexed in multiple namespaces. Remapping such a row would
-        point it at itself. Every pair inside one equivalence group is removed,
-        including loser-to-loser edges in groups larger than two.
+        point it at itself. A TEMP mapping table records each member's final
+        survivor once, so loser-to-loser edges in groups larger than two are
+        removed without expanding the group into every possible pair.
 
         Run *before* the remap and matched on the exact endpoint pair, so a
         self-edge the surviving chunk already carried — someone else's row,
         with its own meaning — is left untouched.
         """
+        mapping_table = quote_ident(_DUPLICATE_MAP_TABLE)
+        # A previous hard SQLite abort may have bypassed normal cleanup. The
+        # table is connection-local and contains only operation-scoped ids, so
+        # always recreate it inside this method's savepoint.
+        db.execute(f"DROP TABLE IF EXISTS temp.{mapping_table}")
+        db.execute(
+            f"CREATE TEMP TABLE {mapping_table} ("
+            "chunk_id TEXT PRIMARY KEY, survivor_id TEXT NOT NULL"
+            ") WITHOUT ROWID"
+        )
+        # Survivors repeat when one group has several losers; losers must be
+        # unique and map directly to their final survivor (no chains).
+        db.executemany(
+            f"INSERT OR IGNORE INTO {mapping_table} (chunk_id, survivor_id) VALUES (?, ?)",
+            ((survivor, survivor) for survivor, _dropped in pairs),
+        )
+        db.executemany(
+            f"INSERT INTO {mapping_table} (chunk_id, survivor_id) VALUES (?, ?)",
+            ((dropped, survivor) for survivor, dropped in pairs),
+        )
+
         by_table: dict[str, list[str]] = {}
         for table, column in columns:
             by_table.setdefault(table, []).append(column)
@@ -568,21 +588,25 @@ class NamespaceOps:
                 continue
             for i, left in enumerate(cols):
                 for right in cols[i + 1 :]:
-                    # executemany, not a loop of execute: one prepared
-                    # statement for the whole merge. Deletes are
-                    # order-independent (unlike the OR IGNORE remap), so
-                    # batching here costs no semantics.
-                    endpoint_pairs = [
-                        (first, second, second, first)
-                        for group in duplicate_groups
-                        for first, second in combinations(group, 2)
-                    ]
-                    db.executemany(
-                        f"DELETE FROM {quote_ident(table)} "
-                        f"WHERE ({quote_ident(left)}=? AND {quote_ident(right)}=?) "
-                        f"OR ({quote_ident(left)}=? AND {quote_ident(right)}=?)",
-                        endpoint_pairs,
+                    q_table = quote_ident(table)
+                    q_left = quote_ident(left)
+                    q_right = quote_ident(right)
+                    # One statement per FK-column pair, independent of how
+                    # many equivalent chunks the assignment selected. The IN
+                    # predicates let SQLite use the existing FK indexes; the
+                    # scalar lookups then prove both endpoints collapse to the
+                    # same survivor. Existing self-edges stay untouched.
+                    db.execute(
+                        f"DELETE FROM {q_table} "
+                        f"WHERE {q_left} IN (SELECT chunk_id FROM temp.{mapping_table}) "
+                        f"AND {q_right} IN (SELECT chunk_id FROM temp.{mapping_table}) "
+                        f"AND {q_left} <> {q_right} "
+                        f"AND (SELECT survivor_id FROM temp.{mapping_table} "
+                        f"     WHERE chunk_id={q_table}.{q_left}) = "
+                        f"    (SELECT survivor_id FROM temp.{mapping_table} "
+                        f"     WHERE chunk_id={q_table}.{q_right})"
                     )
+        db.execute(f"DROP TABLE temp.{mapping_table}")
 
     @staticmethod
     def _has_namespace_meta(db: sqlite3.Connection, namespace: str) -> bool:
@@ -738,12 +762,21 @@ class NamespaceOps:
                 FROM chunks
                 WHERE {selected_where}
             ),
+            selected_keys AS (
+                SELECT DISTINCT source_file, content_hash, start_line
+                FROM selected
+            ),
             pool AS (
-                SELECT id, rowid, namespace, source_file, content_hash, start_line,
-                       access_count, use_count, created_at,
+                SELECT target.id, target.rowid, target.namespace,
+                       target.source_file, target.content_hash, target.start_line,
+                       target.access_count, target.use_count, target.created_at,
                        1 AS is_target, 0 AS is_selected
-                FROM chunks
-                WHERE namespace = ?
+                FROM selected_keys AS selected_key
+                CROSS JOIN chunks AS target
+                WHERE target.namespace = ?
+                  AND target.source_file = selected_key.source_file
+                  AND target.content_hash = selected_key.content_hash
+                  AND target.start_line IS selected_key.start_line
                 UNION ALL
                 SELECT id, rowid, namespace, source_file, content_hash, start_line,
                        access_count, use_count, created_at,

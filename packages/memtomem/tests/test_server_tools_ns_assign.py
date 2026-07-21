@@ -89,6 +89,46 @@ class TestAssignNamespaceStorage:
         assert (await storage.get_chunk(source.id)).metadata.namespace == "outside-ns"
         assert (await storage.get_chunk(wrong_path.id)).metadata.namespace == "source-ns"
 
+    async def test_empty_selection_does_not_scan_a_large_target(self, storage):
+        """Preflight cost follows selected keys, not destination size.
+
+        SQLite VM-step counts are deterministic for one connection and make
+        the old full-destination window query visible without relying on wall
+        clock timing. B-tree depth may add a handful of steps; a target-row
+        scan adds thousands.
+        """
+        db = storage._get_db()
+
+        async def _steps() -> int:
+            steps = 0
+
+            def _count_step() -> int:
+                nonlocal steps
+                steps += 1
+                return 0
+
+            db.set_progress_handler(_count_step, 1)
+            try:
+                await storage.assign_namespace("target-ns", old_namespace="missing-ns")
+            finally:
+                db.set_progress_handler(None, 0)
+            return steps
+
+        before = await _steps()
+        await storage.upsert_chunks(
+            [
+                make_chunk(
+                    content=f"target-{i}",
+                    namespace="target-ns",
+                    source=f"target-{i}.md",
+                )
+                for i in range(200)
+            ]
+        )
+        after = await _steps()
+
+        assert after < before + 500
+
     async def test_source_to_source_collision_uses_691_survivor_order(self, storage):
         preferred = make_chunk(content="same", namespace="source-a", source="shared.md")
         loser = make_chunk(content="same", namespace="source-b", source="shared.md")
@@ -155,6 +195,38 @@ class TestAssignNamespaceStorage:
 
         assert (result.chunks_moved, result.duplicates_dropped) == (1, 2)
         assert await storage.get_related(survivor.id) == []
+
+    async def test_duplicate_edge_cleanup_statement_count_is_constant(self, storage):
+        """One equivalence group must not expand into k*(k-1)/2 DELETEs."""
+        chunks = [
+            make_chunk(content="same", namespace=f"source-{i}", source="shared.md")
+            for i in range(6)
+        ]
+        for chunk in chunks[1:]:
+            chunk.content_hash = chunks[0].content_hash
+        await storage.upsert_chunks(chunks)
+        db = storage._get_db()
+        trace: list[str] = []
+        db.set_trace_callback(lambda sql: trace.append(" ".join(sql.split())))
+        try:
+            result = await storage.assign_namespace(
+                "target-ns", source_filter="shared.md", merge=True
+            )
+        finally:
+            db.set_trace_callback(None)
+
+        edge_deletes = [
+            sql for sql in trace if sql.upper().startswith('DELETE FROM "CHUNK_RELATIONS"')
+        ]
+        assert (result.chunks_moved, result.duplicates_dropped) == (1, 5)
+        assert len(edge_deletes) == 1
+        assert (
+            db.execute(
+                "SELECT 1 FROM sqlite_temp_master WHERE name=?",
+                ("_ns_duplicate_map",),
+            ).fetchone()
+            is None
+        )
 
 
 class TestAssignNamespaceAtomicity:
@@ -303,6 +375,62 @@ class TestAssignNamespaceTool:
 
         assert "Assigned 1 chunks" in output
         assert "1 duplicate chunk(s) dropped" in output
+
+    async def test_merge_drop_marks_active_session_provenance_incomplete(self, ctx, storage):
+        app = ctx.request_context.lifespan_context
+        session_id = "assign-merge-session"
+        source, target = _duplicate_pair()
+        await storage.upsert_chunks([source, target])
+        await storage.create_session(
+            session_id,
+            "planner",
+            "source-ns",
+            {"provenance": "write-v1"},
+        )
+        await storage.add_session_event(
+            session_id,
+            "add",
+            "write-v1 add chunks=1",
+            [str(source.id)],
+            {"provenance": "write-v1", "chunk_count": 1},
+        )
+        app.current_session_id = session_id
+
+        await mem_ns_assign(
+            namespace="target-ns",
+            old_namespace="source-ns",
+            merge=True,
+            ctx=ctx,
+        )
+
+        row = await storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+        event = (await storage.get_session_events(session_id))[0]
+        assert event["chunk_ids"] == [str(source.id)]
+        assert await storage.get_chunk(source.id) is None
+
+    async def test_assign_without_drop_keeps_session_provenance_complete(self, ctx, storage):
+        app = ctx.request_context.lifespan_context
+        session_id = "assign-move-session"
+        source = make_chunk(content="unique", namespace="source-ns", source="unique.md")
+        await storage.upsert_chunks([source])
+        await storage.create_session(
+            session_id,
+            "planner",
+            "source-ns",
+            {"provenance": "write-v1"},
+        )
+        app.current_session_id = session_id
+
+        await mem_ns_assign(
+            namespace="target-ns",
+            old_namespace="source-ns",
+            merge=True,
+            ctx=ctx,
+        )
+
+        row = await storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
 
     @pytest.mark.parametrize("value", ["true", "false", 1, 0])
     async def test_non_literal_merge_is_refused(self, ctx, value):

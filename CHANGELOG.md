@@ -119,7 +119,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   a write lock and refuses with the overlap count before changing anything.
   Literal `merge=true` opts into target-wins consolidation, preserves/remaps
   references, removes redundant FTS/vector sidecars, and reports moved versus
-  dropped rows separately. The operation is savepoint-backed and no longer
+  dropped rows separately. A merge that drops recorded chunk IDs marks the
+  active session's write provenance incomplete instead of leaving dangling IDs
+  under a completeness claim. The operation is savepoint-backed and no longer
   commits or rolls back a caller-owned transaction.
 
 - **Namespace delete and metadata upsert now respect transaction ownership**
