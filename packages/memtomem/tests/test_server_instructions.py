@@ -540,6 +540,7 @@ def test_initialize_response_carries_instructions(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
     # Pin the mode rather than inherit whatever the developer's shell
     # exports — this test asserts the shipping-default text.
