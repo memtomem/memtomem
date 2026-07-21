@@ -14,7 +14,7 @@ OSV by this column, never by the cdnjs path.
 
 | File                           | npm package       | Version | License               | Upstream                                                                          | SHA-256 (full)                                                       |
 | ------------------------------ | ----------------- | ------- | --------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `purify.min.js`                | `dompurify`       | 3.4.11  | Apache-2.0 OR MPL-2.0 | https://cdn.jsdelivr.net/npm/dompurify@3.4.11/dist/purify.min.js                   | `dbabb5b205a333ec49c8c09e7fca30ef66df0523bb8bc0fa9ea843841f111dbd`   |
+| `purify.min.js`                | `dompurify`       | 3.4.12  | Apache-2.0 OR MPL-2.0 | https://cdn.jsdelivr.net/npm/dompurify@3.4.12/dist/purify.min.js                   | `c45ba939765574f96cbf35ee9b6d89f73756a17921814425e74b82f7c54603ce`   |
 | `marked.umd.js`                | `marked`          | 18.0.3  | MIT                   | https://cdn.jsdelivr.net/npm/marked@18.0.3/lib/marked.umd.js                       | `8fe6e9d26d01533807fdb8d7d081a4de43bb3909f7ba15ac69606f5e11891599`   |
 | `prism.min.js`                 | `prismjs`         | 1.30.0  | MIT                   | https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/prism.min.js                   | `a4a8b1f682003b325dc9754e825ed0ba12ebac8fac5433b520eb43d6b24da11b`   |
 | `prism-python.min.js`          | `prismjs`         | 1.30.0  | MIT                   | https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-python.min.js | `ed4385685bcf2d4935c8dbbab4bde16603da1329e092d2bf36c3dadd67e9a85c`   |
@@ -31,13 +31,13 @@ OSV by this column, never by the cdnjs path.
 Copyright 2024 Dr.-Ing. Mario Heiderich, Cure53.
 
 Distributed under the dual Apache-2.0 / MPL-2.0 license (npm
-`license: "(MPL-2.0 OR Apache-2.0)"`, unchanged through 3.4.11). The
+`license: "(MPL-2.0 OR Apache-2.0)"`, unchanged through 3.4.12). The
 vendored `dompurify-LICENSE.txt` reproduces BOTH license texts verbatim;
-note that upstream's `LICENSE` file at the `3.4.11` tag now ships only the
+note that upstream's `LICENSE` file at the `3.4.12` tag now ships only the
 Apache-2.0 half, so the retained dual-text copy is the more complete
 attribution for a still-dual-licensed package.
 
-Source: https://github.com/cure53/DOMPurify/blob/3.4.11/LICENSE
+Source: https://github.com/cure53/DOMPurify/blob/3.4.12/LICENSE
 
 ## marked (`marked.umd.js`) — MIT
 

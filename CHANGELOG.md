@@ -828,6 +828,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **Vendored DOMPurify bumped 3.4.11 → 3.4.12** (GHSA-c2j3-45gr-mqc4, Low) —
+  the SPA's SHA-pinned DOMPurify carried an advisory where a custom element
+  allowed via `CUSTOM_ELEMENT_HANDLING.tagNameCheck` could bypass an
+  `afterSanitizeElements` hook, preserving attributes a policy meant to strip.
+  memtomem's web UI calls `DOMPurify.sanitize` with default options and sets no
+  custom-element handling, so it was never reachable here, but the vendored
+  asset is bumped to the fixed release to clear the blocking OSV gate.
+
 - **`mcp[cli]` floor raised to 1.28.1** (GHSA-vj7q-gjh5-988w / CVE-2026-59950,
   High, CVSS 7.6) — the SDK's deprecated `websocket_server` transport accepted
   handshakes without checking `Host` or `Origin`, so a web page open in your

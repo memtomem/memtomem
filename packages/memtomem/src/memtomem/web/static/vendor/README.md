@@ -47,7 +47,7 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
 
    # SPA assets — bump versions here, then run:
    curl -sSfL -o prism-tomorrow.min.css   https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/themes/prism-tomorrow.min.css
-   curl -sSfL -o purify.min.js            https://cdn.jsdelivr.net/npm/dompurify@3.4.11/dist/purify.min.js
+   curl -sSfL -o purify.min.js            https://cdn.jsdelivr.net/npm/dompurify@3.4.12/dist/purify.min.js
    curl -sSfL -o marked.umd.js            https://cdn.jsdelivr.net/npm/marked@18.0.3/lib/marked.umd.js
    curl -sSfL -o prism.min.js             https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/prism.min.js
    curl -sSfL -o prism-python.min.js      https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-python.min.js
