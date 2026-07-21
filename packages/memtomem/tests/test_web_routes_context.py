@@ -1233,6 +1233,64 @@ class TestSyncSkills:
 # ---------------------------------------------------------------------------
 
 
+class TestSkillSkipReasonRedaction:
+    """Engine skip reasons embed absolute paths; the web wire must not.
+
+    ``target exists and is not a directory: <dst>``,
+    ``refusing to overwrite non-skill directory: <dst>``, ``unreadable:
+    <OSError with filename>`` and the swap-recovery refusal all name a path,
+    because on the CLI that path IS the remediation. The canonical-path
+    disclosure rule (#1385/#1412) is that the CLI gets it verbatim and the
+    web/MCP surfaces do not — these two report builders were passing the raw
+    reason through, leaking the project root (and, at user tier, the OS
+    username) into a bulk-import result.
+    """
+
+    @pytest.mark.anyio
+    async def test_import_skip_reason_carries_no_absolute_path(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        _make_runtime_skill(tmp_path, ".claude/skills", "clash", "# Imported\n")
+        # A non-skill directory already at the canonical destination — the
+        # `_target_conflict` refusal, whose reason names the destination.
+        canonical = tmp_path / ".memtomem" / "skills" / "clash"
+        canonical.mkdir(parents=True)
+        (canonical / "not-a-skill.txt").write_text("junk\n", encoding="utf-8")
+
+        r = await client.post("/api/context/skills/import", json={"overwrite": True})
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["skipped"], data
+        # Scoped to the skip rows: this report also carries a deliberate
+        # top-level ``project_root`` field, which is a separate (pre-existing)
+        # decision and not what this pins.
+        reasons = [s["reason"] or "" for s in data["skipped"]]
+        for reason in reasons:
+            assert str(tmp_path) not in reason, reason
+            assert str(tmp_path.resolve()) not in reason, reason
+        # The condition still reaches the user — redaction, not deletion.
+        assert any("clash" in reason for reason in reasons), reasons
+
+    @pytest.mark.anyio
+    async def test_sync_skip_reason_carries_no_absolute_path(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        canonical = tmp_path / ".memtomem" / "skills" / "hello"
+        canonical.mkdir(parents=True)
+        (canonical / SKILL_MANIFEST).write_text("---\nname: hello\n---\nbody\n", encoding="utf-8")
+        # A non-skill directory at the runtime destination — same refusal, the
+        # other report builder.
+        runtime_dst = tmp_path / ".claude" / "skills" / "hello"
+        runtime_dst.mkdir(parents=True)
+        (runtime_dst / "junk.txt").write_text("junk\n", encoding="utf-8")
+
+        r = await client.post("/api/context/skills/sync")
+
+        assert r.status_code == 200
+        assert str(tmp_path) not in r.text
+
+
 class TestImportSkills:
     @pytest.mark.anyio
     async def test_import(self, client: AsyncClient, tmp_path: Path):

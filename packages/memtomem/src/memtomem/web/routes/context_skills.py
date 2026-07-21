@@ -708,8 +708,18 @@ async def _sync_skills_core(
         "generated": [
             {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
         ],
+        # Engine skip reasons embed absolute paths — the destination for a
+        # target conflict, the transients for a pending swap recovery, an
+        # OSError's filename for an unreadable canonical. Sanitized here, at
+        # the wire, the same way the diff-row reasons on this router already
+        # are (#1385/#1412): the canonical-path disclosure rule is that CLI
+        # gets the path verbatim and the web/MCP surfaces do not.
         "skipped": [
-            {"runtime": rt, "reason": reason, "reason_code": code}
+            {
+                "runtime": rt,
+                "reason": sanitize_diff_reason(reason, project_root),
+                "reason_code": code,
+            }
             for rt, reason, code in result.skipped
         ],
         "canonical_root": CANONICAL_SKILL_ROOT,
@@ -784,8 +794,14 @@ def _import_payload(
             }
             for p in result.imported
         ],
+        # Same wire-boundary sanitization as the sync report above — an import
+        # skip carries the same path-bearing engine reasons.
         "skipped": [
-            {"name": name, "reason": reason, "reason_code": code}
+            {
+                "name": name,
+                "reason": sanitize_diff_reason(reason, project_root),
+                "reason_code": code,
+            }
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
