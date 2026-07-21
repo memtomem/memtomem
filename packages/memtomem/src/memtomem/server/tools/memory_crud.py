@@ -401,6 +401,13 @@ async def _mem_add_core(
 
     # Gate A (chokepoint). enforce_write_guard hard-refuses
     # ``force_unsafe=True`` when scope=='project_shared'.
+    #
+    # The scan covers the entire ``content`` regardless of length — a secret
+    # pasted past any byte offset still trips it. The asymmetry with STM's
+    # compression-side scanner is intentional: STM's window is a routing
+    # signal, while this is the write-rejection gate at the trust boundary.
+    # (Kept as a comment rather than in the tool description: it explains why
+    # the server behaves this way, which no caller needs in order to call it.)
     guard = privacy.enforce_write_guard(
         content,
         surface="mem_add",
@@ -633,21 +640,12 @@ async def mem_add(
     """Add a new memory entry to a markdown file and immediately index it.
 
     The entry is appended to the target file (or a new timestamped file is
-    created in the first configured memory directory). The file is then
-    re-indexed so the entry is immediately searchable.
+    created in the first configured memory directory), then re-indexed so it
+    is immediately searchable.
 
-    Content passes through a trust-boundary redaction guard before any
-    filesystem write. If the content matches a known secret pattern
-    (provider tokens, API keys, PEM headers, etc.) the write is rejected.
-    Set ``force_unsafe=True`` to bypass after manual review; bypass events
-    are recorded with a ``bypassed`` outcome label so guard effectiveness
-    and bypass usage stay observable. See ``mem_add_redaction_stats``.
-
-    The redaction scan covers the entire ``content`` regardless of length —
-    a secret pasted past any byte offset still triggers the guard. The
-    asymmetry with STM's compression-side scanner is intentional: STM's
-    window is a routing signal, while the LTM scan is the write-rejection
-    gate at the trust boundary.
+    All content is scanned for secrets before any filesystem write; a match
+    rejects the write. See ``force_unsafe`` below for the one escape hatch
+    and ``mem_add_redaction_stats`` for the outcome counters.
 
     Args:
         content: The memory content to store
@@ -661,21 +659,25 @@ async def mem_add(
         force_unsafe: When True, bypass the redaction guard for this call
                       even when content matches a secret pattern. Use only
                       when matches are known false positives (e.g.,
-                      documenting an example credential schema).
+                      documenting an example credential schema). The bypass
+                      is recorded with a ``bypassed`` outcome and an audit
+                      line, and it never applies to
+                      ``scope="project_shared"`` — that combination is
+                      hard-refused, because git history cannot be retracted
+                      from clones.
         scope: Write tier: ``user`` (default), ``project_local``, or
                ``project_shared``.
         confirm_project_shared: Required explicit consent for a Git-tracked
                                 ``project_shared`` write.
-        idempotency_key: Optional client-chosen key (max 256 chars) making
-                         this write idempotent for 24h: a retried call with
-                         the same key returns the original result and performs
-                         no new write. Only successful writes are recorded — a
-                         failed call may be retried with the same key. Without
-                         a key, semantics stay at-least-once (a transport retry
-                         may duplicate the entry).
+        idempotency_key: Optional key (max 256 chars) making this write
+                         idempotent for 24h — a retry with the same key
+                         returns the original result and writes nothing.
+                         Only successful writes are recorded, so a failed
+                         call may be retried with the same key. Without a
+                         key, semantics are at-least-once.
 
-    Returns a confirmation message. If highly similar memories already exist
-    (≥90% match), a duplicate warning is appended to the output.
+    Returns a confirmation message, plus a duplicate warning when a highly
+    similar memory (≥90% match) already exists.
     """
     message, _stats = await _mem_add_core(
         content=content,
@@ -728,7 +730,11 @@ async def mem_edit(
             blockquote are preserved unless the value starts with ``## ``.
         force_unsafe: When True, bypass the redaction guard for this call
             even when ``new_content`` matches a secret pattern. Use only
-            when matches are known false positives.
+            when matches are known false positives. The bypass is recorded
+            with a ``bypassed`` outcome and an audit line. It does not apply
+            when the edited chunk's own scope is ``project_shared``: that is
+            hard-refused, because git history cannot be retracted from
+            clones.
     """
     if not new_content.strip():
         return "Error: new_content cannot be empty."
@@ -1010,7 +1016,11 @@ async def mem_batch_add(
         namespace: Namespace for all entries (default: config default)
         file: Target .md file.  If omitted, a timestamped file is created.
         force_unsafe: When True, bypass the redaction guard for any flagged
-                      entries. Bypass events are recorded per item.
+                      entries. Each bypass is recorded per item with a
+                      ``bypassed`` outcome and an audit line. It never
+                      applies to ``scope="project_shared"`` — that
+                      combination is hard-refused for the whole batch,
+                      because git history cannot be retracted from clones.
         scope: ADR-0011 scope axis (``user`` / ``project_shared`` /
                ``project_local``). Applies to every entry in the batch.
         confirm_project_shared: Required when ``scope='project_shared'``

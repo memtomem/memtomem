@@ -13,12 +13,17 @@ from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import remediation, versioning
 from memtomem.context._canonical_txn import versioning_op_locked
-from memtomem.context.error_redact import redact_engine_reason
+from memtomem.context.error_redact import (
+    redact_engine_reason,
+    scrub_absolute_paths,
+    scrub_residual_absolute_paths,
+)
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._validation import strict_bool
 
 if TYPE_CHECKING:
     from memtomem.context._names import Layout
@@ -54,8 +59,18 @@ def _redact_reason(reason: str | None, *roots: Path) -> str:
     suffix guard on the returned string. The MCP tool result flows to the
     calling agent's transcript / model provider, so it gets the same wire-
     boundary sanitization the loopback dashboard applies.
+
+    Composes :func:`scrub_residual_absolute_paths` — the absolute-ONLY scrub,
+    NOT the web's :func:`scrub_absolute_paths`. ``redact_engine_reason`` strips
+    only the roots it is handed plus the import-frozen ``$HOME``, so a runtime
+    dir symlinked onto a shared volume kept its full path on this wire (PR
+    review, reproduced). The web twin's scrub cannot be reused: it also eats
+    the RELATIVE remainder, which here is the remediation
+    (``blocked foo: privacy hits in .claude/agents/foo.md``) and, in the
+    success-path formatters, the intended ``~``-collapsed output. Two postures,
+    two scrubs — see :mod:`memtomem.context.error_redact`.
     """
-    return redact_engine_reason(reason, *roots) or ""
+    return scrub_residual_absolute_paths(redact_engine_reason(reason, *roots) or "")
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
@@ -471,11 +486,18 @@ async def mem_context_detect(
     ``include="skills,agents,commands"`` to also list runtime skill
     directories, sub-agent files, and slash-command files.
 
-    Pass ``include_runtimes=True`` to also report read-only provider-client
-    registration status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B).
-    This is a separate boolean — it is intentionally NOT part of the ``include``
-    set, so the shared sync/generate/init/diff include contract is never
-    widened (``mem_context_sync(include="runtimes")`` still rejects).
+    Args:
+        include: Comma list of extra kinds to report — ``skills``,
+            ``agents``, ``commands``, ``settings``. ``settings`` lists the
+            resolved-scope settings file of each available runtime (Claude,
+            Codex, Gemini, Kimi), including ones not yet created. Empty
+            (default) reports agent files only.
+        include_runtimes: Also report read-only provider-client registration
+            status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B). A
+            separate boolean on purpose — it is NOT part of the ``include``
+            set, so the shared sync/generate/init/diff include contract is
+            never widened (``mem_context_sync(include="runtimes")`` still
+            rejects).
     """
     from memtomem.context.detector import (
         detect_agent_dirs,
@@ -612,12 +634,14 @@ async def mem_context_generate(
             ``project_local``. The same value is also forwarded as the
             ADR-0010 host-write target-scope override for ``settings``
             (mirrors the CLI at ``cli/context_cmd.py:963-987``).
-        allow_host_writes: When ``include="settings"`` writes a settings
-            file outside the project root (today only
-            ``~/.claude/settings.json``), refuse with a
-            ``needs confirmation`` line unless this is ``True``. Re-call
-            with ``allow_host_writes=True`` after surfacing the host
-            paths to the user.
+        allow_host_writes: When ``include="settings"`` resolves to a path
+            outside the project root (``~/.claude/settings.json`` and the
+            Codex / Gemini / Kimi equivalents, depending on the effective
+            scope), refuse with a ``needs confirmation`` line unless this
+            is ``True``. Re-call with ``allow_host_writes=True`` after
+            surfacing the host paths to the user. Same boundary as
+            ``mem_context_sync``; both fan out through the settings
+            generators.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
@@ -928,35 +952,41 @@ async def mem_context_sync(
 ) -> str:
     """Push .memtomem/context.md to all detected agent files.
 
-    Pass ``include="skills,agents,commands,settings"`` to also fan out
-    ``.memtomem/skills/``, ``.memtomem/agents/``, ``.memtomem/commands/``,
-    and ``.memtomem/settings.json`` to their runtime targets (Claude Code,
-    Gemini CLI, Codex CLI).  ``on_drop`` controls the severity when
-    sub-agent / command fields are dropped during conversion: ``ignore``
-    (default), ``warn`` (report but still write), or ``error`` (abort the
-    kind). ``strict=True`` is a legacy alias for ``on_drop="error"``; when
-    both are supplied ``on_drop`` wins unless it is still the default.
-
-    ``scope`` selects the ADR-0011 canonical artifact tier for
-    ``skills``, ``agents``, and ``commands``: ``project_shared``
-    (default), ``user``, or ``project_local``. For ``settings`` the same
-    value is treated as the ADR-0010 host-write target-scope override.
-
-    ``allow_host_writes`` defaults to ``False``: when ``include="settings"``
-    would write to a file outside the project root (today only
-    ``~/.claude/settings.json``), the tool returns a ``needs confirmation``
-    line listing the host path instead of writing. Surface that to the
-    user, then re-call with ``allow_host_writes=True`` to proceed.
-
-    ``label`` (ADR-0022) deploys a frozen version instead of the working
-    canonical for the versioned kinds (``agents`` / ``commands``): pass a label
-    (e.g. ``"production"``) or a bare version tag (``"v2"``) created via
-    ``mem_context_version`` / ``mem_context_promote``. ``""`` (default) /
-    ``"latest"`` fans out the working file (byte-for-byte today's behavior).
-    The label applies only to agents/commands — ineligible included kinds run
-    label-less with a note (invariant 10) — and an unknown/dangling label or a
-    flat-layout artifact is isolated as a per-artifact ``skipped`` row, never a
-    whole-run error. Mirrors the CLI ``mm context sync --label``.
+    Args:
+        include: Comma list of extra kinds to fan out alongside context.md.
+            ``skills`` / ``agents`` / ``commands`` come from
+            ``.memtomem/skills/``, ``.memtomem/agents/``,
+            ``.memtomem/commands/``; ``settings`` comes from the single file
+            ``.memtomem/settings.json``. Targets are the runtimes registered
+            for that kind (Claude Code, Gemini CLI, Codex CLI, Kimi CLI for
+            settings). Empty (default) syncs context.md only.
+        strict: Legacy alias for ``on_drop="error"``. When both are given,
+            ``on_drop`` wins unless it is still at its default.
+        on_drop: Severity when sub-agent / command fields are dropped during
+            conversion — ``ignore`` (default), ``warn`` (report but still
+            write), or ``error`` (abort that kind).
+        scope: One value, two meanings, and two different defaults. For
+            ``skills`` / ``agents`` / ``commands`` it is the ADR-0011
+            canonical artifact tier and defaults to ``project_shared``. For
+            ``settings`` it overrides the ADR-0010 host-write target scope,
+            which otherwise comes from ``hooks.target_scope`` in config
+            (default ``user``). Vocabulary is the same either way:
+            ``user``, ``project_shared``, ``project_local``.
+        allow_host_writes: Consent for writing outside the project root.
+            With ``include="settings"`` a target that resolves to a host
+            path (``~/.claude/settings.json`` and the Codex / Gemini / Kimi
+            equivalents, depending on the effective scope) returns a
+            ``needs confirmation`` line naming the path instead of writing;
+            surface it to the user, then re-call with ``True``.
+        label: ADR-0022 — deploy a frozen version instead of the working
+            canonical for the versioned kinds (``agents`` / ``commands``).
+            Pass a label (``"production"``) or a bare version tag (``"v2"``)
+            created via ``mem_context_version`` / ``mem_context_promote``.
+            ``""`` (default) / ``"latest"`` fans out the working file.
+            Ineligible included kinds run label-less with a note (invariant
+            10); an unknown/dangling label or a flat-layout artifact is
+            isolated as a per-artifact ``skipped`` row, never a whole-run
+            error. Mirrors the CLI ``mm context sync --label``.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
@@ -1296,7 +1326,7 @@ async def mem_context_migrate(
     confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
-    """DEPRECATED alias for ``mem_context_memory_migrate``.
+    """DEPRECATED alias for mem_context_memory_migrate.
 
     Renamed in #1147 (B5-2): ``mem_context_migrate`` only ever covered
     *memory*-tier migration, but its bare name implied parity with the
@@ -1312,6 +1342,19 @@ async def mem_context_migrate(
     routed through ``mem_do`` directly: the registry alias
     ``"context_migrate" → "context_memory_migrate"`` (``tools/meta.py``)
     keeps the old ``mem_do`` action name working.
+
+    Args:
+        source: Single markdown file path OR a glob pattern. Forwarded
+            unchanged to ``mem_context_memory_migrate``.
+        from_scope: Source memory tier — ``user``, ``project_shared``, or
+            ``project_local``.
+        to_scope: Target memory tier (same vocabulary); must differ from
+            ``from_scope``.
+        apply: Execute the migration. ``False`` (default) returns a dry-run
+            preview.
+        confirm_project_shared: Required when ``to_scope="project_shared"``;
+            without it the call returns a ``needs confirmation`` message
+            instead of touching disk.
     """
     return await mem_context_memory_migrate(
         source=source,
@@ -2659,8 +2702,23 @@ _PULL_LOCK_BUDGET_S = 30.0
 #: a new engine status must be classified deliberately, not inherit a prefix
 #: that could understate it (e.g. a future data-loss status rendering as a
 #: benign refusal).
-#: The four the web route maps to non-200 (503/409/500/500) → ``error:``.
-_PULL_ERROR_STATUSES = frozenset({"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"})
+#: The five the web route maps to non-200 (503/409/409/500/500) → ``error:``.
+#: ``swap_recovery_pending`` belongs here rather than with the refusals: the
+#: refusal bucket is defined as "what the web route returns as a typed 200",
+#: and this one is a 409. It is also not an *actionable* refusal — the
+#: remediation is an operator inspecting the artifact on disk, not a parameter
+#: the caller can change and retry (which is why it carries no ``remediation``
+#: entry). Under a known root the reason still names the trees relatively;
+#: outside one it says ``'<path>'`` and the CLI is where the locations survive.
+_PULL_ERROR_STATUSES = frozenset(
+    {
+        "lock_timeout",
+        "plan_stale",
+        "snapshot_failed",
+        "write_failed",
+        "swap_recovery_pending",
+    }
+)
 #: Actionable domain refusals the web route returns as a typed HTTP 200.
 _PULL_REFUSAL_STATUSES = frozenset(
     {
@@ -2692,24 +2750,11 @@ _PULL_BOOL_FLAGS = (
 )
 
 
-def _strict_bool(value: object, field: str) -> bool:
-    """Accept ONLY a literal ``True`` / ``False``; reject anything else.
-
-    The MCP twin of the web ``_only_literal_true`` validator, generalized to
-    both polarities because a *falsy-looking* string is the dangerous direction
-    here: ``"false"`` is truthy in Python, so a coercing implementation would
-    turn a declined consent into a write. Fails closed with a crisp message
-    instead of silently normalizing, so a malformed agent call is corrected
-    rather than acted on. ``1`` / ``0`` are rejected too (``1 is True`` is
-    ``False`` — ints are not booleans).
-    """
-    if value is True or value is False:
-        return value
-    raise ValueError(
-        f"{field} must be a literal boolean (true/false), got "
-        f"{type(value).__name__} {value!r} — a stringified boolean is refused "
-        "because 'false' would read as true."
-    )
+#: Literal-boolean gate for consent-shaped flags. Lives in
+#: ``tools/_validation.py`` since ``mem_ns_rename(merge=…)`` needs the same
+#: guarantee; the module-local name is kept so the call sites and the
+#: comments that reference ``_strict_bool`` below still read as before.
+_strict_bool = strict_bool
 
 
 def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
@@ -2718,9 +2763,13 @@ def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
     ``_redact_reason`` strips the roots it is handed plus the import-frozen
     ``$HOME``; :func:`scrub_absolute_paths` then removes any residual absolute
     path under neither (mirrors the web ``_redact_pull_reason`` composition).
-    """
-    from memtomem.context.error_redact import scrub_absolute_paths
 
+    Pull opts INTO the scrub while the shared ``_redact_reason`` stays out of
+    it — see that function for why the two are not the same decision. Pull
+    reasons carry no actionable relative remainder to protect: they name
+    runtimes and scopes, and after G4a-3a a swap refusal names two canonical
+    trees, which is disclosure rather than remediation.
+    """
     return scrub_absolute_paths(_redact_reason(reason, *roots))
 
 
@@ -2782,12 +2831,19 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     prefix-coded MCP line (``error:`` / ``refused:`` / ``privacy block:`` /
     success), mirroring the web ``_finalize_pull`` status routing.
 
-    The four HTTP-semantic statuses the web route maps to non-200
-    (``lock_timeout`` 503, ``plan_stale`` 409, ``snapshot_failed`` /
-    ``write_failed`` 500) have no status channel over MCP, so they surface as
-    ``error:`` text; ``gate_blocked`` is ``privacy block:``; the actionable
-    domain refusals are ``refused:``; ``applied`` (incl. the byte-identical
-    no-op) is a success line.
+    The five HTTP-semantic statuses the web route maps to non-200
+    (``lock_timeout`` 503, ``plan_stale`` / ``swap_recovery_pending`` 409,
+    ``snapshot_failed`` / ``write_failed`` 500) have no status channel over
+    MCP, so they surface as ``error:`` text; ``gate_blocked`` is
+    ``privacy block:``; the actionable domain refusals are ``refused:``;
+    ``applied`` (incl. the byte-identical no-op) is a success line.
+
+    ``swap_recovery_pending`` sits with the errors rather than the refusals on
+    purpose: ``refused:`` reads as "your request was declined, adjust and
+    retry", and there is no parameter to adjust — an interrupted directory swap
+    needs an operator to look at the artifact on disk. The reason carries that
+    instruction; whether it still carries the locations depends on the
+    redaction above (relative under a known root, ``'<path>'`` outside one).
 
     EVERY ``reason`` is redacted, ``gate_blocked`` included. Pull's
     ``gate_blocked`` reason is built from runtime + scope only

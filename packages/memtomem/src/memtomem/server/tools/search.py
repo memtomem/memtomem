@@ -119,49 +119,41 @@ async def mem_search(
     Args:
         query: Natural language search query
         top_k: Number of results to return (default 10)
-        source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
-        tag_filter: Comma-separated tags — matches chunks containing ANY of the listed tags (OR logic)
+        source_filter: Source path filter — substring, or glob with *, ?, []
+        tag_filter: Comma-separated tags; matches chunks carrying ANY of them
         namespace: Namespace scope (single value)
-        as_of: Temporal bound for retroactive search — date-only ``YYYY-MM-DD`` or
-            quarter ``YYYY-QN`` (N in 1-4). Default ``None`` = current time. Chunks
-            whose ``valid_from`` / ``valid_to`` frontmatter excludes this point in
-            time are filtered out (chunks without those keys are always-valid).
-        bm25_weight: Override BM25 weight in RRF fusion (default 1.0). Set higher to favor keyword matches.
-        dense_weight: Override dense/semantic weight in RRF fusion (default 1.0). Set higher to favor meaning.
-        context_window: Expand each result with ±N adjacent chunks (0=disabled). Use for more context.
-        verbose: (Deprecated — use output_format="verbose" instead.) Show full details.
-        output_format: Output format — "compact" (default, human-readable), "verbose" (full
-            details with UUID/pipeline stats), or "structured" (JSON for machine parsing).
-            When set to non-default, overrides the verbose flag.
-        scope: ADR-0011 scope-axis filter — single value, comma list (``user,project_local``)
-            or glob (``project_*``). When omitted, the default merge applies: in-project
-            searches return ``user`` + the current project's project tiers; out-of-project
-            searches return ``user`` only. Pass ``project_shared`` from outside any
-            project context for a cross-project search.
-        rerank: Per-call rerank control. ``false`` = skip the cross-encoder rerank
-            stage for this call — the fast path for latency-bounded callers
-            (typically <100ms vs several seconds when reranking); also skips the
-            candidate-pool oversample that exists only to feed the reranker.
-            Omitted/``true`` = follow server config (``rerank.enabled``); ``true``
-            cannot enable reranking when the server has it disabled.
+        as_of: Temporal bound for retroactive search — ``YYYY-MM-DD`` or
+            ``YYYY-QN``. Default ``None`` = now. Chunks whose
+            ``valid_from`` / ``valid_to`` frontmatter excludes that point are
+            filtered out; chunks without those keys are always valid.
+        bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor them)
+        dense_weight: RRF weight for meaning matches (default 1.0; raise to favor them)
+        context_window: Expand each result with ±N adjacent chunks (0 = off)
+        verbose: Deprecated — use output_format="verbose".
+        output_format: "compact" (default), "verbose" (adds UUID / pipeline stats),
+            or "structured" (JSON). A non-default value overrides ``verbose``.
+        scope: ADR-0011 tier filter — value, comma list (``user,project_local``)
+            or glob (``project_*``). Omitted, the default merge applies: inside a
+            project ``user`` + that project's tiers, outside one ``user`` only.
+            Pass ``project_shared`` from outside a project to search across
+            projects.
+        rerank: ``false`` skips the cross-encoder rerank stage — the fast path
+            for latency-bounded callers (typically <100ms vs several seconds) —
+            and collapses the candidate pool to ``top_k``, so it narrows recall
+            as well as changing the score scale. Omitted/``true`` follows server
+            config; ``true`` cannot enable reranking on a server that has it
+            disabled.
 
-    Result count may fall below ``top_k`` when filters exclude candidates.
-    Increase ``top_k`` for a wider per-call request. When reranking is enabled,
-    the candidate pool is automatically derived from ``rerank.oversample``,
-    ``rerank.min_pool``, and ``rerank.max_pool``; passing ``rerank=false`` skips
-    reranking for the call and collapses that pool to ``top_k``.
+    A result count below ``top_k`` can mean filters excluded candidates or that
+    the index simply holds no more matches. Raising ``top_k`` widens the
+    request; it does not promise more results.
 
-    Structured output includes a top-level ``score_scale`` naming the base
-    scale the ``score`` values are on — ``"rerank"`` (cross-encoder output;
-    model-dependent range, see the accompanying ``reranker`` model ID),
-    ``"rrf"`` (reciprocal-rank fusion), ``"bm25"``/``"dense"`` (unfused
-    single-retriever scores), or ``"none"`` (filter-only enumeration — no
-    relevance scale, the filter is the selector) — so score thresholds can
-    be chosen per scale instead of inferred from the value range. Optional
-    modifier stages (time decay, access/importance boosts; all default-off)
-    multiply on top of the base scale when the server has them enabled, so
-    absolute thresholds are only portable across servers sharing the same
-    modifier config.
+    ``output_format="structured"`` adds a top-level ``score_scale`` naming the
+    scale ``score`` is on: ``rerank`` (model-dependent range; the ``reranker``
+    field names the model), ``rrf``, ``bm25``/``dense``, or ``none``
+    (filter-only enumeration — no relevance scale). Compare scores only within
+    one scale, and only across servers with the same optional modifier stages
+    (time decay, access/importance boosts) enabled.
     """
     if not query.strip():
         return "Error: query cannot be empty."
@@ -401,7 +393,9 @@ async def mem_increment_access(
     chunk_ids: list[str],
     ctx: CtxType = None,
 ) -> str:
-    """Increment access_count for the given chunks (drives access-frequency boost in search ranking).
+    """Increment access_count for the given chunks.
+
+    Drives the access-frequency boost in search ranking.
 
     Used by external surfacing systems (e.g. memtomem-stm) to record positive
     feedback as a future search-ranking boost. Each call increments the count

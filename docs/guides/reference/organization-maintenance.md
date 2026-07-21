@@ -46,6 +46,32 @@ mem_ns_rename(old="project-v1", new="project-v2")   # SQL update, no re-indexing
 mem_ns_delete(namespace="archived")                  # deletes all chunks
 ```
 
+`ns_rename` refuses when the target namespace already exists, so a rename
+never silently folds two namespaces together:
+
+```
+mem_ns_rename(old="project-v1", new="project-v2", merge=True)
+```
+
+`merge=True` consolidates on purpose: the chunks move into `project-v2` and
+**that namespace's** description and color are kept (the source's metadata row
+is dropped). Where both namespaces hold the *same chunk* — same source file,
+same content hash, same start line — the target's copy is kept and the
+source's duplicate is deleted; the message reports how many.
+`merge` must be a literal `true` — a quoted `"true"` is rejected rather than
+coerced.
+
+The reported chunk count is only the chunk rows. A namespace that was
+registered (`ns_update`) but never written to has no chunks, so its rename
+reports `0 chunks moved` while the metadata row does move — the message says
+which of the two happened. Live sessions follow the rename; share-lineage
+records keep the namespace name they were shared under, as a historical fact.
+
+One rough edge after a merge that dropped duplicates: extracted entities and
+assertions from the dropped copy are kept (they belong to content the surviving
+chunk still holds), so `mem_entity_search` can list the same mention twice and
+entity-type counts read high for those chunks. Re-indexing the file clears it.
+
 ### Bulk assign — `ns_assign`
 
 Move existing chunks to a namespace without re-indexing:

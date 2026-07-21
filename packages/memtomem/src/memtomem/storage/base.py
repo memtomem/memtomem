@@ -33,6 +33,31 @@ class ChunkAuditRow:
 
 
 @dataclass(frozen=True, slots=True)
+class NamespaceRenameResult:
+    """Outcome of :meth:`StorageBackend.rename_namespace`.
+
+    A bare row count could not express the whole outcome: a namespace
+    registered through ``set_namespace_meta`` but never written to has no
+    chunks at all, so ``chunks_moved == 0`` while its metadata row *was*
+    renamed — "0" never meant "nothing changed". Each flag names one
+    thing that happened so callers can phrase the result honestly.
+    """
+
+    #: Rows rewritten in ``chunks``. Zero is a legitimate success.
+    chunks_moved: int
+    #: The source's ``namespace_metadata`` row moved to the new name.
+    #: False both when the source had no metadata row and when the row
+    #: was dropped in favour of an existing target row (merge).
+    metadata_renamed: bool
+    #: The target already existed and ``merge=True`` consolidated into it.
+    merged: bool
+    #: Source chunks the target already held (same file, content hash and
+    #: start line) and which were therefore deleted rather than moved —
+    #: ``chunks`` is UNIQUE on that key. Only ever non-zero on a merge.
+    duplicates_dropped: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class SearchMetadataFilter:
     """Exact metadata constraints applied before retrieval limits."""
 
@@ -171,9 +196,12 @@ class StorageBackend(Protocol):
 
     # Namespace
     async def list_namespaces(self) -> list[tuple[str, int]]: ...
+    async def count_chunks_by_namespace(self, namespace: str) -> int: ...
     async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int: ...
     async def delete_by_namespace(self, namespace: str) -> int: ...
-    async def rename_namespace(self, old: str, new: str) -> int: ...
+    async def rename_namespace(
+        self, old: str, new: str, *, merge: bool = False
+    ) -> NamespaceRenameResult: ...
 
     # Tags
     async def get_tag_counts(self) -> list[tuple[str, int]]: ...

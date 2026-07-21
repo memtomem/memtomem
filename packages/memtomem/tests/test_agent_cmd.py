@@ -10,20 +10,34 @@ from unittest.mock import AsyncMock
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from memtomem.errors import NamespaceConflictError
+from memtomem.storage.base import NamespaceRenameResult
 
 
-def _mock_components(legacy_namespaces, existing_new_namespaces=()):
-    """Storage stub: ``list_namespaces`` returns the given namespace set.
+def _mock_components(legacy_namespaces, existing_new_namespaces=(), chunk_counts=None):
+    """Storage stub: ``list_namespace_meta`` returns the given namespace set.
 
-    Each entry is ``(namespace, chunk_count)`` — mirrors the real
-    ``NamespaceOps.list_namespaces`` shape.  ``rename_namespace`` returns a
-    fixed count so the CLI sees non-zero chunk updates.
+    Each row mirrors the real ``NamespaceOps.list_namespace_meta`` shape
+    (chunks ∪ namespace_metadata, so a registered-but-empty namespace is
+    listed with ``chunk_count`` 0). ``chunk_counts`` overrides the per-
+    namespace count — pass 0 to model a metadata-only legacy namespace.
+    ``rename_namespace`` returns a fixed result so the CLI sees non-zero
+    chunk updates.
     """
-    pairs = [(ns, 2) for ns in legacy_namespaces]
-    pairs.extend((ns, 1) for ns in existing_new_namespaces)
+    counts = chunk_counts or {}
+    rows = [
+        {"namespace": ns, "chunk_count": counts.get(ns, 2), "description": "", "color": ""}
+        for ns in legacy_namespaces
+    ]
+    rows.extend(
+        {"namespace": ns, "chunk_count": counts.get(ns, 1), "description": "", "color": ""}
+        for ns in existing_new_namespaces
+    )
     storage = SimpleNamespace(
-        list_namespaces=AsyncMock(return_value=pairs),
-        rename_namespace=AsyncMock(return_value=2),
+        list_namespace_meta=AsyncMock(return_value=rows),
+        rename_namespace=AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=True, merged=False)
+        ),
     )
     return SimpleNamespace(storage=storage)
 
@@ -61,9 +75,113 @@ class TestAgentMigrate:
         result = CliRunner().invoke(cli, ["agent", "migrate"])
         assert result.exit_code == 0
         assert comp.storage.rename_namespace.await_count == 2
-        comp.storage.rename_namespace.assert_any_await("agent/alpha", "agent-runtime:alpha")
-        comp.storage.rename_namespace.assert_any_await("agent/beta", "agent-runtime:beta")
+        # No collisions in the listing, so nothing to consolidate into and
+        # no consent was asked for — these take the plain rename.
+        comp.storage.rename_namespace.assert_any_await(
+            "agent/alpha", "agent-runtime:alpha", merge=False
+        )
+        comp.storage.rename_namespace.assert_any_await(
+            "agent/beta", "agent-runtime:beta", merge=False
+        )
         assert "Migration complete" in result.output
+
+    def test_metadata_only_legacy_namespace_is_migrated(self, monkeypatch):
+        """A registered-but-empty ``agent/{id}`` has no chunks — still migrates.
+
+        Discovery used to run off ``list_namespaces`` (chunks only), which
+        left such a namespace stranded on the legacy prefix.
+        """
+        comp = _mock_components(["agent/ghost"], chunk_counts={"agent/ghost": 0})
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"])
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_awaited_once_with(
+            "agent/ghost", "agent-runtime:ghost", merge=False
+        )
+
+    def test_dropped_duplicates_are_reported(self, monkeypatch):
+        """The migration deletes chunks the destination already had — say so."""
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        comp.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(
+                chunks_moved=1, metadata_renamed=False, merged=True, duplicates_dropped=3
+            )
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate", "--yes"])
+        assert result.exit_code == 0
+        assert "3 duplicate(s) dropped" in result.output
+
+    def test_existing_target_asks_before_consolidating(self, monkeypatch):
+        """Every other surface demands explicit consent to merge; so does this one."""
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"], input="n\n")
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_not_awaited()
+
+    def test_declining_the_merge_says_nothing_changed(self, monkeypatch):
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"], input="n\n")
+        assert "Aborted" in result.output
+
+    def test_accepting_the_prompt_migrates(self, monkeypatch):
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"], input="y\n")
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_awaited_once_with(
+            "agent/alpha", "agent-runtime:alpha", merge=True
+        )
+
+    def test_the_prompt_says_what_it_is_agreeing_to(self, monkeypatch):
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"], input="y\n")
+        assert "duplicate chunks are dropped" in result.output
+
+    def test_a_target_that_appeared_since_the_listing_is_not_merged(self, monkeypatch):
+        """Consent covered the targets the user was shown, not later arrivals."""
+        comp = _mock_components(["agent/alpha"])  # target absent from the listing
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        CliRunner().invoke(cli, ["agent", "migrate"])
+        comp.storage.rename_namespace.assert_awaited_once_with(
+            "agent/alpha", "agent-runtime:alpha", merge=False
+        )
+
+    def test_a_late_conflict_is_skipped_and_named(self, monkeypatch):
+        comp = _mock_components(["agent/alpha"])
+        comp.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError("target already exists", reason_code="target_exists")
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"])
+        assert result.exit_code == 0
+        assert "Skipped: agent/alpha" in result.output
+
+    def test_yes_skips_the_merge_confirmation(self, monkeypatch):
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate", "--yes"])
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_awaited_once()
+
+    def test_no_confirmation_when_nothing_is_merged(self, monkeypatch):
+        """A collision-free migration stays non-interactive."""
+        comp = _mock_components(["agent/alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"])
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_awaited_once()
+
+    def test_dry_run_flags_existing_merge_target(self, monkeypatch):
+        """A target that already exists is consolidated — say so before applying."""
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate", "--dry-run"])
+        assert result.exit_code == 0
+        assert "merges into existing namespace" in result.output
 
     def test_ignores_already_migrated_namespaces(self, monkeypatch):
         comp = _mock_components(

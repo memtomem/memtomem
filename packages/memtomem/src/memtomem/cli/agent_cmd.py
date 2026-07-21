@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
-from typing import TYPE_CHECKING
 from typing import cast
 
 import click
 
+from memtomem.cli._prompts import confirm
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
@@ -16,9 +16,7 @@ from memtomem.constants import (
     validate_agent_id,
     validate_namespace,
 )
-
-if TYPE_CHECKING:
-    from memtomem.storage.sqlite_backend import SqliteBackend
+from memtomem.errors import NamespaceConflictError
 
 _LEGACY_PREFIX = "agent/"
 # Local alias paired with ``_LEGACY_PREFIX`` so the migration mapping reads
@@ -39,47 +37,108 @@ def agent() -> None:
     default=False,
     help="Print the planned renames without making changes.",
 )
-def migrate(dry_run: bool) -> None:
+@click.option(
+    "--yes",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation asked when a target namespace already exists.",
+)
+def migrate(dry_run: bool, assume_yes: bool) -> None:
     """Rename legacy ``agent/{id}`` namespaces to ``agent-runtime:{id}``.
 
     Moves multi-agent namespaces from the pre-#318 format (``agent/{id}``)
     to the current ``agent-runtime:{id}`` format. Safe to re-run — rows that
     are already in the new format are left untouched.
     """
-    asyncio.run(_run_migrate(dry_run=dry_run))
+    asyncio.run(_run_migrate(dry_run=dry_run, assume_yes=assume_yes))
 
 
-async def _run_migrate(dry_run: bool) -> None:
+async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
-        mapping = await _collect_legacy_mapping(comp.storage)
+        # One listing serves both questions: which legacy namespaces exist,
+        # and which of their targets are already taken.
+        rows = await comp.storage.list_namespace_meta()
+        mapping = _collect_legacy_mapping(rows)
         if not mapping:
             click.echo("No legacy `agent/` namespaces found. Nothing to migrate.")
             return
 
+        # Targets that already exist are consolidated into (rename passes
+        # merge=True), so say so up front rather than letting the listing
+        # imply an empty destination.
+        existing = {row["namespace"] for row in rows}
+
         click.echo(f"Legacy namespaces to migrate: {len(mapping)}")
         for old, new in mapping:
-            click.echo(f"  {old}  ->  {new}")
+            suffix = "  (merges into existing namespace)" if new in existing else ""
+            click.echo(f"  {old}  ->  {new}{suffix}")
 
         if dry_run:
             click.echo("\n(dry-run — no changes made. Re-run without --dry-run to apply.)")
             return
 
+        # Consolidation is destructive — the source's metadata row goes, and
+        # chunks the destination already holds are deleted. Every other
+        # surface makes the caller opt in by name (StrictBool on the tool, an
+        # explicit `merge` on the API); the CLI must not opt in on their
+        # behalf. Only asked when there is actually something to merge into,
+        # so the ordinary "no collisions" migration stays non-interactive.
+        merging = [new for _old, new in mapping if new in existing]
+        if merging and not assume_yes:
+            if not confirm(
+                f"{len(merging)} namespace(s) already exist and will be merged into "
+                f"(their description/color are kept; duplicate chunks are dropped). "
+                f"Continue? (pass --yes to skip this prompt when scripting)"
+            ):
+                click.echo("Aborted — nothing was changed.")
+                return
+
         total = 0
+        dropped = 0
+        skipped: list[str] = []
         for old, new in mapping:
-            renamed = await comp.storage.rename_namespace(old, new)
-            total += renamed
-            click.echo(f"Renamed: {old}  ->  {new}  ({renamed} chunk(s))")
+            # merge only for the targets the user was shown and agreed to.
+            # A target that appeared *since* the listing was never part of
+            # that consent, so it takes the default refusal instead — the
+            # pair is skipped and named, and re-running picks it up with a
+            # fresh prompt.
+            try:
+                result = await comp.storage.rename_namespace(old, new, merge=new in existing)
+            except NamespaceConflictError:
+                skipped.append(old)
+                click.echo(f"Skipped: {old}  ->  {new}  (target appeared after the listing)")
+                continue
+            total += result.chunks_moved
+            dropped += result.duplicates_dropped
+            suffix = "  (merged)" if result.merged else ""
+            if result.duplicates_dropped:
+                # Chunks the destination already held are deleted, not moved —
+                # never let that happen without saying so.
+                suffix += f"  ({result.duplicates_dropped} duplicate(s) dropped, already in {new})"
+            click.echo(f"Renamed: {old}  ->  {new}  ({result.chunks_moved} chunk(s)){suffix}")
 
-        click.echo(f"\nMigration complete. {len(mapping)} namespace(s), {total} chunk(s) updated.")
+        tail = f", {dropped} duplicate(s) dropped" if dropped else ""
+        click.echo(
+            f"\nMigration complete. {len(mapping) - len(skipped)} namespace(s), "
+            f"{total} chunk(s) updated{tail}."
+        )
+        if skipped:
+            click.echo(f"{len(skipped)} skipped — re-run to migrate them.")
 
 
-async def _collect_legacy_mapping(storage: SqliteBackend) -> list[tuple[str, str]]:
-    """Return ``[(old, new), ...]`` pairs for namespaces needing migration."""
-    pairs = await storage.list_namespaces()
+def _collect_legacy_mapping(rows: list[dict]) -> list[tuple[str, str]]:
+    """Return ``[(old, new), ...]`` pairs for namespaces needing migration.
+
+    *rows* come from ``list_namespace_meta`` (chunks ∪ namespace_metadata),
+    not ``list_namespaces`` (chunks only): an agent registered under the
+    legacy ``agent/{id}`` name but never written to exists purely as a
+    metadata row, and a chunks-only listing would leave it stranded on the
+    old prefix forever.
+    """
     out: list[tuple[str, str]] = []
-    for ns, _count in pairs:
+    for ns in sorted(row["namespace"] for row in rows):
         if not ns.startswith(_LEGACY_PREFIX):
             continue
         suffix = ns[len(_LEGACY_PREFIX) :]

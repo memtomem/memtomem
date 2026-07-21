@@ -462,6 +462,37 @@ class TestCaseEMemAddSessionInheritance:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
+    async def test_session_namespace_argument_does_not_redirect_the_write(
+        self, bm25_only_components
+    ):
+        """``namespace=`` on ``mem_session_start`` re-points the session
+        *record* only — it never becomes the inherited write namespace.
+
+        The ``sessions`` category note (server/tools/meta.py) tells callers to
+        pass ``namespace=`` on the write itself for exactly this reason, so the
+        distinction is pinned as behaviour rather than left as prose. Asserting
+        the write **and** the row: a regression that made the row's namespace
+        win would otherwise be invisible from either side alone.
+        """
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await mem_session_start(agent_id="planner", namespace="custom-ns", ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_add(content="session namespace probe", ctx=ctx)  # type: ignore[arg-type]
+            assert "agent-runtime:planner" in result
+            assert "custom-ns" not in result
+
+            rows = await app.storage.list_sessions()
+            active = next(r for r in rows if r["id"] == app.current_session_id)
+            assert active["namespace"] == "custom-ns"
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
     async def test_mem_batch_add_inherits_agent_id_from_session(self, bm25_only_components):
         from memtomem.server.tools.memory_crud import mem_batch_add
 

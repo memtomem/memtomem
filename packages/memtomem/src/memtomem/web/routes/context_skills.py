@@ -47,6 +47,7 @@ from memtomem.web.routes.context_gateway import (
     _safe_rel,
     delete_skip_entry,
     read_text_lenient,
+    redact_wire_reason,
     sanitize_diff_reason,
 )
 from memtomem.web.routes.context_projects import (
@@ -708,8 +709,24 @@ async def _sync_skills_core(
         "generated": [
             {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
         ],
+        # Engine skip reasons embed absolute paths — the destination for a
+        # target conflict, the transients for a pending swap recovery, an
+        # OSError's filename for an unreadable canonical. Sanitized here, at
+        # the wire (#1385/#1412): the canonical-path disclosure rule is that
+        # CLI gets the path verbatim and the web/MCP surfaces do not.
+        #
+        # ``redact_wire_reason``, not bare ``sanitize_diff_reason``: these
+        # are raw engine exception strings, and root-relative stripping alone
+        # leaves an absolute path whenever the target resolves OUTSIDE both the
+        # project root and ``$HOME`` — a runtime dir symlinked onto a shared
+        # volume, which ``_runtime_targets`` resolves before the OSError is
+        # raised. Same two-stage form the Pull reasons use.
         "skipped": [
-            {"runtime": rt, "reason": reason, "reason_code": code}
+            {
+                "runtime": rt,
+                "reason": redact_wire_reason(reason, project_root),
+                "reason_code": code,
+            }
             for rt, reason, code in result.skipped
         ],
         "canonical_root": CANONICAL_SKILL_ROOT,
@@ -784,8 +801,14 @@ def _import_payload(
             }
             for p in result.imported
         ],
+        # Same wire-boundary redaction as the sync report above — an import
+        # skip carries the same path-bearing engine reasons.
         "skipped": [
-            {"name": name, "reason": reason, "reason_code": code}
+            {
+                "name": name,
+                "reason": redact_wire_reason(reason, project_root),
+                "reason_code": code,
+            }
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
