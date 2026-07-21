@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -132,6 +133,13 @@ def _row_5(root: Path, name: str = "skill") -> dict[str, Path]:
     """``dst`` and ``staging`` gone: only the known pre-image can be restored."""
     p = _write_marker(root, name)
     _tree(p["old"], "original")
+    return p
+
+
+def _row_6(root: Path, name: str = "skill") -> dict[str, Path]:
+    """No pre-image: the complete staged replacement is the only tree."""
+    p = _write_marker(root, name)
+    _tree(p["staging"], "replacement")
     return p
 
 
@@ -262,6 +270,23 @@ class TestCopySkill:
         assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
         assert (p["old"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-b"
 
+    @pytest.mark.parametrize("name", ["my skill", "-skill", "s" * 65])
+    def test_preserves_the_legacy_arbitrary_destination_basename_contract(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        """Only canonical basenames can own swaps; ``copy_skill`` accepts more.
+
+        The recovery prelude must not turn that public path API into the
+        canonical name API, including after the destination lock has created
+        its parent and sidecar.
+        """
+        src = _tree(tmp_path / "src-skill", "incoming")
+        dst = tmp_path / "runtime" / name
+
+        copy_skill(src, dst)
+
+        assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "incoming"
+
 
 class TestTransferDiscovery:
     """§2.1.1 — a live marker is evidence of residency, opt-in and read-only."""
@@ -367,6 +392,40 @@ class TestTransferApply:
             "a refused move must leave the source intact"
         )
 
+    @pytest.mark.parametrize(
+        "row_builder", [_row_2, _row_5, _row_6], ids=["row-2", "row-5", "row-6"]
+    )
+    def test_destination_mid_swap_dry_run_warns_apply_may_refuse(
+        self,
+        project: Path,
+        store: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        row_builder: Callable[[Path], dict[str, Path]],
+    ) -> None:
+        """An absent destination can still be materialized by apply recovery."""
+        home = tmp_path / "home"
+        _isolate_home(monkeypatch, home)
+        user_store = home / ".memtomem" / "skills"
+        user_store.mkdir(parents=True)
+        destination = row_builder(user_store)
+        _tree(store / "skill", "source")
+
+        preview = transfer_artifact(
+            "skills",
+            "skill",
+            src_project_root=project,
+            from_scope="project_shared",
+            dst_project_root=None,
+            to_scope="user",
+            mode="move",
+            apply_=False,
+        )
+
+        assert any("destination has an interrupted directory swap" in n for n in preview.notes)
+        assert not destination["dst"].exists(), "dry-run recovered the destination"
+        assert has_pending_swap(user_store, "skill"), "dry-run removed the swap marker"
+
     def test_destination_row_4_is_refused_before_the_lock(
         self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -449,8 +508,14 @@ class TestTransferApply:
         p = _write_marker(store)
         p["old"].mkdir()  # a tree, but not a skill
 
-        with pytest.raises(ArtifactNotFoundError):
+        with pytest.raises(ArtifactNotFoundError) as excinfo:
             self._transfer(project)
+
+        assert str(store) not in excinfo.value.message
+        assert excinfo.value.message == (
+            "skills/skill is no longer a complete artifact "
+            "(it disappeared, or an interrupted transaction left it incomplete)."
+        )
 
 
 @pytest.fixture

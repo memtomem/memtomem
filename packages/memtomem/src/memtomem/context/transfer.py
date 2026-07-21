@@ -923,6 +923,15 @@ def transfer_artifact(
         "source tree — install provenance in particular — is re-classified then "
         "and may differ from this preview."
     )
+    destination_mid_swap = (
+        kind == "skills" and not dst_path.exists() and has_pending_swap(dst_store, dst_name)
+    )
+    destination_mid_swap_note = (
+        "destination has an interrupted directory swap; apply recovers it under "
+        "the canonical lock before checking for a collision. Recovery may "
+        "materialize the destination and refuse this transfer, so resolve the "
+        "pending swap before relying on this preview."
+    )
 
     if not apply_:
         # Dry-run: compute plan, no mutation. ``fanout_planned`` previews
@@ -973,13 +982,16 @@ def transfer_artifact(
                     else ()
                 )
                 + ((mid_swap_note,) if source_mid_swap else ())
+                + ((destination_mid_swap_note,) if destination_mid_swap else ())
             ),
         )
 
     # ── apply path ───────────────────────────────────────────────────
     # The apply carries the same note the preview showed, so a result read on
     # its own still says the classifications below were made after a recovery.
-    notes: tuple[str, ...] = (mid_swap_note,) if source_mid_swap else ()
+    notes: tuple[str, ...] = ((mid_swap_note,) if source_mid_swap else ()) + (
+        (destination_mid_swap_note,) if destination_mid_swap else ()
+    )
     # ADR-0030 §6: name-keyed canonical locks (layout-independent), so this
     # transfer serializes with a Pull / migrate / version op on the same
     # artifact name — the path-keyed pair lock did not. ``dst_name`` may differ
@@ -1018,8 +1030,8 @@ def transfer_artifact(
             src_present = src_path.is_file()
         if not src_present:
             raise ArtifactNotFoundError(
-                f"{kind}/{name} is no longer a complete artifact at {src_path} "
-                f"(it disappeared, or an interrupted transaction left it incomplete)."
+                f"{kind}/{name} is no longer a complete artifact "
+                "(it disappeared, or an interrupted transaction left it incomplete)."
             )
 
         # Re-check dst inside the lock window — some other process could
