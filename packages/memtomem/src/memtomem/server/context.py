@@ -70,6 +70,19 @@ def _require_initialized(components: Components | None, attr: str) -> Components
     return components
 
 
+def _make_set_event() -> asyncio.Event:
+    """An ``asyncio.Event`` that starts **set**.
+
+    ``asyncio.Event()`` starts cleared, which is the wrong default for a
+    "nothing in flight" signal: with zero writes ever recorded, a waiter
+    would block until its timeout and then report a drain failure that
+    never happened.
+    """
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass
 class AppContext:
     """Dependency container for MCP request handlers.
@@ -182,6 +195,30 @@ class AppContext:
     # Guarded by ``_session_lock``.
     _ending_session_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
+    # Serializes a whole session *transition* — start (including the inline
+    # auto-end of a superseded session) and end. Distinct from
+    # ``_session_lock``, which guards individual field mutations and must be
+    # released across the awaits a transition makes (draining writes, reading
+    # events, the DB writes). ``_ending_session_ids`` alone is not enough: it
+    # makes ending at-most-once, but nothing about it decides *which* new
+    # session wins when two starts interleave, so one start could overwrite
+    # or orphan the session another just created.
+    _session_transition_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    # In-flight session-bound writes. A session teardown reads the session's
+    # events to build its summary and counts; a write admitted before the
+    # teardown but still persisting would be missed by that read. The gauge
+    # lets teardown wait for those writes to land.
+    #
+    # Counter and event are mutated together under ``_session_lock`` — a bare
+    # counter with a separately-set event drifts under concurrency. The event
+    # starts **set**: idle is the initial state, and an unset event would make
+    # the common zero-write teardown block for the full drain timeout and then
+    # report a spurious partial drain.
+    _active_writes: int = field(default=0, init=False, repr=False)
+    _writes_idle: asyncio.Event = field(default_factory=_make_set_event, init=False, repr=False)
+
     # ── current_namespace (validated) ─────────────────────────────────────
     # Property + setter pair so every write — whether via ``mem_ns_set``,
     # a future tool we forget to gate, or a bare ``app.current_namespace =
@@ -246,6 +283,53 @@ class AppContext:
             lock = asyncio.Lock()
             self._memory_file_locks[key] = lock
         return lock
+
+    # ── in-flight session-bound writes ────────────────────────────────────
+
+    @contextlib.asynccontextmanager
+    async def write_in_flight(self):
+        """Mark a session-bound write as in flight for its whole span.
+
+        Wrap the *entire* write — capturing the active session, indexing,
+        and any bookkeeping the teardown will later read back. Exiting
+        early, say right after indexing, reopens the gap this closes: a
+        teardown could observe idle, snapshot the session's events, and
+        miss a row written a moment later.
+
+        ``_session_lock`` is held only to mutate the gauge, never across
+        the wrapped body — a writer that held it would deadlock against
+        the very teardown waiting for that writer to finish.
+        """
+        async with self._session_lock:
+            self._active_writes += 1
+            self._writes_idle.clear()
+        try:
+            yield
+        finally:
+            async with self._session_lock:
+                self._active_writes -= 1
+                if self._active_writes <= 0:
+                    self._active_writes = 0
+                    self._writes_idle.set()
+
+    async def wait_writes_drained(self, timeout: float) -> bool:
+        """Wait until no session-bound write is in flight.
+
+        Returns whether the wait succeeded; a timeout is reported, never
+        raised, so a slow or stuck write degrades a teardown's inputs
+        instead of failing the teardown itself. Must be awaited *outside*
+        ``_session_lock`` — writers need that lock to leave the gauge.
+        """
+        try:
+            await asyncio.wait_for(self._writes_idle.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "session_write_drain_timeout active_writes=%d timeout=%.1fs",
+                self._active_writes,
+                timeout,
+            )
+            return False
+        return True
 
     # ── component accessors ───────────────────────────────────────────────
     # These raise ``RuntimeError`` if accessed before ``ensure_initialized``

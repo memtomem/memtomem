@@ -1108,3 +1108,184 @@ class TestSessionSummaryRedactionGate:
         assert secret not in line  # no matched bytes echoed
         memory_dir = Path(comp.config.indexing.memory_dirs[0])
         assert not list((memory_dir / "sessions").rglob("redactiontest.md"))
+
+
+class TestSessionTransitionDrain:
+    """A session transition waits for in-flight session-bound writes.
+
+    Teardown builds its event counts (and, later, its summary inputs) from
+    a snapshot of the session's events. A write admitted before the
+    transition but still persisting would be missing from that snapshot,
+    so start and end both drain first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_write_session_ends_without_waiting(self, components):
+        """The idle case must be instant.
+
+        ``asyncio.Event()`` starts *cleared*, so a naively-constructed
+        gauge would make every ordinary session block for the full drain
+        timeout and then report a partial drain that never happened.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        started = asyncio.get_running_loop().time()
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert "Session ended" in out
+        assert "writes still in flight" not in out
+        assert elapsed < 1.0  # nowhere near _WRITE_DRAIN_TIMEOUT_S
+
+    @pytest.mark.asyncio
+    async def test_end_waits_for_an_in_flight_write(self, components):
+        """The drain must cover the *whole* write, not just its indexing.
+
+        A gauge released before the write's session bookkeeping lands
+        would let teardown observe idle, snapshot the events, and miss a
+        row written a moment later — so this parks inside the gauge and
+        asserts teardown had not snapshotted yet.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        in_write = asyncio.Event()
+        release = asyncio.Event()
+        snapshot_taken = asyncio.Event()
+        real_events = app.storage.get_session_events
+
+        async def watched_events(session_id):
+            snapshot_taken.set()
+            return await real_events(session_id)
+
+        app.storage.get_session_events = watched_events  # type: ignore[method-assign]
+
+        async def slow_write():
+            async with app.write_in_flight():
+                in_write.set()
+                await release.wait()
+
+        writer = asyncio.create_task(slow_write())
+        await in_write.wait()
+        ender = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await asyncio.sleep(0.05)
+
+        assert not snapshot_taken.is_set(), "teardown snapshotted before the write landed"
+
+        release.set()
+        await writer
+        out = await ender
+
+        assert snapshot_taken.is_set()
+        assert "Session ended" in out
+        assert "writes still in flight" not in out
+
+    @pytest.mark.asyncio
+    async def test_drain_timeout_is_reported_not_swallowed(self, components, monkeypatch):
+        """A write that outlasts the drain shortens the event counts, so
+        the response has to say so rather than present them as complete."""
+        from memtomem.server.tools import session as session_mod
+
+        monkeypatch.setattr(session_mod, "_WRITE_DRAIN_TIMEOUT_S", 0.05)
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        release = asyncio.Event()
+        in_write = asyncio.Event()
+
+        async def stuck_write():
+            async with app.write_in_flight():
+                in_write.set()
+                await release.wait()
+
+        writer = asyncio.create_task(stuck_write())
+        await in_write.wait()
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "writes still in flight" in out
+        release.set()
+        await writer
+
+    @pytest.mark.asyncio
+    async def test_a_parked_end_does_not_block_a_second_end(self, components):
+        """The claim is taken before the transition lock, on purpose.
+
+        Holding the transition lock across the entry check would turn the
+        at-most-once early return into a wait on the in-flight teardown —
+        and a deadlock whenever that teardown is parked.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_events = app.storage.get_session_events
+        first = True
+
+        async def gated_events(session_id):
+            nonlocal first
+            if first:
+                first = False
+                entered.set()
+                await release.wait()
+            return await real_events(session_id)
+
+        app.storage.get_session_events = gated_events  # type: ignore[method-assign]
+
+        t1 = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await entered.wait()
+
+        out2 = await asyncio.wait_for(mem_session_end(ctx=ctx), timeout=5)  # type: ignore[arg-type]
+
+        assert out2 == "No active session."
+        release.set()
+        assert "Session ended" in await t1
+
+    @pytest.mark.asyncio
+    async def test_a_start_does_not_re_end_a_session_an_end_already_claimed(self, components):
+        """Start supersedes by ending the previous session — but not one a
+        concurrent ``mem_session_end`` has already claimed, or the
+        effectful phase would run twice for the same session."""
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_events = app.storage.get_session_events
+        first = True
+
+        async def gated_events(session_id):
+            nonlocal first
+            if first:
+                first = False
+                entered.set()
+                await release.wait()
+            return await real_events(session_id)
+
+        end_calls: list[str] = []
+        real_end = app.storage.end_session
+
+        async def counting_end(session_id, summary, metadata):
+            end_calls.append(session_id)
+            return await real_end(session_id, summary, metadata)
+
+        app.storage.get_session_events = gated_events  # type: ignore[method-assign]
+        app.storage.end_session = counting_end  # type: ignore[method-assign]
+
+        ender = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await entered.wait()
+        starter = asyncio.create_task(mem_session_start(agent_id="coder", ctx=ctx))  # type: ignore[arg-type]
+        await asyncio.sleep(0.05)
+        release.set()
+        await ender
+        await starter
+
+        assert end_calls.count(end_calls[0]) == 1
+        assert len(set(end_calls)) == len(end_calls), "a session was ended twice"
