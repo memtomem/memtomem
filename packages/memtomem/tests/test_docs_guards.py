@@ -190,16 +190,30 @@ class TestToolModeFootnoteParity:
         ``configuration.md`` said it too. Scoping the guard to the tables would
         have left the misconception in print, so scan every public markdown
         file instead of enumerating the known ones.
+
+        Matching is per **paragraph**, not per line. A line-scoped version of
+        this check inspected zero lines in this repo: the claim wraps across
+        lines in both prose passages, and the two Config-table footnotes carry
+        no tool name at all (the asterisk does that job). It would only have
+        caught the exact single-line phrasing it replaced — the sweep scoped by
+        one enumeration and then guarded by the same enumeration.
+
+        Note for whoever edits the footnotes: ``canonical_footnote`` extracts a
+        single *line*, so the reference.md / mcp-clients.md footnotes must stay
+        on one line for the parity test above.
         """
         offenders: list[str] = []
         for path in _public_markdown():
-            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if "MEMTOMEM_TOOL_MODE=full" not in line:
+            text = path.read_text(encoding="utf-8")
+            for block in re.split(r"\n\s*\n", text):
+                flat = " ".join(block.split())
+                if "MEMTOMEM_TOOL_MODE=full" not in flat:
                     continue
-                if not any(name in line for name in _ASTERISK_TOOLS):
+                if not any(name in flat for name in _ASTERISK_TOOLS):
                     continue
-                if "mem_do(" in line:
+                if "mem_do(" in flat:
                     continue
+                lineno = text[: text.index(block)].count("\n") + 1
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
         assert not offenders, (
             "these lines gate mem_config / mem_embedding_reset / mem_reset on "

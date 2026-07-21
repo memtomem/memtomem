@@ -301,6 +301,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_ask` is reachable again outside `full` tool mode** — the tool carried
+  `@mcp.tool()` but never `@register(...)`, so the default `core` mode pruned
+  it from the tool list while `mem_do` had no action to route it to: it existed
+  in no mode but `full`, even though the guides advertised it unconditionally.
+  Registered under the `search` category, so `mem_do(action="ask", ...)` now
+  works in `core` and `standard`. Per-mode direct-tool sets are unchanged. An
+  architectural guard now pins the invariant `CLAUDE.md` already stated —
+  every non-core `@mcp.tool()` must also `@register` — with a two-way runtime
+  equality so a module missing from the server's imports fails too.
+
+  The tool-mode footnote in the guides was misleading in the same area and is
+  corrected: the asterisk gates the individual *tool name*, not the capability.
+  `mem_config`, `mem_embedding_reset` and `mem_reset` are reachable through
+  `mem_do` in every mode.
+
 - **The crash-leftover reaper no longer claims a newline-terminated name** —
   Python's `$` also matches immediately before a trailing newline, and a
   newline is a legal POSIX filename character, so
