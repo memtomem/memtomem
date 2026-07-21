@@ -414,3 +414,96 @@ class TestMemAddCoreSurfaces:
         assert [e["event_type"] for e in events] == ["add", "agent_share"]
 
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+
+class TestDirectEngineSurfaces:
+    """The three surfaces that call the indexing engine directly rather
+    than through ``_mem_add_core``."""
+
+    @pytest.mark.asyncio
+    async def test_mem_batch_add_records_one_event_for_the_whole_batch(self, bm25_only_components):
+        """One event per *call*, not per entry — ``event_counts`` is a
+        count of logical writes and six surfaces render it."""
+        from memtomem.server.tools.memory_crud import mem_batch_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_batch_add(  # type: ignore[arg-type]
+            entries=[{"content": f"batched fact number {i}"} for i in range(5)],
+            ctx=ctx,
+        )
+
+        events = await _provenance_events(app, session_id)
+        assert [e["event_type"] for e in events] == ["batch_add"]
+        assert len(events[0]["chunk_ids"]) >= 1
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_mem_index_records_an_index_event(self, bm25_only_components):
+        from memtomem.server.tools.indexing import mem_index
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        (mem_dir / "indexed.md").write_text("# Heading\n\nSomething worth indexing.\n")
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_index(path=str(mem_dir), ctx=ctx)  # type: ignore[arg-type]
+
+        events = await _provenance_events(app, session_id)
+        assert [e["event_type"] for e in events] == ["index"]
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_unchanged_reindex_records_no_second_event(self, bm25_only_components):
+        """``new_chunk_ids`` is only the genuinely-new upserts, so a
+        re-index that changed nothing has nothing to record."""
+        from memtomem.server.tools.indexing import mem_index
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        (mem_dir / "indexed.md").write_text("# Heading\n\nSomething worth indexing.\n")
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_index(path=str(mem_dir), ctx=ctx)  # type: ignore[arg-type]
+        await mem_index(path=str(mem_dir), ctx=ctx)  # type: ignore[arg-type]
+
+        assert len(await _provenance_events(app, session_id)) == 1
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_mem_index_event_names_no_path(self, bm25_only_components):
+        """``scan_session_candidates`` copies event content verbatim into
+        a review candidate and the web API renders it, so a resolved path
+        here would leak through both."""
+        from memtomem.server.tools.indexing import mem_index
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        (mem_dir / "secret-looking-dir-name.md").write_text("# H\n\nBody text here.\n")
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_index(path=str(mem_dir), ctx=ctx)  # type: ignore[arg-type]
+
+        content = (await _provenance_events(app, session_id))[0]["content"]
+        assert str(mem_dir) not in content
+        assert "secret-looking-dir-name" not in content
+        assert "/" not in content
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]

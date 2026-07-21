@@ -19,7 +19,6 @@ from memtomem.server.tools._provenance import (
     capture_session_and_namespace,
     record_write_provenance,
 )
-from memtomem.server.tools.multi_agent import _resolve_agent_namespace
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
 
@@ -1290,65 +1289,81 @@ async def mem_batch_add(
         async_file_lock,
     )
 
-    try:
-        async with (
-            app.get_memory_file_lock(target),
-            async_file_lock(
-                _lock_path_for(target.expanduser().resolve()),
-                timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
-            ),
-        ):
-            # Idempotency claim under the lock (issue #1573), same protocol as
-            # ``_mem_add_core``: the global (tool, key) claim blocks a concurrent
-            # same-key batch even when it targets a different file.
-            if idempotency_key is not None:
-                state, stored = await app.storage.idempotency_claim(
-                    "mem_batch_add", idempotency_key
-                )
-                if state == "completed":
-                    assert stored is not None  # completed rows always carry a result
-                    return stored + _REPLAY_MARKER
-                if state == "pending":
-                    return _idempotency_in_progress_error(idempotency_key)
-            # Inside the lock for the same write-time-namespace reason as
-            # ``_mem_add_core`` — the session can change during the lock wait.
-            effective_ns = namespace or _resolve_agent_namespace(app, None)
-            # Release only for a failure before the append is durable (same rule
-            # as ``_mem_add_core``); once the single append lands the claim is
-            # never released, so a keyed retry can't duplicate the batch.
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                skipped = await asyncio.to_thread(_append_entries)
-            except Exception:
+    # Same gauge span as ``_mem_add_core``: capture through provenance
+    # event, so session teardown cannot snapshot around this write.
+    async with app.write_in_flight():
+        try:
+            async with (
+                app.get_memory_file_lock(target),
+                async_file_lock(
+                    _lock_path_for(target.expanduser().resolve()),
+                    timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
+                ),
+            ):
+                # Idempotency claim under the lock (issue #1573), same protocol as
+                # ``_mem_add_core``: the global (tool, key) claim blocks a concurrent
+                # same-key batch even when it targets a different file.
                 if idempotency_key is not None:
-                    await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
-                raise
-            stats = await app.index_engine.index_file(
-                target, namespace=effective_ns, already_scanned=True, lock_held=True
-            )
-            display_ns = effective_ns or app.config.namespace.default_namespace
-            result = (
-                f"Batch add complete ({len(entries)} entries) → {target}\n"
-                f"- Namespace: {display_ns}\n"
-                f"- Chunks indexed: {stats.indexed_chunks}"
-            )
-            if skipped:
-                result += f"\n- Skipped: {skipped} entries (empty content)"
-            # Fill in the won claim under the lock. A complete failure leaves the
-            # row pending (never released — the append is durable), so a retry
-            # replays/blocks instead of duplicating.
-            if idempotency_key is not None:
-                try:
-                    await app.storage.idempotency_complete("mem_batch_add", idempotency_key, result)
-                except Exception:
-                    logger.warning(
-                        "idempotency ledger complete failed; mem_batch_add key left "
-                        "pending (retry blocks until TTL)",
-                        exc_info=True,
+                    state, stored = await app.storage.idempotency_claim(
+                        "mem_batch_add", idempotency_key
                     )
-    except TimeoutError:
-        return f"Error: {target} is locked by another process (migration in flight?); retry."
-    app.search_pipeline.invalidate_cache()
+                    if state == "completed":
+                        assert stored is not None  # completed rows always carry a result
+                        return stored + _REPLAY_MARKER
+                    if state == "pending":
+                        return _idempotency_in_progress_error(idempotency_key)
+                # Inside the lock for the same write-time-namespace reason as
+                # ``_mem_add_core`` — the session can change during the lock wait
+                # — and in one acquisition with the session id for the same
+                # reason: split, a transition between them would file the chunks
+                # and their provenance under different sessions.
+                provenance_session_id, effective_ns = await capture_session_and_namespace(
+                    app, namespace
+                )
+                # Release only for a failure before the append is durable (same rule
+                # as ``_mem_add_core``); once the single append lands the claim is
+                # never released, so a keyed retry can't duplicate the batch.
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    skipped = await asyncio.to_thread(_append_entries)
+                except Exception:
+                    if idempotency_key is not None:
+                        await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
+                    raise
+                stats = await app.index_engine.index_file(
+                    target, namespace=effective_ns, already_scanned=True, lock_held=True
+                )
+                display_ns = effective_ns or app.config.namespace.default_namespace
+                result = (
+                    f"Batch add complete ({len(entries)} entries) → {target}\n"
+                    f"- Namespace: {display_ns}\n"
+                    f"- Chunks indexed: {stats.indexed_chunks}"
+                )
+                if skipped:
+                    result += f"\n- Skipped: {skipped} entries (empty content)"
+                # Fill in the won claim under the lock. A complete failure leaves the
+                # row pending (never released — the append is durable), so a retry
+                # replays/blocks instead of duplicating.
+                if idempotency_key is not None:
+                    try:
+                        await app.storage.idempotency_complete(
+                            "mem_batch_add", idempotency_key, result
+                        )
+                    except Exception:
+                        logger.warning(
+                            "idempotency ledger complete failed; mem_batch_add key left "
+                            "pending (retry blocks until TTL)",
+                            exc_info=True,
+                        )
+        except TimeoutError:
+            return f"Error: {target} is locked by another process (migration in flight?); retry."
+        app.search_pipeline.invalidate_cache()
+        await record_write_provenance(
+            app,
+            session_id=provenance_session_id,
+            event_type="batch_add",
+            stats=stats,
+        )
 
     return result
 
