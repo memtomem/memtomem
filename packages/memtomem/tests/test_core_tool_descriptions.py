@@ -32,8 +32,10 @@ def _wire_descriptions() -> dict[str, str]:
     return {t.name: (t.description or "") for t in tools if t.name in _CORE_TOOLS}
 
 
-#: Total wire size of the nine core descriptions. Set just above the measured
-#: 8,833 after the trim (was 11,375). This is a budget, not a target: the
+#: Total wire size of the nine core descriptions — a ceiling with a little
+#: headroom over what the trim achieved (down from 11,375). Deliberately not
+#: restating the exact current figure, which goes stale on every reword and
+#: then reads as a contract. This is a budget, not a target: the
 #: floor is roughly "one clear line per parameter", and mem_search alone has
 #: thirteen parameters. Adding text here costs every request in every session,
 #: so an increase should be argued for, and detail that explains the server's
