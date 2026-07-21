@@ -731,15 +731,38 @@ async def context_status_all(
 # scrubbed whole rather than leaving `` Drive/x`` on the wire (the app-level
 # ``[\w.\-]`` scrub stops at the first space). OSError paths are quoted, so
 # matching through spaces cannot bleed into surrounding prose in practice.
+#
+# Deliberately NOT anchored to "absolute only". Trying that (a lookbehind
+# rejecting a separator that continues a name, so a root-stripped
+# ``.memtomem/skills/hello`` keeps its tail) is a mistake this comment exists
+# to stop someone repeating: ``test_context_status_global.py::
+# test_route_redacts_error_reason`` pins that the residual RELATIVE remainder
+# must be scrubbed too, because it still discloses the artifact's location and
+# name inside the store. Eating the tail is the contract, not a rounding error.
+# Callers that need to say WHICH item a reason concerns carry it in a sibling
+# field (``name`` / ``runtime``), never in the redacted prose.
 _ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
 
 
-def _redact_pull_reason(reason: str | None, project_root: Path) -> str | None:
-    """Redact a pull-preview candidate ``reason`` for the wire (defense in depth)."""
+def redact_engine_reason(reason: str | None, project_root: Path) -> str | None:
+    """``sanitize_diff_reason`` plus the residual absolute-path backstop.
+
+    The two-stage form for any wire field carrying **raw engine exception
+    text**, as opposed to a path the route itself resolved. Root-relative
+    stripping is the readable half — a reason under the project keeps its
+    familiar short form — and :data:`_ABS_PATH_RE` is the fail-safe half for
+    everything that lands outside both roots, which is exactly what an
+    ``OSError`` from a runtime dir symlinked onto a shared volume produces.
+    """
     cleaned = sanitize_diff_reason(reason, project_root)
     if cleaned is None:
         return None
     return _ABS_PATH_RE.sub("<path>", cleaned)
+
+
+def _redact_pull_reason(reason: str | None, project_root: Path) -> str | None:
+    """Redact a pull-preview candidate ``reason`` for the wire (defense in depth)."""
+    return redact_engine_reason(reason, project_root)
 
 
 @router.get(

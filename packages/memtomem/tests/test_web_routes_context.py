@@ -1265,12 +1265,17 @@ class TestSkillSkipReasonRedaction:
         # Scoped to the skip rows: this report also carries a deliberate
         # top-level ``project_root`` field, which is a separate (pre-existing)
         # decision and not what this pins.
-        reasons = [s["reason"] or "" for s in data["skipped"]]
-        for reason in reasons:
+        rows = [s for s in data["skipped"] if s["reason_code"] == "target_conflict"]
+        assert rows, data["skipped"]
+        for row in rows:
+            reason = row["reason"] or ""
             assert str(tmp_path) not in reason, reason
             assert str(tmp_path.resolve()) not in reason, reason
-        # The condition still reaches the user — redaction, not deletion.
-        assert any("clash" in reason for reason in reasons), reasons
+            # The CONDITION survives redaction even though the path does not —
+            # the row says which item it is in its own field, which is why the
+            # redactor is free to eat the location entirely.
+            assert "refusing to overwrite non-skill directory" in reason, reason
+            assert row["name"] == "clash"
 
     @pytest.mark.anyio
     async def test_sync_skip_reason_carries_no_absolute_path(
@@ -1289,6 +1294,72 @@ class TestSkillSkipReasonRedaction:
 
         assert r.status_code == 200
         assert str(tmp_path) not in r.text
+
+    @pytest.mark.anyio
+    async def test_sync_route_scrubs_a_reason_outside_both_roots(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The BOUNDARY, not the helper, is what this pins.
+
+        Both route tests above put the offending path under the project root,
+        where plain root-stripping already suffices — so neither of them fails
+        if the builder is downgraded to bare ``sanitize_diff_reason``. A
+        runtime dir symlinked onto a shared volume resolves outside both the
+        project root and ``$HOME``, and only the two-stage redactor removes
+        that. Injected rather than symlinked so the pin is deterministic on
+        every CI platform (the ``probe_pull_drift`` pattern in
+        ``test_context_status_global.py``).
+        """
+        from memtomem.context.skills import SkillSyncResult
+        from memtomem.web.routes import context_skills as routes
+
+        leaky = (
+            "refusing to overwrite non-skill directory: /Volumes/Shared/team/.claude/skills/hello"
+        )
+        monkeypatch.setattr(
+            routes,
+            "generate_all_skills",
+            lambda *_a, **_k: SkillSyncResult(
+                generated=[], skipped=[("claude_skills", leaky, "target_conflict")]
+            ),
+        )
+
+        r = await client.post("/api/context/skills/sync")
+
+        assert r.status_code == 200
+        reason = r.json()["skipped"][0]["reason"]
+        assert "/Volumes/Shared/team" not in reason, reason
+        assert "<path>" in reason, reason
+
+    @pytest.mark.anyio
+    async def test_reason_outside_both_roots_is_still_redacted(self) -> None:
+        """Root-relative stripping alone is not enough.
+
+        A runtime directory symlinked onto a shared volume resolves outside
+        both the project root and ``$HOME``, so ``sanitize_diff_reason`` finds
+        no prefix to strip and passes the absolute path straight through. The
+        engine resolves those targets before raising, so the OSError text
+        genuinely carries them. Unit-level because provoking a real
+        out-of-tree runtime root through the route needs a symlink the CI
+        matrix does not guarantee.
+        """
+        from memtomem.web.routes.context_gateway import redact_engine_reason
+
+        reason = (
+            "refusing to overwrite non-skill directory: "
+            "/Volumes/Shared Drive/team/.claude/skills/hello "
+            "(add a SKILL.md or remove the directory first)"
+        )
+
+        cleaned = redact_engine_reason(reason, Path("/some/project"))
+
+        assert cleaned is not None
+        assert "/Volumes/Shared Drive/team" not in cleaned
+        assert "<path>" in cleaned
+        # The condition survives — redaction, not deletion. Only the location
+        # goes; ``test_context_status_global.py::test_route_redacts_error_reason``
+        # pins that even a root-stripped relative remainder must go with it.
+        assert "refusing to overwrite non-skill directory" in cleaned
 
 
 class TestImportSkills:
