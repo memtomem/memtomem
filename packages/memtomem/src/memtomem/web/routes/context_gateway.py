@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -16,7 +15,7 @@ from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 from memtomem.context._runtime_targets import IMPORT_SOURCE_RUNTIMES, resolve_import_runtimes
-from memtomem.context.error_redact import scrub_absolute_paths
+from memtomem.context.error_redact import redact_engine_reason, scrub_absolute_paths
 from memtomem.context.projects import sync_skip_reason
 from memtomem.context.pull_apply import PullApplyResult, PullPlan, commit_pull, prepare_pull
 from memtomem.context.pull_preview import preview_pull, probe_pull_drift
@@ -60,14 +59,11 @@ router = APIRouter(tags=["context-gateway"])
 def sanitize_diff_reason(message: str | None, project_root: Path) -> str | None:
     """Display-sanitize an engine diff-row ``reason`` for the wire (#1229 U7).
 
-    Engine reasons are raw exception text with absolute source paths
-    EMBEDDED in arbitrary message strings (not bare paths), so plain
-    ``Path.relative_to`` doesn't apply: strip the project-root prefix
-    wherever it appears inside the message, then apply the same
-    HOME-collapse + secret-shape whole-replace + truncation contract as
-    the overview ``error_message`` field. Shared by every context_* list
-    and per-name diff route so the sanitization boundary cannot drift
-    per kind.
+    Engine reasons are raw exception text with absolute source paths embedded
+    in arbitrary message strings (not bare paths), so plain
+    ``Path.relative_to`` doesn't apply. Delegate to the neutral context leaf so
+    Web and MCP share the same component-boundary matching, HOME collapse,
+    secret-shape whole-replace and truncation contract.
 
     Strip BOTH the given root and its ``.resolve()``'d form (#1412): engine
     paths are resolved (``canonical_mcp_server_root`` etc.), but the route may
@@ -75,20 +71,10 @@ def sanitize_diff_reason(message: str | None, project_root: Path) -> str | None:
     ``/private/tmp``, a symlinked home, a case-variant mount). Stripping only
     one form leaves the absolute resolved path in the reason — the same
     canonical-path disclosure #1412 closes on the parse-error 422s, here on the
-    list/diff ``reason`` surface. Longest-first so a root that contains the
-    other as a prefix can't be half-stripped.
+    list/diff ``reason`` surface. A sibling whose name starts with the root is
+    scrubbed, never turned into a relative-looking suffix (#1889).
     """
-    if not message:
-        return None
-    roots = {str(project_root)}
-    try:
-        roots.add(str(project_root.resolve()))
-    except (AttributeError, OSError):
-        pass  # PurePath input / unresolvable root — the bare form still strips
-    cleaned = message
-    for root in sorted(roots, key=len, reverse=True):
-        cleaned = cleaned.replace(root + os.sep, "").replace(root, ".")
-    return _redact_message(cleaned)
+    return redact_engine_reason(message, project_root)
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:

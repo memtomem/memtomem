@@ -6,8 +6,8 @@ before it leaves the loopback dashboard:
 * ``web/routes/_errors._redact_message`` — collapse ``$HOME`` → ``~``, drop
   secret-shape messages whole, then truncate to 200 chars.
 * ``web/routes/context_gateway.sanitize_diff_reason`` — strip the project root
-  (both the given and the ``.resolve()``'d form) wherever it appears inside the
-  message, then apply ``_redact_message``.
+  (both the given and the ``.resolve()``'d form) at path-component boundaries
+  inside the message, then apply ``_redact_message``.
 
 The MCP context tools in ``server/tools/context.py`` are a *second* wire
 boundary for the SAME engine reasons: their string results flow into the
@@ -18,11 +18,11 @@ depends on the server tools' package, not the reverse, and MCP↔web coupling is
 disallowed), so these functions mirror the web contract in a neutral
 ``memtomem.context`` leaf both layers can reach.
 
-The web twins now delegate their absolute-path backstop here
-(``context_gateway.redact_wire_reason`` calls :func:`scrub_absolute_paths`),
-so that half is genuinely shared rather than kept in lock-step by hand. The
-root-stripping half still has a web copy (``sanitize_diff_reason``) because the
-signatures differ.
+The web twins delegate both stages here: ``sanitize_diff_reason`` wraps
+:func:`redact_engine_reason`, and ``context_gateway.redact_wire_reason`` adds
+the stricter :func:`scrub_absolute_paths` backstop. Keeping root matching in
+one neutral leaf matters because a substring match at this boundary can turn
+an external absolute path into a relative-looking disclosure.
 
 **The two layers do NOT agree about relative remainders, and that is
 deliberate.** Web scrubs anything path-shaped, including the remainder left
@@ -38,7 +38,6 @@ keeps its own fixed, path-free detail.
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -98,6 +97,12 @@ _TERMINAL_SINGLE_ABS_PATH_RE = re.compile(
 )
 _PATH_REDACTED_MARKER = "<path>"
 
+# A root occurrence is eligible only where an absolute path can start. In
+# particular, a slash inside another path/URL is not a fresh root. This is the
+# same Unicode-aware boundary posture as ``_RESIDUAL_ABS_PATH_RE``, extended
+# with separators so ``/prefix/srv/project`` cannot match ``/srv/project``.
+_ROOT_START_BOUNDARY = r"(?<![\w.\-~\\/])"
+
 
 def _scrub_single_segment_absolute_paths(message: str) -> str:
     """Scrub conservatively delimited one-segment POSIX/drive-root paths."""
@@ -126,23 +131,21 @@ def redact_message(message: str) -> str:
     return redacted
 
 
-def redact_engine_reason(message: str | None, *project_roots: Path) -> str | None:
-    """Display-sanitize a raw engine reason / error string for the MCP wire.
+def _strip_project_roots(message: str, *project_roots: Path) -> tuple[str, bool]:
+    """Relativize real root components and report prefix-collision attempts.
 
-    Mirror of ``web/routes/context_gateway.sanitize_diff_reason`` generalized to
-    accept more than one root (a transfer straddles a source and a destination
-    project). Engine reasons embed absolute source paths inside arbitrary
-    message text, so ``Path.relative_to`` doesn't apply: strip each root prefix
-    — both the given form and its ``.resolve()``'d form (macOS ``/tmp`` →
-    ``/private/tmp``, a symlinked home, a case-variant mount) — wherever it
-    appears, longest-first so a root that contains another as a prefix can't be
-    half-stripped, then apply :func:`redact_message`.
+    Engine reasons embed paths inside prose, so this is deliberately more
+    conservative than ``str.replace``. A root is stripped only when it starts
+    at a path boundary and is followed by a separator (a descendant) or a
+    definite token boundary (the root itself). Any other continuation is a
+    sibling name, not a child: ``/srv/project-private`` must never become
+    ``.-private``. Both slash forms are accepted so a Windows-shaped reason is
+    handled consistently even when a test drives it on POSIX.
 
-    Returns ``None`` for an empty/absent message so callers can keep their
-    ``if reason`` truthiness checks.
+    The boolean lets the caller scrub a colliding absolute path *before*
+    ``$HOME`` collapse. Otherwise ``~/work/memtomem-stm`` would look like an
+    intentional home-relative remediation and survive the residual scrub.
     """
-    if not message:
-        return None
     roots: set[str] = set()
     for project_root in project_roots:
         roots.add(str(project_root))
@@ -150,9 +153,77 @@ def redact_engine_reason(message: str | None, *project_roots: Path) -> str | Non
             roots.add(str(project_root.resolve()))
         except (AttributeError, OSError):
             pass  # PurePath / unresolvable root — the bare form still strips
+
     cleaned = message
-    for root in sorted(roots, key=len, reverse=True):
-        cleaned = cleaned.replace(root + os.sep, "").replace(root, ".")
+    collision = False
+
+    def _ends_token(source: str, end: int) -> bool:
+        if end == len(source):
+            return True
+        following = source[end]
+        if following in "'\"),]:;" or following.isspace():
+            # Preserve diagnostics such as ``<root> is not a directory``.
+            # A sibling component containing spaces still has a later path
+            # separator (``<root> private/team``); the same check keeps a
+            # colon-bearing sibling (``<root>:private/team``) absolute. Keep
+            # those for the collision scrub instead of treating the delimiter
+            # as the end of the path token.
+            line_tail = source[end + 1 :].splitlines()[0]
+            return "/" not in line_tail and "\\" not in line_tail
+        return False
+
+    for root in sorted((root for root in roots if root), key=len, reverse=True):
+        # ``Path`` strips trailing separators except for filesystem anchors.
+        # For an anchor, the separator is already the whole root and every
+        # absolute descendant starts immediately after it.
+        if root.endswith(("/", "\\")):
+            anchor_pattern = re.compile(rf"{_ROOT_START_BOUNDARY}{re.escape(root)}")
+            cleaned = anchor_pattern.sub("", cleaned)
+            continue
+
+        pattern = re.compile(rf"{_ROOT_START_BOUNDARY}{re.escape(root)}(?P<separator>[/\\])?")
+        source = cleaned
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal collision
+            if match.group("separator") is not None:
+                return ""
+            if _ends_token(source, match.end()):
+                return "."
+            collision = True
+            return match.group(0)
+
+        cleaned = pattern.sub(_replace, source)
+        # A root can also occur *inside* another absolute path, where the
+        # negative lookbehind correctly kept the regex from treating it as a
+        # fresh root. It is still a substring collision that must be scrubbed
+        # before HOME collapse, not left for a bare web sanitizer to emit.
+        if root in cleaned:
+            collision = True
+    return cleaned, collision
+
+
+def redact_engine_reason(message: str | None, *project_roots: Path) -> str | None:
+    """Display-sanitize a raw engine reason / error string for the MCP wire.
+
+    Mirror of ``web/routes/context_gateway.sanitize_diff_reason`` generalized to
+    accept more than one root (a transfer straddles a source and a destination
+    project). Engine reasons embed absolute source paths inside arbitrary
+    message text, so ``Path.relative_to`` doesn't apply: strip each actual root
+    component — both the given form and its ``.resolve()``'d form (macOS
+    ``/tmp`` → ``/private/tmp``, a symlinked home, a case-variant mount) —
+    longest-first. A sibling that merely starts with a root is scrubbed while
+    it is still absolute, before :func:`redact_message` can collapse ``$HOME``
+    and make it look intentionally relative.
+
+    Returns ``None`` for an empty/absent message so callers can keep their
+    ``if reason`` truthiness checks.
+    """
+    if not message:
+        return None
+    cleaned, prefix_collision = _strip_project_roots(message, *project_roots)
+    if prefix_collision:
+        cleaned = scrub_residual_absolute_paths(cleaned)
     return redact_message(cleaned)
 
 

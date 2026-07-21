@@ -136,6 +136,32 @@ def test_list_symlinked_root_canonical_path_is_relative(kind: str, tmp_path: Pat
     _assert_path_free(body, real, real / ".memtomem")
 
 
+def test_list_prefix_colliding_reason_is_path_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bare list sanitizer must not emit a sibling path tail (#1889)."""
+    from memtomem.context._runtime_targets import DiffRow
+
+    _seed_skill(tmp_path)
+    sibling = tmp_path.with_name(tmp_path.name + "-private") / "team" / "secret.md"
+    monkeypatch.setattr(
+        context_skills,
+        "diff_skills",
+        lambda *_a, **_k: [
+            DiffRow("claude_skills", "demo", "parse error", f"unreadable: {sibling}")
+        ],
+    )
+
+    res = _client_for(context_skills.router, tmp_path).get("/context/skills")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    reason = body["skills"][0]["runtimes"][0]["reason"]
+    assert reason == "unreadable: <path>"
+    assert tmp_path.name + "-private" not in json.dumps(body)
+    assert "secret.md" not in json.dumps(body)
+
+
 # ── (c) rendered parse-error 422 ─────────────────────────────────────────
 
 
