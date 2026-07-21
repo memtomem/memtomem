@@ -102,6 +102,17 @@ class NamespaceOps:
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
+    async def count_chunks_by_namespace(self, namespace: str) -> int:
+        """Count chunks in one namespace.
+
+        The rename receipt needs the target's resulting total; going through
+        ``list_namespaces`` for it aggregates the whole ``chunks`` table to
+        read a single bucket.
+        """
+        db = self._get_db()
+        row = db.execute("SELECT COUNT(*) FROM chunks WHERE namespace=?", (namespace,)).fetchone()
+        return int(row[0]) if row else 0
+
     async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int:
         """Count chunks whose namespace starts with any of the given prefixes.
 
@@ -219,17 +230,34 @@ class NamespaceOps:
         borrowed = self._in_transaction()
         owns_txn = False
         if not db.in_transaction:
-            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as exc:
+                # Taking a RESERVED lock up front is a failure mode this
+                # method did not have while it was lazily DEFERRED: a
+                # concurrent writer makes this SQLITE_BUSY. Raised as
+                # StorageError like every other exit here, so MCP renders it
+                # as "Error: …" and web as a handled failure rather than a
+                # bare sqlite3 exception hitting the generic 500 handler.
+                raise StorageError(
+                    f"rename_namespace could not take the write lock: {exc}"
+                ) from exc
             # Opening the transaction is not the same as owning it: inside
             # ``SqliteBackend.transaction()`` the CM has not begun one yet
             # (it only flips the flag), so we take the lock on its behalf and
             # leave the commit/rollback to it.
             owns_txn = not borrowed
         elif not borrowed:
-            logger.warning(
-                "rename_namespace found an open transaction it did not start and that "
-                "SqliteBackend.transaction() does not own; leaving commit/rollback to "
-                "whoever opened it"
+            # Someone left DML pending on the shared connection outside
+            # ``transaction()``. Proceeding would mean doing the whole rename
+            # under a lock we never took, then reporting success for writes
+            # that only land if that stranger commits — and vanish if they
+            # roll back. Reporting a rename that may not have happened is the
+            # exact bug this method exists to close, so refuse instead.
+            raise StorageError(
+                "rename_namespace refused: the connection already has an open transaction "
+                "that SqliteBackend.transaction() does not own. Commit or roll it back "
+                "before renaming — this method cannot report a result it cannot commit."
             )
 
         try:
@@ -353,21 +381,20 @@ class NamespaceOps:
         """
         rows = db.execute(
             """
-            SELECT c.id, c.rowid, (
-                SELECT t.id FROM chunks t
-                WHERE t.namespace = ?
-                  AND t.source_file = c.source_file
-                  AND t.content_hash = c.content_hash
-                  -- ``IS`` matches the UNIQUE index's key exactly only
-                  -- because ``start_line`` is NOT NULL. Were the column ever
-                  -- made nullable, the index would treat two NULLs as
-                  -- distinct (no collision) while ``IS`` would call them
-                  -- equal — deleting rows that never collided.
-                  AND t.start_line IS c.start_line
-                LIMIT 1
-            ) AS survivor
+            SELECT c.id, c.rowid, MIN(t.id) AS survivor
             FROM chunks c
-            WHERE c.namespace = ? AND survivor IS NOT NULL
+            JOIN chunks t
+              ON t.namespace = ?
+             AND t.source_file = c.source_file
+             AND t.content_hash = c.content_hash
+             -- ``IS`` matches the UNIQUE index's key exactly only because
+             -- ``start_line`` is NOT NULL. Were the column ever made
+             -- nullable, the index would treat two NULLs as distinct (no
+             -- collision) while ``IS`` would call them equal — deleting rows
+             -- that never collided.
+             AND t.start_line IS c.start_line
+            WHERE c.namespace = ?
+            GROUP BY c.id, c.rowid
             """,
             (new, old),
         ).fetchall()
@@ -439,6 +466,15 @@ class NamespaceOps:
         survivor already carries the same row (a relation to the same target,
         say): the source's copy is left to be cascaded away, which is the
         target-wins rule again.
+
+        One asymmetry is deliberate: ``access_log`` rows move to the survivor
+        while ``chunks.access_count`` / ``last_accessed`` stay as the target
+        had them (target-wins, like the metadata). The log keeps the fuller
+        history — those accesses did happen, to content the survivor now
+        represents — while the denormalized counters keep the survivor's own
+        ranking signal rather than inheriting a merged one. So the two can
+        disagree for a merged chunk; the counters are not derived from the
+        log and no surface reconciles them.
 
         Schema discovery runs once for the whole merge — a per-duplicate
         ``PRAGMA`` sweep would put ``O(duplicates × tables)`` metadata

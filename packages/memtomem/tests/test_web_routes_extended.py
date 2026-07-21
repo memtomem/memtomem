@@ -1903,7 +1903,7 @@ class TestNamespaceCRUD:
         app.state.storage.rename_namespace = AsyncMock(
             return_value=NamespaceRenameResult(chunks_moved=30, metadata_renamed=True, merged=False)
         )
-        app.state.storage.list_namespaces.return_value = [("general", 30)]
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=30)
         resp = await client.post(
             "/api/namespaces/default/rename",
             json={"new_name": "general"},
@@ -1922,7 +1922,7 @@ class TestNamespaceCRUD:
         app.state.storage.rename_namespace = AsyncMock(
             return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=False, merged=True)
         )
-        app.state.storage.list_namespaces.return_value = [("general", 7)]
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=7)
         resp = await client.post(
             "/api/namespaces/default/rename",
             json={"new_name": "general", "merge": True},
@@ -1937,7 +1937,7 @@ class TestNamespaceCRUD:
                 chunks_moved=2, metadata_renamed=False, merged=True, duplicates_dropped=3
             )
         )
-        app.state.storage.list_namespaces.return_value = [("general", 7)]
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=7)
         resp = await client.post(
             "/api/namespaces/default/rename",
             json={"new_name": "general", "merge": True},
@@ -1949,7 +1949,7 @@ class TestNamespaceCRUD:
         app.state.storage.rename_namespace = AsyncMock(
             return_value=NamespaceRenameResult(chunks_moved=0, metadata_renamed=False, merged=False)
         )
-        app.state.storage.list_namespaces.return_value = [("general", 12)]
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=12)
         resp = await client.post(
             "/api/namespaces/ghost/rename",
             json={"new_name": "general"},

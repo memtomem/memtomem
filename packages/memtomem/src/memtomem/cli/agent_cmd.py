@@ -88,7 +88,8 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
         if merging and not assume_yes:
             if not confirm(
                 f"{len(merging)} namespace(s) already exist and will be merged into "
-                f"(their description/color are kept; duplicate chunks are dropped). Continue?"
+                f"(their description/color are kept; duplicate chunks are dropped). "
+                f"Continue? (pass --yes to skip this prompt when scripting)"
             ):
                 click.echo("Aborted — nothing was changed.")
                 return

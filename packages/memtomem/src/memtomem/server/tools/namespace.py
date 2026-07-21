@@ -149,10 +149,15 @@ async def mem_ns_rename(
         # exists *here* — an MCP caller can retry with merge=True, which a
         # web user cannot. See the reason_code note on the exception.
         if exc.reason_code == "target_exists":
+            # Only merge=True is offered. ``mem_ns_assign`` moves chunks with
+            # a bare UPDATE and no duplicate handling, so on the overlapping-
+            # content case it fails on the UNIQUE (namespace, source_file,
+            # content_hash, start_line) index — a remedy that breaks exactly
+            # where it is most likely to be needed is not a remedy.
             raise NamespaceConflictError(
-                f"{exc}. Pass merge=True to consolidate into it (the target's "
-                f"description/color are kept), or move only the chunks with "
-                f"mem_ns_assign(namespace={new!r}, old_namespace={old!r})",
+                f"{exc}. Pass merge=True to consolidate into it — the target's "
+                f"description/color are kept, and chunks it already holds are "
+                f"dropped rather than duplicated",
                 reason_code=exc.reason_code,
             ) from exc
         raise

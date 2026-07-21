@@ -126,11 +126,11 @@ async def rename_namespace(
         # answer 200 with the *target's* count and metadata — a rename that
         # never happened, presented as one that did. 404 matches the info GET.
         raise HTTPException(status_code=404, detail=f"Namespace '{namespace}' not found")
-    # Report the target's resulting total, the way ``get_namespace`` does:
-    # on a merge the moved-row count and the namespace's size differ, and the
-    # list / info endpoints would immediately contradict a moved count.
-    ns_list = await storage.list_namespaces()
-    count = dict(ns_list).get(body.new_name, 0)
+    # Report the target's resulting total, not the moved-row count: on a merge
+    # the two differ, and the list / info endpoints would immediately
+    # contradict a moved count. Counted directly rather than through
+    # ``list_namespaces``, which aggregates every chunk row to read one bucket.
+    count = await storage.count_chunks_by_namespace(body.new_name)
     meta = await storage.get_namespace_meta(body.new_name)
     return NamespaceRenameResponse(
         namespace=body.new_name,

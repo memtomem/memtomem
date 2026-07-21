@@ -2344,6 +2344,10 @@ class SqliteBackend(
         assert self._ns is not None
         return await self._ns.list_namespaces()
 
+    async def count_chunks_by_namespace(self, namespace: str) -> int:
+        assert self._ns is not None
+        return await self._ns.count_chunks_by_namespace(namespace)
+
     async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int:
         assert self._ns is not None
         return await self._ns.count_chunks_by_ns_prefix(prefixes)

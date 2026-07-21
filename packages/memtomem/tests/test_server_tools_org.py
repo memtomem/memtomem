@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -345,13 +346,14 @@ class TestRenameNamespaceAtomicity:
             f"lock must still precede the preflight, trace: {trace}"
         )
 
-    async def test_a_foreign_open_transaction_is_not_committed(self, storage):
-        """Opening the lock is not owning it — and neither is somebody else's DML.
+    async def test_a_foreign_open_transaction_is_refused(self, storage):
+        """Don't rename under a lock we never took and can't commit.
 
-        The connection runs in sqlite3's implicit-transaction mode, so a
-        pending write left on it outside ``transaction()`` must not be
-        flushed by our commit. Committing a stranger's write is the bug this
-        method exists to prevent, one level up.
+        The connection runs in sqlite3's implicit-transaction mode, so DML
+        left pending on it outside ``transaction()`` is someone else's. We
+        could neither commit the result (it isn't ours to commit) nor claim
+        it happened — reporting a rename that may evaporate is the bug this
+        method exists to close.
         """
         await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
         db = storage._get_db()
@@ -362,10 +364,43 @@ class TestRenameNamespaceAtomicity:
         )
         assert db.in_transaction
 
-        await storage.rename_namespace("src-ns", "dst-ns")
-
-        assert db.in_transaction, "rename committed a transaction it did not open"
+        with pytest.raises(StorageError, match="open transaction"):
+            await storage.rename_namespace("src-ns", "dst-ns")
         db.rollback()
+
+    async def test_a_foreign_open_transaction_is_left_untouched(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        db.execute(
+            "INSERT INTO namespace_metadata "
+            "(namespace, description, color, created_at, updated_at) "
+            "VALUES ('foreign-ns', '', '', 't', 't')"
+        )
+
+        with pytest.raises(StorageError):
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert db.in_transaction, "refusal must not commit or roll back a foreign transaction"
+        db.rollback()
+
+    async def test_a_busy_write_lock_surfaces_as_storage_error(self, storage, tmp_path):
+        """SQLITE_BUSY on the up-front lock is a handled failure, not a raw sqlite3 error.
+
+        The old lazy-DEFERRED code could not fail here at all; taking the
+        lock up front is what introduced the possibility.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        db.commit()
+        blocker = sqlite3.connect(db.execute("PRAGMA database_list").fetchone()[2], timeout=0)
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("UPDATE chunks SET namespace='x' WHERE 0")
+        try:
+            with pytest.raises(StorageError, match="write lock"):
+                await storage.rename_namespace("src-ns", "dst-ns")
+        finally:
+            blocker.rollback()
+            blocker.close()
 
     async def test_no_op_rename_leaves_no_open_transaction(self, storage):
         """A source that holds nothing must not strand the RESERVED lock."""
