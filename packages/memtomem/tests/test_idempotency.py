@@ -16,6 +16,7 @@ tools stay at-least-once (documented). This file pins:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -414,6 +415,15 @@ class TestBatchAppendByteIdentity:
         """The composed single-write output is byte-for-byte what sequential
         ``append_entry`` calls produced before the refactor."""
         import memtomem.tools.memory_writer as mw
+
+        fixed_now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+        class FrozenDateTime:
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+        monkeypatch.setattr(mw, "datetime", FrozenDateTime)
 
         entries = [
             ("one", "A", ["t1"]),
