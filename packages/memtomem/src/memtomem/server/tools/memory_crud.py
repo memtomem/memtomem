@@ -17,6 +17,7 @@ from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embeddin
 from memtomem.server.tool_registry import register
 from memtomem.server.tools._provenance import (
     capture_session_and_namespace,
+    mark_provenance_incomplete,
     record_write_provenance,
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
@@ -150,6 +151,30 @@ async def _locked_chunk(
     yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry."
 
 
+async def _flag_mutation_on_active_session(app: AppContext) -> None:
+    """Tell the active session that a mutation happened inside it.
+
+    ``mem_edit`` and ``mem_delete`` record no provenance event. Their
+    ``new_chunk_ids`` are re-chunk artifacts, not new material: feeding
+    them to a session summary would describe a rewrite as something newly
+    written, while the ids an earlier write recorded for the same file
+    have just gone dangling.
+
+    Staying silent is the one option that is not available. An edit-only
+    session would then carry the provenance marker, report zero writes,
+    and leave no dangling id for a consumer to trip over — so "this
+    session wrote nothing" would read as fact rather than as a gap. The
+    flag makes the gap visible without pretending to describe it.
+
+    No write gauge here on purpose: this writes no session *event*, and
+    the flag lands correctly even on an already-ended row, so there is
+    nothing for session teardown to snapshot around.
+    """
+    async with app._session_lock:
+        session_id = app.current_session_id
+    await mark_provenance_incomplete(app, session_id)
+
+
 async def _mutate_file_and_reindex(
     app: AppContext,
     source_file: Path,
@@ -175,6 +200,7 @@ async def _mutate_file_and_reindex(
         await asyncio.to_thread(mutate)
         stats = await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         app.search_pipeline.invalidate_cache()
+        await _flag_mutation_on_active_session(app)
         return stats, None
     except Exception as exc:
         await asyncio.to_thread(source_file.write_text, original, encoding="utf-8")

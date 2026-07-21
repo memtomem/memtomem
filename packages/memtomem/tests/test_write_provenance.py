@@ -416,6 +416,225 @@ class TestMemAddCoreSurfaces:
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
 
+class TestProvenanceCompletenessSealing:
+    """A marked session must never claim completeness it does not have.
+
+    The drain waits only for writes admitted before it started, and the
+    session handle stays live through teardown, so a write can land its
+    event after teardown snapshotted the event list. That was an accepted
+    residual before the session row asserted anything; once it says "this
+    session records provenance", a silent short list becomes a false
+    claim instead of a missing summary.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_outran_teardown_marks_the_session_incomplete(
+        self, bm25_only_components
+    ):
+        """The event still gets recorded — the write is real — but the
+        session stops presenting its input set as whole."""
+        from uuid import uuid4
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        await app.storage.create_session("late", "planner", "default", {"provenance": "write-v1"})
+        # The session has been claimed for teardown; the write below is
+        # the one that arrives too late to be in the snapshot.
+        app.current_session_id = "late"
+        app._ending_session_ids.add("late")
+
+        await record_write_provenance(
+            app, session_id="late", event_type="add", stats=_Stats([uuid4()])
+        )
+
+        assert len(await _provenance_events(app, "late")) == 1
+        row = await app.storage.get_session("late")
+        assert row["metadata"]["provenance_incomplete"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_write_landing_after_the_session_was_replaced_marks_it_incomplete(
+        self, bm25_only_components
+    ):
+        """Teardown may have finished and released its claim before the
+        straggler lands, so the claim set alone is not enough."""
+        from uuid import uuid4
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        await app.storage.create_session("gone", "planner", "default", {"provenance": "write-v1"})
+        app.current_session_id = "successor"
+
+        await record_write_provenance(
+            app, session_id="gone", event_type="add", stats=_Stats([uuid4()])
+        )
+
+        row = await app.storage.get_session("gone")
+        assert row["metadata"]["provenance_incomplete"] is True
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_write_leaves_the_session_complete(self, bm25_only_components):
+        """The seal must not fire on the common path, or the flag means
+        nothing and every session falls back."""
+        from uuid import uuid4
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        await app.storage.create_session("live", "planner", "default", {"provenance": "write-v1"})
+        app.current_session_id = "live"
+
+        await record_write_provenance(
+            app, session_id="live", event_type="add", stats=_Stats([uuid4()])
+        )
+
+        row = await app.storage.get_session("live")
+        assert "provenance_incomplete" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_a_drain_timeout_is_recorded_on_the_row_not_just_the_response(
+        self, bm25_only_components, monkeypatch
+    ):
+        """A consumer of the stored row never sees the response line."""
+        import asyncio
+
+        from memtomem.server.tools import session as session_mod
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        monkeypatch.setattr(session_mod, "_WRITE_DRAIN_TIMEOUT_S", 0.05)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+
+        in_write = asyncio.Event()
+        release = asyncio.Event()
+
+        async def parked_write():
+            async with app.write_in_flight():
+                in_write.set()
+                await release.wait()
+
+        writer = asyncio.create_task(parked_write())
+        await in_write.wait()
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        release.set()
+        await writer
+
+        assert "writes still in flight" in out
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_session_records_its_own_drain_timeout(
+        self, bm25_only_components, monkeypatch
+    ):
+        """Supersession runs the same protocol, and its row is read by
+        the same consumer."""
+        import asyncio
+
+        from memtomem.server.tools import session as session_mod
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        monkeypatch.setattr(session_mod, "_WRITE_DRAIN_TIMEOUT_S", 0.05)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        superseded_id = app.current_session_id
+
+        in_write = asyncio.Event()
+        release = asyncio.Event()
+
+        async def parked_write():
+            async with app.write_in_flight():
+                in_write.set()
+                await release.wait()
+
+        writer = asyncio.create_task(parked_write())
+        await in_write.wait()
+
+        await mem_session_start(agent_id="builder", ctx=ctx)  # type: ignore[arg-type]
+        release.set()
+        await writer
+
+        row = await app.storage.get_session(superseded_id)
+        assert row["metadata"]["auto_ended"] is True
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_clean_session_end_leaves_no_incomplete_flag(self, bm25_only_components):
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="an ordinary written fact", ctx=ctx)  # type: ignore[arg-type]
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "writes still in flight" not in out
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+
+class TestMutationSurfacesFlagTheSession:
+    """``mem_edit`` / ``mem_delete`` record no event but must not be
+    invisible — see ``_flag_mutation_on_active_session``."""
+
+    @pytest.mark.asyncio
+    async def test_mem_edit_marks_the_session_incomplete_without_an_event(
+        self, bm25_only_components
+    ):
+        from memtomem.server.tools.memory_crud import mem_add, mem_edit
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="the original wording of the note", ctx=ctx)  # type: ignore[arg-type]
+        chunk_id = (await _provenance_events(app, session_id))[0]["chunk_ids"][0]
+
+        await mem_edit(chunk_id=chunk_id, new_content="the revised wording", ctx=ctx)  # type: ignore[arg-type]
+
+        # No second event: an edit's chunk ids are re-chunk artifacts.
+        assert [e["event_type"] for e in await _provenance_events(app, session_id)] == ["add"]
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_mutation_outside_any_session_flags_nothing(self, bm25_only_components):
+        from memtomem.server.tools.memory_crud import mem_add, mem_edit
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="the original wording of the note", ctx=ctx)  # type: ignore[arg-type]
+        chunk_id = (await _provenance_events(app, session_id))[0]["chunk_ids"][0]
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_edit(chunk_id=chunk_id, new_content="edited with no session", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+
 class TestSessionRowMarker:
     """``mem_session_start`` marks its session as provenance-recording.
 
