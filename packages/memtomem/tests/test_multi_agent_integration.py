@@ -655,6 +655,42 @@ class TestCaseGUnboundSessionWriteRouting:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
+    async def test_unbound_session_agent_search_is_unpinned(self, bm25_only_components):
+        """Read-side knock-on of #1875, pinned so it is not a surprise.
+
+        With no agent bound, ``_resolve_agent_namespace`` returns
+        ``None`` and ``mem_agent_search`` therefore runs *unpinned*
+        instead of scoping to ``agent-runtime:default,shared``. That is a
+        read-scope **widening** — the same axis the fix is careful about
+        elsewhere — so it gets an explicit pin: an unbound
+        ``mem_agent_search`` sees what a plain ``mem_search`` sees, and
+        in particular still cannot see another agent's private chunks
+        (the system-prefix filter, not the agent binding, is what keeps
+        those hidden).
+        """
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk("public widening probe", namespace="default"),
+                make_chunk(
+                    "alpha private widening probe",
+                    namespace=f"{AGENT_NAMESPACE_PREFIX}alpha",
+                ),
+            ]
+        )
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        try:
+            out = await mem_agent_search(query="widening probe", agent_id=None, ctx=ctx)  # type: ignore[arg-type]
+            assert "public widening probe" in out
+            assert "alpha private widening probe" not in out
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
     async def test_agent_runtime_default_stays_readable(self, bm25_only_components):
         """Recovery path for data written under the old routing.
 

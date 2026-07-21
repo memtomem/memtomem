@@ -80,7 +80,7 @@ def validate_agent_id(value: object) -> str:
 RESERVED_UNBOUND_AGENT_ID: Final[str] = "default"
 
 
-def normalize_bound_agent_id(value: object | None, *, required: bool = False) -> str | None:
+def normalize_bound_agent_id(value: object, *, required: bool = False) -> str | None:
     """Validate *value* and collapse the unbound sentinel to ``None``.
 
     Call this at surfaces that **bind** an agent to session state, never

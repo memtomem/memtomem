@@ -521,6 +521,30 @@ class TestSessionNamespaceDerivation:
         assert active["agent_id"] == "default"
 
     @pytest.mark.asyncio
+    async def test_bare_start_clears_a_previous_agent_binding(self, components):
+        """Replacing an agent-bound session with a bare one must unbind.
+
+        This transition runs through the auto-end path, which does *not*
+        reset ``current_*`` (the new start overwrites them instead) — so
+        a regression that skipped the overwrite for the unbound case
+        would leave the old agent bound and silently keep routing writes
+        into its namespace. Agents do not stack, and neither do their
+        bindings.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        assert app.current_agent_id == "planner"
+        first_session = app.current_session_id
+
+        out = await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "auto-ended previous session" in out
+        assert app.current_session_id != first_session
+        assert app.current_agent_id is None
+
+    @pytest.mark.asyncio
     async def test_capitalized_default_is_an_ordinary_agent(self, components):
         """The sentinel is exact-match: ``"Default"`` still binds."""
         app = AppContext.from_components(components)

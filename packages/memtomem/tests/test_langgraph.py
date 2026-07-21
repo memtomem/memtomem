@@ -326,6 +326,33 @@ class TestStartAgentSession:
         assert store._current_agent_id is None
 
     @pytest.mark.asyncio
+    async def test_include_shared_raises_after_unbound_default_session(self):
+        """Knock-on of #1875 on the Python surface, pinned deliberately.
+
+        ``_resolve_search_namespace`` treats ``include_shared=True`` with
+        no bound agent as a programming error. Before the fix
+        ``start_agent_session("default")`` bound an agent, so this
+        combination worked (searching ``agent-runtime:default,shared``);
+        now it raises. Failing loudly is the right call — the caller
+        asked for "my scope plus shared" and there is no *my scope* — but
+        it is a behaviour change, so it gets a pin rather than being left
+        to surface as a mystery ``ValueError`` in someone's graph.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        await store.start_agent_session("default")
+
+        with pytest.raises(ValueError, match="requires an active agent session"):
+            store._resolve_search_namespace(None, include_shared=True)
+
+        # include_shared=False / None stay usable — they do not depend on
+        # a bound agent, so the unbound session simply passes through.
+        assert store._resolve_search_namespace("team", include_shared=None) == "team"
+
+    @pytest.mark.asyncio
     async def test_none_agent_id_raises_before_storage(self):
         """``agent_id`` is required on this surface, unlike MCP.
 

@@ -178,11 +178,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   meant a plain `mem_search` could not find the entry the caller had just
   written. The session **record** said `default` the whole time, so nothing in
   the output revealed the redirection. `"default"` is now a reserved sentinel
-  meaning *no agent bound*, applied at every binding surface
-  (`mem_session_start`, `mm session start`, and the LangGraph adapter's
-  `start_agent_session`) through one chokepoint. Omitting `agent_id` — or
-  passing `"default"` explicitly — binds nothing, so writes go where they would
-  with no session at all.
+  meaning *no agent bound*, applied through one chokepoint at both surfaces that
+  bind a runtime agent: `mem_session_start` (MCP) and the LangGraph adapter's
+  `start_agent_session`. Omitting `agent_id` — or passing `"default"`
+  explicitly — binds nothing, so writes go where they would with no session at
+  all. (`mm session start` routes through the same helper, but the CLI is a
+  fresh process per invocation and never bound a runtime agent, so its behaviour
+  is unchanged — that edit only removes a duplicated literal.)
 
   Who is affected, and how:
 
@@ -194,9 +196,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     just wrote is **findable** by a default `mem_search` instead of hidden. (If
     your own rules route writes into a system-prefixed namespace such as
     `archive:`, unpinned search still hides them — that part is unchanged.) If
-    you were
-    relying on that accidental hiding for isolation, pass a real `agent_id` to
-    opt into `agent-runtime:<id>` deliberately.
+    you were relying on that accidental hiding for isolation, pass a real
+    `agent_id` to opt into `agent-runtime:<id>` deliberately.
+  - **`mem_agent_search` reads wider under an unbound session.** With nothing
+    bound it now runs unpinned instead of scoping to
+    `agent-runtime:default,shared` — i.e. the same scope a plain `mem_search`
+    has. Other agents' private chunks stay hidden (that is the system-prefix
+    filter, not the binding), but pass `agent_id=` if you want a pinned read.
+  - **LangGraph `search(include_shared=True)` after `start_agent_session("default")`
+    now raises.** It asks for "my agent scope plus shared" and there is no *my
+    scope* on an unbound session, so it fails loudly instead of quietly
+    searching `agent-runtime:default`. Use `start_agent_session("<real-id>")`,
+    or `include_shared=False`.
   - **Callers who passed `agent_id="default"` explicitly.** Same change; the
     reservation does not distinguish the two spellings.
   - **Existing chunks are not migrated.** There is no namespace-rename
