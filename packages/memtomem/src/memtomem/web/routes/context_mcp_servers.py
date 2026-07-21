@@ -508,10 +508,10 @@ async def sync_mcp_servers(
         description="Canonical-residency tier to fan out. Only project_shared is supported in v1.",
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Sync MCP servers")
+    _reject_non_shared_write(target_scope, "Push MCP servers")
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 return await _sync_mcp_servers_core(project_root)
     except TimeoutError:
-        raise _error(503, "busy", "MCP server sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "MCP server push timed out — another sync may be in progress")

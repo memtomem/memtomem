@@ -417,7 +417,7 @@ def format_scan_block_message(
         f"(ADR-0011 §5).\n"
         f"  Move the {kind} to a writable tier first:\n"
         f"    {target_hint}\n"
-        f"  Or remove the secret from {blocked.path} before re-running sync."
+        f"  Or remove the secret from {blocked.path} before re-running the push."
     )
 
 

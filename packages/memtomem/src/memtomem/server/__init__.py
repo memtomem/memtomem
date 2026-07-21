@@ -42,13 +42,38 @@ from memtomem.server.lifespan import app_lifespan
 # exposes (#1608), and ``instructions=`` is only accepted at construction.
 _TOOL_MODE = os.environ.get("MEMTOMEM_TOOL_MODE", "core").lower()
 
+# ── Tool mode: core | standard | full ─────────────────────────────────
+# Set MEMTOMEM_TOOL_MODE env var to control which tools are exposed.
+#   core     → these tools. Default. mem_do routes to all others.
+#   standard → core + frequently used packs as individual tools + mem_do
+#   full     → all tools registered individually (no mem_do needed)
+#
+# Defined above the FastMCP construction below because the instructions
+# text renders this set's size; the count in the prose can then never
+# drift from the set that is actually exposed.
+_CORE_TOOLS = {
+    "mem_search",
+    "mem_add",
+    "mem_index",
+    "mem_recall",
+    "mem_status",
+    "mem_stats",
+    "mem_list",
+    "mem_read",
+    "mem_do",
+}
+
 # ── mcp instance — must be created before tool-module imports ──────────
 # ``instructions=`` is auto-injected into every MCP client's session as
 # the ``initialize`` response's ``instructions`` field — the only
 # documentation surface most LLMs see before picking a tool. Source of
 # truth lives in ``memtomem/server/instructions.py``; pinned by
 # ``tests/test_server_instructions.py``.
-mcp = FastMCP("memtomem", instructions=build_instructions(_TOOL_MODE), lifespan=app_lifespan)
+mcp = FastMCP(
+    "memtomem",
+    instructions=build_instructions(_TOOL_MODE, core_count=len(_CORE_TOOLS)),
+    lifespan=app_lifespan,
+)
 
 # Pin ``serverInfo.version`` in the MCP ``initialize`` response to the
 # memtomem package version (#383). ``FastMCP.__init__`` has no ``version``
@@ -173,24 +198,6 @@ from memtomem.server.tools.schedule import (
 )
 from memtomem.server.tools.meta import mem_do
 import memtomem.server.resources  # side-effect import: registers MCP resources
-
-# ── Tool mode: core | standard | full ─────────────────────────────────
-# Set MEMTOMEM_TOOL_MODE env var to control which tools are exposed.
-#   core     → 9 tools (8 core + mem_do). Default. mem_do routes to all others.
-#   standard → core + frequently used packs as individual tools + mem_do
-#   full     → all tools registered individually (no mem_do needed)
-
-_CORE_TOOLS = {
-    "mem_search",
-    "mem_add",
-    "mem_index",
-    "mem_recall",
-    "mem_status",
-    "mem_stats",
-    "mem_list",
-    "mem_read",
-    "mem_do",
-}
 
 # Action categories exposed as individual tools in ``standard`` mode.
 # Module-level so tests (instructions/pruning pins) can derive the

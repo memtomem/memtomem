@@ -341,6 +341,31 @@ async function _ctxPullApply(state) {
   }
 }
 
+// The engine states the condition in surface-neutral wording; this appends the
+// browser's OWN remediation, naming the modal's controls rather than the CLI
+// flags the reason used to spell (#1869). Same code→i18n contract as
+// ``_ctxImportSkipText``: an unmapped ``reason_code`` degrades to the neutral
+// reason alone, never to a flag the user cannot type here.
+//
+// ``gate_blocked`` is deliberately gated on ``force_bypassable``, not on the
+// code: a ``project_shared`` block carries the same ``privacy_blocked`` code but
+// hard-refuses the Force control (ADR-0011 §5), so pointing at it would send the
+// user in a circle.
+function _ctxPullHintText(data) {
+  const code = data && data.reason_code;
+  if (!code) return '';
+  if (code === 'privacy_blocked' && !data.force_bypassable) return '';
+  const key = `settings.ctx.pull_hint_${code}`;
+  const label = t(key);
+  return label === key ? '' : label;
+}
+
+function _ctxPullWithHint(data) {
+  const reason = data.reason || t('toast.request_failed');
+  const hint = _ctxPullHintText(data);
+  return hint ? `${reason} ${hint}` : reason;
+}
+
 // Route the apply outcome. applied → success toast + close + refresh. Anything
 // else — an error envelope (503/409/500/400) or a result-coded refusal — surfaces
 // the (server-sanitized) reason as a toast and RE-PREVIEWS: an apply-time refusal
@@ -378,7 +403,7 @@ function _ctxHandlePullResult(state, res) {
     return;
   }
   const message = res.ok
-    ? ((res.data || {}).reason || t('toast.request_failed'))
+    ? _ctxPullWithHint(res.data || {})
     : _ctxPullErr(res.data && res.data.detail);
   // Toast (not the in-modal warning) so the message survives the re-preview's
   // repaint, which clears the warning line.

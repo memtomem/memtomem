@@ -1061,7 +1061,7 @@ def _backup_fanout_target(target: Path) -> Path | None:
     every single-level ``<root>/*/SKILL.md`` discovery (ours and the
     runtimes') stays blind to it. Internal-pattern names
     (``.old-…-<pid>-<hex>.tmp``) are off the table — the sync-time
-    reaper (``skills._reap_stale_internal_dirs``) deletes those.
+    reaper (``skills._recover_and_reap_internal_dirs``) deletes those.
 
     Backups are never auto-deleted by memtomem; the warning at the call
     site and the CLI/MCP move summary name them for manual review.

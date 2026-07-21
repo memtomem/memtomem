@@ -404,10 +404,10 @@ class TestExtractAgentsToCanonical:
             (d / "helper.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
         result = extract_agents_to_canonical(tmp_path)
         assert len(result.imported) == 1
-        # Gemini copy was skipped because Claude already imported it.
+        # Gemini copy was skipped because Claude already pulled it.
         assert len(result.skipped) == 1
         assert result.skipped[0][0] == "helper"
-        assert "already imported" in result.skipped[0][1]
+        assert "already pulled" in result.skipped[0][1]
         assert result.source_runtimes == {"helper": "claude"}
         assert result.runtime_candidates == {"helper": ["claude", "gemini"]}
 

@@ -229,6 +229,31 @@ def test_skills_store_present_is_overwrite_unsupported(home: Path, proj: Path) -
     out = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
     assert isinstance(out, PullApplyResult)
     assert out.status == "skills_overwrite_unsupported"
+
+
+def test_skills_overwrite_still_refused_after_tree_storage_landed(home: Path, proj: Path) -> None:
+    """PR-G3 ships the tree-snapshot WRITER but wires no caller — PR-G4's
+    history-preserving transaction is the only thing that will ever call it.
+
+    Pinned so "the storage layer exists" can never be mistaken for "skills
+    overwrite works": the engine must keep refusing, and it must do so WITHOUT
+    having created a version store as a side effect.
+    """
+    from memtomem.context import versioning
+
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
+    d = _store_skill_dir(proj, "s")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(_skill_body("s", "old store"), encoding="utf-8")
+
+    # The writer is importable and functional…
+    assert callable(versioning.create_tree_version)
+    # …and the Pull path still refuses, leaving no version store behind.
+    out = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(out, PullApplyResult)
+    assert out.status == "skills_overwrite_unsupported"
+    assert not (d / "versions").exists()
+    assert not (d / "versions.json").exists()
     # Store intact.
     assert "old store" in _store_skill_text(proj, "s")
 
@@ -417,6 +442,50 @@ def test_write_failed_on_promote_error_no_staging_leak(
     if parent.exists():
         leftovers = list(parent.glob(".staging-*")) + list(parent.glob(".old-*"))
         assert leftovers == []
+
+
+def test_post_promote_reap_failure_still_applies_and_records(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GC failure after the install must not be reported as a failed write.
+
+    The promote's post-commit reap runs inside ``_commit_skills``'s ``try``, so
+    an ``OSError`` escaping it would return ``write_failed`` for a skill that IS
+    installed and skip ``_record_gate_success`` — the privacy counter silently
+    losing a write that happened. ``skills`` pins the swallow at the unit; this
+    pins the surface the split-brain would actually appear on (code review).
+
+    ``fired`` is what keeps the pin honest. Both outcome assertions hold
+    vacuously if the collector never runs, so dropping ``reap_move_aside=True``
+    from the call below — the regression this test exists for — would leave it
+    green (verified by mutation, code review).
+    """
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "v")})
+    records: list[str] = []
+    monkeypatch.setattr(privacy, "record", lambda outcome, tool: records.append(outcome))
+
+    orig_scan = skills._iter_own_internal_dirs
+    fired: list[Path] = []
+
+    def scan(dst: Path, **kwargs: object):  # type: ignore[no-untyped-def]
+        # Only the post-promote collector asks for ("old",); the pre-write
+        # prelude takes the default and must keep working, or this would pin a
+        # failure before the commit rather than after it.
+        if kwargs.get("kinds") == ("old",):
+            fired.append(dst)
+            raise OSError(errno.EIO, "Input/output error", str(dst))
+        return orig_scan(dst, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(skills, "_iter_own_internal_dirs", scan)
+
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+
+    assert fired, "the post-promote collector never ran — the assertions below are vacuous"
+    assert res.status == "applied"
+    assert "v" in _store_skill_text(proj, "s")
+    assert records == ["pass"], "the gate success went unrecorded for a write that happened"
 
 
 def test_skills_new_pull_writes_tree_no_leftovers(home: Path, proj: Path) -> None:

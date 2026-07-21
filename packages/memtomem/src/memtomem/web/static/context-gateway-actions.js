@@ -312,7 +312,7 @@ async function _ctxRunImport(type, { btn, onComplete }) {
       let r = await importOnce({});
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(_ctxImportErrToast(r.status, err.detail), 'error');
+        showToast(_ctxImportErrToast(r.status, err.detail, type), 'error');
         return;
       }
       let data = await r.json();
@@ -325,7 +325,7 @@ async function _ctxRunImport(type, { btn, onComplete }) {
         if (!r) return;
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(_ctxImportErrToast(r.status, err.detail), 'error');
+          showToast(_ctxImportErrToast(r.status, err.detail, type), 'error');
           return;
         }
         data = await r.json();

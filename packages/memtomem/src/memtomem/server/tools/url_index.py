@@ -32,6 +32,12 @@ async def mem_fetch(
         url: The URL to fetch and index
         tags: Optional tags to apply to indexed chunks
         namespace: Namespace for indexed chunks (default: config default)
+        force_unsafe: Bypass the redaction guard when the fetched page matches a
+            secret pattern. The bypass is recorded with a ``bypassed``
+            outcome and an audit line (see ``mem_add_redaction_stats``).
+            It never applies to a ``project_shared`` destination — that
+            combination is hard-refused, because git history cannot be
+            retracted from clones.
     """
     from memtomem.indexing.url_fetcher import fetch_url
 

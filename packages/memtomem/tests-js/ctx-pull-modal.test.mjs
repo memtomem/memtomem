@@ -291,8 +291,45 @@ describe('Pull picker — apply-time refusal', () => {
     ctx.window.document.getElementById('ctx-pull-apply-btn').click();
     await flush(ctx.window);
     expect(ctx.toasts.length).toBe(1); // the refusal reason is surfaced
+    // ...followed by the BROWSER's remediation, naming this modal's control
+    // rather than the CLI's --overwrite flag (#1869).
+    expect(ctx.toasts[0].msg).toContain('the Store already has it');
+    expect(ctx.toasts[0].msg).toContain(ctx.window.t('settings.ctx.pull_hint_canonical_exists'));
+    expect(ctx.toasts[0].msg).not.toContain('--overwrite');
     expect(ctx.previewCalls.length).toBe(2); // controls re-computed against reality
     expect(modalOf(ctx.window).hidden).toBe(false); // picker stays open to adjust
+  });
+
+  it('localizes the remediation hint (ko)', async () => {
+    const ctx = await bootModal({
+      applyResponses: [{ ok: true, body: { status: 'source_conflict', reason: 'multiple distinct contents', reason_code: 'source_conflict', kind: 'skills', name: NAME, target_scope: 'project_shared', selected_runtime: null, write_outcome: null, duplicate_runtimes: [], canonical_path: null, candidates: [], distinct_landing_count: 2, gate_status: null, gate_hits: null, force_bypassable: false } }],
+    });
+    await ctx.window.I18N.setLang('ko');
+    await openModal(ctx);
+    ctx.window.document.getElementById('ctx-pull-apply-btn').click();
+    await flush(ctx.window);
+    expect(ctx.toasts[0].msg).toContain('\uc704 \ubaa9\ub85d\uc5d0\uc11c'); // "위 목록에서" — the ko hint
+    await ctx.window.I18N.setLang('en');
+  });
+
+  it('offers no force control for a hard project_shared block, and degrades to the bare reason for an unknown code', async () => {
+    // ``privacy_blocked`` arrives on BOTH tiers; only ``force_bypassable``
+    // distinguishes the one where the Force checkbox can actually help.
+    const hard = await bootModal({
+      applyResponses: [{ ok: true, body: { status: 'gate_blocked', reason: 'Gate A blocked the pull', reason_code: 'privacy_blocked', kind: 'skills', name: NAME, target_scope: 'project_shared', selected_runtime: 'claude', write_outcome: null, duplicate_runtimes: [], canonical_path: null, candidates: [], distinct_landing_count: 0, gate_status: 'blocked', gate_hits: 1, force_bypassable: false } }],
+    });
+    await openModal(hard);
+    hard.window.document.getElementById('ctx-pull-apply-btn').click();
+    await flush(hard.window);
+    expect(hard.toasts[0].msg).toBe('Gate A blocked the pull');
+
+    const future = await bootModal({
+      applyResponses: [{ ok: true, body: { status: 'write_failed', reason: 'some future condition', reason_code: 'future_code', kind: 'skills', name: NAME, target_scope: 'project_shared', selected_runtime: 'claude', write_outcome: null, duplicate_runtimes: [], canonical_path: null, candidates: [], distinct_landing_count: 0, gate_status: null, gate_hits: null, force_bypassable: false } }],
+    });
+    await openModal(future);
+    future.window.document.getElementById('ctx-pull-apply-btn').click();
+    await flush(future.window);
+    expect(future.toasts[0].msg).toBe('some future condition');
   });
 
   it('keeps Apply disabled while the post-refusal re-preview is still pending', async () => {
