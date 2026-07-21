@@ -31,6 +31,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tree rather than from a hand-written list, because the list is exactly what
   missed them.
 
+- **Sessions record what they wrote** (#1876, PR-A3 of 4) — the seven
+  chunk-creating MCP write tools (`mem_add`, `mem_batch_add`, `mem_index`,
+  `mem_fetch`, `mem_agent_share`, `mem_candidate_review`,
+  `mem_consolidate_apply`) now append one session event naming the chunk ids
+  they created, and `mem_session_start` marks its session as
+  provenance-recording. `- Events: N (add:M, index:K)` in the
+  `mem_session_end` response therefore reflects real writes for the first
+  time. The auto-summary still picks its inputs by namespace — **PR-B**
+  switches it over to this record and closes #1876, at which point a session
+  whose writes were routed elsewhere by a namespace rule stops silently
+  producing no summary.
+
+  Attribution is fixed alongside: a write's session id and its namespace are
+  now read in a single lock acquisition, after the file-lock wait, so a
+  session transition landing mid-write can no longer file the chunks under
+  one session and the record under another.
+
+  The marker says a session *records* provenance, not that the record is
+  complete. `provenance_incomplete` is set separately — on truncation past
+  the per-event id cap, on a failed event write, when a write outran session
+  teardown or the teardown drain timed out, and when `mem_edit`/`mem_delete`
+  ran inside the session (they re-chunk rather than add, so recording their
+  ids would describe a rewrite as new material). Sessions created by the CLI
+  or the LangGraph adapter carry no marker and are unaffected.
+
+  One visible change today: indexing a large tree inside a session can
+  outlast the 2-second teardown drain, so `mem_session_end` reports
+  `- Warning: writes still in flight — event counts may be short` instead of
+  presenting a short count as complete.
+
+### Fixed
+
+- `add_session_event` was the only write in the session storage mixin that
+  committed unconditionally and had no rollback arm, so a caller's enclosing
+  transaction was flushed early — beyond the reach of its own later rollback
+  — and a failing insert left the transaction open on the shared writer
+  connection for the next statement to hit "database is locked". It now
+  matches `create_session` and `end_session`.
+
 - **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
   primitive that replaces a whole artifact tree and can recover from an
   interruption. A non-empty directory cannot be replaced atomically on POSIX,

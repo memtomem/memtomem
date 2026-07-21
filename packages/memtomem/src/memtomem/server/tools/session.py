@@ -299,6 +299,22 @@ async def mem_session_end(
     handle live is meant to avoid. A wait that times out is reported in
     the return string rather than presented as a complete count.
 
+    Both of those gaps are additionally recorded as
+    ``provenance_incomplete`` on the session row. The response string is
+    for the caller; a consumer reading the stored session — the
+    auto-summary, ``mm session show`` — never sees it, and a session that
+    advertises provenance must not present a short input set as the whole
+    story. The straggler write marks the row itself when it lands.
+
+    ``- Events: N (add:M, index:K)`` counts the provenance events the
+    seven chunk-creating write tools record, so it reflects what the
+    session actually wrote. ``mem_index`` over a large tree can outlast
+    the drain budget; the resulting "writes still in flight" line is
+    expected rather than a fault. ``mem_edit`` and ``mem_delete`` appear
+    in no count — they re-chunk rather than add — but do mark the session
+    incomplete, since their effect on the input set is real and
+    undescribed.
+
     When ``summary`` is provided, the text is also promoted to a
     first-class chunk under ``archive:session:<session_id>`` (Phase A
     of the episodic-session-summary RFC). The chunk is hidden from
