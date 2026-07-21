@@ -57,19 +57,34 @@ def _mapping_key(node: ast.AST) -> tuple[str, str] | None:
     return None
 
 
-def _assignments(body: list[ast.stmt]) -> list[tuple[str, str, int]]:
-    """``(mapping, key, lineno)`` for every subscript assignment directly in ``body``.
+def _same_value(home_value: ast.expr, other: ast.expr, mapping: str) -> bool:
+    """True if ``other`` assigns the *same* home to ``USERPROFILE``.
+
+    Presence alone is not a pairing: ``env["USERPROFILE"] = str(other_dir)``
+    sandboxes the child somewhere the test is not asserting about, which is a
+    subtler version of not sandboxing it at all. Accepts the idiomatic
+    ``env["USERPROFILE"] = env["HOME"]`` alias as well as a literal repeat of the
+    same expression.
+    """
+    if ast.dump(home_value) == ast.dump(other):
+        return True
+    key = _mapping_key(other)
+    return key == (mapping, "HOME")
+
+
+def _assignments(body: list[ast.stmt]) -> list[tuple[str, str, int, ast.expr]]:
+    """``(mapping, key, lineno, value)`` for subscript assignments directly in ``body``.
 
     Deliberately does NOT recurse: a sibling assignment must live at the same
     statement-list depth to count as an unconditional pairing.
     """
-    found: list[tuple[str, str, int]] = []
+    found: list[tuple[str, str, int, ast.expr]] = []
     for stmt in body:
         if isinstance(stmt, ast.Assign):
             for target in stmt.targets:
                 key = _mapping_key(target)
                 if key is not None:
-                    found.append((key[0], key[1], stmt.lineno))
+                    found.append((key[0], key[1], stmt.lineno, stmt.value))
     return found
 
 
@@ -82,27 +97,72 @@ def _iter_statement_lists(node: ast.AST):
                 yield block
 
 
+def _dict_entries(node: ast.Dict) -> dict[str, ast.expr]:
+    entries: dict[str, ast.expr] = {}
+    for key, value in zip(node.keys, node.values):
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            entries[key.value] = value
+    return entries
+
+
 def _enclosing_function(tree: ast.AST, lineno: int) -> str:
+    """Innermost function whose line *range* contains ``lineno``.
+
+    Containment, not "latest ``def`` that starts before this line": with the
+    latter, an outer-function statement that follows a nested ``def`` is
+    attributed to the nested one, which would make an allowlist entry or a
+    stale-entry check point at the wrong name. Same logic as
+    ``test_context_atomic_write_guard.py``.
+    """
     best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.lineno <= lineno:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = getattr(node, "end_lineno", None) or node.lineno
+        if node.lineno <= lineno <= end:
             if best is None or node.lineno > best.lineno:
                 best = node
     return best.name if best is not None else "<module>"
 
 
 def unpaired_home_overrides(tree: ast.AST) -> list[tuple[str, int, str]]:
-    """``(mapping, lineno, function)`` for each unpaired ``env["HOME"]`` assignment."""
+    """``(mapping, lineno, function)`` for each unpaired ``HOME`` override.
+
+    Covers both ways a subprocess environment is built in this suite:
+
+    * ``env["HOME"] = …`` — an unconditional sibling assignment on the same
+      mapping, at the same statement-list depth, carrying the same value.
+    * ``env.update({"HOME": …})`` / ``env = {"HOME": …}`` / ``run(env={...})``
+      — a ``USERPROFILE`` entry in the *same dict literal*. Scanning dict
+      literals wherever they appear covers ``update()``, direct construction and
+      an inline ``env=`` argument without having to special-case each call shape.
+    """
     offenders: list[tuple[str, int, str]] = []
+
     for block in _iter_statement_lists(tree):
         assignments = _assignments(block)
-        for mapping, key, lineno in assignments:
+        for mapping, key, lineno, value in assignments:
             if key != "HOME":
                 continue
-            paired = any(m == mapping and k == "USERPROFILE" for m, k, _ in assignments)
+            paired = any(
+                m == mapping and k == "USERPROFILE" and _same_value(value, v, mapping)
+                for m, k, _, v in assignments
+            )
             if not paired:
                 offenders.append((mapping, lineno, _enclosing_function(tree, lineno)))
-    return offenders
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        entries = _dict_entries(node)
+        if "HOME" not in entries:
+            continue
+        other = entries.get("USERPROFILE")
+        if other is not None and _same_value(entries["HOME"], other, ""):
+            continue
+        offenders.append(("<dict>", node.lineno, _enclosing_function(tree, node.lineno)))
+
+    return sorted(offenders, key=lambda o: (o[1], o[0]))
 
 
 def _test_files() -> list[Path]:
@@ -187,8 +247,52 @@ def test_stale_allowlist_entries_fail() -> None:
             0,
             id="paired-is-clean",
         ),
+        pytest.param(
+            'def f():\n    env["HOME"] = str(home)\n    env["USERPROFILE"] = env["HOME"]\n',
+            0,
+            id="alias-form-is-a-pairing",
+        ),
+        pytest.param(
+            'def f():\n    env["HOME"] = str(home)\n    env["USERPROFILE"] = str(other)\n',
+            1,
+            id="different-value-is-not-a-pairing",
+        ),
         pytest.param('def f():\n    env["XDG_RUNTIME_DIR"] = x\n', 0, id="unrelated-key-is-clean"),
+        # The dict-literal form. A subscript-only matcher missed a real site
+        # (web/test_actual_lifespan_golden.py builds its env via env.update).
+        pytest.param(
+            'def f():\n    env.update({"HOME": str(home), "TMPDIR": t})\n',
+            1,
+            id="update-dict-without-userprofile",
+        ),
+        pytest.param(
+            'def f():\n    env.update({"HOME": str(home), "USERPROFILE": str(home)})\n',
+            0,
+            id="update-dict-paired",
+        ),
+        pytest.param(
+            'def f():\n    env = {"HOME": str(home)}\n',
+            1,
+            id="dict-construction-without-userprofile",
+        ),
+        pytest.param(
+            'def f():\n    run(cmd, env={"HOME": h, "USERPROFILE": h})\n',
+            0,
+            id="inline-env-argument-paired",
+        ),
     ],
 )
 def test_scanner_discriminates(source: str, expected: int) -> None:
     assert len(unpaired_home_overrides(ast.parse(source))) == expected
+
+
+def test_attribution_uses_containment_not_latest_def() -> None:
+    """An outer-function statement after a nested ``def`` belongs to the outer one.
+
+    "Latest ``def`` starting before this line" would name ``inner`` here, which
+    would make an allowlist entry — or the stale-entry check — point at a
+    function that does not contain the offending line.
+    """
+    source = "def outer():\n    def inner():\n        pass\n\n    env['HOME'] = h\n"
+    offenders = unpaired_home_overrides(ast.parse(source))
+    assert [o[2] for o in offenders] == ["outer"]
