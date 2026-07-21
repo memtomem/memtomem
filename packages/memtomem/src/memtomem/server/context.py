@@ -70,19 +70,6 @@ def _require_initialized(components: Components | None, attr: str) -> Components
     return components
 
 
-def _make_set_event() -> asyncio.Event:
-    """An ``asyncio.Event`` that starts **set**.
-
-    ``asyncio.Event()`` starts cleared, which is the wrong default for a
-    "nothing in flight" signal: with zero writes ever recorded, a waiter
-    would block until its timeout and then report a drain failure that
-    never happened.
-    """
-    event = asyncio.Event()
-    event.set()
-    return event
-
-
 @dataclass
 class AppContext:
     """Dependency container for MCP request handlers.
@@ -208,16 +195,32 @@ class AppContext:
     )
     # In-flight session-bound writes. A session teardown reads the session's
     # events to build its summary and counts; a write admitted before the
-    # teardown but still persisting would be missed by that read. The gauge
-    # lets teardown wait for those writes to land.
+    # teardown but still persisting would be missed by that read. The ledger
+    # below lets teardown wait for exactly those writes to land.
     #
-    # Counter and event are mutated together under ``_session_lock`` — a bare
-    # counter with a separately-set event drifts under concurrency. The event
-    # starts **set**: idle is the initial state, and an unset event would make
-    # the common zero-write teardown block for the full drain timeout and then
-    # report a spurious partial drain.
-    _active_writes: int = field(default=0, init=False, repr=False)
-    _writes_idle: asyncio.Event = field(default_factory=_make_set_event, init=False, repr=False)
+    # Each admission takes a monotonically increasing ticket. A drain records
+    # the highest ticket issued so far as its boundary and waits only for
+    # still-open tickets at or below it — writes admitted *after* the drain
+    # started are none of its business, and waiting for them could stall
+    # teardown indefinitely under a steady write stream.
+    #
+    # The tickets exist because a bare "is anything in flight" flag cannot be
+    # waited on safely. ``asyncio.Event.wait()`` returns as soon as it is
+    # woken and never re-checks: writer A can set the event, and writer B can
+    # clear it again before the waiter is scheduled, leaving the waiter to
+    # report a successful drain while B is still running. A ``Condition``
+    # re-tests its predicate on every wakeup, which closes that hole.
+    #
+    # The condition shares ``_session_lock``, so admission and completion are
+    # already serialized against the handle mutations next to them.
+    _write_ticket_seq: int = field(default=0, init=False, repr=False)
+    _open_write_tickets: set[int] = field(default_factory=set, init=False, repr=False)
+    # Built in __post_init__ rather than a default_factory: it has to wrap
+    # ``_session_lock``, and a factory cannot see sibling fields.
+    _writes_done: asyncio.Condition = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._writes_done = asyncio.Condition(self._session_lock)
 
     # ── current_namespace (validated) ─────────────────────────────────────
     # Property + setter pair so every write — whether via ``mem_ns_set``,
@@ -296,36 +299,48 @@ class AppContext:
         teardown could observe idle, snapshot the session's events, and
         miss a row written a moment later.
 
-        ``_session_lock`` is held only to mutate the gauge, never across
-        the wrapped body — a writer that held it would deadlock against
-        the very teardown waiting for that writer to finish.
+        ``_session_lock`` is held only to take and release the ticket,
+        never across the wrapped body — a writer that held it would
+        deadlock against the very teardown waiting for that writer.
         """
-        async with self._session_lock:
-            self._active_writes += 1
-            self._writes_idle.clear()
+        async with self._writes_done:  # acquires _session_lock
+            self._write_ticket_seq += 1
+            ticket = self._write_ticket_seq
+            self._open_write_tickets.add(ticket)
         try:
             yield
         finally:
-            async with self._session_lock:
-                self._active_writes -= 1
-                if self._active_writes <= 0:
-                    self._active_writes = 0
-                    self._writes_idle.set()
+            async with self._writes_done:
+                self._open_write_tickets.discard(ticket)
+                self._writes_done.notify_all()
 
     async def wait_writes_drained(self, timeout: float) -> bool:
-        """Wait until no session-bound write is in flight.
+        """Wait for the session-bound writes already in flight to land.
+
+        Only writes admitted *before* this call are waited on. A write
+        that starts afterwards is none of this drain's business — waiting
+        for those too would let a steady write stream stall a teardown
+        forever.
 
         Returns whether the wait succeeded; a timeout is reported, never
         raised, so a slow or stuck write degrades a teardown's inputs
         instead of failing the teardown itself. Must be awaited *outside*
-        ``_session_lock`` — writers need that lock to leave the gauge.
+        ``_session_lock`` — writers need that lock to release their
+        ticket.
         """
+
+        async def _drain() -> None:
+            async with self._writes_done:
+                boundary = self._write_ticket_seq
+                while any(t <= boundary for t in self._open_write_tickets):
+                    await self._writes_done.wait()
+
         try:
-            await asyncio.wait_for(self._writes_idle.wait(), timeout=timeout)
+            await asyncio.wait_for(_drain(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
-                "session_write_drain_timeout active_writes=%d timeout=%.1fs",
-                self._active_writes,
+                "session_write_drain_timeout open_writes=%d timeout=%.1fs",
+                len(self._open_write_tickets),
                 timeout,
             )
             return False
