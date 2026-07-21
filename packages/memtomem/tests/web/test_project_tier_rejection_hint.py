@@ -252,7 +252,7 @@ def test_tier_badge_html_helper_renders_project_tier_tokens_verbatim(page, mm_we
     is suppressed (returns empty string) so the common case stays
     visually quiet; ``project_shared`` and ``project_local`` get their
     own tier classes; ``project_local`` rows on context surfaces carry
-    the inline ``(not synced to runtimes)`` annotation per ADR-0011 §3.
+    the inline ``(not pushed to runtimes)`` annotation per ADR-0011 §3.
     """
     _install_default_stubs(page)
     page.goto(mm_web_url)
