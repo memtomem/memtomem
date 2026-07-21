@@ -1305,6 +1305,7 @@ class SqliteBackend(
         threads in :attr:`_has_vec_table` so the helper need not poke at
         the backend's invariants. See ADR-0011 follow-up #884.
         """
+        self._require_transaction_idle("sweep_orphan_project_root")
         return sweep_orphan_project_root(
             self._get_db(),
             project_root,

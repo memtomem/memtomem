@@ -224,6 +224,7 @@ class FormationMixin:
         A concurrent finalize and this recovery update serialize in SQLite;
         only the operation that first matches ``status='writing'`` succeeds.
         """
+        self._require_transaction_idle("recover_stale_memory_candidates")
         if limit < 1 or limit > 1000:
             raise ValueError("recovery limit must be between 1 and 1000")
         if not actor.strip():

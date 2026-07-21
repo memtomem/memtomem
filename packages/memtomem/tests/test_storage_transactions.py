@@ -168,6 +168,27 @@ async def test_writer_connection_bypasses_refuse_active_transaction(storage):
     assert storage._get_db().in_transaction is False
 
 
+async def test_self_managed_operations_reject_without_rolling_back_owner(storage):
+    async with storage.transaction():
+        await storage.create_session("owner-row", "owner", "default")
+
+        with pytest.raises(
+            StorageError,
+            match="recover_stale_memory_candidates.*transaction is active",
+        ):
+            await storage.recover_stale_memory_candidates(stale_before="2026-01-01T00:00:00+00:00")
+        assert storage._get_db().in_transaction is True
+
+        with pytest.raises(
+            StorageError,
+            match="sweep_orphan_project_root.*transaction is active",
+        ):
+            await storage.sweep_orphan_project_root("/missing/project")
+        assert storage._get_db().in_transaction is True
+
+    assert await storage.get_session("owner-row") is not None
+
+
 async def test_cancellation_rolls_back_and_releases_owner(storage):
     owner_ready = asyncio.Event()
     wait_forever = asyncio.Event()
