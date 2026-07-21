@@ -527,12 +527,11 @@ class ContextPullApplyResponse(BaseModel):
     The engine is result-coded *on purpose* ("so the Web/MCP surfaces get a
     stable ``reason_code`` and the ``source_conflict`` payload travels with
     it"), so every prepare/commit *domain decision* — the ``applied`` write and
-    every actionable refusal alike — returns HTTP 200 with this body (the four
+    every actionable refusal alike — returns HTTP 200 with this body (the five
     statuses with genuine HTTP meaning are mapped to error codes instead: see
-    ``status`` below); the client picker branches
-    on ``status``. Only the infrastructural ``lock_timeout`` escapes as a 503
-    ``_error`` envelope (the one status the engine docstring maps to HTTP), so
-    it is absent from ``status`` here.
+    ``status`` below); the client picker branches on ``status``. Those five
+    escape as ``_error`` envelopes and are therefore absent from ``status``
+    here.
 
     ``status`` is a CLOSED ``Literal`` — the *domain-decision* subset of the
     engine's ``PullApplyStatus`` the route returns on a 200. The five statuses

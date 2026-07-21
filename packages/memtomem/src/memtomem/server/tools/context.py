@@ -2795,12 +2795,17 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     prefix-coded MCP line (``error:`` / ``refused:`` / ``privacy block:`` /
     success), mirroring the web ``_finalize_pull`` status routing.
 
-    The four HTTP-semantic statuses the web route maps to non-200
-    (``lock_timeout`` 503, ``plan_stale`` 409, ``snapshot_failed`` /
-    ``write_failed`` 500) have no status channel over MCP, so they surface as
-    ``error:`` text; ``gate_blocked`` is ``privacy block:``; the actionable
-    domain refusals are ``refused:``; ``applied`` (incl. the byte-identical
-    no-op) is a success line.
+    The five HTTP-semantic statuses the web route maps to non-200
+    (``lock_timeout`` 503, ``plan_stale`` / ``swap_recovery_pending`` 409,
+    ``snapshot_failed`` / ``write_failed`` 500) have no status channel over
+    MCP, so they surface as ``error:`` text; ``gate_blocked`` is
+    ``privacy block:``; the actionable domain refusals are ``refused:``;
+    ``applied`` (incl. the byte-identical no-op) is a success line.
+
+    ``swap_recovery_pending`` sits with the errors rather than the refusals on
+    purpose: ``refused:`` reads as "your request was declined, adjust and
+    retry", and there is no parameter to adjust — an interrupted directory swap
+    needs an operator to inspect the two paths the reason names.
 
     EVERY ``reason`` is redacted, ``gate_blocked`` included. Pull's
     ``gate_blocked`` reason is built from runtime + scope only
