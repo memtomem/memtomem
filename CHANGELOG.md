@@ -122,7 +122,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   carrying its candidate rows, `gate_blocked` carrying `force_bypassable`,
   `canonical_exists` → overwrite, …) return HTTP 200; only the five statuses
   with genuine HTTP meaning become error codes (lock-timeout → 503, stale plan
-  → 409, pending swap recovery → 409, write failure → 500). Destination consent mirrors the CLI and the
+  → 409, pending swap recovery → 409, write failure → 500). Destination consent
+  mirrors the CLI and the
   dashboard's existing host-write gate: a `project_shared` landing (git-tracked)
   requires `confirm_project_shared`, a `user` landing requires `allow_host_writes`
   (disclosing the host paths), and `target_scope` is explicit (no silent

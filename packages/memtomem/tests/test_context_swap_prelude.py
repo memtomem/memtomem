@@ -241,6 +241,17 @@ class TestPreludeNameContract:
         with pytest.raises(InvalidNameError):
             _recover_and_reap_internal_dirs(store / "foo*")
 
+    def test_the_name_contract_does_not_depend_on_the_parent_existing(self, tmp_path: Path) -> None:
+        """``:raises InvalidNameError:`` has to mean it unconditionally.
+
+        The parent-exists early return used to sit ABOVE validation, so the
+        same bad name raised or returned cleanly depending on whether the
+        directory happened to be there — a contract that holds only sometimes
+        is the kind a caller builds on and then gets surprised by.
+        """
+        with pytest.raises(InvalidNameError):
+            _recover_and_reap_internal_dirs(tmp_path / "no-such-root" / "foo*")
+
     def test_a_clean_destination_is_a_no_op(self, store: Path) -> None:
         """No marker, no transients: the prelude neither raises nor writes."""
         dst = _tree(store / "skill", "canonical")

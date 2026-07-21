@@ -41,6 +41,7 @@ result-coded contract.
 from __future__ import annotations
 
 import hashlib
+import errno
 import logging
 import os
 import secrets
@@ -768,6 +769,23 @@ def _stage_captured_tree(
     suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
     staging = dst.parent / f".staging-{dst.name}-{suffix}.tmp"
     if staging.exists():
+        # ADR-0030 §4.1, same guard as ``skills._stage_skill``: a collision
+        # needs pid reuse AND a 3-byte hex collision, but "the leftover tree is
+        # from us" is the inference the marker retires — the directory swap
+        # shares this basename grammar, so a claimed transient could be sitting
+        # here, and deleting one collapses a recoverable state into one whose
+        # next recovery removes the only copy. This function sits BETWEEN the
+        # two sites that already got the guard (``_stage_skill`` and this
+        # caller's own ``finally``) on the Pull commit path — the one path this
+        # PR teaches to recover — so the asymmetry was at the most exposed
+        # site (PR review).
+        if marker_owns_transient(staging):
+            raise SwapRecoveryError(
+                errno.EBUSY,
+                "a pending directory swap already claims this staging path; "
+                "resolve the interrupted swap before staging again",
+                str(staging),
+            )
         shutil.rmtree(staging)
     try:
         staging.mkdir()

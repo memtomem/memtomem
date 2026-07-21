@@ -629,6 +629,13 @@ def _recover_and_reap_internal_dirs(dst: Path) -> None:
         per-item skip. A future caller that iterates raw directory entries has
         to make that choice explicitly instead of inheriting this one.
     """
+    # Validation FIRST, above the parent probe. ``recover_pending_swaps`` also
+    # validates, but reaching it is conditional on the parent existing, which
+    # made the documented contract conditional too: the same bad name raised or
+    # returned cleanly depending on whether the directory happened to be there
+    # (PR review). It is also the ordering the rule itself implies — a name is
+    # rejected before it is joined onto anything, not after a filesystem probe.
+    validate_name(dst.name, kind="artifact name")
     parent = dst.parent
     if not parent.is_dir():
         return
