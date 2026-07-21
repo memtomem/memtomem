@@ -78,6 +78,7 @@ from memtomem.context.migrate import (
     migrate_one,
     migrate_scope,
 )
+from memtomem.context._dir_swap import SwapRecoveryError
 from memtomem.context.transfer import TransferMode, TransferResult, transfer_artifact
 from memtomem.context.mcp_servers import (
     PROJECT_MCP_CONFIG,
@@ -2391,6 +2392,10 @@ def install_cmd(
         InvalidNameError,
         LockfileError,
         PrivacyScanError,
+        # ADR-0030 §10: an ``OSError`` subclass, and this list catches no
+        # ``OSError`` — without it an interrupted swap in the Store prints a
+        # traceback instead of the engine's one-line explanation.
+        SwapRecoveryError,
     ):
         if asset_type == "skill":
             result = install_skill(root, name)
@@ -2664,6 +2669,7 @@ def update_cmd(
         InvalidNameError,
         LockfileError,
         PrivacyScanError,
+        SwapRecoveryError,  # see the install translator above
     ):
         if asset_type == "skill":
             result = update_skill(
@@ -3037,6 +3043,16 @@ def _run_update_all(
             # the batch continues — a secret in one project's tree must not
             # block clean siblings.
             click.secho(f"  ✗ {c.project_root}: {exc.message}", fg="red")
+            failures += 1
+        except SwapRecoveryError as exc:
+            # BEFORE the broad ``OSError``: an interrupted swap is not an I/O
+            # failure to retry, it needs an operator, and the generic row below
+            # gives no hint of that. Still a per-row failure — the other
+            # projects in this batch are unaffected.
+            click.secho(
+                f"  ✗ {c.project_root}: interrupted directory swap in the Store — {exc}",
+                fg="red",
+            )
             failures += 1
         except OSError as exc:
             click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
@@ -3543,6 +3559,13 @@ def _run_install_all(
             orphans += 1
         except AssetNotFoundError as exc:
             click.secho(f"  ✗ {c.asset_type}/{c.name}: {exc}", fg="red")
+            failures += 1
+        except SwapRecoveryError as exc:
+            # Before the broad ``OSError`` — see the update-all batch.
+            click.secho(
+                f"  ✗ {c.asset_type}/{c.name}: interrupted directory swap in the Store — {exc}",
+                fg="red",
+            )
             failures += 1
         except OSError as exc:
             click.secho(f"  ✗ {c.asset_type}/{c.name}: {exc}", fg="red")
@@ -4331,6 +4354,10 @@ def _transfer_dispatch(
             name,
             src_root,
             cast("TargetScope | None", from_scope),
+            # Same opt-in as the engine's own probe (ADR-0030 §10): a source
+            # mid-swap must resolve here too, or `--to-project` without `--to`
+            # fails at the CLI default before the engine can recover it.
+            marker_counts_as_presence=True,
         )
         if to_scope == "user" and to_project is not None:
             raise click.UsageError(
@@ -6257,7 +6284,17 @@ def seed_validation_cmd(directory: Path, force: bool, as_json: bool) -> None:
             "overwritten. Pass a fresh/empty directory, or --force to seed in place."
         )
 
-    manifest = seed_adr0026_validation_states(directory)
+    try:
+        manifest = seed_adr0026_validation_states(directory)
+    except SwapRecoveryError as exc:
+        # ADR-0030 §10 at the CLI boundary, not inside the seeder: a library
+        # caller (the harness test) should still see the typed error. A dev tool
+        # stops loudly — seeding into a Store with an interrupted swap would
+        # produce a demo project whose state nobody can trust.
+        raise click.ClickException(
+            f"cannot seed: an interrupted directory swap is pending in the target "
+            f"Store and must be resolved first — {exc}"
+        ) from exc
 
     if as_json:
         click.echo(json.dumps(manifest, indent=2))

@@ -1542,6 +1542,7 @@ async def mem_context_artifact_migrate(
         migrate_scope,
     )
     from memtomem.context.privacy_scan import PrivacyScanError
+    from memtomem.context.transfer import TransferRecoveryError
 
     asset = asset_type or None
     nm = name or None
@@ -1607,6 +1608,12 @@ async def mem_context_artifact_migrate(
             return f"privacy block: {exc.message}"
         except MigratePartialError as exc:
             return f"error: {exc.message}"
+        except TransferRecoveryError as exc:
+            # ``migrate_scope`` is a thin wrapper over the transfer engine, so
+            # this is the shape an interrupted swap arrives in. BEFORE the
+            # generic ``ClickException`` arm (it is a subclass), which would
+            # otherwise flatten it into an unactionable ``error:`` line.
+            return f"refused: swap_recovery_pending: {_redact_reason(exc.message, project_root)}"
         except click.ClickException as exc:
             return f"error: {exc.message}"
 
@@ -1952,7 +1959,11 @@ async def mem_context_artifact_transfer(
         _detect_source_scope,
     )
     from memtomem.context.privacy_scan import PrivacyScanError
-    from memtomem.context.transfer import TransferCollisionError, transfer_artifact
+    from memtomem.context.transfer import (
+        TransferCollisionError,
+        TransferRecoveryError,
+        transfer_artifact,
+    )
 
     asset = asset_type or None
     nm = name or None
@@ -2141,6 +2152,13 @@ async def mem_context_artifact_transfer(
         )
     except ArtifactNotFoundError as exc:
         return f"error: {exc.message}"
+    except TransferRecoveryError as exc:
+        # BEFORE ``TransferCollisionError`` (its base): an interrupted swap is
+        # not a collision, and the web twin gives it its own 409 reason code.
+        # Prefix-coded with the reason so the caller can act on it without
+        # parsing prose; the message embeds canonical paths, so it is redacted
+        # like the FileNotFoundError arm below.
+        return f"refused: swap_recovery_pending: {_redact_reason(exc.message, src_root, dst_root)}"
     except TransferCollisionError as exc:
         return f"refused: {exc.message}"
     except PrivacyScanError as exc:

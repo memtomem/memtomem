@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
+from memtomem.context._dir_swap import SwapRecoveryError
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import SKILL_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError, scan_text_content
@@ -27,6 +28,7 @@ from memtomem.context.skills import (
     extract_skills_to_canonical,
     generate_all_skills,
     list_canonical_skills,
+    run_swap_prelude,
 )
 from memtomem.config import TargetScope
 from memtomem.web.routes._artifact_common import (
@@ -68,6 +70,31 @@ router = APIRouter(tags=["context-skills"])
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _swap_recovery_error(exc: SwapRecoveryError, project_root: Path) -> HTTPException:
+    """409 envelope for an interrupted skills swap (ADR-0030 §10).
+
+    A distinct ``reason_code`` rather than the neighbouring ``already_exists``
+    /``missing``: nothing about this state is a naming conflict or an absence,
+    and the two other codes come with remediations ("pick another name", "create
+    it first") that would send the user in the wrong direction. What this needs
+    is an operator looking at the two paths the engine names.
+
+    The message is raw engine text, so it goes through the same two-stage
+    ``redact_wire_reason`` the Pull surfaces use — root-relative where it can
+    be, scrubbed where it cannot (a Store on another volume).
+
+    Not in ``context.remediation``'s hint table by design (#1870): the fix is
+    identical on every surface, so there is no per-surface vocabulary to add,
+    and ``action_hint`` fails open to "" for exactly this case.
+    """
+    return _error(
+        409,
+        "conflict",
+        redact_wire_reason(str(exc), project_root) or "an interrupted swap is pending",
+        reason_code="swap_recovery_pending",
+    )
 
 
 def _canonical_skill_dir(
@@ -335,6 +362,10 @@ async def create_skill(
         # (blocking flock off the loop); ``_gateway_lock`` (held) serializes
         # in-process callers.
         with canonical_sidecar_lock(skill_dir.parent, body.name, timeout=new_lock_budget()()):
+            # ADR-0030 §10: recovery before the existence re-check — a row that
+            # recovery is about to roll back would otherwise 409 as "already
+            # exists" while its tree is on its way out.
+            run_swap_prelude(skill_dir.parent, body.name, kind="skills")
             if skill_dir.exists():
                 # 409 Conflict, matching create_agent / create_command.
                 raise _error(
@@ -360,6 +391,8 @@ async def create_skill(
                 await asyncio.to_thread(_create_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill create timed out — another sync may be in progress")
+    except SwapRecoveryError as exc:
+        raise _swap_recovery_error(exc, project_root) from exc
     return {"name": body.name, "canonical_path": _safe_rel(skill_dir, project_root)}
 
 
@@ -433,6 +466,10 @@ async def update_skill(
         # check, and a bare ``manifest.stat()`` would then 500. Returns
         # ``(status, mtime_ns)`` with status "gone" / "conflict" / "ok".
         with canonical_sidecar_lock(skill_dir.parent, name, timeout=new_lock_budget()()):
+            # ADR-0030 §10: recovery before the manifest/mtime re-check — a
+            # mid-swap canonical would otherwise report "gone" (404) or a bogus
+            # mtime conflict against bytes that are about to be replaced.
+            run_swap_prelude(skill_dir.parent, name, kind="skills")
             if not manifest.is_file():
                 return "gone", 0
             current_mtime_ns = manifest.stat().st_mtime_ns
@@ -454,6 +491,8 @@ async def update_skill(
                 status, mtime_ns = await asyncio.to_thread(_update_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill update timed out — another sync may be in progress")
+    except SwapRecoveryError as exc:
+        raise _swap_recovery_error(exc, project_root) from exc
     if status == "gone":
         raise _error(404, "missing", f"skill {name!r} not found")
     if status == "conflict":
@@ -526,6 +565,13 @@ async def delete_skill(
         # silently removing an unconfirmed user-tier artifact.
         cascade_targets: list[Path] = []
         with canonical_sidecar_lock(skill_dir.parent, name, timeout=new_lock_budget()()):
+            # ADR-0030 §10: recovery before the locked host-write re-gate, so
+            # the snapshot the user confirms — and the set this deletes — is the
+            # recovered tree, never a half-swapped one. Deliberately OUTSIDE the
+            # ``except OSError`` below: a wedged artifact is a refusal for the
+            # whole delete, not a ``skipped`` row that reads like a permissions
+            # problem.
+            run_swap_prelude(skill_dir.parent, name, kind="skills")
             locked_pending: list[Path] = [skill_dir] if skill_dir.exists() else []
             if cascade:
                 for gen in SKILL_GENERATORS.values():
@@ -570,6 +616,8 @@ async def delete_skill(
                 gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill delete timed out — another sync may be in progress")
+    except SwapRecoveryError as exc:
+        raise _swap_recovery_error(exc, project_root) from exc
 
     if gate_envelope is not None:
         return gate_envelope

@@ -69,6 +69,7 @@ from memtomem.context.projects import ProjectScope, compute_scope_id
 from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.context.transfer import (
     TransferCollisionError,
+    TransferRecoveryError,
     TransferResult,
     transfer_artifact,
 )
@@ -495,6 +496,21 @@ async def transfer_context_artifact(
         raise HTTPException(422, exc.message) from exc
     except ArtifactNotFoundError as exc:
         raise _error(404, "missing", exc.message) from exc
+    except TransferRecoveryError as exc:
+        # BEFORE ``TransferCollisionError`` — it is a subclass, and inheriting
+        # that arm would report an interrupted transaction as
+        # ``destination_exists``. Nothing collided: the remediation is to
+        # inspect the two paths the engine names, not to remove something at the
+        # destination. Engine text, so it is redacted like every other raw
+        # exception on this route.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_kind": "conflict",
+                "reason_code": "swap_recovery_pending",
+                "message": _redact_message(exc.message),
+            },
+        ) from exc
     except TransferCollisionError as exc:
         raise HTTPException(
             status_code=409,

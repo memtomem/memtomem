@@ -658,6 +658,44 @@ def _recover_and_reap_internal_dirs(dst: Path) -> None:
         _remove_internal_artifact(stale)
 
 
+def run_swap_prelude(canonical_root: Path, name: str, *, kind: str) -> None:
+    """Run the ADR-0030 §10 recovery prelude for one canonical artifact.
+
+    The entry point every first-party canonical writer calls as the FIRST
+    statement inside its canonical name lock (C0), before any in-lock re-check
+    and before any write. Recovery has to precede the re-checks, not just the
+    writes: a ``dest.exists()`` / dirty-classify / collision probe that runs
+    ahead of it decides on the pre-recovery tree, and several of those probes
+    ``return`` — so a recoverable transaction would be reported as an absent
+    or conflicting artifact and, worse, written over.
+
+    ``kind`` is the artifact kind the caller is writing (``"skills"``,
+    ``"agents"``, ``"commands"``, ``"mcp_servers"``; the plural install/transfer
+    spelling). **Everything but skills is a no-op**, and the gate is load-bearing
+    rather than an optimization: swap markers exist only under a skills
+    canonical root (only the skills tree swap produces them), and the flat kinds
+    address their canonical as ``<root>/<name>.md``, whose ``Path.name`` would
+    fail :func:`~memtomem.context._names.validate_name` on the dot. Callers that
+    are statically skills-only pass ``kind="skills"`` literally; the
+    kind-polymorphic ones (wiki install/update, transfer) pass their own
+    variable, so a future kind that grows a tree layout only has to be added
+    here.
+
+    Takes ``(canonical_root, name)`` rather than the joined path because that is
+    how every wrapper in :mod:`memtomem.context._canonical_txn` spells the lock
+    this must sit under — the two lines read as one unit, and the
+    C0-acquisition guard checks them as one.
+
+    :raises SwapRecoveryError: recovery could not converge; see
+        :func:`_recover_and_reap_internal_dirs`. Every caller translates it
+        into that surface's typed refusal (ADR-0030 §10 / the G4 design note's
+        boundary table) rather than letting it ride the ``OSError`` funnel.
+    """
+    if kind != "skills":
+        return
+    _recover_and_reap_internal_dirs(canonical_root / name)
+
+
 def _target_conflict(dst: Path) -> OSError | None:
     """Why :func:`_promote_staging` would refuse to replace ``dst``, or ``None``.
 
@@ -871,20 +909,20 @@ def copy_skill(src: Path, dst: Path) -> None:
       failure mode for a public entry point; retry, or wait for the competing
       push or import to finish.
 
-    It can also raise :class:`~memtomem.context._dir_swap.SwapRecoveryError`
-    from :func:`_stage_skill` when a staging-path collision names a transient a
-    live swap marker still claims. Deliberately allowed to propagate rather
-    than converted: this is a single-artifact entry point with no batch to keep
-    going, and the caller needs the distinction — the remediation is the
+    It can also raise :class:`~memtomem.context._dir_swap.SwapRecoveryError`,
+    from :func:`run_swap_prelude` when an interrupted swap for ``dst`` cannot be
+    resolved, or from :func:`_stage_skill` when a staging-path collision names a
+    transient a live swap marker still claims. Deliberately allowed to propagate
+    rather than converted: this is a single-artifact entry point with no batch to
+    keep going, and the caller needs the distinction — the remediation is the
     interrupted transaction, not this copy. It is an ``OSError`` subclass, so a
-    caller funnelling ``OSError`` still degrades safely. **This function does
-    NOT run the recovery prelude** — it is one of the C0 holders PR-G4a-3b
-    wires up; until then a pending swap here is refused, never resolved.
+    caller funnelling ``OSError`` still degrades safely.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
         raise FileNotFoundError(f"source skill missing {SKILL_MANIFEST}: {src}")
     with _file_lock(_lock_path_for(dst), timeout=_SKILLS_LOCK_BUDGET_S):
+        run_swap_prelude(dst.parent, dst.name, kind="skills")
         staging = _stage_skill(src, dst)
         try:
             _promote_staging(staging, dst, reap_move_aside=True)
@@ -1956,4 +1994,5 @@ __all__ = [
     "extract_skills_to_canonical",
     "generate_all_skills",
     "list_canonical_skills",
+    "run_swap_prelude",
 ]
