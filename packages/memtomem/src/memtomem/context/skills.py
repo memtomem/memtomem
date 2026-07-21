@@ -47,6 +47,7 @@ from memtomem.context._dir_swap import (
     SwapRecoveryError,
     marker_owns_transient,
     recover_pending_swaps,
+    swap_failure_text,
 )
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
@@ -658,6 +659,61 @@ def _recover_and_reap_internal_dirs(dst: Path) -> None:
         _remove_internal_artifact(stale)
 
 
+def run_swap_prelude(
+    canonical_root: Path,
+    name: str,
+    *,
+    kind: str,
+    allow_noncanonical_name: bool = False,
+) -> None:
+    """Run the ADR-0030 §10 recovery prelude for one canonical artifact.
+
+    The entry point every first-party canonical writer calls as the FIRST
+    statement inside its canonical name lock (C0), before any in-lock re-check
+    and before any write. Recovery has to precede the re-checks, not just the
+    writes: a ``dest.exists()`` / dirty-classify / collision probe that runs
+    ahead of it decides on the pre-recovery tree, and several of those probes
+    ``return`` — so a recoverable transaction would be reported as an absent
+    or conflicting artifact and, worse, written over.
+
+    ``kind`` is the artifact kind the caller is writing (``"skills"``,
+    ``"agents"``, ``"commands"``, ``"mcp_servers"``; the plural install/transfer
+    spelling). **Everything but skills is a no-op**, and the gate is load-bearing
+    rather than an optimization: swap markers exist only under a skills
+    canonical root (only the skills tree swap produces them), and the flat kinds
+    address their canonical as ``<root>/<name>.md``, whose ``Path.name`` would
+    fail :func:`~memtomem.context._names.validate_name` on the dot. Callers that
+    are statically skills-only pass ``kind="skills"`` literally; the
+    kind-polymorphic ones (wiki install/update, transfer) pass their own
+    variable, so a future kind that grows a tree layout only has to be added
+    here.
+
+    ``allow_noncanonical_name`` exists solely for the legacy public
+    :func:`copy_skill` path contract. That API accepts arbitrary destination
+    basenames which the canonical swap writer rejects, so those names cannot
+    own a valid marker and recovery is a no-op. Every canonical writer keeps
+    the default fail-loud validation contract.
+
+    Takes ``(canonical_root, name)`` rather than the joined path because that is
+    how every wrapper in :mod:`memtomem.context._canonical_txn` spells the lock
+    this must sit under — the two lines read as one unit, and the
+    C0-acquisition guard checks them as one.
+
+    :raises SwapRecoveryError: recovery could not converge; see
+        :func:`_recover_and_reap_internal_dirs`. Every caller translates it
+        into that surface's typed refusal (ADR-0030 §10 / the G4 design note's
+        boundary table) rather than letting it ride the ``OSError`` funnel.
+    """
+    if kind != "skills":
+        return
+    if allow_noncanonical_name:
+        try:
+            validate_name(name, kind="artifact name")
+        except InvalidNameError:
+            return
+    _recover_and_reap_internal_dirs(canonical_root / name)
+
+
 def _target_conflict(dst: Path) -> OSError | None:
     """Why :func:`_promote_staging` would refuse to replace ``dst``, or ``None``.
 
@@ -871,20 +927,33 @@ def copy_skill(src: Path, dst: Path) -> None:
       failure mode for a public entry point; retry, or wait for the competing
       push or import to finish.
 
-    It can also raise :class:`~memtomem.context._dir_swap.SwapRecoveryError`
-    from :func:`_stage_skill` when a staging-path collision names a transient a
-    live swap marker still claims. Deliberately allowed to propagate rather
-    than converted: this is a single-artifact entry point with no batch to keep
-    going, and the caller needs the distinction — the remediation is the
+    For a canonical artifact basename, it can also raise
+    :class:`~memtomem.context._dir_swap.SwapRecoveryError`, from
+    :func:`run_swap_prelude` when an interrupted swap for ``dst`` cannot be
+    resolved, or from :func:`_stage_skill` when a staging-path collision names a
+    transient a live swap marker still claims. Deliberately allowed to propagate
+    rather than converted: this is a single-artifact entry point with no batch to
+    keep going, and the caller needs the distinction — the remediation is the
     interrupted transaction, not this copy. It is an ``OSError`` subclass, so a
-    caller funnelling ``OSError`` still degrades safely. **This function does
-    NOT run the recovery prelude** — it is one of the C0 holders PR-G4a-3b
-    wires up; until then a pending swap here is refused, never resolved.
+    caller funnelling ``OSError`` still degrades safely.
+
+    ``copy_skill`` predates canonical-name validation and remains a general path
+    API: destination basenames with spaces, a leading dash, or more than 64
+    characters are still accepted. Those names cannot be produced by the
+    canonical directory-swap writer, so no valid marker can belong to them and
+    the recovery prelude is skipped while staging/promotion retain their legacy
+    behavior.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
         raise FileNotFoundError(f"source skill missing {SKILL_MANIFEST}: {src}")
     with _file_lock(_lock_path_for(dst), timeout=_SKILLS_LOCK_BUDGET_S):
+        run_swap_prelude(
+            dst.parent,
+            dst.name,
+            kind="skills",
+            allow_noncanonical_name=True,
+        )
         staging = _stage_skill(src, dst)
         try:
             _promote_staging(staging, dst, reap_move_aside=True)
@@ -1039,7 +1108,13 @@ def generate_all_skills(
                         _recover_and_reap_internal_dirs(stale_dst)
                     except SwapRecoveryError as exc:
                         blocked_dsts.add(stale_dst)
-                        skipped.append((stale_dst.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (
+                                stale_dst.name,
+                                swap_failure_text(exc),
+                                skip_codes.SWAP_RECOVERY_PENDING,
+                            )
+                        )
                         logger.warning("skip %s: %s", stale_dst, exc)
                 for target, _gen, skill_dir, dst in work:
                     if dst in blocked_dsts:
@@ -1068,7 +1143,13 @@ def generate_all_skills(
                         # unreadable source. Reporting it as PARSE_ERROR would
                         # point the remediation at the skill file instead of at
                         # the interrupted transaction (PR review).
-                        skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (
+                                skill_dir.name,
+                                swap_failure_text(exc),
+                                skip_codes.SWAP_RECOVERY_PENDING,
+                            )
+                        )
                         continue
                     except OSError as exc:
                         skipped.append(
@@ -1215,7 +1296,9 @@ def generate_all_skills(
                 try:
                     _recover_and_reap_internal_dirs(dst)
                 except SwapRecoveryError as exc:
-                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    skipped.append(
+                        (skill_dir.name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                    )
                     logger.warning("skip %s: %s", skill_dir.name, exc)
                     continue
                 # Preflight the promote refusal predicate (same conversion to
@@ -1233,7 +1316,9 @@ def generate_all_skills(
                     staging = _stage_skill(skill_dir, dst, payload_only=True)
                 except SwapRecoveryError as exc:
                     # Before the broad OSError — see the project_shared batch.
-                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    skipped.append(
+                        (skill_dir.name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                    )
                     continue
                 except OSError as exc:
                     skipped.append((skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
@@ -1664,7 +1749,9 @@ def extract_skills_to_canonical(
                     try:
                         _recover_and_reap_internal_dirs(dst)
                     except SwapRecoveryError as exc:
-                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (skill_name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                        )
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
                         # Marked ``seen`` — the wedge is on the DESTINATION, so
                         # the same name from another runtime would hit the same
@@ -1720,7 +1807,9 @@ def extract_skills_to_canonical(
                         # unlike unreadability this is destination-scoped, so
                         # another runtime's copy would hit the same state —
                         # the same reasoning as the prelude's refusal above.
-                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (skill_name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                        )
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
                         seen[skill_name] = runtime_label
                         continue
@@ -1956,4 +2045,5 @@ __all__ = [
     "extract_skills_to_canonical",
     "generate_all_skills",
     "list_canonical_skills",
+    "run_swap_prelude",
 ]

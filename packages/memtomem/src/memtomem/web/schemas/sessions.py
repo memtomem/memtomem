@@ -19,6 +19,7 @@ class SessionOut(BaseModel):
     ended_at: str | None = None
     summary: str | None = None
     namespace: str
+    metadata: dict = {}
 
 
 class SessionEventOut(BaseModel):
