@@ -1301,8 +1301,27 @@ class TestSkillSkipReasonRedaction:
         assert str(tmp_path) not in r.text
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("leaky", "leaked"),
+        [
+            (
+                "refusing to overwrite non-skill directory: "
+                "/Volumes/Shared/team/.claude/skills/hello",
+                "/Volumes/Shared/team",
+            ),
+            ("refusing to overwrite non-skill directory: /secretmount", "/secretmount"),
+            (
+                r"refusing to overwrite non-skill directory: C:\secretmount",
+                r"C:\secretmount",
+            ),
+        ],
+    )
     async def test_sync_route_scrubs_a_reason_outside_both_roots(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        leaky: str,
+        leaked: str,
     ):
         """The BOUNDARY, not the helper, is what this pins.
 
@@ -1318,9 +1337,6 @@ class TestSkillSkipReasonRedaction:
         from memtomem.context.skills import SkillSyncResult
         from memtomem.web.routes import context_skills as routes
 
-        leaky = (
-            "refusing to overwrite non-skill directory: /Volumes/Shared/team/.claude/skills/hello"
-        )
         monkeypatch.setattr(
             routes,
             "generate_all_skills",
@@ -1333,7 +1349,7 @@ class TestSkillSkipReasonRedaction:
 
         assert r.status_code == 200
         reason = r.json()["skipped"][0]["reason"]
-        assert "/Volumes/Shared/team" not in reason, reason
+        assert leaked not in reason, reason
         assert "<path>" in reason, reason
 
     @pytest.mark.anyio
