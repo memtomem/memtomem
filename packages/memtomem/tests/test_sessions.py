@@ -248,6 +248,45 @@ class TestSessionMetadataDurability:
         assert row["metadata"] == {"event_counts": {"add": 1}}
         assert row["summary"] == "done"
 
+    @pytest.mark.asyncio
+    async def test_unusable_metadata_is_not_echoed_into_logs(self, storage, caplog):
+        """Session metadata is arbitrary caller data and can hold
+        secret-shaped strings, so a decode failure must report the shape
+        of the value, never the value."""
+        await storage.create_session("m6", "agent", "default")
+        db = storage._get_db()
+        db.execute(
+            "UPDATE sessions SET metadata = ? WHERE id = ?",
+            ("{broken sk-live-not-a-real-key-000", "m6"),
+        )
+        db.commit()
+
+        with caplog.at_level("WARNING"):
+            await storage.get_session("m6")
+
+        assert "session_metadata_malformed" in caplog.text
+        assert "sk-live-not-a-real-key-000" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_end_session_inside_a_transaction_defers_its_commit(self, storage):
+        """``end_session`` merges, so it reads before it writes — but it
+        must not commit when a caller owns the transaction.
+
+        Committing there would flush the caller's earlier work early and
+        put it beyond the rollback this failure is supposed to trigger.
+        """
+        await storage.create_session("m7", "agent", "default", metadata={"title": "Sprint"})
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.end_session("m7", "done", {"event_counts": {"add": 1}})
+                raise RuntimeError("caller fails after ending the session")
+
+        row = await storage.get_session("m7")
+        assert row["ended_at"] is None
+        assert row["summary"] is None
+        assert row["metadata"] == {"title": "Sprint"}
+
 
 class TestSessionAgentInheritance:
     """``mem_session_start`` records ``agent_id`` on the AppContext so
