@@ -67,6 +67,11 @@ reports `0 chunks moved` while the metadata row does move — the message says
 which of the two happened. Live sessions follow the rename; share-lineage
 records keep the namespace name they were shared under, as a historical fact.
 
+One rough edge after a merge that dropped duplicates: extracted entities and
+assertions from the dropped copy are kept (they belong to content the surviving
+chunk still holds), so `mem_entity_search` can list the same mention twice and
+entity-type counts read high for those chunks. Re-indexing the file clears it.
+
 ### Bulk assign — `ns_assign`
 
 Move existing chunks to a namespace without re-indexing:
