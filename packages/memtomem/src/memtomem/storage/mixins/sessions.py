@@ -128,6 +128,63 @@ class SessionMixin:
                 db.rollback()
             raise
 
+    async def update_session_metadata(self, session_id: str, patch: dict) -> bool:
+        """Merge ``patch`` into a session's metadata, touching nothing else.
+
+        Returns ``True`` when a row was updated, ``False`` when ``patch``
+        is empty or the session does not exist. A missing row is not an
+        error: the callers are best-effort bookkeeping on the write path,
+        and a vanished session must not turn into an exception that fails
+        a memory write which already landed on disk.
+
+        The merge is shallow, for the same reasons spelled out in
+        :meth:`end_session` — top-level keys in ``patch`` replace their
+        stored counterparts, everything else survives, and ``json_patch``
+        is deliberately not used.
+
+        This exists because :meth:`end_session` is the only other writer
+        of the column and it also stamps ``ended_at`` and ``summary``.
+        This method writes ``metadata`` and nothing else, so it can be
+        used while a session is live. It equally does **not** require the
+        session to still be open: the flag its callers set records that a
+        write outran session teardown, which by definition lands after
+        ``ended_at`` was stamped.
+
+        Known shared gap, mirrored from ``end_session`` rather than fixed
+        here: :meth:`SqliteBackend.transaction` only flips
+        ``_in_transaction``, it never issues a ``BEGIN``. Under a
+        *borrowed* transaction the SELECT below can therefore run outside
+        any SQLite transaction, leaving a cross-process window before the
+        UPDATE. Both methods have it; fixing one alone would just make
+        them inconsistent.
+        """
+        if not patch:
+            return False
+        db = self._get_db()
+        owns_transaction = not self._in_transaction
+        if owns_transaction:
+            # Read-modify-write: the read and the write are one unit, or a
+            # concurrent writer landing between them is silently reverted.
+            db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute("SELECT metadata FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                if owns_transaction:
+                    db.execute("COMMIT")
+                return False
+            merged = {**decode_session_metadata(row[0]), **patch}
+            db.execute(
+                "UPDATE sessions SET metadata = ? WHERE id = ?",
+                (json.dumps(merged), session_id),
+            )
+            if owns_transaction:
+                db.execute("COMMIT")
+        except Exception:
+            if owns_transaction:
+                db.rollback()
+            raise
+        return True
+
     async def add_session_event(
         self,
         session_id: str,
