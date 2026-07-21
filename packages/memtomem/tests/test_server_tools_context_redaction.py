@@ -706,3 +706,65 @@ class TestSuccessPathFormattersCollapseHome:
         assert self.HOME not in norm, norm
         assert "destination lock.json could not be written" in norm
         assert "~/.memtomem/lock.json" in norm  # collapsed, diagnostic survives
+
+
+class TestResidualAbsoluteScrub:
+    """The MCP posture: kill what is still absolute, keep what is relative.
+
+    The web twin (``context_gateway.redact_wire_reason``) scrubs anything
+    path-shaped; this surface must not, because the root-stripped remainder is
+    what makes a row actionable. These pin both halves together, since either
+    one alone is satisfiable by the wrong function.
+    """
+
+    def test_path_under_no_known_root_is_scrubbed(self) -> None:
+        """The leak this closes: a runtime dir symlinked onto a shared volume
+        resolves under neither the passed root nor ``$HOME``, so root stripping
+        finds nothing and the full path reached the calling agent's transcript.
+        """
+        from memtomem.context.error_redact import scrub_residual_absolute_paths
+
+        out = scrub_residual_absolute_paths("unreadable: /Volumes/Shared/team/.claude/skills/hello")
+
+        assert "/Volumes/Shared/team" not in out
+        assert "<path>" in out
+        assert out.startswith("unreadable: ")
+
+    @pytest.mark.parametrize(
+        "kept",
+        [
+            "privacy hits in .claude/agents/foo.md (1 finding)",
+            "missing YAML frontmatter: .memtomem/agents/foo/agent.md",
+            "copied to ~/.claude/skills/hello",
+        ],
+    )
+    def test_relative_and_home_collapsed_remainders_survive(self, kept: str) -> None:
+        """What root stripping and ``$HOME`` collapse deliberately leave behind
+        is remediation, not disclosure — and the success-path formatters render
+        ``~``-collapsed paths as their intended output.
+        """
+        from memtomem.context.error_redact import scrub_residual_absolute_paths
+
+        assert scrub_residual_absolute_paths(kept) == kept
+
+    @pytest.mark.anyio
+    async def test_mcp_skip_row_scrubs_an_out_of_root_path(
+        self, layout, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The BOUNDARY, not the helper. Every other test here builds its path
+        under a root that gets stripped, so none of them fails if
+        ``_redact_reason`` drops the scrub.
+        """
+        from memtomem.context import _skip_reasons as skip_codes
+        from memtomem.context import agents as ctx_agents
+        from memtomem.context.agents import ExtractResult
+        from memtomem.server.tools.context import mem_context_init
+
+        reason = "unreadable: /Volumes/Shared/team/.claude/agents/foo.md"
+        result = ExtractResult(imported=[], skipped=[("foo", reason, skip_codes.PARSE_ERROR)])
+        monkeypatch.setattr(ctx_agents, "extract_agents_to_canonical", lambda *a, **k: result)
+
+        out = await mem_context_init(include="agents")
+
+        assert "/Volumes/Shared/team" not in out
+        assert "<path>" in out

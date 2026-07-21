@@ -326,8 +326,24 @@ def _stage_skill(src: Path, dst: Path, *, payload_only: bool = False) -> Path:
     suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
     staging = dst.parent / f".staging-{dst.name}-{suffix}.tmp"
     if staging.exists():
-        # Crashed prior run — collision is unlikely (pid+rand) but if it
-        # happens, the leftover tree is from us; safe to remove.
+        # Crashed prior run — collision needs pid reuse AND a 3-byte hex
+        # collision, so this is rare, but "the leftover tree is from us" is
+        # exactly the assumption ADR-0030 §4.1 retires: the directory swap uses
+        # this same ``.staging-<name>-<pid>-<hex>.tmp`` grammar, so a collision
+        # could name a transient a live marker still claims — and deleting one
+        # of those is the collapse this whole prelude exists to prevent. Fail
+        # rather than clobber; the marker's own recovery resolves it.
+        #
+        # The other ``rmtree(staging)`` sites in this module need no such
+        # guard: each removes a tree the SAME call just created, on its own
+        # error path, so ownership is not an inference (PR review).
+        if marker_owns_transient(staging):
+            raise SwapRecoveryError(
+                errno.EBUSY,
+                "a pending directory swap already claims this staging path; "
+                "resolve the interrupted swap before staging again",
+                str(staging),
+            )
         shutil.rmtree(staging)
     staging.mkdir()
     # The non-payload top level is excluded DURING the copy (root-only, via

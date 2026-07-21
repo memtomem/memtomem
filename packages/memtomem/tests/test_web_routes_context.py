@@ -1343,7 +1343,7 @@ class TestSkillSkipReasonRedaction:
         out-of-tree runtime root through the route needs a symlink the CI
         matrix does not guarantee.
         """
-        from memtomem.web.routes.context_gateway import redact_engine_reason
+        from memtomem.web.routes.context_gateway import redact_wire_reason
 
         reason = (
             "refusing to overwrite non-skill directory: "
@@ -1351,7 +1351,7 @@ class TestSkillSkipReasonRedaction:
             "(add a SKILL.md or remove the directory first)"
         )
 
-        cleaned = redact_engine_reason(reason, Path("/some/project"))
+        cleaned = redact_wire_reason(reason, Path("/some/project"))
 
         assert cleaned is not None
         assert "/Volumes/Shared Drive/team" not in cleaned

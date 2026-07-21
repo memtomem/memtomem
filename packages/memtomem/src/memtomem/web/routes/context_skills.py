@@ -47,7 +47,7 @@ from memtomem.web.routes.context_gateway import (
     _safe_rel,
     delete_skip_entry,
     read_text_lenient,
-    redact_engine_reason,
+    redact_wire_reason,
     sanitize_diff_reason,
 )
 from memtomem.web.routes.context_projects import (
@@ -715,7 +715,7 @@ async def _sync_skills_core(
         # the wire (#1385/#1412): the canonical-path disclosure rule is that
         # CLI gets the path verbatim and the web/MCP surfaces do not.
         #
-        # ``redact_engine_reason``, not bare ``sanitize_diff_reason``: these
+        # ``redact_wire_reason``, not bare ``sanitize_diff_reason``: these
         # are raw engine exception strings, and root-relative stripping alone
         # leaves an absolute path whenever the target resolves OUTSIDE both the
         # project root and ``$HOME`` — a runtime dir symlinked onto a shared
@@ -724,7 +724,7 @@ async def _sync_skills_core(
         "skipped": [
             {
                 "runtime": rt,
-                "reason": redact_engine_reason(reason, project_root),
+                "reason": redact_wire_reason(reason, project_root),
                 "reason_code": code,
             }
             for rt, reason, code in result.skipped
@@ -806,7 +806,7 @@ def _import_payload(
         "skipped": [
             {
                 "name": name,
-                "reason": redact_engine_reason(reason, project_root),
+                "reason": redact_wire_reason(reason, project_root),
                 "reason_code": code,
             }
             for name, reason, code in result.skipped

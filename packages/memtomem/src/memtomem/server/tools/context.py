@@ -13,7 +13,11 @@ from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import remediation, versioning
 from memtomem.context._canonical_txn import versioning_op_locked
-from memtomem.context.error_redact import redact_engine_reason
+from memtomem.context.error_redact import (
+    redact_engine_reason,
+    scrub_absolute_paths,
+    scrub_residual_absolute_paths,
+)
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
@@ -54,8 +58,18 @@ def _redact_reason(reason: str | None, *roots: Path) -> str:
     suffix guard on the returned string. The MCP tool result flows to the
     calling agent's transcript / model provider, so it gets the same wire-
     boundary sanitization the loopback dashboard applies.
+
+    Composes :func:`scrub_residual_absolute_paths` — the absolute-ONLY scrub,
+    NOT the web's :func:`scrub_absolute_paths`. ``redact_engine_reason`` strips
+    only the roots it is handed plus the import-frozen ``$HOME``, so a runtime
+    dir symlinked onto a shared volume kept its full path on this wire (PR
+    review, reproduced). The web twin's scrub cannot be reused: it also eats
+    the RELATIVE remainder, which here is the remediation
+    (``blocked foo: privacy hits in .claude/agents/foo.md``) and, in the
+    success-path formatters, the intended ``~``-collapsed output. Two postures,
+    two scrubs — see :mod:`memtomem.context.error_redact`.
     """
-    return redact_engine_reason(reason, *roots) or ""
+    return scrub_residual_absolute_paths(redact_engine_reason(reason, *roots) or "")
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
@@ -2731,9 +2745,13 @@ def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
     ``_redact_reason`` strips the roots it is handed plus the import-frozen
     ``$HOME``; :func:`scrub_absolute_paths` then removes any residual absolute
     path under neither (mirrors the web ``_redact_pull_reason`` composition).
-    """
-    from memtomem.context.error_redact import scrub_absolute_paths
 
+    Pull opts INTO the scrub while the shared ``_redact_reason`` stays out of
+    it — see that function for why the two are not the same decision. Pull
+    reasons carry no actionable relative remainder to protect: they name
+    runtimes and scopes, and after G4a-3a a swap refusal names two canonical
+    trees, which is disclosure rather than remediation.
+    """
     return scrub_absolute_paths(_redact_reason(reason, *roots))
 
 

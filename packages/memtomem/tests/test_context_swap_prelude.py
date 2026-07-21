@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context._dir_swap import SwapForeignDestination
+from memtomem.context._dir_swap import SwapForeignDestination, SwapRecoveryError
 from memtomem.context._names import InvalidNameError
 from memtomem.context.skills import (
     SKILL_MANIFEST,
@@ -319,3 +319,53 @@ class TestPullSurfacesTheRefusal:
         )
         with pytest.raises(InvalidNameError):
             commit_pull(plan, lock_timeout=5.0)
+
+
+class TestStagingCollisionRespectsTheMarker:
+    def test_stage_skill_refuses_a_marker_owned_staging_path(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_stage_skill`` used to `rmtree` a colliding staging path on the
+        reasoning "the leftover tree is from us".
+
+        §4.1 retires that inference: the directory swap uses the same
+        ``.staging-<name>-<pid>-<hex>.tmp`` grammar, so a collision can name a
+        transient a live marker still claims — and deleting one is exactly the
+        collapse the prelude exists to prevent. Reaching it needs pid reuse AND
+        a 3-byte hex collision, so the suffix is forced rather than waited for;
+        the guard is what is under test, not the odds.
+        """
+        from memtomem.context import skills as skills_mod
+
+        p = _write_marker(store)
+        _tree(p["staging"], "claimed")
+        src = _tree(store.parent / "src", "source")
+        pid, hexpart = SUFFIX.split("-")
+        monkeypatch.setattr(skills_mod.os, "getpid", lambda: int(pid))
+        monkeypatch.setattr(skills_mod.secrets, "token_hex", lambda _n: hexpart)
+
+        with pytest.raises(SwapRecoveryError):
+            skills_mod._stage_skill(src, p["dst"])
+
+        assert (p["staging"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "claimed"
+        assert p["marker"].is_file()
+
+    def test_an_unclaimed_collision_is_still_cleared(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard must not turn ordinary crash debris into a hard failure —
+        an unmarked leftover at the same path is still ours to remove.
+        """
+        from memtomem.context import skills as skills_mod
+
+        p = _paths(store)
+        _tree(p["staging"], "debris")
+        src = _tree(store.parent / "src", "source")
+        pid, hexpart = SUFFIX.split("-")
+        monkeypatch.setattr(skills_mod.os, "getpid", lambda: int(pid))
+        monkeypatch.setattr(skills_mod.secrets, "token_hex", lambda _n: hexpart)
+
+        staging = skills_mod._stage_skill(src, p["dst"])
+
+        assert staging == p["staging"]
+        assert (staging / SKILL_MANIFEST).read_text(encoding="utf-8") == "source"
