@@ -24,7 +24,12 @@ from memtomem.errors import (
     StorageError,
     StorageStartupError,
 )
-from memtomem.storage.base import ChunkAuditRow, NamespaceRenameResult, SearchMetadataFilter
+from memtomem.storage.base import (
+    ChunkAuditRow,
+    NamespaceAssignResult,
+    NamespaceRenameResult,
+    SearchMetadataFilter,
+)
 from memtomem.models import (
     Chunk,
     ChunkMetadata,
@@ -2483,9 +2488,16 @@ class SqliteBackend(
         namespace: str,
         source_filter: str | None = None,
         old_namespace: str | None = None,
-    ) -> int:
+        *,
+        merge: bool = False,
+    ) -> NamespaceAssignResult:
         assert self._ns is not None
-        return await self._ns.assign_namespace(namespace, source_filter, old_namespace)
+        return await self._ns.assign_namespace(
+            namespace,
+            source_filter,
+            old_namespace,
+            merge=merge,
+        )
 
     # ---- row deserialization -------------------------------------------------
 

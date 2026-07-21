@@ -168,11 +168,6 @@ async def mem_ns_rename(
         # exists *here* — an MCP caller can retry with merge=True, which a
         # web user cannot. See the reason_code note on the exception.
         if exc.reason_code == "target_exists":
-            # Only merge=True is offered. ``mem_ns_assign`` moves chunks with
-            # a bare UPDATE and no duplicate handling, so on the overlapping-
-            # content case it fails on the UNIQUE (namespace, source_file,
-            # content_hash, start_line) index — a remedy that breaks exactly
-            # where it is most likely to be needed is not a remedy.
             raise NamespaceConflictError(
                 f"{exc}. Pass merge=True to consolidate into it — the target's "
                 f"description/color are kept, and chunks it already holds are "
@@ -231,12 +226,17 @@ async def mem_ns_assign(
     namespace: str,
     source_filter: str | None = None,
     old_namespace: str | None = None,
+    # This can delete redundant source rows, so consent must stay literal on
+    # both FastMCP and raw mem_do paths. See mem_ns_rename for the two gates.
+    merge: StrictBool = False,
     ctx: CtxType = None,
 ) -> str:
     """Assign existing chunks to a namespace without re-indexing.
 
     Filter chunks by source path and/or current namespace, then move them
-    to the target namespace. This is a SQL UPDATE — fast and non-destructive.
+    to the target namespace. If a selected chunk already exists there, the
+    default call refuses before writing. Pass ``merge=True`` to keep the
+    target's copy and remove redundant selected copies on purpose.
 
     Both ``namespace`` and ``old_namespace`` (when provided) are run
     through :func:`validate_namespace` so a hostile-shaped target cannot
@@ -246,20 +246,41 @@ async def mem_ns_assign(
         namespace: Target namespace to assign chunks to
         source_filter: Only assign chunks from sources containing this substring
         old_namespace: Only assign chunks currently in this namespace
+        merge: Consolidate overlapping chunks instead of refusing. Must be a
+            literal boolean; moved and dropped rows are reported separately.
     """
     validate_namespace(namespace)
     if old_namespace is not None:
         validate_namespace(old_namespace)
     if not source_filter and not old_namespace:
         return "Error: at least one filter (source_filter or old_namespace) is required."
+    merge = strict_bool(merge, "merge")
     app = await _get_app_initialized(ctx)
-    count = await app.storage.assign_namespace(
-        namespace, source_filter=source_filter, old_namespace=old_namespace
-    )
+    try:
+        result = await app.storage.assign_namespace(
+            namespace,
+            source_filter=source_filter,
+            old_namespace=old_namespace,
+            merge=merge,
+        )
+    except NamespaceConflictError as exc:
+        if exc.reason_code == "chunk_overlap":
+            raise NamespaceConflictError(
+                f"{exc}. Pass merge=True to consolidate deliberately — existing target "
+                "copies are kept and redundant selected copies are dropped",
+                reason_code=exc.reason_code,
+            ) from exc
+        raise
     filters = []
     if source_filter:
         filters.append(f"source={source_filter!r}")
     if old_namespace:
         filters.append(f"from={old_namespace!r}")
     suffix = f" ({', '.join(filters)})" if filters else " (all chunks)"
-    return f"Assigned {count} chunks to namespace '{namespace}'{suffix}"
+    detail = ""
+    if result.duplicates_dropped:
+        detail = f", {result.duplicates_dropped} duplicate chunk(s) dropped"
+    return (
+        f"Assigned {result.chunks_moved} chunks to namespace '{namespace}'"
+        f"{suffix}{detail}"
+    )
