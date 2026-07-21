@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from helpers import make_chunk
-from memtomem.errors import StorageError
+from memtomem.errors import NamespaceConflictError, StorageError
 
 
 # ---------------------------------------------------------------------------
@@ -38,16 +39,21 @@ class TestNamespace:
             make_chunk(content="other", namespace="keep-ns"),
         ]
         await storage.upsert_chunks(chunks)
-        count = await storage.rename_namespace("old-ns", "new-ns")
-        assert count == 2
+        result = await storage.rename_namespace("old-ns", "new-ns")
+        assert result.chunks_moved == 2
         ns = dict(await storage.list_namespaces())
         assert "old-ns" not in ns
         assert ns["new-ns"] == 2
         assert ns["keep-ns"] == 1
 
+    async def test_rename_namespace_not_merged_when_target_free(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="old-ns")])
+        result = await storage.rename_namespace("old-ns", "new-ns")
+        assert result.merged is False
+
     async def test_rename_nonexistent_namespace(self, storage):
-        count = await storage.rename_namespace("ghost", "phantom")
-        assert count == 0
+        result = await storage.rename_namespace("ghost", "phantom")
+        assert result.chunks_moved == 0
 
     async def test_delete_by_namespace(self, storage):
         chunks = [
@@ -182,6 +188,616 @@ class TestNamespace:
         await storage.upsert_chunks(chunks)
         with pytest.raises(StorageError, match="Invalid namespace"):
             await storage.assign_namespace("bad\tname", old_namespace="orig")
+
+
+# ---------------------------------------------------------------------------
+# rename_namespace — atomicity and conflict semantics (#1874)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fail_on_metadata_update(storage):
+    """Install a trigger that aborts the metadata rename of one namespace.
+
+    Fault injection *after* the chunk rows are rewritten — the exact shape
+    of the original bug (a PK collision on the metadata rename raised with
+    the chunk UPDATE already applied and uncommitted). A test that only
+    exercises the up-front refusal would pass even with the rollback
+    missing. Installed by the test *after* seeding, and scoped to the
+    source namespace so unrelated metadata writes still work — the
+    "unrelated later commit" is the whole point of the first test.
+    """
+    db = storage._get_db()
+
+    def install(namespace: str) -> None:
+        db.execute(
+            "CREATE TRIGGER _test_meta_boom BEFORE UPDATE ON namespace_metadata "
+            f"WHEN OLD.namespace = '{namespace}' "
+            "BEGIN SELECT RAISE(ABORT, 'boom'); END"
+        )
+        db.commit()
+
+    yield install
+    db.execute("DROP TRIGGER IF EXISTS _test_meta_boom")
+    db.commit()
+
+
+class TestRenameNamespaceAtomicity:
+    async def test_failed_rename_does_not_leak_into_a_later_commit(
+        self, storage, fail_on_metadata_update
+    ):
+        """The reported bug: chunk rows rewritten, metadata rename fails, no rollback.
+
+        The pending UPDATE used to sit on the shared connection until some
+        unrelated ``commit()`` flushed it — persisting a rename the caller
+        was told had failed.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("src-ns", description="d")
+        fail_on_metadata_update("src-ns")
+
+        with pytest.raises(StorageError):
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        # An unrelated write that commits the shared connection.
+        await storage.set_namespace_meta("third-ns", description="unrelated")
+
+        ns = dict(await storage.list_namespaces())
+        assert ns.get("src-ns") == 1
+        assert "dst-ns" not in ns
+
+    async def test_failed_rename_inside_outer_transaction_is_undone(
+        self, storage, fail_on_metadata_update
+    ):
+        """Caller swallows the error inside ``transaction()`` — our writes still vanish.
+
+        The savepoint, not the connection-level rollback, is what makes this
+        hold: rename does not own the outer transaction and must not tear it
+        down, but it also must not leave half its work behind for the outer
+        commit to pick up.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("src-ns", description="d")
+        fail_on_metadata_update("src-ns")
+
+        async with storage.transaction():
+            with pytest.raises(StorageError):
+                await storage.rename_namespace("src-ns", "dst-ns")
+            # …and the caller carries on, committing the outer transaction.
+
+        ns = dict(await storage.list_namespaces())
+        assert ns.get("src-ns") == 1
+        assert "dst-ns" not in ns
+
+    async def test_failed_rename_keeps_the_callers_earlier_writes(
+        self, storage, fail_on_metadata_update
+    ):
+        """Undo *our* writes only — a connection-level rollback would take the caller's too."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("src-ns", description="d")
+        fail_on_metadata_update("src-ns")
+
+        async with storage.transaction():
+            await storage.upsert_chunks([make_chunk(content="earlier", namespace="caller-ns")])
+            with pytest.raises(StorageError):
+                await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert dict(await storage.list_namespaces()).get("caller-ns") == 1
+
+    async def test_successful_rename_is_undone_when_the_caller_aborts(self, storage):
+        """Rename must not commit inside a transaction it does not own."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.rename_namespace("src-ns", "dst-ns")
+                raise RuntimeError("caller aborts")
+
+        ns = dict(await storage.list_namespaces())
+        assert ns.get("src-ns") == 1
+        assert "dst-ns" not in ns
+
+    async def test_write_lock_is_taken_before_the_existence_checks(self, storage):
+        """``BEGIN IMMEDIATE`` precedes the preflight SELECTs.
+
+        Without the ordering, a concurrent writer could create the target
+        between the check and the UPDATE — and every other test here would
+        still pass. Mirrors the trace assertion in test_context_memory_migrate.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        trace: list[str] = []
+        db.set_trace_callback(lambda sql: trace.append(sql.strip().split("\n", 1)[0]))
+        try:
+            await storage.rename_namespace("src-ns", "dst-ns")
+        finally:
+            db.set_trace_callback(None)
+
+        begin_idx = next(i for i, s in enumerate(trace) if "BEGIN IMMEDIATE" in s.upper())
+        select_idx = next(i for i, s in enumerate(trace) if s.upper().startswith("SELECT"))
+        assert begin_idx < select_idx, f"lock must precede the preflight, trace: {trace}"
+
+    async def test_write_lock_is_taken_inside_an_outer_transaction(self, storage):
+        """First statement inside ``transaction()`` still needs its own BEGIN IMMEDIATE.
+
+        ``transaction()`` only flips the backend flag; it does not open a
+        SQLite transaction, so gating the lock on *ownership* would silently
+        drop it here.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        trace: list[str] = []
+        async with storage.transaction():
+            db.set_trace_callback(lambda sql: trace.append(sql.strip().split("\n", 1)[0]))
+            try:
+                await storage.rename_namespace("src-ns", "dst-ns")
+            finally:
+                db.set_trace_callback(None)
+
+        begin_idx = next(
+            (i for i, s in enumerate(trace) if "BEGIN IMMEDIATE" in s.upper()),
+            None,
+        )
+        select_idx = next((i for i, s in enumerate(trace) if s.upper().startswith("SELECT")), None)
+        assert begin_idx is not None, (
+            f"rename must take the write lock even inside transaction(), trace: {trace}"
+        )
+        assert select_idx is None or begin_idx < select_idx, (
+            f"lock must still precede the preflight, trace: {trace}"
+        )
+
+    async def test_a_foreign_open_transaction_is_refused(self, storage):
+        """Don't rename under a lock we never took and can't commit.
+
+        The connection runs in sqlite3's implicit-transaction mode, so DML
+        left pending on it outside ``transaction()`` is someone else's. We
+        could neither commit the result (it isn't ours to commit) nor claim
+        it happened — reporting a rename that may evaporate is the bug this
+        method exists to close.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        db.execute(
+            "INSERT INTO namespace_metadata "
+            "(namespace, description, color, created_at, updated_at) "
+            "VALUES ('foreign-ns', '', '', 't', 't')"
+        )
+        assert db.in_transaction
+
+        with pytest.raises(StorageError, match="open transaction"):
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        # Read through the foreign transaction (same connection, so its
+        # uncommitted rows are visible): the refusal must have written
+        # nothing, not written-then-raised.
+        names = {row[0] for row in db.execute("SELECT DISTINCT namespace FROM chunks").fetchall()}
+        assert names == {"src-ns"}
+        db.rollback()
+
+    async def test_a_foreign_open_transaction_is_left_untouched(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        db.execute(
+            "INSERT INTO namespace_metadata "
+            "(namespace, description, color, created_at, updated_at) "
+            "VALUES ('foreign-ns', '', '', 't', 't')"
+        )
+
+        with pytest.raises(StorageError):
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert db.in_transaction, "refusal must not commit or roll back a foreign transaction"
+        # The stranger's own pending row is still there — we neither flushed
+        # nor discarded it.
+        assert db.execute(
+            "SELECT 1 FROM namespace_metadata WHERE namespace='foreign-ns'"
+        ).fetchone()
+        db.rollback()
+
+    async def test_a_busy_write_lock_surfaces_as_storage_error(self, storage, tmp_path):
+        """SQLITE_BUSY on the up-front lock is a handled failure, not a raw sqlite3 error.
+
+        The old lazy-DEFERRED code could not fail here at all; taking the
+        lock up front is what introduced the possibility.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        db.commit()
+        blocker = sqlite3.connect(db.execute("PRAGMA database_list").fetchone()[2], timeout=0)
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("UPDATE chunks SET namespace='x' WHERE 0")
+        # Don't sit out the production connection's 10s busy timeout: the
+        # contention is deterministic, the waiting is not the point.
+        db.execute("PRAGMA busy_timeout=0")
+        try:
+            with pytest.raises(StorageError, match="write lock"):
+                await storage.rename_namespace("src-ns", "dst-ns")
+        finally:
+            db.execute("PRAGMA busy_timeout=10000")
+            blocker.rollback()
+            blocker.close()
+
+    async def test_no_op_rename_leaves_no_open_transaction(self, storage):
+        """A source that holds nothing must not strand the RESERVED lock."""
+        await storage.rename_namespace("ghost", "phantom")
+        assert storage._get_db().in_transaction is False
+
+
+class TestRenameNamespaceConflicts:
+    async def test_refuses_target_with_metadata_row(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("dst-ns", description="existing")
+
+        with pytest.raises(NamespaceConflictError, match="target already exists"):
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+    async def test_refusal_writes_nothing(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("dst-ns", description="existing")
+
+        with pytest.raises(NamespaceConflictError):
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert dict(await storage.list_namespaces()).get("src-ns") == 1
+
+    async def test_conflict_message_states_the_condition_only(self, storage):
+        """Storage names the condition; each surface adds its own remedy (#1870)."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("dst-ns", description="existing")
+
+        with pytest.raises(NamespaceConflictError) as excinfo:
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert "merge" not in str(excinfo.value) and "ns_assign" not in str(excinfo.value)
+
+    async def test_conflict_carries_a_reason_code(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("dst-ns", description="existing")
+
+        with pytest.raises(NamespaceConflictError) as excinfo:
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert excinfo.value.reason_code == "target_exists"
+
+    async def test_same_name_conflict_carries_its_own_reason_code(self, storage):
+        await storage.set_namespace_meta("same-ns", description="keep me")
+
+        with pytest.raises(NamespaceConflictError) as excinfo:
+            await storage.rename_namespace("same-ns", "same-ns")
+
+        assert excinfo.value.reason_code == "same_name"
+
+    async def test_refuses_target_with_chunks_but_no_metadata(self, storage):
+        await storage.upsert_chunks(
+            [
+                make_chunk(content="one", namespace="src-ns"),
+                make_chunk(content="two", namespace="dst-ns"),
+            ]
+        )
+        with pytest.raises(NamespaceConflictError):
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+    async def test_refuses_rename_onto_itself(self, storage):
+        await storage.set_namespace_meta("same-ns", description="keep me")
+        with pytest.raises(NamespaceConflictError, match="onto itself"):
+            await storage.rename_namespace("same-ns", "same-ns")
+
+    async def test_refuses_rename_onto_itself_even_with_merge(self, storage):
+        """The merge branch would delete the sole metadata row (target-wins + drop source)."""
+        await storage.set_namespace_meta("same-ns", description="keep me")
+        with pytest.raises(NamespaceConflictError):
+            await storage.rename_namespace("same-ns", "same-ns", merge=True)
+        meta = await storage.get_namespace_meta("same-ns")
+        assert meta["description"] == "keep me"
+
+    async def test_missing_source_is_a_no_op_even_when_target_exists(self, storage):
+        """Nothing to move is not a conflict — keeps the pinned zero no-op."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="dst-ns")])
+        result = await storage.rename_namespace("ghost", "dst-ns")
+        assert result.chunks_moved == 0
+
+    async def test_missing_source_leaves_target_untouched(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="dst-ns")])
+        await storage.rename_namespace("ghost", "dst-ns")
+        assert dict(await storage.list_namespaces())["dst-ns"] == 1
+
+
+class TestRenameNamespaceMetadataOnly:
+    async def test_metadata_only_source_reports_zero_chunks(self, storage):
+        await storage.set_namespace_meta("meta-ns", description="registered only")
+        result = await storage.rename_namespace("meta-ns", "renamed-ns")
+        assert result.chunks_moved == 0
+
+    async def test_metadata_only_source_moves_the_row(self, storage):
+        await storage.set_namespace_meta("meta-ns", description="registered only")
+        result = await storage.rename_namespace("meta-ns", "renamed-ns")
+        assert result.metadata_renamed is True
+
+    async def test_metadata_only_source_clears_the_old_name(self, storage):
+        await storage.set_namespace_meta("meta-ns", description="registered only")
+        await storage.rename_namespace("meta-ns", "renamed-ns")
+        assert await storage.get_namespace_meta("meta-ns") is None
+
+    async def test_metadata_only_source_keeps_its_description(self, storage):
+        await storage.set_namespace_meta("meta-ns", description="registered only")
+        await storage.rename_namespace("meta-ns", "renamed-ns")
+        meta = await storage.get_namespace_meta("renamed-ns")
+        assert meta["description"] == "registered only"
+
+
+class TestRenameNamespaceMerge:
+    @pytest.fixture
+    async def merged(self, storage):
+        await storage.upsert_chunks(
+            [
+                make_chunk(content="one", namespace="src-ns"),
+                make_chunk(content="two", namespace="src-ns"),
+                make_chunk(content="three", namespace="dst-ns"),
+            ]
+        )
+        await storage.set_namespace_meta("src-ns", description="source", color="#111111")
+        await storage.set_namespace_meta("dst-ns", description="target", color="#222222")
+        return await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+    async def test_reports_moved_chunks(self, merged):
+        assert merged.chunks_moved == 2
+
+    async def test_reports_merged(self, merged):
+        assert merged.merged is True
+
+    async def test_does_not_report_a_metadata_rename(self, merged):
+        """The source row was dropped, not moved — the target's row survives."""
+        assert merged.metadata_renamed is False
+
+    async def test_chunks_are_consolidated(self, merged, storage):
+        ns = dict(await storage.list_namespaces())
+        assert ns["dst-ns"] == 3
+
+    async def test_source_namespace_is_gone(self, merged, storage):
+        assert "src-ns" not in dict(await storage.list_namespaces())
+
+    async def test_target_metadata_wins(self, merged, storage):
+        meta = await storage.get_namespace_meta("dst-ns")
+        assert (meta["description"], meta["color"]) == ("target", "#222222")
+
+    async def test_source_metadata_row_is_dropped(self, merged, storage):
+        assert await storage.get_namespace_meta("src-ns") is None
+
+    @pytest.fixture
+    async def overlapping(self, storage):
+        """Both namespaces hold the same indexed chunk (same file + hash + line).
+
+        ``chunks`` is UNIQUE on that key, so a naive namespace UPDATE would
+        fail the merge outright. This is not exotic: it is what
+        ``mm agent migrate`` hits when one agent's memory was indexed under
+        both the legacy and the canonical namespace.
+        """
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        only_in_source = make_chunk(content="unique", namespace="src-ns", source="other.md")
+        await storage.upsert_chunks([src, dup, only_in_source])
+        return await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+    async def test_overlapping_merge_succeeds(self, overlapping):
+        assert overlapping.merged is True
+
+    async def test_overlapping_merge_reports_dropped_duplicates(self, overlapping):
+        assert overlapping.duplicates_dropped == 1
+
+    async def test_overlapping_merge_moves_only_the_new_chunk(self, overlapping):
+        assert overlapping.chunks_moved == 1
+
+    async def test_overlapping_merge_leaves_one_copy(self, overlapping, storage):
+        assert dict(await storage.list_namespaces())["dst-ns"] == 2
+
+    async def test_overlapping_merge_empties_the_source(self, overlapping, storage):
+        assert "src-ns" not in dict(await storage.list_namespaces())
+
+    async def test_overlapping_merge_keeps_the_targets_copy(self, storage):
+        """Target wins, matching the metadata rule — its row (and counters) survive."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_chunk(src.id) is None
+        assert await storage.get_chunk(dup.id) is not None
+
+    async def test_overlapping_merge_keeps_relations_of_the_dropped_copy(self, storage):
+        """Provenance pointing at the dropped twin is re-pointed, not cascaded away."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        other = make_chunk(content="elsewhere", namespace="dst-ns", source="other.md")
+        await storage.upsert_chunks([src, dup, other])
+        await storage.add_relation(src.id, other.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(dup.id) == [(other.id, "related")]
+
+    async def test_overlapping_merge_keeps_share_lineage_of_the_dropped_copy(self, storage):
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        shared_copy = make_chunk(content="shared out", namespace="dst-ns", source="copy.md")
+        await storage.upsert_chunks([src, dup, shared_copy])
+        await storage.add_chunk_link(src.id, shared_copy.id, "shared", "dst-ns")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        link = await storage.get_chunk_link(shared_copy.id, "shared")
+        assert link.source_id == dup.id
+
+    async def test_a_relation_between_the_twins_is_not_kept_as_a_self_edge(self, storage):
+        """The edge described two rows that turn out to be one — it says nothing now."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+        await storage.add_relation(src.id, dup.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(dup.id) == []
+
+    async def test_a_share_link_between_the_twins_is_not_kept_as_a_self_edge(self, storage):
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+        await storage.add_chunk_link(src.id, dup.id, "shared", "dst-ns")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_chunk_link(dup.id, "shared") is None
+
+    async def test_pre_existing_self_edges_are_left_alone(self, storage):
+        """Only rows this merge collapsed are cleaned up — not the whole table."""
+        loop = make_chunk(content="loops", namespace="dst-ns", source="loop.md")
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([loop, src, dup])
+        await storage.add_relation(loop.id, loop.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(loop.id) == [(loop.id, "related")]
+
+    async def test_a_survivors_own_self_edge_is_left_alone(self, storage):
+        """The cleanup targets the twin pair, not "any self-edge on the survivor"."""
+        src = make_chunk(content="same", namespace="src-ns", source="shared.md")
+        dup = make_chunk(content="same", namespace="dst-ns", source="shared.md")
+        dup.content_hash = src.content_hash
+        await storage.upsert_chunks([src, dup])
+        await storage.add_relation(dup.id, dup.id, "related")
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert await storage.get_related(dup.id) == [(dup.id, "related")]
+
+    async def test_duplicate_deletes_are_split_into_batches(self, storage, monkeypatch):
+        """The id list is chunked — SQLite's host-parameter limit is finite (999 pre-3.32).
+
+        Asserted on the statement count rather than the outcome: a single
+        unbounded ``IN`` list produces the same rows for five duplicates and
+        only breaks at a scale no test wants to seed.
+        """
+        monkeypatch.setattr("memtomem.storage.sqlite_namespace._DELETE_BATCH", 2)
+        for i in range(5):
+            src = make_chunk(content=f"same{i}", namespace="src-ns", source=f"s{i}.md")
+            dup = make_chunk(content=f"same{i}", namespace="dst-ns", source=f"s{i}.md")
+            dup.content_hash = src.content_hash
+            await storage.upsert_chunks([src, dup])
+
+        db = storage._get_db()
+        trace: list[str] = []
+        db.set_trace_callback(lambda sql: trace.append(" ".join(sql.split())))
+        try:
+            await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+        finally:
+            db.set_trace_callback(None)
+
+        # Distinct statements: sqlite's tracer re-reports a statement for each
+        # row a trigger fires on, so the raw count is not the batch count.
+        deletes = {s for s in trace if s.upper().startswith("DELETE FROM CHUNKS WHERE ID IN")}
+        assert len(deletes) == 3, f"5 duplicates at batch 2 → 3 statements, got: {deletes}"
+
+    async def test_multi_batch_delete_leaves_one_copy_of_each(self, storage, monkeypatch):
+        monkeypatch.setattr("memtomem.storage.sqlite_namespace._DELETE_BATCH", 2)
+        for i in range(5):
+            src = make_chunk(content=f"same{i}", namespace="src-ns", source=f"s{i}.md")
+            dup = make_chunk(content=f"same{i}", namespace="dst-ns", source=f"s{i}.md")
+            dup.content_hash = src.content_hash
+            await storage.upsert_chunks([src, dup])
+
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+
+        assert dict(await storage.list_namespaces()) == {"dst-ns": 5}
+
+    async def test_schema_discovery_does_not_scale_with_duplicates(self, storage):
+        """FK discovery runs once per merge, not once per dropped chunk.
+
+        Otherwise a large migration puts O(duplicates × tables) PRAGMA
+        queries inside the write lock.
+        """
+
+        async def _merge_with(n: int) -> int:
+            for i in range(n):
+                src = make_chunk(content=f"same{i}", namespace="src-ns", source=f"s{i}.md")
+                dup = make_chunk(content=f"same{i}", namespace="dst-ns", source=f"s{i}.md")
+                dup.content_hash = src.content_hash
+                await storage.upsert_chunks([src, dup])
+            db = storage._get_db()
+            trace: list[str] = []
+            db.set_trace_callback(lambda sql: trace.append(sql.strip()))
+            try:
+                await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+            finally:
+                db.set_trace_callback(None)
+            return sum(1 for s in trace if s.upper().startswith("PRAGMA FOREIGN_KEY_LIST"))
+
+        one = await _merge_with(1)
+        await storage.delete_by_namespace("dst-ns")
+        many = await _merge_with(4)
+        assert one == many
+
+    async def test_no_duplicates_dropped_on_a_plain_rename(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        result = await storage.rename_namespace("src-ns", "dst-ns")
+        assert result.duplicates_dropped == 0
+
+    async def test_metadata_only_source_merges_into_metadata_target(self, storage):
+        await storage.set_namespace_meta("src-ns", description="source")
+        await storage.set_namespace_meta("dst-ns", description="target")
+        result = await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+        assert (result.chunks_moved, result.merged) == (0, True)
+
+    async def test_metadata_only_merge_drops_the_source_row(self, storage):
+        await storage.set_namespace_meta("src-ns", description="source")
+        await storage.set_namespace_meta("dst-ns", description="target")
+        await storage.rename_namespace("src-ns", "dst-ns", merge=True)
+        assert await storage.get_namespace_meta("src-ns") is None
+
+
+class TestRenameNamespaceOtherTables:
+    """Namespace identity is ``chunks`` ∪ ``namespace_metadata`` — nothing else."""
+
+    async def test_session_namespace_follows_the_rename(self, storage):
+        """A live session filters chunks by its stored namespace."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.create_session("s1", "alpha", "src-ns")
+        await storage.rename_namespace("src-ns", "dst-ns")
+        row = await storage.get_session("s1")
+        assert row["namespace"] == "dst-ns"
+
+    async def test_session_only_source_is_a_no_op(self, storage):
+        """A namespace that exists only on a session row is not renameable."""
+        await storage.create_session("s1", "alpha", "session-only-ns")
+        result = await storage.rename_namespace("session-only-ns", "dst-ns")
+        assert (result.chunks_moved, result.metadata_renamed) == (0, False)
+
+    async def test_share_lineage_keeps_the_historical_namespace(self, storage):
+        """``chunk_links.namespace_target`` records the name at share time."""
+        src = make_chunk(content="one", namespace="src-ns")
+        dst = make_chunk(content="copy", namespace="src-ns")
+        await storage.upsert_chunks([src, dst])
+        await storage.add_chunk_link(src.id, dst.id, "shared", "src-ns")
+
+        await storage.rename_namespace("src-ns", "dst-ns")
+
+        link = await storage.get_chunk_link(dst.id, "shared")
+        assert link.namespace_target == "src-ns"
+
+    async def test_session_only_target_is_not_a_conflict(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.create_session("s1", "alpha", "dst-ns")
+        result = await storage.rename_namespace("src-ns", "dst-ns")
+        assert result.merged is False
 
 
 # ---------------------------------------------------------------------------

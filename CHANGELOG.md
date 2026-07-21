@@ -326,6 +326,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A failed namespace rename no longer half-applies** (#1874) —
+  `mem_ns_rename` rewrote the chunk rows first and renamed the namespace's
+  metadata row second. Renaming onto a namespace that already had a metadata
+  row therefore failed on the primary key *after* the chunks had been rewritten
+  and with nothing rolling them back, so a later unrelated write could commit a
+  rename the caller was told had failed. The collision is now decided before
+  any write: renaming onto an existing namespace is **refused** (409 on the web
+  admin route, `Error: …` over MCP), and `merge=True` opts into consolidating
+  into it — chunks move, the target's description/color are kept, and where
+  both namespaces hold the same chunk (same source file, content hash and start
+  line) the target's copy is kept while the source's duplicate is dropped
+  (reported, never silent), as is the source's metadata row. The whole
+  operation runs under one lock-taking transaction, so a failure anywhere
+  undoes all of it, including when it runs inside an outer transaction it does
+  not own. `mem_ns_rename` also reports *what* changed rather than a bare chunk
+  count: a namespace registered but never written to renames its metadata row
+  while moving 0 chunks, which used to read as "nothing happened". Relatedly,
+  `mm agent migrate` now finds legacy `agent/{id}` namespaces that exist only
+  as a registration (no chunks) and asks before consolidating into an existing
+  `agent-runtime:{id}` (`--yes` to skip) instead of failing.
+
 - **`mem_ask` is reachable again outside `full` tool mode** — the tool carried
   `@mcp.tool()` but never `@register(...)`, so the default `core` mode pruned
   it from the tool list while `mem_do` had no action to route it to: it existed
