@@ -50,18 +50,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   The marker says a session *records* provenance, not that the record is
   complete. `provenance_incomplete` is set separately — on truncation past
-  the per-event id cap, on a failed or un-indexed write, and when a write
-  outran session teardown or the teardown drain timed out. It is also set by
-  every tool that changes a session's chunk set without being summarizable
-  from it: `mem_edit` and `mem_delete` (they re-chunk rather than add, so
-  recording their ids would describe a rewrite as new material), the bulk
-  delete paths including `mem_ns_delete` and `mem_cleanup_orphans` (they
-  remove chunks an earlier event still names), and the bulk importers
-  `mem_import`, `mem_import_notion` and `mem_import_obsidian` (their output
-  is an ingest, not session work). A test walks the tool source and fails if
-  a new surface reaches the indexing engine or deletes chunks while doing
-  neither — a hand-written list of write surfaces checked against itself is
-  how the importers and bulk deletes were missed in the first place.
+  the per-event id cap, when a write outran session teardown or the drain
+  timed out, and when indexing failed after the content was already durable
+  (whether it raised or reported the failure in its stats). It is also set
+  when an append's own record overstates it: appending under a heading a
+  previous session wrote to re-chunks both into one chunk with a new id, so
+  this session's record would name text it did not author.
+
+  And it is set by every tool that changes a session's chunk set without
+  being summarizable from it: `mem_edit` and `mem_delete` (they re-chunk
+  rather than add), the bulk deletes `mem_ns_delete`, `mem_cleanup_orphans`,
+  `mem_dedup_merge` and `mem_decay_expire` (they remove chunks an earlier
+  event still names), and the bulk importers `mem_import`,
+  `mem_import_notion` and `mem_import_obsidian` (their output is an ingest,
+  not session work).
+
+  A test walks the tool source and fails any function that reaches the
+  indexing engine or deletes chunks — directly or through a helper — while
+  doing neither. A hand-written list of write surfaces checked against
+  itself is how the importers and the bulk deletes were missed in the first
+  place; the guard found `mem_ns_delete`, `mem_cleanup_orphans`,
+  `mem_dedup_merge` and `mem_decay_expire` on its own.
 
   Sessions created by the CLI or the LangGraph adapter carry no marker and
   are unaffected.

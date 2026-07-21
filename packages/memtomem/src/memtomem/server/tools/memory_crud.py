@@ -153,6 +153,37 @@ async def _locked_chunk(
     yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry."
 
 
+async def _flag_imprecise_write(
+    app: AppContext, session_id: str | None, stats: IndexingStats
+) -> None:
+    """Mark the session when an append's own record may overstate it.
+
+    Two cases, both of which leave ``new_chunk_ids`` describing something
+    other than "exactly what this call contributed":
+
+    ``deleted_chunks`` is non-zero. An append re-indexes the whole file,
+    and the chunker merges adjacent small sections — so appending under a
+    heading another session already wrote to produces one chunk holding
+    both texts, with a new id, and the old chunk deleted. That id is in
+    ``new_chunk_ids``, so this session's record names content it did not
+    author. A pure append to fresh material deletes nothing, which is
+    what makes this a precise signal rather than a blanket one.
+
+    ``errors`` is non-empty. Indexing reports some failures by returning
+    them rather than raising — an embedding failure typically comes back
+    as an error with zero new ids. The file is already durable at that
+    point, so the content exists, will be picked up by the watcher later,
+    and belongs to no event. Only the raising path was handled before.
+
+    Attributing precisely instead of flagging would mean tracking the
+    appended span through chunking and diffing, which is a change to the
+    indexing contract rather than to this call site. Until then, saying
+    "this record is not exact" is the honest answer.
+    """
+    if stats.deleted_chunks or stats.errors:
+        await mark_provenance_incomplete(app, session_id)
+
+
 async def _mutate_file_and_reindex(
     app: AppContext,
     source_file: Path,
@@ -595,6 +626,7 @@ async def _mem_add_core(
                 except Exception:
                     await mark_provenance_incomplete(app, provenance_session_id)
                     raise
+                await _flag_imprecise_write(app, provenance_session_id, stats)
                 display_ns = effective_ns or app.config.namespace.default_namespace
                 result = (
                     f"Memory added to {target}\n"
@@ -1373,6 +1405,7 @@ async def mem_batch_add(
                 except Exception:
                     await mark_provenance_incomplete(app, provenance_session_id)
                     raise
+                await _flag_imprecise_write(app, provenance_session_id, stats)
                 display_ns = effective_ns or app.config.namespace.default_namespace
                 result = (
                     f"Batch add complete ({len(entries)} entries) → {target}\n"

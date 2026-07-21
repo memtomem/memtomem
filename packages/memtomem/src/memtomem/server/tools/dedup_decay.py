@@ -92,6 +92,9 @@ async def mem_dedup_merge(
     except ValueError as exc:
         return f"Invalid UUID: {exc}"
 
+    # Same reason as ``mem_cleanup_orphans``: a merged-away chunk may be
+    # one an earlier provenance event still names.
+    provenance_session_id = await capture_session_for_untracked_write(app)
     would_or_did = await app.dedup_scanner.merge(keep_uuid, delete_uuids, dry_run=dry_run)
     if dry_run:
         return (
@@ -99,6 +102,8 @@ async def mem_dedup_merge(
             f"keep_id={keep_id}\n(no changes -- re-run with dry_run=False to apply)"
         )
     app.search_pipeline.invalidate_cache()
+    if would_or_did:
+        await flag_untracked_write(app, provenance_session_id)
     return f"Merge complete: {would_or_did} chunks deleted, keep_id={keep_id}"
 
 
@@ -157,11 +162,13 @@ async def mem_decay_expire(
     from memtomem.search.decay import expire_chunks
 
     app = await _get_app_initialized(ctx)
+    provenance_session_id = await capture_session_for_untracked_write(app)
     stats = await expire_chunks(
         app.storage, max_age_days=max_age_days, dry_run=dry_run, source_filter=source_filter
     )
     if not dry_run and stats.deleted_chunks > 0:
         app.search_pipeline.invalidate_cache()
+        await flag_untracked_write(app, provenance_session_id)
     mode = " (dry-run)" if dry_run else ""
     return (
         f"Memory expiry{mode}:\n"

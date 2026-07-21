@@ -299,8 +299,12 @@ class TestEveryChunkCreatingSurfaceIsAccountedFor:
     than silently shipping a session that claims a complete record.
     """
 
-    # Chunk-mutating calls. Reaching any of these obliges a function to
-    # account for what it did.
+    # Calls that create or destroy chunks. Reaching any of them obliges a
+    # function to account for what it did. ``delete_chunks`` is the
+    # low-level one every deletion helper bottoms out in — leaving it out
+    # was what let ``mem_dedup_merge`` and ``mem_decay_expire`` through,
+    # since they delete via a scanner/service rather than calling storage
+    # directly.
     _CHUNK_CALLS = frozenset(
         {
             "index_file",
@@ -308,51 +312,95 @@ class TestEveryChunkCreatingSurfaceIsAccountedFor:
             "import_chunks",
             "delete_by_source",
             "delete_by_namespace",
+            "delete_chunks",
+            "expire_chunks",
+            "merge",
         }
     )
-    # The two ways to account for it.
+    # The ways to account for it.
     _ACCOUNTING_CALLS = frozenset(
         {
             "record_write_provenance",
             "flag_untracked_write",
             "mark_provenance_incomplete",
+            "_flag_imprecise_write",
         }
     )
-    # Functions that create chunks but are provably not session inputs.
+    # Functions that touch chunks but are provably not session inputs.
+    # Each needs a reason, not just an entry.
     _EXEMPT = {
         # The session's own summary is an output of teardown, not one of
         # the inputs it summarizes. Instrumenting it would make every
         # session record a write it performed on itself.
         ("session.py", "_persist_session_summary_chunk"),
-        # Shared tail of mem_edit / mem_delete's chunk branch: its callers
-        # capture and flag around it, and it is covered by the
-        # ``_mutate_file_and_reindex`` accounting one frame up.
     }
 
     def test_no_chunk_creating_tool_is_silent(self):
+        """Every public tool that changes the chunk set says so.
+
+        Resolved one level through same-module helpers: a tool that
+        delegates its mutation to a private helper is judged on the
+        helper's behavior plus its own, so moving a delete into a helper
+        does not shake the guard off.
+        """
         import ast
         from pathlib import Path
 
         import memtomem
 
         tools = Path(memtomem.__file__).parent / "server" / "tools"
+
+        def called_names(node, *, skip=frozenset()):
+            """Names called inside ``node``.
+
+            A mutator invoked with a literal ``dry_run=True`` is not a
+            mutation and is not counted — checked rather than exempted by
+            hand, so flipping that argument to False re-arms the guard
+            instead of leaving a stale entry in a list.
+            """
+            names = set()
+            for c in ast.walk(node):
+                if not isinstance(c, ast.Call) or not isinstance(c.func, (ast.Attribute, ast.Name)):
+                    continue
+                fname = c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id
+                if fname in skip:
+                    continue
+                dry = next((k for k in c.keywords if k.arg == "dry_run"), None)
+                if (
+                    fname in self._CHUNK_CALLS
+                    and dry is not None
+                    and isinstance(dry.value, ast.Constant)
+                    and dry.value.value is True
+                ):
+                    continue
+                names.add(fname)
+            return names
+
         offenders: list[str] = []
         for path in sorted(tools.glob("*.py")):
             if path.name == "__init__.py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs = {
+                n.name: n
+                for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            # An exempt helper does not contaminate its callers: the reason
+            # it is exempt (a session's own summary is not one of its
+            # inputs) holds just as well one frame up.
+            exempt_here = {n for (f, n) in self._EXEMPT if f == path.name}
+            for name, node in funcs.items():
+                if name in exempt_here:
                     continue
-                if (path.name, node.name) in self._EXEMPT:
-                    continue
-                called = {
-                    c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id
-                    for c in ast.walk(node)
-                    if isinstance(c, ast.Call) and isinstance(c.func, (ast.Attribute, ast.Name))
-                }
+                called = called_names(node, skip=exempt_here)
+                # Inherit from same-module helpers this function calls, so
+                # a mutation hidden one frame down still counts — and so
+                # does the accounting done down there.
+                for helper in called & set(funcs) - {name}:
+                    called |= called_names(funcs[helper], skip=exempt_here)
                 if called & self._CHUNK_CALLS and not (called & self._ACCOUNTING_CALLS):
-                    offenders.append(f"{path.name}::{node.name}")
+                    offenders.append(f"{path.name}::{name}")
 
         assert not offenders, (
             "These functions create or delete chunks without recording provenance "
@@ -840,6 +888,189 @@ class TestProvenanceCompletenessSealing:
         assert "provenance_incomplete" not in row["metadata"]
 
 
+class TestImpreciseWritesFlagTheSession:
+    """An append re-indexes the whole file, so its ``new_chunk_ids`` do
+    not always mean "exactly what this call contributed"."""
+
+    @pytest.mark.asyncio
+    async def test_an_append_that_rechunks_earlier_content_marks_the_session(
+        self, bm25_only_components
+    ):
+        """Appending under a heading a previous session already wrote to
+        merges the two into one chunk with a new id.
+
+        That id lands in this session's provenance, so its record names
+        content it did not author. Attributing precisely would mean
+        tracking the appended span through chunking; until then the
+        session says its record is not exact.
+        """
+        from uuid import UUID
+
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
+        await mem_add(content="ALPHAMARKER", title="Shared", file="shared.md", ctx=ctx)  # type: ignore[arg-type]
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_session_start(agent_id="beta", ctx=ctx)  # type: ignore[arg-type]
+        beta_id = app.current_session_id
+        await mem_add(content="BETAMARKER", title="Shared", file="shared.md", ctx=ctx)  # type: ignore[arg-type]
+
+        # The leak this guards against is real, so assert it is present —
+        # if the chunker stops merging, this test should be revisited
+        # rather than silently passing for the wrong reason.
+        recorded = (await _provenance_events(app, beta_id))[0]["chunk_ids"]
+        bodies = [(await app.storage.get_chunk(UUID(c))).content for c in recorded]
+        assert any("ALPHAMARKER" in b for b in bodies), (
+            "expected the re-chunk to absorb the earlier session's text"
+        )
+
+        row = await app.storage.get_session(beta_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_append_to_fresh_material_stays_complete(self, bm25_only_components):
+        """The signal has to discriminate, or every session falls back
+        and the flag stops meaning anything."""
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="ONE", title="First Heading", file="a.md", ctx=ctx)  # type: ignore[arg-type]
+        await mem_add(content="TWO", title="Second Heading", file="b.md", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_indexing_error_reported_in_stats_marks_the_session(
+        self, bm25_only_components
+    ):
+        """Indexing reports some failures by returning them rather than
+        raising. The append is already durable by then, so the content
+        exists, belongs to no event, and gets picked up by the watcher
+        later — outside the session."""
+        from memtomem.models import IndexingStats
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+
+        async def soft_failure(*args, **kwargs):
+            return IndexingStats(
+                total_files=1,
+                total_chunks=0,
+                indexed_chunks=0,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                errors=("embedding provider unavailable",),
+            )
+
+        app.index_engine.index_file = soft_failure  # type: ignore[method-assign]
+
+        await mem_add(content="content that never got embedded", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_indexing_exception_marks_the_session_before_propagating(
+        self, bm25_only_components
+    ):
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("indexer exploded")
+
+        app.index_engine.index_file = boom  # type: ignore[method-assign]
+
+        # ``@tool_handler`` turns the raise into an error string; the
+        # append already landed either way.
+        await mem_add(content="content whose indexing blew up", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+
+class TestMaintenanceToolsFlagTheSession:
+    @pytest.mark.asyncio
+    async def test_a_decay_expire_marks_the_session_incomplete(self, bm25_only_components):
+        """Found by the AST guard once it learned to follow helpers —
+        ``mem_decay_expire`` deletes through a service, not storage."""
+        from memtomem.server.tools.dedup_decay import mem_decay_expire
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="a fact old enough to expire", ctx=ctx)  # type: ignore[arg-type]
+
+        # max_age_days below any real age ⇒ everything expires.
+        await mem_decay_expire(max_age_days=0.0000001, dry_run=False, ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_dry_run_expiry_flags_nothing(self, bm25_only_components):
+        from memtomem.server.tools.dedup_decay import mem_decay_expire
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="a fact that survives the preview", ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_decay_expire(max_age_days=0.0000001, dry_run=True, ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+
 class TestMutationSurfacesFlagTheSession:
     """``mem_edit`` / ``mem_delete`` record no event but must not be
     invisible — see ``_flag_mutation_on_active_session``."""
@@ -938,6 +1169,80 @@ class TestMutationSurfacesFlagTheSession:
         row = await app.storage.get_session(session_id)
         assert row["metadata"]["provenance_incomplete"] is True
 
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_source_file_delete_marks_the_session_incomplete(self, bm25_only_components):
+        """The ``source_file`` branch is a third path through
+        ``mem_delete``, separate from both the chunk branch and the
+        namespace one, and it was flagging nothing."""
+        from memtomem.server.tools.memory_crud import mem_add, mem_delete
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_add(content="a fact in its own file", file="doomed.md", ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_delete(source_file=str(mem_dir / "doomed.md"), ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_mutation_is_attributed_to_the_session_it_started_in(
+        self, bm25_only_components, monkeypatch
+    ):
+        """The flag must name the session live when the edit was issued.
+
+        Reading the handle after the re-index instead would let a session
+        that ended meanwhile lose the flag entirely and one that started
+        meanwhile inherit a mutation from its predecessor — the same
+        attribution mistake this whole issue exists to fix.
+        """
+        from memtomem.server.tools.memory_crud import mem_add, mem_edit
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
+        first_id = app.current_session_id
+        await mem_add(content="the original wording", ctx=ctx)  # type: ignore[arg-type]
+        chunk_id = (await _provenance_events(app, first_id))[0]["chunk_ids"][0]
+
+        # Swap the session out from under the edit, mid-re-index.
+        real_index_file = app.index_engine.index_file
+        swapped = {"done": False}
+
+        async def swapping_index_file(*args, **kwargs):
+            if not swapped["done"]:
+                swapped["done"] = True
+                await app.storage.create_session("successor", "beta", "default")
+                async with app._session_lock:
+                    app.current_session_id = "successor"
+            return await real_index_file(*args, **kwargs)
+
+        monkeypatch.setattr(app.index_engine, "index_file", swapping_index_file)
+
+        await mem_edit(chunk_id=chunk_id, new_content="the revised wording", ctx=ctx)  # type: ignore[arg-type]
+
+        assert (await app.storage.get_session(first_id))["metadata"][
+            "provenance_incomplete"
+        ] is True
+        successor = await app.storage.get_session("successor")
+        assert "provenance_incomplete" not in successor["metadata"], (
+            "the successor session inherited a mutation that happened in its predecessor"
+        )
+
+        async with app._session_lock:
+            app.current_session_id = first_id
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
