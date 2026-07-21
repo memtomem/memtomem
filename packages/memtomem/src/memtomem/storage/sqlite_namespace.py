@@ -207,17 +207,13 @@ class NamespaceOps:
             )
 
         db = self._get_db()
-        # Two independent signals — conflating them reopens a race (the
-        # same distinction ``SqliteBackend.reset_all`` documents):
-        #   * the write lock is gated on ``db.in_transaction``, because
-        #     ``transaction()`` only flips the backend's flag and does NOT
-        #     begin a SQLite transaction — a rename that is the first
-        #     statement inside that CM still needs its own BEGIN. Python's
-        #     lazy transaction start would only promote on the first DML,
-        #     leaving the preflight SELECTs below unprotected against a
-        #     concurrent writer creating the target between check and UPDATE.
-        #   * ownership (``_in_transaction``) decides only whether *we* are
-        #     allowed to commit/rollback the whole transaction at the end.
+        # Two independent signals — conflating them reopens a race (the same
+        # distinction ``SqliteBackend.reset_all`` documents):
+        #   * ``db.in_transaction`` says whether the write lock already exists.
+        #     ``SqliteBackend.transaction()`` now establishes it before yield;
+        #     standalone rename still has to establish it before these SELECTs.
+        #   * task-affine ownership (``_in_transaction``) decides whether *we*
+        #     may commit/rollback the whole transaction at the end.
         # The savepoint covers the borrowed case: a caller that catches this
         # method's StorageError inside its own ``transaction()`` block must
         # not end up committing our half-written rows.
@@ -242,10 +238,8 @@ class NamespaceOps:
                 raise StorageError(
                     f"rename_namespace could not take the write lock: {exc}"
                 ) from exc
-            # Opening the transaction is not the same as owning it: inside
-            # ``SqliteBackend.transaction()`` the CM has not begun one yet
-            # (it only flips the flag), so we take the lock on its behalf and
-            # leave the commit/rollback to it.
+            # A borrowed outer transaction has already begun, so reaching this
+            # branch means this rename opened the transaction and owns it.
             owns_txn = not borrowed
         elif not borrowed:
             # Someone left DML pending on the shared connection outside

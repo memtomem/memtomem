@@ -103,6 +103,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **SQLite transaction contexts now own a real, task-affine write
+  transaction** (#1896) — `transaction()` takes `BEGIN IMMEDIATE` before its
+  first read or write, so borrowed read-modify-write operations cannot merge a
+  stale snapshot. The shared writer connection now rejects access from another
+  asyncio task instead of letting that task silently join, commit, or roll back
+  the owner's work; callers can retry after the context exits. Cancellation and
+  other `BaseException` exits roll back before releasing ownership, and pooled
+  readers continue to see only committed state.
+
 - `add_session_event` was the only write in the session storage mixin that
   committed unconditionally and had no rollback arm, so a caller's enclosing
   transaction was flushed early — beyond the reach of its own later rollback

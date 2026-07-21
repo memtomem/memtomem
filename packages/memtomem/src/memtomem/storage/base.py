@@ -71,7 +71,8 @@ class StorageBackend(Protocol):
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
 
-    # Transaction
+    # Task-affine transaction. Implementations may restrict the body to
+    # operations that explicitly participate in the outer commit/rollback.
     def transaction(self) -> AbstractAsyncContextManager[None]: ...
 
     # Chunk CRUD

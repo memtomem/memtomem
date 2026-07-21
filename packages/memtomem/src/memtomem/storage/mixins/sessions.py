@@ -150,13 +150,10 @@ class SessionMixin:
         write outran session teardown, which by definition lands after
         ``ended_at`` was stamped.
 
-        Known shared gap, mirrored from ``end_session`` rather than fixed
-        here: :meth:`SqliteBackend.transaction` only flips
-        ``_in_transaction``, it never issues a ``BEGIN``. Under a
-        *borrowed* transaction the SELECT below can therefore run outside
-        any SQLite transaction, leaving a cross-process window before the
-        UPDATE. Both methods have it; fixing one alone would just make
-        them inconsistent.
+        Under a borrowed :meth:`SqliteBackend.transaction`, the outer context
+        has already issued ``BEGIN IMMEDIATE`` before this SELECT. The merge is
+        therefore protected by the same cross-process write lock as the
+        standalone path without committing the caller's earlier work.
         """
         if not patch:
             return False

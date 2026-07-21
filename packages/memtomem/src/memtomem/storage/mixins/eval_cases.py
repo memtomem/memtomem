@@ -274,9 +274,8 @@ class EvalCaseMixin:
                 raise EvalCaseError(f"fingerprints must include {key!r}")
         name = _validate_eval_case_name(name)
         if getattr(self, "_in_transaction", False):
-            # transaction() suppresses commits but takes no lock — running here
-            # would drop the BEGIN IMMEDIATE serialization (mirrors
-            # save_search_feedback).
+            # Promotion owns its full BEGIN/commit/rollback contract and is not
+            # composable inside an outer transaction (mirrors feedback writes).
             raise EvalCaseError("promote_search_run cannot run inside a transaction block")
 
         db = self._get_db()

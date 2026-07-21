@@ -317,22 +317,17 @@ class TestRenameNamespaceAtomicity:
         select_idx = next(i for i, s in enumerate(trace) if s.upper().startswith("SELECT"))
         assert begin_idx < select_idx, f"lock must precede the preflight, trace: {trace}"
 
-    async def test_write_lock_is_taken_inside_an_outer_transaction(self, storage):
-        """First statement inside ``transaction()`` still needs its own BEGIN IMMEDIATE.
-
-        ``transaction()`` only flips the backend flag; it does not open a
-        SQLite transaction, so gating the lock on *ownership* would silently
-        drop it here.
-        """
+    async def test_outer_transaction_locks_before_rename_preflight(self, storage):
+        """The outer ``transaction()`` locks before rename's first SELECT."""
         await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
         db = storage._get_db()
         trace: list[str] = []
-        async with storage.transaction():
-            db.set_trace_callback(lambda sql: trace.append(sql.strip().split("\n", 1)[0]))
-            try:
+        db.set_trace_callback(lambda sql: trace.append(sql.strip().split("\n", 1)[0]))
+        try:
+            async with storage.transaction():
                 await storage.rename_namespace("src-ns", "dst-ns")
-            finally:
-                db.set_trace_callback(None)
+        finally:
+            db.set_trace_callback(None)
 
         begin_idx = next(
             (i for i, s in enumerate(trace) if "BEGIN IMMEDIATE" in s.upper()),
@@ -340,10 +335,10 @@ class TestRenameNamespaceAtomicity:
         )
         select_idx = next((i for i, s in enumerate(trace) if s.upper().startswith("SELECT")), None)
         assert begin_idx is not None, (
-            f"rename must take the write lock even inside transaction(), trace: {trace}"
+            f"transaction() must take the write lock before rename, trace: {trace}"
         )
         assert select_idx is None or begin_idx < select_idx, (
-            f"lock must still precede the preflight, trace: {trace}"
+            f"outer lock must precede the rename preflight, trace: {trace}"
         )
 
     async def test_a_foreign_open_transaction_is_refused(self, storage):
