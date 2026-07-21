@@ -20,6 +20,7 @@ from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._provenance import PROVENANCE_KIND
 from memtomem.summarization import SessionTooLargeError, summarize_session
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,17 @@ async def mem_session_start(
                     app, superseded_id, reason="superseded by new mem_session_start"
                 )
 
-            metadata = {"title": title} if title else {}
+            # The provenance marker says "this session records what its
+            # writes created" — the seven MCP write surfaces log a
+            # provenance event, so a consumer can read the session's real
+            # inputs instead of inferring them from the namespace. It does
+            # NOT say the record is complete; that is
+            # ``provenance_incomplete``, set separately when something was
+            # lost. Sessions created elsewhere (the CLI, the LangGraph
+            # adapter) carry no marker and stay on the namespace path.
+            metadata: dict[str, object] = {"provenance": PROVENANCE_KIND}
+            if title:
+                metadata["title"] = title
             await app.storage.create_session(
                 session_id, stored_agent_id, effective_ns, metadata=metadata
             )

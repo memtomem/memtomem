@@ -416,6 +416,79 @@ class TestMemAddCoreSurfaces:
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
 
+class TestSessionRowMarker:
+    """``mem_session_start`` marks its session as provenance-recording.
+
+    The marker is what lets a consumer distinguish a session whose real
+    inputs it can read from a legacy one it must infer. Sessions created
+    by the CLI or the LangGraph adapter carry no marker and keep the old
+    behavior.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_started_session_carries_the_marker(self, bm25_only_components):
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        row = await app.storage.get_session(app.current_session_id)
+
+        assert row["metadata"]["provenance"] == PROVENANCE_KIND
+        # The marker asserts a mechanism, not completeness — a fresh
+        # session has lost nothing and must not look like it has.
+        assert "provenance_incomplete" not in row["metadata"]
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_the_marker_does_not_displace_the_title(self, bm25_only_components):
+        """``mem_session_list`` reads ``title`` out of the same document."""
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", title="Sprint 7", ctx=ctx)  # type: ignore[arg-type]
+        row = await app.storage.get_session(app.current_session_id)
+
+        assert row["metadata"] == {"provenance": PROVENANCE_KIND, "title": "Sprint 7"}
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_the_marker_survives_session_end(self, bm25_only_components):
+        """``end_session`` merges rather than replaces, so the marker is
+        still there when a consumer reads the closed row."""
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["metadata"]["provenance"] == PROVENANCE_KIND
+        assert "event_counts" in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_a_cli_created_session_carries_no_marker(self, components):
+        """Producers other than ``mem_session_start`` stay unmarked, so a
+        consumer keeps inferring their inputs the old way rather than
+        trusting provenance that was never recorded."""
+        app = AppContext.from_components(components)
+        await app.storage.create_session("cli-session", "planner", "default", {"title": "x"})
+
+        row = await app.storage.get_session("cli-session")
+        assert "provenance" not in row["metadata"]
+
+
 class TestDirectEngineSurfaces:
     """The three surfaces that call the indexing engine directly rather
     than through ``_mem_add_core``."""
