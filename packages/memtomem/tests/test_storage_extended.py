@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1197,3 +1198,146 @@ class TestDeleteByNamespaceMetadata:
         assert deleted == 1
         assert "work" not in self._listed(await storage.list_namespace_meta())
         assert await storage.get_namespace_meta("work") is None
+
+
+class TestRecallByChunkIds:
+    """``recall_chunks(chunk_ids=…)`` — the id-restricted recall path.
+
+    Exists so a caller with explicit provenance can fetch exactly those
+    rows *through* the recall path, keeping the always-on ADR-0011 scope
+    fragment and the ``created_at DESC`` ordering that fetching them via
+    ``get_chunks_batch`` would bypass.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_only_the_named_ids(self, components):
+        storage = components.storage
+        chunks = [make_chunk(content=f"c{i}", source=f"{i}.md") for i in range(4)]
+        await storage.upsert_chunks(chunks)
+        wanted = [chunks[0].id, chunks[2].id]
+
+        got = await storage.recall_chunks(chunk_ids=wanted, limit=100)
+
+        assert {c.id for c in got} == set(wanted)
+
+    @pytest.mark.asyncio
+    async def test_orders_newest_first(self, components):
+        """The summary-link writer truncates with ``[:cap]`` and depends on
+        this ordering, so an id-restricted recall must keep it."""
+        storage = components.storage
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        chunks = [
+            dataclasses.replace(
+                make_chunk(content=f"c{i}", source=f"{i}.md"),
+                created_at=base + timedelta(hours=i),
+            )
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+
+        got = await storage.recall_chunks(chunk_ids=[c.id for c in chunks], limit=100)
+
+        assert [c.content for c in got] == ["c2", "c1", "c0"]
+
+    @pytest.mark.asyncio
+    async def test_empty_sequence_matches_nothing(self, components):
+        """An empty id list means "these zero ids", NOT "no filter".
+
+        Gating on truthiness here would silently widen a caller's
+        filtered-down-to-nothing list into a full unfiltered scan.
+        """
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="present")])
+
+        assert await storage.recall_chunks(chunk_ids=[], limit=100) == []
+
+    @pytest.mark.asyncio
+    async def test_none_leaves_the_recall_unfiltered(self, components):
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="present")])
+
+        got = await storage.recall_chunks(chunk_ids=None, limit=100)
+
+        assert [c.content for c in got] == ["present"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_ids_are_simply_absent(self, components):
+        storage = components.storage
+        chunk = make_chunk(content="real")
+        await storage.upsert_chunks([chunk])
+
+        got = await storage.recall_chunks(chunk_ids=[chunk.id, uuid.uuid4()], limit=100)
+
+        assert [c.id for c in got] == [chunk.id]
+
+    @pytest.mark.asyncio
+    async def test_other_filters_still_apply(self, components):
+        """The id set intersects with, rather than replaces, the other filters."""
+        storage = components.storage
+        a = make_chunk(content="in ns", namespace="work", source="a.md")
+        b = make_chunk(content="other ns", namespace="play", source="b.md")
+        await storage.upsert_chunks([a, b])
+
+        got = await storage.recall_chunks(
+            chunk_ids=[a.id, b.id],
+            namespace_filter=NamespaceFilter(namespaces=("work",)),
+            limit=100,
+        )
+
+        assert [c.id for c in got] == [a.id]
+
+    @pytest.mark.asyncio
+    async def test_large_id_set_does_not_hit_the_variable_limit(self, components):
+        """>999 ids: the reason this binds one JSON array instead of an IN-list.
+
+        An ``IN (?,?,…)`` of this width would blow SQLite's bound-variable
+        limit, and ``placeholders(0)`` cannot express the empty case at all.
+        """
+        storage = components.storage
+        chunks = [make_chunk(content=f"c{i}", source=f"{i}.md") for i in range(5)]
+        await storage.upsert_chunks(chunks)
+        padding = [uuid.uuid4() for _ in range(2000)]
+
+        got = await storage.recall_chunks(chunk_ids=[c.id for c in chunks] + padding, limit=100)
+
+        assert {c.id for c in got} == {c.id for c in chunks}
+
+
+class TestSumChunkContentChars:
+    @pytest.mark.asyncio
+    async def test_agrees_with_the_hydrated_rows(self, components):
+        storage = components.storage
+        chunks = [
+            make_chunk(content="a" * 10, source="a.md"),
+            make_chunk(content="b" * 25, source="b.md"),
+        ]
+        await storage.upsert_chunks(chunks)
+        ids = [c.id for c in chunks]
+
+        count, chars = await storage.sum_chunk_content_chars(ids)
+        hydrated = await storage.recall_chunks(chunk_ids=ids, limit=100)
+
+        assert count == len(hydrated) == 2
+        assert chars == sum(len(c.content) for c in hydrated)
+
+    @pytest.mark.asyncio
+    async def test_counts_characters_not_utf8_bytes(self, components):
+        """The unit must match ``max_input_chars``, a Python character count.
+
+        SQLite ``LENGTH()`` on TEXT counts characters; on a BLOB it would
+        count bytes, and multibyte content would then over-report by ~3x.
+        """
+        storage = components.storage
+        chunk = make_chunk(content="한글abc")
+        await storage.upsert_chunks([chunk])
+
+        _, chars = await storage.sum_chunk_content_chars([chunk.id])
+
+        assert chars == 5
+
+    @pytest.mark.asyncio
+    async def test_empty_id_set_is_zero(self, components):
+        storage = components.storage
+        await storage.upsert_chunks([make_chunk(content="present")])
+
+        assert await storage.sum_chunk_content_chars([]) == (0, 0)

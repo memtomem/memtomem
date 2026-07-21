@@ -168,6 +168,87 @@ class TestSessions:
         assert ids == ["backlog-00", "backlog-01", "backlog-02"]
 
 
+class TestSessionMetadataDurability:
+    """``sessions.metadata`` is a durable document, not a scratch field.
+
+    ``mem_session_start`` writes a ``title`` there and later work records
+    a provenance marker; ending a session must not wipe either. It also
+    has to survive rows whose stored JSON is unusable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_session_decodes_metadata_to_a_dict(self, storage):
+        await storage.create_session("m1", "agent", "default", metadata={"title": "Sprint"})
+
+        row = await storage.get_session("m1")
+
+        assert row["metadata"] == {"title": "Sprint"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored",
+        ["", "not json", "[]", '"text"', "42", "null"],
+        ids=["empty", "syntax-error", "array", "string", "number", "json-null"],
+    )
+    async def test_unusable_metadata_degrades_to_empty_dict(self, storage, stored):
+        """Valid JSON of the wrong *shape* decodes fine but has no ``.get``.
+
+        A caller reading a key off the result would raise on data it is
+        supposed to tolerate, so everything non-object collapses to ``{}``.
+        """
+        await storage.create_session("m2", "agent", "default")
+        db = storage._get_db()
+        db.execute("UPDATE sessions SET metadata = ? WHERE id = ?", (stored, "m2"))
+        db.commit()
+
+        row = await storage.get_session("m2")
+
+        assert row["metadata"] == {}
+
+    @pytest.mark.asyncio
+    async def test_end_session_keeps_keys_it_was_not_given(self, storage):
+        """Ending used to replace the whole document, silently discarding
+        the ``title`` recorded at session start."""
+        await storage.create_session("m3", "agent", "default", metadata={"title": "Sprint"})
+
+        await storage.end_session("m3", "done", {"event_counts": {"add": 2}})
+
+        row = await storage.get_session("m3")
+        assert row["metadata"] == {"title": "Sprint", "event_counts": {"add": 2}}
+
+    @pytest.mark.asyncio
+    async def test_end_session_replaces_snapshot_keys_wholesale(self, storage):
+        """``event_counts`` is a complete snapshot, so a re-end must drop
+        event types the new snapshot no longer names.
+
+        This is why the merge is shallow rather than SQLite's
+        ``json_patch``: JSON Merge Patch recurses into nested objects and
+        would resurrect the stale ``query`` count.
+        """
+        await storage.create_session("m4", "agent", "default")
+        await storage.end_session("m4", None, {"event_counts": {"query": 2, "add": 4}})
+
+        await storage.end_session("m4", None, {"event_counts": {"add": 1}})
+
+        row = await storage.get_session("m4")
+        assert row["metadata"]["event_counts"] == {"add": 1}
+
+    @pytest.mark.asyncio
+    async def test_end_session_survives_unusable_stored_metadata(self, storage):
+        """``get_session`` tolerates a malformed row, so ending one must
+        too — ``json_patch`` would have raised here instead."""
+        await storage.create_session("m5", "agent", "default")
+        db = storage._get_db()
+        db.execute("UPDATE sessions SET metadata = ? WHERE id = ?", ("not json", "m5"))
+        db.commit()
+
+        await storage.end_session("m5", "done", {"event_counts": {"add": 1}})
+
+        row = await storage.get_session("m5")
+        assert row["metadata"] == {"event_counts": {"add": 1}}
+        assert row["summary"] == "done"
+
+
 class TestSessionAgentInheritance:
     """``mem_session_start`` records ``agent_id`` on the AppContext so
     ``mem_agent_search`` can resolve the active agent without the caller

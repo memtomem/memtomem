@@ -3,7 +3,39 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
+
+
+def decode_session_metadata(raw: object) -> dict:
+    """Normalize a stored ``sessions.metadata`` value to a dict.
+
+    The column holds a JSON document written by ``json.dumps``, but a row
+    can predate a schema expectation, be ``NULL``, or have been edited by
+    hand into valid-but-wrong-shape JSON (``[]``, ``"text"``, ``42``,
+    ``null``). Every one of those decodes without error yet has no
+    ``.get`` — callers that read a key off the result would raise on data
+    they are supposed to tolerate. Return ``{}`` for all of them so a bad
+    row degrades to "no metadata" instead of breaking the session path.
+    """
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, (str, bytes, bytearray)):
+        logger.warning("session_metadata_unexpected_column_type type=%s", type(raw).__name__)
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        logger.warning("session_metadata_malformed value=%r", raw)
+        return {}
+    if not isinstance(decoded, dict):
+        logger.warning("session_metadata_not_an_object type=%s", type(decoded).__name__)
+        return {}
+    return decoded
 
 
 class SessionMixin:
@@ -38,11 +70,33 @@ class SessionMixin:
             raise
 
     async def end_session(self, session_id: str, summary: str | None, metadata: dict) -> None:
+        """Close a session, **merging** ``metadata`` into the stored document.
+
+        The merge is shallow: top-level keys in ``metadata`` replace their
+        stored counterparts and every other key survives. Ending a session
+        used to overwrite the whole document with just ``event_counts``,
+        silently discarding the ``title`` recorded at session start — and
+        any other key a caller had put there.
+
+        Shallow is the right depth, not a compromise. SQLite's
+        ``json_patch`` implements JSON Merge Patch, which recurses into
+        nested objects: patching a stored
+        ``{"event_counts": {"query": 2, "add": 4}}`` with
+        ``{"event_counts": {"query": 1}}`` yields
+        ``{"query": 1, "add": 4}`` — resurrecting an event type the new
+        snapshot says is gone. ``event_counts`` is a complete snapshot and
+        must replace wholesale. ``json_patch`` additionally deletes keys
+        on a ``null`` value (so a null could never be persisted) and
+        raises on a row whose stored JSON is malformed, which
+        :func:`decode_session_metadata` deliberately tolerates.
+        """
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        row = db.execute("SELECT metadata FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        merged = {**decode_session_metadata(row[0] if row else None), **metadata}
         db.execute(
             "UPDATE sessions SET ended_at = ?, summary = ?, metadata = ? WHERE id = ?",
-            (now, summary, json.dumps(metadata), session_id),
+            (now, summary, json.dumps(merged), session_id),
         )
         db.commit()
 
@@ -107,6 +161,11 @@ class SessionMixin:
         session's ``started_at`` and ``namespace`` to scope the
         recall_chunks lookup. Mirrors the column shape returned by
         ``list_sessions``.
+
+        ``metadata`` comes back **decoded to a dict**, matching
+        ``get_session_events`` rather than the raw JSON string this used
+        to return; see :func:`decode_session_metadata` for how bad rows
+        degrade.
         """
         db = self._get_db()
         row = db.execute(
@@ -123,7 +182,7 @@ class SessionMixin:
             "ended_at": row[3],
             "summary": row[4],
             "namespace": row[5],
-            "metadata": row[6],
+            "metadata": decode_session_metadata(row[6]),
         }
 
     async def find_stale_active_sessions(
