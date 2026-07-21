@@ -136,15 +136,39 @@ class SessionMixin:
         chunk_ids: list[str] | None = None,
         metadata: dict | None = None,
     ) -> None:
+        """Append an event to a session's log.
+
+        Honors an enclosing transaction and closes its own on failure —
+        the contract every sibling write in this mixin already has
+        (``create_session``, ``end_session``). It was the lone exception:
+        it committed unconditionally, so a caller who opened a
+        transaction had its earlier work flushed here and put beyond
+        rollback, and a failing INSERT left the transaction open on the
+        shared writer connection for the next unrelated commit to flush
+        (the #1572 idiom).
+
+        The rollback arm is what makes the caller's failure handling
+        viable: a caller that reacts to a failed event write by recording
+        the failure elsewhere needs the connection usable afterwards. A
+        left-open transaction would take that fallback down with the
+        primary write.
+        """
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         meta_json = json.dumps(metadata) if metadata else "{}"
-        db.execute(
-            "INSERT INTO session_events (session_id, event_type, content, chunk_ids, created_at, metadata)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, event_type, content, json.dumps(chunk_ids or []), now, meta_json),
-        )
-        db.commit()
+        try:
+            db.execute(
+                "INSERT INTO session_events"
+                " (session_id, event_type, content, chunk_ids, created_at, metadata)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, event_type, content, json.dumps(chunk_ids or []), now, meta_json),
+            )
+            if not self._in_transaction:
+                db.commit()
+        except Exception:
+            if not self._in_transaction:
+                db.rollback()
+            raise
 
     async def list_sessions(
         self,

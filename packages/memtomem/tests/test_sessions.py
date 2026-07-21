@@ -287,6 +287,20 @@ class TestSessionMetadataDurability:
         assert row["summary"] is None
         assert row["metadata"] == {"title": "Sprint"}
 
+    @pytest.mark.asyncio
+    async def test_add_session_event_inside_a_transaction_defers_its_commit(self, storage):
+        """``add_session_event`` was the one session write that committed
+        unconditionally, so a caller's transaction was flushed here and
+        put beyond the rollback its own failure should have triggered."""
+        await storage.create_session("m8", "agent", "default")
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.add_session_event("m8", "add", "write-v1 add chunks=1", ["c1"])
+                raise RuntimeError("caller fails after logging the event")
+
+        assert await storage.get_session_events("m8") == []
+
 
 class TestSessionAgentInheritance:
     """``mem_session_start`` records ``agent_id`` on the AppContext so
