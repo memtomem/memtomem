@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
@@ -10,12 +11,17 @@ from pathlib import Path
 
 import pytest
 
+from memtomem.context import _atomic as _atomic_mod
 from memtomem.context._atomic import (
     _file_lock,
+    _fsync_fd,
     _lock_path_for,
     atomic_write_bytes,
     atomic_write_text,
+    fsync_dir,
     iter_installed_files,
+    rename_no_replace,
+    write_tree_payload,
 )
 
 
@@ -277,3 +283,241 @@ class TestIterInstalledFilesFailClosed:
         monkeypatch.setattr(Path, "iterdir", failing_iterdir)
         with pytest.raises(OSError):
             list(iter_installed_files(root))
+
+
+class TestFsyncDir:
+    """``fsync_dir`` is the rename-durability barrier and must NEVER raise: the
+    rename has already succeeded, so aborting a completed, correct operation
+    because we could not *prove* durability would trade a real failure for a
+    hypothetical one (ADR-0030 §10)."""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot fsync a directory")
+    def test_flushes_a_real_directory(self, tmp_path: Path) -> None:
+        assert fsync_dir(tmp_path) is True
+
+    def test_missing_path_returns_false(self, tmp_path: Path) -> None:
+        assert fsync_dir(tmp_path / "nope") is False
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX open() semantics")
+    def test_regular_file_returns_false(self, tmp_path: Path) -> None:
+        target = tmp_path / "f.txt"
+        target.write_text("x")
+        # A file fd fsyncs fine on POSIX, so this must not be read as a
+        # contract violation — either outcome is acceptable, but it must not
+        # raise, which is the property that matters.
+        assert fsync_dir(target) in (True, False)
+
+    @pytest.mark.parametrize("err", [errno.EINVAL, errno.EPERM, errno.EACCES, errno.EBADF])
+    def test_rejected_fsync_degrades_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: int
+    ) -> None:
+        """Network / tmpfs mounts reject directory fsync — degrade to
+        process-crash consistency instead of failing the caller."""
+        real_fsync = os.fsync
+
+        def _fake(fd: int) -> None:
+            raise OSError(err, os.strerror(err))
+
+        monkeypatch.setattr(os, "fsync", _fake)
+        assert fsync_dir(tmp_path) is False
+        monkeypatch.setattr(os, "fsync", real_fsync)
+
+    def test_open_failure_degrades_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fake(*_args: object, **_kw: object) -> int:
+            raise OSError(errno.EACCES, "denied")
+
+        monkeypatch.setattr(os, "open", _fake)
+        assert fsync_dir(tmp_path) is False
+
+    def test_windows_returns_false_without_opening(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        opened: list[object] = []
+        monkeypatch.setattr(_atomic_mod.sys, "platform", "win32")
+        monkeypatch.setattr(os, "open", lambda *a, **k: opened.append(a))
+        assert fsync_dir(tmp_path) is False
+        assert not opened
+
+
+class TestFullFsync:
+    def test_full_fsync_writes_correct_bytes(self, tmp_path: Path) -> None:
+        target = tmp_path / "v1.md"
+        atomic_write_bytes(target, b"snapshot", full_fsync=True)
+        assert target.read_bytes() == b"snapshot"
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="F_FULLFSYNC is Darwin-only")
+    def test_darwin_uses_f_fullfsync(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import fcntl
+
+        calls: list[int] = []
+        real = fcntl.fcntl
+
+        def _spy(fd: int, op: int, *args: object) -> object:
+            calls.append(op)
+            return real(fd, op, *args)
+
+        monkeypatch.setattr(fcntl, "fcntl", _spy)
+        fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            _fsync_fd(fd, full=True)
+        except OSError:
+            pass  # /dev/null may reject the barrier — the CALL is the assertion
+        finally:
+            os.close(fd)
+        assert getattr(fcntl, "F_FULLFSYNC", 51) in calls
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="F_FULLFSYNC is Darwin-only")
+    def test_falls_back_to_fsync_when_unsupported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Some network mounts ENOTSUP the barrier; a rejection must degrade to
+        the plain fsync we would have done anyway, not fail the write."""
+        import fcntl
+
+        monkeypatch.setattr(
+            fcntl, "fcntl", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.ENOTSUP, "nope"))
+        )
+        fsynced: list[int] = []
+        real_fsync = os.fsync
+        monkeypatch.setattr(os, "fsync", lambda fd: (fsynced.append(fd), real_fsync(fd))[1])
+
+        target = tmp_path / "v1.md"
+        atomic_write_bytes(target, b"x", full_fsync=True)
+        assert target.read_bytes() == b"x"
+        assert fsynced
+
+
+class TestWriteTreePayload:
+    def test_materializes_nested_payload(self, tmp_path: Path) -> None:
+        dst = tmp_path / "v1"
+        write_tree_payload(dst, [("SKILL.md", b"top\n"), ("a/b/c.md", b"deep\n")], durable=True)
+        assert (dst / "SKILL.md").read_bytes() == b"top\n"
+        assert (dst / "a" / "b" / "c.md").read_bytes() == b"deep\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    def test_default_mode_is_0o644(self, tmp_path: Path) -> None:
+        dst = tmp_path / "v1"
+        write_tree_payload(dst, [("f.md", b"x")])
+        assert stat.S_IMODE((dst / "f.md").stat().st_mode) == 0o644
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "../escape",
+            "/abs",
+            "a//b",
+            "",
+            ".",
+            "..",
+            "a/./b",
+            "a/../b",
+            "a\\b",
+            "C:/x",
+            "a/",
+            # Windows DRIVE-RELATIVE: no separator, no ``..``, yet
+            # ``PureWindowsPath('/base').joinpath('C:escape.txt')`` discards the
+            # base entirely — the write lands outside the destination.
+            "C:escape.txt",
+            "safe/C:escape.txt",
+            # NTFS alternate data stream, not a filename.
+            "file:stream",
+            # No OS accepts NUL in a filename, so without a preflight check it
+            # raises from inside the write loop — after earlier entries landed.
+            "bad\0.md",
+            "dir\0/f.md",
+        ],
+    )
+    def test_rejects_unsafe_relpath_writing_nothing(self, tmp_path: Path, rel: str) -> None:
+        """Containment lives at the write primitive so no caller can forget it —
+        and a rejection must leave the destination untouched, not half-built."""
+        dst = tmp_path / "v1"
+        with pytest.raises(ValueError):
+            write_tree_payload(dst, [("ok.md", b"x"), (rel, b"bad")])
+        assert not dst.exists()
+
+    def test_rejects_duplicate_relpath(self, tmp_path: Path) -> None:
+        dst = tmp_path / "v1"
+        with pytest.raises(ValueError, match="duplicate"):
+            write_tree_payload(dst, [("a.md", b"1"), ("a.md", b"2")])
+        assert not dst.exists()
+
+    def test_durable_fsyncs_created_dirs_deepest_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[Path] = []
+        monkeypatch.setattr(_atomic_mod, "fsync_dir", lambda p: seen.append(p) or True)
+
+        dst = tmp_path / "v1"
+        write_tree_payload(dst, [("a/b/c.md", b"x")], durable=True)
+
+        assert seen[-1] == dst  # parent last
+        assert seen[0] == dst / "a" / "b"  # deepest first
+        # EVERY intermediate ancestor, not just the file's immediate parent:
+        # syncing only ``a/b`` leaves ``a``'s entry for ``b`` unflushed, so a
+        # power cut can lose ``b`` from a tree already reported complete.
+        assert set(seen) == {dst / "a" / "b", dst / "a", dst}
+        assert [len(p.parts) for p in seen] == sorted((len(p.parts) for p in seen), reverse=True)
+
+    def test_non_durable_skips_dir_fsync(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[Path] = []
+        monkeypatch.setattr(_atomic_mod, "fsync_dir", lambda p: seen.append(p) or True)
+        write_tree_payload(tmp_path / "v1", [("a/b.md", b"x")])
+        assert seen == []
+
+
+class TestRenameNoReplace:
+    def test_moved_not_copied(self) -> None:
+        """``skills._rename_no_replace`` must be the SAME object, not a copy —
+        a second copy is how one call site silently loses the #1839 exclusivity
+        contract."""
+        from memtomem.context import skills
+
+        assert skills._rename_no_replace is rename_no_replace
+
+    def test_refuses_existing_destination(self, tmp_path: Path) -> None:
+        src = tmp_path / "staging"
+        src.mkdir()
+        (src / "f.md").write_text("new")
+        dst = tmp_path / "target"
+        dst.mkdir()  # empty dir — plain os.rename WOULD replace this on POSIX
+        (dst / "keep.md").write_text("old")
+
+        with pytest.raises(OSError):
+            rename_no_replace(src, dst)
+        assert (dst / "keep.md").read_text() == "old"
+        assert src.is_dir()
+
+    def test_refuses_empty_existing_destination(self, tmp_path: Path) -> None:
+        """The exact case plain ``os.rename`` would silently clobber."""
+        src = tmp_path / "staging"
+        src.mkdir()
+        (src / "f.md").write_text("new")
+        dst = tmp_path / "target"
+        dst.mkdir()
+
+        with pytest.raises(OSError):
+            rename_no_replace(src, dst)
+        assert list(dst.iterdir()) == []
+
+    def test_cross_parent_refused(self, tmp_path: Path) -> None:
+        src = tmp_path / "a" / "staging"
+        src.mkdir(parents=True)
+        dst = tmp_path / "b" / "target"
+        dst.parent.mkdir(parents=True)
+        with pytest.raises(OSError) as exc:
+            rename_no_replace(src, dst)
+        assert exc.value.errno == errno.EXDEV
+
+    def test_promotes_into_absent_destination(self, tmp_path: Path) -> None:
+        src = tmp_path / "staging"
+        src.mkdir()
+        (src / "f.md").write_text("new")
+        dst = tmp_path / "target"
+
+        rename_no_replace(src, dst)
+        assert (dst / "f.md").read_text() == "new"
+        assert not src.exists()

@@ -16,6 +16,7 @@ from memtomem.cli._errors import raise_cli_error
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     InvalidNameError,
+    normalize_bound_agent_id,
     validate_agent_id,
     validate_namespace,
 )
@@ -55,15 +56,19 @@ def _parse_duration(spec: str) -> timedelta:
 def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:
     """Resolve the namespace stored on a CLI-created session record.
 
-    Mirrors the priority chain documented on ``mem_session_start``
-    (``server/tools/session.py:76-95``), with the ``app.current_namespace``
-    step omitted: each ``mm`` invocation is a fresh process and has no
-    cross-call session state to consult.
+    Mirrors the priority chain documented on ``mem_session_start``, with
+    the ``app.current_namespace`` step omitted: each ``mm`` invocation is
+    a fresh process and has no cross-call session state to consult — and
+    for the same reason the CLI binds no runtime agent, so the #1875
+    write-routing question does not arise here. The sentinel is resolved
+    through :func:`normalize_bound_agent_id` so the ``"default"`` rule
+    lives in one place instead of being re-declared as a literal.
     """
     if namespace:
         return namespace
-    if agent_id and agent_id != "default":
-        return f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
+    bound_agent_id = normalize_bound_agent_id(agent_id)
+    if bound_agent_id:
+        return f"{AGENT_NAMESPACE_PREFIX}{bound_agent_id}"
     return "default"
 
 
@@ -267,6 +272,10 @@ async def _start(
             if current:
                 current_row = await comp.storage.get_session(current)
                 if current_row and current_row["ended_at"] is None:
+                    # Compares the *stored literal*, so "default" is a real
+                    # key here — the #1875 sentinel applies to runtime
+                    # bindings, not to the session row (see
+                    # ``normalize_bound_agent_id``).
                     if current_row["agent_id"] == agent_id:
                         session_id = current
                         resumed = True

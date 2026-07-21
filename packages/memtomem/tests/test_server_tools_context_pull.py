@@ -179,10 +179,12 @@ async def test_apply_source_conflict_refuses(proj: Path) -> None:
         kind="agents", name="a", scope="project_shared", apply=True, confirm_project_shared=True
     )
     assert out.startswith("refused:")
-    # Engine reason names the divergent sources + the disambiguation flag
-    # (verbatim, shared with the web picker — CLI-flavored "--from" wording).
+    # The engine names the divergent sources; the REMEDIATION is MCP's own
+    # parameter, never the CLI flag this reason used to hard-code (#1869).
     assert "distinct" in out
     assert "claude" in out and "gemini" in out
+    assert 'Re-call with from_runtime="<runtime>" to choose a source.' in out
+    assert "--from" not in out
     assert not _store_exists(proj, "agents", "a")
 
 
@@ -203,6 +205,8 @@ async def test_apply_overwrite_refused_without_flag(proj: Path) -> None:
         kind="agents", name="a", scope="project_shared", apply=True, confirm_project_shared=True
     )
     assert out.startswith("refused:")
+    assert "Re-call with overwrite=True to replace it." in out
+    assert "--overwrite" not in out
     assert "STORE" in _canonical_agent_text(proj, "a")  # untouched
 
 
@@ -295,6 +299,10 @@ async def test_project_shared_secret_hard_refused_even_with_force(proj: Path) ->
         force_unsafe_import=True,
     )
     assert out.startswith("privacy block:")
+    # No valve exists on the git-tracked tier (ADR-0011 §5) — and the refusal
+    # must not advertise one, even though it carries the same
+    # ``privacy_blocked`` code the bypassable tiers use.
+    assert "force_unsafe_import=True" not in out
     assert not _store_exists(proj, "agents", "a")
 
 
@@ -305,7 +313,11 @@ async def test_user_tier_secret_bypassable_with_literal_true(proj: Path) -> None
         kind="agents", name="a", scope="user", apply=True, allow_host_writes=True
     )
     assert blocked.startswith("privacy block:")
-    assert "force_unsafe_import=True" in blocked
+    # Exactly ONE valve hint: the engine reason used to carry
+    # ``--force-unsafe-import`` while this tool appended its own
+    # ``force_unsafe_import=True``, so an agent saw both spellings (#1869).
+    assert blocked.count("force_unsafe_import=True") == 1
+    assert "--force-unsafe-import" not in blocked
     assert not _store_exists(proj, "agents", "a", scope="user")
 
     # Literal True opens the valve (user tier is bypassable).
@@ -501,13 +513,42 @@ def test_pull_status_buckets_are_exhaustive() -> None:
     )
     # Buckets must not overlap — a status renders with exactly one prefix.
     assert not (_PULL_ERROR_STATUSES & _PULL_REFUSAL_STATUSES)
-    # The four the web route maps to non-200 are exactly the MCP "error:" set.
+    # The five the web route maps to non-200 are exactly the MCP "error:" set.
+    # ``swap_recovery_pending`` is a 409 there, so it belongs here rather than
+    # with the refusals — that bucket is defined as "what the web route returns
+    # as a typed 200", and it is also not an actionable refusal (the
+    # remediation is an operator inspecting paths, not a parameter to change).
     assert set(_PULL_ERROR_STATUSES) == {
         "lock_timeout",
         "plan_stale",
         "snapshot_failed",
         "write_failed",
+        "swap_recovery_pending",
     }
+
+
+def test_swap_recovery_pending_renders_as_error_not_refused() -> None:
+    """A wedged artifact must not inherit the benign ``refused:`` prefix.
+
+    ``refused:`` reads as "your request was declined, adjust and retry"; this
+    state needs an operator to look at two paths on disk. The reason is
+    redacted like every other one.
+    """
+    from memtomem.context.pull_apply import PullApplyResult
+    from memtomem.server.tools.context import _format_pull_result
+
+    result = PullApplyResult(
+        status="swap_recovery_pending",
+        kind="skills",
+        name="demo",
+        scope="user",
+        reason="an interrupted directory swap left two candidate trees",
+        reason_code="swap_recovery_pending",
+    )
+    out = _format_pull_result(result, Path("/nonexistent"))
+    assert out.startswith("error:")
+    assert "unhandled Pull status" not in out
+    assert "interrupted directory swap" in out
 
 
 def test_unknown_status_fails_closed() -> None:

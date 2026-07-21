@@ -1,9 +1,10 @@
 """Tests for the ADR-0022 version/label web routes (``context_versions``).
 
 Covers create (freeze) / promote (== rollback) / delete-label / list across the
-two eligible types (agents + commands), plus the scope-boundary rejections:
-skills + unknown types 404, flat-layout 409 ("migrate first"), non-shared tier
-400, reserved/version-shaped label names 400.
+two writable types (agents + commands) and the READ-ONLY skills surface
+(ADR-0030 §10), plus the scope-boundary rejections: unknown types 404,
+skill mutations 409 ``version_writes_read_only``, flat-layout 409 ("migrate
+first"), non-shared tier 400, reserved/version-shaped label names 400.
 """
 
 from __future__ import annotations
@@ -77,8 +78,7 @@ def _make_dir_command(tmp_path: Path, name: str) -> Path:
 def _make_dir_skill(tmp_path: Path, name: str) -> Path:
     """Directory-layout skill: ``.memtomem/skills/<name>/<SKILL_MANIFEST>``.
 
-    Skills are out of versioning (ADR-0022 inv 7); used only to give the skills
-    LIST a non-empty payload for the ``?include=versions`` no-op assertion.
+    Skills are a READ-ONLY version surface (ADR-0030 §10).
     """
     d = tmp_path / ".memtomem" / "skills" / name
     d.mkdir(parents=True, exist_ok=True)
@@ -124,10 +124,20 @@ class TestListVersions:
         assert body["has_versions"] is False
 
     @pytest.mark.anyio
-    async def test_unsupported_type_skills_404(self, client, tmp_path):
+    async def test_missing_skill_404(self, client, tmp_path):
+        """Skills ARE a version surface now (ADR-0030 §10) — an absent one is a
+        plain missing artifact, not an unsupported type."""
         r = await client.get("/api/context/skills/anything/versions")
         assert r.status_code == 404
-        assert "agents and commands only" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["message"] == "skill 'anything' not found"
+        assert r.json()["detail"]["error_kind"] == "missing"
+
+    @pytest.mark.anyio
+    async def test_unsupported_type_404(self, client, tmp_path):
+        r = await client.get("/api/context/dogs/anything/versions")
+        assert r.status_code == 404
+        message = r.json()["detail"]["message"]
+        assert "agents, commands, skills only" in message
         assert r.json()["detail"]["error_kind"] == "missing"
 
     @pytest.mark.anyio
@@ -350,9 +360,12 @@ class TestCreateVersion:
         assert r.json()["detail"]["reason_code"] == "flat_layout_not_versionable"
 
     @pytest.mark.anyio
-    async def test_create_on_skills_type_404(self, client, tmp_path):
+    async def test_create_on_skills_type_409_read_only(self, client, tmp_path):
+        """Skills gained a version surface (ADR-0030 §10) — creating on it is
+        refused as read-only, no longer as an unsupported type."""
         r = await client.post("/api/context/skills/x/versions", json={})
-        assert r.status_code == 404
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
 
     @pytest.mark.anyio
     async def test_create_non_shared_tier_400(self, client, tmp_path):
@@ -774,3 +787,182 @@ class TestInvalidNameEnvelopeParity:
         for route, r in responses.items():
             assert r.status_code == 400, f"{route}: unexpected status {r.status_code}"
             assert r.json() == expected, f"{route}: {r.json()}"
+
+
+class TestSkillsReadOnlyVersions:
+    """ADR-0030 §10: skills READ their tree-snapshot store; every mutation is
+    refused with 409 ``version_writes_read_only`` — a different failure from the
+    unsupported-type 404, so the UI can tell "no such surface" from "read-only"."""
+
+    def _seed_tree_version(self, tmp_path: Path, name: str) -> Path:
+        from memtomem.context import versioning
+
+        skill_dir = _make_dir_skill(tmp_path, name)
+        versioning.create_tree_version(skill_dir, [("SKILL.md", b"x")], note="from pull")
+        return skill_dir
+
+    @pytest.mark.anyio
+    async def test_get_lists_tree_versions_as_read_only(self, client, tmp_path):
+        self._seed_tree_version(tmp_path, "demo")
+        r = await client.get("/api/context/skills/demo/versions")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["writable"] is False
+        assert body["layout"] == "dir"
+        assert body["migrate_required"] is False
+        assert body["has_versions"] is True
+        assert [(v["tag"], v["layout"]) for v in body["versions"]] == [("v1", "tree")]
+
+    @pytest.mark.anyio
+    async def test_agents_stay_writable_with_file_layout(self, client, tmp_path):
+        _make_dir_agent(tmp_path, "reviewer")
+        r = await client.get("/api/context/agents/reviewer/versions")
+        assert r.json()["writable"] is True
+
+    @pytest.mark.anyio
+    async def test_create_version_409_and_writes_nothing(self, client, tmp_path):
+        skill_dir = _make_dir_skill(tmp_path, "demo")
+        r = await client.post("/api/context/skills/demo/versions", json={"note": "no"})
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
+        assert not (skill_dir / "versions").exists()
+        assert not (skill_dir / "versions.json").exists()
+
+    @pytest.mark.anyio
+    async def test_promote_label_409_and_writes_nothing(self, client, tmp_path):
+        skill_dir = self._seed_tree_version(tmp_path, "demo")
+        before = (skill_dir / "versions.json").read_bytes()
+
+        r = await client.put("/api/context/skills/demo/labels/production", json={"version": "v1"})
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
+        assert (skill_dir / "versions.json").read_bytes() == before
+
+    @pytest.mark.anyio
+    async def test_delete_label_409_and_writes_nothing(self, client, tmp_path):
+        skill_dir = self._seed_tree_version(tmp_path, "demo")
+        before = (skill_dir / "versions.json").read_bytes()
+
+        r = await client.delete("/api/context/skills/demo/labels/production")
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
+        assert (skill_dir / "versions.json").read_bytes() == before
+
+    @pytest.mark.anyio
+    async def test_enable_is_an_idempotent_noop(self, client, tmp_path):
+        """Skills are ALWAYS dir layout, so the requested end state already
+        holds — report the no-op rather than the read-only refusal."""
+        skill_dir = _make_dir_skill(tmp_path, "demo")
+        before = sorted(p.name for p in skill_dir.iterdir())
+
+        r = await client.post("/api/context/skills/demo/versions/enable")
+        assert r.status_code == 200
+        assert r.json() == {
+            "name": "demo",
+            "artifact_type": "skills",
+            "target_scope": "project_shared",
+            "layout": "dir",
+            "migrated": False,
+        }
+        assert sorted(p.name for p in skill_dir.iterdir()) == before
+
+    @pytest.mark.anyio
+    async def test_read_only_refusal_is_distinct_from_unsupported_type(self, client, tmp_path):
+        _make_dir_skill(tmp_path, "demo")
+        read_only = await client.post("/api/context/skills/demo/versions", json={})
+        unsupported = await client.post("/api/context/dogs/demo/versions", json={})
+        assert (read_only.status_code, unsupported.status_code) == (409, 404)
+        assert read_only.json()["detail"]["reason_code"] == "version_writes_read_only"
+        assert unsupported.json()["detail"].get("reason_code") != "version_writes_read_only"
+
+    @pytest.mark.anyio
+    async def test_write_gate_is_type_level_and_precedes_resolution(self, client, tmp_path):
+        """Read-only is a property of the TYPE, so it is reported whether or not
+        the artifact exists — matching how ``_reject_non_shared_write`` already
+        outranks existence on this router. The read path still distinguishes
+        them: ``GET`` on a missing skill 404s (see ``test_missing_skill_404``).
+        """
+        r = await client.post("/api/context/skills/ghost/versions", json={})
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
+
+
+class TestReadOnlyGateOrdering:
+    """Review-gate regression: the read-only gate must outrank the tier gate.
+
+    Otherwise a skill mutation on ``user`` / ``project_local`` reported a tier
+    error, masking the real reason, and ``enable`` — documented as a
+    cross-surface no-op — returned 400 on exactly the tiers where the CLI and
+    MCP twins still succeed.
+    """
+
+    @pytest.mark.parametrize("tier", ["user", "project_local"])
+    @pytest.mark.anyio
+    async def test_create_reports_read_only_not_tier(self, client, tmp_path, tier):
+        _make_dir_skill(tmp_path, "demo")
+        r = await client.post(f"/api/context/skills/demo/versions?target_scope={tier}", json={})
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
+
+    @pytest.mark.parametrize("tier", ["user", "project_local"])
+    @pytest.mark.anyio
+    async def test_promote_reports_read_only_not_tier(self, client, tmp_path, tier):
+        _make_dir_skill(tmp_path, "demo")
+        r = await client.put(
+            f"/api/context/skills/demo/labels/production?target_scope={tier}",
+            json={"version": "v1"},
+        )
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
+
+    @pytest.mark.parametrize("tier", ["user", "project_local"])
+    @pytest.mark.anyio
+    async def test_delete_label_reports_read_only_not_tier(self, client, tmp_path, tier):
+        _make_dir_skill(tmp_path, "demo")
+        r = await client.delete(f"/api/context/skills/demo/labels/production?target_scope={tier}")
+        assert r.status_code == 409
+        assert r.json()["detail"]["reason_code"] == "version_writes_read_only"
+
+    @pytest.mark.anyio
+    async def test_agents_still_get_the_tier_refusal(self, client, tmp_path):
+        """The hoist must not disarm the tier policy for writable types."""
+        _make_dir_agent(tmp_path, "reviewer")
+        r = await client.post("/api/context/agents/reviewer/versions?target_scope=user", json={})
+        assert r.status_code == 400
+        assert r.json()["detail"]["reason_code"] == "non_shared_tier"
+
+    @pytest.mark.anyio
+    async def test_unknown_type_still_gets_the_tier_refusal_first(self, client, tmp_path):
+        """An unknown type is not "read-only" — it must keep its old path."""
+        r = await client.post("/api/context/dogs/demo/versions?target_scope=user", json={})
+        assert r.status_code == 400
+        assert r.json()["detail"]["reason_code"] == "non_shared_tier"
+
+
+class TestSkillsEnableNoopAcrossTiers:
+    @pytest.mark.anyio
+    async def test_enable_is_a_noop_on_the_shared_tier(self, client, tmp_path):
+        """Skills are always dir layout, so enable has nothing to protect and
+        must match the CLI/MCP twins, which have no tier gate at all."""
+        _make_dir_skill(tmp_path, "demo")
+        r = await client.post("/api/context/skills/demo/versions/enable")
+        assert r.status_code == 200
+        assert r.json()["migrated"] is False
+
+    @pytest.mark.parametrize("tier", ["user", "project_local"])
+    @pytest.mark.anyio
+    async def test_enable_on_other_tiers_is_no_longer_a_tier_refusal(self, client, tmp_path, tier):
+        """The fixture seeds only the shared tier, so these 404 on "no such
+        skill in that tier" — the point is that they no longer 400 on the tier
+        policy, which used to mask the intended no-op."""
+        _make_dir_skill(tmp_path, "demo")
+        r = await client.post(f"/api/context/skills/demo/versions/enable?target_scope={tier}")
+        assert r.status_code == 404
+        assert r.json()["detail"].get("reason_code") != "non_shared_tier"
+
+    @pytest.mark.anyio
+    async def test_agent_enable_keeps_its_tier_gate(self, client, tmp_path):
+        _make_flat_agent(tmp_path, "legacy")
+        r = await client.post("/api/context/agents/legacy/versions/enable?target_scope=user")
+        assert r.status_code == 400
+        assert r.json()["detail"]["reason_code"] == "non_shared_tier"

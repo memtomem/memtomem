@@ -295,7 +295,7 @@ async def test_gate_blocked_project_shared_hard(client, proj: Path) -> None:
     assert _SECRET not in resp.text
 
 
-# ── the four HTTP-mapped statuses ────────────────────────────────────────────
+# ── the five HTTP-mapped statuses ────────────────────────────────────────────
 
 
 def _commit_returning(status: str):
@@ -318,6 +318,10 @@ def _commit_returning(status: str):
     [
         ("lock_timeout", 503, "busy"),
         ("plan_stale", 409, "conflict"),
+        # 409, not 500: nothing failed infrastructurally and nothing was
+        # written — the artifact is wedged in a state only an operator can
+        # adjudicate, which is a conflict about the resource (ADR-0030 §10).
+        ("swap_recovery_pending", 409, "conflict"),
         ("snapshot_failed", 500, "internal"),
         ("write_failed", 500, "internal"),
     ],
@@ -350,9 +354,10 @@ async def test_no_absolute_path_in_response(client, proj: Path) -> None:
 
 def test_status_literal_parity_with_engine() -> None:
     """The 200-body ``status`` Literal is exactly the engine's PullApplyStatus
-    minus the four HTTP-mapped statuses (503 lock_timeout, 409 plan_stale, 500
-    snapshot_failed / write_failed). Drift in either direction fails loudly (the
-    ``content_status`` parity rule applied to the apply enum)."""
+    minus the five HTTP-mapped statuses (503 lock_timeout, 409 plan_stale, 409
+    swap_recovery_pending, 500 snapshot_failed / write_failed). Drift in either
+    direction fails loudly (the ``content_status`` parity rule applied to the
+    apply enum)."""
     from typing import get_args
 
     from memtomem.context.pull_apply import PullApplyStatus
@@ -360,4 +365,10 @@ def test_status_literal_parity_with_engine() -> None:
 
     engine = set(get_args(PullApplyStatus))
     wire = set(get_args(ContextPullApplyResponse.model_fields["status"].annotation))
-    assert wire == engine - {"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"}
+    assert wire == engine - {
+        "lock_timeout",
+        "plan_stale",
+        "snapshot_failed",
+        "write_failed",
+        "swap_recovery_pending",
+    }

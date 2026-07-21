@@ -21,15 +21,18 @@ module and covers ``~/.memtomem/config.json`` specifically.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
+import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Callable, Iterator
 
 import portalocker
 
@@ -42,9 +45,12 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_text",
     "copy_tree_atomic",
+    "fsync_dir",
     "installed_at_from_dest",
     "is_copy_skipped_rel",
     "iter_installed_files",
+    "rename_no_replace",
+    "write_tree_payload",
 ]
 
 
@@ -302,7 +308,76 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
         intra.release()
 
 
-def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
+def _fsync_fd(fd: int, *, full: bool) -> None:
+    """``os.fsync`` on *fd*, upgraded to ``F_FULLFSYNC`` on macOS when *full*.
+
+    Darwin's ``fsync(2)`` hands the data to the drive but does NOT flush the
+    drive's own write cache, so a power loss can lose bytes an ``fsync``
+    already acknowledged. ``F_FULLFSYNC`` is Apple's documented barrier for
+    "must survive a power cut". It is not implemented on every filesystem
+    (``ENOTSUP``/``EINVAL`` on some network mounts), so a rejection degrades
+    to the plain ``fsync`` we would have done anyway rather than failing a
+    write whose data is already correct.
+
+    Only meaningful for FILE descriptors — see :func:`fsync_dir` for the
+    directory-entry barrier, which deliberately never asks for ``F_FULLFSYNC``.
+    """
+    if full and sys.platform == "darwin":
+        import fcntl
+
+        # <sys/fcntl.h>: F_FULLFSYNC = 51. Not exposed by Python's fcntl on
+        # every build, so read it defensively.
+        f_fullfsync = getattr(fcntl, "F_FULLFSYNC", 51)
+        try:
+            fcntl.fcntl(fd, f_fullfsync, 0)
+            return
+        except OSError as exc:
+            logger.debug("F_FULLFSYNC unavailable (%s); falling back to fsync", exc)
+    os.fsync(fd)
+
+
+def fsync_dir(path: Path) -> bool:
+    """Best-effort durable flush of a DIRECTORY entry. ``True`` iff flushed.
+
+    A ``rename`` into a directory is only durable once that directory's own
+    entry reaches stable storage; without this barrier a power cut can leave a
+    freshly promoted tree invisible even though every byte inside it was
+    fsynced. Callers that promote by rename (the version-store snapshot) call
+    this on the parent afterwards.
+
+    **Never raises.** Windows cannot open a directory for ``fsync`` at all, and
+    network/tmpfs mounts may reject it (``EINVAL``/``EPERM``/``EACCES``/
+    ``ENOTSUP``/``EBADF``); there the guarantee degrades to process-crash
+    consistency — exactly the posture :func:`atomic_write_bytes` already ships
+    with. Returning a bool instead of raising is deliberate: the rename has
+    already succeeded, and aborting a completed, correct operation because we
+    could not *prove* its durability would trade a real failure for a
+    hypothetical one. Tests assert the return value; production callers ignore
+    it.
+
+    Deliberately never ``F_FULLFSYNC``: it is defined for files and ``EINVAL``s
+    on directory descriptors on several Darwin filesystems.
+    """
+    if sys.platform == "win32":
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError as exc:
+        logger.debug("fsync_dir: cannot open %s (%s)", path, exc)
+        return False
+    try:
+        os.fsync(fd)
+        return True
+    except OSError as exc:
+        logger.debug("fsync_dir: fsync rejected for %s (%s)", path, exc)
+        return False
+    finally:
+        os.close(fd)
+
+
+def atomic_write_bytes(
+    path: Path, data: bytes, mode: int = 0o600, *, full_fsync: bool = False
+) -> None:
     """Atomically write *data* to *path* with an explicit file mode.
 
     ``mode`` is applied via ``os.fchmod`` on the tempfile before the rename
@@ -315,6 +390,12 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
     user-private parents like ``%LOCALAPPDATA%`` — the on-disk ACL is
     user-only by default in those locations, providing functionally
     equivalent access control.
+
+    ``full_fsync`` (default OFF, so every existing call site keeps its current
+    bytes and latency) upgrades the pre-rename flush to ``F_FULLFSYNC`` on
+    macOS for content that must survive a power cut rather than merely a
+    process crash — the immutable version snapshots, which are the only copy
+    of history a later Pull can roll back to.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -325,7 +406,7 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
         with os.fdopen(tmp_fd, "wb") as f:
             f.write(data)
             f.flush()
-            os.fsync(f.fileno())
+            _fsync_fd(f.fileno(), full=full_fsync)
         os.replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -348,6 +429,7 @@ def copy_tree_atomic(
     *,
     mode: int = 0o644,
     skip_top_level: frozenset[str] | None = None,
+    skip_top_level_pred: Callable[[str], bool] | None = None,
     skip_suffixes: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """Recursively mirror *src* → *dst*, each file via :func:`atomic_write_bytes`.
@@ -368,7 +450,14 @@ def copy_tree_atomic(
     depth. ``skip_top_level`` names additional entries skipped ONLY at the
     root of this call (it is deliberately not propagated into the recursion),
     so e.g. a skill's top-level ``overrides/`` source can be excluded without
-    also dropping a legitimate nested ``scripts/overrides/``. ``skip_suffixes``
+    also dropping a legitimate nested ``scripts/overrides/``.
+    ``skip_top_level_pred`` is the same root-only exclusion expressed as a
+    predicate over the entry NAME (skip when it returns ``True``), for callers
+    whose exclusion set is not a fixed name list — the skills fan-out skips the
+    version store's ``.versions.json.<rand>.tmp`` siblings, which no frozenset
+    can enumerate, and pre-listing ``src`` to build one would leave a TOCTOU
+    window against a concurrent version write. Both may be passed; an entry is
+    skipped if either matches. ``skip_suffixes``
     excludes entries by suffix at every depth — the wiki-install copies pass
     :data:`DIRTY_SKIP_SUFFIXES` so the installed surface equals the tracked
     surface (a wiki-shipped ``*.bak`` would be invisible to the dirty walk,
@@ -390,6 +479,7 @@ def copy_tree_atomic(
         digests,
         mode=mode,
         extra_skip=skip_top_level or frozenset(),
+        extra_skip_pred=skip_top_level_pred,
         skip_suffixes=skip_suffixes,
     )
     return digests
@@ -403,6 +493,7 @@ def _copy_tree_collect(
     *,
     mode: int,
     extra_skip: frozenset[str],
+    extra_skip_pred: Callable[[str], bool] | None = None,
     skip_suffixes: frozenset[str],
 ) -> None:
     """Recursive body of :func:`copy_tree_atomic`.
@@ -410,12 +501,14 @@ def _copy_tree_collect(
     Threads the accumulating rel→digest map and the rel prefix (the old
     self-recursion restarted relpaths at each level, which was fine for a
     count but not for a map keyed by root-relative paths). ``extra_skip``
-    is passed empty on recursion — ``skip_top_level`` is root-only by
-    contract.
+    and ``extra_skip_pred`` are passed empty/``None`` on recursion —
+    ``skip_top_level``/``skip_top_level_pred`` are root-only by contract.
     """
     dst.mkdir(parents=True, exist_ok=True)
     for entry in src.iterdir():
         if entry.name in COPY_SKIP_NAMES or entry.name in extra_skip:
+            continue
+        if extra_skip_pred is not None and extra_skip_pred(entry.name):
             continue
         if entry.suffix in skip_suffixes:
             continue
@@ -436,8 +529,204 @@ def _copy_tree_collect(
                 digests,
                 mode=mode,
                 extra_skip=frozenset(),
+                extra_skip_pred=None,
                 skip_suffixes=skip_suffixes,
             )
+
+
+def _validate_payload_relpath(rel: str) -> PurePosixPath:
+    """Validate one ``write_tree_payload`` relpath or raise ``ValueError``.
+
+    Containment lives at the write primitive so no caller can forget it: every
+    relpath must be a non-empty POSIX-relative path with no ``..`` / ``.`` /
+    empty segment, no backslash and no colon-bearing segment.
+
+    The last two are cross-platform containment, not pedantry. A backslash is a
+    legal filename character on POSIX but a separator on Windows, so accepting
+    one would land the same payload as a single file here and a nested tree
+    there. A colon segment looks like an ordinary (if odd) directory name to
+    ``PurePosixPath``, but Windows reads ``C:escape.txt`` as a DRIVE-RELATIVE
+    path and ``joinpath`` discards the destination base entirely — the write
+    escapes with no ``..`` anywhere in the string (see
+    :data:`_COLON_SEGMENT_RE`). Both are refused on every platform, so a
+    payload that validates here is safe everywhere — the check must not become
+    ``sys.platform``-conditional, or a payload built on Linux would land
+    unvalidated on Windows.
+    """
+    if not rel:
+        raise ValueError("payload relpath is empty")
+    if "\0" in rel:
+        # No OS accepts a NUL in a filename, so this would raise from deep
+        # inside the write loop — AFTER earlier entries already landed, which
+        # is precisely the half-populated destination this preflight exists to
+        # prevent. Reject it here, where nothing has been written yet.
+        raise ValueError(f"payload relpath {rel!r} contains a NUL byte")
+    if "\\" in rel:
+        raise ValueError(f"payload relpath {rel!r} contains a backslash")
+    pure = PurePosixPath(rel)
+    if pure.is_absolute() or pure.drive or pure.root:
+        raise ValueError(f"payload relpath {rel!r} is not relative")
+    parts = pure.parts
+    if not parts:
+        raise ValueError(f"payload relpath {rel!r} has no path segments")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"payload relpath {rel!r} contains a '.' or '..' segment")
+    # ANY colon anywhere in a segment, deliberately broader than a ``^[A-Za-z]:$``
+    # drive test. Windows also honors the DRIVE-RELATIVE form ``C:escape.txt``
+    # (no separator, no ``..``), where ``joinpath`` discards the destination base
+    # outright; ``file:stream`` is an NTFS alternate-data-stream reference rather
+    # than a filename. A colon is not a legal filename character on Windows at
+    # all, so refusing the whole class costs nothing and closes both holes.
+    if any(":" in part for part in parts):
+        raise ValueError(f"payload relpath {rel!r} contains a ':' in a path segment")
+    # ``PurePosixPath`` collapses ``a//b`` and a trailing slash; compare against
+    # the round-trip so a caller cannot smuggle a non-canonical form whose
+    # written path differs from the key it believes it wrote.
+    if pure.as_posix() != rel:
+        raise ValueError(f"payload relpath {rel!r} is not canonical (got {pure.as_posix()!r})")
+    return pure
+
+
+def write_tree_payload(
+    dst_dir: Path,
+    payload: Sequence[tuple[str, bytes]],
+    *,
+    mode: int = 0o644,
+    durable: bool = False,
+) -> None:
+    """Materialize a ``(posix_relpath, bytes)`` payload under *dst_dir*.
+
+    The captured-bytes twin of :func:`copy_tree_atomic`: it writes the bytes
+    the caller already read and judged (privacy-scanned, digested), never
+    re-reading a source that a concurrent editor could have changed since. That
+    is what lets a version snapshot promise "these exact bytes" — and why the
+    snapshot path uses this instead of a tree copy.
+
+    Files land through :func:`atomic_write_bytes` at *mode* (``0o644`` — the
+    copier's content mode, which is also why the ADR-0030 §10 tree digest
+    excludes the executable bit: preserving a bit the copier drops would make
+    digests unreproducible).
+
+    EVERY relpath is validated (see :func:`_validate_payload_relpath`) and
+    duplicates rejected BEFORE anything is written, so a bad payload leaves
+    *dst_dir* untouched rather than half-populated.
+
+    ``durable=True`` adds the power-cut barrier: ``full_fsync`` per file, then
+    an ``fsync`` of every directory this call created, deepest first, and
+    finally *dst_dir* — so the file entries are on stable storage before the
+    caller renames the tree into place. Directory-fsync failures degrade
+    silently (:func:`fsync_dir`).
+    """
+    seen: set[str] = set()
+    validated: list[tuple[PurePosixPath, bytes]] = []
+    for rel, data in payload:
+        pure = _validate_payload_relpath(rel)
+        if rel in seen:
+            raise ValueError(f"duplicate payload relpath {rel!r}")
+        seen.add(rel)
+        validated.append((pure, data))
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    created_dirs: set[Path] = set()
+    for pure, data in validated:
+        target = dst_dir.joinpath(*pure.parts)
+        # EVERY intermediate ancestor, not just the immediate parent: for
+        # ``a/b/c.md``, syncing only ``a/b`` leaves ``a``'s entry for ``b``
+        # unflushed, so a power cut can lose ``b`` (and everything under it)
+        # from a tree the caller has already been told is complete.
+        for depth in range(1, len(pure.parts)):
+            created_dirs.add(dst_dir.joinpath(*pure.parts[:depth]))
+        atomic_write_bytes(target, data, mode=mode, full_fsync=durable)
+
+    if not durable:
+        return
+    # Deepest first: a child's entry must be durable before the parent that
+    # names it, or a power cut could leave a synced parent pointing at an
+    # unsynced child.
+    for directory in sorted(created_dirs, key=lambda p: len(p.parts), reverse=True):
+        fsync_dir(directory)
+    fsync_dir(dst_dir)
+
+
+def rename_no_replace(staging: Path, dst: Path) -> None:
+    """Atomically rename ``staging`` to an absent ``dst`` or fail closed.
+
+    Directory promotion needs an OS no-replace primitive: plain POSIX
+    :func:`os.rename` may replace an empty destination directory, leaving a
+    shell/editor writer's ``mkdir`` → ``SKILL.md`` sequence vulnerable. Linux
+    and macOS expose the required flag only through native APIs, so call those
+    lazily via :mod:`ctypes`; Windows :func:`os.rename` is already exclusive.
+
+    A missing native symbol or unsupported platform/filesystem is loud
+    ``ENOTSUP``. Never degrade to ``exists()`` + :func:`os.replace`, which
+    would recreate the race this helper closes (#1839).
+
+    Lives here rather than in ``skills.py`` because the version store's
+    write-once snapshot promote needs the identical primitive; a second copy is
+    exactly how one call site would silently lose exclusivity.
+    """
+    if staging.parent != dst.parent:
+        raise OSError(
+            errno.EXDEV,
+            "atomic no-replace promote requires a shared parent directory",
+            str(dst),
+        )
+
+    if sys.platform == "win32":
+        # Python's Windows contract refuses every existing destination.
+        os.rename(staging, dst)
+        return
+
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    staging_bytes = os.fsencode(staging)
+    dst_bytes = os.fsencode(dst)
+    unsupported_errno = getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)
+
+    if sys.platform.startswith("linux"):
+        try:
+            rename = getattr(libc, "renameat2")
+        except AttributeError:
+            raise OSError(
+                unsupported_errno,
+                "atomic no-replace directory rename is unavailable",
+                str(dst),
+            ) from None
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        # Linux <fcntl.h>: AT_FDCWD=-100; <stdio.h>: RENAME_NOREPLACE=1.
+        args: tuple[object, ...] = (-100, staging_bytes, -100, dst_bytes, 1)
+    elif sys.platform == "darwin":
+        try:
+            rename = getattr(libc, "renamex_np")
+        except AttributeError:
+            raise OSError(
+                unsupported_errno,
+                "atomic no-replace directory rename is unavailable",
+                str(dst),
+            ) from None
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        # Darwin <sys/stdio.h>: RENAME_EXCL=0x00000004.
+        args = (staging_bytes, dst_bytes, 0x00000004)
+    else:
+        raise OSError(
+            unsupported_errno,
+            "atomic no-replace directory rename is unavailable",
+            str(dst),
+        )
+
+    ctypes.set_errno(0)
+    if rename(*args) != 0:
+        native_errno = ctypes.get_errno() or errno.EIO
+        raise OSError(native_errno, os.strerror(native_errno), str(dst))
 
 
 def is_copy_skipped_rel(rel: str | PurePosixPath) -> bool:

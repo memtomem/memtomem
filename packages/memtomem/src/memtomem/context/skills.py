@@ -20,11 +20,12 @@ frontmatter rewriting without touching callers.
 from __future__ import annotations
 
 import errno
+import glob
 import logging
 import os
 import secrets
 import shutil
-import sys
+import stat
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -40,12 +41,21 @@ from memtomem.context._atomic import (
     _lock_path_for,
     atomic_write_bytes,
     copy_tree_atomic,
+    rename_no_replace,
+)
+from memtomem.context._dir_swap import (
+    SwapRecoveryError,
+    marker_owns_transient,
+    recover_pending_swaps,
 )
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import (
     GENERATOR_VENDOR,
+    INTERNAL_ARTIFACT_KINDS,
     InvalidNameError,
+    Layout,
+    internal_artifact_owner,
     is_internal_artifact_dir,
     validate_name,
 )
@@ -55,6 +65,7 @@ from memtomem.context._runtime_targets import (
     runtime_artifact_listing,
     runtime_fanout_root,
 )
+from memtomem.context.skill_payload import is_payload_top_name
 from memtomem.context.privacy_scan import (
     raise_or_collect,
     scan_artifact_tree,
@@ -75,12 +86,12 @@ SKILL_MANIFEST = "SKILL.md"
 # typed ``lock_timeout`` skip and a retry hint, and an ``asyncio.to_thread``
 # web caller can never be wedged by a stuck cross-process lock holder.
 _SKILLS_LOCK_BUDGET_S = 30.0
-# Canonical-side subdirectory that holds per-vendor SKILL.md overrides
-# (``<canonical>/<name>/overrides/<vendor>.<ext>`` — see
-# :mod:`memtomem.context.override`). It is the SOURCE of overrides, never part
-# of a runtime fan-out payload, so it is stripped from the staged tree before
-# fan-out and excluded from diff comparison.
-_OVERRIDES_DIRNAME = "overrides"
+# The canonical-side ``overrides/`` subdirectory (SOURCE of per-vendor
+# SKILL.md overrides — see :mod:`memtomem.context.override`) and the version
+# store are Store-owned, never part of a runtime fan-out payload. Both are
+# named once, in :mod:`memtomem.context.skill_payload`
+# (:func:`~memtomem.context.skill_payload.is_payload_top_name`), so the
+# fan-out staging surface and the diff comparison below cannot drift apart.
 
 
 class SkillGenerator(Protocol):
@@ -242,10 +253,48 @@ def list_canonical_skills(
     return skills
 
 
+def resolve_canonical_skill(
+    project_root: Path, name: str, *, scope: TargetScope = "project_shared"
+) -> tuple[Path, Layout] | None:
+    """Return the canonical ``(SKILL.md path, "dir")`` for *name*, or ``None``.
+
+    Shape-compatible with :func:`~memtomem.context.agents.resolve_canonical_agent`
+    and :func:`~memtomem.context.commands.resolve_canonical_command` so the
+    version surfaces (CLI / web / MCP) can hold ONE eligible-type table instead
+    of three ad-hoc probes that would drift apart on the discovery rules.
+
+    Two shape notes that matter to those callers:
+
+    - The layout is a constant ``"dir"``. Skills have no flat form, so there is
+      nothing to migrate and ``enable`` (flat→dir adoption) is a no-op for them.
+    - The returned path is the MANIFEST, not a "working canonical". A skill's
+      content is its whole payload tree (ADR-0030 §10), so version callers use
+      this value as an existence probe plus a handle on ``.parent`` — the
+      artifact directory that owns ``versions/`` and ``versions.json``. Nothing
+      should snapshot it as if it were the artifact.
+
+    Applies the same rules as :func:`list_canonical_skills`: an internal
+    ``.staging-*`` / ``.old-*`` leftover or an invalid name is NOT a skill.
+    Name validation is left to callers, mirroring the agent/command resolvers.
+    """
+    root = canonical_skills_root(project_root, scope=scope)
+    skill_dir = root / name
+    if is_internal_artifact_dir(name):
+        return None
+    try:
+        validate_name(name, kind="skill name")
+    except InvalidNameError:
+        return None
+    manifest = skill_dir / SKILL_MANIFEST
+    if not skill_dir.is_dir() or not manifest.is_file():
+        return None
+    return manifest, "dir"
+
+
 # ── Copy primitive ────────────────────────────────────────────────────
 
 
-def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path:
+def _stage_skill(src: Path, dst: Path, *, payload_only: bool = False) -> Path:
     """Mirror ``src`` into a same-fs staging directory under ``dst.parent``.
 
     Picks ``dst.parent / .staging-<dst.name>-<pid>-<rand>.tmp`` so the
@@ -257,13 +306,17 @@ def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path
     ``src`` MUST contain ``SKILL.md``. ``dst.parent`` is created if it
     does not yet exist.
 
-    ``strip_overrides`` removes the top-level ``overrides/`` directory from
-    the staged tree. Runtime fan-out passes ``True`` so the canonical
-    override SOURCE never lands in a runtime tree (which would leak every
-    other vendor's override bytes into this vendor's tree, and let one
-    vendor's override secret block the whole fan-out at scan time). Pure
-    canonical→canonical / runtime→canonical copies keep the default
-    (``False``) so the override source survives.
+    ``payload_only`` stages only the ADR-0030 §10 **payload surface**
+    (:func:`~memtomem.context.skill_payload.is_payload_top_name`), dropping the
+    Store-owned top level: ``overrides/`` (whose canonical SOURCE landing in a
+    runtime tree would leak every other vendor's override bytes into this
+    vendor's tree, and let one vendor's override secret block the whole fan-out
+    at scan time) and the version store — ``versions/`` + ``versions.json`` and
+    its lock/temp sidecars — which is Store history that must never fan out to
+    a runtime (a runtime copy of it would also read as permanent drift). Only
+    runtime fan-out passes ``True``; pure canonical→canonical and the reverse
+    runtime→canonical import keep the default (``False``), which stays the WIDE
+    copier surface Gate A scans.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
@@ -273,34 +326,247 @@ def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path
     suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
     staging = dst.parent / f".staging-{dst.name}-{suffix}.tmp"
     if staging.exists():
-        # Crashed prior run — collision is unlikely (pid+rand) but if it
-        # happens, the leftover tree is from us; safe to remove.
+        # Crashed prior run — collision needs pid reuse AND a 3-byte hex
+        # collision, so this is rare, but "the leftover tree is from us" is
+        # exactly the assumption ADR-0030 §4.1 retires: the directory swap uses
+        # this same ``.staging-<name>-<pid>-<hex>.tmp`` grammar, so a collision
+        # could name a transient a live marker still claims — and deleting one
+        # of those is the collapse this whole prelude exists to prevent. Fail
+        # rather than clobber; the marker's own recovery resolves it.
+        #
+        # The other ``rmtree(staging)`` sites in this module need no such
+        # guard: each removes a tree the SAME call just created, on its own
+        # error path, so ownership is not an inference (PR review).
+        if marker_owns_transient(staging):
+            raise SwapRecoveryError(
+                errno.EBUSY,
+                "a pending directory swap already claims this staging path; "
+                "resolve the interrupted swap before staging again",
+                str(staging),
+            )
         shutil.rmtree(staging)
     staging.mkdir()
-    # ``strip_overrides`` excludes the top-level ``overrides/`` source DURING
-    # the copy (via ``skip_top_level``) so those bytes never reach the runtime
-    # staging tree — no crash window where they exist, no silent leak if a
-    # post-copy delete failed. The override itself is applied separately from
-    # the canonical source via ``_override.resolve`` (which reads canonical,
-    # not staging), so the skip never affects override application; and the
-    # scan therefore never sees (and cannot block on) an unrelated vendor's
-    # override.
-    skip = frozenset({_OVERRIDES_DIRNAME}) if strip_overrides else None
+    # The non-payload top level is excluded DURING the copy (root-only, via
+    # ``skip_top_level_pred``) so those bytes never reach the runtime staging
+    # tree — no crash window where they exist, no silent leak if a post-copy
+    # delete failed. A predicate rather than a name set because the manifest's
+    # ``.versions.json.<rand>.tmp`` siblings cannot be enumerated up front. The
+    # override itself is applied separately from the canonical source via
+    # ``_override.resolve`` (which reads canonical, not staging), so the skip
+    # never affects override application; and the scan therefore never sees
+    # (and cannot block on) an unrelated vendor's override.
+    skip_pred = (lambda name: not is_payload_top_name(name)) if payload_only else None
     # Codex review fold: if ``copy_tree_atomic`` raises after partial
     # copy, the caller would never see ``staging`` (no return value),
     # leaving an unscanned partial tree under the runtime fan-out root.
     # Clean up here before re-raising so Gate A's staging-dir-first
     # contract holds even on copy failure.
     try:
-        copy_tree_atomic(src, staging, skip_top_level=skip)
+        copy_tree_atomic(src, staging, skip_top_level_pred=skip_pred)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return staging
 
 
-def _reap_stale_internal_dirs(dst: Path) -> None:
-    """Remove crash-leftover staging/move-aside trees for ``dst``.
+def _remove_internal_artifact(path: Path) -> None:
+    """Delete one of our own crash artifacts, whatever type it turned out to be.
+
+    ``shutil.rmtree`` refuses a symlink, and with ``ignore_errors=True`` it
+    refuses *silently* — so a move-aside that captured a symlinked destination
+    was never actually removed. Nothing reports it and nothing retries it, so
+    a setup that recreates a managed symlink before each push accumulates one
+    dead ``.old-…`` link per run, forever.
+
+    Dispatch on ``lstat``, and only for the two types we ourselves create:
+    directories are removed as trees, symlinks are unlinked. **Anything else
+    is preserved and logged**, deliberately. Widening this to "unlink every
+    non-directory" would delete a regular file that an out-of-band writer had
+    dropped at the destination between the promote's conflict check and its
+    move-aside, and a file that merely happens to carry the reserved name —
+    both of which survive today, because ``rmtree`` refuses them (Codex
+    review). The leak this fixes is one dead symlink; the cure must not be
+    broader than that.
+
+    The classification is **best-effort against an out-of-band writer**: the
+    entry can change type between the ``lstat`` and the removal. Closing that
+    would need a portable compare-and-unlink, which does not exist (``O_PATH``
+    is Linux-only and Windows is supported here); a quarantine-rename dance
+    relocates the race rather than removing it. Reaching harm also requires
+    guessing the randomized reserved pathname while inside the destination
+    sidecar lock, so the residual is accepted.
+
+    On Windows, ``Path.unlink`` on a *directory* symlink is routed to
+    ``RemoveDirectoryW`` by CPython and works; it is nonetheless unexercised in
+    CI, since the symlink tests are ``requires_symlinks``-marked and skip
+    without Developer Mode. The failure mode if that ever changed is a logged
+    warning plus the pre-existing leak — no worse than before.
+
+    Callers have already established ownership; this only decides *how*.
+    """
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return
+    if stat.S_ISDIR(mode):
+        shutil.rmtree(path, ignore_errors=True)
+        return
+    if not stat.S_ISLNK(mode):
+        logger.warning(
+            "keeping internal artifact %s: expected a directory or a symlink, "
+            "found neither — inspect and remove it manually",
+            path,
+        )
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        logger.warning("could not remove internal artifact %s: %s", path, exc)
+
+
+def _iter_own_internal_dirs(
+    dst: Path, *, kinds: tuple[str, ...] = INTERNAL_ARTIFACT_KINDS
+) -> Iterator[tuple[str, Path]]:
+    """Yield ``(kind, path)`` for the REAPABLE internal trees belonging to ``dst``.
+
+    ``kind`` is one of :data:`memtomem.context._names.INTERNAL_ARTIFACT_KINDS`;
+    the two are not interchangeable (see
+    :func:`_recover_and_reap_internal_dirs`), so callers get it rather than
+    re-deriving it from the name. The default scans them all, and comes from
+    the same constant the name pattern is built from so a future third
+    transient cannot be classifiable but unscannable.
+
+    **The owner equality is the guarantee.** A glob cannot express "this
+    destination and no other": ``.old-foo-*.tmp`` matches
+    ``.old-foo-bar-<pid>-<rand>.tmp``, which belongs to the valid skill
+    ``foo-bar``, and a hyphen is not a metacharacter so no amount of escaping
+    helps. Parsing each candidate's owner and comparing it to ``dst.name`` is
+    what makes the match exact.
+
+    :func:`glob.escape` on the interpolated name is **scan narrowing, not
+    correctness** — the owner check already rejects what an unescaped ``foo*``
+    would sweep in. It stays because a pattern that walks half the directory
+    on every push is its own hazard, and because the two defenses fail
+    independently.
+
+    A name that is not internal-shaped at all — a user skill like
+    ``.staging-<dst>-notes.tmp`` — parses to no owner and is skipped, which is
+    the #1229 rule this preserves.
+
+    **A transient a live swap marker still claims is never yielded**
+    (ADR-0030 §10 / :func:`memtomem.context._dir_swap.marker_owns_transient`).
+    The filter lives HERE, at the one place both reaping sites enumerate
+    through, rather than being repeated in each of them: the sites are reaps,
+    the rule applies to every reap, and a third one added later would otherwise
+    have to remember it. Deleting a claimed transient is how the fail-closed
+    "all three present" recovery row collapses into the "``dst`` + ``old``"
+    row, whose action then deletes ``old`` — the only copy of the artifact.
+
+    This filter is NOT a substitute for running
+    :func:`memtomem.context._dir_swap.recover_pending_swaps` first: it keeps a
+    marked transient alive, it does not resolve the transaction. Ordering is
+    the prelude's job.
+    """
+    parent = dst.parent
+    safe = glob.escape(dst.name)
+    for kind in kinds:
+        for candidate in parent.glob(f".{kind}-{safe}-*.tmp"):
+            if internal_artifact_owner(candidate.name) != dst.name:
+                continue
+            if marker_owns_transient(candidate):
+                logger.debug(
+                    "keeping internal artifact %s: a live swap marker still claims it", candidate
+                )
+                continue
+            yield kind, candidate
+
+
+def _canonical_is_present(dst: Path) -> bool:
+    """Whether ``dst`` is a real directory right now, followed links excluded.
+
+    The single expression of the ADR-0030 §10 precondition for deleting a
+    move-aside tree, so both deletion sites ask the same question at the moment
+    they delete. ``lstat`` rather than ``is_dir()``: a symlink at the canonical
+    path is not the canonical tree, and letting one stand in would license
+    deleting the real tree on the strength of a link placed by accident.
+    """
+    try:
+        return stat.S_ISDIR(dst.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _reap_move_aside(dst: Path) -> None:
+    """Reap ``.old-*`` leftovers now that ``dst`` is present.
+
+    The prelude runs *before* the promote, so on a first install it sees an
+    absent ``dst`` and keeps any ``.old-*`` it finds — at that moment
+    indistinguishable from the only surviving copy of an interrupted promote
+    (ADR-0030 §10). Something has to run on the other side of the rename or
+    that tree is kept forever: the reverse-import path in particular refuses
+    its own second pass before it ever re-acquires the lock, so "the next run
+    clears it" is false there.
+
+    Called from :func:`_promote_staging`'s success paths rather than from each
+    call site: the moment the canonical becomes present is exactly the moment
+    the ADR rule starts permitting the reap, and putting it anywhere else makes
+    it something every future writer has to remember. Deliberately narrow — it
+    never recovers, only reaps — so it stays safe to call from inside the
+    promote primitive.
+
+    Deliberately does NOT recover: it runs after a promote that already
+    succeeded, and recovery belongs to the prelude that runs before the write.
+    It is still bound by §4.1 — a marker-owned ``.old-*`` is not ours to
+    delete — which it inherits from :func:`_iter_own_internal_dirs`, the one
+    enumeration both reaping sites go through. The ``.old-*`` half is the
+    dangerous one: it holds the pre-image.
+
+    It re-checks presence rather than trusting the rename it follows. "We just
+    created ``dst``" is not the same claim as "``dst`` is there now": the lock
+    does not serialize editors and shells, so one can remove or replace it in
+    the window, and the ADR precondition has to hold where the deletion
+    happens, not where it was predicted (Codex review).
+
+    The check is **once per call, not once per candidate**, and that is a
+    boundary rather than an oversight. Re-reading before every removal narrows
+    the window without closing it — the tree can still be swapped between the
+    ``lstat`` and the ``rmtree`` — so it buys no guarantee, only the appearance
+    of one. ADR-0030 §6 already draws this line: non-first-party writers
+    (editors, shells) are outside the guarantee. Closing it for real needs
+    descriptor-relative traversal across every walker here, which is a separate
+    change (tracked in the PR-G4 design note, §2.3).
+
+    **Never lets an ``OSError`` out**, which is the whole failure class a
+    filesystem sweep produces. It runs AFTER the rename has committed, so a
+    failure here is a failure to collect garbage, not a failure to write.
+    Deliberately not ``except Exception``: post-commit is exactly where a
+    swallowed programming error would be hardest to notice, and the calling
+    surfaces funnel ``OSError`` specifically (a ``TypeError`` from a bad edit
+    should crash loudly rather than be logged as a reaping hiccup). The same
+    reading applies to :func:`_remove_internal_artifact` on the promote's own
+    cleanup path, which is likewise post-commit and swallows ``OSError``.
+
+    Letting one out would make the promote report the write it already
+    performed as an error —
+    in :func:`~memtomem.context.pull_apply._commit_skills` a raw ``OSError``
+    becomes a ``write_failed`` refusal while ``dst`` is installed, and the
+    privacy gate's success is never recorded. The individual removals were
+    already best-effort; the enumeration around them (``Path.glob`` can raise
+    mid-iteration) was not, so the whole body is wrapped and logged (Codex
+    review).
+    """
+    try:
+        if not dst.parent.is_dir() or not _canonical_is_present(dst):
+            return
+        for _, stale in _iter_own_internal_dirs(dst, kinds=("old",)):
+            logger.debug("reaping move-aside tree %s after promote", stale)
+            _remove_internal_artifact(stale)
+    except OSError as exc:
+        logger.warning("could not reap move-aside trees for %s: %s", dst, exc)
+
+
+def _recover_and_reap_internal_dirs(dst: Path) -> None:
+    """Resolve a pending swap for ``dst``, then remove crash leftovers.
 
     A SIGKILL between :func:`_stage_skill` and the cleanup in
     :func:`_promote_staging` leaves ``.staging-<name>-*.tmp`` /
@@ -313,20 +579,83 @@ def _reap_stale_internal_dirs(dst: Path) -> None:
     Both the sync fan-out paths and the reverse-import path
     (:func:`extract_skills_to_canonical`, #1247 id 18) hold that lock, so
     runtime-side AND canonical-side leftovers get reaped.
+
+    **Ownership is decided by parsing the leftover, not by matching a
+    prefix.** The lock covers exactly one destination, so anything reaped must
+    provably belong to that destination. A prefix glob does not prove it: with
+    ``dst.name == "foo"``, ``.old-foo-*.tmp`` also matches
+    ``.old-foo-bar-<pid>-<rand>.tmp``, which belongs to the perfectly valid
+    skill ``foo-bar`` — so syncing ``foo`` deleted another skill's in-flight
+    rollback tree while holding the wrong lock, and hyphenated skill names are
+    the norm here (Codex review; live since #1229).
+
+    **An ``.old-*`` is reaped only while ``dst`` is a present, non-symlink
+    directory** (ADR-0030 §10). The two transients are not equivalent: a
+    staging tree is a copy whose source is still on disk, but a move-aside
+    tree is the ORIGINAL, parked there by :func:`_promote_staging` for the
+    instant between its two renames. Crash in that instant and ``.old-*``
+    holds the only copy of the canonical — reaping it unconditionally, as this
+    function used to, is what turns a recoverable crash into data loss. When
+    ``dst`` is absent the leftover is kept and logged at WARNING naming both
+    paths; :func:`_reap_move_aside` clears it once the promote makes ``dst``
+    present again. A leaked directory is cheap, a deleted canonical is not.
+
+    **Recovery runs FIRST, and a refusal aborts** (ADR-0030 §10, stated in
+    :mod:`memtomem.context._dir_swap`'s module docstring):
+    :func:`~memtomem.context._dir_swap.recover_pending_swaps` resolves every
+    *marked* transaction before anything is reaped, and only then does the
+    unmarked debris get collected. The order is load-bearing in both
+    directions. Reaping first would delete a transient the marker still
+    describes, so recovery would then classify a state that no longer exists.
+    And falling through to a reap after recovery *refused* would do the same to
+    the one state that is deliberately left intact — so the refusal propagates
+    rather than being logged and swallowed.
+
+    That is also why this function is the prelude rather than a second helper
+    every writer must remember to call alongside a reaper: a rule spread over
+    two calls is a rule that gets half-applied.
+
+    :raises SwapRecoveryError: recovery could not converge (ambiguous
+        provenance, a destination recreated by a non-gateway writer, a tampered
+        marker, a wrong-type transient). An ``OSError`` subclass, so a caller
+        that already funnels ``OSError`` into a typed per-item skip degrades
+        safely — but every call site translates it explicitly.
+    :raises InvalidNameError: ``dst.name`` is not a valid artifact identifier.
+        A ``ValueError``, **not** an ``OSError``, so it deliberately does NOT
+        ride the funnel above. Every call site derives ``dst`` from an artifact
+        that was already resolved and validated (a Store listing, a validated
+        Pull plan, a runtime fan-out target), so an invalid name here is a
+        programming error and must crash loudly rather than degrade into a
+        per-item skip. A future caller that iterates raw directory entries has
+        to make that choice explicitly instead of inheriting this one.
     """
+    # Validation FIRST, above the parent probe. ``recover_pending_swaps`` also
+    # validates, but reaching it is conditional on the parent existing, which
+    # made the documented contract conditional too: the same bad name raised or
+    # returned cleanly depending on whether the directory happened to be there
+    # (PR review). It is also the ordering the rule itself implies — a name is
+    # rejected before it is joined onto anything, not after a filesystem probe.
+    validate_name(dst.name, kind="artifact name")
     parent = dst.parent
     if not parent.is_dir():
         return
-    for pattern in (f".staging-{dst.name}-*.tmp", f".old-{dst.name}-*.tmp"):
-        for stale in parent.glob(pattern):
-            # The glob narrows by destination name; the shared predicate makes
-            # the kill decision — a user skill named e.g.
-            # ``.staging-<dst>-notes.tmp`` matches the glob but not the
-            # pid+rand shape and must never be deleted (Codex review, #1229).
-            if not is_internal_artifact_dir(stale.name):
-                continue
-            logger.debug("reaping stale internal artifact dir %s", stale)
-            shutil.rmtree(stale, ignore_errors=True)
+    recover_pending_swaps(parent, dst.name)
+    # Presence is re-read AFTER recovery: a forwarding/rollback row may have
+    # just restored ``dst``, which is exactly when the ``.old-*`` rule below
+    # starts permitting a reap.
+    dst_is_dir = _canonical_is_present(dst)
+    for kind, stale in _iter_own_internal_dirs(dst):
+        if kind == "old" and not dst_is_dir:
+            logger.warning(
+                "keeping move-aside tree %s: canonical %s is absent, so this "
+                "may be its only copy (interrupted promote) — it will be "
+                "cleared by the next promote that restores the canonical",
+                stale,
+                dst,
+            )
+            continue
+        logger.debug("reaping stale internal artifact dir %s", stale)
+        _remove_internal_artifact(stale)
 
 
 def _target_conflict(dst: Path) -> OSError | None:
@@ -337,14 +666,28 @@ def _target_conflict(dst: Path) -> OSError | None:
     typed ``TARGET_CONFLICT`` skip — so the preflights can never drift from
     what the promote actually enforces (#1229). An existing but EMPTY
     non-skill directory is not a conflict (the promote replaces it).
+
+    **The interpolated path is QUOTED**, and that is a wire requirement rather
+    than a style choice (PR review). The web/MCP redactors replace a path run
+    with ``<path>``, and their segment class deliberately includes spaces so a
+    mount like ``/Volumes/My Drive/x`` is scrubbed whole — which means an
+    UNQUOTED path mid-sentence lets the run swallow everything after it, up to
+    the next quote or newline. This message put its remediation after the path,
+    so the wire form degraded to ``…directory: .claude<path>`` and the user lost
+    "add a SKILL.md or remove the directory first" — on a destination that was
+    already root-relative, i.e. where there was no disclosure to redact at all.
+    Quoting restores the boundary the redactor's own comment assumes ("OSError
+    paths are quoted, so matching through spaces cannot bleed into surrounding
+    prose"). Any new refusal built here must quote its paths for the same
+    reason.
     """
     if not dst.exists():
         return None
     if not dst.is_dir():
-        return NotADirectoryError(f"target exists and is not a directory: {dst}")
+        return NotADirectoryError(f"target exists and is not a directory: '{dst}'")
     if not (dst / SKILL_MANIFEST).is_file() and any(dst.iterdir()):
         return IsADirectoryError(
-            f"refusing to overwrite non-skill directory: {dst} "
+            f"refusing to overwrite non-skill directory: '{dst}' "
             f"(add a SKILL.md or remove the directory first)"
         )
     return None
@@ -373,81 +716,12 @@ def _promote_race_conflict(exc: OSError) -> bool:
     return exc.errno in (errno.ENOTEMPTY, errno.EEXIST)
 
 
-def _rename_no_replace(staging: Path, dst: Path) -> None:
-    """Atomically rename ``staging`` to an absent ``dst`` or fail closed.
-
-    Directory promotion needs an OS no-replace primitive: plain POSIX
-    :func:`os.rename` may replace an empty destination directory, leaving a
-    shell/editor writer's ``mkdir`` → ``SKILL.md`` sequence vulnerable. Linux
-    and macOS expose the required flag only through native APIs, so call those
-    lazily via :mod:`ctypes`; Windows :func:`os.rename` is already exclusive.
-
-    A missing native symbol or unsupported platform/filesystem is loud
-    ``ENOTSUP``. Never degrade to ``exists()`` + :func:`os.replace`, which
-    would recreate the race this helper closes (#1839).
-    """
-    if staging.parent != dst.parent:
-        raise OSError(
-            errno.EXDEV,
-            "atomic no-replace skill promote requires a shared parent directory",
-            str(dst),
-        )
-
-    if sys.platform == "win32":
-        # Python's Windows contract refuses every existing destination.
-        os.rename(staging, dst)
-        return
-
-    import ctypes
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    staging_bytes = os.fsencode(staging)
-    dst_bytes = os.fsencode(dst)
-    unsupported_errno = getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)
-
-    if sys.platform.startswith("linux"):
-        try:
-            rename = getattr(libc, "renameat2")
-        except AttributeError:
-            raise OSError(
-                unsupported_errno,
-                "atomic no-replace directory rename is unavailable",
-                str(dst),
-            ) from None
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename.restype = ctypes.c_int
-        # Linux <fcntl.h>: AT_FDCWD=-100; <stdio.h>: RENAME_NOREPLACE=1.
-        args = (-100, staging_bytes, -100, dst_bytes, 1)
-    elif sys.platform == "darwin":
-        try:
-            rename = getattr(libc, "renamex_np")
-        except AttributeError:
-            raise OSError(
-                unsupported_errno,
-                "atomic no-replace directory rename is unavailable",
-                str(dst),
-            ) from None
-        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        rename.restype = ctypes.c_int
-        # Darwin <sys/stdio.h>: RENAME_EXCL=0x00000004.
-        args = (staging_bytes, dst_bytes, 0x00000004)
-    else:
-        raise OSError(
-            unsupported_errno,
-            "atomic no-replace directory rename is unavailable",
-            str(dst),
-        )
-
-    ctypes.set_errno(0)
-    if rename(*args) != 0:
-        native_errno = ctypes.get_errno() or errno.EIO
-        raise OSError(native_errno, os.strerror(native_errno), str(dst))
+# Moved to ``_atomic`` (ADR-0030 PR-G3) — the version store's write-once
+# snapshot promote needs the same primitive, and a second copy is exactly how
+# one call site would silently lose the #1839 exclusivity contract. This is the
+# SAME object, not a re-export of a copy; ``test_context_atomic`` pins the
+# identity so a future "tidy-up" cannot fork them.
+_rename_no_replace = rename_no_replace
 
 
 def _promote_staging(
@@ -455,6 +729,7 @@ def _promote_staging(
     dst: Path,
     *,
     replace_existing: bool = True,
+    reap_move_aside: bool = False,
 ) -> None:
     """Promote ``staging`` into ``dst`` (same-fs precondition).
 
@@ -462,9 +737,42 @@ def _promote_staging(
     skill aside, rename staging into place, and roll back on failure. With
     ``False`` (runtime→canonical imports), one native exclusive rename installs
     a new skill or raises ``EEXIST`` without touching the destination (#1839).
+
+    ``reap_move_aside=True`` clears stale ``.old-*`` trees on the success
+    paths, where the destination has just become present — the condition
+    ADR-0030 §10 requires before one may be deleted, and what frees the tree
+    :func:`_recover_and_reap_internal_dirs` had to keep on the way in.
+
+    It runs only where the promote SUCCEEDS, so the keep is not guaranteed to
+    be temporary. The ``replace_existing=False`` branch losing its exclusive
+    rename to a non-gateway writer is the concrete case: ``dst`` exists but is
+    foreign, the reap never runs, and the reverse-import path refuses on later
+    runs before it re-acquires the lock. That outcome is the right one —
+    ``.old-*`` may still be the only copy of what we put there — but it means
+    "the next promote clears it" describes the common path, not a guarantee.
+
+    **It defaults to False because it is safe only under the destination
+    sidecar lock**, and this primitive cannot see whether its caller holds one.
+    Reaping cannot tell an in-flight move-aside from an abandoned one, so an
+    unsynchronized writer would delete a tree another writer is mid-rollback
+    on, and that rollback's breadcrumb would point at nothing. Every current
+    caller holds the lock and opts in; the default is chosen so that a future
+    one who forgets leaks a directory rather than losing a tree.
+
+    **The §10 rule binds this function's own cleanup too**, independently of
+    that flag. The ``replace_existing=True`` path deletes the tree it parked
+    aside a moment earlier, and it checks presence first for the same reason
+    the reaper does: a writer outside the lock can remove ``dst`` between the
+    second rename and the cleanup, and an unconditional delete there destroys
+    the only remaining copy. This was declined once as "the transaction's own
+    completion, which the swap marker handles" — but the marker resolves a
+    CRASH between the renames, and this is a live process losing a live
+    destination, which no marker sees (Codex re-gate).
     """
     if not replace_existing:
         _rename_no_replace(staging, dst)
+        if reap_move_aside:
+            _reap_move_aside(dst)
         return
 
     conflict = _target_conflict(dst)
@@ -499,32 +807,90 @@ def _promote_staging(
                 )
                 raise promote_exc from rollback_exc
             raise
-        shutil.rmtree(old, ignore_errors=True)
+        # The transaction's own move-aside is subject to the same ADR-0030 §10
+        # rule as anybody else's. "We just renamed staging onto dst" is not
+        # "dst is there now": the lock does not serialize editors and shells,
+        # and one that removes dst in this window turns an unconditional
+        # delete here into the loss of the only remaining copy — the exact
+        # failure the guarded reaper below exists to prevent, reached through
+        # the promote's own cleanup instead (Codex re-gate). Keeping it is the
+        # same outcome as the prelude's keep-branch: the next promote that
+        # restores dst collects it.
+        if _canonical_is_present(dst):
+            _remove_internal_artifact(old)
+        else:
+            logger.warning(
+                "keeping move-aside tree %s: canonical %s vanished between the "
+                "promote and its cleanup, so this may be its only copy — it "
+                "will be cleared by the next promote that restores the canonical",
+                old,
+                dst,
+            )
+        if reap_move_aside:
+            _reap_move_aside(dst)
     else:
         os.replace(staging, dst)
+        if reap_move_aside:
+            _reap_move_aside(dst)
 
 
 def copy_skill(src: Path, dst: Path) -> None:
     """Mirror a skill directory from ``src`` to ``dst`` via staging-then-promote.
 
     Thin public wrapper (``__all__``) kept for external callers that don't
-    care about the staging step (no privacy scan, no override merge, no
-    destination lock — pure file copy). The gateway's own flows use
-    :func:`_stage_skill` + :func:`_promote_staging` directly: sync scans +
-    override-applies between the two halves, and the reverse import
-    (#1247 id 18) converts each half's failure into its own typed skip
-    while holding the destination sidecar lock.
+    care about the staging step (no privacy scan, no override merge — pure
+    file copy). The gateway's own flows use :func:`_stage_skill` +
+    :func:`_promote_staging` directly: sync scans + override-applies between
+    the two halves, and the reverse import (#1247 id 18) converts each half's
+    failure into its own typed skip.
 
     Individual files are written atomically via
     :func:`memtomem.context._atomic.atomic_write_bytes`. Directory-level
     atomicity is now provided by the staging+promote pair.
+
+    It holds the destination sidecar lock across stage→promote, like every
+    other first-party writer (ADR-0030 §6). It used to skip the lock, which
+    made it the one path that could park a ``.old-*`` tree no other writer
+    knew about — a concurrent gateway flow reaping that destination could
+    delete the tree this copy was about to roll back onto, leaving the
+    rollback with nothing to restore (Codex review). Reaping cannot tell an
+    in-flight move-aside from an abandoned one; the lock is what makes the
+    distinction unnecessary.
+
+    Two consequences of taking that lock, both deliberate:
+
+    * The source is preflighted **before** acquiring it. Locking creates
+      ``dst.parent`` and a ``.{name}.lock`` sidecar there, so a bad ``src``
+      would otherwise leave both behind on a call that previously touched
+      nothing at all. :func:`_stage_skill` re-checks under the lock, so this
+      is a cheap early exit rather than the authoritative check: a source that
+      disappears before we lock still fails there, and one that disappears
+      mid-copy is already handled by staging cleanup.
+    * It can now raise ``TimeoutError`` after ``_SKILLS_LOCK_BUDGET_S``, when
+      another writer holds the destination past the budget. That is a new
+      failure mode for a public entry point; retry, or wait for the competing
+      push or import to finish.
+
+    It can also raise :class:`~memtomem.context._dir_swap.SwapRecoveryError`
+    from :func:`_stage_skill` when a staging-path collision names a transient a
+    live swap marker still claims. Deliberately allowed to propagate rather
+    than converted: this is a single-artifact entry point with no batch to keep
+    going, and the caller needs the distinction — the remediation is the
+    interrupted transaction, not this copy. It is an ``OSError`` subclass, so a
+    caller funnelling ``OSError`` still degrades safely. **This function does
+    NOT run the recovery prelude** — it is one of the C0 holders PR-G4a-3b
+    wires up; until then a pending swap here is refused, never resolved.
     """
-    staging = _stage_skill(src, dst)
-    try:
-        _promote_staging(staging, dst)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    manifest = src / SKILL_MANIFEST
+    if not manifest.is_file():
+        raise FileNotFoundError(f"source skill missing {SKILL_MANIFEST}: {src}")
+    with _file_lock(_lock_path_for(dst), timeout=_SKILLS_LOCK_BUDGET_S):
+        staging = _stage_skill(src, dst)
+        try:
+            _promote_staging(staging, dst, reap_move_aside=True)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
 
 # ── Fan-out: canonical → runtimes ─────────────────────────────────────
@@ -651,16 +1017,33 @@ def generate_all_skills(
                             "<all>",
                             "another process held a destination lock past the "
                             f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
-                            "re-run sync to retry",
+                            "re-run the push to retry",
                             skip_codes.LOCK_TIMEOUT,
                         )
                     )
                     return SkillSyncResult(generated=generated, skipped=skipped)
-                # All destination locks held — safe point to reap crash
-                # leftovers before they collide with fresh staging work.
+                # All destination locks held — safe point to recover any
+                # interrupted swap and reap crash leftovers before they collide
+                # with fresh staging work.
+                #
+                # Caught PER DESTINATION, not around the loop: an escaping
+                # raise would abort a batch whose other destinations are
+                # perfectly fine, and the #1229 all-or-nothing contract is
+                # per-destination, not per-run. A wedged destination is
+                # recorded AND added to ``blocked_dsts`` — recording a skip
+                # while still staging into that destination would contradict
+                # the fail-closed recovery result it came from.
+                blocked_dsts: set[Path] = set()
                 for stale_dst in sorted({dst for _, _, _, dst in work}, key=str):
-                    _reap_stale_internal_dirs(stale_dst)
+                    try:
+                        _recover_and_reap_internal_dirs(stale_dst)
+                    except SwapRecoveryError as exc:
+                        blocked_dsts.add(stale_dst)
+                        skipped.append((stale_dst.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        logger.warning("skip %s: %s", stale_dst, exc)
                 for target, _gen, skill_dir, dst in work:
+                    if dst in blocked_dsts:
+                        continue
                     # Preflight the promote refusal predicate while the
                     # destination locks are held, BEFORE anything stages: a
                     # pre-existing non-skill dst would otherwise make the
@@ -678,7 +1061,15 @@ def generate_all_skills(
                     # commands.py read_bytes failure handling. Privacy block
                     # is the only failure that still aborts the batch.
                     try:
-                        staging = _stage_skill(skill_dir, dst, strip_overrides=True)
+                        staging = _stage_skill(skill_dir, dst, payload_only=True)
+                    except SwapRecoveryError as exc:
+                        # BEFORE the broad OSError: staging can now refuse a
+                        # marker-claimed collision, and that is not an
+                        # unreadable source. Reporting it as PARSE_ERROR would
+                        # point the remediation at the skill file instead of at
+                        # the interrupted transaction (PR review).
+                        skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        continue
                     except OSError as exc:
                         skipped.append(
                             (skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR)
@@ -728,7 +1119,7 @@ def generate_all_skills(
 
                 for target, staging, dst in staged:
                     try:
-                        _promote_staging(staging, dst)
+                        _promote_staging(staging, dst, reap_move_aside=True)
                     except OSError as exc:
                         # Residual race: only a NON-gateway writer (manual
                         # shell, editor) can recreate conflicting content at
@@ -811,14 +1202,22 @@ def generate_all_skills(
                         skill_dir.name,
                         "another process held the destination lock past the "
                         f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
-                        "re-run sync to retry",
+                        "re-run the push to retry",
                         skip_codes.LOCK_TIMEOUT,
                     )
                 )
                 continue
             with dst_lock:
-                # Lock held — safe point to reap crash leftovers for this dst.
-                _reap_stale_internal_dirs(dst)
+                # Lock held — safe point to recover an interrupted swap and
+                # reap crash leftovers for this dst. A refusal is a typed
+                # per-item skip, exactly like the `_target_conflict` one below:
+                # the batch continues, this destination does not.
+                try:
+                    _recover_and_reap_internal_dirs(dst)
+                except SwapRecoveryError as exc:
+                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    logger.warning("skip %s: %s", skill_dir.name, exc)
+                    continue
                 # Preflight the promote refusal predicate (same conversion to
                 # a typed skip as the project_shared batch above, #1229) —
                 # before staging so a conflicted destination wastes no
@@ -831,7 +1230,11 @@ def generate_all_skills(
                 # an exception bubbling up — symmetric with agents.py /
                 # commands.py read_bytes failure handling.
                 try:
-                    staging = _stage_skill(skill_dir, dst, strip_overrides=True)
+                    staging = _stage_skill(skill_dir, dst, payload_only=True)
+                except SwapRecoveryError as exc:
+                    # Before the broad OSError — see the project_shared batch.
+                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    continue
                 except OSError as exc:
                     skipped.append((skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                     continue
@@ -888,7 +1291,7 @@ def generate_all_skills(
                         # gateway writers only) — same typed-skip conversion.
                         # Non-race OSErrors re-raise loud (#1247 id 18).
                         try:
-                            _promote_staging(staging, dst)
+                            _promote_staging(staging, dst, reap_move_aside=True)
                         except OSError as exc:
                             if not _promote_race_conflict(exc):
                                 raise
@@ -1101,14 +1504,14 @@ def extract_skills_to_canonical(
                 logger.warning("skip %r from %s: invalid name", skill_name, runtime_label)
                 continue
             if skill_name in seen:
-                reason = f"already imported from {seen[skill_name]}"
+                reason = f"already pulled from {seen[skill_name]}"
                 skipped.append((skill_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                 continue
             dst = canonical_root / skill_name
             if dst.exists():
                 if not overwrite:
-                    reason = "canonical exists (use --overwrite)"
+                    reason = "canonical exists"
                     skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
                     logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                     seen[skill_name] = runtime_label
@@ -1131,10 +1534,10 @@ def extract_skills_to_canonical(
                 # (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G) — until
                 # that ships, only a ``new`` skills Pull is allowed; refuse
                 # rather than clobber unsnapshotted. Remediation: delete the
-                # canonical skill first, then re-import. Fires for dry-run too.
+                # canonical skill first, then pull again. Fires for dry-run too.
                 reason = (
                     "overwriting an existing skill needs directory-tree snapshots "
-                    "(a future release) — delete the canonical skill first to re-import"
+                    "(a future release) — delete the canonical skill first, then pull again"
                 )
                 skipped.append((skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
@@ -1218,7 +1621,7 @@ def extract_skills_to_canonical(
                         skill_name,
                         (
                             f"blocked: {blocked_file.name} hit "
-                            f"{blocked_outcome.hits_count} pattern(s){blocked_outcome.hint}"
+                            f"{blocked_outcome.hits_count} pattern(s)"
                         ),
                         blocked_outcome.code,
                     )
@@ -1243,7 +1646,7 @@ def extract_skills_to_canonical(
                     reason = (
                         "another process held the canonical destination lock "
                         f"past the {_SKILLS_LOCK_BUDGET_S:g}s acquisition "
-                        "budget — re-run the import to retry"
+                        "budget — re-run the pull to retry"
                     )
                     # No ``seen`` mark: contention is transient and
                     # destination-lock-specific, so a later runtime's copy of
@@ -1254,10 +1657,23 @@ def extract_skills_to_canonical(
                     logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                     continue
                 with dst_lock:
-                    # Lock held — safe point to reap crash leftovers for this
-                    # canonical dst (previously unreachable for the import
-                    # path, which relied on discovery filtering alone).
-                    _reap_stale_internal_dirs(dst)
+                    # Lock held — safe point to recover an interrupted swap and
+                    # reap crash leftovers for this canonical dst (previously
+                    # unreachable for the import path, which relied on discovery
+                    # filtering alone).
+                    try:
+                        _recover_and_reap_internal_dirs(dst)
+                    except SwapRecoveryError as exc:
+                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
+                        # Marked ``seen`` — the wedge is on the DESTINATION, so
+                        # the same name from another runtime would hit the same
+                        # state and add a duplicate row. This is the
+                        # ``canonical_exists`` posture, not the ``lock_timeout``
+                        # one (contention is transient and worth a retry from
+                        # another source; a fail-closed recovery state is not).
+                        seen[skill_name] = runtime_label
+                        continue
                     # Re-check the existence contract under the lock: a parallel
                     # importer can land dst between the lock-free preflight above
                     # and our acquisition. Mirrors the pre-lock branch exactly so
@@ -1265,7 +1681,7 @@ def extract_skills_to_canonical(
                     # freshly imported skill).
                     if dst.exists():
                         if not overwrite:
-                            reason = "canonical exists (use --overwrite)"
+                            reason = "canonical exists"
                             skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
                             logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                             seen[skill_name] = runtime_label
@@ -1283,7 +1699,7 @@ def extract_skills_to_canonical(
                         reason = (
                             "overwriting an existing skill needs directory-tree "
                             "snapshots (a future release) — delete the canonical "
-                            "skill first to re-import"
+                            "skill first, then pull again"
                         )
                         skipped.append(
                             (skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED)
@@ -1299,6 +1715,15 @@ def extract_skills_to_canonical(
                     # copy of the same name still imports.
                     try:
                         staging = _stage_skill(skill_dir, dst)
+                    except SwapRecoveryError as exc:
+                        # Before the broad OSError, and WITH a ``seen`` mark:
+                        # unlike unreadability this is destination-scoped, so
+                        # another runtime's copy would hit the same state —
+                        # the same reasoning as the prelude's refusal above.
+                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
+                        seen[skill_name] = runtime_label
+                        continue
                     except OSError as exc:
                         skipped.append((skill_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
@@ -1309,7 +1734,7 @@ def extract_skills_to_canonical(
                         # including when ``overwrite=True``. Use one exclusive
                         # rename so a manual writer landing dst after the
                         # under-lock re-check can never be moved aside (#1839).
-                        _promote_staging(staging, dst, replace_existing=False)
+                        _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
                     except OSError as exc:
                         # Verified destination races (refusal pair +
                         # ENOTEMPTY/EEXIST from a NON-gateway writer — the
@@ -1358,9 +1783,13 @@ def _skill_effective_equal(
     * :data:`COPY_SKIP_NAMES` (``.git`` / ``.DS_Store`` / ``__pycache__``) and
       symlinks are excluded at EVERY depth — sync never copies them, so they
       are ignored on both sides (a stray cache on either side is not drift).
-    * the top-level ``overrides/`` SOURCE directory is excluded from the
-      canonical side only (a leaked ``overrides/`` on the runtime side IS drift,
-      so re-sync is prompted to clean it).
+    * the non-payload top level (ADR-0030 §10: the ``overrides/`` SOURCE
+      directory and the ``versions/`` + ``versions.json`` version store) is
+      excluded from the canonical side only — fan-out does not copy it
+      (``_stage_skill(payload_only=True)``), so counting it would report every
+      override-carrying or versioned skill as permanently out of sync. The
+      asymmetry is deliberate: the same names leaked onto the RUNTIME side ARE
+      drift, so re-sync is prompted to clean them.
     * the top-level ``SKILL.md`` is replaced by ``override_bytes`` when a
       per-vendor override exists; everything else is byte-compared verbatim.
 
@@ -1375,7 +1804,7 @@ def _skill_effective_equal(
         for p in d.iterdir():
             if p.name in COPY_SKIP_NAMES or p.is_symlink():
                 continue
-            if top_level and is_canonical and p.name == _OVERRIDES_DIRNAME:
+            if top_level and is_canonical and not is_payload_top_name(p.name):
                 continue
             names.append(p.name)
         return sorted(names)

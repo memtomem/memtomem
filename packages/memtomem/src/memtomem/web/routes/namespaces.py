@@ -16,17 +16,29 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from memtomem.errors import NamespaceConflictError
 from memtomem.web.deps import get_storage
 from memtomem.web.schemas import (
     DeleteResponse,
     NamespaceInfoResponse,
     NamespaceMetaRequest,
     NamespaceOut,
+    NamespaceRenameResponse,
     NamespacesListResponse,
     RenameRequest,
 )
 
 admin_router = APIRouter(prefix="/namespaces", tags=["namespaces"])
+
+# Per-``reason_code`` 409 wording for the rename route. The UI offers no merge
+# affordance (``renameNamespace()`` posts ``{new_name}`` only), so the only
+# remedy that exists on this surface is "choose a different name" — telling a
+# UI user to pass ``merge=True`` or call ``ns_assign`` would be advice they
+# cannot follow.
+_RENAME_CONFLICT_DETAIL = {
+    "target_exists": "A namespace named '{new}' already exists. Choose a different name.",
+    "same_name": "'{new}' is the current name — pick a different one.",
+}
 
 
 # Registered on the read router in namespaces_read.py; not on admin_router
@@ -86,20 +98,57 @@ async def update_metadata(
     )
 
 
-@admin_router.post("/{namespace}/rename", response_model=NamespaceInfoResponse)
+@admin_router.post("/{namespace}/rename", response_model=NamespaceRenameResponse)
 async def rename_namespace(
     namespace: str,
     body: RenameRequest,
     storage=Depends(get_storage),
-) -> NamespaceInfoResponse:
-    """Rename a namespace."""
-    count = await storage.rename_namespace(namespace, body.new_name)
+) -> NamespaceRenameResponse:
+    """Rename a namespace.
+
+    Refuses with 409 when the target namespace already exists (or equals the
+    source). To consolidate into an existing namespace instead, repeat the
+    request with ``"merge": true`` — a literal JSON boolean: the chunks move,
+    the *target's* description and color are kept, and chunks it already holds
+    are dropped rather than duplicated (`duplicates_dropped` in the response
+    says how many). 404 when the source namespace holds nothing.
+
+    The 409 ``detail`` is written for the settings UI, which posts renames
+    without a merge affordance; API clients get the merge option from this
+    description. See ``NamespaceOps.rename_namespace``.
+    """
+    try:
+        result = await storage.rename_namespace(namespace, body.new_name, merge=body.merge)
+    except NamespaceConflictError as exc:
+        # Caller-resolvable collision (existing target, or old == new), not an
+        # internal fault — without this it would land on the generic 500
+        # handler in web/app.py. The detail is phrased for *this* surface:
+        # forwarding storage's message would tell a UI user to "pass
+        # merge=True" or call a tool the UI has no affordance for (#1870).
+        template = _RENAME_CONFLICT_DETAIL.get(exc.reason_code, "Cannot rename '{old}' to '{new}'.")
+        detail = template.format(old=namespace, new=body.new_name)
+        raise HTTPException(status_code=409, detail=detail) from exc
+    if not (result.chunks_moved or result.metadata_renamed or result.merged):
+        # Nothing moved because the source held nothing. Falling through would
+        # answer 200 with the *target's* count and metadata — a rename that
+        # never happened, presented as one that did. 404 matches the info GET.
+        raise HTTPException(status_code=404, detail=f"Namespace '{namespace}' not found")
+    # Report the target's resulting total, not the moved-row count: on a merge
+    # the two differ, and the list / info endpoints would immediately
+    # contradict a moved count. Counted directly rather than through
+    # ``list_namespaces``, which aggregates every chunk row to read one bucket.
+    count = await storage.count_chunks_by_namespace(body.new_name)
     meta = await storage.get_namespace_meta(body.new_name)
-    return NamespaceInfoResponse(
+    return NamespaceRenameResponse(
         namespace=body.new_name,
         chunk_count=count,
         description=meta.get("description", "") if meta else "",
         color=meta.get("color", "") if meta else "",
+        chunks_moved=result.chunks_moved,
+        # A merge deletes the source's copy of chunks the target already had;
+        # the receipt says how many so the deletion is never silent.
+        duplicates_dropped=result.duplicates_dropped,
+        merged=result.merged,
     )
 
 

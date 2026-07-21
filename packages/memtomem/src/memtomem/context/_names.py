@@ -25,9 +25,11 @@ from typing import Literal
 
 __all__ = [
     "GENERATOR_VENDOR",
+    "INTERNAL_ARTIFACT_KINDS",
     "InvalidNameError",
     "Layout",
     "OVERRIDE_FORMATS",
+    "internal_artifact_owner",
     "is_internal_artifact_dir",
     "override_vendors",
     "renderable_vendors",
@@ -41,7 +43,22 @@ __all__ = [
 # cross-importing.
 Layout = Literal["flat", "dir"]
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# ``\Z``, never ``$``, in both name patterns here — but for different reasons,
+# and only one of them was a live defect.
+#
+# Python's ``$`` also matches immediately before a trailing newline, and a
+# newline is a legal POSIX filename character. Whether that is exploitable
+# depends entirely on the CALL SITE: ``.fullmatch()`` still requires the whole
+# string, so the trailing newline is left unconsumed and rejected regardless of
+# the anchor, while ``.match()`` stops at the assertion and accepts it.
+#
+# ``_NAME_RE`` is used via ``fullmatch`` below, so ``$`` never actually admitted
+# ``"skill\n"``; ``\Z`` here is belt-and-braces so the pattern stays correct if
+# a future caller reaches for ``match``. ``_INTERNAL_DIR_RE`` IS matched with
+# ``.match()``, where ``$`` classified ``.old-<name>-<pid>-<rand>.tmp\n`` as our
+# own leftover and handed it to the reaper — a name we never generate, so
+# anything wearing one belongs to somebody else.
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 _MAX_LEN = 64
 
 # ADR-0008 PR-C: per-(asset_type, vendor) override file extension. The
@@ -140,7 +157,53 @@ class InvalidNameError(ValueError):
 # ``.tmp`` names, so a looser ``.staging-*.tmp`` match would silently hide —
 # and let the sync-time reaper delete — a legitimately named user skill like
 # ``.staging-notes.tmp`` (Codex review on #1229).
-_INTERNAL_DIR_RE = re.compile(r"^\.(?:staging|old)-.+-\d+-[0-9a-f]{6}\.tmp$")
+#
+# The kinds are a named constant and the pattern is built from it, because the
+# reaper scans by kind (``skills._iter_own_internal_dirs`` globs
+# ``.<kind>-<dst>-*.tmp``) while everything else classifies by this pattern.
+# Spelling the alternation twice is how "hidden" and "deletable" drift apart:
+# a third transient added to the regex alone becomes invisible to discovery
+# and immortal on disk, and one added to the scan alone is deleted by a reaper
+# that cannot prove it owns it.
+#
+# ``re.escape`` on each kind rather than raw interpolation: the whole point of
+# the constant is that a third kind is safe to add in one place, and a raw join
+# would make that true only for the alphanumeric ones.
+INTERNAL_ARTIFACT_KINDS: tuple[str, ...] = ("staging", "old")
+
+_INTERNAL_DIR_RE = re.compile(
+    rf"^\.(?:{'|'.join(re.escape(k) for k in INTERNAL_ARTIFACT_KINDS)})"
+    rf"-(?P<owner>.+)-\d+-[0-9a-f]{{6}}\.tmp\Z"
+)
+
+
+def internal_artifact_owner(name: str) -> str | None:
+    """The destination name an internal artifact belongs to, or ``None``.
+
+    Same predicate as :func:`is_internal_artifact_dir`, but it also answers
+    *whose* leftover this is — which a reaper must know, because the
+    destination name is not recoverable from a prefix match. ``.old-foo-*``
+    matches ``.old-foo-bar-<pid>-<rand>.tmp``, so a reaper working from a glob
+    deletes the skill ``foo-bar``'s in-flight trees while holding only
+    ``foo``'s lock, and hyphenated skill names are the norm.
+
+    The split is unambiguous because the suffix is both **anchored to the end**
+    (``-<decimal pid>-<6 hex>`` then a literal ``.tmp`` and ``\\Z``) and matched
+    after a **greedy** ``.+``: the match must consume the whole name and the
+    owner takes as much of it as it can, so the suffix is necessarily the LAST
+    pid+rand run. So ``.old-foo-bar-123-abc123.tmp`` parses as ``foo-bar``,
+    never as ``foo``, and ``.old-foo-123-abc123-456-def789.tmp`` as
+    ``foo-123-abc123`` — only producible by a skill genuinely named that, since
+    a leftover carries exactly one pid+rand.
+
+    The two properties are **independently sufficient** on that input (dropping
+    either alone still parses it correctly; dropping both yields ``foo``), so
+    neither is "the" reason on its own. Keep both: the anchor is what rejects
+    non-leftover names outright, and greediness is what keeps the parse correct
+    if the anchor is ever loosened.
+    """
+    match = _INTERNAL_DIR_RE.match(name)
+    return match.group("owner") if match else None
 
 
 def is_internal_artifact_dir(name: str) -> bool:
@@ -149,11 +212,18 @@ def is_internal_artifact_dir(name: str) -> bool:
     These are *our own* crash artifacts, not user content — discovery loops
     (canonical listing, runtime scans, extract, detect, status) skip them
     silently rather than warning about an invalid name, and
-    ``skills._reap_stale_internal_dirs`` deletes them under the destination
+    ``skills._recover_and_reap_internal_dirs`` deletes them under the destination
     sidecar lock. Both sides MUST use this one predicate so "hidden" and
     "deletable" can never drift apart.
+
+    Hiding is name-shape-only and stays that way: a leftover belonging to
+    *another* destination must still be hidden from discovery. Deleting is
+    the narrower question, and that is what :func:`internal_artifact_owner`
+    is for — which is also why this delegates to it rather than running its
+    own match. Two independent matches would be two things to keep in step;
+    one makes "hidden" and "deletable" agree by construction.
     """
-    return _INTERNAL_DIR_RE.match(name) is not None
+    return internal_artifact_owner(name) is not None
 
 
 def validate_name(s: object, *, kind: str = "name") -> str:

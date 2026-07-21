@@ -73,6 +73,20 @@ session-bound write contract. Project B's team uses `projB-*`. The two
 teams never collide because the literal `agent_id` strings differ. **No code
 change is required for this case.**
 
+**Amendment (2026-07-21, #1875).** The session-bound write contract requires a
+*bound* agent, and `"default"` is now reserved to mean **no agent bound** at
+every binding surface (`mem_session_start`, `mm session start`, the LangGraph
+adapter's `start_agent_session`). Previously `mem_session_start()` with no
+`agent_id` bound the literal `"default"` and routed all subsequent writes into
+`agent-runtime:default` — a hidden system namespace, so the caller could not
+read back their own entries with a plain `mem_search`. An unbound session now
+leaves writes where they would land with no session at all. This does not touch
+the arity invariant (§1) or the `projA-planner` convention above; it only
+removes an accidental binding. The reservation applies to *inferred* bindings
+only: `agent-runtime:default` stays addressable through an explicit
+`agent_id=` / `namespace=` argument, which is the sole recovery path for chunks
+written there before the fix (there is no namespace-rename primitive).
+
 ### 3. Per-project SHARED memory — a `shared:<project>` bucket
 
 Team-shared-but-project-isolated knowledge goes to a per-project shared
