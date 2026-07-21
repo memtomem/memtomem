@@ -21,6 +21,7 @@ that replaced the inline ``shutil.rmtree(dst); copy_tree_atomic`` in
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import shutil
@@ -37,6 +38,7 @@ from memtomem.context.scope_resolver import canonical_artifact_dir
 from memtomem.context.skills import (
     SKILL_GENERATORS,
     SKILL_MANIFEST,
+    _iter_own_internal_dirs,
     _iter_scannable_skill_files,
     _promote_staging,
     _reap_move_aside,
@@ -462,6 +464,14 @@ class TestStaleLeftoverReaping:
         The assertion is still worth keeping — metacharacter names are a real
         input class, and this is the test that would catch it if the owner
         check were ever loosened for them.
+
+        Driven through :func:`_iter_own_internal_dirs` rather than the prelude:
+        the prelude now runs swap recovery first, which validates the name and
+        rejects a metacharacter one outright (see
+        ``test_prelude_rejects_a_name_production_cannot_produce``). The
+        enumerator is where the glob lives and is still reached with such a
+        name by :func:`_reap_move_aside`, which does not validate — so this is
+        the layer that has something to prove.
         """
         root = tmp_path / ".memtomem/skills"
         root.mkdir(parents=True)
@@ -474,10 +484,16 @@ class TestStaleLeftoverReaping:
         dst.mkdir()
         (dst / SKILL_MANIFEST).write_text("canonical\n", encoding="utf-8")
 
-        _recover_and_reap_internal_dirs(dst)
+        reached = {p for _kind, p in _iter_own_internal_dirs(dst)}
+        assert victim not in reached, f"{weird!r} reached another destination's move-aside tree"
+        assert victim_staging not in reached, (
+            f"{weird!r} reached another destination's staging tree"
+        )
 
-        assert victim.is_dir(), f"{weird!r} reached another destination's move-aside tree"
-        assert victim_staging.is_dir(), f"{weird!r} reached another destination's staging tree"
+        # And end-to-end through the reaper that actually sees such a name.
+        _reap_move_aside(dst)
+        assert victim.is_dir()
+        assert victim_staging.is_dir()
 
     @pytest.mark.requires_symlinks
     def test_symlink_leftover_is_unlinked_not_silently_kept(self, tmp_path: Path) -> None:
@@ -1947,3 +1963,191 @@ class TestSyncPromoteRaceClassification:
         promoted = {rt for rt, _p in result.generated}
         assert "claude_skills" not in promoted
         assert promoted, result.skipped
+
+
+def _plant_row_4(root: Path, name: str, suffix: str = "999999-abc123") -> dict[str, Path]:
+    """Plant the fail-closed recovery state (``dst`` + ``old`` + ``staging``
+    + marker) for *name* under *root*.
+
+    Row 4 rather than a recoverable row on purpose: it is the only state the
+    prelude REFUSES, so it is the one that proves each call site translates the
+    refusal instead of letting an ``OSError`` escape.
+    """
+    paths = {
+        "dst": root / name,
+        "old": root / f".old-{name}-{suffix}.tmp",
+        "staging": root / f".staging-{name}-{suffix}.tmp",
+        "marker": root / f".swap-{name}-{suffix}.json",
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    for key in ("dst", "old", "staging"):
+        paths[key].mkdir(parents=True, exist_ok=True)
+        (paths[key] / SKILL_MANIFEST).write_text(f"{key}\n", encoding="utf-8")
+    paths["marker"].write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "name": name,
+                "suffix": suffix,
+                "dst": paths["dst"].name,
+                "old": paths["old"].name,
+                "staging": paths["staging"].name,
+                "created_at": "2026-07-21T00:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return paths
+
+
+def _plant_wrong_type_transient(
+    root: Path, name: str, suffix: str = "999999-abc123"
+) -> dict[str, Path]:
+    """Plant a marked swap whose ``.old-*`` is a regular FILE, ``dst`` absent.
+
+    The reverse import refuses ``canonical exists`` in a PRE-LOCK check, so it
+    only reaches the prelude when ``dst`` is absent — and every ``dst``-absent
+    recovery row (2, 5, 6) converges rather than refusing. The refusal that IS
+    reachable there is the type gate: recovery classifies by existence but
+    requires every present transient to be a real directory, because
+    forwarding a regular file or a symlink into the canonical position is the
+    thing the fail-closed posture exists to prevent.
+    """
+    paths = {
+        "dst": root / name,
+        "old": root / f".old-{name}-{suffix}.tmp",
+        "staging": root / f".staging-{name}-{suffix}.tmp",
+        "marker": root / f".swap-{name}-{suffix}.json",
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    paths["old"].write_text("not a directory\n", encoding="utf-8")
+    paths["marker"].write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "name": name,
+                "suffix": suffix,
+                "dst": paths["dst"].name,
+                "old": paths["old"].name,
+                "staging": paths["staging"].name,
+                "created_at": "2026-07-21T00:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return paths
+
+
+class TestSwapRecoveryRefusalIsTranslatedPerItem:
+    """ADR-0030 §10 / PR-G4a-3 — the prelude can now raise, so every call site
+    needs a stated translation.
+
+    ``SwapRecoveryError`` subclasses ``OSError`` so a missed translation
+    degrades safely rather than crashing, but "degrades safely" here means a
+    wedged artifact reported as an unreadable file. Each site converts it to
+    its own typed code, and the batch keeps going.
+    """
+
+    def test_reverse_import_skips_only_the_wedged_destination(self, tmp_path: Path) -> None:
+        """A wedged canonical is a typed ``SWAP_RECOVERY_PENDING`` skip — its
+        own code, not ``TARGET_CONFLICT`` — and the other skill still imports.
+
+        An escaping raise would abort a batch whose other destinations are
+        fine, which is the #1229 contract this mirrors.
+        """
+        _seed_runtime_skill(tmp_path, name="foo")
+        _seed_runtime_skill(tmp_path, name="bar", body="---\nname: bar\n---\nbody\n")
+        canonical = canonical_skills_root(tmp_path)
+        planted = _plant_wrong_type_transient(canonical, "foo")
+
+        result = extract_skills_to_canonical(tmp_path)
+
+        wedged = [s for s in result.skipped if s[2] == skip_codes.SWAP_RECOVERY_PENDING]
+        assert len(wedged) == 1, result.skipped
+        assert wedged[0][0] == "foo"
+        assert not [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert [p.name for p in result.imported] == ["bar"]
+        # Fail-closed: the wedged destination was not written and nothing the
+        # marker claims was removed.
+        assert not planted["dst"].exists()
+        assert planted["old"].is_file() and planted["marker"].is_file()
+
+    def test_reverse_import_does_not_retry_the_same_destination_from_another_runtime(
+        self, tmp_path: Path
+    ) -> None:
+        """The wedge is on the DESTINATION, so a second runtime's copy of the
+        same name would hit the identical state and add a duplicate row.
+
+        This is the ``canonical_exists`` posture (mark ``seen``), deliberately
+        NOT the ``lock_timeout`` one — contention is transient and worth a
+        retry from another source; a fail-closed recovery state is not.
+        """
+        _seed_runtime_skill(tmp_path, runtime_dir=".claude/skills", name="foo")
+        _seed_runtime_skill(tmp_path, runtime_dir=".gemini/skills", name="foo")
+        _plant_wrong_type_transient(canonical_skills_root(tmp_path), "foo")
+
+        result = extract_skills_to_canonical(tmp_path)
+
+        wedged = [s for s in result.skipped if s[2] == skip_codes.SWAP_RECOVERY_PENDING]
+        assert len(wedged) == 1, result.skipped
+
+    def test_multi_destination_push_excludes_the_blocked_destination_only(
+        self, tmp_path: Path
+    ) -> None:
+        """The project_shared fan-out reaps every destination BEFORE the
+        per-item loop, so a wedged one must be recorded AND excluded from the
+        staging that follows.
+
+        Recording a skip while still staging into that destination would
+        contradict the fail-closed recovery result it came from — the reason
+        ``blocked_dsts`` exists rather than a bare ``skipped.append``.
+        """
+        _seed_canonical_skill(tmp_path, name="hello")
+        _seed_canonical_skill(tmp_path, name="other", skill_md="---\nname: other\n---\nbody\n")
+        gen = SKILL_GENERATORS["claude_skills"]
+        wedged_dst = gen.target_dir(tmp_path, "hello")
+        healthy_dst = gen.target_dir(tmp_path, "other")
+        assert wedged_dst is not None and healthy_dst is not None
+        planted = _plant_row_4(wedged_dst.parent, "hello")
+
+        result = generate_all_skills(tmp_path, runtimes=["claude_skills"])
+
+        wedged = [s for s in result.skipped if s[2] == skip_codes.SWAP_RECOVERY_PENDING]
+        assert len(wedged) == 1, result.skipped
+        assert wedged[0][0] == "hello"
+        # Excluded from staging: the fail-closed state is byte-for-byte intact.
+        assert (planted["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "dst\n"
+        assert planted["old"].is_dir() and planted["staging"].is_dir()
+        assert planted["marker"].is_file()
+        # The healthy destination still completes.
+        assert ("claude_skills", healthy_dst) in result.generated
+
+    def test_single_destination_push_skips_the_wedged_destination(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The user-scope fan-out takes one destination lock at a time, so its
+        translation is a plain per-item skip with no ``blocked_dsts`` — a
+        separate code path from the project_shared batch above, and one a
+        single test over the default scope would never reach.
+        """
+        set_home(monkeypatch, tmp_path / "home")
+        _seed_canonical_skill(tmp_path, name="hello", scope="user")
+        _seed_canonical_skill(
+            tmp_path, name="other", scope="user", skill_md="---\nname: other\n---\nbody\n"
+        )
+        gen = SKILL_GENERATORS["claude_skills"]
+        wedged_dst = gen.target_dir(tmp_path, "hello", scope="user")
+        healthy_dst = gen.target_dir(tmp_path, "other", scope="user")
+        assert wedged_dst is not None and healthy_dst is not None
+        planted = _plant_row_4(wedged_dst.parent, "hello")
+
+        result = generate_all_skills(tmp_path, runtimes=["claude_skills"], scope="user")
+
+        wedged = [s for s in result.skipped if s[2] == skip_codes.SWAP_RECOVERY_PENDING]
+        assert len(wedged) == 1, result.skipped
+        assert wedged[0][0] == "hello"
+        assert (planted["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "dst\n"
+        assert planted["marker"].is_file()
+        assert ("claude_skills", healthy_dst) in result.generated

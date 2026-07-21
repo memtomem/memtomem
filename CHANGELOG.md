@@ -7,6 +7,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Interrupted skill updates are now recovered before the next write**
+  (ADR-0030 §10, PR-G4a-3a) — PR-G4a-2 shipped the crash-safe directory swap
+  and its recovery machine with no caller. **Push, reverse import and Pull**
+  now run recovery *first* whenever they take a skill's canonical lock: a
+  leftover transaction is completed, rolled back, or — when two candidate trees
+  survive and which one is the original is genuinely ambiguous — refused with
+  both paths named and nothing changed. Crash leftovers are still collected
+  afterwards, but a tree the marker still claims is now left alone; deleting
+  one turned a recoverable state into one whose next recovery would have
+  removed the only copy of the skill.
+  The refusal reaches each surface as its own condition rather than a generic
+  failure: a typed per-item skip that lets the rest of a push or import
+  proceed, `swap_recovery_pending` on a Pull, and HTTP **409** on the web API.
+  In every case the operation you asked for did **not** run — recovery may have
+  safely advanced the leftover transaction first, but it never half-applies
+  your request and never leaves the artifact worse than it found it.
+  **Not yet every writer.** Skill create/edit/delete in the web UI, wiki
+  install/update, cross-scope transfer and `copy_skill` still take the lock
+  without recovering, so those paths can still overwrite a pending transaction
+  — the pre-existing behavior, unchanged here. Wiring them is a follow-up, and
+  it ships with a build-time guard that finds such writers by analyzing the
+  tree rather than from a hand-written list, because the list is exactly what
+  missed them.
+
 - **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
   primitive that replaces a whole artifact tree and can recover from an
   interruption. A non-empty directory cannot be replaced atomically on POSIX,
@@ -96,9 +120,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `commit_pull`). Domain decisions are delivered as a stable typed envelope the
   UI branches on — the applied write and every refusal (`source_conflict`
   carrying its candidate rows, `gate_blocked` carrying `force_bypassable`,
-  `canonical_exists` → overwrite, …) return HTTP 200; only the four statuses
+  `canonical_exists` → overwrite, …) return HTTP 200; only the five statuses
   with genuine HTTP meaning become error codes (lock-timeout → 503, stale plan
-  → 409, write failure → 500). Destination consent mirrors the CLI and the
+  → 409, pending swap recovery → 409, write failure → 500). Destination consent
+  mirrors the CLI and the
   dashboard's existing host-write gate: a `project_shared` landing (git-tracked)
   requires `confirm_project_shared`, a `user` landing requires `allow_host_writes`
   (disclosing the host paths), and `target_scope` is explicit (no silent
@@ -300,6 +325,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   observations, and both search caches.
 
 ### Fixed
+
+- **A failed namespace rename no longer half-applies** (#1874) —
+  `mem_ns_rename` rewrote the chunk rows first and renamed the namespace's
+  metadata row second. Renaming onto a namespace that already had a metadata
+  row therefore failed on the primary key *after* the chunks had been rewritten
+  and with nothing rolling them back, so a later unrelated write could commit a
+  rename the caller was told had failed. The collision is now decided before
+  any write: renaming onto an existing namespace is **refused** (409 on the web
+  admin route, `Error: …` over MCP), and `merge=True` opts into consolidating
+  into it — chunks move, the target's description/color are kept, and where
+  both namespaces hold the same chunk (same source file, content hash and start
+  line) the target's copy is kept while the source's duplicate is dropped
+  (reported, never silent), as is the source's metadata row. The whole
+  operation runs under one lock-taking transaction, so a failure anywhere
+  undoes all of it, including when it runs inside an outer transaction it does
+  not own. `mem_ns_rename` also reports *what* changed rather than a bare chunk
+  count: a namespace registered but never written to renames its metadata row
+  while moving 0 chunks, which used to read as "nothing happened". Relatedly,
+  `mm agent migrate` now finds legacy `agent/{id}` namespaces that exist only
+  as a registration (no chunks) and asks before consolidating into an existing
+  `agent-runtime:{id}` (`--yes` to skip) instead of failing.
 
 - **`mem_ask` is reachable again outside `full` tool mode** — the tool carried
   `@mcp.tool()` but never `@register(...)`, so the default `core` mode pruned

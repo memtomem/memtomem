@@ -9,6 +9,31 @@ class StorageError(Mem2MemError):
     """Storage backend error."""
 
 
+class NamespaceConflictError(StorageError):
+    """A namespace rename was refused because it would collide.
+
+    Raised by ``rename_namespace`` when the target namespace already
+    exists (holds chunks or a metadata row) and the caller did not opt
+    into ``merge=True``, and when source and target are the same name.
+    Distinct from the generic :class:`StorageError` so the web layer can
+    answer 409 (a caller-resolvable conflict) instead of falling through
+    to the generic 500 handler; MCP surfaces it as a plain ``Error: …``
+    string via ``tool_handler``'s ``StorageError`` branch.
+
+    The message states the *condition* only. What to do about it differs
+    per surface — an MCP client can pass ``merge=True``, a web user can
+    only pick another name — so each surface phrases its own remedy off
+    :attr:`reason_code` rather than forwarding storage's wording to a
+    caller who cannot act on it.
+    """
+
+    #: ``"target_exists"`` — *new* already holds chunks or a metadata row.
+    #: ``"same_name"`` — source and target are the same namespace.
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class StorageStartupError(StorageError):
     """Classified, path-safe storage initialization failure."""
 

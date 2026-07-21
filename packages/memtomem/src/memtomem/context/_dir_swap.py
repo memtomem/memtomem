@@ -565,7 +565,7 @@ def _clear_marker_or_refuse(paths: _SwapPaths) -> None:
         raise SwapRecoveryError(
             errno.EBUSY,
             f"recovered the swap for {paths.name!r} but could not remove its marker "
-            f"({paths.marker}), so the transaction is not resolved; nothing further may "
+            f"('{paths.marker}'), so the transaction is not resolved; nothing further may "
             "touch this artifact until the marker is removed by hand",
             str(paths.dst),
             retained=(paths.marker,),
@@ -611,7 +611,7 @@ def _unwind_rename2(paths: _SwapPaths, promote_exc: OSError) -> None:
         )
         raise SwapRecoveryError(
             errno.EBUSY,
-            f"directory swap could not be unwound; the original tree is at {paths.old}",
+            f"directory swap could not be unwound; the original tree is at '{paths.old}'",
             str(paths.dst),
             original=promote_exc,
             retained=(paths.marker, paths.old, paths.staging),
@@ -661,10 +661,10 @@ def _require_dir(path: Path, what: str) -> None:
     try:
         mode = os.lstat(path).st_mode
     except OSError as exc:
-        raise ValueError(f"{what} {path} is unusable ({exc})") from exc
+        raise ValueError(f"{what} '{path}' is unusable ({exc})") from exc
     if not stat.S_ISDIR(mode):
         raise ValueError(
-            f"{what} {path} is not a directory "
+            f"{what} '{path}' is not a directory "
             "(symlinks and special files are refused, as they are during recovery)"
         )
 
@@ -720,7 +720,7 @@ def swap_dir_tree(staging: Path, dst: Path) -> None:
     # the root itself or at its parent. See :func:`_swap_paths`.
     validate_name(dst.name, kind="artifact name")
     if staging.parent != dst.parent:
-        raise ValueError(f"staging {staging} must be a sibling of {dst}")
+        raise ValueError(f"staging '{staging}' must be a sibling of '{dst}'")
     match = _staging_re_for(dst.name).match(staging.name)
     if match is None:
         raise ValueError(
@@ -824,8 +824,8 @@ def _rename_recovery(src: Path, dst: Path) -> None:
         if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
             raise SwapForeignDestination(
                 errno.EBUSY,
-                f"{dst} was recreated by a non-gateway writer while recovering the swap; "
-                f"refusing to clobber it. The tree this recovery would have restored is at {src}",
+                f"'{dst}' was recreated by a non-gateway writer while recovering the swap; "
+                f"refusing to clobber it. The tree this recovery would have restored is at '{src}'",
                 str(dst),
                 retained=(src, dst),
             ) from exc
@@ -944,10 +944,20 @@ def recover_pending_swaps(root: Path, name: str) -> bool:
         case (True, True, True):  # row 4 — fail closed, provenance ambiguous
             raise SwapForeignDestination(
                 errno.EBUSY,
+                # Written to SURVIVE the wire, which took two changes (PR
+                # review). Every interpolated path is QUOTED, because the
+                # web/MCP redactors replace a path run with ``<path>`` and
+                # their segment class includes spaces — an unquoted path
+                # mid-sentence swallows everything after it. And the
+                # instruction comes BEFORE the paths, because those redactors
+                # also truncate at 200 characters: the earlier wording spent
+                # its budget explaining the two readings and lost "inspect
+                # both by hand" off the end, on every surface, which is the
+                # entire point of the refusal. The explanation is what gets
+                # cut now, and it is the part a reader can do without.
                 f"an interrupted directory swap left two candidate trees for {name!r} and which "
-                f"one is the original is AMBIGUOUS: either {paths.dst} was recreated during the "
-                f"swap (making {paths.old} the original), or the swap never moved anything "
-                f"(making {paths.dst} the original). Inspect both by hand; nothing was changed",
+                f"is the original is AMBIGUOUS — inspect both by hand; nothing was changed. "
+                f"Present: '{paths.dst}'; moved aside: '{paths.old}'",
                 str(paths.dst),
                 retained=(paths.marker, paths.dst, paths.old, paths.staging),
             )
