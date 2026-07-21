@@ -415,6 +415,15 @@ class TestBatchAppendByteIdentity:
         ``append_entry`` calls produced before the refactor."""
         import memtomem.tools.memory_writer as mw
 
+        fixed_now = mw.datetime(2026, 7, 21, 12, 34, 56, tzinfo=mw.timezone.utc)
+
+        class _FrozenDatetime:
+            @staticmethod
+            def now(_tz=None):
+                return fixed_now
+
+        monkeypatch.setattr(mw, "datetime", _FrozenDatetime)
+
         entries = [
             ("one", "A", ["t1"]),
             ("## already a heading", None, None),
