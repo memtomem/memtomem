@@ -430,7 +430,10 @@ class TestMemAddCoreCallSiteLabels:
         tools = Path(memtomem.__file__).parent / "server" / "tools"
         labels: dict[str, str] = {}
         for path in sorted(tools.glob("*.py")):
-            tree = ast.parse(path.read_text())
+            # Pin UTF-8: py312 resolves ``read_text``'s encoding from the
+            # locale, so on a cp1252 Windows runner this raises
+            # UnicodeDecodeError on any non-ASCII byte in a tool module.
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
