@@ -342,17 +342,17 @@ def test_install_guide_bodies_carry_verbatim_commands(page, mm_web_url: str) -> 
     cases = {
         "claude": [
             "claude mcp add memtomem",
-            "uvx --isolated --from 'memtomem[all]==0.3.11' memtomem-server",
+            "uvx --isolated --from 'memtomem[all]==0.3.12' memtomem-server",
         ],
         "antigravity": [
             "~/.gemini/antigravity-cli/mcp_config.json",
             '"command": "uvx"',
-            '"memtomem[all]==0.3.11"',
+            '"memtomem[all]==0.3.12"',
         ],
         "codex": [
             "[mcp_servers.memtomem]",
             'command = "uvx"',
-            '"memtomem[all]==0.3.11"',
+            '"memtomem[all]==0.3.12"',
         ],
         "kimi": ["mm init --mcp kimi"],
     }

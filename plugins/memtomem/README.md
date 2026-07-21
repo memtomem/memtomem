@@ -17,7 +17,7 @@ loaded. BM25 is the default and requires no embedding provider.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```sh
-uvx --from 'memtomem==0.3.11' mm init --preset minimal --non-interactive
+uvx --from 'memtomem==0.3.12' mm init --preset minimal --non-interactive
 mm status
 ```
 
