@@ -414,6 +414,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   to `<path>` while slash-bearing prose, URLs, relative remediation paths, and
   `~`-collapsed paths retain their existing behavior.
 
+- **Session metadata and chunk detail now preserve the HTTP scope contract**
+  (#1897) — `GET /api/sessions` returns each session's decoded metadata object,
+  including its title and write-provenance completeness state. Direct
+  `GET /api/chunks/{id}` reads now pass through the same ADR-0011 project
+  boundary as recall, so knowing an id cannot reveal another project's chunk;
+  missing and out-of-scope ids both return the existing 404 response.
+
 - **A failed namespace rename no longer half-applies** (#1874) —
   `mem_ns_rename` rewrote the chunk rows first and renamed the namespace's
   metadata row second. Renaming onto a namespace that already had a metadata

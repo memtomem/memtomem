@@ -233,6 +233,12 @@ class SessionMixin:
         since: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
+        """Return session rows with ``metadata`` normalized to a dict.
+
+        This matches :meth:`get_session` and keeps HTTP/CLI/MCP consumers
+        from having to distinguish SQLite's raw JSON text from an object.
+        See :func:`decode_session_metadata` for malformed-row handling.
+        """
         db = self._get_db()
         query = (
             "SELECT id, agent_id, started_at, ended_at, summary, namespace, metadata FROM sessions"
@@ -258,7 +264,7 @@ class SessionMixin:
                 "ended_at": r[3],
                 "summary": r[4],
                 "namespace": r[5],
-                "metadata": r[6],
+                "metadata": decode_session_metadata(r[6]),
             }
             for r in rows
         ]

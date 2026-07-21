@@ -178,11 +178,18 @@ class TestSessionMetadataDurability:
 
     @pytest.mark.asyncio
     async def test_get_session_decodes_metadata_to_a_dict(self, storage):
-        await storage.create_session("m1", "agent", "default", metadata={"title": "Sprint"})
+        metadata = {
+            "title": "Sprint",
+            "provenance": "write-v1",
+            "provenance_incomplete": True,
+        }
+        await storage.create_session("m1", "agent", "default", metadata=metadata)
 
         row = await storage.get_session("m1")
+        listed = await storage.list_sessions(agent_id="agent")
 
-        assert row["metadata"] == {"title": "Sprint"}
+        assert row["metadata"] == metadata
+        assert listed[0]["metadata"] == metadata
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -202,8 +209,10 @@ class TestSessionMetadataDurability:
         db.commit()
 
         row = await storage.get_session("m2")
+        listed = await storage.list_sessions(agent_id="agent")
 
         assert row["metadata"] == {}
+        assert listed[0]["metadata"] == {}
 
     @pytest.mark.asyncio
     async def test_end_session_keeps_keys_it_was_not_given(self, storage):

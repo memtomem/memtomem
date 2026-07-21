@@ -7,9 +7,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.tools.memory_writer import remove_lines, replace_chunk_body
 from memtomem.web.deps import (
+    get_config,
     get_embedder,
     get_index_engine,
     get_search_pipeline,
@@ -46,11 +48,23 @@ async def list_chunks(
 
 
 @router.get("/{chunk_id}", response_model=ChunkOut)
-async def get_chunk(chunk_id: UUID, storage=Depends(get_storage)) -> ChunkOut:
-    chunk = await storage.get_chunk(chunk_id)
-    if chunk is None:
+async def get_chunk(
+    chunk_id: UUID,
+    storage=Depends(get_storage),
+    config=Depends(get_config),
+) -> ChunkOut:
+    # Knowing an id is not authorization. Hydrate through the same always-on
+    # ADR-0011 scope fragment as search/recall: outside a project only user
+    # rows are visible; inside one, user + that project's rows are visible.
+    project_context_root = _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
+    chunks = await storage.recall_chunks(
+        chunk_ids=(chunk_id,),
+        limit=1,
+        project_context_root=project_context_root,
+    )
+    if not chunks:
         raise HTTPException(status_code=404, detail="Chunk not found")
-    return chunk_to_out(chunk)
+    return chunk_to_out(chunks[0])
 
 
 @router.patch("/{chunk_id}", response_model=ChunkOut)
