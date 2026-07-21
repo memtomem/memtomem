@@ -443,13 +443,16 @@ class NamespaceOps:
                 continue
             for i, left in enumerate(cols):
                 for right in cols[i + 1 :]:
-                    for survivor, dropped in pairs:
-                        db.execute(
-                            f"DELETE FROM {quote_ident(table)} "
-                            f"WHERE ({quote_ident(left)}=? AND {quote_ident(right)}=?) "
-                            f"OR ({quote_ident(left)}=? AND {quote_ident(right)}=?)",
-                            (dropped, survivor, survivor, dropped),
-                        )
+                    # executemany, not a loop of execute: one prepared
+                    # statement for the whole merge. Deletes are
+                    # order-independent (unlike the OR IGNORE remap), so
+                    # batching here costs no semantics.
+                    db.executemany(
+                        f"DELETE FROM {quote_ident(table)} "
+                        f"WHERE ({quote_ident(left)}=? AND {quote_ident(right)}=?) "
+                        f"OR ({quote_ident(left)}=? AND {quote_ident(right)}=?)",
+                        [(dropped, survivor, survivor, dropped) for survivor, dropped in pairs],
+                    )
 
     @staticmethod
     def _has_namespace_meta(db: sqlite3.Connection, namespace: str) -> bool:
