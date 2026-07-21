@@ -256,6 +256,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **The server instructions now fit in the client's prompt, and the detail moved
+  somewhere it can't be cut** (#1881) — the `instructions` string returned on
+  `initialize` is the only workflow-level text most clients put in front of the
+  model, and it was 3,364 / 3,219 / 2,673 characters for core / standard / full.
+  A Claude Code system prompt carrying it ended mid-word at ~2,048 characters,
+  and because the namespace table and the closing "when in doubt, default to
+  `mem_add` / `mem_search`" line were appended **last**, the part every mode lost
+  was the generic guidance — the mode-specific narrative it was cut for survived.
+  Each mode is now a recipe plus a pointer (1,694 / 1,660 / 1,555), the generic
+  sections come before the mode block, and the core-tool count is rendered from
+  the exposed set instead of typed. The narrative it displaced — the
+  session-bound write contract, the per-project team buckets (ADR-0028), and the
+  scope `mem_agent_search` actually resolves — moved to
+  `mem_do(action="help", params={"category": "sessions"})` and
+  `params={"category": "multi_agent"}`, which are fetched on demand rather than
+  paid on every prompt, and are budgeted in their own right.
+  Two things the old text said imprecisely are now stated in full: an unbound
+  session does **not** by itself make `mem_agent_search` unpinned (it drops one
+  step of `explicit agent_id → session's bound agent → current namespace →
+  unpinned`), and `namespace=` has to be passed **on the write** — passing it to
+  `mem_session_start` re-points the session record only, which is now pinned as
+  behaviour and not just prose.
+
 - **Refusals now tell you what to do on the surface you are actually using**
   (#1869) — engine refusal reasons hard-coded CLI flag spellings, so an agent
   that hit a source conflict over MCP was told to `pass --from <runtime>`, a
