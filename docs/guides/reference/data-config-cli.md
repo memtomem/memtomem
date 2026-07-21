@@ -166,7 +166,11 @@ discovery works the same way for `source_type="claude"`.
 
 ## 7. Config — `mem_stats`, `mem_status`, `mem_config`, `mem_embedding_reset`
 
-> **Tool mode note:** `mem_config`, `mem_embedding_reset`, and `mem_reset` require `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` / `mm embedding-reset` (CLI) or the Web UI Settings tab.
+> **Tool mode note:** `mem_config`, `mem_embedding_reset`, and `mem_reset` are exposed as individual
+> tools only under `MEMTOMEM_TOOL_MODE=full`. The actions themselves stay reachable in `core` and
+> `standard` mode through the dispatcher — `mem_do(action="config", params={...})`,
+> `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the
+> CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
 ### `mem_stats` / `mem_status`
 

@@ -1011,7 +1011,9 @@ carry the `MEMTOMEM_` prefix.
 
 ## Querying and Modifying at Runtime
 
-You can also inspect and change settings at runtime via the `mem_config` MCP tool (requires `MEMTOMEM_TOOL_MODE=full`; in `core` or `standard` mode, use `mm config` CLI or the Web UI Settings tab):
+You can also inspect and change settings at runtime via the `mem_config` MCP tool. It is exposed as an
+individual tool only under `MEMTOMEM_TOOL_MODE=full`; in `core` or `standard` mode call
+`mem_do(action="config", params={...})`, or use the `mm config` CLI / the Web UI Settings tab:
 
 ```
 mem_config()                                      # Output all settings as JSON

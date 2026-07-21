@@ -58,7 +58,13 @@ async def mem_ns_set(
     namespace: str,
     ctx: CtxType = None,
 ) -> str:
-    """Set the session-default namespace. Subsequent search/add/recall use this unless overridden.
+    """Set the session-default namespace.
+
+    Subsequent search / add / recall use it unless they pass namespace=.
+
+    One exception: while a session is active this is the *read* default only —
+    resolver-backed writes go to agent-runtime:<agent_id> unless the call
+    passes namespace= explicitly.
 
     ``namespace`` is run through :func:`validate_namespace` before the
     write, mirroring ``mem_session_start(namespace=...)``. Without the
@@ -69,6 +75,10 @@ async def mem_ns_set(
     re-opening the bypass issue #496 closed at the explicit
     ``namespace=`` surface. See issue #500 for the transitive-bypass
     write-up.
+
+    Args:
+        namespace: Namespace to make the session default. Validated before
+            the write; a rejected value leaves the current default in place.
 
     Examples::
         mem_ns_set(namespace="work")
@@ -108,6 +118,17 @@ async def mem_ns_rename(
     Both ``old`` and ``new`` are run through :func:`validate_namespace`
     so a hostile-shaped string cannot land verbatim in the chunks /
     namespace_metadata rows via the rename path. See issue #500.
+
+    Args:
+        old: Existing namespace to rename. The reported count covers chunk
+            rows only — a namespace that exists as metadata but holds no
+            chunks still gets its metadata row renamed while reporting 0.
+        new: Target namespace, validated before the write. If it holds
+            chunks but has no metadata row, the two namespaces are silently
+            merged; if it has a metadata row, the call fails on the
+            metadata primary key AFTER the chunk rows were already
+            rewritten (#1874 — do not rely on the failure
+            meaning "nothing happened").
 
     Examples::
         mem_ns_rename(old="project:v1", new="project:v2")
