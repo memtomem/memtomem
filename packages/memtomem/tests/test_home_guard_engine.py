@@ -1,19 +1,15 @@
-"""Pins for ``_home_guard``: the real-home write detector (#1892).
+"""Pins for the narrow real-settings write detector (#1892, #1903).
 
-Everything here runs against a **synthetic** home under ``tmp_path``. Nothing in
-this file may read or write the developer's real ``$HOME`` — a guard that damages
-the thing it protects while testing itself would be its own best argument.
-
-The negative pins matter more than the positive ones: a fingerprinting guard
-that silently stops detecting looks exactly like a clean run, so each detection
-path is asserted to actually fire, and each known false-positive shape is
-asserted not to.
+All filesystem mutation in this module uses a synthetic home.  The final
+integration pins start a nested pytest process whose *process home* is also a
+synthetic directory, so testing the guard cannot damage the files it protects.
 """
 
 from __future__ import annotations
 
-import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,12 +20,26 @@ from . import _home_guard as hg
 @pytest.fixture
 def fake_home(tmp_path: Path) -> Path:
     home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    (home / ".memtomem").mkdir(parents=True)
+    home.mkdir()
     return home
 
 
-# -- the off switch ---------------------------------------------------------
+@pytest.fixture
+def watched(fake_home: Path) -> Path:
+    target = fake_home / ".claude" / "settings.json"
+    target.parent.mkdir()
+    target.write_text('{"model": "opus"}', encoding="utf-8")
+    return target
+
+
+def _cycle(paths: tuple[Path, ...], mutate) -> list[hg.Violation]:
+    before = hg.snapshot_files(paths)
+    hg.require_armable(before)
+    mutate()
+    return hg.diff_files(before, hg.snapshot_files(paths))
+
+
+# -- switch and target derivation ------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -46,12 +56,6 @@ def fake_home(tmp_path: Path) -> Path:
     ],
 )
 def test_guard_enabled_parses_the_off_switch(value: dict[str, str], expected: bool) -> None:
-    """Pure parsing, so the default can be pinned without touching the real env.
-
-    Asserting ``guard_enabled(os.environ)`` here would fail under the documented
-    ``MEMTOMEM_TEST_HOME_GUARD=off`` invocation — the switch would break the test
-    that exists to describe it.
-    """
     assert hg.guard_enabled(value) is expected
 
 
@@ -63,483 +67,297 @@ def test_as_home_restores_the_previous_environment(fake_home: Path) -> None:
     assert (os.environ.get("HOME"), os.environ.get("USERPROFILE")) == before
 
 
-# -- derivation -------------------------------------------------------------
+def test_derivation_is_exactly_the_four_settings_targets(fake_home: Path) -> None:
+    assert set(hg.derive_targets(fake_home)) == {
+        fake_home / ".claude" / "settings.json",
+        fake_home / ".codex" / "hooks.json",
+        fake_home / ".gemini" / "settings.json",
+        fake_home / ".kimi" / "config.toml",
+    }
 
 
-def test_derivation_is_non_empty_and_home_contained(fake_home: Path) -> None:
-    protected = hg.derive_protected(fake_home)
-    assert protected.files or protected.roots
-    for path in protected.files + protected.roots:
-        assert path.is_absolute()
-        assert path.is_relative_to(fake_home), f"{path} escapes the synthetic home"
-
-
-def test_every_fanout_target_is_covered(fake_home: Path) -> None:
-    """EVERY non-None (artifact, runtime) target, not one per runtime.
-
-    "At least one of skills/agents/commands per runtime" was the first version of
-    this pin and it was too weak by exactly the margin that matters: dropping
-    ``commands`` from the derivation left it green. A new runtime — or a new
-    artifact kind — must be protected the day it lands, and a hand-edit replacing
-    the derivation with a literal list must fail here.
-    """
-    from memtomem.context._runtime_targets import KNOWN_RUNTIMES, runtime_fanout_root
-
-    protected = hg.derive_protected(fake_home)
-    everything = set(protected.files) | set(protected.roots)
-
-    missing: list[str] = []
-    checked = 0
-    for artifact in ("skills", "agents", "commands"):
-        for runtime in KNOWN_RUNTIMES:
-            with hg.as_home(fake_home):
-                target = runtime_fanout_root(artifact, runtime, "user", None)
-            if target is None:
-                continue  # no fan-out by design
-            checked += 1
-            if not any(p == Path(target) or Path(target).is_relative_to(p) for p in everything):
-                missing.append(f"{artifact}/{runtime} -> {target}")
-
-    assert checked >= len(KNOWN_RUNTIMES), "fan-out sweep found almost nothing — it is broken"
-    assert not missing, "unprotected fan-out targets:\n  " + "\n  ".join(missing)
-
-
-def test_every_settings_target_is_covered(fake_home: Path) -> None:
-    """Each generator's user-scope target must actually be in the watched set."""
+def test_every_current_settings_generator_is_included(fake_home: Path) -> None:
     from memtomem.context.settings import SETTINGS_GENERATORS
 
-    protected = hg.derive_protected(fake_home)
-    watched = set(protected.files) | set(protected.roots)
-
-    missing: list[str] = []
-    for name, generator in SETTINGS_GENERATORS.items():
-        with hg.as_home(fake_home):
-            target = generator.target_file(fake_home / "nope", "user")
-        if target is None:
-            continue
-        if not any(Path(target) == p or Path(target).is_relative_to(p) for p in watched):
-            missing.append(f"{name} -> {target}")
-    assert SETTINGS_GENERATORS, "no settings generators registered — the sweep is broken"
-    assert not missing, "unprotected settings targets:\n  " + "\n  ".join(missing)
-
-
-def test_user_scope_targets_ignore_project_root(fake_home: Path) -> None:
-    """The derivation passes a nonexistent project root; pin that it cannot matter."""
-    from memtomem.context.settings import SETTINGS_GENERATORS
-
+    targets = set(hg.derive_targets(fake_home))
     with hg.as_home(fake_home):
-        for generator in SETTINGS_GENERATORS.values():
-            first = generator.target_file(fake_home / "project-a", "user")
-            second = generator.target_file(fake_home / "project-b", "user")
-            assert first == second, f"{generator.name}: user scope depends on project_root"
+        expected = {
+            Path(target)
+            for generator in SETTINGS_GENERATORS.values()
+            if (target := generator.target_file(fake_home / "no-project", "user")) is not None
+        }
+    assert targets == expected
 
 
-def test_fastembed_cache_is_excluded(fake_home: Path) -> None:
-    """The model cache is legitimately written by the golden-path run."""
-    protected = hg.derive_protected(fake_home)
-    cache = fake_home / ".memtomem" / "cache"
-    assert cache in protected.excluded
-    assert not any(p.is_relative_to(cache) for p in protected.files + protected.roots)
+def test_future_settings_generator_is_included(fake_home: Path, monkeypatch) -> None:
+    from memtomem.context import settings
+
+    class FutureGenerator:
+        name = "future"
+
+        @staticmethod
+        def target_file(project_root: Path, scope: str) -> Path:
+            del project_root
+            assert scope == "user"
+            return Path.home() / ".future" / "settings.json"
+
+    monkeypatch.setitem(settings.SETTINGS_GENERATORS, "future", FutureGenerator())
+    assert fake_home / ".future" / "settings.json" in hg.derive_targets(fake_home)
 
 
-def test_wiki_root_comes_from_the_call_time_resolver(fake_home: Path) -> None:
-    """Not ``DEFAULT_WIKI_PATH`` — that constant is frozen to the real home.
+def test_derivation_refuses_a_target_outside_home(
+    fake_home: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from memtomem.context import settings
 
-    Using it would put a real-home path in a synthetic-home derivation, where the
-    ``is_relative_to(home)`` filter then silently drops it and the wiki ends up
-    unguarded in production too.
-    """
-    protected = hg.derive_protected(fake_home)
-    assert (fake_home / ".memtomem-wiki") in set(protected.roots)
+    class EscapingGenerator:
+        name = "escape"
 
+        @staticmethod
+        def target_file(project_root: Path, scope: str) -> Path:
+            del project_root, scope
+            return tmp_path / "outside.json"
 
-def test_effective_configured_db_path_is_picked_up(fake_home: Path) -> None:
-    """A developer who moved their DB elsewhere under $HOME is still covered."""
-    moved = fake_home / "elsewhere" / "custom.db"
-    (fake_home / ".memtomem" / "config.json").write_text(
-        json.dumps({"storage": {"sqlite_path": str(moved)}}), encoding="utf-8"
-    )
-    protected = hg.derive_protected(fake_home)
-    assert moved in set(protected.roots)
+    monkeypatch.setattr(settings, "SETTINGS_GENERATORS", {"escape": EscapingGenerator()})
+    with pytest.raises(hg.HomeGuardError, match="escapes the real home"):
+        hg.derive_targets(fake_home)
 
 
-def test_indexed_memory_dirs_are_not_protected(fake_home: Path) -> None:
-    """Inputs the suite reads are not outputs it owns.
-
-    ``indexing.memory_dirs`` resolves on a real machine to things like
-    ``~/.claude/projects/<slug>/memory`` and ``~/.claude/plans`` — directories the
-    developer's own coding agent rewrites continuously, concurrently with any
-    test run. Guarding them would turn someone else's ordinary write into a red
-    build, and a guard that cries wolf gets switched off. Pinned because the
-    symmetry with ``sqlite_path`` above makes "just add memory_dirs too" look
-    like an obvious completion.
-    """
-    indexed = fake_home / "notes"
-    (fake_home / ".memtomem" / "config.json").write_text(
-        json.dumps({"indexing": {"memory_dirs": [str(indexed)]}}), encoding="utf-8"
-    )
-    protected = hg.derive_protected(fake_home)
-    assert indexed not in set(protected.roots)
-
-
-def test_derivation_refuses_to_arm_on_an_empty_set(fake_home: Path, monkeypatch) -> None:
-    """An empty protected set looks exactly like a clean run — fail loudly instead.
-
-    Simulates every production registry going away at once (renamed, moved, or an
-    import that silently started returning nothing), which is the shape in which
-    this guard would rot into a no-op.
-    """
-    from memtomem.context import runtime_registry, scope_resolver, settings
-    from memtomem.wiki import store as wiki_store
+def test_derivation_refuses_an_empty_registry(fake_home: Path, monkeypatch) -> None:
+    from memtomem.context import settings
 
     monkeypatch.setattr(settings, "SETTINGS_GENERATORS", {})
-    monkeypatch.setattr(runtime_registry, "registry_location_paths", lambda *a, **k: {})
-    monkeypatch.setattr(hg, "_ARTIFACTS", ())
-    monkeypatch.setattr(hg, "_effective_config_paths", lambda home: [])
-    # The two remaining roots are absolute constants — point them outside the
-    # home so the ``is_relative_to(home)`` filter drops them.
-    monkeypatch.setattr(scope_resolver, "DEFAULT_USER_ARTIFACT_BASE", Path("/dev/null/nope"))
-    monkeypatch.setattr(wiki_store, "_wiki_path_from_env", lambda: Path("/dev/null/nope"))
-
-    with pytest.raises(hg.HomeGuardError, match="derivation produced nothing"):
-        hg.derive_protected(fake_home)
+    with pytest.raises(hg.HomeGuardError, match="produced no settings targets"):
+        hg.derive_targets(fake_home)
 
 
-# -- per-test file tier -----------------------------------------------------
+# -- bounded file fingerprints ---------------------------------------------
 
 
-@pytest.fixture
-def watched(fake_home: Path) -> Path:
+def test_missing_file_is_armable(fake_home: Path) -> None:
     target = fake_home / ".claude" / "settings.json"
-    target.write_text('{"model": "opus"}', encoding="utf-8")
-    return target
-
-
-def _cycle(paths: tuple[Path, ...], mutate) -> list[hg.Violation]:
-    before = hg.snapshot_files(paths)
-    digests = hg.snapshot_file_digests(paths)
-    mutate()
-    return hg.diff_files(before, hg.snapshot_files(paths), digests=digests)
+    snapshot = hg.snapshot_files((target,))
+    assert snapshot[str(target)].state == "missing"
+    hg.require_armable(snapshot)
 
 
 def test_content_change_is_a_violation(watched: Path) -> None:
     violations = _cycle((watched,), lambda: watched.write_text("{}", encoding="utf-8"))
-    assert [v.kind for v in violations] == ["modified"]
-    assert "sha256" in violations[0].detail
+    assert [item.kind for item in violations] == ["modified"]
+    assert violations[0].detail == "byte content changed"
 
 
-def test_byte_identical_rewrite_is_not_a_violation(watched: Path) -> None:
-    """Observed in the wild: an editor rewrote settings.json with identical bytes.
-
-    Only the mtime moved. A metadata-only comparison would have blamed whichever
-    test happened to be running.
-    """
-    original = watched.read_text(encoding="utf-8")
+def test_same_size_restored_mtime_change_is_a_violation(watched: Path) -> None:
+    watched.write_text("AAAA", encoding="utf-8")
+    original = watched.stat()
 
     def rewrite() -> None:
-        watched.write_text(original, encoding="utf-8")
-        st = watched.stat()
-        os.utime(watched, ns=(st.st_atime_ns + 10**9, st.st_mtime_ns + 10**9))
+        watched.write_text("BBBB", encoding="utf-8")
+        os.utime(watched, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    assert [item.kind for item in _cycle((watched,), rewrite)] == ["modified"]
+
+
+def test_byte_identical_rewrite_is_clean(watched: Path) -> None:
+    original = watched.read_bytes()
+
+    def rewrite() -> None:
+        watched.write_bytes(original)
+        stat = watched.stat()
+        os.utime(watched, ns=(stat.st_atime_ns + 10**9, stat.st_mtime_ns + 10**9))
 
     assert _cycle((watched,), rewrite) == []
 
 
 def test_deletion_is_a_violation(watched: Path) -> None:
-    violations = _cycle((watched,), watched.unlink)
-    assert [v.kind for v in violations] == ["deleted"]
+    assert [item.kind for item in _cycle((watched,), watched.unlink)] == ["deleted"]
 
 
-def test_creation_of_an_absent_file_is_a_violation(fake_home: Path) -> None:
-    """The CI shape of #1892: the runner has no ~/.claude/settings.json at all.
-
-    A guard that only compared existing files would have stayed green on CI while
-    the suite created one.
-    """
-    absent = fake_home / ".claude" / "settings.json"
-    violations = _cycle((absent,), lambda: absent.write_text("{}", encoding="utf-8"))
-    assert [v.kind for v in violations] == ["created"]
+def test_creation_is_a_violation(fake_home: Path) -> None:
+    target = fake_home / ".claude" / "settings.json"
+    target.parent.mkdir()
+    assert [
+        item.kind for item in _cycle((target,), lambda: target.write_text("{}", encoding="utf-8"))
+    ] == ["created"]
 
 
 def test_untouched_file_is_clean(watched: Path) -> None:
     assert _cycle((watched,), lambda: None) == []
 
 
-# -- session tree tier ------------------------------------------------------
+def test_oversized_file_is_refused(fake_home: Path) -> None:
+    target = fake_home / "large.json"
+    target.write_bytes(b"12345")
+    value = hg.fingerprint(target, max_bytes=4)
+    assert value.state == "unsafe"
+    assert "limit is 4" in value.detail
 
 
-def test_new_entry_in_a_protected_tree_is_a_violation(fake_home: Path) -> None:
-    root = fake_home / ".claude" / "skills"
-    (root / "existing").mkdir(parents=True)
-    (root / "existing" / "SKILL.md").write_text("a", encoding="utf-8")
-
-    before = hg.tree_manifest((root,))
-    (root / "sneaky").mkdir()
-    (root / "sneaky" / "SKILL.md").write_text("b", encoding="utf-8")
-    violations = hg.diff_trees(before, hg.tree_manifest((root,)))
-
-    # Two: the directory and the file. Directories are entries in their own
-    # right so that creating or removing an EMPTY one is visible — a file-only
-    # manifest cannot see it at all.
-    assert [v.kind for v in violations] == ["created", "created"]
-    assert any(v.path.endswith("SKILL.md") for v in violations)
-
-
-def test_empty_directory_creation_is_a_violation(fake_home: Path) -> None:
-    """The gap a file-only manifest leaves."""
-    root = fake_home / ".claude" / "skills"
-    root.mkdir(parents=True)
-    before = hg.tree_manifest((root,))
-    (root / "empty").mkdir()
-    assert [v.kind for v in hg.diff_trees(before, hg.tree_manifest((root,)))] == ["created"]
-
-
-def test_nested_content_change_is_a_violation(fake_home: Path) -> None:
-    """The gap a shallow directory stamp would leave: parent mtime does not move."""
-    root = fake_home / ".claude" / "skills"
-    nested = root / "thing" / "SKILL.md"
-    nested.parent.mkdir(parents=True)
-    nested.write_text("before", encoding="utf-8")
-
-    before = hg.tree_manifest((root,))
-    nested.write_text("after!", encoding="utf-8")  # same length, different bytes
-    violations = hg.diff_trees(before, hg.tree_manifest((root,)))
-
-    assert [v.kind for v in violations] == ["modified"]
-
-
-def test_tree_byte_identical_rewrite_is_not_a_violation(fake_home: Path) -> None:
-    root = fake_home / ".claude" / "skills"
-    nested = root / "thing" / "SKILL.md"
-    nested.parent.mkdir(parents=True)
-    nested.write_text("same", encoding="utf-8")
-
-    before = hg.tree_manifest((root,))
-    nested.write_text("same", encoding="utf-8")
-    st = nested.stat()
-    os.utime(nested, ns=(st.st_atime_ns + 10**9, st.st_mtime_ns + 10**9))
-
-    assert hg.diff_trees(before, hg.tree_manifest((root,))) == []
-
-
-def test_oversized_file_degrades_to_metadata_and_says_so(fake_home: Path, monkeypatch) -> None:
-    """The ~99 MB SQLite DB is why this path exists — never imply content coverage."""
-    monkeypatch.setattr(hg, "MAX_DIGEST_BYTES", 4)
-    root = fake_home / ".memtomem"
-    big = root / "memtomem.db"
-    big.write_text("0123456789", encoding="utf-8")
-
-    before = hg.tree_manifest((root,))
-    assert str(big) in before.metadata_only
-
-    os.utime(big, ns=(0, 0))
-    violations = hg.diff_trees(before, hg.tree_manifest((root,)))
-    assert len(violations) == 1
-    assert "content is not covered" in violations[0].detail
-
-
-def test_entry_cap_aborts_rather_than_warning(fake_home: Path) -> None:
-    """A partially watched root looks identical to a clean one."""
-    root = fake_home / ".memtomem" / "memories"
-    root.mkdir(parents=True)
-    for i in range(5):
-        (root / f"{i}.md").write_text("x", encoding="utf-8")
-
-    with pytest.raises(hg.HomeGuardError, match="Refusing to arm"):
-        hg.tree_manifest((root,), max_entries=3)
-
-
-# -- shapes Codex found on review of #1903 ----------------------------------
-
-
-def test_walker_honours_exclusions_not_just_derivation(fake_home: Path) -> None:
-    """The cache sits INSIDE ~/.memtomem, which is itself a protected root.
-
-    Pinning only that derivation drops the cache is a self-certifying
-    half-measure: the walk descends into it anyway, and every fastembed model
-    download becomes a violation for whichever test is running.
-    """
-    protected = hg.derive_protected(fake_home)
-    root = fake_home / ".memtomem"
-    before = hg.tree_manifest((root,), excluded=protected.excluded)
-    cache_file = root / "cache" / "fastembed" / "model.onnx"
-    cache_file.parent.mkdir(parents=True)
-    cache_file.write_text("weights", encoding="utf-8")
-    assert hg.diff_trees(before, hg.tree_manifest((root,), excluded=protected.excluded)) == []
-
-
-def test_same_size_restored_mtime_content_change_is_caught(fake_home: Path) -> None:
-    """A stat fast path is blind to this, and the repo writes preserved-mtime fixtures."""
-    target = fake_home / ".claude" / "settings.json"
-    target.write_text("AAAA", encoding="utf-8")
-    st = target.stat()
-
-    def rewrite() -> None:
-        target.write_text("BBBB", encoding="utf-8")  # same length
-        os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))  # mtime restored
-
-    assert [v.kind for v in _cycle((target,), rewrite)] == ["modified"]
-
-
-def test_symlink_is_recorded_not_followed(fake_home: Path, tmp_path: Path) -> None:
-    """Following a link lets it bypass the digest cap: lstat sizes the link,
-    the read chases the target — which may be huge, or a blocking device."""
-    big = tmp_path / "big.bin"
-    big.write_bytes(b"x" * (hg.MAX_DIGEST_BYTES + 10))
-    root = fake_home / ".claude" / "skills"
-    root.mkdir(parents=True)
-    (root / "link").symlink_to(big)
-
-    manifest = hg.tree_manifest((root,))
-    entry = manifest.entries[str(root / "link")]
-    assert entry.startswith("symlink:"), entry
-    assert "sha256" not in entry
-
-
-def test_sqlite_sidecars_are_covered(fake_home: Path) -> None:
-    """A WAL-mode write can land entirely in -wal and leave the .db bytes alone."""
-    moved = fake_home / "db" / "custom.db"
-    (fake_home / ".memtomem" / "config.json").write_text(
-        json.dumps({"storage": {"sqlite_path": str(moved)}}), encoding="utf-8"
-    )
-    roots = set(hg.derive_protected(fake_home).roots)
-    assert moved in roots
-    assert moved.with_name("custom.db-wal") in roots
-    assert moved.with_suffix(".provenance_key") in roots
-
-
-def test_detection_only_registry_paths_are_not_watched(fake_home: Path) -> None:
-    """registry_location_paths lists what memtomem PROBES, not what it writes.
-
-    The Antigravity configs are read and shown as manual paste targets. Watching
-    them blames Antigravity's own churn on whichever test is running.
-    """
-    watched = set(hg.derive_protected(fake_home).files)
-    assert (fake_home / ".gemini" / "antigravity" / "mcp_config.json") not in watched
-    assert (fake_home / ".claude.json") not in watched
-
-
-# -- shapes Codex reproduced on re-gate of #1903 -----------------------------
-
-
-def test_empty_root_creation_is_a_violation(fake_home: Path) -> None:
-    """A watched root appearing at all is the event; it need not have contents.
-
-    Recording only a root's CHILDREN made this invisible: absent root and
-    freshly-created empty root both manifest as {}.
-    """
-    root = fake_home / ".claude" / "skills"
-    assert not root.exists()
-    before = hg.tree_manifest((root,))
-    root.mkdir(parents=True)
-    assert [v.kind for v in hg.diff_trees(before, hg.tree_manifest((root,)))] == ["created"]
-
-
-def test_directory_symlink_retarget_is_a_violation(fake_home: Path, tmp_path: Path) -> None:
-    """``followlinks=False`` stops the walk but still lists the link in dirnames.
-
-    Recording it as a plain "dir" made retargeting it — pointing a watched skills
-    directory at somewhere else entirely — produce identical manifests.
-    """
-    root = fake_home / ".claude" / "skills"
-    root.mkdir(parents=True)
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    link = root / "linked"
-    link.symlink_to(tmp_path / "a")
-
-    before = hg.tree_manifest((root,))
-    link.unlink()
-    link.symlink_to(tmp_path / "b")
-
-    assert [v.kind for v in hg.diff_trees(before, hg.tree_manifest((root,)))] == ["modified"]
-
-
-def test_per_test_tier_does_not_follow_symlinks(fake_home: Path, tmp_path: Path) -> None:
-    """The tier is hashed on EVERY test — following a link would let one huge or
-    blocking target be read 10,300 times."""
-    big = tmp_path / "big.bin"
-    big.write_bytes(b"x" * (hg.MAX_DIGEST_BYTES + 10))
-    link = fake_home / ".claude" / "settings.json"
-    link.symlink_to(big)
-
-    prints = hg.snapshot_file_digests((link,))
-    assert prints[str(link)].startswith("symlink:")
-
-
-def test_unreadable_files_are_not_all_equal(fake_home: Path) -> None:
-    """Two different unreadable files both hashed to None and compared equal."""
-    a = fake_home / "a.bin"
-    a.write_bytes(b"aaaa")
-    b = fake_home / "b.bin"
-    b.write_bytes(b"bbbbbbbb")
-    a.chmod(0o000)
-    b.chmod(0o000)
-    try:
-        pa, pb = hg.fingerprint(a), hg.fingerprint(b)
-        if pa is not None and pa.startswith("unreadable:"):
-            assert pa != pb, "distinct unreadable files must not fingerprint alike"
-    finally:
-        a.chmod(0o600)
-        b.chmod(0o600)
-
-
-# -- fail-closed edge cases (round-3 review) ---------------------------------
-
-
-def test_unreadable_directory_aborts_rather_than_reading_as_empty(fake_home: Path) -> None:
-    """``os.walk`` swallows traversal errors by default and yields nothing.
-
-    A change inside an unreadable subtree then produces an identical manifest —
-    the guard reports "clean" about a directory it could not even open.
-    """
-    root = fake_home / ".memtomem"
-    locked = root / "locked"
-    locked.mkdir(parents=True)
-    (locked / "secret.md").write_text("x", encoding="utf-8")
-    locked.chmod(0o000)
-    try:
-        with pytest.raises(hg.HomeGuardError, match="cannot traverse"):
-            hg.tree_manifest((root,))
-    finally:
-        locked.chmod(0o700)
-
-
-def test_directory_symlink_subtree_is_reported_as_uncovered(
-    fake_home: Path, tmp_path: Path
+def test_file_that_grows_during_read_is_refused(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Retargeting is detected, but writes THROUGH the link are not.
-
-    That gap is surfaced instead of skipped silently: an uncovered subtree
-    nobody mentions is the same failure shape as a guard that is not armed.
-    """
-    root = fake_home / ".claude" / "skills"
-    root.mkdir(parents=True)
-    (tmp_path / "elsewhere").mkdir()
-    (root / "linked").symlink_to(tmp_path / "elsewhere")
-
-    manifest = hg.tree_manifest((root,))
-    assert manifest.uncovered == (str(root / "linked"),)
+    target = fake_home / "growing.json"
+    target.write_bytes(b"x")
+    chunks = iter((b"1234", b"5"))
+    monkeypatch.setattr(hg.os, "read", lambda fd, size: next(chunks, b""))
+    value = hg.fingerprint(target, max_bytes=4)
+    assert value.state == "unsafe"
+    assert "grew beyond" in value.detail
 
 
-def test_dangling_root_symlink_is_still_fingerprinted(fake_home: Path, tmp_path: Path) -> None:
-    """``exists()`` is False for a broken link, so an exists-first check skips it."""
-    root = fake_home / ".claude" / "skills"
-    root.parent.mkdir(parents=True, exist_ok=True)
-    root.symlink_to(tmp_path / "gone")
-    assert not root.exists()
+def test_unreadable_file_is_refused(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = fake_home / "unreadable.json"
+    target.write_text("{}", encoding="utf-8")
 
-    manifest = hg.tree_manifest((root,))
-    assert manifest.entries[str(root)].startswith("symlink:")
+    def deny_open(path, flags):
+        del path, flags
+        raise PermissionError("denied for pin")
+
+    monkeypatch.setattr(hg.os, "open", deny_open)
+    value = hg.fingerprint(target)
+    assert value.state == "unsafe"
+    assert "denied for pin" in value.detail
 
 
-def test_oversized_file_is_never_hashed_even_if_it_grows(fake_home: Path, monkeypatch) -> None:
-    """The cap is enforced on the read, not only on the pre-open stat.
+def test_directory_is_refused(fake_home: Path) -> None:
+    target = fake_home / "settings.json"
+    target.mkdir()
+    value = hg.fingerprint(target)
+    assert value.state == "unsafe"
+    assert "not a regular file" in value.detail
 
-    Checking size before opening is a race: the file can grow past the cap in
-    between, and the old code streamed the whole thing.
-    """
-    monkeypatch.setattr(hg, "MAX_DIGEST_BYTES", 16)
-    big = fake_home / "big.bin"
-    big.write_bytes(b"x" * 64)
-    result = hg.fingerprint(big)
-    assert result is not None and result.startswith("meta:"), result
+
+@pytest.mark.requires_symlinks
+def test_final_file_symlink_is_refused(fake_home: Path, tmp_path: Path) -> None:
+    target_file = tmp_path / "target.json"
+    target_file.write_text("{}", encoding="utf-8")
+    link = fake_home / "settings.json"
+    link.symlink_to(target_file)
+    value = hg.fingerprint(link)
+    assert value.state == "unsafe"
+    assert "symlink or reparse point" in value.detail
+
+
+@pytest.mark.requires_symlinks
+def test_parent_directory_symlink_is_accepted(fake_home: Path, tmp_path: Path) -> None:
+    real_parent = tmp_path / "claude-real"
+    real_parent.mkdir()
+    target = real_parent / "settings.json"
+    target.write_text("{}", encoding="utf-8")
+    (fake_home / ".claude").symlink_to(real_parent, target_is_directory=True)
+    lexical_target = fake_home / ".claude" / "settings.json"
+    assert hg.fingerprint(lexical_target).state == "regular"
+
+
+def test_reparse_attribute_is_refused(watched: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hg, "_is_reparse_point", lambda stat: True)
+    value = hg.fingerprint(watched)
+    assert value.state == "unsafe"
+    assert "reparse point" in value.detail
+
+
+def test_require_armable_aggregates_unsafe_paths(fake_home: Path) -> None:
+    first = str(fake_home / "a.json")
+    second = str(fake_home / "b.json")
+    snapshot = {
+        first: hg.FileFingerprint("unsafe", detail="first reason"),
+        second: hg.FileFingerprint("unsafe", detail="second reason"),
+    }
+    with pytest.raises(hg.HomeGuardError) as caught:
+        hg.require_armable(snapshot)
+    assert first in str(caught.value)
+    assert second in str(caught.value)
+    assert f"{hg.DISABLE_ENV}=off" in str(caught.value)
+
+
+def test_transition_to_unsafe_is_a_violation(watched: Path) -> None:
+    before = hg.snapshot_files((watched,))
+    after = {str(watched): hg.FileFingerprint("unsafe", detail="became unsafe")}
+    violations = hg.diff_files(before, after)
+    assert [item.kind for item in violations] == ["unsafe"]
+    assert violations[0].detail == "became unsafe"
+
+
+def test_failure_message_contains_no_digest(watched: Path) -> None:
+    before = hg.snapshot_files((watched,))
+    watched.write_text("changed", encoding="utf-8")
+    violations = hg.diff_files(before, hg.snapshot_files((watched,)))
+    message = hg.format_violations("test_example", violations)
+    assert "test_example" in message
+    assert "set_home" in message
+    assert before[str(watched)].digest not in message
+
+
+# -- actual pytest wiring ---------------------------------------------------
+
+
+def _run_nested_pytest(
+    tmp_path: Path, body: str, *, disabled: bool = False
+) -> subprocess.CompletedProcess[str]:
+    suite = tmp_path / ("disabled-suite" if disabled else "enabled-suite")
+    suite.mkdir()
+    synthetic_home = suite / "home"
+    synthetic_home.mkdir()
+    test_file = suite / "test_nested_guard.py"
+    test_file.write_text(body, encoding="utf-8")
+
+    package_root = Path(__file__).parents[1]
+    env = os.environ.copy()
+    env["HOME"] = str(synthetic_home)
+    env["USERPROFILE"] = str(synthetic_home)
+    env["PYTHONPATH"] = os.pathsep.join([str(package_root), env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
+    if disabled:
+        env[hg.DISABLE_ENV] = "off"
+    else:
+        env.pop(hg.DISABLE_ENV, None)
+
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "tests.conftest",
+            "--confcutdir",
+            str(suite),
+            "-q",
+            str(test_file),
+        ],
+        cwd=package_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+
+
+_INDIRECT_WRITE_TEST = """
+from pathlib import Path
+
+def test_indirect_production_target_write():
+    from memtomem.context.settings import SETTINGS_GENERATORS
+    target = SETTINGS_GENERATORS["claude_settings"].target_file(Path.cwd(), "user")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{}", encoding="utf-8")
+"""
+
+
+def test_pytest_wiring_fails_the_indirect_writer(tmp_path: Path) -> None:
+    result = _run_nested_pytest(tmp_path, _INDIRECT_WRITE_TEST)
+    assert result.returncode == 1, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert "changed real user settings outside its test sandbox" in combined
+    assert "created" in combined
+
+
+def test_pytest_wiring_allows_a_clean_test(tmp_path: Path) -> None:
+    result = _run_nested_pytest(tmp_path, "def test_clean():\n    assert True\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_pytest_wiring_honours_the_escape_hatch(tmp_path: Path) -> None:
+    result = _run_nested_pytest(tmp_path, _INDIRECT_WRITE_TEST, disabled=True)
+    assert result.returncode == 0, result.stdout + result.stderr
