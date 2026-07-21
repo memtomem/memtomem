@@ -736,6 +736,9 @@ class TestResidualAbsoluteScrub:
             "privacy hits in .claude/agents/foo.md (1 finding)",
             "missing YAML frontmatter: .memtomem/agents/foo/agent.md",
             "copied to ~/.claude/skills/hello",
+            # Non-ASCII segment: an ASCII-only lookbehind read it as a boundary
+            # and scrubbed the remainder to ``자료<path>`` (PR review).
+            "unreadable: 자료/agents/foo.md",
         ],
     )
     def test_relative_and_home_collapsed_remainders_survive(self, kept: str) -> None:

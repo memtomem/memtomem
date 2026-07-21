@@ -66,7 +66,12 @@ _ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
 # :func:`scrub_residual_absolute_paths`. The lookbehind class is "characters a
 # path segment can end with", so ``~/x/y`` and ``.claude/agents/foo.md`` are
 # left intact while ``/Volumes/Shared/x`` after any boundary is not.
-_RESIDUAL_ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.\-~])(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
+#
+# ``\w``, not ``[A-Za-z0-9_]``: Python's ``\w`` is Unicode-aware by default, and
+# an ASCII-only class treats a non-ASCII segment as a boundary — ``자료/x/y``
+# scrubbed to ``자료<path>``, destroying a relative remainder this function
+# exists to preserve (PR review). Filenames here come from user directories.
+_RESIDUAL_ABS_PATH_RE = re.compile(r"(?<![\w.\-~])(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
 _PATH_REDACTED_MARKER = "<path>"
 
 
