@@ -42,6 +42,15 @@ def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | Non
        so workflows that pre-date session-driven agent inheritance keep
        working unchanged.
 
+    This helper deliberately does **not** special-case the reserved
+    ``"default"`` agent id. A session that named no agent leaves
+    ``app.current_agent_id`` as ``None`` *by construction* at the binding
+    surface (``normalize_bound_agent_id``), so step 2 simply does not
+    fire — enforcing the rule at the one producer instead of at each of
+    this helper's six consumers (#1875). Step 1 keeps working for an
+    explicit ``"default"``: ``agent-runtime:default`` stays addressable,
+    which is the only read path back to data written there before the fix.
+
     Returns ``None`` if no source resolved a namespace, in which case
     the caller treats the operation as un-pinned (read tools search
     everything; write tools defer to the indexing engine's auto-NS

@@ -69,6 +69,59 @@ def validate_agent_id(value: object) -> str:
     return validate_name(value, kind="agent-id")
 
 
+# The agent id that means "no agent bound". Reserved **only** at
+# session-binding surfaces — the places that infer an agent from session
+# state and stamp it on ``AppContext.current_agent_id`` /
+# ``MemtomemStore._current_agent_id``. It is *not* reserved as a
+# namespace: ``agent-runtime:default`` stays addressable through an
+# explicit ``agent_id=`` / ``namespace=`` argument on
+# ``mem_agent_register`` / ``mem_agent_search`` / ``mem_add``, which is
+# also the recovery path for data written there before #1875.
+RESERVED_UNBOUND_AGENT_ID: Final[str] = "default"
+
+
+def normalize_bound_agent_id(value: object, *, required: bool = False) -> str | None:
+    """Validate *value* and collapse the unbound sentinel to ``None``.
+
+    Call this at surfaces that **bind** an agent to session state, never
+    at surfaces that take an explicit agent id as a lookup key — hence
+    the ``bound`` in the name. Normalizing an explicit read (e.g.
+    ``mem_agent_search(agent_id="default")``) would silently widen the
+    caller's scope, which is the mirror image of the bug #1875 fixes.
+
+    Order is **validate first, normalize second**: everything other than
+    ``None`` goes through :func:`validate_agent_id`, so ``""``,
+    ``"   "``, ``"foo:bar"``, ``"../x"`` and non-``str`` values keep
+    raising :class:`InvalidNameError` instead of being downgraded to an
+    unbound session.
+
+    ``None`` means "the caller omitted the argument", which is a legal
+    way to ask for an unbound session on surfaces where ``agent_id`` is
+    optional. Pass ``required=True`` on surfaces where it is a mandatory
+    positional (``MemtomemStore.start_agent_session``) so ``None`` raises
+    the same ``InvalidNameError`` as any other invalid id rather than
+    reaching the NOT NULL ``sessions.agent_id`` column. Keeping that in
+    the helper — instead of a hand-rolled check at the call site — is
+    what keeps both the rule and its error message in one place.
+
+    Matching is exact and case-sensitive: ``"Default"`` is an ordinary
+    agent id. Namespaces are case-sensitive everywhere else in this
+    codebase and ``validate_name`` never case-folds, so folding here
+    would be a novel rule with no precedent.
+
+    The *session row* still stores the literal ``"default"`` for an
+    unbound session (``sessions.agent_id`` is ``TEXT NOT NULL DEFAULT
+    'default'``, and ``mm session start --idempotent`` compares that
+    literal). Only the runtime binding becomes ``None``. That
+    divergence is deliberate; see issue #1875.
+    """
+
+    if value is None and not required:
+        return None
+    validated = validate_agent_id(value)
+    return None if validated == RESERVED_UNBOUND_AGENT_ID else validated
+
+
 # Namespace charset for caller-supplied ``namespace=`` / ``target=``
 # overrides on session-start and ``mem_agent_share``. Covers the existing
 # in-tree shapes (``default``, ``shared``, ``archive:summary``,

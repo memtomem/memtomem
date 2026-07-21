@@ -167,6 +167,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Omitted/`true` follows `rerank.enabled`; `true` cannot force-enable
   reranking on a server that has it disabled.
 
+### Changed (BREAKING)
+
+- **A session that names no agent no longer hijacks where your writes land**
+  (#1875) — `mem_session_start` defaulted `agent_id` to the literal `"default"`
+  and bound it unconditionally, while the namespace resolver only tested that
+  field for truthiness. So `mem_session_start()` with no arguments silently
+  redirected every subsequent `mem_add` / `mem_batch_add` / `mem_index` /
+  `mem_fetch` into `agent-runtime:default` — a *hidden* system namespace, which
+  meant a plain `mem_search` could not find the entry the caller had just
+  written. The session **record** said `default` the whole time, so nothing in
+  the output revealed the redirection. `"default"` is now a reserved sentinel
+  meaning *no agent bound*, applied through one chokepoint at both surfaces that
+  bind a runtime agent: `mem_session_start` (MCP) and the LangGraph adapter's
+  `start_agent_session`. Omitting `agent_id` — or passing `"default"`
+  explicitly — binds nothing, so writes go where they would with no session at
+  all. (`mm session start` routes through the same helper, but the CLI is a
+  fresh process per invocation and never bound a runtime agent, so its behaviour
+  is unchanged — that edit only removes a duplicated literal.)
+
+  Who is affected, and how:
+
+  - **Callers who started a session without `agent_id`.** New writes move out of
+    `agent-runtime:default` and land wherever they would with no session at all
+    — `current_namespace` if you set one, otherwise whatever your namespace
+    rules / `auto_ns` / `default_namespace` resolve to. Visibility then follows
+    the ordinary search filters, so in the usual configuration the entry you
+    just wrote is **findable** by a default `mem_search` instead of hidden. (If
+    your own rules route writes into a system-prefixed namespace such as
+    `archive:`, unpinned search still hides them — that part is unchanged.) If
+    you were relying on that accidental hiding for isolation, pass a real
+    `agent_id` to opt into `agent-runtime:<id>` deliberately.
+  - **`mem_agent_search` reads wider under an unbound session.** With nothing
+    bound it now runs unpinned instead of scoping to
+    `agent-runtime:default,shared` — i.e. the same scope a plain `mem_search`
+    has. Other agents' private chunks stay hidden (that is the system-prefix
+    filter, not the binding), but pass `agent_id=` if you want a pinned read.
+  - **LangGraph `search(include_shared=True)` after `start_agent_session("default")`
+    now raises.** It asks for "my agent scope plus shared" and there is no *my
+    scope* on an unbound session, so it fails loudly instead of quietly
+    searching `agent-runtime:default`. Use `start_agent_session("<real-id>")`,
+    or `include_shared=False`.
+  - **Callers who passed `agent_id="default"` explicitly.** Same change; the
+    reservation does not distinguish the two spellings.
+  - **Existing chunks are not migrated.** There is no namespace-rename
+    primitive, so anything already in `agent-runtime:default` stays there. It
+    remains reachable — `mem_agent_search(agent_id="default")` or
+    `mem_search(namespace="agent-runtime:default")` — because the reservation
+    applies to *inferred* bindings only, never to an explicit lookup key.
+    Re-add the content if you want it in your default namespace.
+  - **Named-agent workflows are unchanged.** `mem_session_start(agent_id="planner")`
+    still binds `agent-runtime:planner` for reads and writes. `"Default"` (any
+    other casing) is an ordinary agent id — the sentinel is exact-match.
+
+  Side effect worth knowing: an unbound session's own writes are now
+  summarizable. `mem_session_end()`'s auto-summary recalls chunks by the
+  session row's namespace, which previously never matched where the writes had
+  actually gone, so every unbound session reported `below min_chunks` and
+  silently produced no summary. The two now agree in the ordinary case; they
+  can still diverge where a namespace rule, `auto_ns`, or a non-default
+  `default_namespace` sends the write somewhere the session row does not name.
+  That residual is pre-existing and tracked in #1876.
+
 ### Changed
 
 - **Refusals now tell you what to do on the surface you are actually using**
