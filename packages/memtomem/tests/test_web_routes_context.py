@@ -1271,10 +1271,15 @@ class TestSkillSkipReasonRedaction:
             reason = row["reason"] or ""
             assert str(tmp_path) not in reason, reason
             assert str(tmp_path.resolve()) not in reason, reason
-            # The CONDITION survives redaction even though the path does not —
-            # the row says which item it is in its own field, which is why the
-            # redactor is free to eat the location entirely.
+            # The CONDITION survives redaction even though the location does
+            # not. Asserting the PREFIX alone is what let a regression through
+            # once (PR review): the prefix sits before the path and always
+            # survives, so it stayed true while the redactor ate the entire
+            # rest of the sentence — the scrub's segment class includes spaces
+            # and parens, so an unquoted path swallowed the remediation with
+            # it. The trailing clause is the assertion with something to prove.
             assert "refusing to overwrite non-skill directory" in reason, reason
+            assert "(add a SKILL.md" in reason, reason
             assert row["name"] == "clash"
 
     @pytest.mark.anyio

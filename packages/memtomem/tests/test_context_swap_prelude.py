@@ -369,3 +369,66 @@ class TestStagingCollisionRespectsTheMarker:
 
         assert staging == p["staging"]
         assert (staging / SKILL_MANIFEST).read_text(encoding="utf-8") == "source"
+
+
+class TestRefusalsSurviveWireRedaction:
+    """A refusal whose paths are unquoted loses everything after them.
+
+    The wire redactors replace a path run with ``<path>`` and their segment
+    class deliberately includes spaces and parens, so that a mount like
+    ``/Volumes/My Drive/x`` is scrubbed whole. The cost is that an UNQUOTED
+    path mid-sentence swallows the rest of the message — and these refusals put
+    their instruction AFTER the paths. Pinned at the message builders, because
+    the alternative (narrowing the segment class) would re-open the whitespace
+    hole the class exists to close.
+    """
+
+    @pytest.mark.parametrize("surface", ["web", "mcp"])
+    def test_row_4_instruction_survives_both_wires(self, store: Path, surface: str) -> None:
+        """The refusal's whole point is "inspect both by hand" — if redaction
+        eats it, the new status promises an operator action it never delivers.
+        """
+        from memtomem.context.error_redact import (
+            redact_engine_reason,
+            scrub_residual_absolute_paths,
+        )
+        from memtomem.web.routes.context_gateway import redact_wire_reason
+
+        p = _write_marker(store)
+        _tree(p["dst"], "candidate-a")
+        _tree(p["old"], "candidate-b")
+        _tree(p["staging"], "replacement")
+        with pytest.raises(SwapForeignDestination) as caught:
+            _recover_and_reap_internal_dirs(p["dst"])
+
+        # A root the artifact is NOT under — the case with no prefix to strip,
+        # so the scrub is the only thing acting on the message.
+        elsewhere = Path("/nonexistent/other")
+        raw = str(caught.value)
+        if surface == "web":
+            shown = redact_wire_reason(raw, elsewhere) or ""
+        else:
+            shown = scrub_residual_absolute_paths(redact_engine_reason(raw, elsewhere) or "")
+
+        assert str(store) not in shown, shown
+        assert "AMBIGUOUS" in shown, shown
+        assert "inspect both by hand" in shown, shown
+
+    def test_target_conflict_remediation_survives_the_web_wire(self, store: Path) -> None:
+        """The most common skip row on this surface, and the one where the
+        destination is normally already root-relative — so there was no
+        disclosure to redact and any loss here is pure loss.
+        """
+        from memtomem.context.skills import _target_conflict
+        from memtomem.web.routes.context_gateway import redact_wire_reason
+
+        dst = _tree(store / "clash", "junk")
+        (dst / SKILL_MANIFEST).unlink()
+        (dst / "junk.txt").write_text("x", encoding="utf-8")
+        conflict = _target_conflict(dst)
+        assert conflict is not None
+
+        shown = redact_wire_reason(str(conflict), store.parent.parent) or ""
+
+        assert "refusing to overwrite non-skill directory" in shown, shown
+        assert "(add a SKILL.md or remove the directory first)" in shown, shown

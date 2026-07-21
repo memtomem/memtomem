@@ -2677,8 +2677,10 @@ _PULL_LOCK_BUDGET_S = 30.0
 #: ``swap_recovery_pending`` belongs here rather than with the refusals: the
 #: refusal bucket is defined as "what the web route returns as a typed 200",
 #: and this one is a 409. It is also not an *actionable* refusal — the
-#: remediation is an operator inspecting two paths, not a parameter the caller
-#: can change and retry (which is why it carries no ``remediation`` entry).
+#: remediation is an operator inspecting the artifact on disk, not a parameter
+#: the caller can change and retry (which is why it carries no ``remediation``
+#: entry). Under a known root the reason still names the trees relatively;
+#: outside one it says ``'<path>'`` and the CLI is where the locations survive.
 _PULL_ERROR_STATUSES = frozenset(
     {
         "lock_timeout",
@@ -2823,7 +2825,9 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     ``swap_recovery_pending`` sits with the errors rather than the refusals on
     purpose: ``refused:`` reads as "your request was declined, adjust and
     retry", and there is no parameter to adjust — an interrupted directory swap
-    needs an operator to inspect the two paths the reason names.
+    needs an operator to look at the artifact on disk. The reason carries that
+    instruction; whether it still carries the locations depends on the
+    redaction above (relative under a known root, ``'<path>'`` outside one).
 
     EVERY ``reason`` is redacted, ``gate_blocked`` included. Pull's
     ``gate_blocked`` reason is built from runtime + scope only

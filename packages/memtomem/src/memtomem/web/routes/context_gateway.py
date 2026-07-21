@@ -1027,11 +1027,14 @@ def _finalize_pull(result: PullApplyResult, project_root: Path) -> dict:
             reason_code=result.reason_code,
         )
     if status == "swap_recovery_pending":
-        # 409, not 500: nothing failed infrastructurally and nothing was
-        # written — the artifact is wedged in a state only an operator can
-        # adjudicate, which is a conflict about the resource, not a server
-        # fault. The reason names the paths to inspect and is redacted like
-        # every other one here.
+        # 409, not 500: nothing failed infrastructurally and the requested
+        # operation did not run — the artifact is wedged in a state only an
+        # operator can adjudicate, which is a conflict about the resource, not
+        # a server fault. The reason carries the CONDITION and the instruction
+        # to inspect; the paths themselves are redacted to ``'<path>'`` here as
+        # on every other wire field, and the CLI is where they survive verbatim
+        # (PR review — an earlier version of this comment promised paths this
+        # surface deliberately does not emit).
         raise _error(
             409,
             "conflict",

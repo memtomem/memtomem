@@ -659,14 +659,28 @@ def _target_conflict(dst: Path) -> OSError | None:
     typed ``TARGET_CONFLICT`` skip — so the preflights can never drift from
     what the promote actually enforces (#1229). An existing but EMPTY
     non-skill directory is not a conflict (the promote replaces it).
+
+    **The interpolated path is QUOTED**, and that is a wire requirement rather
+    than a style choice (PR review). The web/MCP redactors replace a path run
+    with ``<path>``, and their segment class deliberately includes spaces so a
+    mount like ``/Volumes/My Drive/x`` is scrubbed whole — which means an
+    UNQUOTED path mid-sentence lets the run swallow everything after it, up to
+    the next quote or newline. This message put its remediation after the path,
+    so the wire form degraded to ``…directory: .claude<path>`` and the user lost
+    "add a SKILL.md or remove the directory first" — on a destination that was
+    already root-relative, i.e. where there was no disclosure to redact at all.
+    Quoting restores the boundary the redactor's own comment assumes ("OSError
+    paths are quoted, so matching through spaces cannot bleed into surrounding
+    prose"). Any new refusal built here must quote its paths for the same
+    reason.
     """
     if not dst.exists():
         return None
     if not dst.is_dir():
-        return NotADirectoryError(f"target exists and is not a directory: {dst}")
+        return NotADirectoryError(f"target exists and is not a directory: '{dst}'")
     if not (dst / SKILL_MANIFEST).is_file() and any(dst.iterdir()):
         return IsADirectoryError(
-            f"refusing to overwrite non-skill directory: {dst} "
+            f"refusing to overwrite non-skill directory: '{dst}' "
             f"(add a SKILL.md or remove the directory first)"
         )
     return None
@@ -849,6 +863,16 @@ def copy_skill(src: Path, dst: Path) -> None:
       another writer holds the destination past the budget. That is a new
       failure mode for a public entry point; retry, or wait for the competing
       push or import to finish.
+
+    It can also raise :class:`~memtomem.context._dir_swap.SwapRecoveryError`
+    from :func:`_stage_skill` when a staging-path collision names a transient a
+    live swap marker still claims. Deliberately allowed to propagate rather
+    than converted: this is a single-artifact entry point with no batch to keep
+    going, and the caller needs the distinction — the remediation is the
+    interrupted transaction, not this copy. It is an ``OSError`` subclass, so a
+    caller funnelling ``OSError`` still degrades safely. **This function does
+    NOT run the recovery prelude** — it is one of the C0 holders PR-G4a-3b
+    wires up; until then a pending swap here is refused, never resolved.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
@@ -1031,6 +1055,14 @@ def generate_all_skills(
                     # is the only failure that still aborts the batch.
                     try:
                         staging = _stage_skill(skill_dir, dst, payload_only=True)
+                    except SwapRecoveryError as exc:
+                        # BEFORE the broad OSError: staging can now refuse a
+                        # marker-claimed collision, and that is not an
+                        # unreadable source. Reporting it as PARSE_ERROR would
+                        # point the remediation at the skill file instead of at
+                        # the interrupted transaction (PR review).
+                        skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        continue
                     except OSError as exc:
                         skipped.append(
                             (skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR)
@@ -1192,6 +1224,10 @@ def generate_all_skills(
                 # commands.py read_bytes failure handling.
                 try:
                     staging = _stage_skill(skill_dir, dst, payload_only=True)
+                except SwapRecoveryError as exc:
+                    # Before the broad OSError — see the project_shared batch.
+                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    continue
                 except OSError as exc:
                     skipped.append((skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                     continue
@@ -1672,6 +1708,15 @@ def extract_skills_to_canonical(
                     # copy of the same name still imports.
                     try:
                         staging = _stage_skill(skill_dir, dst)
+                    except SwapRecoveryError as exc:
+                        # Before the broad OSError, and WITH a ``seen`` mark:
+                        # unlike unreadability this is destination-scoped, so
+                        # another runtime's copy would hit the same state —
+                        # the same reasoning as the prelude's refusal above.
+                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
+                        seen[skill_name] = runtime_label
+                        continue
                     except OSError as exc:
                         skipped.append((skill_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
