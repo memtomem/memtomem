@@ -785,6 +785,15 @@ def create_tables(
         "CREATE INDEX IF NOT EXISTS idx_memory_assertions_lookup "
         "ON memory_assertions(subject_entity_id, predicate, status)"
     )
+    # Provenance lookup by chunk. The read paths query by subject (index
+    # above), but anything that rewrites or removes a chunk has to find the
+    # assertions pointing at it — the namespace-merge remap does so once per
+    # duplicate, which without this index is a full scan of a table that grows
+    # with automatic fact extraction.
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_assertions_source_chunk "
+        "ON memory_assertions(source_chunk_id)"
+    )
     db.execute("""
         CREATE TABLE IF NOT EXISTS assertion_edges (
             source_assertion_id TEXT NOT NULL REFERENCES memory_assertions(id) ON DELETE CASCADE,

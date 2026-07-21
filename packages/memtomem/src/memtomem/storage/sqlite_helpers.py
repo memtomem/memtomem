@@ -80,3 +80,18 @@ def namespace_sql(ns: NamespaceFilter) -> tuple[str, list]:
         params = [f"{escape_like(p)}%" for p in ns.exclude_prefixes]
         return clauses, params
     return "", []
+
+
+def quote_ident(name: str) -> str:
+    """Quote a SQLite identifier for interpolation into DDL/DML.
+
+    ``reset_all`` interpolates table names discovered from ``sqlite_master``
+    (including tables an older binary has never heard of), so bracket quoting
+    (``[name]``) is unsafe — a valid identifier containing ``]`` would produce
+    invalid SQL and abort a privacy reset. Double-quote with embedded ``"``
+    doubled per the SQL standard.
+
+    Lives here rather than in ``sqlite_backend`` so the delegated ops modules
+    (which the backend imports) can use it without an import cycle.
+    """
+    return '"' + name.replace('"', '""') + '"'

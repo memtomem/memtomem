@@ -18,7 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem.errors import NamespaceConflictError
 from memtomem.models import Chunk, ChunkMetadata
+from memtomem.storage.base import NamespaceRenameResult
 from memtomem.web.app import create_app
 from .helpers import set_home
 
@@ -662,7 +664,48 @@ class TestProcedures:
 
 
 class TestSettingsSync:
-    """Tests for the settings-sync route (record-format hooks)."""
+    """Tests for the settings-sync route (record-format hooks).
+
+    The ``target_scope=user`` path resolves to
+    ``Path.home() / ".claude" / "settings.json"`` — see
+    :func:`memtomem.context.settings.resolve_scope_path`. Every test here
+    runs against a throwaway home so neither the developer's nor the CI
+    runner's real settings file is ever opened (#1892).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_home(self, monkeypatch, tmp_path_factory):
+        """Redirect ``Path.home()`` at the env level for this whole class.
+
+        These tests used to write the *real* ``~/.claude/settings.json``
+        and put it back in a ``finally``, with the only copy held in a
+        local variable. Any non-graceful exit — a ``pkill``, a CI job
+        timeout, an IDE stop button — skipped the restore and destroyed
+        the file; the next test then read the wreckage as its own backup
+        and faithfully restored that instead, so the loss looked like a
+        stable state rather than a fault. Isolating the home removes the
+        need for the restore dance entirely.
+
+        ``set_home`` sets ``USERPROFILE`` as well as ``HOME`` because
+        ``Path.home()`` consults it first on Windows, where a bare
+        ``HOME`` override is silently ignored.
+
+        The home comes from ``tmp_path_factory``, **not** from ``tmp_path``:
+        most tests here set ``project_root = tmp_path``, and the host-write
+        gate refuses a target only when it is *outside* the project root
+        (``_is_under_project_root``, ``context/settings.py``). A home nested
+        under ``tmp_path`` would sit inside the project root and silently
+        disarm that gate for any future POST-sync test in this class.
+
+        Creating ``.claude/`` is load-bearing, not cosmetic:
+        ``ClaudeSettingsGenerator.is_available()`` probes for that directory,
+        so without it every sync result would come back ``skipped`` — and
+        whether it happened to exist would depend on the machine.
+        """
+        home = tmp_path_factory.mktemp("settings_sync_home")
+        (home / ".claude").mkdir()
+        set_home(monkeypatch, home)
+        return home
 
     @staticmethod
     def _rule(matcher: str = "", command: str = "echo ok") -> dict:
@@ -710,23 +753,15 @@ class TestSettingsSync:
         canonical.write_text(json.dumps(hooks), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(hooks), encoding="utf-8")
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps(hooks), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync?target_scope=user")
-            data = resp.json()
-            assert data["status"] == "in_sync"
-            assert len(data["hooks"]["synced"]) == 1
-            assert data["hooks"]["synced"][0]["event"] == "PostToolUse"
-            assert data["hooks"]["synced"][0]["matcher"] == "Write"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        data = resp.json()
+        assert data["status"] == "in_sync"
+        assert len(data["hooks"]["synced"]) == 1
+        assert data["hooks"]["synced"][0]["event"] == "PostToolUse"
+        assert data["hooks"]["synced"][0]["matcher"] == "Write"
 
     async def test_conflict_detected(self, app, client: AsyncClient, tmp_path):
         """Same event+matcher but different config → status is conflicts."""
@@ -740,27 +775,18 @@ class TestSettingsSync:
         )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
-            )
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync?target_scope=user")
-            data = resp.json()
-            assert data["status"] == "conflicts"
-            assert len(data["hooks"]["conflicts"]) == 1
-            c = data["hooks"]["conflicts"][0]
-            assert c["event"] == "PostToolUse"
-            assert c["matcher"] == "Write"
-            assert c["existing"]["hooks"][0]["command"] == "echo old"
-            assert c["proposed"]["hooks"][0]["command"] == "echo new"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        data = resp.json()
+        assert data["status"] == "conflicts"
+        assert len(data["hooks"]["conflicts"]) == 1
+        c = data["hooks"]["conflicts"][0]
+        assert c["event"] == "PostToolUse"
+        assert c["matcher"] == "Write"
+        assert c["existing"]["hooks"][0]["command"] == "echo old"
+        assert c["proposed"]["hooks"][0]["command"] == "echo new"
 
     async def test_pending_hooks(self, app, client: AsyncClient, tmp_path):
         """Rules in canonical but not in target are pending."""
@@ -771,21 +797,14 @@ class TestSettingsSync:
         canonical.write_text(json.dumps({"hooks": {"PostToolUse": [rule]}}), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync?target_scope=user")
-            data = resp.json()
-            assert data["status"] == "out_of_sync"
-            assert len(data["hooks"]["pending"]) == 1
-            assert data["hooks"]["pending"][0]["event"] == "PostToolUse"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        data = resp.json()
+        assert data["status"] == "out_of_sync"
+        assert len(data["hooks"]["pending"]) == 1
+        assert data["hooks"]["pending"][0]["event"] == "PostToolUse"
 
     async def test_dedup_when_target_has_multiple_same_matcher_rules(
         self, app, client: AsyncClient, tmp_path
@@ -809,26 +828,19 @@ class TestSettingsSync:
         canonical.write_text(json.dumps({"hooks": {"PostToolUse": [existing_a]}}), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [existing_a, existing_b]}}),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [existing_a, existing_b]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync?target_scope=user")
-            data = resp.json()
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        data = resp.json()
 
-            assert data["status"] == "in_sync"  # was "conflicts" before the fix
-            assert data["hooks"]["conflicts"] == []
-            assert len(data["hooks"]["synced"]) == 1
-            assert data["hooks"]["synced"][0]["matcher"] == "Write"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        assert data["status"] == "in_sync"  # was "conflicts" before the fix
+        assert data["hooks"]["conflicts"] == []
+        assert len(data["hooks"]["synced"]) == 1
+        assert data["hooks"]["synced"][0]["matcher"] == "Write"
 
     async def test_resolve_replaces_rule(self, app, client: AsyncClient, tmp_path):
         """POST /resolve replaces the target's rule with canonical version."""
@@ -842,27 +854,18 @@ class TestSettingsSync:
         )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
-            )
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
-            )
-            data = resp.json()
-            assert data["status"] == "ok"
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+        )
+        data = resp.json()
+        assert data["status"] == "ok"
 
-            updated = json.loads(target.read_text(encoding="utf-8"))
-            assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo new"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        updated = json.loads(target.read_text(encoding="utf-8"))
+        assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo new"
 
     async def test_resolve_missing_canonical_returns_404(self, app, client: AsyncClient, tmp_path):
         """POST /resolve when canonical file doesn't exist returns HTTP 404."""
@@ -894,24 +897,16 @@ class TestSettingsSync:
         canonical.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
-            )
-            assert resp.status_code == 404
-            assert resp.json()["detail"]["error_kind"] == "missing"
-            assert "not in canonical source" in resp.json()["detail"]["message"]
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error_kind"] == "missing"
+        assert "not in canonical source" in resp.json()["detail"]["message"]
 
     async def test_resolve_array_form_canonical_hooks_returns_422(
         self, app, client: AsyncClient, tmp_path
@@ -982,28 +977,20 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            c = data["hooks"]["conflicts"][0]
-            assert c["target_rule_index"] == 0
-            assert isinstance(c["target_rule_hash"], str) and len(c["target_rule_hash"]) == 64
-            assert isinstance(c["proposed_hash"], str) and len(c["proposed_hash"]) == 64
-            # Target identity hashes the unstamped on-disk row; the proposed
-            # identity hashes the marker-stamped canonical rule, so they differ.
-            assert c["target_rule_hash"] != c["proposed_hash"]
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        c = data["hooks"]["conflicts"][0]
+        assert c["target_rule_index"] == 0
+        assert isinstance(c["target_rule_hash"], str) and len(c["target_rule_hash"]) == 64
+        assert isinstance(c["proposed_hash"], str) and len(c["proposed_hash"]) == 64
+        # Target identity hashes the unstamped on-disk row; the proposed
+        # identity hashes the marker-stamped canonical rule, so they differ.
+        assert c["target_rule_hash"] != c["proposed_hash"]
 
     async def test_resolve_replaces_rule_by_identity(self, app, client: AsyncClient, tmp_path):
         """Issue #1112: the single-conflict case resolves via exact identity
@@ -1016,37 +1003,29 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            c = (await client.get("/api/settings-sync?target_scope=user")).json()["hooks"][
-                "conflicts"
-            ][0]
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={
-                    "event": "PostToolUse",
-                    "matcher": "Write",
-                    "action": "use_proposed",
-                    "rule_index": c["target_rule_index"],
-                    "rule_hash": c["target_rule_hash"],
-                    "proposed_hash": c["proposed_hash"],
-                },
-            )
-            assert resp.json()["status"] == "ok"
-            updated = json.loads(target.read_text(encoding="utf-8"))
-            assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo new"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        c = (await client.get("/api/settings-sync?target_scope=user")).json()["hooks"]["conflicts"][
+            0
+        ]
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={
+                "event": "PostToolUse",
+                "matcher": "Write",
+                "action": "use_proposed",
+                "rule_index": c["target_rule_index"],
+                "rule_hash": c["target_rule_hash"],
+                "proposed_hash": c["proposed_hash"],
+            },
+        )
+        assert resp.json()["status"] == "ok"
+        updated = json.loads(target.read_text(encoding="utf-8"))
+        assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo new"
 
     async def test_two_same_matcher_conflicts_resolve_independently(
         self, app, client: AsyncClient, tmp_path
@@ -1071,73 +1050,65 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps(
-                    {
-                        "hooks": {
-                            "PostToolUse": [
-                                self._rule("Write", "echo u1"),
-                                self._rule("Write", "echo u2"),
-                            ]
-                        }
+        target.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            self._rule("Write", "echo u1"),
+                            self._rule("Write", "echo u2"),
+                        ]
                     }
-                ),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+                }
+            ),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            assert data["status"] == "conflicts"
-            conflicts = data["hooks"]["conflicts"]
-            assert len(conflicts) == 2
-            by_index = {c["target_rule_index"]: c for c in conflicts}
-            # Distinct target rows — not both pointing at the first slot.
-            assert set(by_index) == {0, 1}
-            assert by_index[1]["existing"]["hooks"][0]["command"] == "echo u2"
-            assert by_index[1]["proposed"]["hooks"][0]["command"] == "echo c2"
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        assert data["status"] == "conflicts"
+        conflicts = data["hooks"]["conflicts"]
+        assert len(conflicts) == 2
+        by_index = {c["target_rule_index"]: c for c in conflicts}
+        # Distinct target rows — not both pointing at the first slot.
+        assert set(by_index) == {0, 1}
+        assert by_index[1]["existing"]["hooks"][0]["command"] == "echo u2"
+        assert by_index[1]["proposed"]["hooks"][0]["command"] == "echo c2"
 
-            # Resolve only the row-1 conflict.
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={
-                    "event": "PostToolUse",
-                    "matcher": "Write",
-                    "action": "use_proposed",
-                    "rule_index": by_index[1]["target_rule_index"],
-                    "rule_hash": by_index[1]["target_rule_hash"],
-                    "proposed_hash": by_index[1]["proposed_hash"],
-                },
-            )
-            assert resp.json()["status"] == "ok"
-            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
-            assert rules[0]["hooks"][0]["command"] == "echo u1"  # untouched
-            assert rules[1]["hooks"][0]["command"] == "echo c2"  # the Nth row
+        # Resolve only the row-1 conflict.
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={
+                "event": "PostToolUse",
+                "matcher": "Write",
+                "action": "use_proposed",
+                "rule_index": by_index[1]["target_rule_index"],
+                "rule_hash": by_index[1]["target_rule_hash"],
+                "proposed_hash": by_index[1]["proposed_hash"],
+            },
+        )
+        assert resp.json()["status"] == "ok"
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+        assert rules[0]["hooks"][0]["command"] == "echo u1"  # untouched
+        assert rules[1]["hooks"][0]["command"] == "echo c2"  # the Nth row
 
-            # Resolving the row-0 conflict (its identity is still valid since
-            # row 0 was untouched) replaces the first row with the first rule.
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={
-                    "event": "PostToolUse",
-                    "matcher": "Write",
-                    "action": "use_proposed",
-                    "rule_index": by_index[0]["target_rule_index"],
-                    "rule_hash": by_index[0]["target_rule_hash"],
-                    "proposed_hash": by_index[0]["proposed_hash"],
-                },
-            )
-            assert resp.json()["status"] == "ok"
-            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
-            assert rules[0]["hooks"][0]["command"] == "echo c1"
-            assert rules[1]["hooks"][0]["command"] == "echo c2"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        # Resolving the row-0 conflict (its identity is still valid since
+        # row 0 was untouched) replaces the first row with the first rule.
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={
+                "event": "PostToolUse",
+                "matcher": "Write",
+                "action": "use_proposed",
+                "rule_index": by_index[0]["target_rule_index"],
+                "rule_hash": by_index[0]["target_rule_hash"],
+                "proposed_hash": by_index[0]["proposed_hash"],
+            },
+        )
+        assert resp.json()["status"] == "ok"
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+        assert rules[0]["hooks"][0]["command"] == "echo c1"
+        assert rules[1]["hooks"][0]["command"] == "echo c2"
 
     async def test_resolve_stale_hash_returns_aborted(self, app, client: AsyncClient, tmp_path):
         """Issue #1112: an out-of-date ``rule_hash`` (the row moved or changed
@@ -1150,43 +1121,35 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            c = (await client.get("/api/settings-sync?target_scope=user")).json()["hooks"][
-                "conflicts"
-            ][0]
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={
-                    "event": "PostToolUse",
-                    "matcher": "Write",
-                    "action": "use_proposed",
-                    "rule_index": c["target_rule_index"],
-                    "rule_hash": "0" * 64,  # stale / wrong identity
-                    "proposed_hash": c["proposed_hash"],
-                },
-            )
-            # Stale-write aborts are HTTP 409, matching the
-            # Skills/Commands/Agents envelope contract (#1229).
-            assert resp.status_code == 409
-            body = resp.json()
-            assert body["status"] == "aborted"
-            assert "changed" in body["reason"].lower()
-            # No silent mis-resolve: the target row is left exactly as it was.
-            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
-            assert rules[0]["hooks"][0]["command"] == "echo old"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        c = (await client.get("/api/settings-sync?target_scope=user")).json()["hooks"]["conflicts"][
+            0
+        ]
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={
+                "event": "PostToolUse",
+                "matcher": "Write",
+                "action": "use_proposed",
+                "rule_index": c["target_rule_index"],
+                "rule_hash": "0" * 64,  # stale / wrong identity
+                "proposed_hash": c["proposed_hash"],
+            },
+        )
+        # Stale-write aborts are HTTP 409, matching the
+        # Skills/Commands/Agents envelope contract (#1229).
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["status"] == "aborted"
+        assert "changed" in body["reason"].lower()
+        # No silent mis-resolve: the target row is left exactly as it was.
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+        assert rules[0]["hooks"][0]["command"] == "echo old"
 
     async def test_more_canonical_than_user_rows_stays_conflict_not_pending(
         self, app, client: AsyncClient, tmp_path
@@ -1212,26 +1175,18 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo u1")]}}),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo u1")]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            assert data["status"] == "conflicts"
-            # Both canonical rules collide with the single user row → two
-            # conflicts, zero pending (a sync would emit two warnings, add none).
-            assert len(data["hooks"]["conflicts"]) == 2
-            assert data["hooks"]["pending"] == []
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        assert data["status"] == "conflicts"
+        # Both canonical rules collide with the single user row → two
+        # conflicts, zero pending (a sync would emit two warnings, add none).
+        assert len(data["hooks"]["conflicts"]) == 2
+        assert data["hooks"]["pending"] == []
 
     async def test_resolve_partial_identity_returns_400(self, app, client: AsyncClient, tmp_path):
         """Issue #1112 (Codex r2): rule identity is all-or-nothing. A request
@@ -1245,37 +1200,29 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={
-                    "event": "PostToolUse",
-                    "matcher": "Write",
-                    "action": "use_proposed",
-                    "rule_index": 0,
-                    "rule_hash": "a" * 64,
-                    # proposed_hash deliberately omitted → partial identity.
-                },
-            )
-            assert resp.status_code == 400
-            assert resp.json()["detail"]["error_kind"] == "validation"
-            assert "Partial rule identity" in resp.json()["detail"]["message"]
-            # Target untouched by the rejected request.
-            rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
-            assert rules[0]["hooks"][0]["command"] == "echo old"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={
+                "event": "PostToolUse",
+                "matcher": "Write",
+                "action": "use_proposed",
+                "rule_index": 0,
+                "rule_hash": "a" * 64,
+                # proposed_hash deliberately omitted → partial identity.
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error_kind"] == "validation"
+        assert "Partial rule identity" in resp.json()["detail"]["message"]
+        # Target untouched by the rejected request.
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+        assert rules[0]["hooks"][0]["command"] == "echo old"
 
     async def test_marked_rule_differing_is_not_conflict(self, app, client: AsyncClient, tmp_path):
         """ADR-0019: a memtomem-marked target rule that differs is a pending
@@ -1300,22 +1247,15 @@ class TestSettingsSync:
         )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(json.dumps({"hooks": {"PostToolUse": [marked]}}), encoding="utf-8")
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [marked]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.get("/api/settings-sync?target_scope=user")
-            data = resp.json()
-            assert data["status"] != "conflicts"
-            assert data["hooks"]["conflicts"] == []
-            assert len(data["hooks"]["pending"]) == 1
-            assert data["hooks"]["pending"][0]["matcher"] == "Write"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        data = resp.json()
+        assert data["status"] != "conflicts"
+        assert data["hooks"]["conflicts"] == []
+        assert len(data["hooks"]["pending"]) == 1
+        assert data["hooks"]["pending"][0]["matcher"] == "Write"
 
     async def test_resolve_writes_ownership_marker(self, app, client: AsyncClient, tmp_path):
         """ADR-0019: resolving via 'use memtomem's version' writes a *marked*
@@ -1330,33 +1270,24 @@ class TestSettingsSync:
         )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
-            )
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.post(
-                "/api/settings-sync/resolve?target_scope=user",
-                json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
-            )
-            assert resp.json()["status"] == "ok"
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+        )
+        assert resp.json()["status"] == "ok"
 
-            written = json.loads(target.read_text(encoding="utf-8"))
-            handler = written["hooks"]["PostToolUse"][0]["hooks"][0]
-            assert handler["statusMessage"].startswith("memtomem · ")
+        written = json.loads(target.read_text(encoding="utf-8"))
+        handler = written["hooks"]["PostToolUse"][0]["hooks"][0]
+        assert handler["statusMessage"].startswith("memtomem · ")
 
-            # A follow-up sync status read sees it as synced, not a conflict.
-            resp2 = await client.get("/api/settings-sync?target_scope=user")
-            data = resp2.json()
-            assert data["status"] == "in_sync"
-            assert data["hooks"]["conflicts"] == []
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        # A follow-up sync status read sees it as synced, not a conflict.
+        resp2 = await client.get("/api/settings-sync?target_scope=user")
+        data = resp2.json()
+        assert data["status"] == "in_sync"
+        assert data["hooks"]["conflicts"] == []
 
     async def test_diff_mirrors_merge_owned_slot_fifo(self, app, client: AsyncClient, tmp_path):
         """ADR-0019: with two canonical rules at one matcher and a target that
@@ -1392,24 +1323,17 @@ class TestSettingsSync:
         )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [marked, user_rule]}}), encoding="utf-8"
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [marked, user_rule]}}), encoding="utf-8"
+        )
+        app.state.project_root = tmp_path
 
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            # One owned slot → one managed-update pending; the second canonical
-            # rule has no slot and collides with the user rule → one conflict.
-            assert len(data["hooks"]["pending"]) == 1
-            assert len(data["hooks"]["conflicts"]) == 1
-            assert data["hooks"]["conflicts"][0]["existing"]["hooks"][0]["command"] == "echo user"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        # One owned slot → one managed-update pending; the second canonical
+        # rule has no slot and collides with the user rule → one conflict.
+        assert len(data["hooks"]["pending"]) == 1
+        assert len(data["hooks"]["conflicts"]) == 1
+        assert data["hooks"]["conflicts"][0]["existing"]["hooks"][0]["command"] == "echo user"
 
     async def test_diff_consumes_owned_slot_before_user_equality(
         self, app, client: AsyncClient, tmp_path
@@ -1437,22 +1361,15 @@ class TestSettingsSync:
         )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [marked_stale, user_equal]}}), encoding="utf-8"
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [marked_stale, user_equal]}}), encoding="utf-8"
+        )
+        app.state.project_root = tmp_path
 
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            assert data["status"] == "out_of_sync"
-            assert len(data["hooks"]["pending"]) == 1
-            assert data["hooks"]["conflicts"] == []
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        assert data["status"] == "out_of_sync"
+        assert len(data["hooks"]["pending"]) == 1
+        assert data["hooks"]["conflicts"] == []
 
     async def test_diff_owned_target_only_is_out_of_sync(self, app, client: AsyncClient, tmp_path):
         """ADR-0019: a memtomem-owned rule under an event canonical no longer
@@ -1484,25 +1401,16 @@ class TestSettingsSync:
         }
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps(
-                    {"hooks": {"PostToolUse": [synced_marked], "SessionStart": [stale_owned]}}
-                ),
-                encoding="utf-8",
-            )
-            app.state.project_root = tmp_path
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [synced_marked], "SessionStart": [stale_owned]}}),
+            encoding="utf-8",
+        )
+        app.state.project_root = tmp_path
 
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            assert data["status"] == "out_of_sync"  # stale owned rule will be pruned
-            assert data["hooks"]["conflicts"] == []
-            assert data["hooks"]["pending"] == []  # nothing to add; only a removal
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        assert data["status"] == "out_of_sync"  # stale owned rule will be pruned
+        assert data["hooks"]["conflicts"] == []
+        assert data["hooks"]["pending"] == []  # nothing to add; only a removal
 
     async def test_diff_surplus_owned_duplicate_is_out_of_sync(
         self, app, client: AsyncClient, tmp_path
@@ -1538,20 +1446,13 @@ class TestSettingsSync:
         }
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(json.dumps({"hooks": {"PostToolUse": [o1, o2]}}), encoding="utf-8")
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [o1, o2]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            assert data["status"] == "out_of_sync"  # surplus owned rule will be pruned
-            assert data["hooks"]["conflicts"] == []
-            assert len(data["hooks"]["synced"]) == 1  # first owned rule matches canonical
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        assert data["status"] == "out_of_sync"  # surplus owned rule will be pruned
+        assert data["hooks"]["conflicts"] == []
+        assert len(data["hooks"]["synced"]) == 1  # first owned rule matches canonical
 
     async def test_diff_empty_canonical_owned_target_is_out_of_sync(
         self, app, client: AsyncClient, tmp_path
@@ -1575,26 +1476,19 @@ class TestSettingsSync:
         }
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            # Owned rule present → a sync prunes it → out_of_sync.
-            target.write_text(json.dumps({"hooks": {"PostToolUse": [owned]}}), encoding="utf-8")
-            app.state.project_root = tmp_path
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            assert data["status"] == "out_of_sync"
+        # Owned rule present → a sync prunes it → out_of_sync.
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [owned]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        assert data["status"] == "out_of_sync"
 
-            # Only user rules → nothing for memtomem to do → no_hooks.
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [self._rule("Bash", "echo user")]}}),
-                encoding="utf-8",
-            )
-            data = (await client.get("/api/settings-sync?target_scope=user")).json()
-            assert data["status"] == "no_hooks"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        # Only user rules → nothing for memtomem to do → no_hooks.
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Bash", "echo user")]}}),
+            encoding="utf-8",
+        )
+        data = (await client.get("/api/settings-sync?target_scope=user")).json()
+        assert data["status"] == "no_hooks"
 
     # -- URL alias tests (/api/context/settings/*) ----------------------------
 
@@ -1620,15 +1514,10 @@ class TestSettingsSync:
         assert "results" in resp.json()
 
     async def test_post_refuses_host_write_by_default(
-        self, app, client: AsyncClient, tmp_path, monkeypatch
+        self, app, client: AsyncClient, tmp_path, _isolated_home
     ):
         """``POST /api/settings-sync`` without a body refuses host writes by
         default — review item 1 on PR #484. Library-level gate threading."""
-        # Isolate HOME so the test cannot edit the real ~/.claude/settings.json.
-        fake_home = tmp_path / "home"
-        fake_home.mkdir()
-        (fake_home / ".claude").mkdir()
-        set_home(monkeypatch, fake_home)
         project = tmp_path / "proj"
         project.mkdir()
         canonical = project / ".memtomem" / "settings.json"
@@ -1648,16 +1537,11 @@ class TestSettingsSync:
         claude = next(r for r in results if r["name"] == "claude_settings")
         assert claude["status"] == "needs_confirmation"
         assert "outside the project root" in claude["reason"]
-        assert not (fake_home / ".claude" / "settings.json").exists()
+        assert not (_isolated_home / ".claude" / "settings.json").exists()
 
     async def test_post_proceeds_with_allow_host_writes_true(
-        self, app, client: AsyncClient, tmp_path, monkeypatch
+        self, app, client: AsyncClient, tmp_path, _isolated_home
     ):
-        fake_home = tmp_path / "home"
-        fake_home.mkdir()
-        (fake_home / ".claude").mkdir()
-        set_home(monkeypatch, fake_home)
-
         project = tmp_path / "proj"
         project.mkdir()
         canonical = project / ".memtomem" / "settings.json"
@@ -1676,7 +1560,7 @@ class TestSettingsSync:
         results = resp.json()["results"]
         claude = next(r for r in results if r["name"] == "claude_settings")
         assert claude["status"] == "ok"
-        assert (fake_home / ".claude" / "settings.json").is_file()
+        assert (_isolated_home / ".claude" / "settings.json").is_file()
 
     async def test_alias_post_context_settings_resolve(self, app, client: AsyncClient, tmp_path):
         """POST /api/context/settings/resolve resolves a hook conflict."""
@@ -1690,27 +1574,18 @@ class TestSettingsSync:
         )
 
         target = Path.home() / ".claude" / "settings.json"
-        backup = target.read_text(encoding="utf-8") if target.is_file() else None
-        try:
-            target.write_text(
-                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
-            )
-            app.state.project_root = tmp_path
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
 
-            resp = await client.post(
-                "/api/context/settings/resolve?target_scope=user",
-                json={"event": "PostToolUse", "matcher": "Edit", "action": "use_proposed"},
-            )
-            data = resp.json()
-            assert data["status"] == "ok"
+        resp = await client.post(
+            "/api/context/settings/resolve?target_scope=user",
+            json={"event": "PostToolUse", "matcher": "Edit", "action": "use_proposed"},
+        )
+        data = resp.json()
+        assert data["status"] == "ok"
 
-            updated = json.loads(target.read_text(encoding="utf-8"))
-            assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo v2"
-        finally:
-            if backup is not None:
-                target.write_text(backup, encoding="utf-8")
-            elif target.is_file():
-                target.unlink()
+        updated = json.loads(target.read_text(encoding="utf-8"))
+        assert updated["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo v2"
 
 
 # ---------------------------------------------------------------------------
@@ -1898,7 +1773,10 @@ class TestNamespaceCRUD:
         assert data["namespace"] == "default"
 
     async def test_rename_namespace(self, app, client: AsyncClient):
-        app.state.storage.rename_namespace = AsyncMock(return_value=30)
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=30, metadata_renamed=True, merged=False)
+        )
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=30)
         resp = await client.post(
             "/api/namespaces/default/rename",
             json={"new_name": "general"},
@@ -1907,6 +1785,106 @@ class TestNamespaceCRUD:
         data = resp.json()
         assert data["namespace"] == "general"
         assert data["chunk_count"] == 30
+
+    async def test_rename_merge_reports_resulting_total(self, app, client: AsyncClient):
+        """On a merge the moved count and the namespace's size differ.
+
+        Reporting the moved count would contradict the list / info endpoints
+        the UI reads right after the rename.
+        """
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=False, merged=True)
+        )
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=7)
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general", "merge": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["chunk_count"] == 7
+
+    async def test_rename_receipt_reports_dropped_duplicates(self, app, client: AsyncClient):
+        """A merge deletes the source's copy of chunks the target had — never silently."""
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(
+                chunks_moved=2, metadata_renamed=False, merged=True, duplicates_dropped=3
+            )
+        )
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=7)
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general", "merge": True},
+        )
+        assert resp.json()["duplicates_dropped"] == 3
+
+    async def test_rename_missing_source_is_404(self, app, client: AsyncClient):
+        """An all-zero result means the source held nothing — not a successful rename."""
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=0, metadata_renamed=False, merged=False)
+        )
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=12)
+        resp = await client.post(
+            "/api/namespaces/ghost/rename",
+            json={"new_name": "general"},
+        )
+        assert resp.status_code == 404
+
+    async def test_rename_namespace_conflict_is_409(self, app, client: AsyncClient):
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError("target already exists", reason_code="target_exists")
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general"},
+        )
+        assert resp.status_code == 409
+
+    async def test_conflict_detail_is_actionable_on_this_surface(self, app, client: AsyncClient):
+        """The UI has no merge affordance — don't tell the user to pass merge=True."""
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError(
+                "Cannot rename namespace 'default' to 'general': target already exists "
+                "(3 chunk(s), metadata row: yes)",
+                reason_code="target_exists",
+            )
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general"},
+        )
+        detail = resp.json()["detail"]
+        assert "merge" not in detail and "ns_assign" not in detail
+
+    async def test_conflict_detail_names_the_remedy_the_ui_has(self, app, client: AsyncClient):
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError("target already exists", reason_code="target_exists")
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general"},
+        )
+        assert "Choose a different name" in resp.json()["detail"]
+
+    async def test_rename_onto_itself_is_409_not_500(self, app, client: AsyncClient):
+        """Deterministic client input — must not land on the generic 500 handler."""
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError(
+                "Cannot rename namespace onto itself", reason_code="same_name"
+            )
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "default"},
+        )
+        assert resp.status_code == 409
+
+    async def test_rename_merge_rejects_stringified_bool(self, client: AsyncClient):
+        """``merge`` is StrictBool: consolidation needs literal consent."""
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general", "merge": "true"},
+        )
+        assert resp.status_code == 422
 
     async def test_rename_namespace_empty_name_rejected(self, client: AsyncClient):
         """Empty new_name is rejected by Pydantic min_length=1."""

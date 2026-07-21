@@ -7,6 +7,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Interrupted skill updates are now recovered before the next write**
+  (ADR-0030 §10, PR-G4a-3a) — PR-G4a-2 shipped the crash-safe directory swap
+  and its recovery machine with no caller. **Push, reverse import and Pull**
+  now run recovery *first* whenever they take a skill's canonical lock: a
+  leftover transaction is completed, rolled back, or — when two candidate trees
+  survive and which one is the original is genuinely ambiguous — refused with
+  both paths named and nothing changed. Crash leftovers are still collected
+  afterwards, but a tree the marker still claims is now left alone; deleting
+  one turned a recoverable state into one whose next recovery would have
+  removed the only copy of the skill.
+  The refusal reaches each surface as its own condition rather than a generic
+  failure: a typed per-item skip that lets the rest of a push or import
+  proceed, `swap_recovery_pending` on a Pull, and HTTP **409** on the web API.
+  In every case the operation you asked for did **not** run — recovery may have
+  safely advanced the leftover transaction first, but it never half-applies
+  your request and never leaves the artifact worse than it found it.
+  **Not yet every writer.** Skill create/edit/delete in the web UI, wiki
+  install/update, cross-scope transfer and `copy_skill` still take the lock
+  without recovering, so those paths can still overwrite a pending transaction
+  — the pre-existing behavior, unchanged here. Wiring them is a follow-up, and
+  it ships with a build-time guard that finds such writers by analyzing the
+  tree rather than from a hand-written list, because the list is exactly what
+  missed them.
+
 - **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
   primitive that replaces a whole artifact tree and can recover from an
   interruption. A non-empty directory cannot be replaced atomically on POSIX,
@@ -96,9 +120,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `commit_pull`). Domain decisions are delivered as a stable typed envelope the
   UI branches on — the applied write and every refusal (`source_conflict`
   carrying its candidate rows, `gate_blocked` carrying `force_bypassable`,
-  `canonical_exists` → overwrite, …) return HTTP 200; only the four statuses
+  `canonical_exists` → overwrite, …) return HTTP 200; only the five statuses
   with genuine HTTP meaning become error codes (lock-timeout → 503, stale plan
-  → 409, write failure → 500). Destination consent mirrors the CLI and the
+  → 409, pending swap recovery → 409, write failure → 500). Destination consent
+  mirrors the CLI and the
   dashboard's existing host-write gate: a `project_shared` landing (git-tracked)
   requires `confirm_project_shared`, a `user` landing requires `allow_host_writes`
   (disclosing the host paths), and `target_scope` is explicit (no silent
@@ -231,6 +256,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **The server instructions now fit in the client's prompt, and the detail moved
+  somewhere it can't be cut** (#1881) — the `instructions` string returned on
+  `initialize` is the only workflow-level text most clients put in front of the
+  model, and it was 3,364 / 3,219 / 2,673 characters for core / standard / full.
+  A Claude Code system prompt carrying it ended mid-word at ~2,048 characters,
+  and because the namespace table and the closing "when in doubt, default to
+  `mem_add` / `mem_search`" line were appended **last**, the part every mode lost
+  was the generic guidance — the mode-specific narrative it was cut for survived.
+  Each mode is now a recipe plus a pointer (1,694 / 1,660 / 1,555), the generic
+  sections come before the mode block, and the core-tool count is rendered from
+  the exposed set instead of typed. The narrative it displaced — the
+  session-bound write contract, the per-project team buckets (ADR-0028), and the
+  scope `mem_agent_search` actually resolves — moved to
+  `mem_do(action="help", params={"category": "sessions"})` and
+  `params={"category": "multi_agent"}`, which are fetched on demand rather than
+  paid on every prompt, and are budgeted in their own right.
+  Two things the old text said imprecisely are now stated in full: an unbound
+  session does **not** by itself make `mem_agent_search` unpinned (it drops one
+  step of `explicit agent_id → session's bound agent → current namespace →
+  unpinned`), and `namespace=` has to be passed **on the write** — passing it to
+  `mem_session_start` re-points the session record only, which is now pinned as
+  behaviour and not just prose.
+
 - **Refusals now tell you what to do on the surface you are actually using**
   (#1869) — engine refusal reasons hard-coded CLI flag spellings, so an agent
   that hit a source conflict over MCP was told to `pass --from <runtime>`, a
@@ -300,6 +348,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   observations, and both search caches.
 
 ### Fixed
+
+- **A failed namespace rename no longer half-applies** (#1874) —
+  `mem_ns_rename` rewrote the chunk rows first and renamed the namespace's
+  metadata row second. Renaming onto a namespace that already had a metadata
+  row therefore failed on the primary key *after* the chunks had been rewritten
+  and with nothing rolling them back, so a later unrelated write could commit a
+  rename the caller was told had failed. The collision is now decided before
+  any write: renaming onto an existing namespace is **refused** (409 on the web
+  admin route, `Error: …` over MCP), and `merge=True` opts into consolidating
+  into it — chunks move, the target's description/color are kept, and where
+  both namespaces hold the same chunk (same source file, content hash and start
+  line) the target's copy is kept while the source's duplicate is dropped
+  (reported, never silent), as is the source's metadata row. The whole
+  operation runs under one lock-taking transaction, so a failure anywhere
+  undoes all of it, including when it runs inside an outer transaction it does
+  not own. `mem_ns_rename` also reports *what* changed rather than a bare chunk
+  count: a namespace registered but never written to renames its metadata row
+  while moving 0 chunks, which used to read as "nothing happened". Relatedly,
+  `mm agent migrate` now finds legacy `agent/{id}` namespaces that exist only
+  as a registration (no chunks) and asks before consolidating into an existing
+  `agent-runtime:{id}` (`--yes` to skip) instead of failing.
+
+- **`mem_ask` is reachable again outside `full` tool mode** — the tool carried
+  `@mcp.tool()` but never `@register(...)`, so the default `core` mode pruned
+  it from the tool list while `mem_do` had no action to route it to: it existed
+  in no mode but `full`, even though the guides advertised it unconditionally.
+  Registered under the `search` category, so `mem_do(action="ask", ...)` now
+  works in `core` and `standard`. Per-mode direct-tool sets are unchanged. An
+  architectural guard now pins the invariant `CLAUDE.md` already stated —
+  every non-core `@mcp.tool()` must also `@register` — with a two-way runtime
+  equality so a module missing from the server's imports fails too.
+
+  The tool-mode footnote in the guides was misleading in the same area and is
+  corrected: the asterisk gates the individual *tool name*, not the capability.
+  `mem_config`, `mem_embedding_reset` and `mem_reset` are reachable through
+  `mem_do` in every mode.
 
 - **The crash-leftover reaper no longer claims a newline-terminated name** —
   Python's `$` also matches immediately before a trailing newline, and a

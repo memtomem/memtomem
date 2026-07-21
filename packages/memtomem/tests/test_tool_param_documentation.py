@@ -1,0 +1,224 @@
+"""Every MCP tool parameter must be documented, and the safety valve twice.
+
+Two surfaces read these docstrings: the wire ``description`` a client gets for
+an exposed tool, and ``mem_do(action="help", params={"category": ...})`` — the
+only parameter documentation that exists for a non-core action in the default
+core mode. Fourteen tools had parameters but no ``Args:`` block at all, so the
+help catalog listed bare types (``scope: TargetScope = 'user'``) and an agent
+had to guess. Four of them hid ``force_unsafe``, the redaction-guard bypass.
+
+The coverage check is deliberately scoped to the whole tool surface rather
+than to ``ACTIONS``: a direct-only tool (``mem_context_migrate``) and the
+register-only actions (``mem_ingest``, ``mem_increment_access``,
+``mem_version``) each appear on exactly one of the two surfaces, and both are
+read by somebody.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+_TOOLS_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "server" / "tools"
+
+
+def _tool_functions() -> list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]]:
+    """Every ``@mcp.tool()`` / ``@register``-ed function in ``server/tools``."""
+    found: list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]] = []
+    for path in sorted(_TOOLS_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = [ast.unparse(d) for d in node.decorator_list]
+            exposed = any(d.startswith("mcp.tool") for d in decorators)
+            routed = any(d.startswith("register(") for d in decorators)
+            if exposed or routed:
+                found.append((path.name, node))
+    return found
+
+
+def _params(node: ast.AsyncFunctionDef | ast.FunctionDef) -> list[str]:
+    args = node.args
+    return [
+        a.arg
+        for a in args.posonlyargs + args.args + args.kwonlyargs
+        if a.arg not in ("ctx", "self")
+    ]
+
+
+def test_no_tool_takes_variadic_arguments() -> None:
+    """``*args`` / ``**kwargs`` would publish an empty MCP parameter schema.
+
+    ``_params`` cannot name what it cannot see, so reject the shape outright
+    rather than let a variadic tool pass the coverage check vacuously. The
+    deprecated ``mem_context_migrate`` alias repeats its signature explicitly
+    for exactly this reason.
+    """
+    offenders = [
+        f"{filename}::{node.name}"
+        for filename, node in _tool_functions()
+        if node.args.vararg is not None or node.args.kwarg is not None
+    ]
+    assert not offenders, f"tools must declare explicit parameters: {offenders}"
+
+
+def _arg_docs(node: ast.AsyncFunctionDef | ast.FunctionDef) -> dict[str, str]:
+    """Parsed ``Args:`` entries, using the parser the help catalog uses.
+
+    Going through ``_parse_arg_docs`` rather than a private regex is
+    deliberate: the claim being guarded is "this parameter is documented
+    *where an agent can read it*", and ``mem_do(action="help")`` renders
+    exactly what this parser returns. A textual scan would accept a
+    ``name:`` line sitting in an Examples block and stay green while the
+    help entry was empty.
+    """
+    from memtomem.server.tool_registry import _parse_arg_docs
+
+    return _parse_arg_docs(ast.get_docstring(node, clean=False) or "")
+
+
+def test_sweep_finds_the_tool_surface() -> None:
+    """Guard the guard: an empty sweep would make every check below vacuous."""
+    assert len(_tool_functions()) > 90
+
+
+def test_no_docstring_documents_a_parameter_that_does_not_exist() -> None:
+    """The parse must not invent keys, even before register() filters them.
+
+    ``register()`` drops non-signature keys, so ``ACTIONS`` stays clean either
+    way; this asserts the parse itself, which is what a section-termination
+    regression would break first (an ``Examples::`` block following ``Args:``
+    used to be read as a parameter named ``Examples``).
+    """
+    offenders = {
+        f"{filename}::{node.name}": extra
+        for filename, node in _tool_functions()
+        if (extra := sorted(set(_arg_docs(node)) - set(_params(node))))
+    }
+    assert not offenders, f"docstrings parsed into non-existent parameters: {offenders}"
+
+
+def test_every_tool_parameter_is_documented() -> None:
+    offenders = {
+        f"{filename}::{node.name}": missing
+        for filename, node in _tool_functions()
+        if (missing := sorted(set(_params(node)) - set(_arg_docs(node))))
+    }
+    assert not offenders, (
+        f"tool parameters with no Args: entry: {offenders}. In core mode "
+        "mem_do(action='help') shows only the type for these, so an agent has "
+        "to guess what to pass."
+    )
+
+
+#: Each entry is (alternative spellings, what the clause has to convey).
+#: Alternatives exist because the existing docs say "redaction gate" in one
+#: place and "redaction guard" in another; both state the same contract, and
+#: forcing one spelling would be churn, not clarity.
+_SAFETY_MARKERS = (
+    (("redaction guard", "redaction gate"), "what the valve actually bypasses"),
+    (("bypassed", "audit-log", "audit line"), "that the bypass is recorded, not silent"),
+)
+
+#: Tools whose write path cannot reach ``project_shared``, so the "never
+#: bypassable for project_shared" clause would be a false statement in their
+#: docs. ``mem_import`` calls ``enforce_write_guard(..., scope="user")``
+#: unconditionally (``memtomem/tools/export_import.py``), so the scope-aware
+#: refusal never fires for it. Everything else must carry the clause.
+_NO_PROJECT_SHARED_PATH = {
+    "mem_import": "guard is invoked with scope='user' in tools/export_import.py",
+}
+
+
+def _force_unsafe_tools() -> list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]]:
+    """Derived from signatures, so a sixth tool cannot slip in undocumented."""
+    return [(f, n) for f, n in _tool_functions() if "force_unsafe" in _params(n)]
+
+
+def test_force_unsafe_tools_are_found() -> None:
+    """Pin the surface that was actually reviewed, not a lower bound.
+
+    A ``>= 5`` sentinel would not notice four of the nine tools losing the
+    parameter, which is weaker than the signature-derived discovery it guards.
+    """
+    found = sorted(node.name for _, node in _force_unsafe_tools())
+    assert found == [
+        "mem_add",
+        "mem_batch_add",
+        "mem_edit",
+        "mem_fetch",
+        "mem_import",
+        "mem_import_notion",
+        "mem_import_obsidian",
+        "mem_pinned_set",
+        "mem_session_end",
+    ], f"the force_unsafe surface changed: {found}"
+
+
+@pytest.mark.parametrize(
+    "markers,why", _SAFETY_MARKERS, ids=[m[0][0].replace(" ", "-") for m in _SAFETY_MARKERS]
+)
+def test_force_unsafe_documentation_states_the_contract(markers: tuple[str, ...], why: str) -> None:
+    """Non-emptiness is not enough for the redaction bypass.
+
+    ``force_unsafe`` is the one parameter whose misuse writes a secret to
+    disk, so its description has to carry the contract itself — an agent
+    reading the help catalog has nothing else to consult.
+    """
+    offenders = [
+        f"{filename}::{node.name}"
+        for filename, node in _force_unsafe_tools()
+        if not any(marker in _arg_docs(node).get("force_unsafe", "") for marker in markers)
+    ]
+    assert not offenders, f"force_unsafe docs must state {why}: missing in {offenders}"
+
+
+def test_force_unsafe_documentation_states_the_project_shared_refusal() -> None:
+    """Scope-aware: only claim it where the refusal can actually fire.
+
+    ``enforce_write_guard`` hard-refuses a bypass when ``scope`` is
+    ``project_shared``, so every tool that can write there must say so. A
+    tool that always passes ``scope="user"`` must NOT say so — a false safety
+    claim is worse than a missing one — hence the justified exemption list.
+    """
+    offenders = [
+        f"{filename}::{node.name}"
+        for filename, node in _force_unsafe_tools()
+        if node.name not in _NO_PROJECT_SHARED_PATH
+        and "project_shared" not in _arg_docs(node).get("force_unsafe", "")
+    ]
+    assert not offenders, (
+        "force_unsafe docs must state that project_shared is never bypassable: "
+        f"missing in {offenders}"
+    )
+
+
+def test_project_shared_exemptions_are_still_exempt() -> None:
+    """The exemption list must not outlive its justification.
+
+    If ``mem_import`` ever starts passing a real scope, the clause becomes
+    required and this test says so instead of silently keeping the tool out
+    of the check.
+    """
+    path = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "tools" / "export_import.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # Substring-matching the file would also match the ``scope="user"`` that
+    # appears inside its own docstring, so deleting the real keyword would
+    # leave this green on prose alone — the exact drift it exists to catch.
+    pinned = [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and ast.unparse(call.func).endswith("enforce_write_guard")
+        and any(
+            kw.arg == "scope" and getattr(kw.value, "value", None) == "user" for kw in call.keywords
+        )
+    ]
+    assert pinned, (
+        "tools/export_import.py no longer calls enforce_write_guard with a literal "
+        "scope='user' — mem_import can now reach a scope-aware refusal, so drop it "
+        "from _NO_PROJECT_SHARED_PATH and document the project_shared clause on it"
+    )

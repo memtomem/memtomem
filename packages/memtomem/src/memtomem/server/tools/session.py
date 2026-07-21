@@ -299,6 +299,12 @@ async def mem_session_end(
         summary: Optional summary of what was accomplished in this
             session. When provided, also written as a chunk under
             ``<memory_dir>/sessions/<YYYY-MM>/<session_id>.md``.
+        force_unsafe: Bypass the redaction guard when the summary matches a
+            secret pattern. The bypass is recorded with a ``bypassed``
+            outcome and an audit line (see ``mem_add_redaction_stats``).
+            It never applies to a ``project_shared`` destination — that
+            combination is hard-refused, because git history cannot be
+            retracted from clones.
     """
     app = await _get_app_initialized(ctx)
 
