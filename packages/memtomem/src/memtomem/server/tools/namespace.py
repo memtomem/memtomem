@@ -4,11 +4,15 @@ mem_ns_update.
 
 from __future__ import annotations
 
+from pydantic import StrictBool
+
 from memtomem.constants import validate_namespace
+from memtomem.errors import NamespaceConflictError
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._validation import strict_bool
 
 
 @mcp.tool()
@@ -111,33 +115,78 @@ async def mem_ns_get(
 async def mem_ns_rename(
     old: str,
     new: str,
+    # StrictBool, not bool: FastMCP builds a LAX pydantic arg model from these
+    # annotations, so a bare ``bool`` would coerce ``1`` / ``"true"`` into a
+    # merge — a destructive consolidation the caller never asked for.
+    # ``strict_bool`` in the body then covers the ``mem_do`` path, which
+    # bypasses that model entirely. Both are needed.
+    merge: StrictBool = False,
     ctx: CtxType = None,
 ) -> str:
     """Rename a namespace (SQL UPDATE, no re-indexing needed).
+
+    Refuses when ``new`` already exists (holds chunks or a metadata row)
+    so a rename can't silently fold two namespaces together. Pass
+    ``merge=True`` to consolidate on purpose: chunks move into ``new``
+    and the *target's* description/color are kept.
 
     Both ``old`` and ``new`` are run through :func:`validate_namespace`
     so a hostile-shaped string cannot land verbatim in the chunks /
     namespace_metadata rows via the rename path. See issue #500.
 
     Args:
-        old: Existing namespace to rename. The reported count covers chunk
-            rows only — a namespace that exists as metadata but holds no
-            chunks still gets its metadata row renamed while reporting 0.
-        new: Target namespace, validated before the write. If it holds
-            chunks but has no metadata row, the two namespaces are silently
-            merged; if it has a metadata row, the call fails on the
-            metadata primary key AFTER the chunk rows were already
-            rewritten (#1874 — do not rely on the failure
-            meaning "nothing happened").
+        old: Namespace to rename. A namespace that exists only as
+            metadata (registered, zero chunks) renames fine — the
+            reported chunk count is 0 but the metadata row moves.
+        new: New name. Must not already exist unless ``merge=True``.
+        merge: Consolidate into an existing ``new`` instead of refusing.
 
     Examples::
         mem_ns_rename(old="project:v1", new="project:v2")
+        mem_ns_rename(old="project:draft", new="project:v2", merge=True)
+
+    (Legacy ``agent/{id}`` namespaces cannot be named here — the slash fails
+    validation. Use ``mm agent migrate``, which consolidates them.)
     """
     validate_namespace(old)
     validate_namespace(new)
+    merge = strict_bool(merge, "merge")
     app = await _get_app_initialized(ctx)
-    count = await app.storage.rename_namespace(old, new)
-    return f"Renamed namespace '{old}' -> '{new}' ({count} chunks updated)"
+    try:
+        result = await app.storage.rename_namespace(old, new, merge=merge)
+    except NamespaceConflictError as exc:
+        # Storage states the condition; this surface adds the remedy that
+        # exists *here* — an MCP caller can retry with merge=True, which a
+        # web user cannot. See the reason_code note on the exception.
+        if exc.reason_code == "target_exists":
+            # Only merge=True is offered. ``mem_ns_assign`` moves chunks with
+            # a bare UPDATE and no duplicate handling, so on the overlapping-
+            # content case it fails on the UNIQUE (namespace, source_file,
+            # content_hash, start_line) index — a remedy that breaks exactly
+            # where it is most likely to be needed is not a remedy.
+            raise NamespaceConflictError(
+                f"{exc}. Pass merge=True to consolidate into it — the target's "
+                f"description/color are kept, and chunks it already holds are "
+                f"dropped rather than duplicated",
+                reason_code=exc.reason_code,
+            ) from exc
+        raise
+    if not (result.chunks_moved or result.metadata_renamed or result.merged):
+        # Nothing to move: a namespace is its chunks and its metadata row, and
+        # this one had neither. Saying "Renamed" would be a lie.
+        return f"Namespace '{old}' not found — nothing renamed."
+    if result.merged:
+        detail = f"merged into existing '{new}'"
+        if result.duplicates_dropped:
+            detail += (
+                f", {result.duplicates_dropped} duplicate chunk(s) dropped "
+                f"(already present in '{new}')"
+            )
+    elif result.metadata_renamed:
+        detail = "metadata row renamed"
+    else:
+        detail = "no metadata row"
+    return f"Renamed namespace '{old}' -> '{new}' ({result.chunks_moved} chunks moved, {detail})"
 
 
 @mcp.tool()

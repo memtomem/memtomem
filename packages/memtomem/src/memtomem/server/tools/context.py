@@ -19,6 +19,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._validation import strict_bool
 
 if TYPE_CHECKING:
     from memtomem.context._names import Layout
@@ -2720,24 +2721,11 @@ _PULL_BOOL_FLAGS = (
 )
 
 
-def _strict_bool(value: object, field: str) -> bool:
-    """Accept ONLY a literal ``True`` / ``False``; reject anything else.
-
-    The MCP twin of the web ``_only_literal_true`` validator, generalized to
-    both polarities because a *falsy-looking* string is the dangerous direction
-    here: ``"false"`` is truthy in Python, so a coercing implementation would
-    turn a declined consent into a write. Fails closed with a crisp message
-    instead of silently normalizing, so a malformed agent call is corrected
-    rather than acted on. ``1`` / ``0`` are rejected too (``1 is True`` is
-    ``False`` — ints are not booleans).
-    """
-    if value is True or value is False:
-        return value
-    raise ValueError(
-        f"{field} must be a literal boolean (true/false), got "
-        f"{type(value).__name__} {value!r} — a stringified boolean is refused "
-        "because 'false' would read as true."
-    )
+#: Literal-boolean gate for consent-shaped flags. Lives in
+#: ``tools/_validation.py`` since ``mem_ns_rename(merge=…)`` needs the same
+#: guarantee; the module-local name is kept so the call sites and the
+#: comments that reference ``_strict_bool`` below still read as before.
+_strict_bool = strict_bool
 
 
 def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
