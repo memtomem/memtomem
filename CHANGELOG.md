@@ -349,6 +349,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Context wire redaction now covers single-segment absolute paths** (#1890) —
+  a runtime root such as `/secretmount` or `C:\secretmount` can appear in an
+  `OSError`, but the shared Web/MCP backstops required two path segments and
+  passed it through. Quoted filenames and bare terminal error values now redact
+  to `<path>` while slash-bearing prose, URLs, relative remediation paths, and
+  `~`-collapsed paths retain their existing behavior.
+
 - **A failed namespace rename no longer half-applies** (#1874) —
   `mem_ns_rename` rewrote the chunk rows first and renamed the namespace's
   metadata row second. Renaming onto a namespace that already had a metadata
