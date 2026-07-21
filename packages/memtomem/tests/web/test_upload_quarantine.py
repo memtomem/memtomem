@@ -11,13 +11,11 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.web.middleware import body_limit
 
+from ..helpers import set_home
+
 # These cases are imported by ``test_web_routes.py`` so they share its large
 # application fixtures without duplicating those fixtures across modules.
 __test__ = False
-
-
-def _set_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
-    monkeypatch.setenv("HOME", str(home))
 
 
 def _assert_no_quarantine(home: Path) -> None:
@@ -32,7 +30,7 @@ class TestUploadQuarantineBoundaries:
     ) -> None:
         from memtomem.web import upload_quarantine
 
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(upload_quarantine, "MAX_UPLOAD_BYTES", 4)
         monkeypatch.setattr(upload_quarantine, "MAX_UPLOAD_AGGREGATE_BYTES", 20)
 
@@ -49,7 +47,7 @@ class TestUploadQuarantineBoundaries:
     ) -> None:
         from memtomem.web import upload_quarantine
 
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         monkeypatch.setattr(upload_quarantine, "MAX_UPLOAD_BYTES", 10)
         monkeypatch.setattr(upload_quarantine, "MAX_UPLOAD_AGGREGATE_BYTES", 6)
         exact = [("files", ("a.md", b"123")), ("files", ("b.md", b"456"))]
@@ -66,13 +64,13 @@ class TestUploadQuarantineBoundaries:
     async def test_exact_file_count_passes_and_plus_one_is_rejected_before_upload_dir(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         exact = [("files", (f"{i}.md", b"x")) for i in range(32)]
         assert (await client.post("/api/upload", files=exact)).status_code == 200
 
         second_home = tmp_path / "overflow"
         second_home.mkdir()
-        _set_home(monkeypatch, second_home)
+        set_home(monkeypatch, second_home)
         overflow = [("files", (f"{i}.md", b"x")) for i in range(33)]
         response = await client.post("/api/upload", files=overflow)
         assert response.status_code == 413
@@ -81,7 +79,7 @@ class TestUploadQuarantineBoundaries:
     async def test_text_field_and_empty_multipart_are_generic_client_errors(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         text = await client.post("/api/upload", data={"note": "x"}, files={"files": ("a.md", b"x")})
         assert text.status_code == 400
         assert text.json() == {"detail": "Malformed upload"}
@@ -99,7 +97,7 @@ class TestUploadQuarantineLifecycle:
     async def test_decode_failure_cleans_quarantine_and_writes_no_final(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         response = await client.post("/api/upload", files={"files": ("bad.md", b"\xff")})
         assert response.status_code == 200
         assert response.json()["files"][0]["error"].startswith("Decode failed:")
@@ -109,7 +107,7 @@ class TestUploadQuarantineLifecycle:
     async def test_blocked_file_cleans_quarantine(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         secret = b"token=sk-" + b"a" * 30
         response = await client.post("/api/upload", files={"files": ("secret.md", secret)})
         assert response.status_code == 200
@@ -122,7 +120,7 @@ class TestUploadQuarantineLifecycle:
     ) -> None:
         from memtomem.web import upload_quarantine
 
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
 
         async def cancel(*args, **kwargs):
             raise asyncio.CancelledError
@@ -140,7 +138,7 @@ class TestUploadQuarantineLifecycle:
     ) -> None:
         from memtomem.web import upload_quarantine
 
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
 
         async def fail(*args, **kwargs):
             raise RuntimeError("sensitive server detail")
@@ -154,7 +152,7 @@ class TestUploadQuarantineLifecycle:
     async def test_index_failure_keeps_promoted_file_and_cleans_quarantine(
         self, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         app.state.index_engine.index_file = AsyncMock(side_effect=RuntimeError("internal detail"))
         response = await client.post("/api/upload", files={"files": ("kept.md", b"safe")})
         assert response.status_code == 200
@@ -166,7 +164,7 @@ class TestUploadQuarantineLifecycle:
     async def test_same_name_never_overwrites(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
 
         async def upload(content: bytes):
             return await client.post("/api/upload", files={"files": ("same.md", content)})
@@ -182,7 +180,7 @@ class TestUploadQuarantineLifecycle:
     async def test_quarantine_and_final_modes_are_owner_only(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _set_home(monkeypatch, tmp_path)
+        set_home(monkeypatch, tmp_path)
         response = await client.post("/api/upload", files={"files": ("safe.md", b"safe")})
         path = Path(response.json()["files"][0]["path"])
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Iterator
 
 # Ensure tests/ directory is importable for helpers.py
 sys.path.insert(0, str(Path(__file__).parent))
@@ -20,6 +21,7 @@ from memtomem.server.component_factory import Components, create_components, clo
 # per-file imports. Keeping the definitions in ``_wiki_fixtures.py`` avoids
 # bloating this already-heavy conftest with unrelated git-env plumbing.
 from _wiki_fixtures import git_identity, unborn_wiki, wiki_root  # noqa: F401
+import _home_guard as _home_guard
 
 
 # The Langfuse SDK's own env names. Sub-configs no longer bind bare env vars
@@ -39,8 +41,56 @@ _BARE_LANGFUSE_ENV_VARS = (
 _SESSION_TRACE_ENV_PREFIX = "MEMTOMEM_SESSION_TRACE__"
 
 
+@pytest.fixture(scope="session")
+def _real_home_guard_targets() -> tuple[Path, ...]:
+    """Capture the real user-settings targets before tests can redirect HOME."""
+    if not _home_guard.guard_enabled():
+        return ()
+    targets = _home_guard.derive_targets(Path.home())
+    _home_guard.require_armable(_home_guard.snapshot_files(targets))
+    return targets
+
+
 @pytest.fixture(autouse=True)
-def _hermetic_dotenv(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+def _real_home_write_guard(
+    request: pytest.FixtureRequest,
+    _real_home_guard_targets: tuple[Path, ...],
+) -> Iterator[None]:
+    """Fail the test that leaves a real runtime settings file changed.
+
+    Autouse function fixtures are established before ordinary function
+    fixtures and torn down after them, so this brackets their writes as well as
+    the test body.  The target tuple is session-scoped and lexical: a test's
+    later ``set_home`` call cannot redirect the guard away from the real files.
+    """
+    if not _real_home_guard_targets:
+        yield
+        return
+
+    before = _home_guard.snapshot_files(_real_home_guard_targets)
+    _home_guard.require_armable(before)
+    yield
+    after = _home_guard.snapshot_files(_real_home_guard_targets)
+    violations = _home_guard.diff_files(before, after)
+    if violations:
+        pytest.fail(
+            _home_guard.format_violations(request.node.nodeid, violations),
+            pytrace=False,
+        )
+
+
+# The root autouse fixtures below explicitly depend on
+# ``_real_home_write_guard``.  That ordering makes the guard set up before the
+# shared ``monkeypatch`` fixture and tear down after it, so a test that patches
+# ``os.open``/``os.read`` cannot distort the real-settings comparison.
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_dotenv(
+    request: pytest.FixtureRequest,
+    _real_home_write_guard: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Keep the developer's shell and repo-root ``.env`` out of every test.
 
     ``app_lifespan`` sources ``.env`` via ``_load_dotenv()``; python-dotenv
@@ -178,7 +228,10 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def _csrf_observe_only_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def _csrf_observe_only_default(
+    _real_home_write_guard: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Default CSRF enforcement to OFF for the test suite.
 
     Production defaults to enforce. Most route tests build TestClients
@@ -196,7 +249,11 @@ def _csrf_observe_only_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_claude_projects_scan(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_claude_projects_scan(
+    tmp_path,
+    _real_home_write_guard: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Point the ``~/.claude/projects`` scan at a nonexistent dir suite-wide.
 
     ``auto_display_configured_projects`` is on by default in production, so

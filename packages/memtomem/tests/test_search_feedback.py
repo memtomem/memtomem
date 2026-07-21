@@ -128,8 +128,7 @@ class TestSaveSearchFeedback:
         assert _feedback_rows(storage) == []
 
     async def test_rejected_inside_transaction_block(self, storage):
-        """transaction() takes no lock, so the feedback read-modify-write
-        must refuse to run there rather than lose its serialization."""
+        """Feedback owns its transaction lifecycle and rejects outer nesting."""
         await _seed_run(storage, RUN_A)
         with pytest.raises(StorageError, match="transaction"):
             async with storage.transaction():

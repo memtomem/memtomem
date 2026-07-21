@@ -40,6 +40,7 @@ def actual_web_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     env.update(
         {
             "HOME": str(home),
+            "USERPROFILE": str(home),
             "TMPDIR": str(temp_dir),
             "XDG_RUNTIME_DIR": str(runtime),
             "MEMTOMEM_WEB__CSRF_ENFORCE": "1",

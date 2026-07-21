@@ -196,6 +196,7 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
 
     proc = _spawn_server(env)
@@ -305,6 +306,7 @@ def test_sigterm_unlinks_legacy_pid_file_end_to_end(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
 
     proc = _spawn_server(env)
@@ -369,6 +371,7 @@ def test_server_warns_but_proceeds_when_legacy_lock_held_exclusively(
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
 
     holder = open(legacy_pid, "a+b")  # held for test scope
@@ -424,9 +427,11 @@ def test_two_post_412_servers_coexist_with_shared_lock(tmp_path: Path) -> None:
 
     env1 = os.environ.copy()
     env1["HOME"] = str(home)
+    env1["USERPROFILE"] = str(home)
     env1["XDG_RUNTIME_DIR"] = str(xdg1)
     env2 = os.environ.copy()
     env2["HOME"] = str(home)
+    env2["USERPROFILE"] = str(home)
     env2["XDG_RUNTIME_DIR"] = str(xdg2)
 
     proc1 = _spawn_server(env1)

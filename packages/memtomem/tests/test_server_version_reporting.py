@@ -60,6 +60,7 @@ def test_initialize_response_reports_memtomem_version(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
 
     initialize_request = {

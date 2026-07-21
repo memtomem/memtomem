@@ -310,6 +310,7 @@ class TestEveryChunkCreatingSurfaceIsAccountedFor:
             "index_file",
             "index_path",
             "import_chunks",
+            "assign_namespace",
             "delete_by_source",
             "delete_by_namespace",
             "delete_chunks",
