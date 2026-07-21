@@ -20,6 +20,7 @@ The harness mirrors ``test_context_gateway_overview.py``: lifespan is off
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -571,7 +572,10 @@ def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_ur
             ),
         )
 
-    page.route("**/api/context/skills/draft-skill**", _on_detail)
+    page.route(
+        re.compile(r"/api/context/skills/draft-skill(?:\?.*)?$"),
+        _on_detail,
+    )
 
     page.goto(mm_web_url)
     _open_skills_list(page)
@@ -593,9 +597,9 @@ def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_ur
     card = page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first
     card.click()
 
-    page.wait_for_function(
-        "() => window.__lastDetailUrl !== undefined || true",
-        timeout=500,
+    page.wait_for_selector(
+        "#ctx-skills-detail .ctx-detail-name",
+        timeout=5_000,
     )
     # The card MUST be clickable on non-shared tiers — readonly-card workaround
     # is gone now that routes honor target_scope.

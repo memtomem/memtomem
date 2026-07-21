@@ -450,10 +450,8 @@ async def test_reset_all_acquires_write_lock_before_enumeration(storage):
 
 
 async def test_reset_all_acquires_write_lock_inside_transaction_cm(storage):
-    """The ``transaction()`` CM only flips a flag — it does not begin a DB
-    transaction — so a reset that is the first statement inside it must still
-    issue ``BEGIN IMMEDIATE`` before enumerating, or a concurrent writer could
-    slip a new table in between enumeration and deletion."""
+    """The outer CM locks before reset enumerates tables, so no writer can
+    create a table between enumeration and deletion."""
     db = storage._get_db()
     traced: list[str] = []
     db.set_trace_callback(lambda sql: traced.append(sql))

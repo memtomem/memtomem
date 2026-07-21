@@ -246,6 +246,7 @@ async def mem_candidate_review(
                 namespace=None,
                 template=None,
                 ctx=ctx,
+                event_type="candidate_review",
             )
             if stats is None:
                 await app.storage.release_memory_candidate(candidate_id)

@@ -45,7 +45,12 @@ from pathlib import Path
 
 import pytest
 
-from memtomem.context.error_redact import redact_engine_reason, redact_message
+from memtomem.context.error_redact import (
+    redact_engine_reason,
+    redact_message,
+    scrub_absolute_paths,
+    scrub_residual_absolute_paths,
+)
 
 
 @pytest.fixture
@@ -708,6 +713,64 @@ class TestSuccessPathFormattersCollapseHome:
         assert "~/.memtomem/lock.json" in norm  # collapsed, diagnostic survives
 
 
+class TestSingleSegmentAbsoluteScrub:
+    """Single-segment paths need stricter context than the broad path run."""
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("/secretmount", "<path>"),
+            ("unreadable: /secretmount", "unreadable: <path>"),
+            (r"unreadable: C:\secretmount", "unreadable: <path>"),
+            ("unreadable: D:/shared/", "unreadable: <path>"),
+            ("unreadable: /자료", "unreadable: <path>"),
+            (
+                "unreadable: '/Shared Drive' while loading",
+                "unreadable: '<path>' while loading",
+            ),
+            (
+                r'unreadable: "C:\\Shared Drive" while loading',
+                'unreadable: "<path>" while loading',
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "scrubber",
+        [scrub_absolute_paths, scrub_residual_absolute_paths],
+        ids=["web", "mcp"],
+    )
+    def test_scrubs_conservatively_delimited_paths(self, message, expected, scrubber) -> None:
+        assert scrubber(message) == expected
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "slash / in prose",
+            "choose read/write mode",
+            "ratio 1/2",
+            "visit /health",
+            "unreadable: see /secretmount",
+            "URL: https://example.com",
+            "relative/path",
+            "./relative",
+            "../relative",
+            "~/only",
+            "자료/파일",
+            r"folder\child",
+            r"C:relative",
+            "/",
+            "C:\\",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "scrubber",
+        [scrub_absolute_paths, scrub_residual_absolute_paths],
+        ids=["web", "mcp"],
+    )
+    def test_keeps_slash_prose_and_non_absolute_shapes(self, message, scrubber) -> None:
+        assert scrubber(message) == message
+
+
 class TestResidualAbsoluteScrub:
     """The MCP posture: kill what is still absolute, keep what is relative.
 
@@ -751,8 +814,23 @@ class TestResidualAbsoluteScrub:
         assert scrub_residual_absolute_paths(kept) == kept
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("reason", "leaked"),
+        [
+            (
+                "unreadable: /Volumes/Shared/team/.claude/agents/foo.md",
+                "/Volumes/Shared/team",
+            ),
+            ("unreadable: /secretmount", "/secretmount"),
+            (r"unreadable: C:\secretmount", r"C:\secretmount"),
+        ],
+    )
     async def test_mcp_skip_row_scrubs_an_out_of_root_path(
-        self, layout, monkeypatch: pytest.MonkeyPatch
+        self,
+        layout,
+        monkeypatch: pytest.MonkeyPatch,
+        reason: str,
+        leaked: str,
     ) -> None:
         """The BOUNDARY, not the helper. Every other test here builds its path
         under a root that gets stripped, so none of them fails if
@@ -763,11 +841,10 @@ class TestResidualAbsoluteScrub:
         from memtomem.context.agents import ExtractResult
         from memtomem.server.tools.context import mem_context_init
 
-        reason = "unreadable: /Volumes/Shared/team/.claude/agents/foo.md"
         result = ExtractResult(imported=[], skipped=[("foo", reason, skip_codes.PARSE_ERROR)])
         monkeypatch.setattr(ctx_agents, "extract_agents_to_canonical", lambda *a, **k: result)
 
         out = await mem_context_init(include="agents")
 
-        assert "/Volumes/Shared/team" not in out
+        assert leaked not in out
         assert "<path>" in out

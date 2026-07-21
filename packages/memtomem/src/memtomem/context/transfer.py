@@ -91,9 +91,15 @@ from memtomem.context.lockfile import (
     digests_from_entry,
 )
 from memtomem.context._canonical_txn import acquire_canonical_locks
+from memtomem.context._dir_swap import (
+    SwapRecoveryError,
+    has_pending_swap,
+    swap_failure_text,
+)
 from memtomem.context.migrate import (
     _DIR_MANIFEST,
     SCOPE_MIGRATABLE_KINDS,
+    ArtifactNotFoundError,
     MigratePartialError,
     _detect_source_scope,
     _existing_fanout_targets,
@@ -103,6 +109,7 @@ from memtomem.context.migrate import (
 )
 from memtomem.context.privacy_scan import raise_or_collect, scan_artifact_tree
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
+from memtomem.context.skills import run_swap_prelude
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +117,7 @@ __all__ = [
     "ProvenanceCarry",
     "TransferCollisionError",
     "TransferMode",
+    "TransferRecoveryError",
     "TransferResult",
     "transfer_artifact",
 ]
@@ -125,6 +133,25 @@ class TransferCollisionError(click.ClickException):
     replaces, so every existing ``except ClickException`` / ``str(exc)``
     consumer — CLI verbs, MCP migrate action, the ``migrate_scope``
     wrapper's pinned wording — is untouched.
+    """
+
+
+class TransferRecoveryError(TransferCollisionError):
+    """An interrupted skills swap on the source or destination blocks the transfer.
+
+    Raised when :func:`~memtomem.context.skills.run_swap_prelude` cannot resolve
+    a pending swap under either canonical lock (ADR-0030 §10). Subclasses the
+    collision rather than surfacing the raw
+    :class:`~memtomem.context._dir_swap.SwapRecoveryError` for two reasons: the
+    CLI already prints a ``ClickException`` as a one-line error instead of a
+    traceback, and a surface that has not been taught the new state still
+    degrades to "conflict" rather than "bad request" or a 500.
+
+    **Every ladder that catches ``TransferCollisionError`` must catch this
+    FIRST.** Reusing the collision's ``destination_exists`` wire code would
+    actively mislead — nothing collided; a transaction was interrupted, and the
+    remediation is to inspect the two paths named in the message, not to remove
+    something at the destination.
     """
 
 
@@ -821,7 +848,13 @@ def transfer_artifact(
     if to_scope in ("project_shared", "project_local") and dst_root is None:
         raise click.ClickException(f"to_scope='{to_scope}' requires dst_project_root.")
 
-    src_scope, src_path, layout = _detect_source_scope(kind, name, src_root, from_scope)
+    # ADR-0030 §10: a live swap marker counts as source presence, so an artifact
+    # caught between a swap's two renames is reachable by the transfer that can
+    # repair it. Read-only here; the apply path re-verifies the full layout
+    # contract under the canonical locks, after the recovery prelude.
+    src_scope, src_path, layout = _detect_source_scope(
+        kind, name, src_root, from_scope, marker_counts_as_presence=True
+    )
 
     src_store = canonical_artifact_dir(kind, src_scope, src_root)
     dst_store = canonical_artifact_dir(kind, to_scope, dst_root)
@@ -874,6 +907,32 @@ def transfer_artifact(
             return None
         return _classify_provenance_carry(kind, name, src_root, renamed=new_name is not None)
 
+    # A source discovered through its swap marker alone has no tree to read yet
+    # (ADR-0030 §10). Only the apply path recovers it, so the dry run must SAY
+    # that rather than report classifications derived from an absent directory:
+    # ``_plan_provenance`` would see a missing source, call it unprovable, and
+    # then apply — which recovers first — could legitimately classify the very
+    # same artifact clean and carry its lockfile entry. Preview and apply would
+    # disagree with nothing having changed in between (PR review).
+    source_mid_swap = (
+        layout == "dir" and not src_path.is_dir() and has_pending_swap(src_store, name)
+    )
+    mid_swap_note = (
+        "source has an interrupted directory swap; it is recovered under the "
+        "canonical lock before this transfer runs, so anything derived from the "
+        "source tree — install provenance in particular — is re-classified then "
+        "and may differ from this preview."
+    )
+    destination_mid_swap = (
+        kind == "skills" and not dst_path.exists() and has_pending_swap(dst_store, dst_name)
+    )
+    destination_mid_swap_note = (
+        "destination has an interrupted directory swap; apply recovers it under "
+        "the canonical lock before checking for a collision. Recovery may "
+        "materialize the destination and refuse this transfer, so resolve the "
+        "pending swap before relying on this preview."
+    )
+
     if not apply_:
         # Dry-run: compute plan, no mutation. ``fanout_planned`` previews
         # the deletion half of a move — the same selection the apply-side
@@ -917,14 +976,22 @@ def transfer_artifact(
             # mirror, so the plan the user confirms shows every caveat the
             # apply would print (this used to be apply-only).
             notes=(
-                _rename_overrides_note(src_path, dst_path, name)
-                if mode == "copy" and new_name is not None and layout == "dir"
-                else ()
+                (
+                    _rename_overrides_note(src_path, dst_path, name)
+                    if mode == "copy" and new_name is not None and layout == "dir"
+                    else ()
+                )
+                + ((mid_swap_note,) if source_mid_swap else ())
+                + ((destination_mid_swap_note,) if destination_mid_swap else ())
             ),
         )
 
     # ── apply path ───────────────────────────────────────────────────
-    notes: tuple[str, ...] = ()
+    # The apply carries the same note the preview showed, so a result read on
+    # its own still says the classifications below were made after a recovery.
+    notes: tuple[str, ...] = ((mid_swap_note,) if source_mid_swap else ()) + (
+        (destination_mid_swap_note,) if destination_mid_swap else ()
+    )
     # ADR-0030 §6: name-keyed canonical locks (layout-independent), so this
     # transfer serializes with a Pull / migrate / version op on the same
     # artifact name — the path-keyed pair lock did not. ``dst_name`` may differ
@@ -938,6 +1005,35 @@ def transfer_artifact(
         return None if _txn_deadline is None else max(0.0, _txn_deadline - time.monotonic())
 
     with acquire_canonical_locks([(src_store, name), (dst_store, dst_name)], timeout=lock_timeout):
+        # ADR-0030 §10: resolve any interrupted swap on BOTH roots before
+        # anything reads them. Apply-only by construction — the dry-run path
+        # returned above, so a preview never mutates. The source half is what
+        # makes a mid-swap artifact reachable at all (see ``_detect_source_scope``
+        # and its ``marker_counts_as_presence``); the destination half keeps the
+        # collision check below from deciding on a tree that recovery is about
+        # to roll back.
+        try:
+            run_swap_prelude(src_store, name, kind=kind)
+            run_swap_prelude(dst_store, dst_name, kind=kind)
+        except SwapRecoveryError as exc:
+            raise TransferRecoveryError(swap_failure_text(exc)) from exc
+
+        # The source must still satisfy the FULL discovery contract under the
+        # lock, not merely exist. Discovery may have counted a live swap marker
+        # as presence, and recovery authenticates the marker↔path relationship
+        # — not the payload — so a tree restored without its manifest (an
+        # out-of-band writer, a partially extracted staging tree) would
+        # otherwise be transferred as if it were a valid artifact.
+        if layout == "dir":
+            src_present = src_path.is_dir() and (src_path / _DIR_MANIFEST[kind]).is_file()
+        else:
+            src_present = src_path.is_file()
+        if not src_present:
+            raise ArtifactNotFoundError(
+                f"{kind}/{name} is no longer a complete artifact "
+                "(it disappeared, or an interrupted transaction left it incomplete)."
+            )
+
         # Re-check dst inside the lock window — some other process could
         # have created it between the dry-run preview and the apply
         # phase, even with our own lock-pair held (the writer would have
@@ -959,8 +1055,10 @@ def transfer_artifact(
                     _rewrite_staged_manifest_name(staging, kind, layout, new_name)
                     if layout == "dir":
                         # Shared derivation with the dry-run preview (probed
-                        # off src there) — see _rename_overrides_note.
-                        notes = _rename_overrides_note(staging, dst_path, name)
+                        # off src there) — see _rename_overrides_note. Appended,
+                        # not assigned: a mid-swap source already put its own
+                        # note here and both belong on the result.
+                        notes = notes + _rename_overrides_note(staging, dst_path, name)
                 if to_scope == "project_shared":
                     scan = scan_artifact_tree(
                         staging,

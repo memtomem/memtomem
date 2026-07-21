@@ -1265,6 +1265,7 @@ class TestMemAddCoreIntegration:
             namespace=None,
             template=None,
             ctx=ctx,
+            event_type="add",
         )
 
         assert "Memory added" in message
@@ -1288,6 +1289,7 @@ class TestMemAddCoreIntegration:
             namespace=None,
             template=None,
             ctx=ctx,
+            event_type="add",
         )
         assert "Error" in message
         assert stats is None

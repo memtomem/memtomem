@@ -128,6 +128,60 @@ class SessionMixin:
                 db.rollback()
             raise
 
+    async def update_session_metadata(self, session_id: str, patch: dict) -> bool:
+        """Merge ``patch`` into a session's metadata, touching nothing else.
+
+        Returns ``True`` when a row was updated, ``False`` when ``patch``
+        is empty or the session does not exist. A missing row is not an
+        error: the callers are best-effort bookkeeping on the write path,
+        and a vanished session must not turn into an exception that fails
+        a memory write which already landed on disk.
+
+        The merge is shallow, for the same reasons spelled out in
+        :meth:`end_session` — top-level keys in ``patch`` replace their
+        stored counterparts, everything else survives, and ``json_patch``
+        is deliberately not used.
+
+        This exists because :meth:`end_session` is the only other writer
+        of the column and it also stamps ``ended_at`` and ``summary``.
+        This method writes ``metadata`` and nothing else, so it can be
+        used while a session is live. It equally does **not** require the
+        session to still be open: the flag its callers set records that a
+        write outran session teardown, which by definition lands after
+        ``ended_at`` was stamped.
+
+        Under a borrowed :meth:`SqliteBackend.transaction`, the outer context
+        has already issued ``BEGIN IMMEDIATE`` before this SELECT. The merge is
+        therefore protected by the same cross-process write lock as the
+        standalone path without committing the caller's earlier work.
+        """
+        if not patch:
+            return False
+        db = self._get_db()
+        owns_transaction = not self._in_transaction
+        if owns_transaction:
+            # Read-modify-write: the read and the write are one unit, or a
+            # concurrent writer landing between them is silently reverted.
+            db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute("SELECT metadata FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                if owns_transaction:
+                    db.execute("COMMIT")
+                return False
+            merged = {**decode_session_metadata(row[0]), **patch}
+            db.execute(
+                "UPDATE sessions SET metadata = ? WHERE id = ?",
+                (json.dumps(merged), session_id),
+            )
+            if owns_transaction:
+                db.execute("COMMIT")
+        except Exception:
+            if owns_transaction:
+                db.rollback()
+            raise
+        return True
+
     async def add_session_event(
         self,
         session_id: str,
@@ -136,15 +190,39 @@ class SessionMixin:
         chunk_ids: list[str] | None = None,
         metadata: dict | None = None,
     ) -> None:
+        """Append an event to a session's log.
+
+        Honors an enclosing transaction and closes its own on failure —
+        the contract every sibling write in this mixin already has
+        (``create_session``, ``end_session``). It was the lone exception:
+        it committed unconditionally, so a caller who opened a
+        transaction had its earlier work flushed here and put beyond
+        rollback, and a failing INSERT left the transaction open on the
+        shared writer connection for the next unrelated commit to flush
+        (the #1572 idiom).
+
+        The rollback arm is what makes the caller's failure handling
+        viable: a caller that reacts to a failed event write by recording
+        the failure elsewhere needs the connection usable afterwards. A
+        left-open transaction would take that fallback down with the
+        primary write.
+        """
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         meta_json = json.dumps(metadata) if metadata else "{}"
-        db.execute(
-            "INSERT INTO session_events (session_id, event_type, content, chunk_ids, created_at, metadata)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, event_type, content, json.dumps(chunk_ids or []), now, meta_json),
-        )
-        db.commit()
+        try:
+            db.execute(
+                "INSERT INTO session_events"
+                " (session_id, event_type, content, chunk_ids, created_at, metadata)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, event_type, content, json.dumps(chunk_ids or []), now, meta_json),
+            )
+            if not self._in_transaction:
+                db.commit()
+        except Exception:
+            if not self._in_transaction:
+                db.rollback()
+            raise
 
     async def list_sessions(
         self,
@@ -152,6 +230,12 @@ class SessionMixin:
         since: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
+        """Return session rows with ``metadata`` normalized to a dict.
+
+        This matches :meth:`get_session` and keeps HTTP/CLI/MCP consumers
+        from having to distinguish SQLite's raw JSON text from an object.
+        See :func:`decode_session_metadata` for malformed-row handling.
+        """
         db = self._get_db()
         query = (
             "SELECT id, agent_id, started_at, ended_at, summary, namespace, metadata FROM sessions"
@@ -177,7 +261,7 @@ class SessionMixin:
                 "ended_at": r[3],
                 "summary": r[4],
                 "namespace": r[5],
-                "metadata": r[6],
+                "metadata": decode_session_metadata(r[6]),
             }
             for r in rows
         ]

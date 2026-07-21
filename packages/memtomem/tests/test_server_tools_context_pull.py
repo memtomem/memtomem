@@ -452,18 +452,25 @@ def test_identical_noop_never_renders_empty() -> None:
     assert "already identical" in out
 
 
-def test_pull_reason_scrubs_residual_absolute_paths() -> None:
+@pytest.mark.parametrize(
+    ("path", "leaked"),
+    [
+        ("/Volumes/My Drive/secrets/skill.md", "/Volumes"),
+        ("/secretmount", "/secretmount"),
+        (r"C:\secretmount", r"C:\secretmount"),
+    ],
+)
+def test_pull_reason_scrubs_residual_absolute_paths(path: str, leaked: str) -> None:
     """Paths under neither the project root nor the frozen ``$HOME`` (a
     symlinked runtime dir, an odd mount) are scrubbed — the neutral twin of the
     web ``_redact_pull_reason`` backstop."""
     from memtomem.server.tools.context import _redact_pull_reason
 
     out = _redact_pull_reason(
-        "could not read '/Volumes/My Drive/secrets/skill.md': EACCES",
+        f"could not read '{path}': EACCES",
         Path("/some/project"),
     )
-    assert "/Volumes" not in out
-    assert "My Drive" not in out
+    assert leaked not in out
     assert "<path>" in out
 
 
