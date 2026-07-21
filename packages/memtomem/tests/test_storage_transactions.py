@@ -176,9 +176,7 @@ async def test_self_managed_operations_reject_without_rolling_back_owner(storage
             StorageError,
             match="recover_stale_memory_candidates.*transaction is active",
         ):
-            await storage.recover_stale_memory_candidates(
-                stale_before="2026-01-01T00:00:00+00:00"
-            )
+            await storage.recover_stale_memory_candidates(stale_before="2026-01-01T00:00:00+00:00")
         assert storage._get_db().in_transaction is True
 
         with pytest.raises(
