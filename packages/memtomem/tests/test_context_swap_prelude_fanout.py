@@ -136,6 +136,24 @@ def _assert_converged(root: Path, dst: Path, content: str) -> None:
     assert _residue(root) == [], "recovery left a marker or transient behind"
 
 
+def _isolate_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> Path:
+    """Point the user tier at *home*, and PROVE it moved.
+
+    Every user-tier case here writes through ``Path.home()``. A bare
+    ``monkeypatch.setenv("HOME", …)`` is silently ignored on Windows — which
+    reads ``USERPROFILE`` first — so these tests wrote into the runner's real
+    home there, collided with each other, and failed only on Windows CI.
+    ``set_home`` sets both, and the assertion is what keeps this from
+    regressing quietly: on a platform where the override does not take, the
+    test says so instead of mutating a real user's Store.
+    """
+    set_home(monkeypatch, home)
+    assert Path.home().resolve() == home.resolve(), (
+        "the user tier still resolves outside the test sandbox — refusing to write to a real home"
+    )
+    return home
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     (tmp_path / ".memtomem" / "skills").mkdir(parents=True)
@@ -252,7 +270,7 @@ class TestTransferApply:
     def test_source_row_2_is_recovered_and_moved(
         self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        _isolate_home(monkeypatch, tmp_path / "home")
         p = _row_2(store)
 
         self._transfer(project)
@@ -263,7 +281,7 @@ class TestTransferApply:
     def test_source_row_5_is_recovered_and_moved(
         self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        _isolate_home(monkeypatch, tmp_path / "home")
         p = _row_5(store)
 
         self._transfer(project)
@@ -275,7 +293,7 @@ class TestTransferApply:
         self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Reachable here — the source tree is what discovery found, not a collision."""
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        _isolate_home(monkeypatch, tmp_path / "home")
         p = _row_4(store)
         before = _residue(store)
 
@@ -297,7 +315,7 @@ class TestTransferApply:
         transfer instead lands on top of a live transaction.
         """
         home = tmp_path / "home"
-        monkeypatch.setenv("HOME", str(home))
+        _isolate_home(monkeypatch, home)
         user_store = home / ".memtomem" / "skills"
         user_store.mkdir(parents=True)
         dp = _row_2(user_store)
@@ -324,7 +342,7 @@ class TestTransferApply:
         pre-flight.
         """
         home = tmp_path / "home"
-        monkeypatch.setenv("HOME", str(home))
+        _isolate_home(monkeypatch, home)
         user_store = home / ".memtomem" / "skills"
         user_store.mkdir(parents=True)
         _tree(store / "skill", "source")
@@ -348,7 +366,7 @@ class TestTransferApply:
         discovery contract, so that is a not-found, not a transfer of a
         half-artifact.
         """
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        _isolate_home(monkeypatch, tmp_path / "home")
         p = _write_marker(store)
         p["old"].mkdir()  # a tree, but not a skill
 
@@ -650,7 +668,7 @@ class TestMcpTransfer:
     ) -> None:
         from memtomem.server.tools.context import mem_context_artifact_transfer
 
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        _isolate_home(monkeypatch, tmp_path / "home")
         monkeypatch.chdir(project)
         _row_4(store)
 
@@ -687,8 +705,7 @@ class TestMcpTransfer:
 
         home = tmp_path / "home"
         home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setenv("USERPROFILE", str(home))
+        _isolate_home(monkeypatch, home)
         proj_a, proj_b = tmp_path / "proj-a", tmp_path / "proj-b"
         for proj in (proj_a, proj_b):
             (proj / ".git").mkdir(parents=True)
