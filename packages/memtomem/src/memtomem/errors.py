@@ -19,7 +19,19 @@ class NamespaceConflictError(StorageError):
     answer 409 (a caller-resolvable conflict) instead of falling through
     to the generic 500 handler; MCP surfaces it as a plain ``Error: …``
     string via ``tool_handler``'s ``StorageError`` branch.
+
+    The message states the *condition* only. What to do about it differs
+    per surface — an MCP client can pass ``merge=True``, a web user can
+    only pick another name — so each surface phrases its own remedy off
+    :attr:`reason_code` rather than forwarding storage's wording to a
+    caller who cannot act on it.
     """
+
+    #: ``"target_exists"`` — *new* already holds chunks or a metadata row.
+    #: ``"same_name"`` — source and target are the same namespace.
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class StorageStartupError(StorageError):

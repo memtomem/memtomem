@@ -345,6 +345,28 @@ class TestRenameNamespaceAtomicity:
             f"lock must still precede the preflight, trace: {trace}"
         )
 
+    async def test_a_foreign_open_transaction_is_not_committed(self, storage):
+        """Opening the lock is not owning it — and neither is somebody else's DML.
+
+        The connection runs in sqlite3's implicit-transaction mode, so a
+        pending write left on it outside ``transaction()`` must not be
+        flushed by our commit. Committing a stranger's write is the bug this
+        method exists to prevent, one level up.
+        """
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        db = storage._get_db()
+        db.execute(
+            "INSERT INTO namespace_metadata "
+            "(namespace, description, color, created_at, updated_at) "
+            "VALUES ('foreign-ns', '', '', 't', 't')"
+        )
+        assert db.in_transaction
+
+        await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert db.in_transaction, "rename committed a transaction it did not open"
+        db.rollback()
+
     async def test_no_op_rename_leaves_no_open_transaction(self, storage):
         """A source that holds nothing must not strand the RESERVED lock."""
         await storage.rename_namespace("ghost", "phantom")
@@ -367,6 +389,33 @@ class TestRenameNamespaceConflicts:
             await storage.rename_namespace("src-ns", "dst-ns")
 
         assert dict(await storage.list_namespaces()).get("src-ns") == 1
+
+    async def test_conflict_message_states_the_condition_only(self, storage):
+        """Storage names the condition; each surface adds its own remedy (#1870)."""
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("dst-ns", description="existing")
+
+        with pytest.raises(NamespaceConflictError) as excinfo:
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert "merge" not in str(excinfo.value) and "ns_assign" not in str(excinfo.value)
+
+    async def test_conflict_carries_a_reason_code(self, storage):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        await storage.set_namespace_meta("dst-ns", description="existing")
+
+        with pytest.raises(NamespaceConflictError) as excinfo:
+            await storage.rename_namespace("src-ns", "dst-ns")
+
+        assert excinfo.value.reason_code == "target_exists"
+
+    async def test_same_name_conflict_carries_its_own_reason_code(self, storage):
+        await storage.set_namespace_meta("same-ns", description="keep me")
+
+        with pytest.raises(NamespaceConflictError) as excinfo:
+            await storage.rename_namespace("same-ns", "same-ns")
+
+        assert excinfo.value.reason_code == "same_name"
 
     async def test_refuses_target_with_chunks_but_no_metadata(self, storage):
         await storage.upsert_chunks(

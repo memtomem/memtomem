@@ -250,14 +250,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   into it — chunks move, the target's description/color are kept, and where
   both namespaces hold the same chunk (same source file, content hash and start
   line) the target's copy is kept while the source's duplicate is dropped
-  (reported, never silent), as is the source's metadata row. The whole operation runs under one lock-taking
-  transaction, so a failure anywhere undoes all of it, including when it runs
-  inside an outer transaction it does not own. `mem_ns_rename` also reports
-  *what* changed rather than a bare chunk count: a namespace registered but
-  never written to renames its metadata row while moving 0 chunks, which used
-  to read as "nothing happened". Relatedly, `mm agent migrate` now finds legacy
-  `agent/{id}` namespaces that exist only as a registration (no chunks) and
-  consolidates into an existing `agent-runtime:{id}` instead of failing.
+  (reported, never silent), as is the source's metadata row. The whole
+  operation runs under one lock-taking transaction, so a failure anywhere
+  undoes all of it, including when it runs inside an outer transaction it does
+  not own. `mem_ns_rename` also reports *what* changed rather than a bare chunk
+  count: a namespace registered but never written to renames its metadata row
+  while moving 0 chunks, which used to read as "nothing happened". Relatedly,
+  `mm agent migrate` now finds legacy `agent/{id}` namespaces that exist only
+  as a registration (no chunks) and asks before consolidating into an existing
+  `agent-runtime:{id}` (`--yes` to skip) instead of failing.
 
 - **The crash-leftover reaper no longer claims a newline-terminated name** —
   Python's `$` also matches immediately before a trailing newline, and a

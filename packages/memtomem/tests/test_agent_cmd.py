@@ -105,9 +105,38 @@ class TestAgentMigrate:
             )
         )
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
-        result = CliRunner().invoke(cli, ["agent", "migrate"])
+        result = CliRunner().invoke(cli, ["agent", "migrate", "--yes"])
         assert result.exit_code == 0
         assert "3 duplicate(s) dropped" in result.output
+
+    def test_existing_target_asks_before_consolidating(self, monkeypatch):
+        """Every other surface demands explicit consent to merge; so does this one."""
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"], input="n\n")
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_not_awaited()
+
+    def test_declining_the_merge_says_nothing_changed(self, monkeypatch):
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"], input="n\n")
+        assert "Aborted" in result.output
+
+    def test_yes_skips_the_merge_confirmation(self, monkeypatch):
+        comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate", "--yes"])
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_awaited_once()
+
+    def test_no_confirmation_when_nothing_is_merged(self, monkeypatch):
+        """A collision-free migration stays non-interactive."""
+        comp = _mock_components(["agent/alpha"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"])
+        assert result.exit_code == 0
+        comp.storage.rename_namespace.assert_awaited_once()
 
     def test_dry_run_flags_existing_merge_target(self, monkeypatch):
         """A target that already exists is consolidated — say so before applying."""

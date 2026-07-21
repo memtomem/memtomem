@@ -30,6 +30,16 @@ from memtomem.web.schemas import (
 
 admin_router = APIRouter(prefix="/namespaces", tags=["namespaces"])
 
+# Per-``reason_code`` 409 wording for the rename route. The UI offers no merge
+# affordance (``renameNamespace()`` posts ``{new_name}`` only), so the only
+# remedy that exists on this surface is "choose a different name" — telling a
+# UI user to pass ``merge=True`` or call ``ns_assign`` would be advice they
+# cannot follow.
+_RENAME_CONFLICT_DETAIL = {
+    "target_exists": "A namespace named '{new}' already exists. Choose a different name.",
+    "same_name": "'{new}' is the current name — pick a different one.",
+}
+
 
 # Registered on the read router in namespaces_read.py; not on admin_router
 # (read-side surface lives in the prod tier — see web/app.py _PROD_ROUTERS).
@@ -104,8 +114,13 @@ async def rename_namespace(
     except NamespaceConflictError as exc:
         # Caller-resolvable collision (existing target, or old == new), not an
         # internal fault — without this it would land on the generic 500
-        # handler in web/app.py.
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # handler in web/app.py. The detail is phrased for *this* surface:
+        # forwarding storage's message would tell a UI user to "pass
+        # merge=True" or call a tool the UI has no affordance for (#1870).
+        detail = _RENAME_CONFLICT_DETAIL.get(
+            exc.reason_code, f"Cannot rename '{namespace}' to '{body.new_name}'."
+        ).format(old=namespace, new=body.new_name)
+        raise HTTPException(status_code=409, detail=detail) from exc
     if not (result.chunks_moved or result.metadata_renamed or result.merged):
         # Nothing moved because the source held nothing. Falling through would
         # answer 200 with the *target's* count and metadata — a rename that

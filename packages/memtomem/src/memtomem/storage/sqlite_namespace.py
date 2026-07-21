@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from typing import Callable, Sequence
@@ -9,6 +10,8 @@ from typing import Callable, Sequence
 from memtomem.errors import NamespaceConflictError, StorageError
 from memtomem.storage.base import NamespaceRenameResult
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders, quote_ident
+
+logger = logging.getLogger(__name__)
 
 # Savepoint name for ``rename_namespace``. A savepoint (rather than a bare
 # commit/rollback pair) is what makes the method safe inside an outer
@@ -188,7 +191,8 @@ class NamespaceOps:
         _ensure_valid_namespace(new)
         if old == new:
             raise NamespaceConflictError(
-                f"Cannot rename namespace {old!r} onto itself (source and target are equal)"
+                f"Cannot rename namespace {old!r} onto itself (source and target are equal)",
+                reason_code="same_name",
             )
 
         db = self._get_db()
@@ -206,12 +210,30 @@ class NamespaceOps:
         # The savepoint covers the borrowed case: a caller that catches this
         # method's StorageError inside its own ``transaction()`` block must
         # not end up committing our half-written rows.
-        owns_txn = not self._in_transaction()
+        # Ownership is "we opened it", not "the backend flag says no outer
+        # transaction". The connection runs in sqlite3's legacy implicit mode
+        # (``isolation_level=""``), so a pending write left on it outside
+        # ``transaction()`` would otherwise read as ours — and we would commit
+        # a stranger's DML, or roll it back on failure. That is the very bug
+        # this method exists to stop, one level up.
+        borrowed = self._in_transaction()
+        owns_txn = False
         if not db.in_transaction:
             db.execute("BEGIN IMMEDIATE")
-        db.execute(f"SAVEPOINT {_RENAME_SAVEPOINT}")
+            # Opening the transaction is not the same as owning it: inside
+            # ``SqliteBackend.transaction()`` the CM has not begun one yet
+            # (it only flips the flag), so we take the lock on its behalf and
+            # leave the commit/rollback to it.
+            owns_txn = not borrowed
+        elif not borrowed:
+            logger.warning(
+                "rename_namespace found an open transaction it did not start and that "
+                "SqliteBackend.transaction() does not own; leaving commit/rollback to "
+                "whoever opened it"
+            )
 
         try:
+            db.execute(f"SAVEPOINT {_RENAME_SAVEPOINT}")
             if not self._namespace_exists(db, old):
                 # Renaming a namespace that holds nothing is a no-op, not an
                 # error — and not a conflict either, so this check precedes
@@ -225,12 +247,15 @@ class NamespaceOps:
                 target_meta = self._has_namespace_meta(db, new)
                 merged = bool(target_chunks) or target_meta
                 if merged and not merge:
+                    # Condition only — no "pass merge=True", no tool names. The
+                    # web user reading this 409 has no merge affordance, and a
+                    # remedy they cannot act on is worse than none (#1870).
+                    # Surfaces phrase their own off ``reason_code``.
                     raise NamespaceConflictError(
                         f"Cannot rename namespace {old!r} to {new!r}: target already exists "
                         f"({target_chunks} chunk(s), metadata row: "
-                        f"{'yes' if target_meta else 'no'}). Pass merge=True to consolidate "
-                        f"into it (the target's description/color are kept), or move only the "
-                        f"chunks with ns_assign(namespace={new!r}, old_namespace={old!r})."
+                        f"{'yes' if target_meta else 'no'})",
+                        reason_code="target_exists",
                     )
 
                 now = now_iso()
@@ -284,13 +309,27 @@ class NamespaceOps:
 
     @staticmethod
     def _undo_rename(db: sqlite3.Connection, owns_txn: bool) -> None:
-        """Discard this rename's writes, whether we own the transaction or not."""
-        db.execute(f"ROLLBACK TO {_RENAME_SAVEPOINT}")
-        db.execute(f"RELEASE {_RENAME_SAVEPOINT}")
+        """Discard this rename's writes, whether we own the transaction or not.
+
+        Runs from inside an ``except`` block, so every step is best-effort:
+        a statement that already aborted the transaction (a hard SQLite
+        error, ``ON CONFLICT ROLLBACK``) leaves no savepoint to roll back to,
+        and letting "no such savepoint" propagate would replace the real
+        failure with a bookkeeping one — and skip the connection rollback
+        that still needs to happen.
+        """
+        for statement in (f"ROLLBACK TO {_RENAME_SAVEPOINT}", f"RELEASE {_RENAME_SAVEPOINT}"):
+            try:
+                db.execute(statement)
+            except sqlite3.Error as exc:
+                logger.debug("rename_namespace undo: %s failed (%s)", statement, exc)
         if owns_txn:
             # Also ends the transaction opened above, releasing the RESERVED
             # lock instead of leaving it for the next unrelated commit.
-            db.rollback()
+            try:
+                db.rollback()
+            except sqlite3.Error as exc:
+                logger.warning("rename_namespace undo: rollback failed (%s)", exc)
 
     def _drop_duplicate_chunks(self, db: sqlite3.Connection, old: str, new: str) -> int:
         """Delete source chunks the target already holds. Returns how many.
@@ -319,6 +358,11 @@ class NamespaceOps:
                 WHERE t.namespace = ?
                   AND t.source_file = c.source_file
                   AND t.content_hash = c.content_hash
+                  -- ``IS`` matches the UNIQUE index's key exactly only
+                  -- because ``start_line`` is NOT NULL. Were the column ever
+                  -- made nullable, the index would treat two NULLs as
+                  -- distinct (no collision) while ``IS`` would call them
+                  -- equal — deleting rows that never collided.
                   AND t.start_line IS c.start_line
                 LIMIT 1
             ) AS survivor

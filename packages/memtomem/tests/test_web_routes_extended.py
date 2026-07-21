@@ -1958,7 +1958,7 @@ class TestNamespaceCRUD:
 
     async def test_rename_namespace_conflict_is_409(self, app, client: AsyncClient):
         app.state.storage.rename_namespace = AsyncMock(
-            side_effect=NamespaceConflictError("target already exists")
+            side_effect=NamespaceConflictError("target already exists", reason_code="target_exists")
         )
         resp = await client.post(
             "/api/namespaces/default/rename",
@@ -1966,10 +1966,38 @@ class TestNamespaceCRUD:
         )
         assert resp.status_code == 409
 
+    async def test_conflict_detail_is_actionable_on_this_surface(self, app, client: AsyncClient):
+        """The UI has no merge affordance — don't tell the user to pass merge=True."""
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError(
+                "Cannot rename namespace 'default' to 'general': target already exists "
+                "(3 chunk(s), metadata row: yes)",
+                reason_code="target_exists",
+            )
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general"},
+        )
+        detail = resp.json()["detail"]
+        assert "merge" not in detail and "ns_assign" not in detail
+
+    async def test_conflict_detail_names_the_remedy_the_ui_has(self, app, client: AsyncClient):
+        app.state.storage.rename_namespace = AsyncMock(
+            side_effect=NamespaceConflictError("target already exists", reason_code="target_exists")
+        )
+        resp = await client.post(
+            "/api/namespaces/default/rename",
+            json={"new_name": "general"},
+        )
+        assert "Choose a different name" in resp.json()["detail"]
+
     async def test_rename_onto_itself_is_409_not_500(self, app, client: AsyncClient):
         """Deterministic client input — must not land on the generic 500 handler."""
         app.state.storage.rename_namespace = AsyncMock(
-            side_effect=NamespaceConflictError("Cannot rename namespace onto itself")
+            side_effect=NamespaceConflictError(
+                "Cannot rename namespace onto itself", reason_code="same_name"
+            )
         )
         resp = await client.post(
             "/api/namespaces/default/rename",

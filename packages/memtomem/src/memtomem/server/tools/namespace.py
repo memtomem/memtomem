@@ -7,6 +7,7 @@ from __future__ import annotations
 from pydantic import StrictBool
 
 from memtomem.constants import validate_namespace
+from memtomem.errors import NamespaceConflictError
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -141,7 +142,20 @@ async def mem_ns_rename(
     validate_namespace(new)
     merge = strict_bool(merge, "merge")
     app = await _get_app_initialized(ctx)
-    result = await app.storage.rename_namespace(old, new, merge=merge)
+    try:
+        result = await app.storage.rename_namespace(old, new, merge=merge)
+    except NamespaceConflictError as exc:
+        # Storage states the condition; this surface adds the remedy that
+        # exists *here* — an MCP caller can retry with merge=True, which a
+        # web user cannot. See the reason_code note on the exception.
+        if exc.reason_code == "target_exists":
+            raise NamespaceConflictError(
+                f"{exc}. Pass merge=True to consolidate into it (the target's "
+                f"description/color are kept), or move only the chunks with "
+                f"mem_ns_assign(namespace={new!r}, old_namespace={old!r})",
+                reason_code=exc.reason_code,
+            ) from exc
+        raise
     if not (result.chunks_moved or result.metadata_renamed or result.merged):
         # Nothing to move: a namespace is its chunks and its metadata row, and
         # this one had neither. Saying "Renamed" would be a lie.
