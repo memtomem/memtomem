@@ -37,7 +37,7 @@ from uuid import UUID, uuid4
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
-    validate_agent_id,
+    normalize_bound_agent_id,
     validate_namespace,
 )
 
@@ -222,8 +222,9 @@ class MemtomemStore:
 
         ``self._current_agent_id`` is concatenated into ``AGENT_NAMESPACE_PREFIX``
         without re-validation here: ``start_agent_session`` is the sole writer
-        of that field and runs ``validate_agent_id`` before binding, so any
-        value that reaches this point is already gate-checked.
+        of that field and runs ``normalize_bound_agent_id`` before binding, so
+        any value that reaches this point is already gate-checked — and is
+        never the reserved ``"default"``, which binds ``None`` instead (#1875).
         """
 
         if include_shared is True and self._current_agent_id is None:
@@ -248,8 +249,9 @@ class MemtomemStore:
         land in ``agent-runtime:<id>``.
 
         ``self._current_agent_id`` reaches the concat path pre-validated —
-        ``start_agent_session`` is the only writer and runs ``validate_agent_id``
-        before binding (same invariant as ``_resolve_search_namespace``).
+        ``start_agent_session`` is the only writer and runs
+        ``normalize_bound_agent_id`` before binding (same invariant as
+        ``_resolve_search_namespace``).
         """
 
         if namespace is not None:
@@ -409,6 +411,13 @@ class MemtomemStore:
         ``add`` calls inherit the agent scope without the caller passing
         ``namespace=`` on every call.
 
+        Passing the reserved ``agent_id="default"`` starts an *unbound*
+        session instead: the row namespace stays ``"default"`` and
+        ``_current_agent_id`` stays ``None``, so ``add`` / ``search``
+        behave as they do with no agent session. Mirrors the MCP
+        ``mem_session_start`` surface (#1875); prefer :meth:`start_session`
+        when that is what you meant.
+
         Returns the session id.
 
         Raises:
@@ -427,17 +436,35 @@ class MemtomemStore:
                 though ``agent_id`` itself was clean (issue #496 — closes
                 the kin gap to the ``agent_id`` work in #486 / #492).
         """
-        validate_agent_id(agent_id)
+        # Validate-then-normalize: malformed ids still raise, while the
+        # reserved "default" collapses to an unbound session (#1875), the
+        # same rule the MCP ``mem_session_start`` surface applies. Without
+        # it this method would bind ``agent-runtime:default`` and route
+        # every subsequent ``add`` into a hidden system namespace.
+        #
+        # ``required=True``: ``agent_id`` is a mandatory positional here,
+        # unlike the MCP surface where omitting it is the documented way to
+        # start an unbound session. Without it a ``None`` would read as
+        # "nothing to bind" and land in the NOT NULL ``sessions.agent_id``
+        # column as a backend IntegrityError instead of the
+        # InvalidNameError callers have always gotten.
+        bound_agent_id = normalize_bound_agent_id(agent_id, required=True)
         if namespace is not None:
             validate_namespace(namespace)
 
         comp = await self._ensure_init()
         session_id = str(uuid4())
-        ns = namespace or f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
+        if namespace:
+            ns = namespace
+        elif bound_agent_id:
+            ns = f"{AGENT_NAMESPACE_PREFIX}{bound_agent_id}"
+        else:
+            ns = "default"
+        # The row keeps the literal; only the runtime binding is None.
         await comp.storage.create_session(session_id, agent_id, ns)
         async with self._session_lock:
             self._current_session_id = session_id
-            self._current_agent_id = agent_id
+            self._current_agent_id = bound_agent_id
         return session_id
 
     async def end_session(self, summary: str | None = None) -> dict:

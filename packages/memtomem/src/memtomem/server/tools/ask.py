@@ -8,6 +8,7 @@ import logging
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
+from memtomem.server.tool_registry import register
 from memtomem.server.validation import MAX_QUERY_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 @mcp.tool()
 @tool_handler
+@register("search")
 async def mem_ask(
     question: str,
     top_k: int = 5,

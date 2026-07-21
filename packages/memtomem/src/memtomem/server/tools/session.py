@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from memtomem.constants import AGENT_NAMESPACE_PREFIX, validate_agent_id, validate_namespace
+from memtomem.constants import (
+    AGENT_NAMESPACE_PREFIX,
+    RESERVED_UNBOUND_AGENT_ID,
+    normalize_bound_agent_id,
+    validate_namespace,
+)
 from memtomem.models import NamespaceFilter
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
@@ -57,7 +62,7 @@ async def _end_active_session_inline(app: AppContext, reason: str) -> str | None
 @tool_handler
 @register("sessions")
 async def mem_session_start(
-    agent_id: str = "default",
+    agent_id: str | None = None,
     title: str | None = None,
     namespace: str | None = None,
     ctx: CtxType = None,
@@ -65,15 +70,29 @@ async def mem_session_start(
     """Start a new episodic memory session.
 
     Creates a session record and sets it as the current session. All
-    subsequent tool calls will be tracked as session events. The
+    subsequent tool calls will be tracked as session events. A **named**
     ``agent_id`` is recorded on ``AppContext.current_agent_id`` so that
     multi-agent tools (``mem_agent_search`` and friends) can resolve the
     active agent without the caller passing it on every call.
 
+    Omitting ``agent_id`` — or passing the reserved
+    ``"default"`` — starts an *unbound* session: no agent is bound, so
+    ``mem_add`` / ``mem_batch_add`` / ``mem_index`` route exactly as they
+    would with no session at all (``app.current_namespace``, else the
+    indexing engine's namespace rules / ``auto_ns`` /
+    ``default_namespace``), and visibility follows the ordinary search
+    filters from there. Before #1875 an unbound session bound the
+    literal agent ``"default"`` and silently redirected every subsequent
+    write into ``agent-runtime:default``, which is a hidden system
+    namespace — callers could not read back what they had just written.
+    ``agent-runtime:default`` itself is still reachable with an explicit
+    ``namespace=`` / ``agent_id=`` argument.
+
     State transitions:
 
     * No active session → records the new session, sets
-      ``current_session_id`` and ``current_agent_id``.
+      ``current_session_id`` and ``current_agent_id`` (the latter stays
+      ``None`` for an unbound session).
     * Active session present → the previous session is **auto-ended**
       (with a warning logged and an inline notice in the return string)
       and the new session takes its place. The previous ``agent_id`` is
@@ -87,31 +106,42 @@ async def mem_session_start(
        Run through :func:`validate_namespace` so a hostile-shaped string
        like ``"agent-runtime:foo:bar"`` cannot smuggle past the
        ``agent_id`` gate via the override; see issue #496.
-    2. ``agent-runtime:<agent_id>`` when ``agent_id`` is non-default.
-       This is the common case for multi-agent workflows.
+    2. ``agent-runtime:<agent_id>`` when an agent was actually named
+       (i.e. ``agent_id`` is neither omitted nor the reserved
+       ``"default"``). This is the common case for multi-agent workflows.
     3. ``app.current_namespace`` (pre-multi-agent fallback).
     4. ``"default"``.
 
-    Only the **session record's** namespace is derived; ``mem_add`` /
-    ``mem_search`` without explicit ``namespace=`` still consult
-    ``app.current_namespace`` as before. Namespace and agent_id remain
-    separate axes on ``AppContext``.
+    This priority chain derives the **session record's** namespace only.
+    The *write* routing is a separate consequence of the agent binding:
+    with an agent bound, ``mem_add`` / ``mem_batch_add`` / ``mem_index``
+    without an explicit ``namespace=`` resolve to
+    ``agent-runtime:<agent_id>``; unbound, they consult
+    ``app.current_namespace`` and the indexing config exactly as they do
+    with no session at all. Namespace and agent_id remain separate axes
+    on ``AppContext``.
 
     Args:
-        agent_id: Identifier for the agent starting the session
+        agent_id: Identifier for the agent starting the session. Omit
+            (or pass ``"default"``) to start an unbound session.
         title: Optional human-readable session title (e.g. "Sprint Planning")
-        namespace: Session namespace. When omitted and ``agent_id`` is
-            non-default, defaults to ``agent-runtime:<agent_id>``.
+        namespace: Session namespace. When omitted and an agent was
+            named, defaults to ``agent-runtime:<agent_id>``.
     """
-    validate_agent_id(agent_id)
+    bound_agent_id = normalize_bound_agent_id(agent_id)
+    # The row keeps the literal "default" for an unbound session: the
+    # column is NOT NULL, ``mem_session_list`` renders it unguarded, and
+    # ``mm session start --idempotent`` compares it as a key. Only the
+    # runtime binding below collapses to None (#1875).
+    stored_agent_id = agent_id or RESERVED_UNBOUND_AGENT_ID
     if namespace is not None:
         validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
     session_id = str(uuid4())
     if namespace:
         effective_ns = namespace
-    elif agent_id and agent_id != "default":
-        effective_ns = f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
+    elif bound_agent_id:
+        effective_ns = f"{AGENT_NAMESPACE_PREFIX}{bound_agent_id}"
     elif app.current_namespace:
         effective_ns = app.current_namespace
     else:
@@ -125,16 +155,25 @@ async def mem_session_start(
             )
 
         metadata = {"title": title} if title else {}
-        await app.storage.create_session(session_id, agent_id, effective_ns, metadata=metadata)
+        await app.storage.create_session(
+            session_id, stored_agent_id, effective_ns, metadata=metadata
+        )
         app.current_session_id = session_id
-        app.current_agent_id = agent_id
+        app.current_agent_id = bound_agent_id
 
     lines = [f"Session started: {session_id}"]
     if auto_end_notice:
         lines.append(auto_end_notice)
     if title:
         lines.append(f"- Title: {title}")
-    lines.append(f"- Agent: {agent_id}")
+    # Deliberately does not name a write namespace for the unbound case:
+    # ``effective_ns`` only populates the session row, while an unbound
+    # write resolves through app.current_namespace and the indexing
+    # engine's own rules (namespace policy / auto_ns / default_namespace).
+    if bound_agent_id:
+        lines.append(f"- Agent: {bound_agent_id}")
+    else:
+        lines.append("- Agent: (none — no agent bound)")
     lines.append(f"- Namespace: {effective_ns}")
     return "\n".join(lines)
 
@@ -548,9 +587,12 @@ def _format_session_summary(
     per-section tags promote cleanly to ``ChunkMetadata.tags``.
 
     ``agent_id`` is preserved as ``None`` rather than coerced to
-    ``"default"``: collapsing to a literal would mask sessions that
-    truly had no agent owner behind the legitimate ``default`` agent
-    convention.
+    ``"default"``: since #1875 the literal never reaches here — it
+    normalizes to ``None`` at bind time (see
+    :func:`memtomem.constants.normalize_bound_agent_id`) — so
+    ``agent_id: null`` in the frontmatter means the session genuinely
+    had no agent owner, and the ``agent=<id>`` tag is omitted rather
+    than emitted as a meaningless ``agent=default``.
     """
     iso_ts = ended_at.isoformat(timespec="seconds")
     tag_list = ["session-summary"]

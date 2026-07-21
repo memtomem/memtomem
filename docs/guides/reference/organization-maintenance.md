@@ -133,6 +133,17 @@ auto-derives, so scope-bound writes from session-aware tools land
 there without a manual `namespace=` argument (see "Multi-agent
 workflow" below).
 
+`default` is reserved on that surface: `mem_session_start()` with no
+`agent_id` — or with `agent_id="default"` — starts a session that binds
+**no** agent, so writes route exactly as they would with no session at
+all (`current_namespace` if set, otherwise your namespace rules /
+`auto_ns` / `default_namespace`) instead of being redirected into the
+hidden `agent-runtime:default`. Pass a real `agent_id` when you
+want the isolated `agent-runtime:<id>` scope. The reservation is exact-match
+and applies only to this inferred binding: `agent-runtime:default` is still
+addressable through an explicit `namespace=` filter or
+`mem_agent_search(agent_id="default")`.
+
 ---
 
 ## 5. Maintenance — `mem_dedup_*`, `mem_decay_*`, `mem_auto_tag`

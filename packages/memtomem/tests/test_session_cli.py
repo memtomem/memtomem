@@ -607,3 +607,40 @@ class TestSessionStartIdempotent:
         comp.storage.find_stale_active_sessions.assert_awaited_once()
         kwargs = comp.storage.find_stale_active_sessions.await_args.kwargs
         assert kwargs.get("limit") == cap
+
+
+class TestDeriveSessionNamespace:
+    """``_derive_session_namespace`` resolves the namespace stored on a
+    CLI-created session row.
+
+    Pinned as a table because #1875 replaced the inline
+    ``agent_id != "default"`` literal with the shared
+    ``normalize_bound_agent_id`` chokepoint — the refactor must be
+    behaviour-preserving here. The CLI is a fresh process per invocation
+    and binds no runtime agent, so only the row namespace is at stake.
+    """
+
+    @pytest.mark.parametrize(
+        ("agent_id", "namespace", "expected"),
+        [
+            ("default", None, "default"),
+            ("planner", None, "agent-runtime:planner"),
+            ("default", "custom", "custom"),
+            ("planner", "custom", "custom"),
+            # Exact-match sentinel: "Default" is an ordinary agent id.
+            ("Default", None, "agent-runtime:Default"),
+        ],
+    )
+    def test_derivation_table(self, agent_id, namespace, expected):
+        from memtomem.cli.session_cmd import _derive_session_namespace
+
+        assert _derive_session_namespace(agent_id, namespace) == expected
+
+    def test_malformed_agent_id_still_raises(self):
+        """The normalization runs ``validate_agent_id`` first, so a
+        hostile shape cannot slip through the derivation seam."""
+        from memtomem.cli.session_cmd import _derive_session_namespace
+        from memtomem.constants import InvalidNameError
+
+        with pytest.raises(InvalidNameError):
+            _derive_session_namespace("foo:bar", None)
