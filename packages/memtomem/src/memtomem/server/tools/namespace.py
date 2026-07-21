@@ -58,7 +58,9 @@ async def mem_ns_set(
     namespace: str,
     ctx: CtxType = None,
 ) -> str:
-    """Set the session-default namespace. Subsequent search/add/recall use this unless overridden.
+    """Set the session-default namespace.
+
+    Subsequent search / add / recall use it unless they pass namespace=.
 
     One exception: while a session is active this is the *read* default only —
     resolver-backed writes go to agent-runtime:<agent_id> unless the call
