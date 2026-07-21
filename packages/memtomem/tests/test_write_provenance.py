@@ -416,6 +416,183 @@ class TestMemAddCoreSurfaces:
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
 
+class TestProvenanceSessionAttribution:
+    """A write is attributed to the session live when it *wrote*.
+
+    Waiting on the file lock is a suspension point, so the active session
+    can change between a tool being invoked and its content reaching the
+    disk. The namespace resolution has always been done after that wait
+    for exactly this reason; the session id has to be read in the same
+    breath or the chunks and their provenance describe two different
+    sessions.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_session_id_is_read_under_the_same_lock_as_the_namespace(
+        self, bm25_only_components, monkeypatch
+    ):
+        """Two separate ``_session_lock`` acquisitions would leave a
+        window between them wide enough for a whole transition.
+
+        Asserted structurally rather than by trying to hit the window:
+        the race needs a transition to interleave between two reads that
+        are microseconds apart, which no timing-based test can make
+        reliable.
+        """
+        from memtomem.server.tools import _provenance as provenance_mod
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        observed: list[bool] = []
+        real_resolve = provenance_mod._resolve_agent_namespace
+
+        def watched(app_arg, agent_id):
+            observed.append(app_arg._session_lock.locked())
+            return real_resolve(app_arg, agent_id)
+
+        monkeypatch.setattr(provenance_mod, "_resolve_agent_namespace", watched)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        observed.clear()
+        await mem_add(content="written under a held session lock", ctx=ctx)  # type: ignore[arg-type]
+
+        assert observed, "the namespace resolution hook never ran"
+        assert all(observed), (
+            "the namespace was resolved without _session_lock held — the session "
+            "id and the namespace are being read in separate acquisitions"
+        )
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_write_parked_on_the_file_lock_is_attributed_to_the_session_it_lands_in(
+        self, bm25_only_components, monkeypatch
+    ):
+        """The whole point of resolving after the wait, applied to the
+        provenance: a write whose lock wait straddles a session swap
+        belongs to the session that was live when it wrote.
+
+        Capturing before the wait would file these chunks under the old
+        session while the namespace resolved for the new one — the same
+        chunks-and-record-disagree failure #1876 is about.
+        """
+        import asyncio
+
+        from memtomem.server.tools import session as session_mod
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        monkeypatch.setattr(session_mod, "_WRITE_DRAIN_TIMEOUT_S", 0.05)
+
+        await mem_session_start(agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
+        first_id = app.current_session_id
+
+        # Park a writer on the target file's lock, then swap the session
+        # underneath it before letting it proceed.
+        from memtomem.server.tools.memory_crud import _validate_path
+
+        target, err = _validate_path("notes.md", app.config.indexing.memory_dirs)
+        assert err is None and target is not None
+
+        released = asyncio.Event()
+
+        async def hold_the_file_lock():
+            async with app.get_memory_file_lock(target):
+                await released.wait()
+
+        holder = asyncio.create_task(hold_the_file_lock())
+        await asyncio.sleep(0.05)
+
+        writer = asyncio.create_task(
+            mem_add(content="written across a session swap", file="notes.md", ctx=ctx)  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0.05)
+
+        await mem_session_start(agent_id="beta", ctx=ctx)  # type: ignore[arg-type]
+        second_id = app.current_session_id
+        assert second_id != first_id
+
+        released.set()
+        await holder
+        await writer
+
+        assert await _provenance_events(app, first_id) == []
+        landed = await _provenance_events(app, second_id)
+        assert [e["event_type"] for e in landed] == ["add"]
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+
+class TestProvenanceDrain:
+    """Session teardown waits for the provenance *event*, not merely for
+    the indexing that preceded it."""
+
+    @pytest.mark.asyncio
+    async def test_end_waits_for_the_provenance_event_not_just_the_indexing(
+        self, bm25_only_components
+    ):
+        """A gauge that closed after ``index_file`` but before the event
+        write would let teardown observe idle, snapshot an empty event
+        list, and end the session reporting no writes — even though a
+        chunk had already landed on disk. A consumer would inherit that
+        as "this session wrote nothing".
+        """
+        import asyncio
+
+        from memtomem.server.tools.memory_crud import mem_add
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+
+        in_event = asyncio.Event()
+        release = asyncio.Event()
+        snapshot_taken = asyncio.Event()
+        real_add_event = app.storage.add_session_event
+        real_get_events = app.storage.get_session_events
+
+        async def gated_add_event(*args, **kwargs):
+            in_event.set()
+            await release.wait()
+            return await real_add_event(*args, **kwargs)
+
+        async def watched_get_events(sid):
+            snapshot_taken.set()
+            return await real_get_events(sid)
+
+        app.storage.add_session_event = gated_add_event  # type: ignore[method-assign]
+        app.storage.get_session_events = watched_get_events  # type: ignore[method-assign]
+
+        writer = asyncio.create_task(mem_add(content="a fact still being logged", ctx=ctx))  # type: ignore[arg-type]
+        await in_event.wait()
+
+        ender = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await asyncio.sleep(0.05)
+
+        assert not snapshot_taken.is_set(), (
+            "teardown snapshotted the event list while a provenance event was still being written"
+        )
+
+        release.set()
+        await writer
+        out = await ender
+
+        assert "add:1" in out
+        assert "writes still in flight" not in out
+        assert len(await _provenance_events(app, session_id)) == 1
+
+
 class TestProvenanceCompletenessSealing:
     """A marked session must never claim completeness it does not have.
 

@@ -53,6 +53,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from memtomem.server.tools.multi_agent import _resolve_agent_namespace
+
 if TYPE_CHECKING:
     from memtomem.models import IndexingStats
     from memtomem.server.context import AppContext
@@ -104,8 +106,6 @@ async def capture_session_and_namespace(
     session live when it actually happened, not the one live when the
     tool was invoked.
     """
-    from memtomem.server.tools.multi_agent import _resolve_agent_namespace
-
     async with app._session_lock:
         session_id = app.current_session_id
         resolved = _resolve_agent_namespace(app, None)
