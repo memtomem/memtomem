@@ -54,7 +54,7 @@ async def test_alias_delegates_from_equals_to(tmp_path: Path) -> None:
         source=str(src), from_scope="user", to_scope="user"
     )
     aliased = await mem_context_migrate(source=str(src), from_scope="user", to_scope="user")
-    assert aliased == canonical == "error: --from and --to must differ."
+    assert aliased == canonical == "error: from_scope and to_scope must differ."
 
 
 @pytest.mark.anyio
@@ -78,4 +78,4 @@ async def test_mem_do_old_action_name_still_routes(tmp_path: Path) -> None:
         action="context_migrate",
         params={"source": str(src), "from_scope": "user", "to_scope": "user"},
     )
-    assert out == "error: --from and --to must differ."
+    assert out == "error: from_scope and to_scope must differ."

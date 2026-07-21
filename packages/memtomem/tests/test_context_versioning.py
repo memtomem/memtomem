@@ -8,6 +8,9 @@ validation, locking/no-overwrite) and its integration with the label-aware
 from __future__ import annotations
 
 import json
+import shutil
+import stat
+import sys
 import threading
 
 import pytest
@@ -16,6 +19,8 @@ from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import versioning as v
 from memtomem.context.agents import CANONICAL_AGENT_ROOT, generate_all_agents
 from memtomem.context.commands import CANONICAL_COMMAND_ROOT, generate_all_commands
+
+_MANIFEST_NAME = "versions.json"
 
 # A dir-layout canonical agent whose rendered body carries a distinctive marker
 # so we can tell which version's bytes reached the runtime.
@@ -302,11 +307,17 @@ class TestSchemaCompat:
     """
 
     def _seed_with_unknown_fields(self, artifact_dir, working):
-        """A real v1 plus fields this build does not own, written to disk."""
+        """A real v1 plus fields this build does not own, written to disk.
+
+        The unknown per-entry key must be one this build genuinely does not own
+        — ``layout`` was the stand-in while it was hypothetical (PR-G1), but
+        PR-G3 made it a real field, so using it here would test round-tripping
+        of a KNOWN key and quietly stop covering the unknown-key path.
+        """
         v.create_version(artifact_dir, working)
         raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
         raw["future_top_level"] = {"campaign": 2}
-        raw["versions"]["v1"]["layout"] = "tree"
+        raw["versions"]["v1"]["future_entry_field"] = {"cas": "sha256:…"}
         (artifact_dir / "versions.json").write_text(json.dumps(raw), encoding="utf-8")
         return raw
 
@@ -321,7 +332,7 @@ class TestSchemaCompat:
         assert raw["labels"] == {"production": "v1"}
         # …and the unknown fields survived it.
         assert raw["future_top_level"] == {"campaign": 2}
-        assert raw["versions"]["v1"]["layout"] == "tree"
+        assert raw["versions"]["v1"]["future_entry_field"] == {"cas": "sha256:…"}
 
     def test_delete_label_preserves_unknown_fields(self, tmp_path):
         artifact_dir, working = _make_dir_agent(tmp_path)
@@ -333,7 +344,7 @@ class TestSchemaCompat:
         raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
         assert raw["labels"] == {}  # the mutation really happened
         assert raw["future_top_level"] == {"campaign": 2}
-        assert raw["versions"]["v1"]["layout"] == "tree"
+        assert raw["versions"]["v1"]["future_entry_field"] == {"cas": "sha256:…"}
 
     def test_create_version_preserves_unknown_fields(self, tmp_path):
         artifact_dir, working = _make_dir_agent(tmp_path)
@@ -345,7 +356,7 @@ class TestSchemaCompat:
         raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
         assert "v2" in raw["versions"]  # the mutation really happened
         assert raw["future_top_level"] == {"campaign": 2}
-        assert raw["versions"]["v1"]["layout"] == "tree"
+        assert raw["versions"]["v1"]["future_entry_field"] == {"cas": "sha256:…"}
 
     def test_unknown_fields_reach_the_dataclasses(self, tmp_path):
         artifact_dir, working = _make_dir_agent(tmp_path)
@@ -354,24 +365,32 @@ class TestSchemaCompat:
         manifest = v.load_manifest(artifact_dir)
 
         assert manifest.extra == {"future_top_level": {"campaign": 2}}
-        assert manifest.versions["v1"].extra == {"layout": "tree"}
+        assert manifest.versions["v1"].extra == {"future_entry_field": {"cas": "sha256:…"}}
+        # ``layout`` is an OWNED key now — it must not leak into extra.
+        assert "layout" not in manifest.versions["v1"].extra
         # Known keys are NOT duplicated into extra.
         assert "versions" not in manifest.extra
         assert "created_at" not in manifest.versions["v1"].extra
 
     def test_legacy_manifest_gains_schema_version(self, tmp_path):
-        """A schema-less manifest round-trips unchanged except the added field."""
+        """A schema-less manifest round-trips unchanged except the added field.
+
+        The added value is **1**, not this build's ``SCHEMA_VERSION`` — a
+        file-entries-only manifest declares the minimum a reader needs, so an
+        older build keeps reading it (see ``_required_schema_version``).
+        """
+        assert v.SCHEMA_VERSION == 2, "this test's point is that 1 != SCHEMA_VERSION"
         artifact_dir, working = _make_dir_agent(tmp_path)
         v.create_version(artifact_dir, working)
         raw_before = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
         raw_before.pop("schema_version", None)
         (artifact_dir / "versions.json").write_text(json.dumps(raw_before), encoding="utf-8")
 
-        assert v.load_manifest(artifact_dir).schema_version == v.SCHEMA_VERSION
+        assert v.load_manifest(artifact_dir).schema_version == 1
         v.promote_label(artifact_dir, "production", "v1")
 
         raw_after = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
-        assert raw_after["schema_version"] == v.SCHEMA_VERSION
+        assert raw_after["schema_version"] == 1
         assert raw_after["versions"] == raw_before["versions"]
 
     def test_refuses_newer_schema_version(self, tmp_path):
@@ -432,7 +451,9 @@ class TestSchemaCompat:
         raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
         assert list(raw["versions"]) == ["v1"]
         assert raw["labels"] == {}
-        assert raw["schema_version"] == v.SCHEMA_VERSION
+        # 1, not SCHEMA_VERSION: the manifest holds only file-layout entries,
+        # and a tampered ``extra`` must not be able to advertise otherwise.
+        assert raw["schema_version"] == 1
         assert raw["versions"]["v1"]["created_at"] != "hacked"
         assert raw["versions"]["v1"]["note"] != "hacked"
 
@@ -619,3 +640,655 @@ class TestLabelAwareSyncCommands:
         nolabel_out = (tmp_path / ".claude/commands/my-cmd.md").read_text(encoding="utf-8")
         assert latest_out == nolabel_out
         assert "MARKER: WORKING" in latest_out
+
+
+# ── Tree snapshots (ADR-0030 §10, PR-G3) ─────────────────────────────
+
+
+def _make_skill(project_root, name="demo", *, extra=None):
+    """A canonical skill dir with a SKILL.md plus optional extra files."""
+    skill_dir = project_root / ".memtomem" / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\n---\n\nBody\n", encoding="utf-8")
+    for rel, text in (extra or {}).items():
+        path = skill_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return skill_dir
+
+
+def _read_tree(root):
+    """``{posix_relpath: bytes}`` of every file under *root*."""
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+class TestSchemaMinimality:
+    """Writers emit the MINIMUM schema the manifest's content needs, never this
+    build's maximum — so a flat agents/commands store stays readable by a build
+    that predates tree layout (``_required_schema_version``)."""
+
+    def test_flat_only_manifest_writes_schema_1(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        v.create_version(artifact_dir, working)
+        v.promote_label(artifact_dir, "production", "v2")
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert raw["schema_version"] == 1
+        assert v.SCHEMA_VERSION == 2  # …and the constant really did advance
+
+    def test_flat_entry_carries_no_layout_key(self, tmp_path):
+        """File entries stay byte-shape identical to what every pre-G3 build
+        wrote — an added default key would churn every manifest on first touch."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working, note="n")
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert raw["versions"]["v1"] == {
+            "created_at": raw["versions"]["v1"]["created_at"],
+            "note": "n",
+        }
+
+    def test_tree_entry_bumps_manifest_to_schema_2(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+
+        raw = json.loads((skill_dir / "versions.json").read_text(encoding="utf-8"))
+        assert raw["schema_version"] == 2
+        assert raw["versions"]["v1"]["layout"] == "tree"
+
+    def test_mixed_manifest_stays_schema_2_after_flat_create(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_tree_version(artifact_dir, [("SKILL.md", b"x")])
+        v.create_version(artifact_dir, working)
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert raw["schema_version"] == 2
+        assert raw["versions"]["v1"]["layout"] == "tree"
+        assert "layout" not in raw["versions"]["v2"]
+
+    def test_hand_written_schema_2_without_tree_entries_downgrades(self, tmp_path):
+        """Deliberate, not a bug: the manifest holds nothing an older reader
+        cannot read, so declaring 2 would lock it out for no reason."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["schema_version"] = 2
+        (artifact_dir / "versions.json").write_text(json.dumps(raw), encoding="utf-8")
+
+        v.promote_label(artifact_dir, "production", "v1")
+
+        after = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert after["schema_version"] == 1
+
+    @pytest.mark.parametrize("bad", ["sparse", "", 1, None, ["tree"]])
+    def test_unknown_layout_value_refused(self, tmp_path, bad):
+        """A newer storage shape MUST also bump schema_version (which the gate
+        refuses first), so an unknown layout here is corruption — fail closed
+        rather than treat a tree-ish entry as a readable file."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["versions"]["v1"]["layout"] = bad
+        (artifact_dir / "versions.json").write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(v.VersionError, match="layout"):
+            v.load_manifest(artifact_dir)
+
+
+class TestCreateTreeVersion:
+    def test_writes_payload_into_versions_dir(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        payload = [
+            ("SKILL.md", b"# demo\n"),
+            ("scripts/run.sh", b"echo hi\n"),
+            ("references/deep/notes.md", b"notes\n"),
+        ]
+        rec = v.create_tree_version(skill_dir, payload, note="from pull")
+
+        assert rec.tag == "v1"
+        assert rec.layout == "tree"
+        assert rec.note == "from pull"
+        snapshot = skill_dir / "versions" / "v1"
+        assert snapshot.is_dir()
+        assert _read_tree(snapshot) == dict(payload)
+
+    def test_snapshot_digest_matches_payload_digest(self, tmp_path):
+        """The stored tree must re-digest to the value the caller computed —
+        otherwise a later CAS / drift check would see a phantom change."""
+        from memtomem.context.skill_payload import payload_digest
+
+        skill_dir = _make_skill(tmp_path)
+        payload = [("SKILL.md", b"# demo\n"), ("scripts/run.sh", b"echo\n")]
+        v.create_tree_version(skill_dir, payload)
+
+        snapshot = skill_dir / "versions" / "v1"
+        assert payload_digest(list(_read_tree(snapshot).items())) == payload_digest(payload)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    def test_files_land_at_0o644(self, tmp_path):
+        """The copier's content mode — and why the §10 digest excludes the exec
+        bit (preserving a bit the copier drops makes digests unreproducible)."""
+        skill_dir = _make_skill(tmp_path)
+        v.create_tree_version(skill_dir, [("scripts/run.sh", b"echo\n")])
+        mode = (skill_dir / "versions" / "v1" / "scripts" / "run.sh").stat().st_mode
+        assert stat.S_IMODE(mode) == 0o644
+
+    def test_snapshot_is_a_new_inode_not_a_hardlink(self, tmp_path):
+        """Never hardlink live payload: an editor (or a pre-swap crash) could
+        then mutate history through the shared inode."""
+        skill_dir = _make_skill(tmp_path)
+        live = skill_dir / "SKILL.md"
+        v.create_tree_version(skill_dir, [("SKILL.md", live.read_bytes())])
+        snapshot_file = skill_dir / "versions" / "v1" / "SKILL.md"
+
+        assert snapshot_file.stat().st_ino != live.stat().st_ino
+        live.write_bytes(b"EDITED\n")
+        assert snapshot_file.read_bytes() != b"EDITED\n"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [("versions/v1/SKILL.md", b"x")],
+            [("versions", b"x")],
+            [("versions.json", b"{}")],
+            [("SKILL.md", b"ok"), ("versions/v1/SKILL.md", b"x")],
+        ],
+    )
+    def test_refuses_version_store_internal_payload(self, tmp_path, payload):
+        """A snapshot can never contain the version store — else v2 contains v1,
+        every snapshot doubles the store, and fan-out ships history."""
+        skill_dir = _make_skill(tmp_path)
+        with pytest.raises(v.VersionError, match="version-store internal"):
+            v.create_tree_version(skill_dir, payload)
+        assert not (skill_dir / "versions").exists()
+
+    def test_refuses_empty_payload(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        with pytest.raises(v.VersionError, match="empty payload"):
+            v.create_tree_version(skill_dir, [])
+        assert not (skill_dir / "versions").exists()
+
+    @pytest.mark.parametrize(
+        "rel", ["../escape.md", "/abs.md", "a//b.md", "", ".", "a/../../b.md", "a\\b.md"]
+    )
+    def test_refuses_traversal_relpaths(self, tmp_path, rel):
+        skill_dir = _make_skill(tmp_path)
+        with pytest.raises(ValueError):
+            v.create_tree_version(skill_dir, [(rel, b"x")])
+        # Nothing written and no staging leftover.
+        vdir = skill_dir / "versions"
+        assert not vdir.exists() or list(vdir.iterdir()) == []
+
+    def test_refuses_duplicate_relpath(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        with pytest.raises(ValueError, match="duplicate"):
+            v.create_tree_version(skill_dir, [("a.md", b"1"), ("a.md", b"2")])
+
+    def test_v2_does_not_contain_v1(self, tmp_path):
+        """The recursion hazard §10 exists to close, end to end: snapshot a real
+        skill twice through the payload iterator that defines skill content."""
+        from memtomem.context.skill_payload import iter_skill_payload_files
+
+        skill_dir = _make_skill(
+            tmp_path,
+            extra={
+                "scripts/run.sh": "echo\n",
+                # Store-owned top level — excluded from payload…
+                "overrides/claude.md": "override\n",
+                # …but a NESTED same-name file is ordinary user content.
+                "scripts/versions.json": "{}\n",
+            },
+        )
+        v.create_tree_version(skill_dir, iter_skill_payload_files(skill_dir))
+        v.create_tree_version(skill_dir, iter_skill_payload_files(skill_dir))
+
+        v2 = _read_tree(skill_dir / "versions" / "v2")
+        assert not any(rel.startswith("versions/") for rel in v2)
+        assert "versions.json" not in v2
+        assert not any(rel.startswith("overrides/") for rel in v2)
+        assert "scripts/versions.json" in v2  # nested content survives
+        assert set(v2) == {"SKILL.md", "scripts/run.sh", "scripts/versions.json"}
+
+    def test_flat_layout_raises(self, tmp_path):
+        missing = tmp_path / ".memtomem" / "skills" / "ghost"
+        with pytest.raises(v.VersionsDirMissingError):
+            v.create_tree_version(missing, [("SKILL.md", b"x")])
+
+    def test_orphan_tree_dir_preserved_and_bumps_tag(self, tmp_path):
+        """A crash between the snapshot write and the manifest save leaves an
+        orphan vN/ — real snapshot bytes whose row we failed to record. It is
+        PRESERVED and skipped, never reaped (ADR-0030 §10)."""
+        skill_dir = _make_skill(tmp_path)
+        orphan = skill_dir / "versions" / "v1"
+        orphan.mkdir(parents=True)
+        (orphan / "SKILL.md").write_bytes(b"orphan bytes\n")
+
+        rec = v.create_tree_version(skill_dir, [("SKILL.md", b"new\n")])
+
+        assert rec.tag == "v2"
+        assert (orphan / "SKILL.md").read_bytes() == b"orphan bytes\n"
+        assert set(v.load_manifest(skill_dir).versions) == {"v2"}
+
+    def test_tree_dir_blocks_flat_tag_reuse(self, tmp_path):
+        """Cross-layout reconciliation: one tag must never name two snapshots."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)  # v1.md
+        (artifact_dir / "versions" / "v2").mkdir()  # orphan tree dir
+
+        assert v.create_version(artifact_dir, working).tag == "v3"
+
+    def test_write_once_refuses_taken_tag(self, tmp_path, monkeypatch):
+        skill_dir = _make_skill(tmp_path)
+        v.create_tree_version(skill_dir, [("SKILL.md", b"first\n")])
+        monkeypatch.setattr(v, "_next_version_tag_reconciled", lambda *_: "v1")
+
+        with pytest.raises(v.InvalidTagError, match="already exists"):
+            v.create_tree_version(skill_dir, [("SKILL.md", b"second\n")])
+
+        # The existing snapshot is untouched and the manifest did not grow.
+        assert (skill_dir / "versions" / "v1" / "SKILL.md").read_bytes() == b"first\n"
+        assert set(v.load_manifest(skill_dir).versions) == {"v1"}
+
+    def test_promote_race_on_destination_fails_closed(self, tmp_path, monkeypatch):
+        """If the destination appears between allocation and the rename, the
+        exclusive rename must refuse rather than clobber (#1839 contract)."""
+        skill_dir = _make_skill(tmp_path)
+        real = v.write_tree_payload
+
+        def _racing(dst_dir, payload, **kw):
+            real(dst_dir, payload, **kw)
+            (skill_dir / "versions" / "v1").mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(v, "write_tree_payload", _racing)
+        with pytest.raises(OSError):
+            v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+
+        assert v.load_manifest(skill_dir).versions == {}
+        assert not list((skill_dir / "versions").glob(".staging-*"))
+
+    def test_manifest_save_failure_leaves_orphan_not_a_dangling_row(self, tmp_path, monkeypatch):
+        """Snapshot lands BEFORE the row, so a crash leaves an orphan (harmless,
+        skipped) rather than a manifest row naming nothing."""
+        skill_dir = _make_skill(tmp_path)
+
+        def _boom(*_args, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(v, "_save_manifest", _boom)
+        with pytest.raises(OSError):
+            v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+
+        assert (skill_dir / "versions" / "v1" / "SKILL.md").read_bytes() == b"x"
+        assert v.load_manifest(skill_dir).versions == {}
+        monkeypatch.undo()
+        assert v.create_tree_version(skill_dir, [("SKILL.md", b"y")]).tag == "v2"
+
+    def test_conforming_staging_leftover_is_reaped(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        stale = skill_dir / "versions" / ".staging-v1-4242-a1b2c3.tmp"
+        stale.mkdir(parents=True)
+        (stale / "SKILL.md").write_bytes(b"junk")
+
+        v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+        assert not stale.exists()
+
+    def test_non_conforming_staging_name_is_not_deleted(self, tmp_path):
+        """The reaper defers to ``is_internal_artifact_dir``; a name that merely
+        looks staging-ish is user data and must survive (#1229 lesson)."""
+        skill_dir = _make_skill(tmp_path)
+        keep = skill_dir / "versions" / ".staging-v1-notes.tmp"
+        keep.mkdir(parents=True)
+        (keep / "keep.md").write_bytes(b"mine")
+
+        v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+        assert (keep / "keep.md").read_bytes() == b"mine"
+
+    @pytest.mark.parametrize("mode", ["returns_false", "raises"])
+    def test_survives_unavailable_directory_fsync(self, tmp_path, monkeypatch, mode):
+        """Windows and some network/tmpfs mounts reject directory fsync; there
+        durability degrades to process-crash consistency and the create must
+        still succeed."""
+        skill_dir = _make_skill(tmp_path)
+        seen = []
+
+        def _fake(path):
+            seen.append(path)
+            if mode == "raises":
+                raise OSError("not supported")
+            return False
+
+        monkeypatch.setattr(v, "fsync_dir", _fake)
+        if mode == "raises":
+            with pytest.raises(OSError):
+                v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+            return
+        rec = v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+        assert rec.tag == "v1"
+        assert skill_dir / "versions" in seen and skill_dir in seen
+
+
+class TestTreeResolution:
+    """Single-file APIs refuse a tree entry and vice versa — neither can
+    silently serve the other's shape."""
+
+    def _seeded(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+        return skill_dir
+
+    def test_resolve_version_refuses_tree(self, tmp_path):
+        skill_dir = self._seeded(tmp_path)
+        with pytest.raises(v.TreeVersionError, match="v1"):
+            v.resolve_version(skill_dir, "v1")
+
+    def test_resolve_label_propagates_refusal(self, tmp_path):
+        skill_dir = self._seeded(tmp_path)
+        # The label can't even be created (see below), so point one by hand to
+        # prove the READ path refuses too, not just the write path.
+        raw = json.loads((skill_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["labels"] = {"production": "v1"}
+        (skill_dir / "versions.json").write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(v.TreeVersionError):
+            v.resolve_label(skill_dir, "production")
+
+    def test_promote_label_refuses_tree_target(self, tmp_path):
+        skill_dir = self._seeded(tmp_path)
+        with pytest.raises(v.TreeVersionError, match="deferred"):
+            v.promote_label(skill_dir, "production", "v1")
+        assert v.load_manifest(skill_dir).labels == {}
+
+    def test_label_resolver_refusal_is_isolated_as_a_skip(self, tmp_path):
+        """A tree version reached through labeled fan-out must degrade to a
+        per-artifact skip, not abort the whole sync."""
+        artifact_dir, _ = _make_dir_agent(tmp_path)
+        v.create_tree_version(artifact_dir, [("SKILL.md", b"x")])
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["labels"] = {"production": "v1"}
+        (artifact_dir / "versions.json").write_text(json.dumps(raw), encoding="utf-8")
+
+        result = generate_all_agents(tmp_path, runtimes=["claude_agents"], label="production")
+        assert result.skipped and not result.generated
+        assert skip_codes.PARSE_ERROR in {code for _, _, code in result.skipped}
+
+    def test_resolve_version_tree_round_trip(self, tmp_path):
+        skill_dir = self._seeded(tmp_path)
+        assert v.resolve_version_tree(skill_dir, "v1") == skill_dir / "versions" / "v1"
+
+    def test_resolve_version_tree_refuses_file_entry(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        with pytest.raises(v.TreeVersionError, match="file snapshot"):
+            v.resolve_version_tree(artifact_dir, "v1")
+
+    def test_resolve_version_tree_missing_dir(self, tmp_path):
+        skill_dir = self._seeded(tmp_path)
+        shutil.rmtree(skill_dir / "versions" / "v1")
+        with pytest.raises(v.VersionNotFoundError, match="missing"):
+            v.resolve_version_tree(skill_dir, "v1")
+
+
+class TestTreeConcurrency:
+    def test_concurrent_tree_creates_allocate_distinct_tags(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        barrier = threading.Barrier(2)
+        tags: list[str] = []
+        errors: list[Exception] = []
+
+        def worker(marker):
+            try:
+                barrier.wait()
+                tags.append(v.create_tree_version(skill_dir, [("SKILL.md", marker)]).tag)
+            except Exception as exc:  # noqa: BLE001 — surface for assertion
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(m,)) for m in (b"a\n", b"b\n")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        assert sorted(tags) == ["v1", "v2"]
+        assert (skill_dir / "versions" / "v1" / "SKILL.md").is_file()
+        assert (skill_dir / "versions" / "v2" / "SKILL.md").is_file()
+        assert set(v.load_manifest(skill_dir).versions) == {"v1", "v2"}
+        assert not list((skill_dir / "versions").glob(".staging-*"))
+
+    def test_flat_and_tree_creates_do_not_collide(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        barrier = threading.Barrier(2)
+        tags: list[str] = []
+        errors: list[Exception] = []
+
+        def flat():
+            try:
+                barrier.wait()
+                tags.append(v.create_version(artifact_dir, working).tag)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def tree():
+            try:
+                barrier.wait()
+                tags.append(v.create_tree_version(artifact_dir, [("SKILL.md", b"x")]).tag)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=fn) for fn in (flat, tree)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        assert sorted(tags) == ["v1", "v2"]
+        entries = sorted(p.name for p in (artifact_dir / "versions").iterdir())
+        assert entries in (["v1", "v2.md"], ["v1.md", "v2"])
+
+    def test_lock_timeout_expires_when_sidecar_held(self, tmp_path):
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        skill_dir = _make_skill(tmp_path)
+        lock = _lock_path_for(v.versions_json_path(skill_dir))
+        with _file_lock(lock):
+            with pytest.raises(TimeoutError):
+                v.create_tree_version(skill_dir, [("SKILL.md", b"x")], lock_timeout=0.1)
+        assert not (skill_dir / "versions").exists() or not list((skill_dir / "versions").iterdir())
+
+
+class TestCodexReviewRegressions:
+    """Findings from the PR-G3 review gate — each reproduced before it was fixed."""
+
+    def test_case_variant_on_a_case_sensitive_fs_is_allowed(self, tmp_path):
+        """The guard tests ALIASING, not spelling. On ext4 a user's ``Versions/``
+        is a distinct directory and must stay legal content — banning it by name
+        would break Linux to fix a macOS/Windows bug.
+
+        Skipped where the filesystem really is case-insensitive, since there the
+        premise cannot hold.
+        """
+        skill_dir = _make_skill(tmp_path)
+        probe = skill_dir / "CaseProbe"
+        probe.mkdir()
+        if (skill_dir / "caseprobe").exists():
+            pytest.skip("filesystem is case-insensitive")
+        probe.rmdir()
+
+        (skill_dir / "Versions").mkdir()
+        (skill_dir / "Versions" / "note.md").write_text("user content\n", encoding="utf-8")
+
+        assert v.create_tree_version(skill_dir, [("SKILL.md", b"x")]).tag == "v1"
+
+    def test_case_colliding_versions_dir_is_refused(self, tmp_path):
+        """On a case-INSENSITIVE filesystem a pre-existing ``Versions/`` IS the
+        store, but the payload iterator's exclusion set is case-sensitive and
+        reads it as skill content. The two disagree, the snapshot lands inside
+        a directory the next payload read includes, and v2 ends up containing
+        v1 — the exact recursion hazard §10 exists to prevent. Refuse loudly.
+        """
+        skill_dir = _make_skill(tmp_path)
+        (skill_dir / "Versions").mkdir()
+        if not (skill_dir / "versions").exists():
+            pytest.skip("filesystem is case-sensitive — no aliasing to detect")
+        (skill_dir / "Versions" / "note.md").write_text("user content\n", encoding="utf-8")
+
+        with pytest.raises(v.VersionError, match="case-insensitive"):
+            v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+
+    def test_case_colliding_manifest_is_refused(self, tmp_path):
+        skill_dir = _make_skill(tmp_path)
+        (skill_dir / "Versions.JSON").write_text("{}", encoding="utf-8")
+        if not (skill_dir / "versions.json").exists():
+            pytest.skip("filesystem is case-sensitive — no aliasing to detect")
+
+        with pytest.raises(v.VersionError, match="case-insensitive"):
+            v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+
+    def test_exact_case_reserved_names_are_not_refused(self, tmp_path):
+        """The guard targets ALIASES, not the store's own files — a second
+        create must not trip over the ``versions/`` the first one made."""
+        skill_dir = _make_skill(tmp_path)
+        assert v.create_tree_version(skill_dir, [("SKILL.md", b"a")]).tag == "v1"
+        assert v.create_tree_version(skill_dir, [("SKILL.md", b"b")]).tag == "v2"
+
+    def test_declared_schema_below_entry_requirement_is_refused(self, tmp_path):
+        """``schema_version: 1`` carrying a tree entry is self-contradictory —
+        no build that wrote it could have meant it, and accepting it would let
+        a hand-edited file smuggle tree state past the version gate."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["versions"]["v1"]["layout"] = "tree"  # schema_version stays 1
+        (artifact_dir / "versions.json").write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(v.VersionError, match="require"):
+            v.load_manifest(artifact_dir)
+
+    def test_versions_dir_entry_is_durable_before_promotion(self, tmp_path, monkeypatch):
+        """The artifact dir must be fsynced when ``versions/`` is first created,
+        BEFORE anything is promoted into it — otherwise a power cut could leave
+        a saved manifest row naming a directory whose entry never landed."""
+        skill_dir = _make_skill(tmp_path)
+        order: list[str] = []
+        real_rename = v.rename_no_replace
+        monkeypatch.setattr(v, "fsync_dir", lambda p: order.append(f"fsync:{p.name}") or True)
+        monkeypatch.setattr(
+            v,
+            "rename_no_replace",
+            lambda s, d: order.append("promote") or real_rename(s, d),
+        )
+
+        v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+
+        assert order.index(f"fsync:{skill_dir.name}") < order.index("promote")
+
+    def test_barrier_fires_even_when_a_flat_create_made_versions_dir(self, tmp_path, monkeypatch):
+        """ "It already existed" is NOT proof the entry was ever fsynced.
+
+        ``create_version`` creates ``versions/`` as a side effect of
+        ``atomic_write_bytes``' parent mkdir and never syncs the parent, so a
+        flat-then-tree sequence would skip the barrier on exactly the shape
+        that needs it. The barrier is therefore unconditional.
+        """
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)  # makes versions/ with no parent fsync
+        assert (artifact_dir / "versions").is_dir()
+
+        order: list[str] = []
+        real_rename = v.rename_no_replace
+        monkeypatch.setattr(v, "fsync_dir", lambda p: order.append(f"fsync:{p.name}") or True)
+        monkeypatch.setattr(
+            v,
+            "rename_no_replace",
+            lambda s, d: order.append("promote") or real_rename(s, d),
+        )
+        v.create_tree_version(artifact_dir, [("SKILL.md", b"x")])
+
+        assert order.index(f"fsync:{artifact_dir.name}") < order.index("promote")
+
+    def test_alias_created_after_the_first_check_is_still_refused(self, tmp_path, monkeypatch):
+        """The sidecar lock serializes memtomem's own writers, but nothing stops
+        an out-of-band ``mkdir Versions/`` landing between the check and the
+        ``mkdir(exist_ok=True)`` that would then silently adopt it."""
+        skill_dir = _make_skill(tmp_path)
+        probe = skill_dir / "CaseProbe"
+        probe.mkdir()
+        insensitive = (skill_dir / "caseprobe").exists()
+        probe.rmdir()
+        if not insensitive:
+            pytest.skip("filesystem is case-sensitive — no aliasing to detect")
+
+        calls: list[int] = []
+        real = v._refuse_case_colliding_store
+
+        def _racing(artifact_dir):
+            real(artifact_dir)
+            calls.append(1)
+            if len(calls) == 1:  # slip the alias in right after the FIRST check
+                (skill_dir / "Versions").mkdir(exist_ok=True)
+
+        monkeypatch.setattr(v, "_refuse_case_colliding_store", _racing)
+        with pytest.raises(v.VersionError, match="case-insensitive"):
+            v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+
+    def test_manifest_alias_appearing_mid_transaction_never_lands_as_payload(
+        self, tmp_path, monkeypatch
+    ):
+        """Both collision checks run before the manifest exists, so a
+        ``Versions.JSON`` created later can still claim the directory entry.
+
+        The INVARIANT is platform-independent — the manifest must never end up
+        spelled as something the case-sensitive payload iterator would fan out —
+        but the two case-insensitive filesystems reach it differently, so this
+        asserts the OUTCOME rather than a specific exception:
+
+        - APFS keeps the EXISTING entry's spelling through ``os.replace``, so
+          our bytes land under ``Versions.JSON`` and the guard repairs the
+          spelling with a same-file rename.
+        - NTFS adopts the SOURCE spelling, so the entry is already canonical
+          and there is nothing to repair.
+
+        An earlier version asserted ``pytest.raises`` unconditionally — that
+        pinned the macOS path as universal and failed on Windows CI while the
+        invariant itself held perfectly.
+        """
+        from memtomem.context.skill_payload import is_payload_top_name
+
+        skill_dir = _make_skill(tmp_path)
+        probe = skill_dir / "CaseProbe"
+        probe.mkdir()
+        insensitive = (skill_dir / "caseprobe").exists()
+        probe.rmdir()
+        if not insensitive:
+            pytest.skip("filesystem is case-sensitive — no aliasing to detect")
+
+        real_save = v._save_manifest
+
+        def _racing(artifact_dir, manifest):
+            # Slip the alias in just before our own manifest write lands.
+            (skill_dir / "Versions.JSON").write_text("{}", encoding="utf-8")
+            real_save(artifact_dir, manifest)
+
+        monkeypatch.setattr(v, "_save_manifest", _racing)
+        v.create_tree_version(skill_dir, [("SKILL.md", b"x")])
+        monkeypatch.undo()
+
+        # THE invariant: no manifest-shaped entry is left sitting in the
+        # payload surface, where fan-out would ship version metadata.
+        leaked = [
+            e.name
+            for e in skill_dir.iterdir()
+            if e.name.lower() == _MANIFEST_NAME and is_payload_top_name(e.name)
+        ]
+        assert not leaked, f"version metadata would fan out as payload: {leaked}"
+
+        # …and the store is intact and usable under the canonical name.
+        assert (skill_dir / _MANIFEST_NAME).is_file()
+        assert set(v.load_manifest(skill_dir).versions) == {"v1"}
+        assert v.create_tree_version(skill_dir, [("SKILL.md", b"y")]).tag == "v2"

@@ -22,7 +22,17 @@ from memtomem.server.tool_registry import register
 @tool_handler
 @register("formation")
 async def mem_formation_scan(session_id: str, ctx: CtxType = None) -> str:
-    """Generate review candidates from one exact session's events; writes no long-term memory."""
+    """Generate review candidates from one exact session's events; writes no long-term memory.
+
+    Classifies the session's recorded events and queues the ones that look
+    memory-worthy as ``pending`` candidates. Events that carry a privacy hit
+    are skipped rather than queued. Approval is a separate step
+    (``mem_candidate_review``) — nothing durable is written here.
+
+    Args:
+        session_id: Session whose events to scan. Only this session's events
+            are considered; there is no "scan everything" mode.
+    """
     app = await _get_app_initialized(ctx)
     candidates = await scan_session_candidates(app.storage, session_id)
     return json.dumps({"created": len(candidates), "candidates": candidates}, ensure_ascii=False)
@@ -38,7 +48,25 @@ async def mem_candidate_propose(
     idempotency_key: str,
     ctx: CtxType = None,
 ) -> str:
-    """Queue an explicit pending candidate; never write durable memory."""
+    """Queue an explicit pending candidate; never write durable memory.
+
+    For an external agent that already knows what it wants remembered. The
+    proposal is queued for review, never promoted here.
+
+    Args:
+        content: Candidate text (max 2,000 chars, non-empty). Rejected
+            outright if it matches a privacy pattern — there is no
+            force_unsafe valve on this path.
+        source: Short origin identifier for the proposal — required,
+            non-whitespace, max 128 chars.
+        source_ref: Pointer back to the origin — URL, file path, message id
+            (max 512 chars). Also privacy-scanned.
+        idempotency_key: Caller-chosen key — required, non-whitespace, max
+            256 chars — that makes a retry safe: a repeat with the SAME
+            content returns the original candidate with ``duplicate: true``
+            instead of queueing a second one. Reusing the key with
+            different content is an error, not a second candidate.
+    """
     app = await _get_app_initialized(ctx)
     candidate, duplicate = await propose_memory_candidate(
         app.storage,
@@ -63,7 +91,17 @@ async def mem_candidate_propose(
 @tool_handler
 @register("formation")
 async def mem_candidate_list(status: str = "pending", limit: int = 100, ctx: CtxType = None) -> str:
-    """List memory-formation review candidates."""
+    """List memory-formation review candidates.
+
+    Expired ``pending`` candidates are flipped to ``expired`` as a side effect
+    of listing, so the pending queue is always current.
+
+    Args:
+        status: Status to list — ``pending`` (default), ``approved``,
+            ``rejected``, ``expired``, ``writing``, or ``write_uncertain``.
+            An unknown status is not an error; it returns an empty list.
+        limit: Maximum candidates to return, oldest first (default 100).
+    """
     app = await _get_app_initialized(ctx)
     return json.dumps(
         await app.storage.list_memory_candidates(status=status, limit=limit),
@@ -80,7 +118,19 @@ async def mem_candidate_recover(
     actor: str = "mcp-operator",
     ctx: CtxType = None,
 ) -> str:
-    """Return stale interrupted approval claims to the pending queue."""
+    """Return stale interrupted approval claims to the pending queue.
+
+    An approval claims its candidate before writing; a crash between claim and
+    finalize leaves it stuck. This releases claims older than the cutoff back
+    to ``pending`` so they can be reviewed again.
+
+    Args:
+        stale_after_minutes: Age a claim must exceed to be released, 1-1440
+            (default 15). Out-of-range values return an error, not a clamp.
+        limit: Maximum claims to release in one call, 1-1000 (default 100).
+        actor: Non-empty identifier recorded on each release for the audit
+            trail (default "mcp-operator").
+    """
     if not 1 <= stale_after_minutes <= 1440:
         return json.dumps({"ok": False, "reason": "stale_after_minutes must be between 1 and 1440"})
     if not 1 <= limit <= 1000:
@@ -114,7 +164,22 @@ async def mem_candidate_review(
     reason: str = "",
     ctx: CtxType = None,
 ) -> str:
-    """Approve or reject a candidate; only approval writes durable memory."""
+    """Approve or reject a candidate; only approval writes durable memory.
+
+    Approval claims the candidate, performs the durable write (a pinned block
+    or a ``mem_add``, per the candidate's destination), then finalizes. If the
+    claim is recovered concurrently after the write landed, the candidate is
+    quarantined as ``write_uncertain`` and the response says the write already
+    persisted — inspect it rather than re-approving.
+
+    Args:
+        candidate_id: Candidate to decide on.
+        decision: ``approve`` or ``reject``; anything else is refused.
+        reviewer: Who decided, recorded on the candidate (default "user").
+        reason: Free-text justification. Required — along with a non-empty
+            reviewer — when rejecting a ``write_uncertain`` candidate, since
+            that resolution asserts the durable destination was inspected.
+    """
     app = await _get_app_initialized(ctx)
     candidate = await app.storage.get_memory_candidate(candidate_id)
     if candidate is None:

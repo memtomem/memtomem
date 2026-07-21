@@ -41,6 +41,7 @@ result-coded contract.
 from __future__ import annotations
 
 import hashlib
+import errno
 import logging
 import os
 import secrets
@@ -58,7 +59,8 @@ from memtomem.context._canonical_txn import (
     write_canonical_locked,
 )
 from memtomem.context._gate_a import GateStatus
-from memtomem.context._names import Layout
+from memtomem.context._dir_swap import SwapRecoveryError, marker_owns_transient
+from memtomem.context._names import Layout, validate_name
 from memtomem.context._runtime_targets import resolve_import_runtimes
 from memtomem.context.pull_preview import (
     PullCandidate,
@@ -66,9 +68,9 @@ from memtomem.context.pull_preview import (
     _collect,
     _group_and_resolve,
     _runtime_candidate_path,
-    iter_skill_payload_files,
 )
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
+from memtomem.context.skill_payload import iter_skill_payload_files, payload_digest
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,7 @@ PullApplyStatus = Literal[
     "snapshot_failed",  # pre-overwrite snapshot failed (fail-closed)
     "write_failed",  # unexpected OSError writing the captured bytes (e.g. ENOTSUP promote)
     "plan_stale",  # destination changed between prepare and commit
+    "swap_recovery_pending",  # an interrupted directory swap needs an operator (ADR-0030 §10)
 ]
 
 
@@ -159,22 +162,10 @@ class PullPlan:
 
 
 # ── digests ────────────────────────────────────────────────────────────────
-
-
-def _payload_digest(payload: list[tuple[str, bytes]]) -> str:
-    """Order-independent SHA-256 over a ``(relpath, bytes)`` payload (skills).
-
-    Length-prefixed framing so no ``(rel, data)`` pair can be confused with a
-    different split of the same bytes.
-    """
-    h = hashlib.sha256()
-    for rel, data in sorted(payload):
-        rel_b = rel.encode("utf-8")
-        h.update(len(rel_b).to_bytes(8, "big"))
-        h.update(rel_b)
-        h.update(len(data).to_bytes(8, "big"))
-        h.update(data)
-    return h.hexdigest()
+#
+# The skills tree digest itself lives in ``skill_payload.payload_digest`` — the
+# canonical ADR-0030 §10 serialization, shared with the snapshot/version
+# identity that PR-G3 adds. Only the kind dispatch below is local.
 
 
 def _expected_digest(
@@ -189,7 +180,7 @@ def _expected_digest(
     if store_payload is None:
         return None
     if kind == "skills":
-        return _payload_digest(store_payload)
+        return payload_digest(store_payload)
     # Single-file agents/commands: bytes of the one payload entry. ``_read_store``
     # guarantees a present (non-None) payload is non-empty for these kinds
     # (``[("", bytes)]``); guard it explicitly (not ``assert`` — stripped under
@@ -345,7 +336,19 @@ def prepare_pull(
     :class:`PullPlan` to confirm-and-commit, or a :class:`PullApplyResult`
     (a refusal, or the ``applied``/``identical`` no-op when the Store already
     holds the selected content).
+
+    ``name`` is validated HERE rather than being assumed validated by the
+    caller. Every shipping surface does validate (``context_gateway`` routes,
+    ``mem_context_pull``, the CLI), but this engine builds destination paths as
+    ``canonical_root / name`` — and a separator-carrying name like
+    ``../other/x`` yields a perfectly ordinary *basename* while pointing the
+    parent somewhere else entirely, so a downstream basename check cannot catch
+    it. The commit path recovers interrupted swaps, which renames and deletes
+    trees; a defense that only holds while every caller remembers to validate
+    is not a defense for that. :func:`commit_pull` re-checks for the same
+    reason (a :class:`PullPlan` is constructible directly).
     """
+    validate_name(name, kind=f"{kind[:-1]} name")
     resolved_root = project_root.resolve() if project_root is not None else None
     if source_runtime is not None:
         # Validate eligibility up front (export-only / unknown → ValueError).
@@ -446,8 +449,8 @@ def prepare_pull(
             return _refuse(
                 "canonical_exists",
                 skip_codes.CANONICAL_EXISTS,
-                f"the Store already has {kind}/{name}; pass --overwrite to replace it "
-                f"(the current canonical is snapshotted first).",
+                f"the Store already has {kind}/{name}; a plain pull will not replace it "
+                f"(an overwrite snapshots the current canonical first).",
             )
 
     # Gate A — ONE audited decision for the whole Pull, over the captured bytes
@@ -476,14 +479,18 @@ def prepare_pull(
     if isinstance(gate, _GateBlocked):
         if gate.force_bypassable:
             reason = (
-                f"Gate A flagged the '{selected.runtime}' copy — pass "
-                f"--force-unsafe-import to pull it into scope='{scope}' after review."
+                f"Gate A flagged the '{selected.runtime}' copy; it was not pulled into "
+                f"scope='{scope}'."
             )
         else:
             reason = (
+                # No tier retry is offered: ``project_local`` has no runtime
+                # fan-out (ADR-0011 §3) and ``user`` resolves its sources from
+                # ``$HOME``, so neither re-attempts THIS copy. "Remove the
+                # secret" is the whole remediation, and it is surface-neutral.
                 f"Gate A blocked the pull into scope='{scope}' — no force bypass for "
-                f"project_shared (ADR-0011 §5). Remove the secret or pull into "
-                f"user / project_local."
+                f"project_shared (ADR-0011 §5). Remove the secret from the source "
+                f"first."
             )
         return _refuse(
             "gate_blocked",
@@ -545,7 +552,7 @@ def _source_conflict_reason(kind: ArtifactKind, name: str, working: list[_Cand])
         msg = (
             f"multiple distinct contents would land for {kind}/{name}: "
             + "; ".join(parts)
-            + " — pass --from <runtime> to choose."
+            + ". Name a source runtime."
         )
         if unreadable:
             msg += (
@@ -559,7 +566,7 @@ def _source_conflict_reason(kind: ArtifactKind, name: str, working: list[_Cand])
     # distinct contents" when the distinct count is zero or one.
     return (
         f"the {', '.join(unreadable)} copy of {kind}/{name} could not be read, so "
-        f"auto-selection is off — pass --from <runtime> to choose a source explicitly."
+        f"auto-selection is off. Name a source runtime explicitly."
     )
 
 
@@ -580,7 +587,15 @@ def commit_pull(
     lands. ``lock_timeout=None`` blocks (the CLI default, Ctrl-C-able); the
     async Web/MCP surfaces pass a bound and map the ``lock_timeout`` result to a
     503.
+
+    Re-validates ``plan.name`` before either branch derives a path from it.
+    ``prepare_pull`` already did, but a :class:`PullPlan` is a plain frozen
+    dataclass a caller can build directly, and everything below joins the name
+    onto a canonical root — including the swap recovery the skills branch runs,
+    which renames and removes directories. The check is cheap and it is the
+    last point where an escaping name is still only a string.
     """
+    validate_name(plan.name, kind=f"{plan.kind[:-1]} name")
     if plan.kind == "skills":
         return _commit_skills(plan, lock_timeout=lock_timeout)
     return _commit_atomic(plan, lock_timeout=lock_timeout)
@@ -643,7 +658,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
     from memtomem.context.skills import (
         _promote_race_conflict,
         _promote_staging,
-        _reap_stale_internal_dirs,
+        _recover_and_reap_internal_dirs,
         _target_conflict,
     )
 
@@ -652,7 +667,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
 
     try:
         with canonical_sidecar_lock(canonical_root, plan.name, timeout=lock_timeout):
-            _reap_stale_internal_dirs(dst)
+            _recover_and_reap_internal_dirs(dst)
 
             # Destination precondition (R3/R4 Major): the state the user
             # previewed must still hold.
@@ -660,7 +675,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             actual_digest: str | None = None
             if present:
                 try:
-                    actual_digest = _payload_digest(iter_skill_payload_files(dst))
+                    actual_digest = payload_digest(iter_skill_payload_files(dst))
                 except OSError:
                     actual_digest = None
             if (present, actual_digest) != (plan.store_present, plan.expected_store_digest):
@@ -680,7 +695,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             staging: Path | None = None
             try:
                 staging = _stage_captured_tree(plan.captured, dst)
-                _promote_staging(staging, dst, replace_existing=False)
+                _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
             except OSError as exc:
                 if _promote_race_conflict(exc):
                     return _refusal_for(
@@ -695,12 +710,34 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             finally:
                 # No .staging-* leak on any promote error (R3 Major 4). On the
                 # success path the tree was renamed into dst, so this is a no-op.
-                if staging is not None and staging.exists():
+                #
+                # ADR-0030 §10 / _dir_swap §4.1: a transient a live swap marker
+                # claims is removed only by the successful forward path or by
+                # recovery — never by a caller's cleanup. This staging tree uses
+                # the same ``.staging-<name>-<pid>-<hex>.tmp`` grammar the swap
+                # does, so once a swap is in flight here, deleting it would
+                # collapse the fail-closed "all three present" recovery row into
+                # the "dst + old" row, whose action then deletes ``old`` — the
+                # only copy of the artifact. Unreachable until the overwrite
+                # transaction lands (nothing writes a marker yet); wired now
+                # because the failure it prevents is silent and permanent.
+                if staging is not None and staging.exists() and not marker_owns_transient(staging):
                     shutil.rmtree(staging, ignore_errors=True)
 
             # Write landed — record the passed/bypassed privacy counter once.
             if plan.gate is not None:
                 _record_gate_success(plan.gate, plan.surface)
+    except SwapRecoveryError as exc:
+        # The prelude refused to resolve an interrupted directory swap
+        # (ADR-0030 §10). Its own status, deliberately NOT ``target_conflict``
+        # (nothing the user put at the destination caused this, and "remove it
+        # and re-run" is the wrong advice) and not ``write_failed`` (nothing
+        # was written — the artifact is wedged, and a 500 would report an
+        # infrastructure failure for a state that needs an operator's eyes).
+        # Must precede any broad ``OSError`` clause added later: this is one.
+        return _refusal_for(
+            plan, "swap_recovery_pending", skip_codes.SWAP_RECOVERY_PENDING, str(exc)
+        )
     except TimeoutError:
         return _lock_timeout_result(plan)
 
@@ -732,6 +769,23 @@ def _stage_captured_tree(
     suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
     staging = dst.parent / f".staging-{dst.name}-{suffix}.tmp"
     if staging.exists():
+        # ADR-0030 §4.1, same guard as ``skills._stage_skill``: a collision
+        # needs pid reuse AND a 3-byte hex collision, but "the leftover tree is
+        # from us" is the inference the marker retires — the directory swap
+        # shares this basename grammar, so a claimed transient could be sitting
+        # here, and deleting one collapses a recoverable state into one whose
+        # next recovery removes the only copy. This function sits BETWEEN the
+        # two sites that already got the guard (``_stage_skill`` and this
+        # caller's own ``finally``) on the Pull commit path — the one path this
+        # PR teaches to recover — so the asymmetry was at the most exposed
+        # site (PR review).
+        if marker_owns_transient(staging):
+            raise SwapRecoveryError(
+                errno.EBUSY,
+                "a pending directory swap already claims this staging path; "
+                "resolve the interrupted swap before staging again",
+                str(staging),
+            )
         shutil.rmtree(staging)
     try:
         staging.mkdir()
@@ -763,7 +817,7 @@ def _map_write_outcome(plan: PullPlan, outcome: str, dst: Path, layout: Layout) 
             plan,
             "canonical_exists",
             skip_codes.CANONICAL_EXISTS,
-            f"the Store already has {plan.kind}/{plan.name}; pass --overwrite to replace it.",
+            f"the Store already has {plan.kind}/{plan.name}; a plain pull will not replace it.",
         )
     if outcome == "flat_refused":
         return _refusal_for(

@@ -193,14 +193,14 @@ def seed_adr0026_validation_states(project_root: Path) -> dict[str, Any]:
                 "name": SKILL_OUT_OF_SYNC,
                 "diff_status": "out of sync",
                 "verdict": "needs_sync",
-                "action": "Sync",
+                "action": "Push",
             },
             "not_yet_imported": {
                 "tile": "commands",
                 "name": COMMAND_NOT_IMPORTED,
                 "diff_status": "missing canonical",
                 "verdict": "not_saved",
-                "action": "Import",
+                "action": "Pull",
             },
             "empty_type": {"tile": "agents", "diff_status": None, "verdict": "empty"},
             "mcp_orphan": {

@@ -33,6 +33,14 @@ Cases:
   (not ``default``), matching the contract the public page
   advertises. Pre-multi-agent (no session) callers fall back to
   ``app.current_namespace`` unchanged.
+* **G — unbound session write routing** (#1875): the *inverse* of E.
+  ``mem_session_start()`` with no ``agent_id`` binds no agent, so
+  ``mem_add`` routes as it would with no session at all — under this
+  fixture's non-system ``team-default`` namespace that also means the
+  entry stays findable by a plain ``mem_search``. Pre-fix the literal
+  ``"default"`` was bound and the write vanished into the hidden
+  ``agent-runtime:default``. Includes the recovery pin: that namespace
+  stays readable through an explicit ``agent_id="default"``.
 """
 
 from __future__ import annotations
@@ -454,6 +462,37 @@ class TestCaseEMemAddSessionInheritance:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
+    async def test_session_namespace_argument_does_not_redirect_the_write(
+        self, bm25_only_components
+    ):
+        """``namespace=`` on ``mem_session_start`` re-points the session
+        *record* only — it never becomes the inherited write namespace.
+
+        The ``sessions`` category note (server/tools/meta.py) tells callers to
+        pass ``namespace=`` on the write itself for exactly this reason, so the
+        distinction is pinned as behaviour rather than left as prose. Asserting
+        the write **and** the row: a regression that made the row's namespace
+        win would otherwise be invisible from either side alone.
+        """
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await mem_session_start(agent_id="planner", namespace="custom-ns", ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_add(content="session namespace probe", ctx=ctx)  # type: ignore[arg-type]
+            assert "agent-runtime:planner" in result
+            assert "custom-ns" not in result
+
+            rows = await app.storage.list_sessions()
+            active = next(r for r in rows if r["id"] == app.current_session_id)
+            assert active["namespace"] == "custom-ns"
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
     async def test_mem_batch_add_inherits_agent_id_from_session(self, bm25_only_components):
         from memtomem.server.tools.memory_crud import mem_batch_add
 
@@ -553,6 +592,164 @@ class TestCaseEMemAddSessionInheritance:
             assert "team-notes" not in result
         finally:
             await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+
+# ── Case G — unbound session does not hijack write routing (#1875) ───
+
+
+@pytest.fixture
+async def custom_default_ns_components(tmp_path, monkeypatch):
+    """``bm25_only_components`` with a **distinctive** default namespace.
+
+    The shared fixture leaves ``default_namespace == "default"``, which
+    cannot tell "landed in the configured default" apart from "landed in
+    the literal string ``default``" — an assertion against it would
+    false-green the contract this case is about.
+    """
+    from memtomem.config import Mem2MemConfig
+    from memtomem.server.component_factory import close_components, create_components
+
+    isolate_memtomem_env(monkeypatch)
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir(exist_ok=True)
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "bm25-custom-ns.db"
+    config.indexing.memory_dirs = [mem_dir]
+    config.embedding.dimension = 1024
+    config.search.enable_dense = False
+    config.namespace.default_namespace = "team-default"
+
+    comp = await create_components(config)
+    try:
+        yield comp, mem_dir
+    finally:
+        await close_components(comp)
+
+
+class TestCaseGUnboundSessionWriteRouting:
+    """A session that names no agent must not redirect writes.
+
+    Before #1875 ``mem_session_start`` defaulted ``agent_id`` to the
+    literal ``"default"`` and bound it unconditionally, so every
+    subsequent ``mem_add`` landed in ``agent-runtime:default``. That
+    prefix is a default *system* prefix, so the caller could not find
+    their own entry with a plain ``mem_search`` — the write was
+    effectively swallowed. The counter-case (a named agent still routes
+    to ``agent-runtime:<id>``) is Case E above.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unbound_session_writes_to_configured_default(self, custom_default_ns_components):
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = custom_default_ns_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_add(content="unbound session probe alpha", ctx=ctx)  # type: ignore[arg-type]
+            assert "agent-runtime:default" not in result
+            assert "team-default" in result
+
+            chunks = await comp.storage.recall_chunks(limit=50)
+            namespaces = {c.metadata.namespace for c in chunks}
+            assert namespaces == {"team-default"}, namespaces
+
+            # The assertion that encodes the actual harm: an unpinned
+            # search finds the entry. The three above would all pass
+            # under a cosmetic fix that only changed the display string.
+            out = await mem_search(query="unbound session probe", ctx=ctx)  # type: ignore[arg-type]
+            assert "unbound session probe alpha" in out
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_explicit_default_agent_id_is_also_unbound(self, custom_default_ns_components):
+        """``agent_id="default"`` is the reserved sentinel, not an agent —
+        the shipped instructions taught that spelling, so the explicit
+        form must behave like the omitted one."""
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = custom_default_ns_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await mem_session_start(agent_id="default", ctx=ctx)  # type: ignore[arg-type]
+        try:
+            result = await mem_add(content="explicit default probe beta", ctx=ctx)  # type: ignore[arg-type]
+            assert "agent-runtime:default" not in result
+            assert "team-default" in result
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_unbound_session_agent_search_is_unpinned(self, bm25_only_components):
+        """Read-side knock-on of #1875, pinned so it is not a surprise.
+
+        With no agent bound, ``_resolve_agent_namespace`` returns
+        ``None`` and ``mem_agent_search`` therefore runs *unpinned*
+        instead of scoping to ``agent-runtime:default,shared``. That is a
+        read-scope **widening** — the same axis the fix is careful about
+        elsewhere — so it gets an explicit pin: an unbound
+        ``mem_agent_search`` sees what a plain ``mem_search`` sees, and
+        in particular still cannot see another agent's private chunks
+        (the system-prefix filter, not the agent binding, is what keeps
+        those hidden).
+        """
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk("public widening probe", namespace="default"),
+                make_chunk(
+                    "alpha private widening probe",
+                    namespace=f"{AGENT_NAMESPACE_PREFIX}alpha",
+                ),
+            ]
+        )
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        try:
+            out = await mem_agent_search(query="widening probe", agent_id=None, ctx=ctx)  # type: ignore[arg-type]
+            assert "public widening probe" in out
+            assert "alpha private widening probe" not in out
+        finally:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_agent_runtime_default_stays_readable(self, bm25_only_components):
+        """Recovery path for data written under the old routing.
+
+        ``agent-runtime:default`` is reserved only at *binding* surfaces.
+        There is no namespace-rename primitive, so an explicit
+        ``agent_id="default"`` read is the only way back to chunks that
+        landed there pre-#1875 — rejecting it would strand them.
+        """
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk(
+                    "legacy note stranded by the old routing",
+                    namespace=f"{AGENT_NAMESPACE_PREFIX}default",
+                ),
+            ]
+        )
+
+        # Hidden from a plain search (that is the harm being fixed)...
+        plain = await mem_search(query="stranded", ctx=ctx)  # type: ignore[arg-type]
+        assert "legacy note" not in plain
+
+        # ...but still reachable with an explicit agent_id.
+        out = await mem_agent_search(query="stranded", agent_id="default", ctx=ctx)  # type: ignore[arg-type]
+        assert "legacy note" in out
 
 
 # ── Case F — mem_agent_search output_format parity with mem_search ───

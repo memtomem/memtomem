@@ -277,16 +277,16 @@ def _reject_ineligible_tier(target_scope: TargetScope) -> None:
         raise _error(
             400,
             "validation",
-            "Sync all is supported on the project_shared tier; project_local "
+            "Push All is supported on the project_shared tier; project_local "
             "is a draft tier with no runtime fan-out (ADR-0011 §3).",
         )
     if target_scope == "user":
         raise _error(
             400,
             "validation",
-            "Sync all is a project-tier action (#1263); sync skills, commands, "
+            "Push All is a project-tier action (#1263); push skills, commands, "
             "agents, and settings individually on the user tier (mcp-servers "
-            "sync is project_shared-only).",
+            "push is project_shared-only).",
         )
 
 
@@ -298,12 +298,12 @@ async def sync_all_context(
         description=(
             "Canonical-residency tier to fan out. Only project_shared is "
             "supported: project_local has no runtime fan-out (ADR-0011 §3) "
-            "and Sync All stays a project-tier action (#1263) — sync "
+            "and Push All stays a project-tier action (#1263) — push "
             "artifact types individually on the user tier."
         ),
     ),
 ) -> dict:
-    """Run every per-type sync phase under one gateway-lock window.
+    """Run every per-type push phase under one gateway-lock window.
 
     Returns HTTP 200 with ``{phases: [...], summary: {...}}`` whenever the
     phases ran — mixed results cannot map to one HTTP code, so per-phase
@@ -324,7 +324,7 @@ async def sync_all_context(
         raise _error(
             503,
             "busy",
-            "Sync all timed out — another sync may be in progress. Phases "
+            "Push All timed out — another sync may be in progress. Phases "
             "that completed before the timeout have already written their "
             "runtime files; re-run to converge.",
         )
@@ -413,7 +413,7 @@ async def sync_all_projects_context(
         ),
     ),
 ) -> dict:
-    """Run the five-phase sync for every eligible discovered project.
+    """Run the five-phase push for every eligible discovered project.
 
     Returns HTTP 200 with ``{projects: [...], summary: {...}}`` whenever
     the loop ran; non-2xx only for the pre-run tier gate (400) and CSRF
@@ -466,7 +466,7 @@ async def sync_all_projects_context(
                         "error_kind": "busy",
                         "http_status": 503,
                         "message": (
-                            "sync timed out for this project — another sync may "
+                            "push timed out for this project — another sync may "
                             "be in progress. Phases that completed before the "
                             "timeout have already written their runtime files; "
                             "re-run to converge."

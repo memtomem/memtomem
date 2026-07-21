@@ -340,15 +340,15 @@ async def import_commands(
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
-            "Canonical-residency tier to import into. user requires the "
+            "Canonical-residency tier to pull into. user requires the "
             "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
         ),
     ),
     dry_run: bool = Query(
         False,
         description=(
-            "Preview the import without writing to canonical (rank-10): runs the "
-            "full scan + privacy walk + dedup and returns the would-import / would-"
+            "Preview the pull without writing to canonical (rank-10): runs the "
+            "full scan + privacy walk + dedup and returns the would-pull / would-"
             "skip counts, leaving disk untouched. Returned regardless of "
             "confirmation flags (mirrors the transfer route's dry_run)."
         ),
@@ -369,12 +369,12 @@ async def import_command(
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
-            "Canonical-residency tier to import into. user requires the "
+            "Canonical-residency tier to pull into. user requires the "
             "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
         ),
     ),
 ) -> dict:
-    """Import a single runtime command into the scoped canonical dir.
+    """Pull a single runtime command into the scoped canonical dir.
 
     Same response shape as the section-level import so the web UI can reuse
     its rendering. 404 when no runtime file matches the name (the section

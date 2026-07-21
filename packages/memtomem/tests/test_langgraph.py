@@ -288,6 +288,96 @@ class TestStartAgentSession:
         assert store._current_agent_id == "planner"
 
     @pytest.mark.asyncio
+    async def test_reserved_default_agent_id_binds_nothing(self):
+        """#1875: ``"default"`` is the unbound sentinel on this surface too.
+
+        Without the normalization the Python adapter would bind
+        ``agent-runtime:default`` and route every subsequent ``add`` into
+        a hidden system namespace — the same bug the MCP surface had,
+        and the reason the fix could not stop at ``session.py``.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        sid = await store.start_agent_session("default")
+
+        assert store._current_session_id == sid
+        assert store._current_agent_id is None
+        args, _ = store._components.storage.create_session.call_args
+        assert args[1] == "default"  # row keeps the literal
+        assert args[2] == "default"  # not agent-runtime:default
+        # And the add/search resolvers therefore stay un-pinned.
+        assert store._resolve_add_namespace(None) is None
+
+    @pytest.mark.asyncio
+    async def test_reserved_default_still_honors_explicit_namespace(self):
+        """The ``namespace=`` escape hatch is orthogonal to the binding."""
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        await store.start_agent_session("default", namespace="custom:scope")
+
+        args, _ = store._components.storage.create_session.call_args
+        assert args[2] == "custom:scope"
+        assert store._current_agent_id is None
+
+    @pytest.mark.asyncio
+    async def test_include_shared_raises_after_unbound_default_session(self):
+        """Knock-on of #1875 on the Python surface, pinned deliberately.
+
+        ``_resolve_search_namespace`` treats ``include_shared=True`` with
+        no bound agent as a programming error. Before the fix
+        ``start_agent_session("default")`` bound an agent, so this
+        combination worked (searching ``agent-runtime:default,shared``);
+        now it raises. Failing loudly is the right call — the caller
+        asked for "my scope plus shared" and there is no *my scope* — but
+        it is a behaviour change, so it gets a pin rather than being left
+        to surface as a mystery ``ValueError`` in someone's graph.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        await store.start_agent_session("default")
+
+        with pytest.raises(ValueError, match="requires an active agent session"):
+            store._resolve_search_namespace(None, include_shared=True)
+
+        # include_shared=False / None stay usable — they do not depend on
+        # a bound agent, so the unbound session simply passes through.
+        assert store._resolve_search_namespace("team", include_shared=None) == "team"
+
+    @pytest.mark.asyncio
+    async def test_none_agent_id_raises_before_storage(self):
+        """``agent_id`` is required on this surface, unlike MCP.
+
+        ``normalize_bound_agent_id`` passes ``None`` through as "nothing
+        to bind" — correct where omission is the documented way to start
+        an unbound session, wrong here. Without an explicit reject the
+        ``None`` would reach the NOT NULL ``sessions.agent_id`` column as
+        a backend ``IntegrityError`` instead of the ``InvalidNameError``
+        this surface has always raised.
+        """
+        from memtomem.constants import InvalidNameError
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        store._components = comp
+
+        with pytest.raises(InvalidNameError):
+            await store.start_agent_session(None)
+
+        comp.storage.create_session.assert_not_awaited()
+        assert store._current_session_id is None
+        assert store._current_agent_id is None
+
+    @pytest.mark.asyncio
     async def test_empty_agent_id_raises(self):
         from memtomem.constants import InvalidNameError
         from memtomem.integrations.langgraph import MemtomemStore

@@ -24,7 +24,7 @@ from memtomem.errors import (
     StorageError,
     StorageStartupError,
 )
-from memtomem.storage.base import ChunkAuditRow, SearchMetadataFilter
+from memtomem.storage.base import ChunkAuditRow, NamespaceRenameResult, SearchMetadataFilter
 from memtomem.models import (
     Chunk,
     ChunkMetadata,
@@ -40,6 +40,7 @@ from memtomem.storage.sqlite_helpers import (
     namespace_sql,
     norm_path,
     placeholders,
+    quote_ident,
     serialize_f32,
 )
 from memtomem.storage.orphan_gc import (
@@ -85,16 +86,10 @@ _REBUILD_FTS_BATCH_SIZE = 1000
 _AI_SUMMARY_KEY_PREFIX = "ai_summary:"
 
 
-def _quote_ident(name: str) -> str:
-    """Quote a SQLite identifier for interpolation into DDL/DML.
-
-    ``reset_all`` interpolates table names discovered from ``sqlite_master``
-    (including tables an older binary has never heard of), so bracket quoting
-    (``[name]``) is unsafe — a valid identifier containing ``]`` would produce
-    invalid SQL and abort a privacy reset. Double-quote with embedded ``"``
-    doubled per the SQL standard.
-    """
-    return '"' + name.replace('"', '""') + '"'
+#: Identifier quoting for interpolated table/column names. Defined in
+#: ``sqlite_helpers`` so the ops modules can share it; the module-local name
+#: is kept because every call site here reads ``_quote_ident``.
+_quote_ident = quote_ident
 
 
 def _is_virtual_table_sql(sql: str | None) -> bool:
@@ -310,7 +305,9 @@ class SqliteBackend(
 
             stage = "schema"
             self._meta = MetaManager(self._get_db)
-            self._ns = NamespaceOps(self._get_db, lambda: self._has_vec_table)
+            self._ns = NamespaceOps(
+                self._get_db, lambda: self._has_vec_table, lambda: self._in_transaction
+            )
 
             self._dimension, self._dim_mismatch, self._model_mismatch = create_tables(
                 self._db,
@@ -2347,6 +2344,10 @@ class SqliteBackend(
         assert self._ns is not None
         return await self._ns.list_namespaces()
 
+    async def count_chunks_by_namespace(self, namespace: str) -> int:
+        assert self._ns is not None
+        return await self._ns.count_chunks_by_namespace(namespace)
+
     async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int:
         assert self._ns is not None
         return await self._ns.count_chunks_by_ns_prefix(prefixes)
@@ -2355,9 +2356,11 @@ class SqliteBackend(
         assert self._ns is not None
         return await self._ns.delete_by_namespace(namespace)
 
-    async def rename_namespace(self, old: str, new: str) -> int:
+    async def rename_namespace(
+        self, old: str, new: str, *, merge: bool = False
+    ) -> NamespaceRenameResult:
         assert self._ns is not None
-        return await self._ns.rename_namespace(old, new)
+        return await self._ns.rename_namespace(old, new, merge=merge)
 
     async def get_namespace_meta(self, namespace: str) -> dict | None:
         assert self._ns is not None

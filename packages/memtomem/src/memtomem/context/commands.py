@@ -672,7 +672,7 @@ def extract_commands_to_canonical(
                 logger.warning("skip %r from %s: invalid name", cmd_name, gemini_label)
                 continue
             if cmd_name in seen:
-                reason = f"already imported from {seen[cmd_name]}"
+                reason = f"already pulled from {seen[cmd_name]}"
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                 continue
@@ -684,7 +684,7 @@ def extract_commands_to_canonical(
                 logger=logger,
             )
             if dst.exists() and not overwrite:
-                reason = "canonical exists (use --overwrite)"
+                reason = "canonical exists"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
                 logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                 seen[cmd_name] = gemini_label
@@ -731,7 +731,7 @@ def extract_commands_to_canonical(
                 skipped.append(
                     (
                         cmd_name,
-                        f"blocked: {outcome.hits_count} privacy pattern hit(s){outcome.hint}",
+                        f"blocked: {outcome.hits_count} privacy pattern hit(s)",
                         outcome.code,
                     )
                 )
@@ -767,7 +767,7 @@ def extract_commands_to_canonical(
                     reason = (
                         "another process held the canonical destination lock (or its "
                         f"version store) past the {_CANONICAL_LOCK_BUDGET_S:g}s "
-                        "acquisition budget — re-run the import to retry"
+                        "acquisition budget — re-run the pull to retry"
                     )
                     skipped.append((cmd_name, reason, skip_codes.LOCK_TIMEOUT))
                     logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
@@ -779,7 +779,7 @@ def extract_commands_to_canonical(
                     seen[cmd_name] = gemini_label
                     continue
                 if write_outcome == "exists":
-                    reason = "canonical exists (use --overwrite)"
+                    reason = "canonical exists"
                     skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
                     logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                     seen[cmd_name] = gemini_label

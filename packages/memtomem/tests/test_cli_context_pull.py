@@ -136,7 +136,7 @@ def test_apply_source_conflict_refuses(proj: Path) -> None:
     )
     res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
     assert res.exit_code != 0
-    assert "pass --from" in res.output
+    assert "Pass --from <runtime>" in res.output
     assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
 
 
@@ -255,3 +255,43 @@ def test_gate_blocked_refused_before_prompt(proj: Path) -> None:
     res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="y\n")
     assert res.exit_code != 0
     assert "Continue?" not in res.output  # never reached the prompt
+
+
+# ── per-surface remediation hints (#1869) ────────────────────────────────────
+
+
+def test_canonical_exists_refusal_names_the_cli_flag(proj: Path) -> None:
+    """The engine states the condition; the CLI adds ``--overwrite``.
+
+    The reason itself must stay flag-free — that is what lets MCP and the web
+    render ``overwrite=True`` / the Overwrite checkbox for the same refusal.
+    """
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")}, scope="user")
+    assert _invoke(["pull", "agents", "a", "--apply", "--scope", "user", "--yes"]).exit_code == 0
+    # Diverge the runtime copy — an identical second pull is a no-op, not a
+    # ``canonical_exists`` refusal.
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c2")}, scope="user")
+
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "user", "--yes"])
+    assert res.exit_code != 0
+    assert "a plain pull will not replace it" in res.output  # neutral condition
+    assert "Pass --overwrite to replace it." in res.output  # CLI remediation
+    assert "overwrite=True" not in res.output  # never another surface's spelling
+
+
+def test_user_tier_gate_block_names_the_cli_force_flag(proj: Path) -> None:
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", f"tok {_SECRET}")}, scope="user")
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "user", "--yes"])
+    assert res.exit_code != 0
+    assert "Pass --force-unsafe-import to bypass after review." in res.output
+
+
+def test_project_shared_gate_block_offers_no_force_valve(proj: Path) -> None:
+    """``privacy_blocked`` on the git-tracked tier carries the same reason code
+    as the bypassable tiers, but the valve does not exist there (ADR-0011 §5).
+    Keying the hint on the code alone would send the user to a flag that
+    hard-refuses — the hint is gated on ``force_bypassable`` instead."""
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", f"tok {_SECRET}")})
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    assert res.exit_code != 0
+    assert "--force-unsafe-import" not in res.output

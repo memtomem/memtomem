@@ -312,3 +312,123 @@ def test_enable_button_posts_to_versions_enable_route(page, mm_web_url: str) -> 
     ) as info:
         page.locator("#ctx-agents-detail .ctx-version-enable-btn").click()
     assert info.value.method == "POST"
+
+
+# ── Skills: read-only version surface (ADR-0030 §10, PR-G3) ──────────
+
+_SKILL_DETAIL = {
+    "name": "pdf-tools",
+    "content": "---\nname: pdf-tools\ndescription: PDFs\n---\n\nBody",
+    "mtime_ns": str(1_700_000_000 * 1_000_000_000),
+    "target_scope": "project_shared",
+    "layout": "dir",
+    "fields": {"description": "PDFs"},
+}
+
+_SKILL_VERSIONS = {
+    "name": "pdf-tools",
+    "artifact_type": "skills",
+    "target_scope": "project_shared",
+    "layout": "dir",
+    "versions": [
+        {"tag": "v2", "created_at": "2026-07-19T11:00:00Z", "note": "", "layout": "tree"},
+        {"tag": "v1", "created_at": "2026-07-19T09:00:00Z", "note": "", "layout": "tree"},
+    ],
+    "labels": {"production": "v2"},
+    "has_versions": True,
+    "migrate_required": False,
+    "writable": False,
+}
+
+
+def test_skill_versions_render_read_only(page, mm_web_url: str) -> None:
+    """The section mounts and lists history, but renders NO write control — a
+    control the server would 409 is worse than no control."""
+    install_default_stubs(page)
+    _stub_versions(page, "skills", _SKILL_DETAIL, _SKILL_VERSIONS)
+    page.goto(mm_web_url)
+    _open_detail(page, "skills", "pdf-tools")
+    _wait_versions(page, "skills", 2)
+
+    detail = "#ctx-skills-detail"
+    assert page.locator(f"{detail} .ctx-version-freeze-btn").count() == 0
+    assert page.locator(f"{detail} .ctx-version-promote-btn").count() == 0
+    assert page.locator(f"{detail} .ctx-version-label-select").count() == 0
+    assert page.locator(f"{detail} .ctx-version-label-remove").count() == 0
+    # The read-only notice explains why the controls are absent.
+    assert page.locator(f"{detail} .ctx-version-readonly").count() == 1
+
+
+def test_skill_versions_still_show_labels_and_tree_marker(page, mm_web_url: str) -> None:
+    """Read-only strips the affordances, not the information."""
+    install_default_stubs(page)
+    _stub_versions(page, "skills", _SKILL_DETAIL, _SKILL_VERSIONS)
+    page.goto(mm_web_url)
+    _open_detail(page, "skills", "pdf-tools")
+    _wait_versions(page, "skills", 2)
+
+    chip = page.locator(
+        "#ctx-skills-detail .ctx-version-row[data-tag='v2'] "
+        ".ctx-version-label-chip[data-label='production']"
+    )
+    assert chip.count() == 1
+    assert page.locator("#ctx-skills-detail .ctx-version-shape").count() == 2
+
+
+def test_skill_versions_issue_no_mutating_requests(page, mm_web_url: str) -> None:
+    """Nothing rendered may fire a write — pinned at the network layer so a
+    future control added without a gate is caught, not just its absence."""
+    install_default_stubs(page)
+    _stub_versions(page, "skills", _SKILL_DETAIL, _SKILL_VERSIONS)
+    mutations: list[str] = []
+    page.on(
+        "request",
+        lambda r: (
+            mutations.append(f"{r.method} {r.url}")
+            if r.method in ("POST", "PUT", "DELETE") and "/api/context/skills/" in r.url
+            else None
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_detail(page, "skills", "pdf-tools")
+    _wait_versions(page, "skills", 2)
+    page.wait_for_timeout(250)
+
+    assert mutations == []
+
+
+def test_agent_versions_stay_writable(page, mm_web_url: str) -> None:
+    """Regression guard: the read-only path must not leak into agents."""
+    install_default_stubs(page)
+    _stub_versions(page, "agents", _AGENT_DETAIL, _VERSIONS)
+    page.goto(mm_web_url)
+    _open_detail(page, "agents", "code-reviewer")
+    _wait_versions(page, "agents", 2)
+
+    detail = "#ctx-agents-detail"
+    assert page.locator(f"{detail} .ctx-version-freeze-btn").count() == 1
+    assert page.locator(f"{detail} .ctx-version-promote-btn").count() == 2
+    assert page.locator(f"{detail} .ctx-version-readonly").count() == 0
+
+
+_SKILL_VERSIONS_EMPTY = dict(_SKILL_VERSIONS, versions=[], labels={}, has_versions=False)
+
+
+def test_read_only_empty_state_does_not_advertise_freezing(page, mm_web_url: str) -> None:
+    """The writable empty state says "freeze … to create v1" — nonsense two lines
+    under a notice explaining that freezing is unavailable here."""
+    install_default_stubs(page)
+    _stub_versions(page, "skills", _SKILL_DETAIL, _SKILL_VERSIONS_EMPTY)
+    page.goto(mm_web_url)
+    _open_detail(page, "skills", "pdf-tools")
+    page.wait_for_function(
+        "() => {"
+        "  const s = document.querySelector('#ctx-skills-detail .ctx-detail-versions');"
+        "  return s && !s.hidden && s.querySelector('.ctx-version-empty') !== null;"
+        "}",
+        timeout=5_000,
+    )
+
+    empty = page.locator("#ctx-skills-detail .ctx-version-empty")
+    assert empty.get_attribute("data-i18n") == "settings.ctx.versions.empty_read_only"
+    assert "freeze" not in empty.inner_text().lower()
