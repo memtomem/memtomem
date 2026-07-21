@@ -26,6 +26,7 @@ encoded rather than assumed.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -34,10 +35,21 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from memtomem.context._dir_swap import SwapForeignDestination, SwapRecoveryError, has_pending_swap
-from memtomem.context.install import AlreadyInstalledError, install_skill
+from memtomem.context.install import (
+    AlreadyInstalledError,
+    StaleInstallError,
+    _apply_pinned_install,
+    _classify_for_install_all,
+    install_skill,
+    update_skill,
+)
 from memtomem.context.migrate import ArtifactNotFoundError, _detect_source_scope
 from memtomem.context.skills import SKILL_MANIFEST, copy_skill, run_swap_prelude
-from memtomem.context.transfer import TransferRecoveryError, transfer_artifact
+from memtomem.context.transfer import (
+    TransferCollisionError,
+    TransferRecoveryError,
+    transfer_artifact,
+)
 from memtomem.web.app import create_app
 from memtomem.wiki.store import WikiStore
 
@@ -273,6 +285,59 @@ class TestTransferApply:
         assert _residue(store) == before
         assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
 
+    def test_destination_row_2_is_recovered_then_collides(
+        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The DESTINATION prelude, which the source cases prove nothing about.
+
+        A user-tier destination mid-swap has no ``dst``, so the pre-lock
+        collision check passes. Recovery under the lock materializes the
+        destination — and the in-lock re-check then refuses, correctly, on the
+        tree that actually exists. Delete the destination prelude and this
+        transfer instead lands on top of a live transaction.
+        """
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        user_store = home / ".memtomem" / "skills"
+        user_store.mkdir(parents=True)
+        dp = _row_2(user_store)
+        _tree(store / "skill", "source")
+
+        with pytest.raises(TransferCollisionError):
+            self._transfer(project)
+
+        _assert_converged(user_store, dp["dst"], "replacement")
+        assert (store / "skill" / SKILL_MANIFEST).read_text(encoding="utf-8") == "source", (
+            "a refused move must leave the source intact"
+        )
+
+    def test_destination_row_4_is_refused_before_the_lock(
+        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The narrowed contract at the destination, encoded.
+
+        Row 4 leaves a real ``dst``, which the unlocked pre-flight sees, so the
+        transfer refuses as ``destination_exists`` and the prelude is never
+        reached. True, and it writes nothing — the source and all three
+        destination trees are exactly as they were. The destination prelude is
+        proven by the row-2 case above, which is the state that DOES pass the
+        pre-flight.
+        """
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        user_store = home / ".memtomem" / "skills"
+        user_store.mkdir(parents=True)
+        _tree(store / "skill", "source")
+        _row_4(user_store)
+        before = _residue(user_store)
+
+        with pytest.raises(TransferCollisionError) as exc:
+            self._transfer(project)
+
+        assert not isinstance(exc.value, TransferRecoveryError)
+        assert _residue(user_store) == before
+        assert (store / "skill" / SKILL_MANIFEST).read_text(encoding="utf-8") == "source"
+
     def test_a_recovered_tree_without_its_manifest_is_not_transferred(
         self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -410,7 +475,31 @@ class TestWebSkillRoutes:
 
 
 class TestWikiInstall:
-    """``install.py`` — the three kind-polymorphic sites, exercised through install_skill."""
+    """``install.py`` — all three kind-polymorphic sites, each through its own entry point.
+
+    One test per site, deliberately: they are three separate ``with`` bodies
+    with three separate in-lock re-checks, so a suite that only ever calls
+    ``install_skill`` stays green with either of the other two preludes deleted
+    (Codex code gate).
+    """
+
+    @staticmethod
+    def _wiki_commit(wiki_root_path: Path, name: str, body: bytes) -> None:
+        """Commit new bytes for ``name`` so an update has work to do.
+
+        Without a second commit the update returns a no-op BEFORE taking the
+        lock (HEAD already matches the recorded pin), and the test would prove
+        nothing about the prelude.
+        """
+        (wiki_root_path / "skills" / name / SKILL_MANIFEST).write_bytes(body)
+        subprocess.run(
+            ["git", "-C", str(wiki_root_path), "add", "."], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(wiki_root_path), "commit", "-m", f"update {name}"],
+            check=True,
+            capture_output=True,
+        )
 
     @staticmethod
     def _wiki_with(wiki_root_path: Path, name: str) -> None:
@@ -469,6 +558,89 @@ class TestWikiInstall:
 
         assert _residue(store) == before
 
+    def test_update_recovers_before_the_dirty_classify(
+        self, wiki_root: Path, tmp_path: Path
+    ) -> None:
+        """``_apply_update``'s own site: the dirty re-classification reads the tree.
+
+        A row-2 destination has no ``dst`` at all, so a pre-recovery classify
+        would see "missing dest" and re-extract over the transaction. After
+        recovery the tree is the replacement — which differs from the recorded
+        install — so the update correctly refuses as dirty instead.
+        """
+        self._wiki_with(wiki_root, "foo")
+        project = tmp_path / "proj"
+        project.mkdir()
+        install_skill(project, "foo")  # records the lock.json entry update needs
+        self._wiki_commit(wiki_root, "foo", b"# newer\n")
+        store = project / ".memtomem" / "skills"
+        shutil.rmtree(store / "foo")
+        p = _row_2(store, name="foo")
+
+        with pytest.raises(StaleInstallError):
+            update_skill(project, "foo")
+
+        _assert_converged(store, p["dst"], "replacement")
+
+    def test_row_4_refuses_the_update_and_deletes_nothing(
+        self, wiki_root: Path, tmp_path: Path
+    ) -> None:
+        """Row 4 under ``--force``, the one way an update reaches the lock in that state.
+
+        Without force the pre-lock dirty classify refuses first — row 4 leaves a
+        ``dst`` whose bytes differ from the recorded install, so it reads as a
+        local edit. That is the narrowed §10 contract again, and the second
+        assertion below pins it. With force the pre-lock gate is deliberately
+        skipped, the lock is taken, and the prelude is what refuses: an
+        interrupted transaction is not something ``--force`` may overwrite.
+        """
+        self._wiki_with(wiki_root, "foo")
+        project = tmp_path / "proj"
+        project.mkdir()
+        install_skill(project, "foo")
+        self._wiki_commit(wiki_root, "foo", b"# newer\n")
+        store = project / ".memtomem" / "skills"
+        shutil.rmtree(store / "foo")
+        p = _row_4(store, name="foo")
+        before = _residue(store)
+
+        with pytest.raises(SwapRecoveryError):
+            update_skill(project, "foo", force=True)
+
+        assert _residue(store) == before
+        assert (p["old"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-b"
+        assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
+
+        # …and without --force it never gets that far: a pre-lock refusal that
+        # still reaps nothing.
+        with pytest.raises(StaleInstallError):
+            update_skill(project, "foo")
+        assert _residue(store) == before
+
+    def test_pinned_install_recovers_before_its_own_re_check(
+        self, wiki_root: Path, tmp_path: Path
+    ) -> None:
+        """``_apply_pinned_install`` — the third site, reached via ``install --all``.
+
+        Its own ``with`` body and its own dirty re-classify, so the other two
+        preludes prove nothing about it.
+        """
+        self._wiki_with(wiki_root, "foo")
+        project = tmp_path / "proj"
+        project.mkdir()
+        install_skill(project, "foo")
+        self._wiki_commit(wiki_root, "foo", b"# newer\n")
+        store = project / ".memtomem" / "skills"
+        shutil.rmtree(store / "foo")
+        p = _row_2(store, name="foo")
+
+        classifications = _classify_for_install_all(project, wiki=WikiStore.at_default())
+        row = next(c for c in classifications if c.name == "foo")
+        with pytest.raises((StaleInstallError, AlreadyInstalledError)):
+            _apply_pinned_install(project, row, wiki=WikiStore.at_default(), force=False)
+
+        _assert_converged(store, p["dst"], "replacement")
+
 
 class TestMcpTransfer:
     """MCP parity: the refusal is prefix-coded, not flattened into a collision."""
@@ -496,6 +668,59 @@ class TestMcpTransfer:
         # NOT the plain collision line the base class would have produced.
         assert "destination already exists" not in out
 
+    async def test_row_2_resolves_the_default_tier_cross_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The third discovery probe: MCP's own default-tier lookup.
+
+        Reached when ``to_project_scope_id`` is given without ``to_scope`` —
+        the tool then resolves the source tier itself, through a
+        ``_detect_source_scope`` handed to ``to_thread``. Without the marker
+        opt-in there it answers "not found" and the engine that would have
+        recovered the artifact is never called. That third call site was missed
+        by a grep for the function because it is passed as a callable, not
+        called (Codex code gate).
+        """
+        from memtomem.cli.context_cmd import ContextGatewayConfig  # noqa: F401 — patched below
+        from memtomem.context.projects import KnownProjectsStore, compute_scope_id
+        from memtomem.server.tools.context import mem_context_artifact_transfer
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        proj_a, proj_b = tmp_path / "proj-a", tmp_path / "proj-b"
+        for proj in (proj_a, proj_b):
+            (proj / ".git").mkdir(parents=True)
+            (proj / ".memtomem").mkdir()
+        kp = tmp_path / "known_projects.json"
+
+        class _FakeCfg:
+            known_projects_path = kp
+            experimental_claude_projects_scan = False
+            auto_display_configured_projects = True
+
+        monkeypatch.setattr("memtomem.cli.context_cmd.ContextGatewayConfig", lambda: _FakeCfg())
+        monkeypatch.chdir(proj_a)
+        KnownProjectsStore(kp).add(proj_b)
+
+        store = proj_a / ".memtomem" / "skills"
+        store.mkdir()
+        p = _row_2(store)
+
+        out = await mem_context_artifact_transfer(
+            asset_type="skills",
+            name="skill",
+            mode="copy",
+            to_project_scope_id=compute_scope_id(proj_b),
+            # Dry run: discovery must resolve the tier, and nothing may be written.
+        )
+
+        assert "not found" not in out, out
+        assert _residue(store) == sorted([p["marker"].name, p["old"].name, p["staging"].name]), (
+            "a dry run must not recover anything"
+        )
+
 
 class TestSeeder:
     """The dev seeder stops loudly rather than seeding over a wedged Store."""
@@ -520,6 +745,28 @@ class TestSeeder:
             seed_adr0026_validation_states(tmp_path)
 
         assert _residue(skills) == before
+
+    def test_the_second_seeded_skill_has_its_own_prelude(self, tmp_path: Path) -> None:
+        """Two writes, two locks, two preludes — and the first one aborts the run.
+
+        A wedge on the FIRST skill stops the seeder before the second write, so
+        a test that only wedges ``code-review`` would stay green with the
+        second prelude deleted. This one wedges ``commit-helper`` instead, which
+        is only reachable after the first write has already succeeded.
+        """
+        from memtomem.context._validation_seed import SKILL_IN_SYNC, seed_adr0026_validation_states
+
+        skills = tmp_path / ".memtomem" / "skills"
+        skills.mkdir(parents=True)
+        p = _row_2(skills, name=SKILL_IN_SYNC)
+
+        seed_adr0026_validation_states(tmp_path)
+
+        # The second write's prelude converged the transaction, then the seeder
+        # overwrote the manifest with its own body — no residue either way.
+        assert _residue(skills) == []
+        assert p["dst"].is_dir()
+        assert SKILL_IN_SYNC in (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8")
 
     def test_the_cli_turns_it_into_a_one_line_error(self, tmp_path: Path) -> None:
         from click.testing import CliRunner

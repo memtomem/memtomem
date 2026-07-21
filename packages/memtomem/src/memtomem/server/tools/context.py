@@ -2076,6 +2076,13 @@ async def mem_context_artifact_transfer(
                 nm,
                 src_root,
                 cast("TargetScope | None", frm),
+                # Same opt-in as the engine probe and the CLI's (ADR-0030 §10):
+                # without it a skill caught between a swap's two renames fails
+                # this default-tier lookup and never reaches the engine that
+                # could recover it. Third of three probes on the transfer path —
+                # a grep for the call missed this one because it is passed to
+                # ``to_thread`` as a callable rather than called here.
+                marker_counts_as_presence=True,
             )
         except click.ClickException as exc:
             return f"error: {exc.message}"

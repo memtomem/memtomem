@@ -69,28 +69,40 @@ _LOCK_PATH_BUILDERS = frozenset({"_lock_path_for", "canonical_lock_path"})
 #: Names that satisfy §10 when they dominate a C0 body.
 _PRELUDES = frozenset({"run_swap_prelude", "_recover_and_reap_internal_dirs"})
 
-#: Mutating calls used by the ``before_mutators`` dominance mode only (see
-#: :class:`_Site`). Deliberately small and deliberately NOT the membership
-#: rule: a mutator missing here weakens dominance at the two sites that use
-#: that mode, and nothing else.
-_MUTATORS = frozenset(
+#: Calls allowed to run BEFORE the prelude in the ``lock_loop`` dominance mode.
+#:
+#: An allowlist, not a blocklist of mutators. A blocklist is not a dominance
+#: check at all (Codex code gate): anything it forgets — an unlisted write, or
+#: a ``dst.exists()`` probe, which is the very read §10 is about — sails past
+#: it. These names are the lock-acquisition machinery and pure computation over
+#: paths; nothing here touches an artifact tree, so a body that reaches the
+#: prelude having called only these has read and written nothing.
+_PRE_PRELUDE_ALLOWED = frozenset(
     {
-        "_stage_skill",
-        "_promote_staging",
-        "_stage_copy",
-        "_stage_move",
-        "_promote_move",
-        "create_tree_version",
-        "create_version",
-        "atomic_write_text",
-        "atomic_write_bytes",
-        "copy_tree_atomic",
-        "copy_asset_at_commit",
-        "rmtree",
-        "replace",
-        "mkdir",
-        "unlink",
-        "_write_lf",
+        # lock acquisition itself
+        "_file_lock",
+        "async_file_lock",
+        "_lock_path_for",
+        "canonical_lock_path",
+        "enter_context",
+        "ExitStack",
+        "_lock_timeout",
+        # pure builtins / path algebra over names
+        "sorted",
+        "set",
+        "frozenset",
+        "list",
+        "dict",
+        "tuple",
+        "len",
+        "str",
+        "append",
+        "add",
+        "get",
+        "keys",
+        "values",
+        "items",
+        "SkillSyncResult",
     }
 )
 
@@ -162,11 +174,36 @@ def _qualname_for(spans: list[tuple[int, int, str]], lineno: int) -> str:
     return best
 
 
+def _alias_expand(tree: ast.AST) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """``local spelling → canonical name`` for wrappers, primitives and builders.
+
+    ``import X as Y`` is the one rename an AST scan cannot see through by
+    default, and it is a rename the tree is free to adopt tomorrow. Every local
+    binding maps back to the original name so classifications keep their keys.
+    """
+    maps = (
+        {n: n for n in _WRAPPERS},
+        {n: n for n in _PRIMITIVES},
+        {n: n for n in _LOCK_PATH_BUILDERS},
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in node.names:
+            if alias.asname is None:
+                continue
+            original = alias.name.rsplit(".", 1)[-1]
+            for table in maps:
+                if original in table:
+                    table[alias.asname] = original
+    return maps
+
+
 def _bound_names(target: ast.AST) -> set[str]:
     return {sub.id for sub in ast.walk(target) if isinstance(sub, ast.Name)}
 
 
-def _canonical_path_vars(fn: ast.AST) -> set[str]:
+def _canonical_path_vars(fn: ast.AST, builders: frozenset[str] = _LOCK_PATH_BUILDERS) -> set[str]:
     """Names in *fn* that carry a canonical-lock path, transitively.
 
     Four binding shapes, and every one of them appears in the tree today:
@@ -182,7 +219,7 @@ def _canonical_path_vars(fn: ast.AST) -> set[str]:
     """
     names: set[str] = set()
     while True:
-        known = _LOCK_PATH_BUILDERS | names
+        known = builders | names
         grown = set(names)
         for node in ast.walk(fn):
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
@@ -231,9 +268,15 @@ def sites_in_source(source: str, module: str) -> tuple[list[_Site], ast.AST]:
     """
     tree = ast.parse(source)
     spans = _qualname_index(tree)
+    # Local spellings of the tracked names, so a renaming import cannot hide an
+    # acquisition: ``from … import canonical_sidecar_lock as c0_lock`` binds a
+    # different Name, and a purely name-based scan would see nothing (Codex code
+    # gate). The alias is registered under the ORIGINAL name so the registry key
+    # stays stable if the alias is later changed.
+    wrappers, primitives, builders = _alias_expand(tree)
     # Function-scoped variable analysis for the derived-primitive form.
     fn_nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    var_cache = {id(n): _canonical_path_vars(n) for n in fn_nodes}
+    var_cache = {id(n): _canonical_path_vars(n, frozenset(builders)) for n in fn_nodes}
 
     def vars_at(lineno: int) -> set[str]:
         found: set[str] = set()
@@ -247,19 +290,19 @@ def sites_in_source(source: str, module: str) -> tuple[list[_Site], ast.AST]:
         # Form 1 — a reference to an approved wrapper. The wrappers' own
         # definitions are not matched (a ``def`` is a FunctionDef, not a Name)
         # and neither are imports (an alias) or docstring mentions (a string).
-        if isinstance(node, ast.Name) and node.id in _WRAPPERS:
-            hits.append((node.lineno, node.id, node))
+        if isinstance(node, ast.Name) and node.id in wrappers:
+            hits.append((node.lineno, wrappers[node.id], node))
             continue
-        if isinstance(node, ast.Attribute) and node.attr in _WRAPPERS:
-            hits.append((node.lineno, node.attr, node))
+        if isinstance(node, ast.Attribute) and node.attr in wrappers:
+            hits.append((node.lineno, wrappers[node.attr], node))
             continue
         # Form 2 — a raw primitive whose path argument is canonical-derived.
         if isinstance(node, ast.Call):
             callee = _callee_name(node.func)
-            if callee in _PRIMITIVES and node.args:
+            if callee in primitives and node.args:
                 arg = node.args[0]
-                if _mentions(arg, _LOCK_PATH_BUILDERS) or _mentions(arg, vars_at(node.lineno)):
-                    hits.append((node.lineno, callee, node))
+                if _mentions(arg, set(builders)) or _mentions(arg, vars_at(node.lineno)):
+                    hits.append((node.lineno, primitives[callee], node))
 
     sites: list[_Site] = []
     counters: dict[tuple[str, str], int] = {}
@@ -297,7 +340,7 @@ def discover_sites() -> list[_Site]:
 
 #: ``key → (classification, dominance_mode, why)``. ``dominance_mode`` is read
 #: only for :data:`RUNS_SWAP_PRELUDE`: ``"first"`` (the prelude is the first
-#: executable statement of the locked body) or ``"before_mutators"`` (the two
+#: executable statement of the locked body) or ``"lock_loop"`` (the one
 #: batch sites whose lock acquisition is itself a loop — see the module note on
 #: dominance). Every row states WHY in its own words; a row with no reason is
 #: how an unexamined site sneaks in wearing a classification.
@@ -315,7 +358,7 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
     ),
     ("context/skills.py", "generate_all_skills", 0, "_file_lock"): (
         RUNS_SWAP_PRELUDE,
-        "before_mutators",
+        "lock_loop",
         "project_shared push: acquires N destination locks in an ExitStack loop, "
         "then recovers per destination, so no single statement can be first — "
         "the batch cannot recover a destination before it holds every lock "
@@ -706,12 +749,14 @@ def _locked_body(module_tree: ast.AST, site: _Site) -> list[ast.stmt] | None:
 def _leading_calls(body: list[ast.stmt]) -> set[str]:
     """Callee names reachable as the FIRST executable step of *body*.
 
-    A ``try:`` or a ``for``/``async for`` that leads the body is descended
-    into: both are how the shipping recovery sites spell "run the prelude
-    first" — the import path wraps it to convert the refusal into a typed skip,
-    and the per-destination paths loop over their destinations. Anything else
-    (an assignment, an ``if``, a probe) ends the walk, which is the point: those
-    are exactly the pre-recovery reads §10 forbids.
+    A ``try:`` that leads the body is descended into — that is how two shipping
+    sites spell "run the prelude first", wrapping it to convert the refusal into
+    a typed per-item skip. Anything else (an assignment, an ``if``, a ``for``, a
+    probe) ends the walk, which is the point: those are exactly the
+    pre-recovery reads §10 forbids. A ``for`` is deliberately NOT descended
+    into here — its iterator is evaluated first, and a zero-iteration loop runs
+    the prelude never; the loop-shaped sites are classified ``lock_loop`` and
+    checked by :func:`_prelude_precedes_any_work` instead (Codex code gate).
     """
     names: set[str] = set()
     while body:
@@ -724,22 +769,36 @@ def _leading_calls(body: list[ast.stmt]) -> set[str]:
         if isinstance(head, ast.Try):
             body = head.body
             continue
-        if isinstance(head, (ast.For, ast.AsyncFor)):
-            body = head.body
-            continue
         return names
     return names
 
 
-def _prelude_precedes_mutators(body: list[ast.stmt]) -> bool:
-    """Whether a prelude call comes before any mutator in *body*'s statement order."""
-    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
-        if not isinstance(node, ast.Call):
-            continue
+def _prelude_precedes_any_work(body: list[ast.stmt]) -> bool:
+    """Whether the prelude runs before ANY call that is not lock machinery.
+
+    The ``lock_loop`` mode, for a body whose acquisition is itself a loop over
+    ``enter_context`` — no single statement can be first there, because the
+    batch cannot recover a destination until it holds every lock.
+
+    Checked against an ALLOWLIST (:data:`_PRE_PRELUDE_ALLOWED`). The earlier
+    blocklist-of-mutators form was not a dominance check: it passed any write
+    it had not been told about, and passed every filesystem *read* by
+    construction — including the ``exists()`` probe whose pre-recovery answer is
+    the whole problem.
+    """
+    calls = [
+        node
+        for node in ast.walk(ast.Module(body=body, type_ignores=[]))
+        if isinstance(node, ast.Call)
+    ]
+    # SOURCE order, not ``ast.walk`` order — the walk is breadth-first, so
+    # "the first Call it yields" is a different claim entirely (and one that
+    # silently accepts a probe nested a level deeper than the prelude).
+    for node in sorted(calls, key=lambda n: (n.lineno, n.col_offset)):
         name = _callee_name(node.func)
         if name in _PRELUDES:
             return True
-        if name in _MUTATORS:
+        if name not in _PRE_PRELUDE_ALLOWED:
             return False
     return False
 
@@ -766,7 +825,7 @@ def test_classifications_are_from_the_closed_set_and_explained() -> None:
         assert classification in _CLASSIFICATIONS, f"{key}: unknown classification"
         assert why.strip(), f"{key}: classification with no written reason"
         if classification == RUNS_SWAP_PRELUDE:
-            assert mode in {"first", "before_mutators"}, f"{key}: bad dominance mode {mode!r}"
+            assert mode in {"first", "lock_loop"}, f"{key}: bad dominance mode {mode!r}"
         else:
             assert mode == "", f"{key}: dominance mode only applies to {RUNS_SWAP_PRELUDE}"
 
@@ -800,7 +859,7 @@ def test_skills_c0_sites_run_the_prelude_first() -> None:
                     f"{site.module}:{site.lineno} ({site.qualname}) — the locked body does "
                     "not START with a prelude call"
                 )
-        elif not _prelude_precedes_mutators(body):
+        elif not _prelude_precedes_any_work(body):
             offenders.append(
                 f"{site.module}:{site.lineno} ({site.qualname}) — a mutator runs before the prelude"
             )
@@ -868,12 +927,55 @@ def writer(root, name):
         _promote_staging(stage, root / name)
 """
 
+_SYNTHETIC_ALIASED_IMPORT = """
+from memtomem.context._canonical_txn import canonical_sidecar_lock as c0_lock
+
+def new_writer(root, name):
+    with c0_lock(root, name):
+        write(root / name)
+"""
+
+#: The ``lock_loop`` mode's two escapes under the old blocklist rule: a
+#: filesystem PROBE (allowed by construction — it mutates nothing) and a write
+#: the blocklist had simply never heard of.
+_SYNTHETIC_LOOP_PROBE_FIRST = """
+def new_batch(dsts):
+    with ExitStack() as stack:
+        for lock_path in sorted({_lock_path_for(d) for d in dsts}):
+            stack.enter_context(_file_lock(lock_path))
+        if dsts[0].exists():
+            return
+        for dst in dsts:
+            run_swap_prelude(dst.parent, dst.name, kind="skills")
+"""
+
+_SYNTHETIC_LOOP_UNLISTED_WRITE_FIRST = """
+def new_batch(dsts):
+    with ExitStack() as stack:
+        for lock_path in sorted({_lock_path_for(d) for d in dsts}):
+            stack.enter_context(_file_lock(lock_path))
+        _some_new_writer(dsts)
+        for dst in dsts:
+            run_swap_prelude(dst.parent, dst.name, kind="skills")
+"""
+
+_SYNTHETIC_LOOP_PRELUDE_FIRST = """
+def new_batch(dsts):
+    with ExitStack() as stack:
+        for lock_path in sorted({_lock_path_for(d) for d in dsts}):
+            stack.enter_context(_file_lock(lock_path))
+        for dst in dsts:
+            run_swap_prelude(dst.parent, dst.name, kind="skills")
+        _some_new_writer(dsts)
+"""
+
 
 def test_guard_detects_every_acquisition_form() -> None:
     for label, source in (
         ("wrapper call", _SYNTHETIC_CALL_FORM),
         ("wrapper passed to an executor", _SYNTHETIC_OFFLOAD_FORM),
         ("raw primitive on a loop-variable path", _SYNTHETIC_LOOP_VAR_FORM),
+        ("wrapper imported under an alias", _SYNTHETIC_ALIASED_IMPORT),
     ):
         sites, _tree = sites_in_source(source, "synthetic.py")
         assert sites, f"discovery missed a {label} acquisition"
@@ -881,6 +983,33 @@ def test_guard_detects_every_acquisition_form() -> None:
             "the synthetic module must be UNclassified — that is what makes a new "
             "acquisition fail the build"
         )
+
+
+def test_an_alias_keeps_the_original_name_in_its_key() -> None:
+    """Alias resolution must not fork the registry key onto the local spelling."""
+    sites, _tree = sites_in_source(_SYNTHETIC_ALIASED_IMPORT, "synthetic.py")
+    assert [s.callee for s in sites] == ["canonical_sidecar_lock"]
+
+
+def test_lock_loop_dominance_rejects_any_pre_prelude_work() -> None:
+    """The allowlist rule: a probe or an unlisted write before the prelude fails.
+
+    Both were accepted by the blocklist-of-mutators form this replaced — the
+    probe because it mutates nothing, the write because the list had not been
+    told about it (Codex code gate).
+    """
+    for label, source in (
+        ("an exists() probe", _SYNTHETIC_LOOP_PROBE_FIRST),
+        ("an unlisted write", _SYNTHETIC_LOOP_UNLISTED_WRITE_FIRST),
+    ):
+        sites, tree = sites_in_source(source, "synthetic.py")
+        body = _locked_body(tree, sites[0])
+        assert body is not None
+        assert not _prelude_precedes_any_work(body), f"lock_loop dominance accepted {label}"
+
+    sites, tree = sites_in_source(_SYNTHETIC_LOOP_PRELUDE_FIRST, "synthetic.py")
+    body = _locked_body(tree, sites[0])
+    assert body is not None and _prelude_precedes_any_work(body)
 
 
 def test_dominance_rejects_a_missing_or_demoted_prelude() -> None:
