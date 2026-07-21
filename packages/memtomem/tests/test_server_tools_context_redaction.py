@@ -41,7 +41,7 @@ exercised here.
 
 from __future__ import annotations
 
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -122,7 +122,11 @@ class TestNeutralRedactor:
         from memtomem.web.routes.context_gateway import sanitize_diff_reason
 
         monkeypatch.setattr(error_redact, "_HOME", "/home/alice")
-        root = Path("/home/alice/work/memtomem")
+        # Keep the fabricated POSIX root POSIX-shaped on Windows too. ``Path``
+        # would turn it into ``\\home\\...`` there while the reason remains
+        # slash-shaped, testing a representation mismatch rather than the
+        # pre-HOME collision ordering.
+        root = PurePosixPath("/home/alice/work/memtomem")
         reason = "unreadable: /home/alice/work/memtomem-stm/team/secret.md"
 
         assert _redact_reason(reason, root) == "unreadable: <path>"
@@ -142,7 +146,8 @@ class TestNeutralRedactor:
         from memtomem.server.tools.context import _redact_reason
         from memtomem.web.routes.context_gateway import sanitize_diff_reason
 
-        root = Path("/srv/project")
+        # This is intentionally a synthetic POSIX reason on every CI host.
+        root = PurePosixPath("/srv/project")
         reason = "unreadable: /prefix/srv/project/team/secret.md"
 
         assert _redact_reason(reason, root) == "unreadable: <path>"
