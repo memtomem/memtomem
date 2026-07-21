@@ -58,6 +58,20 @@ class NamespaceRenameResult:
 
 
 @dataclass(frozen=True, slots=True)
+class NamespaceAssignResult:
+    """Outcome of :meth:`StorageBackend.assign_namespace`.
+
+    Assignment can explicitly consolidate duplicate chunks instead of moving
+    them, so one integer cannot distinguish rows rewritten from rows deleted.
+    """
+
+    #: Selected non-target rows whose namespace was rewritten.
+    chunks_moved: int
+    #: Selected duplicate rows removed during an explicit merge.
+    duplicates_dropped: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class SearchMetadataFilter:
     """Exact metadata constraints applied before retrieval limits."""
 
@@ -71,7 +85,8 @@ class StorageBackend(Protocol):
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
 
-    # Transaction
+    # Task-affine transaction. Implementations may restrict the body to
+    # operations that explicitly participate in the outer commit/rollback.
     def transaction(self) -> AbstractAsyncContextManager[None]: ...
 
     # Chunk CRUD
@@ -141,6 +156,21 @@ class StorageBackend(Protocol):
         source_files: Sequence[Path],
         limit_per_file: int = 10000,
     ) -> dict[Path, list[Chunk]]: ...
+    # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
+    # set while keeping every other filter this method applies — notably the
+    # always-on ADR-0011 scope fragment and the ``created_at DESC`` ordering.
+    # Fetching the same rows through ``get_chunks_batch`` would bypass both.
+    #
+    # Presence-gated, not truthiness-gated: ``chunk_ids=None`` means "no id
+    # filter", while an **empty sequence** means "these zero ids" and matches
+    # nothing. Passing a caller's filtered-down list must never silently widen
+    # into an unfiltered scan.
+    #
+    # ``sum_chunk_content_chars`` returns ``(count, total_content_chars)`` for
+    # the same id set + scope filter without materializing a row. The unit is
+    # **characters** (SQLite ``LENGTH()`` on TEXT), matching
+    # ``session_summary.max_input_chars``; it is a lower bound on any prompt
+    # built from those rows, never the authoritative limit.
     async def recall_chunks(
         self,
         since: datetime | None = None,
@@ -152,7 +182,13 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        chunk_ids: Sequence[UUID] | None = None,
     ) -> list[Chunk]: ...
+    async def sum_chunk_content_chars(
+        self,
+        chunk_ids: Sequence[UUID],
+        project_context_root: Path | None = None,
+    ) -> tuple[int, int]: ...
 
     # Audit enumeration (independent of search / recall paths)
     #
@@ -229,6 +265,7 @@ class StorageBackend(Protocol):
         self, session_id: str, agent_id: str, namespace: str, metadata: dict | None = None
     ) -> None: ...
     async def end_session(self, session_id: str, summary: str | None, metadata: dict) -> None: ...
+    async def update_session_metadata(self, session_id: str, patch: dict) -> bool: ...
     async def add_session_event(
         self,
         session_id: str,
@@ -315,4 +352,6 @@ class StorageBackend(Protocol):
         namespace: str,
         source_filter: str | None = None,
         old_namespace: str | None = None,
-    ) -> int: ...
+        *,
+        merge: bool = False,
+    ) -> NamespaceAssignResult: ...

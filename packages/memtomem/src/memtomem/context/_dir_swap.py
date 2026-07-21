@@ -104,11 +104,13 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "SwapForeignDestination",
     "SwapRecoveryError",
+    "has_pending_swap",
     "marker_owns_transient",
     "new_swap_suffix",
     "recover_pending_swaps",
     "staging_path_for",
     "swap_dir_tree",
+    "swap_failure_text",
 ]
 
 
@@ -442,6 +444,76 @@ def _find_marker(root: Path, name: str) -> Path | None:
             str(root / name),
         )
     return found[0]
+
+
+def swap_failure_text(exc: SwapRecoveryError) -> str:
+    """The sentence a surface should show for *exc*.
+
+    Every raise here uses the three-argument ``OSError`` form, so ``str(exc)``
+    renders as ``[Errno 16] <sentence>: '<path>'`` — an errno nobody acts on in
+    front, and a repeat of a path the sentence already names (quoted, for the
+    redactors) behind. That is what reached the CLI, the 409 body and the MCP
+    line before this existed.
+
+    ``strerror`` is the sentence as written — but **the filename is re-attached
+    unless the sentence already names it** (PR review). Only some raises here
+    embed their paths in the prose: the ambiguous-provenance row names both
+    trees because an operator must compare them, while ``swap marker is not a
+    JSON object`` and ``swap transient exists but is not a directory`` carry the
+    offending path in ``filename`` alone. Returning ``strerror`` flat would drop
+    it, and with a transfer holding two canonical roots the reader could not
+    tell which side needs repairing.
+
+    Quoted, because that is this package's wire contract: the web/MCP redactors
+    replace a path run with ``<path>`` and their segment class includes spaces,
+    so an unquoted path swallows the prose after it.
+
+    The fallback keeps a single-argument raise (none today, but the class does
+    not forbid one) from rendering as an empty message.
+    """
+    text = exc.strerror or str(exc)
+    filename = exc.filename
+    if filename and str(filename) not in text:
+        return f"{text}: '{filename}'"
+    return text
+
+
+def has_pending_swap(root: Path, name: str) -> bool:
+    """Whether a live swap marker for *name* sits under *root*. Read-only.
+
+    Evidence that the artifact belongs to this canonical root even when its
+    ``<root>/<name>/`` tree is momentarily absent — the window between the two
+    renames of a swap. Artifact *discovery* uses it so an interrupted
+    transaction stays reachable by the operations that can repair it
+    (ADR-0030 §10 / the transfer path's ``marker_counts_as_presence``);
+    without it the source probe reports "not found" and the prelude that would
+    resolve the swap is never reached.
+
+    **Never raises and never mutates**, so a preview / dry-run stays
+    side-effect free and a wedged artifact cannot turn a read into an error:
+
+    * two markers for one name — the fail-closed state of :func:`_find_marker`
+      — still answers ``True``. It is the strongest possible evidence that
+      something is mid-transaction here, and the refusal belongs to the prelude
+      under the lock, where it can be reported with the right remediation.
+    * an unreadable root answers ``False`` — a directory we cannot scan is not
+      evidence of anything, and discovery has its own not-found wording.
+
+    ``name`` is deliberately NOT validated: the matcher is built with
+    ``re.escape``, so a name that could not address an artifact simply matches
+    nothing, and callers reach discovery before the name has necessarily been
+    through :func:`~memtomem.context._names.validate_name`.
+
+    This is a *presence* signal only. It says nothing about whether the tree is
+    recoverable or intact, so a caller must still re-establish its own contract
+    (layout, manifest) under the lock after the prelude has run.
+    """
+    try:
+        return _find_marker(root, name) is not None
+    except SwapRecoveryError:
+        return True
+    except OSError:
+        return False
 
 
 def _load_marker(marker: Path, root: Path, name: str) -> _SwapPaths:

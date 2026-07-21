@@ -7,6 +7,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Every writer of a skill now recovers an interrupted update, not just three**
+  (ADR-0030 §10, PR-G4a-3b) — the follow-up promised below. Skill
+  create/edit/delete in the web UI, `mm context install` / `update` from the
+  wiki, cross-scope transfer, `copy_skill` and the validation seeder all take a
+  skill's canonical lock; none of them recovered a pending transaction, so each
+  could write over one and leave the next recovery deleting the only surviving
+  copy. All of them now run recovery first — **before** their own
+  already-exists / dirty / collision checks, since those decide on what they
+  read, and reading the half-swapped state is how a recoverable crash became a
+  refusal or an overwrite.
+  Each surface reports the ambiguous case in its own vocabulary: HTTP **409**
+  `swap_recovery_pending` on the web API, `refused: swap_recovery_pending:` from
+  the MCP tools, a one-line error (never a traceback) on the CLI, and a per-row
+  failure that lets a batch continue. Nothing is deleted in any of them.
+  A **cross-scope transfer can now reach an artifact mid-swap at all**: source
+  discovery previously reported "not found" while the tree was between renames,
+  which meant the one operation that could repair it refused to look. A live
+  marker now counts as evidence the artifact lives in that scope — read-only, so
+  a dry run still changes nothing — and the transfer re-verifies the full
+  layout under its locks before moving anything.
+  A build-time guard now derives the list of canonical-lock holders **from the
+  source tree** and fails if any is unclassified, so a future writer cannot join
+  the gap quietly. That is deliberate: the hand-written list this PR started
+  from had already missed one of the ten.
+
 - **Interrupted skill updates are now recovered before the next write**
   (ADR-0030 §10, PR-G4a-3a) — PR-G4a-2 shipped the crash-safe directory swap
   and its recovery machine with no caller. **Push, reverse import and Pull**
@@ -23,13 +48,98 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   In every case the operation you asked for did **not** run — recovery may have
   safely advanced the leftover transaction first, but it never half-applies
   your request and never leaves the artifact worse than it found it.
-  **Not yet every writer.** Skill create/edit/delete in the web UI, wiki
-  install/update, cross-scope transfer and `copy_skill` still take the lock
-  without recovering, so those paths can still overwrite a pending transaction
-  — the pre-existing behavior, unchanged here. Wiring them is a follow-up, and
-  it ships with a build-time guard that finds such writers by analyzing the
-  tree rather than from a hand-written list, because the list is exactly what
-  missed them.
+  **Not yet every writer** at the time this shipped: skill create/edit/delete
+  in the web UI, wiki install/update, cross-scope transfer and `copy_skill`
+  still took the lock without recovering. PR-G4a-3b (above) closed that gap.
+
+- **Sessions record what they wrote** (#1876, PR-A3 of 4) — the seven
+  chunk-creating MCP write tools (`mem_add`, `mem_batch_add`, `mem_index`,
+  `mem_fetch`, `mem_agent_share`, `mem_candidate_review`,
+  `mem_consolidate_apply`) now append one session event naming the chunk ids
+  they created, and `mem_session_start` marks its session as
+  provenance-recording. `- Events: N (add:M, index:K)` in the
+  `mem_session_end` response therefore reflects real writes for the first
+  time. The auto-summary still picks its inputs by namespace — **PR-B**
+  switches it over to this record and closes #1876, at which point a session
+  whose writes were routed elsewhere by a namespace rule stops silently
+  producing no summary.
+
+  Attribution is fixed alongside: a write's session id and its namespace are
+  now read in a single lock acquisition, after the file-lock wait, so a
+  session transition landing mid-write can no longer file the chunks under
+  one session and the record under another.
+
+  The marker says a session *records* provenance, not that the record is
+  complete. `provenance_incomplete` is set separately — on truncation past
+  the per-event id cap, when a write outran session teardown or the drain
+  timed out, and when indexing failed after the content was already durable
+  (whether it raised or reported the failure in its stats). It is also set
+  when an append's own record overstates it: appending under a heading a
+  previous session wrote to re-chunks both into one chunk with a new id, so
+  this session's record would name text it did not author.
+
+  And it is set by every tool that changes a session's chunk set without
+  being summarizable from it: `mem_edit` and `mem_delete` (they re-chunk
+  rather than add), the bulk deletes `mem_ns_delete`, `mem_cleanup_orphans`,
+  `mem_dedup_merge` and `mem_decay_expire` (they remove chunks an earlier
+  event still names), and the bulk importers `mem_import`,
+  `mem_import_notion` and `mem_import_obsidian` (their output is an ingest,
+  not session work).
+
+  A test walks the tool source and fails any function that reaches the
+  indexing engine or deletes chunks — directly or through a helper — while
+  doing neither. A hand-written list of write surfaces checked against
+  itself is how the importers and the bulk deletes were missed in the first
+  place; the guard found `mem_ns_delete`, `mem_cleanup_orphans`,
+  `mem_dedup_merge` and `mem_decay_expire` on its own.
+
+  Sessions created by the CLI or the LangGraph adapter carry no marker and
+  are unaffected.
+
+  One visible change today: indexing a large tree inside a session can
+  outlast the 2-second teardown drain, so `mem_session_end` reports
+  `- Warning: writes still in flight — event counts may be short` instead of
+  presenting a short count as complete.
+
+### Fixed
+
+- **SQLite transaction contexts now own a real, task-affine write
+  transaction** (#1896) — `transaction()` takes `BEGIN IMMEDIATE` before its
+  first read or write, so borrowed read-modify-write operations cannot merge a
+  stale snapshot. The shared writer connection now rejects access from another
+  asyncio task instead of letting that task silently join, commit, or roll back
+  the owner's work; callers can retry after the context exits. Cancellation and
+  other `BaseException` exits roll back before releasing ownership, and pooled
+  readers continue to see only committed state.
+
+- **Namespace bulk assignment now handles overlapping chunks explicitly**
+  (#1886) — `ns_assign` used to discover a duplicate only when SQLite rejected
+  its bare `UPDATE` against the unique content index, leaving callers with an
+  internal `IntegrityError`. It now preflights the exact filtered row set under
+  a write lock and refuses with the overlap count before changing anything.
+  Literal `merge=true` opts into target-wins consolidation, preserves/remaps
+  references, removes redundant FTS/vector sidecars, and reports moved versus
+  dropped rows separately. A merge that drops recorded chunk IDs marks the
+  active session's write provenance incomplete instead of leaving dangling IDs
+  under a completeness claim. The operation is savepoint-backed and no longer
+  commits or rolls back a caller-owned transaction.
+
+- **Namespace delete and metadata upsert now respect transaction ownership**
+  (#1888) — `delete_by_namespace` and `set_namespace_meta` previously committed
+  or rolled back the shared SQLite connection unconditionally, so they could
+  flush or discard a caller's earlier writes. Both now take the write lock up
+  front, isolate their own statements in dedicated savepoints, and commit or
+  roll back the connection only when they opened the transaction. A pending
+  transaction not owned by `SqliteBackend.transaction()` is refused without
+  modification; failures restore deleted chunks and index sidecars or remove a
+  partially inserted metadata row while preserving the caller's prior work.
+
+- `add_session_event` was the only write in the session storage mixin that
+  committed unconditionally and had no rollback arm, so a caller's enclosing
+  transaction was flushed early — beyond the reach of its own later rollback
+  — and a failing insert left the transaction open on the shared writer
+  connection for the next statement to hit "database is locked". It now
+  matches `create_session` and `end_session`.
 
 - **Crash-safe directory swap** (ADR-0030 §10, PR-G4a-2) — a new internal
   primitive that replaces a whole artifact tree and can recover from an
@@ -348,6 +458,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   observations, and both search caches.
 
 ### Fixed
+
+- **Context wire redaction now covers single-segment absolute paths** (#1890) —
+  a runtime root such as `/secretmount` or `C:\secretmount` can appear in an
+  `OSError`, but the shared Web/MCP backstops required two path segments and
+  passed it through. Quoted filenames and bare terminal error values now redact
+  to `<path>` while slash-bearing prose, URLs, relative remediation paths, and
+  `~`-collapsed paths retain their existing behavior.
+
+- **Session metadata and chunk detail now preserve the HTTP scope contract**
+  (#1897) — `GET /api/sessions` returns each session's decoded metadata object,
+  including its title and write-provenance completeness state. Direct
+  `GET /api/chunks/{id}` reads now pass through the same ADR-0011 project
+  boundary as recall, so knowing an id cannot reveal another project's chunk;
+  missing and out-of-scope ids both return the existing 404 response.
 
 - **A failed namespace rename no longer half-applies** (#1874) —
   `mem_ns_rename` rewrote the chunk rows first and renamed the namespace's

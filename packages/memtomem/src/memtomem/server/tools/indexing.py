@@ -8,7 +8,10 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
-from memtomem.server.tools.multi_agent import _resolve_agent_namespace
+from memtomem.server.tools._provenance import (
+    capture_session_and_namespace,
+    record_write_provenance,
+)
 
 
 @mcp.tool()
@@ -38,15 +41,33 @@ async def mem_index(
         return mismatch_msg
 
     target = Path(path).expanduser().resolve()
-    effective_ns = namespace or _resolve_agent_namespace(app, None)
 
-    stats = await app.index_engine.index_path(
-        target,
-        recursive=recursive,
-        force=force,
-        namespace=effective_ns,
-        path_scope="explicit",
-    )
+    # The gauge spans capture -> index -> provenance event. Indexing a
+    # large tree can outlast the session-teardown drain budget, in which
+    # case ``mem_session_end`` reports that writes were still in flight
+    # rather than presenting a short event count as complete.
+    async with app.write_in_flight():
+        # Session id and namespace in one ``_session_lock`` acquisition:
+        # split, a transition between them files the chunks and their
+        # provenance under different sessions.
+        provenance_session_id, effective_ns = await capture_session_and_namespace(app, namespace)
+
+        stats = await app.index_engine.index_path(
+            target,
+            recursive=recursive,
+            force=force,
+            namespace=effective_ns,
+            path_scope="explicit",
+        )
+
+        # No-ops on its own when nothing new was written, which covers the
+        # zero-file and unchanged-re-index paths below.
+        await record_write_provenance(
+            app,
+            session_id=provenance_session_id,
+            event_type="index",
+            stats=stats,
+        )
 
     if stats.errors and stats.total_files == 0:
         return "Error: " + "; ".join(stats.errors)

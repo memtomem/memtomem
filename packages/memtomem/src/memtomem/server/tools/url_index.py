@@ -9,7 +9,10 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.tools.multi_agent import _resolve_agent_namespace
+from memtomem.server.tools._provenance import (
+    capture_session_and_namespace,
+    record_write_provenance,
+)
 
 
 @mcp.tool()
@@ -67,36 +70,49 @@ async def mem_fetch(
     # but not indexed, and surfaced here instead of silently reporting success.
     from memtomem.indexing.engine import PrivacyRejection
 
-    effective_ns = namespace or _resolve_agent_namespace(app, None)
-    try:
-        stats = await app.index_engine.index_file(
-            file_path, namespace=effective_ns, already_scanned=True
-        )
-    except PrivacyRejection as exc:
-        app.search_pipeline.invalidate_cache()
-        return (
-            f"Fetched but NOT indexed — blocked by the redaction guard: {url}\n"
-            f"- Saved to: {file_path}\n"
-            f"- Secret-pattern hits: {exc.hit_count}. Review the file; re-index "
-            f"with 'mm index --force-unsafe' if it is a false positive."
-        )
+    # The gauge closes only after the tag merge below: that re-upserts the
+    # very chunks the provenance ids name, so "the write has landed" is not
+    # true until it is done.
+    async with app.write_in_flight():
+        # One ``_session_lock`` acquisition for both — see ``_mem_add_core``.
+        provenance_session_id, effective_ns = await capture_session_and_namespace(app, namespace)
+        try:
+            stats = await app.index_engine.index_file(
+                file_path, namespace=effective_ns, already_scanned=True
+            )
+        except PrivacyRejection as exc:
+            app.search_pipeline.invalidate_cache()
+            # Nothing was indexed, so there is no provenance to record.
+            return (
+                f"Fetched but NOT indexed — blocked by the redaction guard: {url}\n"
+                f"- Saved to: {file_path}\n"
+                f"- Secret-pattern hits: {exc.hit_count}. Review the file; re-index "
+                f"with 'mm index --force-unsafe' if it is a false positive."
+            )
 
-    # Apply tags if provided
-    if tags and stats.indexed_chunks > 0:
-        chunks = await app.storage.list_chunks_by_source(file_path)
-        updated = []
-        for c in chunks:
-            merged = set(c.metadata.tags) | set(tags)
-            if merged != set(c.metadata.tags):
-                c.metadata = c.metadata.__class__(
-                    **{
-                        **{f: getattr(c.metadata, f) for f in c.metadata.__dataclass_fields__},
-                        "tags": tuple(sorted(merged)),
-                    }
-                )
-                updated.append(c)
-        if updated:
-            await app.storage.upsert_chunks(updated)
+        # Apply tags if provided
+        if tags and stats.indexed_chunks > 0:
+            chunks = await app.storage.list_chunks_by_source(file_path)
+            updated = []
+            for c in chunks:
+                merged = set(c.metadata.tags) | set(tags)
+                if merged != set(c.metadata.tags):
+                    c.metadata = c.metadata.__class__(
+                        **{
+                            **{f: getattr(c.metadata, f) for f in c.metadata.__dataclass_fields__},
+                            "tags": tuple(sorted(merged)),
+                        }
+                    )
+                    updated.append(c)
+            if updated:
+                await app.storage.upsert_chunks(updated)
+
+        await record_write_provenance(
+            app,
+            session_id=provenance_session_id,
+            event_type="fetch",
+            stats=stats,
+        )
 
     app.search_pipeline.invalidate_cache()
 

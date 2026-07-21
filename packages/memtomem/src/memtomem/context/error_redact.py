@@ -72,7 +72,39 @@ _ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
 # scrubbed to ``자료<path>``, destroying a relative remainder this function
 # exists to preserve (PR review). Filenames here come from user directories.
 _RESIDUAL_ABS_PATH_RE = re.compile(r"(?<![\w.\-~])(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
+
+# A single path segment is lexically indistinguishable from slash-bearing prose
+# (``read/write``, a slash command, a URL host). Keep the established broad
+# two-segment patterns above and add only the contexts engine errors actually
+# produce: a filename enclosed in matching quotes, or a bare terminal path that
+# is the whole message / the final value after ``: ``. Quoted segments may
+# contain spaces; bare ones may not, so they cannot swallow trailing prose.
+_QUOTED_SINGLE_SEGMENT = r"[^/\\'\"\n]+"
+_TERMINAL_SINGLE_SEGMENT = r"[^\s/\\'\"\n]+"
+# ``OSError`` filename rendering escapes a Windows separator as ``\\`` in the
+# displayed message, while custom engine reasons commonly contain the native
+# single separator. Accept both textual shapes after an explicit drive letter.
+_WINDOWS_TEXT_SEPARATOR = r"(?:/|\\{1,2})"
+_QUOTED_SINGLE_ABS_PATH_RE = re.compile(
+    rf"(?P<quote>['\"])(?:/{_QUOTED_SINGLE_SEGMENT}/?|"
+    rf"[A-Za-z]:{_WINDOWS_TEXT_SEPARATOR}{_QUOTED_SINGLE_SEGMENT}"
+    rf"(?:{_WINDOWS_TEXT_SEPARATOR})?)(?P=quote)"
+)
+_TERMINAL_SINGLE_ABS_PATH_RE = re.compile(
+    rf"(?P<prefix>^|:[ \t]+)(?:/{_TERMINAL_SINGLE_SEGMENT}/?|"
+    rf"[A-Za-z]:{_WINDOWS_TEXT_SEPARATOR}{_TERMINAL_SINGLE_SEGMENT}"
+    rf"(?:{_WINDOWS_TEXT_SEPARATOR})?)"
+    rf"(?P<trailing>[ \t]*)\Z"
+)
 _PATH_REDACTED_MARKER = "<path>"
+
+
+def _scrub_single_segment_absolute_paths(message: str) -> str:
+    """Scrub conservatively delimited one-segment POSIX/drive-root paths."""
+    quoted = _QUOTED_SINGLE_ABS_PATH_RE.sub(rf"\g<quote>{_PATH_REDACTED_MARKER}\g<quote>", message)
+    return _TERMINAL_SINGLE_ABS_PATH_RE.sub(
+        rf"\g<prefix>{_PATH_REDACTED_MARKER}\g<trailing>", quoted
+    )
 
 
 def redact_message(message: str) -> str:
@@ -134,7 +166,8 @@ def scrub_absolute_paths(message: str) -> str:
     runtime dir outside every known root cannot disclose its location to the
     calling agent's transcript.
     """
-    return _ABS_PATH_RE.sub(_PATH_REDACTED_MARKER, message)
+    scrubbed = _ABS_PATH_RE.sub(_PATH_REDACTED_MARKER, message)
+    return _scrub_single_segment_absolute_paths(scrubbed)
 
 
 def scrub_residual_absolute_paths(message: str) -> str:
@@ -159,4 +192,5 @@ def scrub_residual_absolute_paths(message: str) -> str:
     mismatch — and is pure disclosure. It cannot weaken the scrub relative to
     doing nothing, which is what this surface did before.
     """
-    return _RESIDUAL_ABS_PATH_RE.sub(_PATH_REDACTED_MARKER, message)
+    scrubbed = _RESIDUAL_ABS_PATH_RE.sub(_PATH_REDACTED_MARKER, message)
+    return _scrub_single_segment_absolute_paths(scrubbed)

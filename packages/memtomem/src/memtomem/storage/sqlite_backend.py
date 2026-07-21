@@ -12,7 +12,7 @@ import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Sequence
 from uuid import UUID
 
 import sqlite_vec
@@ -24,7 +24,12 @@ from memtomem.errors import (
     StorageError,
     StorageStartupError,
 )
-from memtomem.storage.base import ChunkAuditRow, NamespaceRenameResult, SearchMetadataFilter
+from memtomem.storage.base import (
+    ChunkAuditRow,
+    NamespaceAssignResult,
+    NamespaceRenameResult,
+    SearchMetadataFilter,
+)
 from memtomem.models import (
     Chunk,
     ChunkMetadata,
@@ -154,6 +159,23 @@ def _classify_startup_error(exc: BaseException, stage: str) -> StorageStartupErr
     )
 
 
+def _chunk_ids_sql(column_alias: str = "") -> str:
+    """SQL fragment restricting rows to an explicit chunk-id set.
+
+    Uses ``json_each`` over a single bound JSON array rather than an
+    ``IN (?,?,…)`` list, for three reasons: ``placeholders(0)`` raises, so
+    an IN-list cannot express the empty set at all; a large provenance
+    set would otherwise blow past SQLite's bound-variable limit; and one
+    parameter is cheaper to bind than thousands. Mirrors the ``json_each``
+    idiom already used for the tag filter.
+    """
+    return f"{column_alias}id IN (SELECT value FROM json_each(?))"
+
+
+def _chunk_ids_param(chunk_ids: Sequence[UUID]) -> str:
+    return json.dumps([str(cid) for cid in chunk_ids])
+
+
 def _metadata_filter_sql(
     metadata_filter: SearchMetadataFilter | None,
     *,
@@ -244,7 +266,10 @@ class SqliteBackend(
         self._policy_mismatch: tuple[str, str, int | None, int | None] | None = None
         self._meta: MetaManager | None = None
         self._ns: NamespaceOps | None = None
-        self._in_transaction: bool = False
+        # ``transaction()`` is task-affine.  The owner is also the guard for
+        # the single shared writer connection: another coroutine must never
+        # observe, commit, or roll back this task's pending writes.
+        self._transaction_owner: asyncio.Task[Any] | None = None
         self._read_pool: list[sqlite3.Connection] = []
         self._read_pool_idx = 0
         self._read_pool_lock = threading.Lock()
@@ -366,7 +391,31 @@ class SqliteBackend(
     def _get_db(self) -> sqlite3.Connection:
         if self._db is None:
             raise StorageError("Database not initialized. Call initialize() first.")
+        owner = self._transaction_owner
+        if owner is not None and owner is not self._current_task():
+            raise StorageError(
+                "SQLite transaction is owned by another task; retry after it completes"
+            )
         return self._db
+
+    @staticmethod
+    def _current_task() -> asyncio.Task[Any] | None:
+        """Return the running task, or ``None`` for defensive sync callers."""
+        try:
+            return asyncio.current_task()
+        except RuntimeError:
+            return None
+
+    @property
+    def _in_transaction(self) -> bool:
+        """Whether the current task owns this backend's write transaction."""
+        owner = self._transaction_owner
+        return owner is not None and owner is self._current_task()
+
+    def _require_transaction_idle(self, operation: str) -> None:
+        """Reject operations that bypass the guarded writer connection."""
+        if self._transaction_owner is not None:
+            raise StorageError(f"{operation} cannot run while a transaction is active")
 
     def _get_read_db(self) -> sqlite3.Connection:
         """Return a read-only connection from the pool (round-robin, thread-safe)."""
@@ -378,6 +427,7 @@ class SqliteBackend(
         return conn
 
     async def close(self) -> None:
+        self._require_transaction_idle("close")
         for rconn in getattr(self, "_read_pool", []):
             try:
                 rconn.close()
@@ -403,24 +453,42 @@ class SqliteBackend(
     # ---- transaction ---------------------------------------------------------
 
     @asynccontextmanager
-    async def transaction(self):
+    async def transaction(self) -> AsyncIterator[None]:
         """Async context manager for atomic multi-operation transactions.
 
-        While inside this block, individual method commits/rollbacks are
-        suppressed.  The CM commits on success or rolls back on failure.
+        The context takes SQLite's write lock before yielding and is owned by
+        the task that entered it. Transaction-aware methods called by that
+        task suppress their individual commits/rollbacks. Other tasks using
+        the shared writer connection fail closed and may retry after exit.
         """
-        if self._in_transaction:
+        task = self._current_task()
+        if task is None:
+            raise StorageError("transaction() requires a running asyncio task")
+        if self._transaction_owner is task:
             raise StorageError("Nested transactions are not supported")
+        if self._transaction_owner is not None:
+            raise StorageError(
+                "SQLite transaction is owned by another task; retry after it completes"
+            )
         db = self._get_db()
-        self._in_transaction = True
+        if db.in_transaction:
+            raise StorageError(
+                "transaction() refused: the connection already has an open transaction"
+            )
+        try:
+            db.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise StorageError(f"transaction() could not take the write lock: {exc}") from exc
+
+        self._transaction_owner = task
         try:
             yield
             db.commit()
-        except Exception:
+        except BaseException:
             db.rollback()
             raise
         finally:
-            self._in_transaction = False
+            self._transaction_owner = None
 
     # ---- meta delegation -----------------------------------------------------
 
@@ -716,11 +784,9 @@ class SqliteBackend(
         incomplete: list[str] = []
         try:
             # Take the write lock before enumerating, so a concurrent writer
-            # can't add a table between enumeration and deletion. The
-            # ``transaction()`` CM only flips ``_in_transaction`` — it does NOT
-            # begin a DB transaction — so gate on ``db.in_transaction``, not on
-            # ownership: a reset that is the first statement inside the CM still
-            # needs its own BEGIN IMMEDIATE.
+            # can't add a table between enumeration and deletion. An enclosing
+            # ``transaction()`` has already issued ``BEGIN IMMEDIATE``; a
+            # standalone reset must acquire the same lock itself.
             if not db.in_transaction:
                 db.execute("BEGIN IMMEDIATE")
             db.execute("PRAGMA defer_foreign_keys = ON")
@@ -1239,6 +1305,7 @@ class SqliteBackend(
         threads in :attr:`_has_vec_table` so the helper need not poke at
         the backend's invariants. See ADR-0011 follow-up #884.
         """
+        self._require_transaction_idle("sweep_orphan_project_root")
         return sweep_orphan_project_root(
             self._get_db(),
             project_root,
@@ -1432,10 +1499,8 @@ class SqliteBackend(
         project_root = str(new_project_root) if new_project_root else None
         # Take an explicit RESERVED lock before the SELECT so the
         # rowid set we read can't be invalidated by a concurrent
-        # watcher INSERT before we UPDATE. ``BEGIN IMMEDIATE`` is a
-        # no-op if we're already inside an outer ``transaction()``
-        # context (sqlite raises which we swallow); guard via the
-        # backend's own ``_in_transaction`` flag.
+        # watcher INSERT before we UPDATE. An outer ``transaction()`` already
+        # owns that lock, so only the standalone path begins and finalizes one.
         opened_tx = False
         if not self._in_transaction:
             db.execute("BEGIN IMMEDIATE")
@@ -1515,9 +1580,11 @@ class SqliteBackend(
         even for corpora with hundreds of thousands of chunks (issue #278).
         The worker opens its own writer connection against the same SQLite
         file; WAL + SQLite's file-level lock serialise it against writes on
-        the main connection, so the rebuild is atomic and independent of any
-        transaction the main connection may hold.
+        the main connection. Running it while this backend owns a transaction
+        is rejected before dispatch so the worker cannot self-contend or evade
+        the backend's task-affine transaction contract.
         """
+        self._require_transaction_idle("rebuild_fts")
         assert self._db is not None
         db_path = str(Path(self._config.sqlite_path).expanduser())
 
@@ -1563,8 +1630,9 @@ class SqliteBackend(
         """Fetch embeddings for a list of chunk IDs. Returns {id: embedding}."""
         if not chunk_ids or not self._has_vec_table:
             return {}
-        db = self._db
-        assert db is not None
+        # The owner needs read-your-writes; every other task uses a WAL reader
+        # and therefore cannot observe the owner's uncommitted vector rows.
+        db = self._get_db() if self._in_transaction else self._get_read_db()
         rows = db.execute(
             f"""SELECT c.id, v.embedding FROM chunks c
                 JOIN chunks_vec v ON v.rowid = c.rowid
@@ -2047,11 +2115,15 @@ class SqliteBackend(
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        chunk_ids: Sequence[UUID] | None = None,
     ) -> list[Chunk]:
         db = self._get_read_db()
         conditions: list[str] = []
         params: list[object] = []
 
+        if chunk_ids is not None:
+            conditions.append(_chunk_ids_sql())
+            params.append(_chunk_ids_param(chunk_ids))
         if since is not None:
             conditions.append("created_at >= ?")
             params.append(since.isoformat())
@@ -2099,6 +2171,39 @@ class SqliteBackend(
             params,
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
+
+    async def sum_chunk_content_chars(
+        self,
+        chunk_ids: Sequence[UUID],
+        project_context_root: Path | None = None,
+    ) -> tuple[int, int]:
+        """Return ``(count, total_content_chars)`` without materializing rows.
+
+        Applies the same id filter and always-on ADR-0011 scope fragment
+        ``recall_chunks`` would, so the count agrees with what a recall of
+        the same ids under the same project context would return.
+
+        The character total is a **lower bound** on the prompt a caller
+        will eventually build, not a prediction of it: a formatter that
+        adds headers, source paths, and separators pushes the real length
+        higher, while one that strips content can pull it lower. Use it to
+        reject the obviously-oversized cheaply, never as the authoritative
+        limit. The unit is characters (SQLite ``LENGTH()`` counts
+        characters on TEXT, not UTF-8 bytes), matching the
+        ``max_input_chars`` knob it exists to serve.
+        """
+        db = self._get_read_db()
+        conditions = [_chunk_ids_sql()]
+        params: list[object] = [_chunk_ids_param(chunk_ids)]
+        scope_frag, scope_params = scope_context_sql(None, project_context_root)
+        conditions.append(scope_frag)
+        params.extend(scope_params)
+        row = db.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(LENGTH(content)), 0) FROM chunks "
+            f"WHERE {' AND '.join(conditions)}",
+            params,
+        ).fetchone()
+        return int(row[0]), int(row[1])
 
     async def get_all_source_files(self) -> set[Path]:
         db = self._get_db()
@@ -2384,9 +2489,16 @@ class SqliteBackend(
         namespace: str,
         source_filter: str | None = None,
         old_namespace: str | None = None,
-    ) -> int:
+        *,
+        merge: bool = False,
+    ) -> NamespaceAssignResult:
         assert self._ns is not None
-        return await self._ns.assign_namespace(namespace, source_filter, old_namespace)
+        return await self._ns.assign_namespace(
+            namespace,
+            source_filter,
+            old_namespace,
+            merge=merge,
+        )
 
     # ---- row deserialization -------------------------------------------------
 

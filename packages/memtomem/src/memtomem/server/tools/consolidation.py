@@ -314,6 +314,7 @@ async def mem_consolidate_apply(
         scope=cast(TargetScope, derived_scope),
         confirm_project_shared=confirm_project_shared,
         project_root_override=project_root_override,
+        event_type="consolidate_apply",
     )
 
     if stats is None or not stats.new_chunk_ids:

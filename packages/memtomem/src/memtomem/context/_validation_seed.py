@@ -50,7 +50,12 @@ from memtomem.context._canonical_txn import canonical_sidecar_lock
 from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context.mcp_servers import CANONICAL_MCP_SERVER_ROOT, PROJECT_MCP_CONFIG
 from memtomem.context.scope_resolver import ArtifactKind
-from memtomem.context.skills import CANONICAL_SKILL_ROOT, SKILL_GENERATORS, SKILL_MANIFEST
+from memtomem.context.skills import (
+    CANONICAL_SKILL_ROOT,
+    SKILL_GENERATORS,
+    SKILL_MANIFEST,
+    run_swap_prelude,
+)
 
 # Names chosen to read naturally under the §Validation framing task
 # ("get this project's skills into Claude Code").
@@ -147,6 +152,7 @@ def seed_adr0026_validation_states(project_root: Path) -> dict[str, Any]:
     # writer. The runtime-fan-out writes below are runtime targets, not
     # canonicals, and stay unlocked.
     with canonical_sidecar_lock(skill_canon, SKILL_OUT_OF_SYNC):
+        run_swap_prelude(skill_canon, SKILL_OUT_OF_SYNC, kind="skills")
         _write_lf(skill_canon / SKILL_OUT_OF_SYNC / SKILL_MANIFEST, review_canonical)
     for runtime, root in skill_runtimes.items():
         body = review_claude_stale if runtime == _RUNTIME else review_canonical
@@ -156,6 +162,7 @@ def seed_adr0026_validation_states(project_root: Path) -> dict[str, Any]:
     # the P5 "already synced, what does Sync do to it?" item).
     in_sync_body = f"# {SKILL_IN_SYNC}\n\nWrites Conventional Commit messages.\n"
     with canonical_sidecar_lock(skill_canon, SKILL_IN_SYNC):
+        run_swap_prelude(skill_canon, SKILL_IN_SYNC, kind="skills")
         _write_lf(skill_canon / SKILL_IN_SYNC / SKILL_MANIFEST, in_sync_body)
     for root in skill_runtimes.values():
         _write_lf(root / SKILL_IN_SYNC / SKILL_MANIFEST, in_sync_body)

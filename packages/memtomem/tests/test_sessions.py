@@ -168,6 +168,256 @@ class TestSessions:
         assert ids == ["backlog-00", "backlog-01", "backlog-02"]
 
 
+class TestSessionMetadataDurability:
+    """``sessions.metadata`` is a durable document, not a scratch field.
+
+    ``mem_session_start`` writes a ``title`` there and later work records
+    a provenance marker; ending a session must not wipe either. It also
+    has to survive rows whose stored JSON is unusable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_session_decodes_metadata_to_a_dict(self, storage):
+        metadata = {
+            "title": "Sprint",
+            "provenance": "write-v1",
+            "provenance_incomplete": True,
+        }
+        await storage.create_session("m1", "agent", "default", metadata=metadata)
+
+        row = await storage.get_session("m1")
+        listed = await storage.list_sessions(agent_id="agent")
+
+        assert row["metadata"] == metadata
+        assert listed[0]["metadata"] == metadata
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored",
+        ["", "not json", "[]", '"text"', "42", "null"],
+        ids=["empty", "syntax-error", "array", "string", "number", "json-null"],
+    )
+    async def test_unusable_metadata_degrades_to_empty_dict(self, storage, stored):
+        """Valid JSON of the wrong *shape* decodes fine but has no ``.get``.
+
+        A caller reading a key off the result would raise on data it is
+        supposed to tolerate, so everything non-object collapses to ``{}``.
+        """
+        await storage.create_session("m2", "agent", "default")
+        db = storage._get_db()
+        db.execute("UPDATE sessions SET metadata = ? WHERE id = ?", (stored, "m2"))
+        db.commit()
+
+        row = await storage.get_session("m2")
+        listed = await storage.list_sessions(agent_id="agent")
+
+        assert row["metadata"] == {}
+        assert listed[0]["metadata"] == {}
+
+    @pytest.mark.asyncio
+    async def test_end_session_keeps_keys_it_was_not_given(self, storage):
+        """Ending used to replace the whole document, silently discarding
+        the ``title`` recorded at session start."""
+        await storage.create_session("m3", "agent", "default", metadata={"title": "Sprint"})
+
+        await storage.end_session("m3", "done", {"event_counts": {"add": 2}})
+
+        row = await storage.get_session("m3")
+        assert row["metadata"] == {"title": "Sprint", "event_counts": {"add": 2}}
+
+    @pytest.mark.asyncio
+    async def test_end_session_replaces_snapshot_keys_wholesale(self, storage):
+        """``event_counts`` is a complete snapshot, so a re-end must drop
+        event types the new snapshot no longer names.
+
+        This is why the merge is shallow rather than SQLite's
+        ``json_patch``: JSON Merge Patch recurses into nested objects and
+        would resurrect the stale ``query`` count.
+        """
+        await storage.create_session("m4", "agent", "default")
+        await storage.end_session("m4", None, {"event_counts": {"query": 2, "add": 4}})
+
+        await storage.end_session("m4", None, {"event_counts": {"add": 1}})
+
+        row = await storage.get_session("m4")
+        assert row["metadata"]["event_counts"] == {"add": 1}
+
+    @pytest.mark.asyncio
+    async def test_end_session_survives_unusable_stored_metadata(self, storage):
+        """``get_session`` tolerates a malformed row, so ending one must
+        too — ``json_patch`` would have raised here instead."""
+        await storage.create_session("m5", "agent", "default")
+        db = storage._get_db()
+        db.execute("UPDATE sessions SET metadata = ? WHERE id = ?", ("not json", "m5"))
+        db.commit()
+
+        await storage.end_session("m5", "done", {"event_counts": {"add": 1}})
+
+        row = await storage.get_session("m5")
+        assert row["metadata"] == {"event_counts": {"add": 1}}
+        assert row["summary"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_unusable_metadata_is_not_echoed_into_logs(self, storage, caplog):
+        """Session metadata is arbitrary caller data and can hold
+        secret-shaped strings, so a decode failure must report the shape
+        of the value, never the value."""
+        await storage.create_session("m6", "agent", "default")
+        db = storage._get_db()
+        db.execute(
+            "UPDATE sessions SET metadata = ? WHERE id = ?",
+            ("{broken sk-live-not-a-real-key-000", "m6"),
+        )
+        db.commit()
+
+        with caplog.at_level("WARNING"):
+            await storage.get_session("m6")
+
+        assert "session_metadata_malformed" in caplog.text
+        assert "sk-live-not-a-real-key-000" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_end_session_inside_a_transaction_defers_its_commit(self, storage):
+        """``end_session`` merges, so it reads before it writes — but it
+        must not commit when a caller owns the transaction.
+
+        Committing there would flush the caller's earlier work early and
+        put it beyond the rollback this failure is supposed to trigger.
+        """
+        await storage.create_session("m7", "agent", "default", metadata={"title": "Sprint"})
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.end_session("m7", "done", {"event_counts": {"add": 1}})
+                raise RuntimeError("caller fails after ending the session")
+
+        row = await storage.get_session("m7")
+        assert row["ended_at"] is None
+        assert row["summary"] is None
+        assert row["metadata"] == {"title": "Sprint"}
+
+    @pytest.mark.asyncio
+    async def test_add_session_event_inside_a_transaction_defers_its_commit(self, storage):
+        """``add_session_event`` was the one session write that committed
+        unconditionally, so a caller's transaction was flushed here and
+        put beyond the rollback its own failure should have triggered."""
+        await storage.create_session("m8", "agent", "default")
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.add_session_event("m8", "add", "write-v1 add chunks=1", ["c1"])
+                raise RuntimeError("caller fails after logging the event")
+
+        assert await storage.get_session_events("m8") == []
+
+
+class TestUpdateSessionMetadata:
+    """``update_session_metadata`` patches a session's metadata without
+    closing it.
+
+    ``end_session`` was the only writer of the column, and it also stamps
+    ``ended_at`` and ``summary`` — unusable for bookkeeping that has to
+    land while a session is still live, or after it closed without
+    re-closing it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_patch_merges_shallowly_and_keeps_other_keys(self, storage):
+        await storage.create_session("u1", "agent", "default", metadata={"title": "Sprint"})
+
+        assert await storage.update_session_metadata("u1", {"provenance_incomplete": True}) is True
+
+        row = await storage.get_session("u1")
+        assert row["metadata"] == {"title": "Sprint", "provenance_incomplete": True}
+
+    @pytest.mark.asyncio
+    async def test_patch_never_touches_ended_at_or_summary(self, storage):
+        """The whole reason this is not ``end_session``: it must be able
+        to annotate a session without changing its lifecycle state."""
+        await storage.create_session("u2", "agent", "default")
+        await storage.end_session("u2", "the summary", {"event_counts": {"add": 1}})
+        before = await storage.get_session("u2")
+
+        await storage.update_session_metadata("u2", {"provenance_incomplete": True})
+
+        after = await storage.get_session("u2")
+        assert after["ended_at"] == before["ended_at"]
+        assert after["summary"] == "the summary"
+        assert after["metadata"]["event_counts"] == {"add": 1}
+
+    @pytest.mark.asyncio
+    async def test_patch_lands_on_an_already_ended_session(self, storage):
+        """The flag this method exists to set records a write that
+        outran session teardown — which by construction happens after
+        ``ended_at`` was stamped. Refusing ended rows would drop the
+        signal in exactly the case it is for.
+        """
+        await storage.create_session("u3", "agent", "default")
+        await storage.end_session("u3", "done", {"event_counts": {"add": 1}})
+
+        assert await storage.update_session_metadata("u3", {"provenance_incomplete": True}) is True
+
+        row = await storage.get_session("u3")
+        assert row["metadata"]["provenance_incomplete"] is True
+
+    @pytest.mark.asyncio
+    async def test_patch_on_a_missing_session_returns_false(self, storage):
+        """Best-effort bookkeeping on the write path: a vanished session
+        must not raise into a memory write that already landed."""
+        assert await storage.update_session_metadata("no-such-id", {"x": 1}) is False
+        assert await storage.get_session("no-such-id") is None
+
+    @pytest.mark.asyncio
+    async def test_empty_patch_is_a_noop(self, storage):
+        await storage.create_session("u4", "agent", "default", metadata={"title": "Sprint"})
+
+        assert await storage.update_session_metadata("u4", {}) is False
+
+        row = await storage.get_session("u4")
+        assert row["metadata"] == {"title": "Sprint"}
+
+    @pytest.mark.asyncio
+    async def test_patch_inside_a_transaction_defers_its_commit(self, storage):
+        await storage.create_session("u5", "agent", "default", metadata={"title": "Sprint"})
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.update_session_metadata("u5", {"provenance_incomplete": True})
+                raise RuntimeError("caller fails after patching")
+
+        row = await storage.get_session("u5")
+        assert row["metadata"] == {"title": "Sprint"}
+
+    @pytest.mark.asyncio
+    async def test_patch_survives_unusable_stored_metadata(self, storage):
+        """``get_session`` tolerates a malformed row, so patching one
+        must too rather than raising on the write path."""
+        await storage.create_session("u6", "agent", "default")
+        db = storage._get_db()
+        db.execute("UPDATE sessions SET metadata = ? WHERE id = ?", ("not json", "u6"))
+        db.commit()
+
+        assert await storage.update_session_metadata("u6", {"provenance_incomplete": True}) is True
+
+        row = await storage.get_session("u6")
+        assert row["metadata"] == {"provenance_incomplete": True}
+
+    @pytest.mark.asyncio
+    async def test_patch_does_not_echo_metadata_into_logs(self, storage, caplog):
+        await storage.create_session("u7", "agent", "default")
+        db = storage._get_db()
+        db.execute(
+            "UPDATE sessions SET metadata = ? WHERE id = ?",
+            ("{broken sk-live-not-a-real-key-000", "u7"),
+        )
+        db.commit()
+
+        with caplog.at_level("WARNING"):
+            await storage.update_session_metadata("u7", {"provenance_incomplete": True})
+
+        assert "sk-live-not-a-real-key-000" not in caplog.text
+
+
 class TestSessionAgentInheritance:
     """``mem_session_start`` records ``agent_id`` on the AppContext so
     ``mem_agent_search`` can resolve the active agent without the caller
@@ -988,3 +1238,255 @@ class TestSessionSummaryRedactionGate:
         assert secret not in line  # no matched bytes echoed
         memory_dir = Path(comp.config.indexing.memory_dirs[0])
         assert not list((memory_dir / "sessions").rglob("redactiontest.md"))
+
+
+class TestSessionTransitionDrain:
+    """A session transition waits for in-flight session-bound writes.
+
+    Teardown builds its event counts (and, later, its summary inputs) from
+    a snapshot of the session's events. A write admitted before the
+    transition but still persisting would be missing from that snapshot,
+    so start and end both drain first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_write_session_ends_without_waiting(self, components):
+        """The idle case must be instant.
+
+        ``asyncio.Event()`` starts *cleared*, so a naively-constructed
+        gauge would make every ordinary session block for the full drain
+        timeout and then report a partial drain that never happened.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        started = asyncio.get_running_loop().time()
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert "Session ended" in out
+        assert "writes still in flight" not in out
+        assert elapsed < 1.0  # nowhere near _WRITE_DRAIN_TIMEOUT_S
+
+    @pytest.mark.asyncio
+    async def test_end_waits_for_an_in_flight_write(self, components):
+        """The drain must cover the *whole* write, not just its indexing.
+
+        A gauge released before the write's session bookkeeping lands
+        would let teardown observe idle, snapshot the events, and miss a
+        row written a moment later — so this parks inside the gauge and
+        asserts teardown had not snapshotted yet.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        in_write = asyncio.Event()
+        release = asyncio.Event()
+        snapshot_taken = asyncio.Event()
+        real_events = app.storage.get_session_events
+
+        async def watched_events(session_id):
+            snapshot_taken.set()
+            return await real_events(session_id)
+
+        app.storage.get_session_events = watched_events  # type: ignore[method-assign]
+
+        async def slow_write():
+            async with app.write_in_flight():
+                in_write.set()
+                await release.wait()
+
+        writer = asyncio.create_task(slow_write())
+        await in_write.wait()
+        ender = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await asyncio.sleep(0.05)
+
+        assert not snapshot_taken.is_set(), "teardown snapshotted before the write landed"
+
+        release.set()
+        await writer
+        out = await ender
+
+        assert snapshot_taken.is_set()
+        assert "Session ended" in out
+        assert "writes still in flight" not in out
+
+    @pytest.mark.asyncio
+    async def test_drain_ignores_writes_admitted_after_it_started(self, components):
+        """The drain waits for the writes already in flight, not for the
+        stream to go quiet — otherwise a steady trickle of writes could
+        stall a teardown indefinitely."""
+        app = AppContext.from_components(components)
+
+        before = app.write_in_flight()
+        await before.__aenter__()
+        waiter = asyncio.create_task(app.wait_writes_drained(2.0))
+        await asyncio.sleep(0)  # park the waiter
+
+        after = app.write_in_flight()
+        await after.__aenter__()
+        await before.__aexit__(None, None, None)
+
+        assert await waiter is True
+        await after.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_drain_holds_until_a_pre_existing_write_lands(self, components):
+        """Other writers churning through must not release the waiter.
+
+        A plain "nothing in flight" event cannot express this safely:
+        ``Event.wait()`` returns as soon as it is woken and never
+        re-checks, so a set/clear pair between two writers can hand the
+        waiter a success it did not earn.
+        """
+        app = AppContext.from_components(components)
+
+        held = app.write_in_flight()
+        await held.__aenter__()
+        waiter = asyncio.create_task(app.wait_writes_drained(2.0))
+        await asyncio.sleep(0)
+
+        for _ in range(3):
+            churn = app.write_in_flight()
+            await churn.__aenter__()
+            await churn.__aexit__(None, None, None)
+            await asyncio.sleep(0)
+
+        assert not waiter.done(), "drain returned while a pre-existing write was open"
+
+        await held.__aexit__(None, None, None)
+        assert await waiter is True
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_still_releases_its_ticket(self, components):
+        """A raising write must not wedge every later drain."""
+        app = AppContext.from_components(components)
+
+        with pytest.raises(RuntimeError):
+            async with app.write_in_flight():
+                raise RuntimeError("write blew up")
+
+        assert app._open_write_tickets == set()
+        assert await app.wait_writes_drained(0.05) is True
+
+    @pytest.mark.asyncio
+    async def test_drain_timeout_is_reported_not_swallowed(self, components, monkeypatch):
+        """A write that outlasts the drain shortens the event counts, so
+        the response has to say so rather than present them as complete."""
+        from memtomem.server.tools import session as session_mod
+
+        monkeypatch.setattr(session_mod, "_WRITE_DRAIN_TIMEOUT_S", 0.05)
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        release = asyncio.Event()
+        in_write = asyncio.Event()
+
+        async def stuck_write():
+            async with app.write_in_flight():
+                in_write.set()
+                await release.wait()
+
+        writer = asyncio.create_task(stuck_write())
+        await in_write.wait()
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "writes still in flight" in out
+        release.set()
+        await writer
+
+    @pytest.mark.asyncio
+    async def test_a_parked_end_does_not_block_a_second_end(self, components):
+        """The claim is taken before the transition lock, on purpose.
+
+        Holding the transition lock across the entry check would turn the
+        at-most-once early return into a wait on the in-flight teardown —
+        and a deadlock whenever that teardown is parked.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_events = app.storage.get_session_events
+        first = True
+
+        async def gated_events(session_id):
+            nonlocal first
+            if first:
+                first = False
+                entered.set()
+                await release.wait()
+            return await real_events(session_id)
+
+        app.storage.get_session_events = gated_events  # type: ignore[method-assign]
+
+        t1 = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await entered.wait()
+
+        out2 = await asyncio.wait_for(mem_session_end(ctx=ctx), timeout=5)  # type: ignore[arg-type]
+
+        assert out2 == "No active session."
+        release.set()
+        assert "Session ended" in await t1
+
+    @pytest.mark.asyncio
+    async def test_a_start_skips_a_session_an_end_already_claimed(self, components):
+        """Start supersedes by ending the previous session — but not one a
+        concurrent ``mem_session_end`` has already claimed, or the
+        effectful phase would run twice for the same session.
+
+        The claim is taken *outside* the transition lock, so a start can
+        genuinely win the lock while an end holds only the claim. That
+        window is reproduced directly by seeding ``_ending_session_ids``
+        — racing the two calls does not reach this branch, because the
+        end takes the transition lock before the start can look.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        claimed = app.current_session_id
+        assert claimed is not None
+
+        end_calls: list[str] = []
+        real_end = app.storage.end_session
+
+        async def counting_end(session_id, summary, metadata):
+            end_calls.append(session_id)
+            return await real_end(session_id, summary, metadata)
+
+        app.storage.end_session = counting_end  # type: ignore[method-assign]
+        app._ending_session_ids.add(claimed)  # an end owns this session
+
+        out = await mem_session_start(agent_id="coder", ctx=ctx)  # type: ignore[arg-type]
+
+        assert end_calls == [], "start ended a session an end had already claimed"
+        assert "auto-ended" not in out
+        assert app.current_session_id != claimed
+        # The claim belongs to the end; the start must leave it alone.
+        assert claimed in app._ending_session_ids
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_starts_leave_one_active_session(self, components):
+        """The transition lock's primary job. ``_ending_session_ids`` makes
+        *ending* at-most-once but says nothing about which start wins, so
+        without serialization one start could publish its handle over the
+        other's and orphan a row that was never ended."""
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="first", ctx=ctx)  # type: ignore[arg-type]
+
+        await asyncio.gather(
+            mem_session_start(agent_id="second", ctx=ctx),  # type: ignore[arg-type]
+            mem_session_start(agent_id="third", ctx=ctx),  # type: ignore[arg-type]
+        )
+
+        rows = await app.storage.list_sessions()
+        active = [r for r in rows if r["ended_at"] is None]
+        assert len(rows) == 3
+        assert [r["id"] for r in active] == [app.current_session_id]

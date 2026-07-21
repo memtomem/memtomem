@@ -410,6 +410,7 @@ async def mem_agent_share(
         namespace=target,
         template=None,
         ctx=ctx,
+        event_type="agent_share",
     )
 
     # Record the structured link (PR-2 of the chunk_links series). The

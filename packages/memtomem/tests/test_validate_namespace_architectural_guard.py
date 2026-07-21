@@ -117,6 +117,13 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         ("memory_crud.py", "mem_batch_add", "namespace"),
         ("procedure.py", "mem_procedure_save", "namespace"),
         ("url_index.py", "mem_fetch", "namespace"),
+        # Not a surface of its own: ``capture_session_and_namespace``
+        # forwards its caller's already-classified ``namespace`` (the four
+        # write-path entries above) and only decides what to fall back to
+        # when it is None. Gating here would double-validate the same value
+        # and still leave the callers' own parameters ungated, so it is
+        # deferred with them and moves when they do.
+        ("_provenance.py", "capture_session_and_namespace", "namespace"),
         # ``mem_tag_merge.target`` is a *tag name*, not a namespace — caught
         # by the parameter-name heuristic but semantically distinct from the
         # ``mem_agent_share.target`` shape above. Tags travel through

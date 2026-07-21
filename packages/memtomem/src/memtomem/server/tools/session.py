@@ -20,34 +20,53 @@ from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._provenance import PROVENANCE_KIND
 from memtomem.summarization import SessionTooLargeError, summarize_session
 
 logger = logging.getLogger(__name__)
 
+# How long a session transition waits for in-flight session-bound writes to
+# land before giving up and saying so. Short on purpose: teardown must stay
+# responsive, and a write that outlasts this is reported rather than waited on
+# indefinitely. It does not close the window entirely — a write admitted
+# *after* the drain returns still misses the snapshot, which is inherent to
+# leaving the session handle live during teardown (see mem_session_end).
+_WRITE_DRAIN_TIMEOUT_S = 2.0
 
-async def _end_active_session_inline(app: AppContext, reason: str) -> str | None:
-    """End the currently-active session without resetting ``current_*`` state.
 
-    Returns a one-line warning describing what was rolled forward, or
-    ``None`` when no session was active. Caller is responsible for
-    resetting ``current_session_id`` / ``current_agent_id`` afterwards
-    (typically by overwriting them as part of a fresh session start).
+async def _end_active_session_inline(
+    app: AppContext, session_id: str, reason: str, *, drained: bool = True
+) -> str:
+    """End a superseded session without resetting ``current_*`` state.
+
+    Returns a one-line warning describing what was rolled forward. The
+    caller is responsible for resetting ``current_session_id`` /
+    ``current_agent_id`` afterwards (typically by overwriting them as
+    part of a fresh session start), and for having claimed ``session_id``
+    and drained in-flight writes first — see the transition protocol in
+    :func:`mem_session_start`.
+
+    ``session_id`` is passed in rather than read off ``app`` here: this
+    runs outside ``_session_lock`` (it awaits the DB, and reading a
+    session's events must not happen under a lock its writers need), so
+    the handle could change underfoot.
+
+    ``drained=False`` says the caller's drain timed out, so the event
+    snapshot below may be short. It is recorded on the row rather than
+    only in the caller's notice, because the consumer of a superseded
+    session reads the row and never sees the notice.
     """
-
-    session_id = app.current_session_id
-    if not session_id:
-        return None
 
     events = await app.storage.get_session_events(session_id)
     event_counts: dict[str, int] = {}
     for e in events:
         event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
-    await app.storage.end_session(
-        session_id,
-        f"[auto-ended: {reason}]",
-        {"event_counts": event_counts, "auto_ended": True},
-    )
+    end_metadata: dict[str, object] = {"event_counts": event_counts, "auto_ended": True}
+    if not drained:
+        end_metadata["provenance_incomplete"] = True
+
+    await app.storage.end_session(session_id, f"[auto-ended: {reason}]", end_metadata)
     await app.storage.scratch_cleanup(session_id)
     logger.warning(
         "mem_session_start auto-ended previous session %s (%s events) — %s",
@@ -97,6 +116,15 @@ async def mem_session_start(
       (with a warning logged and an inline notice in the return string)
       and the new session takes its place. The previous ``agent_id`` is
       replaced by the new one — agents do not stack.
+    * Active session already being ended by a concurrent
+      ``mem_session_end`` → that end owns the teardown; this start only
+      takes the handle over rather than ending the session twice.
+
+    Superseding waits (briefly) for in-flight session-bound writes to
+    land before reading the previous session's events, so its final
+    event counts are not short by a write that was already under way. A
+    write that outlasts the wait is reported in the return string rather
+    than waited on indefinitely.
 
     Namespace derivation priority (matches the LangGraph adapter
     ``MemtomemStore.start_agent_session`` so MCP and Python entry points
@@ -148,22 +176,75 @@ async def mem_session_start(
         effective_ns = "default"
 
     auto_end_notice: str | None = None
-    async with app._session_lock:
-        if app.current_session_id:
-            auto_end_notice = await _end_active_session_inline(
-                app, reason="superseded by new mem_session_start"
-            )
+    drain_notice: str | None = None
+    # Session transition protocol (shared with mem_session_end): the
+    # transition lock is held across the whole swap, while _session_lock is
+    # taken only in short bursts to touch the handles. The two cannot be one
+    # lock — the drain below has to wait for writers that need _session_lock
+    # to leave the gauge, so holding it across the drain would deadlock.
+    #
+    # _ending_session_ids alone would not serialize this: it makes ending
+    # at-most-once, but nothing in it decides which new session wins when two
+    # starts interleave, so one start could publish its handle over another's
+    # and orphan a freshly created row.
+    async with app._session_transition_lock:
+        async with app._session_lock:
+            superseded_id = app.current_session_id
+            # An id already claimed belongs to a mem_session_end that took its
+            # claim before reaching for the transition lock and is now waiting
+            # on it. That end owns the teardown; this start must only take the
+            # handle over, never end the session a second time.
+            if superseded_id and superseded_id in app._ending_session_ids:
+                superseded_id = None
+            elif superseded_id:
+                app._ending_session_ids.add(superseded_id)
 
-        metadata = {"title": title} if title else {}
-        await app.storage.create_session(
-            session_id, stored_agent_id, effective_ns, metadata=metadata
-        )
-        app.current_session_id = session_id
-        app.current_agent_id = bound_agent_id
+        try:
+            if superseded_id:
+                # Drain before reading the superseded session's events: a
+                # write admitted before this transition may still be
+                # persisting, and its record has to be in the snapshot that
+                # closes the session out.
+                superseded_drained = await app.wait_writes_drained(_WRITE_DRAIN_TIMEOUT_S)
+                if not superseded_drained:
+                    drain_notice = (
+                        "(warning: writes still in flight — the superseded "
+                        "session's event counts may be short)"
+                    )
+                auto_end_notice = await _end_active_session_inline(
+                    app,
+                    superseded_id,
+                    reason="superseded by new mem_session_start",
+                    drained=superseded_drained,
+                )
+
+            # The provenance marker says "this session records what its
+            # writes created" — the seven MCP write surfaces log a
+            # provenance event, so a consumer can read the session's real
+            # inputs instead of inferring them from the namespace. It does
+            # NOT say the record is complete; that is
+            # ``provenance_incomplete``, set separately when something was
+            # lost. Sessions created elsewhere (the CLI, the LangGraph
+            # adapter) carry no marker and stay on the namespace path.
+            metadata: dict[str, object] = {"provenance": PROVENANCE_KIND}
+            if title:
+                metadata["title"] = title
+            await app.storage.create_session(
+                session_id, stored_agent_id, effective_ns, metadata=metadata
+            )
+            async with app._session_lock:
+                app.current_session_id = session_id
+                app.current_agent_id = bound_agent_id
+        finally:
+            if superseded_id:
+                async with app._session_lock:
+                    app._ending_session_ids.discard(superseded_id)
 
     lines = [f"Session started: {session_id}"]
     if auto_end_notice:
         lines.append(auto_end_notice)
+    if drain_notice:
+        lines.append(drain_notice)
     if title:
         lines.append(f"- Title: {title}")
     # Deliberately does not name a write namespace for the unbound case:
@@ -206,6 +287,37 @@ async def mem_session_end(
     mid-phase failure (a retry must not risk a duplicate billable summary);
     an active DB row orphaned by a mid-phase crash is reaped by
     the stale-session path (``find_stale_active_sessions``).
+
+    Because the handle stays live, a write can be in flight when the
+    teardown starts. The teardown therefore waits briefly for in-flight
+    session-bound writes to land before snapshotting the session's
+    events, so the counts (and the auto-summary inputs built from them)
+    are not short by a write that was already under way. This narrows
+    the window but cannot close it: a write admitted *after* the wait
+    returns still misses the snapshot. Closing it entirely would mean
+    blocking writes during teardown, which is exactly what keeping the
+    handle live is meant to avoid. A wait that times out is reported in
+    the return string rather than presented as a complete count.
+
+    Both of those gaps are additionally recorded as
+    ``provenance_incomplete`` on the session row. The response string is
+    for the caller; a consumer reading the stored session — the
+    auto-summary, ``mm session show`` — never sees it, and a session that
+    advertises provenance must not present a short input set as the whole
+    story. The straggler write marks the row itself when it lands.
+
+    ``- Events: N (add:M, index:K)`` counts the provenance events the
+    seven chunk-creating write tools record, so it reflects what the
+    session actually wrote. ``mem_index`` over a large tree can outlast
+    the drain budget; the resulting "writes still in flight" line is
+    expected rather than a fault.
+
+    Tools that change the session's chunk set without being summarizable
+    from it appear in no count and instead mark the session incomplete:
+    the mutations (``mem_edit``, ``mem_delete``), the bulk deletes
+    (``mem_ns_delete``, ``mem_cleanup_orphans``) and the bulk importers.
+    Their effect on the input set is real and undescribed, which is
+    exactly what the flag is for.
 
     When ``summary`` is provided, the text is also promoted to a
     first-class chunk under ``archive:session:<session_id>`` (Phase A
@@ -253,6 +365,11 @@ async def mem_session_end(
     # concurrent session-bound writes during the multi-second phase still
     # route to this session's scope (agent-namespace / scratch binding)
     # instead of the default. agent_id is captured for the archive helper.
+    # The claim is taken *before* the transition lock, not under it. A
+    # concurrent or retried end must return "No active session." immediately
+    # rather than queue behind the in-flight teardown — that early return is
+    # the at-most-once contract, and waiting for the lock would turn it into a
+    # multi-second block (and a deadlock whenever the first end is parked).
     async with app._session_lock:
         session_id = app.current_session_id
         if not session_id or session_id in app._ending_session_ids:
@@ -261,92 +378,18 @@ async def mem_session_end(
         agent_id = app.current_agent_id
 
     try:
-        # Gather session stats
-        events = await app.storage.get_session_events(session_id)
-        event_counts: dict[str, int] = {}
-        for e in events:
-            event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
-
-        # Read the session row before end_session writes ended_at — we need
-        # ``started_at`` and ``namespace`` for the Phase B auto-summary
-        # chunk lookup. Tolerate missing rows defensively (the row was
-        # created in mem_session_start, so absence indicates external
-        # tampering or a backend bug; either way, fall back to skipping
-        # auto-summary rather than crashing the close path).
-        session_row = await app.storage.get_session(session_id)
-
-        await app.storage.end_session(session_id, summary, {"event_counts": event_counts})
-
-        effective_summary = summary
-        auto_summary_skip_reason: str | None = None
-        auto_source_chunks: list = []
-        if not summary:
-            (
-                effective_summary,
-                auto_summary_skip_reason,
-                auto_source_chunks,
-            ) = await _maybe_auto_summarize(
+        # Held across the rest of the teardown so a supervening
+        # mem_session_start cannot interleave its swap with this one. Taken
+        # after _session_lock was released, so the two locks are never held
+        # together and cannot invert against mem_session_start's order.
+        async with app._session_transition_lock:
+            return await _end_session_phase(
                 app,
                 session_id=session_id,
-                session_row=session_row,
+                agent_id=agent_id,
+                summary=summary,
+                force_unsafe=force_unsafe,
             )
-
-        summary_chunk_line: str | None = None
-        summary_chunk_id = None
-        if effective_summary:
-            try:
-                summary_chunk_line, summary_chunk_id = await _persist_session_summary_chunk(
-                    app,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    summary=effective_summary,
-                    event_counts=event_counts,
-                    force_unsafe=force_unsafe,
-                )
-            except Exception:
-                logger.warning(
-                    "session_summary_chunk_persist_failed session_id=%s",
-                    session_id,
-                    exc_info=True,
-                )
-
-        # Phase B-2: link the summary chunk back to the source chunks it
-        # summarized. Only runs on the auto path (manual ``summary=`` did
-        # not collect source chunks). Failures are best-effort: a broken
-        # link writer must not roll back the session-end DB write or the
-        # archive chunk that already landed.
-        if summary_chunk_id is not None and auto_source_chunks:
-            try:
-                await _write_summary_links(
-                    app,
-                    summary_chunk_id=summary_chunk_id,
-                    source_chunks=auto_source_chunks,
-                    cap=app.config.session_summary.max_summary_links,
-                )
-            except Exception:
-                logger.warning(
-                    "session_summary_links_failed session_id=%s",
-                    session_id,
-                    exc_info=True,
-                )
-
-        # Cleanup session-bound working memory
-        cleaned = await app.storage.scratch_cleanup(session_id)
-
-        lines = [
-            f"Session ended: {session_id}",
-            f"- Events: {len(events)} ({', '.join(f'{k}:{v}' for k, v in event_counts.items())})",
-        ]
-        if effective_summary:
-            prefix = "Summary" if summary else "Auto summary"
-            lines.append(f"- {prefix}: {effective_summary[:100]}...")
-        elif auto_summary_skip_reason:
-            lines.append(f"- Auto summary: skipped ({auto_summary_skip_reason})")
-        if summary_chunk_line:
-            lines.append(summary_chunk_line)
-        if cleaned:
-            lines.append(f"- Working memory cleaned: {cleaned} entries")
-        return "\n".join(lines)
     finally:
         # Release the claim and clear the public handle now that the phase
         # is over — on success OR failure. Running on failure too means a
@@ -360,6 +403,124 @@ async def mem_session_end(
             if app.current_session_id == session_id:
                 app.current_session_id = None
                 app.current_agent_id = None
+
+
+async def _end_session_phase(
+    app: AppContext,
+    *,
+    session_id: str,
+    agent_id: str | None,
+    summary: str | None,
+    force_unsafe: bool,
+) -> str:
+    """The effectful half of ``mem_session_end``, under the transition lock.
+
+    The caller owns the claim and the handle cleanup; this runs the drain,
+    the snapshot, and the summary/persist work.
+    """
+    # Drain before snapshotting: a write admitted before this teardown may
+    # still be persisting, and the snapshot below is what the summary and
+    # the event counts are built from. Deliberately outside _session_lock —
+    # writers need that lock to leave the gauge.
+    drained = await app.wait_writes_drained(_WRITE_DRAIN_TIMEOUT_S)
+
+    # Gather session stats
+    events = await app.storage.get_session_events(session_id)
+    event_counts: dict[str, int] = {}
+    for e in events:
+        event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
+
+    # Read the session row before end_session writes ended_at — we need
+    # ``started_at`` and ``namespace`` for the Phase B auto-summary
+    # chunk lookup. Tolerate missing rows defensively (the row was
+    # created in mem_session_start, so absence indicates external
+    # tampering or a backend bug; either way, fall back to skipping
+    # auto-summary rather than crashing the close path).
+    session_row = await app.storage.get_session(session_id)
+
+    # A drain that timed out means the snapshot above may be short. The
+    # response line below says so, but a consumer of the stored row never
+    # sees the response — so record it where the row is read, or a marked
+    # session presents a partial input set as the whole story.
+    end_metadata: dict[str, object] = {"event_counts": event_counts}
+    if not drained:
+        end_metadata["provenance_incomplete"] = True
+
+    await app.storage.end_session(session_id, summary, end_metadata)
+
+    effective_summary = summary
+    auto_summary_skip_reason: str | None = None
+    auto_source_chunks: list = []
+    if not summary:
+        (
+            effective_summary,
+            auto_summary_skip_reason,
+            auto_source_chunks,
+        ) = await _maybe_auto_summarize(
+            app,
+            session_id=session_id,
+            session_row=session_row,
+        )
+
+    summary_chunk_line: str | None = None
+    summary_chunk_id = None
+    if effective_summary:
+        try:
+            summary_chunk_line, summary_chunk_id = await _persist_session_summary_chunk(
+                app,
+                session_id=session_id,
+                agent_id=agent_id,
+                summary=effective_summary,
+                event_counts=event_counts,
+                force_unsafe=force_unsafe,
+            )
+        except Exception:
+            logger.warning(
+                "session_summary_chunk_persist_failed session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    # Phase B-2: link the summary chunk back to the source chunks it
+    # summarized. Only runs on the auto path (manual ``summary=`` did
+    # not collect source chunks). Failures are best-effort: a broken
+    # link writer must not roll back the session-end DB write or the
+    # archive chunk that already landed.
+    if summary_chunk_id is not None and auto_source_chunks:
+        try:
+            await _write_summary_links(
+                app,
+                summary_chunk_id=summary_chunk_id,
+                source_chunks=auto_source_chunks,
+                cap=app.config.session_summary.max_summary_links,
+            )
+        except Exception:
+            logger.warning(
+                "session_summary_links_failed session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    # Cleanup session-bound working memory
+    cleaned = await app.storage.scratch_cleanup(session_id)
+
+    lines = [
+        f"Session ended: {session_id}",
+        f"- Events: {len(events)} ({', '.join(f'{k}:{v}' for k, v in event_counts.items())})",
+    ]
+    if not drained:
+        # Say so rather than presenting a short count as complete.
+        lines.append("- Warning: writes still in flight — event counts may be short")
+    if effective_summary:
+        prefix = "Summary" if summary else "Auto summary"
+        lines.append(f"- {prefix}: {effective_summary[:100]}...")
+    elif auto_summary_skip_reason:
+        lines.append(f"- Auto summary: skipped ({auto_summary_skip_reason})")
+    if summary_chunk_line:
+        lines.append(summary_chunk_line)
+    if cleaned:
+        lines.append(f"- Working memory cleaned: {cleaned} entries")
+    return "\n".join(lines)
 
 
 async def _maybe_auto_summarize(
