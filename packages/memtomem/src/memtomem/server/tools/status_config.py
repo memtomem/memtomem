@@ -475,30 +475,17 @@ async def mem_status(
 ) -> str:
     """Show indexing statistics and current configuration summary.
 
-    Reports storage backend, embedding info, chunk/source counts, and
-    warns when orphaned source files are detected (files removed from
-    disk but still indexed — run mem_cleanup_orphans to fix).
+    Reports storage backend, embedding info, chunk/source counts, and warns
+    about orphaned source files (indexed but gone from disk — run
+    mem_cleanup_orphans).
 
-    When a configuration drift is detected (e.g. embedding dimension
-    mismatch between the DB and the runtime config) the output carries
-    a ``Warnings`` block whose entries follow this schema — kept stable
-    across versions so external consumers (uptime probes, dashboards)
-    can pattern-match on the keys:
-
-    ``kind``    open enum describing the warning. Current values:
-                ``embedding_dim_mismatch``, ``scheduler_watchdog_disabled``,
-                ``mmr_disabled_no_dense``. Future releases may add
-                ``stale_index``, ``orphan_vectors``, etc. — consumers
-                must tolerate unknown kinds rather than erroring.
-    ``fix``     the canonical CLI command a user should run.
-    ``doc``     optional — a relative-path link into ``docs/guides/``
-                with the full remediation flow (see
-                ``configuration.md#reset-flow``). Not every warning kind
-                carries one (``scheduler_watchdog_disabled`` does not).
-
-    Embedding-mismatch entries also include ``stored`` and ``configured``
-    sub-blocks echoing the DB vs runtime provider/model/dimension so the
-    user can see what changed without consulting another tool.
+    Configuration drift adds a ``Warnings`` block. Each entry has ``kind``
+    (an open enum — tolerate unrecognised values rather than erroring),
+    ``fix`` (the CLI command to run) and an optional ``doc`` link into
+    ``docs/guides/``. Embedding-mismatch entries also carry ``stored`` and
+    ``configured`` sub-blocks echoing DB vs runtime provider/model/dimension.
+    These keys are stable across versions, so probes and dashboards can
+    pattern-match on them.
     """
     app = await _get_app_initialized(ctx)
     return await format_status_report(app)

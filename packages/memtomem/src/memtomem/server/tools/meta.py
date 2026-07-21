@@ -49,14 +49,11 @@ async def mem_do(
     This is the gateway to all advanced memtomem features beyond the
     core tools (search, add, index, recall, status, stats, list, read).
 
-    Use action="help" to see all available actions grouped by category.
-    Use action="help" with params={"category": "sessions"} for details.
+    action="help" lists every action grouped by category;
+    params={"category": "<name>"} adds per-parameter detail and, for some
+    categories, usage notes.
 
-    Categories: crud, namespace, tags, sessions, scratch, relations,
-    analytics, maintenance, policy, entity, multi_agent, importers,
-    procedures, advanced, ingest, search, context
-
-    Common aliases are resolved automatically (e.g. "orphans" →
+    Common aliases resolve automatically (e.g. "orphans" →
     "cleanup_orphans", "health" → "eval").
 
     Args:

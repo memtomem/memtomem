@@ -35,67 +35,79 @@ async def mem_policy_add(
         name: Unique policy name
         policy_type: One of 'auto_archive', 'auto_consolidate',
             'auto_expire', 'auto_promote', 'auto_tag'
-        config: JSON config string. Examples:
-            auto_archive (flat — single target):
-              {"max_age_days": 30, "archive_namespace": "archive"}
-
-            auto_archive (rule + categorized buckets):
-              {
-                "max_age_days": 90,
-                "age_field": "last_accessed_at",
-                "min_access_count": 3,
-                "max_importance_score": 0.3,
-                "archive_namespace_template": "archive:{first_tag}"
-              }
-              - age_field: "created_at" (default) or "last_accessed_at"
-                (null-safe: falls back to created_at via COALESCE).
-              - min_access_count: only chunks with access_count <= this.
-              - max_importance_score: only chunks with importance_score < this.
-              - archive_namespace_template: per-chunk target. Supports the
-                {first_tag} placeholder (empty tags → "misc"). Chunks already
-                in their resolved target namespace are skipped.
-
-            auto_consolidate:
-              {
-                "min_group_size": 3,
-                "max_groups": 10,
-                "max_bullets": 20,
-                "keep_originals": true,
-                "summary_namespace": "archive:summary"
-              }
-              - Groups chunks by source file (min chunks = min_group_size)
-                and creates one deterministic heuristic summary per source,
-                linking originals via ``consolidated_into`` relations.
-              - Idempotent: re-runs with the same chunk set are a no-op;
-                added/removed chunks trigger regeneration.
-              - Mixed-namespace sources are skipped with a warning.
-              - keep_originals=false soft-decays originals
-                (importance_score *= 0.5, floor 0.3) instead of deleting.
-              - Summaries default to the ``archive:summary`` namespace so
-                they don't pollute default search results.
-
-            auto_promote (inverse of auto_archive):
-              {"min_access_count": 5, "target_namespace": "default"}
-              {
-                "source_prefix": "archive",
-                "target_namespace": "default",
-                "min_access_count": 3,
-                "min_importance_score": 0.5,
-                "recency_days": 30
-              }
-              - source_prefix: namespace prefix to scan (default "archive").
-              - target_namespace: destination (default "default").
-              - min_access_count: chunks need at least this many accesses.
-              - min_importance_score: optional importance floor (AND).
-              - recency_days: only if last_accessed_at is within N days
-                (opposite of auto_archive's age cutoff — *recent* access
-                qualifies). Null last_accessed_at disqualifies.
-              - Resets last_accessed_at on promotion to prevent immediate
-                re-archival (ping-pong prevention).
-
-            auto_expire: {"max_age_days": 90}
-            auto_tag: {"max_tags": 5}
+        config: JSON config string; the keys depend on policy_type —
+            auto_archive: max_age_days, archive_namespace (or
+            archive_namespace_template), age_field, min_access_count,
+            max_importance_score; auto_consolidate: min_group_size,
+            max_groups, max_bullets, keep_originals, summary_namespace;
+            auto_promote: source_prefix, target_namespace, min_access_count,
+            min_importance_score, recency_days; auto_expire: max_age_days;
+            auto_tag: max_tags. ``{}`` uses the per-type defaults. Field
+            semantics and worked examples:
+            docs/guides/reference/automation.md.
         namespace_filter: Only apply to chunks in this namespace
+
+    Config schemas (by policy_type)::
+
+    auto_archive (flat — single target):
+      {"max_age_days": 30, "archive_namespace": "archive"}
+
+    auto_archive (rule + categorized buckets):
+      {
+        "max_age_days": 90,
+        "age_field": "last_accessed_at",
+        "min_access_count": 3,
+        "max_importance_score": 0.3,
+        "archive_namespace_template": "archive:{first_tag}"
+      }
+      - age_field: "created_at" (default) or "last_accessed_at"
+        (null-safe: falls back to created_at via COALESCE).
+      - min_access_count: only chunks with access_count <= this.
+      - max_importance_score: only chunks with importance_score < this.
+      - archive_namespace_template: per-chunk target. Supports the
+        {first_tag} placeholder (empty tags → "misc"). Chunks already
+        in their resolved target namespace are skipped.
+
+    auto_consolidate:
+      {
+        "min_group_size": 3,
+        "max_groups": 10,
+        "max_bullets": 20,
+        "keep_originals": true,
+        "summary_namespace": "archive:summary"
+      }
+      - Groups chunks by source file (min chunks = min_group_size)
+        and creates one deterministic heuristic summary per source,
+        linking originals via ``consolidated_into`` relations.
+      - Idempotent: re-runs with the same chunk set are a no-op;
+        added/removed chunks trigger regeneration.
+      - Mixed-namespace sources are skipped with a warning.
+      - keep_originals=false soft-decays originals
+        (importance_score *= 0.5, floor 0.3) instead of deleting.
+      - Summaries default to the ``archive:summary`` namespace so
+        they don't pollute default search results.
+
+    auto_promote (inverse of auto_archive):
+      {"min_access_count": 5, "target_namespace": "default"}
+      {
+        "source_prefix": "archive",
+        "target_namespace": "default",
+        "min_access_count": 3,
+        "min_importance_score": 0.5,
+        "recency_days": 30
+      }
+      - source_prefix: namespace prefix to scan (default "archive").
+      - target_namespace: destination (default "default").
+      - min_access_count: chunks need at least this many accesses.
+      - min_importance_score: optional importance floor (AND).
+      - recency_days: only if last_accessed_at is within N days
+        (opposite of auto_archive's age cutoff — *recent* access
+        qualifies). Null last_accessed_at disqualifies.
+      - Resets last_accessed_at on promotion to prevent immediate
+        re-archival (ping-pong prevention).
+
+    auto_expire: {"max_age_days": 90}
+    auto_tag: {"max_tags": 5}
     """
     if not name or not name.strip():
         return "Error: policy name cannot be empty."

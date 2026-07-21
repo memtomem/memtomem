@@ -28,29 +28,50 @@ ACTIONS: dict[str, ActionInfo] = {}
 
 
 def _parse_arg_docs(docstring: str) -> dict[str, str]:
-    """Extract per-parameter descriptions from a Google-style Args section."""
+    """Extract per-parameter descriptions from a Google-style Args section.
+
+    Only lines at the indent of the *first* parameter start a new entry.
+    Anything indented deeper is continuation text for the parameter above it.
+    A docstring is free to nest ``key: value`` blocks under a parameter — JSON
+    schemas in ``mem_policy_add``, bullet lists elsewhere — and those keys are
+    not parameters. Matching any ``\\s{4,}(\\w+):`` line, as this did before,
+    turned ``auto_expire:`` inside a config example into a phantom parameter
+    that ``mem_do(action="help")`` then advertised as callable.
+    """
+    import re
+
     result: dict[str, str] = {}
     in_args = False
+    args_indent = 0
+    param_indent: int | None = None
     current_name = ""
     current_desc = ""
-    import re
 
     for line in docstring.splitlines():
         stripped = line.strip()
-        if stripped in ("Args:", "Arguments:"):
-            in_args = True
+        if not in_args:
+            if stripped in ("Args:", "Arguments:"):
+                in_args = True
+                args_indent = len(line) - len(line.lstrip())
             continue
-        if in_args:
-            if stripped and not stripped.startswith("-") and not line.startswith("    "):
-                break  # Left the Args section
-            match = re.match(r"^\s{4,}(\w+):\s*(.+)$", line)
-            if match:
-                if current_name:
-                    result[current_name] = current_desc.strip()
-                current_name = match.group(1)
-                current_desc = match.group(2)
-            elif current_name and stripped:
-                current_desc += " " + stripped
+        if not stripped:
+            continue  # blank lines are allowed inside the block
+        indent = len(line) - len(line.lstrip())
+        # Dedenting back to (or past) the ``Args:`` header ends the section.
+        # Docstrings are not uniformly indented at runtime — some arrive
+        # dedented, some keep the source indentation — so compare against the
+        # header/params we actually saw rather than a fixed column.
+        if indent <= (param_indent - 1 if param_indent is not None else args_indent):
+            break
+        match = re.match(r"^\s+(\w+):\s*(.+)$", line)
+        if match and (param_indent is None or indent == param_indent):
+            param_indent = indent
+            if current_name:
+                result[current_name] = current_desc.strip()
+            current_name = match.group(1)
+            current_desc = match.group(2)
+        elif current_name:
+            current_desc += " " + stripped
     if current_name:
         result[current_name] = current_desc.strip()
     return result
@@ -80,13 +101,20 @@ def register(category: str):
             default = f" = {p.default!r}" if p.default != inspect.Parameter.empty else ""
             params[name] = f"{type_str}{default}"
 
+        # Second line of defense behind the parser: only real parameters may
+        # reach the help catalog. A docstring shape the parser mis-reads can
+        # still produce a stray key; dropping it here means the worst outcome
+        # is a missing description, never an invented parameter an agent then
+        # tries to pass.
+        param_docs = {k: v for k, v in _parse_arg_docs(fn.__doc__ or "").items() if k in params}
+
         action_name = fn.__name__.removeprefix("mem_")
         ACTIONS[action_name] = ActionInfo(
             fn=fn,
             category=category,
             description=(fn.__doc__ or "").split("\n")[0].strip(),
             params=params,
-            param_docs=_parse_arg_docs(fn.__doc__ or ""),
+            param_docs=param_docs,
         )
         return fn
 
