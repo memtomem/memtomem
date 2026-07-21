@@ -513,13 +513,42 @@ def test_pull_status_buckets_are_exhaustive() -> None:
     )
     # Buckets must not overlap — a status renders with exactly one prefix.
     assert not (_PULL_ERROR_STATUSES & _PULL_REFUSAL_STATUSES)
-    # The four the web route maps to non-200 are exactly the MCP "error:" set.
+    # The five the web route maps to non-200 are exactly the MCP "error:" set.
+    # ``swap_recovery_pending`` is a 409 there, so it belongs here rather than
+    # with the refusals — that bucket is defined as "what the web route returns
+    # as a typed 200", and it is also not an actionable refusal (the
+    # remediation is an operator inspecting paths, not a parameter to change).
     assert set(_PULL_ERROR_STATUSES) == {
         "lock_timeout",
         "plan_stale",
         "snapshot_failed",
         "write_failed",
+        "swap_recovery_pending",
     }
+
+
+def test_swap_recovery_pending_renders_as_error_not_refused() -> None:
+    """A wedged artifact must not inherit the benign ``refused:`` prefix.
+
+    ``refused:`` reads as "your request was declined, adjust and retry"; this
+    state needs an operator to look at two paths on disk. The reason is
+    redacted like every other one.
+    """
+    from memtomem.context.pull_apply import PullApplyResult
+    from memtomem.server.tools.context import _format_pull_result
+
+    result = PullApplyResult(
+        status="swap_recovery_pending",
+        kind="skills",
+        name="demo",
+        scope="user",
+        reason="an interrupted directory swap left two candidate trees",
+        reason_code="swap_recovery_pending",
+    )
+    out = _format_pull_result(result, Path("/nonexistent"))
+    assert out.startswith("error:")
+    assert "unhandled Pull status" not in out
+    assert "interrupted directory swap" in out
 
 
 def test_unknown_status_fails_closed() -> None:

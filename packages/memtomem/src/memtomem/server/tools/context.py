@@ -13,7 +13,11 @@ from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import remediation, versioning
 from memtomem.context._canonical_txn import versioning_op_locked
-from memtomem.context.error_redact import redact_engine_reason
+from memtomem.context.error_redact import (
+    redact_engine_reason,
+    scrub_absolute_paths,
+    scrub_residual_absolute_paths,
+)
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
@@ -55,8 +59,18 @@ def _redact_reason(reason: str | None, *roots: Path) -> str:
     suffix guard on the returned string. The MCP tool result flows to the
     calling agent's transcript / model provider, so it gets the same wire-
     boundary sanitization the loopback dashboard applies.
+
+    Composes :func:`scrub_residual_absolute_paths` — the absolute-ONLY scrub,
+    NOT the web's :func:`scrub_absolute_paths`. ``redact_engine_reason`` strips
+    only the roots it is handed plus the import-frozen ``$HOME``, so a runtime
+    dir symlinked onto a shared volume kept its full path on this wire (PR
+    review, reproduced). The web twin's scrub cannot be reused: it also eats
+    the RELATIVE remainder, which here is the remediation
+    (``blocked foo: privacy hits in .claude/agents/foo.md``) and, in the
+    success-path formatters, the intended ``~``-collapsed output. Two postures,
+    two scrubs — see :mod:`memtomem.context.error_redact`.
     """
-    return redact_engine_reason(reason, *roots) or ""
+    return scrub_residual_absolute_paths(redact_engine_reason(reason, *roots) or "")
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
@@ -2688,8 +2702,23 @@ _PULL_LOCK_BUDGET_S = 30.0
 #: a new engine status must be classified deliberately, not inherit a prefix
 #: that could understate it (e.g. a future data-loss status rendering as a
 #: benign refusal).
-#: The four the web route maps to non-200 (503/409/500/500) → ``error:``.
-_PULL_ERROR_STATUSES = frozenset({"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"})
+#: The five the web route maps to non-200 (503/409/409/500/500) → ``error:``.
+#: ``swap_recovery_pending`` belongs here rather than with the refusals: the
+#: refusal bucket is defined as "what the web route returns as a typed 200",
+#: and this one is a 409. It is also not an *actionable* refusal — the
+#: remediation is an operator inspecting the artifact on disk, not a parameter
+#: the caller can change and retry (which is why it carries no ``remediation``
+#: entry). Under a known root the reason still names the trees relatively;
+#: outside one it says ``'<path>'`` and the CLI is where the locations survive.
+_PULL_ERROR_STATUSES = frozenset(
+    {
+        "lock_timeout",
+        "plan_stale",
+        "snapshot_failed",
+        "write_failed",
+        "swap_recovery_pending",
+    }
+)
 #: Actionable domain refusals the web route returns as a typed HTTP 200.
 _PULL_REFUSAL_STATUSES = frozenset(
     {
@@ -2734,9 +2763,13 @@ def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
     ``_redact_reason`` strips the roots it is handed plus the import-frozen
     ``$HOME``; :func:`scrub_absolute_paths` then removes any residual absolute
     path under neither (mirrors the web ``_redact_pull_reason`` composition).
-    """
-    from memtomem.context.error_redact import scrub_absolute_paths
 
+    Pull opts INTO the scrub while the shared ``_redact_reason`` stays out of
+    it — see that function for why the two are not the same decision. Pull
+    reasons carry no actionable relative remainder to protect: they name
+    runtimes and scopes, and after G4a-3a a swap refusal names two canonical
+    trees, which is disclosure rather than remediation.
+    """
     return scrub_absolute_paths(_redact_reason(reason, *roots))
 
 
@@ -2798,12 +2831,19 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     prefix-coded MCP line (``error:`` / ``refused:`` / ``privacy block:`` /
     success), mirroring the web ``_finalize_pull`` status routing.
 
-    The four HTTP-semantic statuses the web route maps to non-200
-    (``lock_timeout`` 503, ``plan_stale`` 409, ``snapshot_failed`` /
-    ``write_failed`` 500) have no status channel over MCP, so they surface as
-    ``error:`` text; ``gate_blocked`` is ``privacy block:``; the actionable
-    domain refusals are ``refused:``; ``applied`` (incl. the byte-identical
-    no-op) is a success line.
+    The five HTTP-semantic statuses the web route maps to non-200
+    (``lock_timeout`` 503, ``plan_stale`` / ``swap_recovery_pending`` 409,
+    ``snapshot_failed`` / ``write_failed`` 500) have no status channel over
+    MCP, so they surface as ``error:`` text; ``gate_blocked`` is
+    ``privacy block:``; the actionable domain refusals are ``refused:``;
+    ``applied`` (incl. the byte-identical no-op) is a success line.
+
+    ``swap_recovery_pending`` sits with the errors rather than the refusals on
+    purpose: ``refused:`` reads as "your request was declined, adjust and
+    retry", and there is no parameter to adjust — an interrupted directory swap
+    needs an operator to look at the artifact on disk. The reason carries that
+    instruction; whether it still carries the locations depends on the
+    redaction above (relative under a known root, ``'<path>'`` outside one).
 
     EVERY ``reason`` is redacted, ``gate_blocked`` included. Pull's
     ``gate_blocked`` reason is built from runtime + scope only
