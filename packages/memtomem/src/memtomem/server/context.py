@@ -176,10 +176,12 @@ class AppContext:
     # already here returns "No active session." and does not re-run the
     # phase. Kept separate from ``current_session_id`` so the claim does NOT
     # null the public session handle at entry: nulling it early would make
-    # concurrent session-bound writes (``mem_add`` agent-namespace routing,
-    # ``mem_scratch_set`` binding) see no active session for the whole
-    # multi-second phase. The handle is nulled only when the phase completes.
-    # Guarded by ``_session_lock``.
+    # concurrent writes lose ``mem_add`` agent-namespace routing and
+    # ``mem_scratch_set`` binding for the whole multi-second phase. Provenance
+    # capture treats membership in this set as a seal, so those later writes
+    # keep their routing context without joining the closing session. The
+    # handle is nulled only when the phase completes. Guarded by
+    # ``_session_lock``.
     _ending_session_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     # Serializes a whole session *transition* — start (including the inline

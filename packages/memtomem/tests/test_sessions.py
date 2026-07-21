@@ -592,8 +592,8 @@ class TestSessionEndClaim:
     async def test_handle_stays_live_during_teardown_for_agent_routing(self, components):
         """The claim must not deactivate the session for *other* concurrent
         tools: while ``mem_session_end``'s effectful phase runs, the public
-        ``current_agent_id`` must stay set so a concurrent session-bound write
-        still routes to ``agent-runtime:<id>`` instead of the default scope.
+        ``current_agent_id`` must stay set so a concurrent write still routes
+        to ``agent-runtime:<id>`` instead of the default scope.
         Regression pin for the claim-vs-handle separation (#1571 review): a
         naive null-at-entry leaves this None for the whole multi-second phase.
         """
@@ -1049,19 +1049,46 @@ class TestSessionSummaryPhaseB:
             ctx, memory_dir, namespace="agent-runtime:planner"
         )
 
-        real_recall = app.storage.recall_chunks
-
-        async def reject_exact_hydration(*args, **kwargs):
-            if kwargs.get("chunk_ids") is not None:
-                raise AssertionError("raw-size precheck should stop exact hydration")
-            return await real_recall(*args, **kwargs)
-
-        app.storage.recall_chunks = reject_exact_hydration  # type: ignore[method-assign]
-
         out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
         assert "archive:session:" not in out
         assert "too large" in out
-        assert not components.llm.calls, "oversize check must short-circuit before generate()"
+        assert not components.llm.calls, "assembled-body check must stop before generate()"
+
+    @pytest.mark.asyncio
+    async def test_raw_whitespace_does_not_false_reject_exact_summary(self, components):
+        """The hard limit applies after ``chunk.content.strip()``.
+
+        ``SUM(LENGTH(content))`` is not a lower bound on that body: enough
+        edge whitespace can make the raw aggregate exceed the cap while the
+        actual prompt remains small.
+        """
+        components.llm = _FakeLLM(response="trimmed exact summary")
+        components.config.session_summary.min_chunks = 1
+        components.config.session_summary.max_input_chars = 80
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        padded = make_chunk(
+            content=(" " * 200) + ("\n\t" * 100) + "TRIMMED-CONTENT" + (" \n" * 200),
+            source="trimmed.md",
+        )
+        await app.storage.upsert_chunks([padded])
+        await self._record_write_event(app, session_id, [str(padded.id)])
+
+        raw_count, raw_chars = await app.storage.sum_chunk_content_chars([padded.id])
+        assert raw_count == 1
+        assert raw_chars > components.config.session_summary.max_input_chars
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "Auto summary:" in out
+        assert "too large" not in out
+        assert len(components.llm.calls) == 1
+        assert "TRIMMED-CONTENT" in components.llm.calls[0][0]
 
     @pytest.mark.asyncio
     async def test_auto_summary_reaches_unbound_session_writes(self, components):
@@ -1239,6 +1266,73 @@ class TestSessionSummaryPhaseB:
         prompt = components.llm.calls[0][0]
         assert "TIMEOUT-LEGACY-INPUT" in prompt
         assert "TIMEOUT-EXACT-INPUT" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_write_started_during_llm_is_outside_the_sealed_session(self, components):
+        """A post-snapshot write must not invalidate a persisted archive.
+
+        The public handles stay live while the LLM runs so namespace routing
+        remains stable. Provenance is already sealed, though: the late write
+        lands in the same agent namespace without joining the closing
+        session or racing a late ``provenance_incomplete`` flag against the
+        archive write.
+        """
+
+        class _BlockingLLM(_FakeLLM):
+            def __init__(self) -> None:
+                super().__init__(response="sealed session summary")
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def generate(
+                self, prompt: str, *, system: str = "", max_tokens: int = 1024
+            ) -> str:
+                self.calls.append((prompt, system, max_tokens))
+                self.started.set()
+                await self.release.wait()
+                return self.response
+
+        llm = _BlockingLLM()
+        components.llm = llm
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        self._seed_chunks(memory_dir, count=1, prefix="before-seal")
+        await self._index_dir(ctx, memory_dir, namespace=None)
+
+        ender = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await asyncio.wait_for(llm.started.wait(), timeout=2.0)
+
+        late_path = memory_dir / "late-after-snapshot.md"
+        late_path.write_text("# Late\n\nLATE-AFTER-SNAPSHOT", encoding="utf-8")
+        late_out = await mem_index(path=str(late_path), ctx=ctx)  # type: ignore[arg-type]
+        assert "Indexing complete" in late_out
+        assert "agent-runtime:planner" in {
+            chunk.metadata.namespace
+            for chunk in await app.storage.recall_chunks(limit=20)
+            if "LATE-AFTER-SNAPSHOT" in chunk.content
+        }
+
+        provenance_events = [
+            event
+            for event in await app.storage.get_session_events(session_id)
+            if (event.get("metadata") or {}).get("provenance") == PROVENANCE_KIND
+        ]
+        assert len(provenance_events) == 1
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+        llm.release.set()
+        out = await ender
+
+        assert f"archive:session:{session_id}" in out
+        assert "LATE-AFTER-SNAPSHOT" not in llm.calls[0][0]
 
     @pytest.mark.asyncio
     async def test_malformed_provenance_falls_back_without_logging_value(self, components, caplog):

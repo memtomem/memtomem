@@ -2132,14 +2132,12 @@ class SqliteBackend(
         ``recall_chunks`` would, so the count agrees with what a recall of
         the same ids under the same project context would return.
 
-        The character total is a **lower bound** on the prompt a caller
-        will eventually build, not a prediction of it: a formatter that
-        adds headers, source paths, and separators pushes the real length
-        higher, while one that strips content can pull it lower. Use it to
-        reject the obviously-oversized cheaply, never as the authoritative
-        limit. The unit is characters (SQLite ``LENGTH()`` counts
-        characters on TEXT, not UTF-8 bytes), matching the
-        ``max_input_chars`` knob it exists to serve.
+        The character total is not a bound on the prompt a caller will
+        eventually build: headers, source paths, and separators push the
+        formatted length higher, while stripping leading/trailing whitespace
+        can pull it lower by an arbitrary amount. The unit is characters
+        (SQLite ``LENGTH()`` counts characters on TEXT, not UTF-8 bytes), but
+        callers must apply any hard size limit to the assembled body.
         """
         db = self._get_read_db()
         conditions = [_chunk_ids_sql()]

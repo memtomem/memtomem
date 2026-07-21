@@ -105,9 +105,21 @@ async def capture_session_and_namespace(
     lock is a suspension point, and the write must be attributed to the
     session live when it actually happened, not the one live when the
     tool was invoked.
+
+    A session claimed by ``mem_session_end`` / a superseding start is
+    already sealed for new provenance even though its public handle stays
+    set until teardown finishes. The handle is still needed to preserve
+    agent-namespace routing, but assigning a new write to the closing
+    session after its drain boundary would let the write miss the event
+    snapshot and invalidate an archive summary that is already being
+    generated. Claim and capture use this same lock, so a write either
+    captured the session before the claim (and its earlier gauge ticket is
+    covered by the drain) or is excluded from the closing session here.
     """
     async with app._session_lock:
         session_id = app.current_session_id
+        if session_id in app._ending_session_ids:
+            session_id = None
         resolved = _resolve_agent_namespace(app, None)
     return session_id, (namespace or resolved)
 
@@ -184,10 +196,9 @@ async def record_write_provenance(
         await mark_provenance_incomplete(app, session_id)
         return
 
-    # Did this write outrun its session? The drain only waits for writes
-    # admitted before it started, and the session handle stays live
-    # through teardown, so a write can legitimately land its event after
-    # teardown snapshotted the event list. Checked *after* the write, so
+    # Did a write that captured this session before the seal outrun it? Its
+    # gauge ticket is inside the drain boundary, but a timeout can still let
+    # the event land after teardown's snapshot. Checked *after* the write, so
     # a claim taken while the write was in flight is still seen.
     async with app._session_lock:
         sealed = session_id in app._ending_session_ids or app.current_session_id != session_id
@@ -205,9 +216,15 @@ async def capture_session_for_untracked_write(app: AppContext) -> str | None:
     session that started meanwhile inherit the previous one's mutation.
     That is the same attribution mistake this issue exists to fix, so it
     must not be reintroduced by the code fixing it.
+
+    As with tracked writes, a claimed session is sealed. A mutation that
+    reaches this capture point after teardown claimed the session belongs
+    outside that session's historical input set and must not race a late
+    ``provenance_incomplete`` patch against an already-persisted summary.
     """
     async with app._session_lock:
-        return app.current_session_id
+        session_id = app.current_session_id
+        return None if session_id in app._ending_session_ids else session_id
 
 
 async def flag_untracked_write(app: AppContext, session_id: str | None) -> None:

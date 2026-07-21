@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 # How long a session transition waits for in-flight session-bound writes to
 # land before giving up and saying so. Short on purpose: teardown must stay
 # responsive, and a write that outlasts this is reported rather than waited on
-# indefinitely. It does not close the window entirely — a write admitted
-# *after* the drain returns still misses the snapshot, which is inherent to
-# leaving the session handle live during teardown (see mem_session_end).
+# indefinitely. The transition claim seals new provenance before this drain;
+# later writes keep the public handle for routing but do not join the closing
+# session's event snapshot (see mem_session_end).
 _WRITE_DRAIN_TIMEOUT_S = 2.0
 
 
@@ -280,31 +280,25 @@ async def mem_session_end(
     instead of re-running the effectful phase — the summarize/persist work
     runs **at most once** per session. The public ``current_session_id`` /
     ``current_agent_id`` handles stay set through the phase and are cleared
-    only when it completes, so concurrent session-bound writes
-    (``mem_add`` agent-namespace routing, ``mem_scratch_set`` binding) still
-    resolve to the active session during teardown instead of silently
-    falling back to the default scope. The claim is not released on
+    only when it completes, so concurrent writes still preserve
+    ``mem_add`` agent-namespace routing and ``mem_scratch_set`` binding
+    instead of silently falling back to the default scope. The claim also
+    seals chunk-write provenance: a write that reaches attribution after
+    the claim keeps the resolved agent namespace but does not join the
+    closing session. The claim is not released on
     mid-phase failure (a retry must not risk a duplicate billable summary);
     an active DB row orphaned by a mid-phase crash is reaped by
     the stale-session path (``find_stale_active_sessions``).
 
-    Because the handle stays live, a write can be in flight when the
-    teardown starts. The teardown therefore waits briefly for in-flight
-    session-bound writes to land before snapshotting the session's
-    events, so the counts (and the auto-summary inputs built from them)
-    are not short by a write that was already under way. This narrows
-    the window but cannot close it: a write admitted *after* the wait
-    returns still misses the snapshot. Closing it entirely would mean
-    blocking writes during teardown, which is exactly what keeping the
-    handle live is meant to avoid. A wait that times out is reported in
-    the return string rather than presented as a complete count.
-
-    Both of those gaps are additionally recorded as
-    ``provenance_incomplete`` on the session row. The response string is
-    for the caller; a consumer reading the stored session — the
-    auto-summary, ``mm session show`` — never sees it, and a session that
-    advertises provenance must not present a short input set as the whole
-    story. The straggler write marks the row itself when it lands.
+    A write can already be in flight when teardown takes the claim. The
+    teardown therefore waits briefly for writes that captured the session
+    before the seal to land before snapshotting its events. Because gauge
+    admission precedes capture and both capture and claim use
+    ``_session_lock``, a write retaining this session id is necessarily on
+    the drain's side of the boundary; later writes continue in the same
+    namespace without being attributed to the closing session. A wait that
+    times out is reported in the return string and recorded as
+    ``provenance_incomplete`` on the row rather than presented as complete.
 
     ``- Events: N (add:M, index:K)`` counts the provenance events the
     seven chunk-creating write tools record, so it reflects what the
@@ -367,9 +361,11 @@ async def mem_session_end(
     #
     # The public handle is deliberately left set here (unlike a naive
     # null-at-entry): it is cleared only after the phase, in the finally, so
-    # concurrent session-bound writes during the multi-second phase still
-    # route to this session's scope (agent-namespace / scratch binding)
-    # instead of the default. agent_id is captured for the archive helper.
+    # concurrent writes during the multi-second phase still preserve the
+    # session's routing context (agent namespace / scratch binding) instead
+    # of falling back to the default. Provenance capture treats the claim as
+    # a seal, so later chunk writes do not join the closing session. agent_id
+    # is captured for the archive helper.
     # The claim is taken *before* the transition lock, not under it. A
     # concurrent or retried end must return "No active session." immediately
     # rather than queue behind the in-flight teardown — that early return is
@@ -595,11 +591,13 @@ async def _maybe_auto_summarize(
             )
             use_provenance = False
         else:
-            # Count first so an empty authoritative set stays empty, an
-            # obviously oversized set is rejected without hydrating it,
-            # and a deleted / scope-hidden id is detected rather than
-            # silently presenting a partial provenance record as complete.
-            chunk_count, content_chars = await app.storage.sum_chunk_content_chars(
+            # Count first so an empty authoritative set stays empty and a
+            # deleted / scope-hidden id is detected rather than silently
+            # presenting a partial provenance record as complete. The raw
+            # content total is intentionally not a size gate: the prompt
+            # formatter strips leading/trailing whitespace, so it can be
+            # larger than the authoritative assembled body.
+            chunk_count, _content_chars = await app.storage.sum_chunk_content_chars(
                 chunk_ids,
                 project_context_root=project_context_root,
             )
@@ -614,15 +612,6 @@ async def _maybe_auto_summarize(
                 use_provenance = False
             elif chunk_count < cfg.min_chunks:
                 return None, "below min_chunks", []
-            elif content_chars > cfg.max_input_chars:
-                logger.info(
-                    "auto_summary_skipped session_id=%s reason=raw content is %s chars, "
-                    "exceeds max_input_chars=%s",
-                    session_id,
-                    content_chars,
-                    cfg.max_input_chars,
-                )
-                return None, "too large", []
             else:
                 chunks = await app.storage.recall_chunks(
                     chunk_ids=chunk_ids,
