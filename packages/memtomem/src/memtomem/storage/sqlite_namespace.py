@@ -255,11 +255,12 @@ class NamespaceOps:
         stores a namespace string merely points at it:
 
         * ``sessions.namespace`` **follows** the rename inside the same
-          transaction — a live session's auto-summary filters chunks by
-          the namespace recorded on its row, so leaving it behind would
-          make the summary find nothing (``server/tools/session.py``).
-          It does not make a namespace *exist*, though: a session-only
-          namespace is not renameable and is not a rename target.
+          transaction — unmarked or provenance-incomplete sessions retain
+          the legacy auto-summary fallback that filters chunks by the
+          namespace recorded on the row, so leaving it behind would make
+          that fallback find nothing (``server/tools/session.py``). It does
+          not make a namespace *exist*, though: a session-only namespace is
+          not renameable and is not a rename target.
         * ``chunk_links.namespace_target`` is deliberately **not**
           rewritten. It records what the target namespace was called at
           share time — an immutable historical fact, not a live pointer.

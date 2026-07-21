@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 # How long a session transition waits for in-flight session-bound writes to
 # land before giving up and saying so. Short on purpose: teardown must stay
 # responsive, and a write that outlasts this is reported rather than waited on
-# indefinitely. It does not close the window entirely — a write admitted
-# *after* the drain returns still misses the snapshot, which is inherent to
-# leaving the session handle live during teardown (see mem_session_end).
+# indefinitely. The transition claim seals new provenance before this drain;
+# later writes keep the public handle for routing but do not join the closing
+# session's event snapshot (see mem_session_end).
 _WRITE_DRAIN_TIMEOUT_S = 2.0
 
 
@@ -280,31 +280,25 @@ async def mem_session_end(
     instead of re-running the effectful phase — the summarize/persist work
     runs **at most once** per session. The public ``current_session_id`` /
     ``current_agent_id`` handles stay set through the phase and are cleared
-    only when it completes, so concurrent session-bound writes
-    (``mem_add`` agent-namespace routing, ``mem_scratch_set`` binding) still
-    resolve to the active session during teardown instead of silently
-    falling back to the default scope. The claim is not released on
+    only when it completes, so concurrent writes still preserve
+    ``mem_add`` agent-namespace routing and ``mem_scratch_set`` binding
+    instead of silently falling back to the default scope. The claim also
+    seals chunk-write provenance: a write that reaches attribution after
+    the claim keeps the resolved agent namespace but does not join the
+    closing session. The claim is not released on
     mid-phase failure (a retry must not risk a duplicate billable summary);
     an active DB row orphaned by a mid-phase crash is reaped by
     the stale-session path (``find_stale_active_sessions``).
 
-    Because the handle stays live, a write can be in flight when the
-    teardown starts. The teardown therefore waits briefly for in-flight
-    session-bound writes to land before snapshotting the session's
-    events, so the counts (and the auto-summary inputs built from them)
-    are not short by a write that was already under way. This narrows
-    the window but cannot close it: a write admitted *after* the wait
-    returns still misses the snapshot. Closing it entirely would mean
-    blocking writes during teardown, which is exactly what keeping the
-    handle live is meant to avoid. A wait that times out is reported in
-    the return string rather than presented as a complete count.
-
-    Both of those gaps are additionally recorded as
-    ``provenance_incomplete`` on the session row. The response string is
-    for the caller; a consumer reading the stored session — the
-    auto-summary, ``mm session show`` — never sees it, and a session that
-    advertises provenance must not present a short input set as the whole
-    story. The straggler write marks the row itself when it lands.
+    A write can already be in flight when teardown takes the claim. The
+    teardown therefore waits briefly for writes that captured the session
+    before the seal to land before snapshotting its events. Because gauge
+    admission precedes capture and both capture and claim use
+    ``_session_lock``, a write retaining this session id is necessarily on
+    the drain's side of the boundary; later writes continue in the same
+    namespace without being attributed to the closing session. A wait that
+    times out is reported in the return string and recorded as
+    ``provenance_incomplete`` on the row rather than presented as complete.
 
     ``- Events: N (add:M, index:K)`` counts the provenance events the
     seven chunk-creating write tools record, so it reflects what the
@@ -329,10 +323,15 @@ async def mem_session_end(
 
     When ``summary`` is omitted, Phase B's auto path runs: if the
     server has an LLM provider configured, ``session_summary.auto`` is
-    True, and the session collected at least
-    ``session_summary.min_chunks`` chunks in its namespace since
-    ``started_at``, the server asks the LLM for a short narrative
-    summary and persists it through the same archive-chunk path.
+    True, and the session recorded at least
+    ``session_summary.min_chunks`` written chunks, the server asks the
+    LLM for a short narrative summary and persists it through the same
+    archive-chunk path. Provenance-enabled sessions select only the
+    chunk ids carried by marked write events, so namespace rules may
+    scatter one session's writes without losing them and unrelated
+    concurrent writes are excluded. Sessions created by older / non-MCP
+    callers, and sessions whose provenance is marked incomplete, keep
+    the legacy ``namespace`` + ``started_at`` selection path.
     Sessions whose serialized chunk body exceeds
     ``session_summary.max_input_chars`` skip the auto path with a
     log warning (callers can pass an explicit ``summary=`` instead).
@@ -362,9 +361,11 @@ async def mem_session_end(
     #
     # The public handle is deliberately left set here (unlike a naive
     # null-at-entry): it is cleared only after the phase, in the finally, so
-    # concurrent session-bound writes during the multi-second phase still
-    # route to this session's scope (agent-namespace / scratch binding)
-    # instead of the default. agent_id is captured for the archive helper.
+    # concurrent writes during the multi-second phase still preserve the
+    # session's routing context (agent namespace / scratch binding) instead
+    # of falling back to the default. Provenance capture treats the claim as
+    # a seal, so later chunk writes do not join the closing session. agent_id
+    # is captured for the archive helper.
     # The claim is taken *before* the transition lock, not under it. A
     # concurrent or retried end must return "No active session." immediately
     # rather than queue behind the in-flight teardown — that early return is
@@ -430,14 +431,6 @@ async def _end_session_phase(
     for e in events:
         event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
-    # Read the session row before end_session writes ended_at — we need
-    # ``started_at`` and ``namespace`` for the Phase B auto-summary
-    # chunk lookup. Tolerate missing rows defensively (the row was
-    # created in mem_session_start, so absence indicates external
-    # tampering or a backend bug; either way, fall back to skipping
-    # auto-summary rather than crashing the close path).
-    session_row = await app.storage.get_session(session_id)
-
     # A drain that timed out means the snapshot above may be short. The
     # response line below says so, but a consumer of the stored row never
     # sees the response — so record it where the row is read, or a marked
@@ -447,6 +440,14 @@ async def _end_session_phase(
         end_metadata["provenance_incomplete"] = True
 
     await app.storage.end_session(session_id, summary, end_metadata)
+
+    # Read the final row after end_session merged ``end_metadata``. In
+    # particular, a drain timeout writes ``provenance_incomplete`` above;
+    # reading before the merge would hand the auto-summary a stale row and
+    # let it trust the short event snapshot as authoritative. Tolerate a
+    # missing row defensively: absence indicates external tampering or a
+    # backend bug, and the auto path skips rather than crashing teardown.
+    session_row = await app.storage.get_session(session_id)
 
     effective_summary = summary
     auto_summary_skip_reason: str | None = None
@@ -460,6 +461,8 @@ async def _end_session_phase(
             app,
             session_id=session_id,
             session_row=session_row,
+            events=events,
+            transition_incomplete=not drained,
         )
 
     summary_chunk_line: str | None = None
@@ -528,8 +531,15 @@ async def _maybe_auto_summarize(
     *,
     session_id: str,
     session_row: dict | None,
+    events: list[dict],
+    transition_incomplete: bool,
 ) -> tuple[str | None, str | None, list]:
     """Run the Phase B auto-summary path when prerequisites are met.
+
+    A complete ``write-v1`` session selects its marked event ids exactly.
+    An unmarked or incomplete session uses the legacy namespace/time-window
+    inference. A marked session with no write events is authoritative empty,
+    not a request to widen back to the legacy scan.
 
     Returns ``(summary_text, skip_reason, source_chunks)``. When the
     auto path produced text, ``skip_reason`` is ``None`` and
@@ -556,37 +566,97 @@ async def _maybe_auto_summarize(
     if session_row is None:
         return None, "no session row", []
 
-    started_at_str = session_row.get("started_at")
-    namespace = session_row.get("namespace") or "default"
-    if not started_at_str:
-        return None, "no started_at", []
-
-    try:
-        started_at = datetime.fromisoformat(started_at_str)
-    except ValueError:
-        logger.warning(
-            "auto_summary_invalid_started_at session_id=%s value=%r",
-            session_id,
-            started_at_str,
-        )
-        return None, "no started_at", []
-    if started_at.tzinfo is None:
-        started_at = started_at.replace(tzinfo=timezone.utc)
-
-    ns_filter = NamespaceFilter(namespaces=(namespace,))
     # ADR-0011 PR-D round 9: thread project context onto the always-on
-    # scope filter so an auto-summary for a session run in a
-    # registered project still picks up the session's project_shared /
-    # project_local chunks.
+    # scope filter for both provenance recall and the legacy namespace
+    # fallback.
     from memtomem.server.tools.search import _resolve_project_context_root
 
     project_context_root = _resolve_project_context_root(app)
-    chunks = await app.storage.recall_chunks(
-        since=started_at,
-        namespace_filter=ns_filter,
-        limit=max(cfg.min_chunks * 4, 200),
-        project_context_root=project_context_root,
-    )
+
+    metadata = session_row.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    provenance_enabled = metadata.get("provenance") == PROVENANCE_KIND
+    provenance_incomplete = transition_incomplete or bool(metadata.get("provenance_incomplete"))
+
+    chunks: list
+    use_provenance = provenance_enabled and not provenance_incomplete
+    if use_provenance:
+        chunk_ids, invalid_reason = _collect_provenance_chunk_ids(events)
+        if invalid_reason is not None:
+            logger.warning(
+                "auto_summary_provenance_fallback session_id=%s reason=%s",
+                session_id,
+                invalid_reason,
+            )
+            use_provenance = False
+        else:
+            # Count first so an empty authoritative set stays empty and a
+            # deleted / scope-hidden id is detected rather than silently
+            # presenting a partial provenance record as complete. The raw
+            # content total is intentionally not a size gate: the prompt
+            # formatter strips leading/trailing whitespace, so it can be
+            # larger than the authoritative assembled body.
+            chunk_count, _content_chars = await app.storage.sum_chunk_content_chars(
+                chunk_ids,
+                project_context_root=project_context_root,
+            )
+            if chunk_count != len(chunk_ids):
+                logger.warning(
+                    "auto_summary_provenance_fallback "
+                    "session_id=%s reason=chunk_id_shortfall expected=%s found=%s",
+                    session_id,
+                    len(chunk_ids),
+                    chunk_count,
+                )
+                use_provenance = False
+            elif chunk_count < cfg.min_chunks:
+                return None, "below min_chunks", []
+            else:
+                chunks = await app.storage.recall_chunks(
+                    chunk_ids=chunk_ids,
+                    limit=chunk_count,
+                    project_context_root=project_context_root,
+                )
+                if len(chunks) != chunk_count:
+                    # A concurrent delete can land between the aggregate
+                    # and hydration. Treat that exactly like the aggregate
+                    # shortfall instead of summarizing a set that changed
+                    # underneath us.
+                    logger.warning(
+                        "auto_summary_provenance_fallback "
+                        "session_id=%s reason=hydration_shortfall expected=%s found=%s",
+                        session_id,
+                        chunk_count,
+                        len(chunks),
+                    )
+                    use_provenance = False
+
+    if not use_provenance:
+        started_at_str = session_row.get("started_at")
+        namespace = session_row.get("namespace") or "default"
+        if not started_at_str:
+            return None, "no started_at", []
+
+        try:
+            started_at = datetime.fromisoformat(started_at_str)
+        except ValueError:
+            logger.warning(
+                "auto_summary_invalid_started_at session_id=%s value=%r",
+                session_id,
+                started_at_str,
+            )
+            return None, "no started_at", []
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+
+        chunks = await app.storage.recall_chunks(
+            since=started_at,
+            namespace_filter=NamespaceFilter(namespaces=(namespace,)),
+            limit=max(cfg.min_chunks * 4, 200),
+            project_context_root=project_context_root,
+        )
+
     if len(chunks) < cfg.min_chunks:
         return None, "below min_chunks", []
 
@@ -612,6 +682,53 @@ async def _maybe_auto_summarize(
     if not summary:
         return None, "empty output", []
     return summary, None, chunks
+
+
+def _collect_provenance_chunk_ids(events: list[dict]) -> tuple[list[UUID], str | None]:
+    """Return the distinct ids from marked write-provenance events.
+
+    ``session_events.chunk_ids`` is shared with query/read events, so the
+    event marker — not a non-empty id list — is the authority. ``None`` is
+    not used for the empty case: a marked session with zero write events
+    authoritatively wrote nothing and must not widen into the legacy
+    namespace/time-window scan.
+
+    The failure reason is a fixed diagnostic token. Raw event values may
+    be caller supplied and can be secret-shaped, so they are never copied
+    into logs.
+    """
+    chunk_ids: list[UUID] = []
+    seen: set[UUID] = set()
+
+    for event in events:
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("provenance") != PROVENANCE_KIND:
+            continue
+
+        raw_ids = event.get("chunk_ids")
+        chunk_count = metadata.get("chunk_count")
+        if (
+            not isinstance(raw_ids, list)
+            or not isinstance(chunk_count, int)
+            or isinstance(chunk_count, bool)
+            or chunk_count < 0
+        ):
+            return [], "malformed_event"
+        if metadata.get("truncated") or chunk_count != len(raw_ids):
+            return [], "incomplete_event"
+
+        for raw_id in raw_ids:
+            if not isinstance(raw_id, str):
+                return [], "malformed_chunk_id"
+            try:
+                chunk_id = UUID(raw_id)
+            except ValueError:
+                return [], "malformed_chunk_id"
+            if chunk_id not in seen:
+                seen.add(chunk_id)
+                chunk_ids.append(chunk_id)
+
+    return chunk_ids, None
 
 
 async def _persist_session_summary_chunk(

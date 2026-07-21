@@ -895,8 +895,8 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_SESSION_SUMMARY__AUTO` | `true` | When `mem_session_end` is called without `summary=`, run an LLM auto-summary over chunks added during the session |
-| `MEMTOMEM_SESSION_SUMMARY__MIN_CHUNKS` | `5` | Minimum chunks added during the session before auto-summary fires |
+| `MEMTOMEM_SESSION_SUMMARY__AUTO` | `true` | When `mem_session_end` is called without `summary=`, run an LLM auto-summary over chunks the session recorded as written |
+| `MEMTOMEM_SESSION_SUMMARY__MIN_CHUNKS` | `5` | Minimum recorded write chunks before auto-summary fires |
 | `MEMTOMEM_SESSION_SUMMARY__MAX_SUMMARY_TOKENS` | `500` | Output cap for the generated summary |
 | `MEMTOMEM_SESSION_SUMMARY__MAX_INPUT_CHARS` | `60000` | Skip auto-summary when the assembled chunk body exceeds this; pass an explicit `summary=` instead |
 | `MEMTOMEM_SESSION_SUMMARY__MAX_SUMMARY_LINKS` | `50` | Cap on `chunk_links` rows (`link_type="summarizes"`) written from the summary chunk back to the source chunks. Newest first, tail dropped. |
@@ -904,7 +904,7 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 | `MEMTOMEM_SESSION_SUMMARY__EXPANSION_SCORE_THRESHOLD` | `0.3` | Minimum summary-chunk score before its summarized source files are pulled into the rescue leg |
 | `MEMTOMEM_SESSION_SUMMARY__EXPANSION_RESCUE_WEIGHT` | `0.5` | RRF weight applied to the rescue-leg result list (past-session source chunks) |
 
-Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. Generated summaries are persisted as `archive:session:<id>` chunks (hidden from default `mem_search`). Skip reasons (`disabled`, `no llm`, `below min_chunks`, `too large`, `empty output`, `llm error`) surface in the `mem_session_end` response so operators can see why auto-summary did not fire.
+Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. MCP sessions use their marked write-event chunk IDs, so writes scattered by namespace rules are included while unrelated chunks from the same namespace and time window are not. Sessions created by legacy, CLI, or LangGraph paths, and sessions marked with incomplete provenance, retain the namespace/time-window fallback. Generated summaries are persisted as `archive:session:<id>` chunks (hidden from default `mem_search`). Skip reasons (`disabled`, `no llm`, `below min_chunks`, `too large`, `empty output`, `llm error`) surface in the `mem_session_end` response so operators can see why auto-summary did not fire.
 
 ## Session Trace
 

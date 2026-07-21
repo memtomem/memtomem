@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from helpers import make_chunk
 from memtomem.server.context import AppContext
+from memtomem.server.tools._provenance import PROVENANCE_KIND
 from memtomem.server.tools.indexing import mem_index
 from memtomem.server.tools.session import mem_session_end, mem_session_start
 
@@ -590,8 +592,8 @@ class TestSessionEndClaim:
     async def test_handle_stays_live_during_teardown_for_agent_routing(self, components):
         """The claim must not deactivate the session for *other* concurrent
         tools: while ``mem_session_end``'s effectful phase runs, the public
-        ``current_agent_id`` must stay set so a concurrent session-bound write
-        still routes to ``agent-runtime:<id>`` instead of the default scope.
+        ``current_agent_id`` must stay set so a concurrent write still routes
+        to ``agent-runtime:<id>`` instead of the default scope.
         Regression pin for the claim-vs-handle separation (#1571 review): a
         naive null-at-entry leaves this None for the whole multi-second phase.
         """
@@ -935,9 +937,25 @@ class TestSessionSummaryPhaseB:
                 encoding="utf-8",
             )
 
-    async def _index_dir(self, app: AppContext, memory_dir: Path, namespace: str) -> None:
-        for path in sorted(memory_dir.glob("auto-*.md")):
-            await app.index_engine.index_file(path, namespace=namespace)
+    async def _index_dir(
+        self,
+        ctx: _StubCtx,
+        memory_dir: Path,
+        namespace: str | None,
+    ) -> None:
+        """Index through the production tool so write provenance is recorded."""
+        out = await mem_index(path=str(memory_dir), namespace=namespace, ctx=ctx)  # type: ignore[arg-type]
+        assert "Indexing complete" in out
+
+    @staticmethod
+    async def _record_write_event(app: AppContext, session_id: str, chunk_ids: list[str]) -> None:
+        await app.storage.add_session_event(
+            session_id,
+            "add",
+            f"{PROVENANCE_KIND} add chunks={len(chunk_ids)}",
+            chunk_ids,
+            {"provenance": PROVENANCE_KIND, "chunk_count": len(chunk_ids)},
+        )
 
     @pytest.mark.asyncio
     async def test_auto_summary_runs_when_threshold_met(self, components, monkeypatch):
@@ -951,7 +969,7 @@ class TestSessionSummaryPhaseB:
 
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         self._seed_chunks(memory_dir, count=6)
-        await self._index_dir(app, memory_dir, namespace="agent-runtime:planner")
+        await self._index_dir(ctx, memory_dir, namespace="agent-runtime:planner")
 
         out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
@@ -973,7 +991,7 @@ class TestSessionSummaryPhaseB:
         await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         self._seed_chunks(memory_dir, count=2)
-        await self._index_dir(app, memory_dir, namespace="agent-runtime:planner")
+        await self._index_dir(ctx, memory_dir, namespace="agent-runtime:planner")
 
         out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
@@ -991,7 +1009,7 @@ class TestSessionSummaryPhaseB:
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
         await TestSessionSummaryPhaseB()._index_dir(
-            app, memory_dir, namespace="agent-runtime:planner"
+            ctx, memory_dir, namespace="agent-runtime:planner"
         )
 
         out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
@@ -1009,7 +1027,7 @@ class TestSessionSummaryPhaseB:
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
         await TestSessionSummaryPhaseB()._index_dir(
-            app, memory_dir, namespace="agent-runtime:planner"
+            ctx, memory_dir, namespace="agent-runtime:planner"
         )
 
         out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
@@ -1028,32 +1046,61 @@ class TestSessionSummaryPhaseB:
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
         await TestSessionSummaryPhaseB()._index_dir(
-            app, memory_dir, namespace="agent-runtime:planner"
+            ctx, memory_dir, namespace="agent-runtime:planner"
         )
 
         out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
         assert "archive:session:" not in out
         assert "too large" in out
-        assert not components.llm.calls, "oversize check must short-circuit before generate()"
+        assert not components.llm.calls, "assembled-body check must stop before generate()"
+
+    @pytest.mark.asyncio
+    async def test_raw_whitespace_does_not_false_reject_exact_summary(self, components):
+        """The hard limit applies after ``chunk.content.strip()``.
+
+        ``SUM(LENGTH(content))`` is not a lower bound on that body: enough
+        edge whitespace can make the raw aggregate exceed the cap while the
+        actual prompt remains small.
+        """
+        components.llm = _FakeLLM(response="trimmed exact summary")
+        components.config.session_summary.min_chunks = 1
+        components.config.session_summary.max_input_chars = 80
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        padded = make_chunk(
+            content=(" " * 200) + ("\n\t" * 100) + "TRIMMED-CONTENT" + (" \n" * 200),
+            source="trimmed.md",
+        )
+        await app.storage.upsert_chunks([padded])
+        await self._record_write_event(app, session_id, [str(padded.id)])
+
+        raw_count, raw_chars = await app.storage.sum_chunk_content_chars([padded.id])
+        assert raw_count == 1
+        assert raw_chars > components.config.session_summary.max_input_chars
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "Auto summary:" in out
+        assert "too large" not in out
+        assert len(components.llm.calls) == 1
+        assert "TRIMMED-CONTENT" in components.llm.calls[0][0]
 
     @pytest.mark.asyncio
     async def test_auto_summary_reaches_unbound_session_writes(self, components):
-        """#1875: an unbound session's own writes are summarizable.
+        """#1876: provenance crosses a configured default-namespace redirect.
 
-        ``_maybe_auto_summarize`` recalls chunks by the *session row's*
-        namespace. Before the fix a bare ``mem_session_start()`` bound
-        the literal agent ``"default"``, so ``mem_index`` routed the
-        writes into ``agent-runtime:default`` while the row said
-        ``"default"`` — the recall never matched and every unbound
-        session silently reported ``"below min_chunks"``. Routing the
-        writes through the real tool (not an explicit ``namespace=``) is
-        what makes this a regression pin rather than a tautology.
-
-        The residual mismatch when ns rules / ``auto_ns`` / a non-default
-        ``default_namespace`` redirect the write is tracked in #1876 —
-        this pins the plain case only.
+        The session row still says ``default`` while the indexing engine
+        routes the real write into ``team-default``. Namespace/time recall
+        therefore misses all six chunks; only the marked event ids can make
+        the summary fire.
         """
         components.llm = _FakeLLM(response="The session set up alpha beta gamma notes.")
+        components.config.namespace.default_namespace = "team-default"
         app = AppContext.from_components(components)
         ctx = _StubCtx(app)
 
@@ -1065,12 +1112,359 @@ class TestSessionSummaryPhaseB:
         TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
         index_out = await mem_index(path=str(memory_dir), ctx=ctx)  # type: ignore[arg-type]
         assert "agent-runtime:default" not in index_out
+        written = await app.storage.recall_chunks(limit=20)
+        assert {chunk.metadata.namespace for chunk in written} == {"team-default"}
 
         out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
         assert "below min_chunks" not in out
         assert f"archive:session:{session_id}" in out
         assert components.llm.calls, "LLM provider should have been invoked"
+
+    @pytest.mark.asyncio
+    async def test_namespace_rules_scatter_one_write_and_query_ids_stay_out(self, components):
+        """One mem_index may scatter files, but only its marked ids belong in the prompt."""
+        from memtomem.config import NamespaceConfig, NamespacePolicyRule
+        from memtomem.indexing.engine import _build_exclude_spec
+
+        components.llm = _FakeLLM(response="cross-namespace summary")
+        components.config.session_summary.min_chunks = 2
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        alpha_dir = memory_dir / "alpha"
+        beta_dir = memory_dir / "beta"
+        alpha_dir.mkdir()
+        beta_dir.mkdir()
+        (alpha_dir / "a.md").write_text("# Alpha\n\nALPHA-WRITE", encoding="utf-8")
+        (beta_dir / "b.md").write_text("# Beta\n\nBETA-WRITE", encoding="utf-8")
+
+        rules = [
+            NamespacePolicyRule(path_glob=f"{alpha_dir.as_posix()}/**", namespace="team-alpha"),
+            NamespacePolicyRule(path_glob=f"{beta_dir.as_posix()}/**", namespace="team-beta"),
+        ]
+        app.index_engine._ns_config = NamespaceConfig(rules=rules)
+        app.index_engine._ns_rule_specs = [
+            (_build_exclude_spec([rule.path_glob]), rule) for rule in rules
+        ]
+        await mem_index(path=str(memory_dir), ctx=ctx)  # type: ignore[arg-type]
+
+        scattered = await app.storage.recall_chunks(limit=20)
+        assert {chunk.metadata.namespace for chunk in scattered} == {"team-alpha", "team-beta"}
+
+        unrelated = make_chunk(content="UNRELATED-QUERY-RESULT", namespace="default")
+        await app.storage.upsert_chunks([unrelated])
+        await app.storage.add_session_event(
+            session_id,
+            "query",
+            "query result",
+            [str(unrelated.id)],
+            {"kind": "query"},
+        )
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "Auto summary:" in out
+        prompt = components.llm.calls[0][0]
+        assert "ALPHA-WRITE" in prompt
+        assert "BETA-WRITE" in prompt
+        assert "UNRELATED-QUERY-RESULT" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_marked_zero_write_session_does_not_widen_to_namespace(self, components):
+        """A complete marked session with no write events authoritatively wrote nothing."""
+        components.llm = _FakeLLM()
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        await app.storage.upsert_chunks(
+            [make_chunk(content="CONCURRENT-UNRELATED", namespace="default")]
+        )
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "below min_chunks" in out
+        assert not components.llm.calls
+
+    @pytest.mark.asyncio
+    async def test_incomplete_provenance_uses_legacy_namespace_fallback(self, components):
+        components.llm = _FakeLLM(response="fallback summary")
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        legacy = make_chunk(content="LEGACY-NAMESPACE-INPUT", namespace="agent-runtime:planner")
+        exact = make_chunk(content="SHORT-EXACT-INPUT", namespace="elsewhere")
+        await app.storage.upsert_chunks([legacy, exact])
+        await self._record_write_event(app, session_id, [str(exact.id)])
+        await app.storage.update_session_metadata(session_id, {"provenance_incomplete": True})
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        prompt = components.llm.calls[0][0]
+        assert "LEGACY-NAMESPACE-INPUT" in prompt
+        assert "SHORT-EXACT-INPUT" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_unmarked_legacy_session_keeps_namespace_fallback(self, components):
+        """CLI/LangGraph-created rows have no marker and retain the old selection path."""
+        components.llm = _FakeLLM(response="legacy summary")
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await app.storage.create_session("legacy-session", "planner", "legacy-ns")
+        app.current_session_id = "legacy-session"
+        app.current_agent_id = "planner"
+        await app.storage.upsert_chunks(
+            [make_chunk(content="UNMARKED-LEGACY-INPUT", namespace="legacy-ns")]
+        )
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "UNMARKED-LEGACY-INPUT" in components.llm.calls[0][0]
+
+    @pytest.mark.asyncio
+    async def test_drain_timeout_is_seen_by_auto_summary_consumer(self, components, monkeypatch):
+        """The timeout flag is written during end_session, after the old row read point."""
+        from memtomem.server.tools import session as session_mod
+
+        monkeypatch.setattr(session_mod, "_WRITE_DRAIN_TIMEOUT_S", 0.01)
+        components.llm = _FakeLLM(response="timeout fallback summary")
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        legacy = make_chunk(content="TIMEOUT-LEGACY-INPUT", namespace="agent-runtime:planner")
+        exact = make_chunk(content="TIMEOUT-EXACT-INPUT", namespace="elsewhere")
+        await app.storage.upsert_chunks([legacy, exact])
+        await self._record_write_event(app, session_id, [str(exact.id)])
+
+        held = app.write_in_flight()
+        await held.__aenter__()
+        try:
+            out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        finally:
+            await held.__aexit__(None, None, None)
+
+        assert "writes still in flight" in out
+        prompt = components.llm.calls[0][0]
+        assert "TIMEOUT-LEGACY-INPUT" in prompt
+        assert "TIMEOUT-EXACT-INPUT" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_write_started_during_llm_is_outside_the_sealed_session(self, components):
+        """A post-snapshot write must not invalidate a persisted archive.
+
+        The public handles stay live while the LLM runs so namespace routing
+        remains stable. Provenance is already sealed, though: the late write
+        lands in the same agent namespace without joining the closing
+        session or racing a late ``provenance_incomplete`` flag against the
+        archive write.
+        """
+
+        class _BlockingLLM(_FakeLLM):
+            def __init__(self) -> None:
+                super().__init__(response="sealed session summary")
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def generate(
+                self, prompt: str, *, system: str = "", max_tokens: int = 1024
+            ) -> str:
+                self.calls.append((prompt, system, max_tokens))
+                self.started.set()
+                await self.release.wait()
+                return self.response
+
+        llm = _BlockingLLM()
+        components.llm = llm
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        self._seed_chunks(memory_dir, count=1, prefix="before-seal")
+        await self._index_dir(ctx, memory_dir, namespace=None)
+
+        ender = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await asyncio.wait_for(llm.started.wait(), timeout=2.0)
+
+        late_path = memory_dir / "late-after-snapshot.md"
+        late_path.write_text("# Late\n\nLATE-AFTER-SNAPSHOT", encoding="utf-8")
+        late_out = await mem_index(path=str(late_path), ctx=ctx)  # type: ignore[arg-type]
+        assert "Indexing complete" in late_out
+        assert "agent-runtime:planner" in {
+            chunk.metadata.namespace
+            for chunk in await app.storage.recall_chunks(limit=20)
+            if "LATE-AFTER-SNAPSHOT" in chunk.content
+        }
+
+        provenance_events = [
+            event
+            for event in await app.storage.get_session_events(session_id)
+            if (event.get("metadata") or {}).get("provenance") == PROVENANCE_KIND
+        ]
+        assert len(provenance_events) == 1
+        row = await app.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+
+        llm.release.set()
+        out = await ender
+
+        assert f"archive:session:{session_id}" in out
+        assert "LATE-AFTER-SNAPSHOT" not in llm.calls[0][0]
+
+    @pytest.mark.asyncio
+    async def test_malformed_provenance_falls_back_without_logging_value(self, components, caplog):
+        components.llm = _FakeLLM(response="safe fallback")
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        legacy = make_chunk(content="MALFORMED-FALLBACK", namespace="agent-runtime:planner")
+        await app.storage.upsert_chunks([legacy])
+        secret_shaped_bad_id = "sk-secret-shaped-not-a-uuid"
+        await self._record_write_event(app, session_id, [secret_shaped_bad_id])
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "MALFORMED-FALLBACK" in components.llm.calls[0][0]
+        assert "reason=malformed_chunk_id" in caplog.text
+        assert secret_shaped_bad_id not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_deleted_provenance_id_shortfall_falls_back(self, components, caplog):
+        components.llm = _FakeLLM(response="shortfall fallback")
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        legacy = make_chunk(content="SHORTFALL-FALLBACK", namespace="agent-runtime:planner")
+        deleted = make_chunk(content="DELETED-EXACT", namespace="elsewhere")
+        await app.storage.upsert_chunks([legacy, deleted])
+        await self._record_write_event(app, session_id, [str(deleted.id)])
+        await app.storage.delete_chunks([deleted.id])
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "SHORTFALL-FALLBACK" in components.llm.calls[0][0]
+        assert "reason=chunk_id_shortfall" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_provenance_hydrates_more_than_legacy_limit(self, components):
+        components.llm = _FakeLLM(response="large exact set")
+        components.config.session_summary.min_chunks = 201
+        components.config.session_summary.max_input_chars = 200_000
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        chunks = [
+            make_chunk(content=f"TINY-WRITE-{i:03d}", namespace=f"spread-{i % 3}")
+            for i in range(205)
+        ]
+        await app.storage.upsert_chunks(chunks)
+        await self._record_write_event(app, session_id, [str(chunk.id) for chunk in chunks])
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        prompt = components.llm.calls[0][0]
+        assert "(205 total, newest first)" in prompt
+        assert "TINY-WRITE-000" in prompt
+        assert "TINY-WRITE-204" in prompt
+
+    @pytest.mark.asyncio
+    async def test_formatter_overhead_still_enforces_exact_size_limit(self, components):
+        components.llm = _FakeLLM()
+        components.config.session_summary.min_chunks = 1
+        components.config.session_summary.max_input_chars = 2
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        chunk = make_chunk(content="x", source="a-very-long-source-path.md")
+        await app.storage.upsert_chunks([chunk])
+        await self._record_write_event(app, session_id, [str(chunk.id)])
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "too large" in out
+        assert not components.llm.calls
+
+    def test_provenance_id_collection_ignores_queries_and_deduplicates(self):
+        from memtomem.server.tools.session import _collect_provenance_chunk_ids
+
+        chunk_id = make_chunk().id
+        events = [
+            {
+                "metadata": {"kind": "query"},
+                "chunk_ids": [str(make_chunk().id)],
+            },
+            {
+                "metadata": {"provenance": PROVENANCE_KIND, "chunk_count": 1},
+                "chunk_ids": [str(chunk_id)],
+            },
+            {
+                "metadata": {"provenance": PROVENANCE_KIND, "chunk_count": 1},
+                "chunk_ids": [str(chunk_id)],
+            },
+        ]
+
+        ids, reason = _collect_provenance_chunk_ids(events)
+
+        assert ids == [chunk_id]
+        assert reason is None
+
+    def test_provenance_id_collection_rejects_truncated_event(self):
+        from memtomem.server.tools.session import _collect_provenance_chunk_ids
+
+        event = {
+            "metadata": {
+                "provenance": PROVENANCE_KIND,
+                "chunk_count": 2,
+                "truncated": True,
+            },
+            "chunk_ids": [str(make_chunk().id)],
+        }
+
+        ids, reason = _collect_provenance_chunk_ids([event])
+
+        assert ids == []
+        assert reason == "incomplete_event"
 
     @pytest.mark.asyncio
     async def test_unbound_session_summary_chunk_has_no_agent(self, components):
@@ -1119,7 +1513,7 @@ class TestSessionSummaryPhaseB:
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
         await TestSessionSummaryPhaseB()._index_dir(
-            app, memory_dir, namespace="agent-runtime:planner"
+            ctx, memory_dir, namespace="agent-runtime:planner"
         )
 
         source_chunks = await app.storage.recall_chunks(limit=100)
@@ -1159,7 +1553,7 @@ class TestSessionSummaryPhaseB:
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
         await TestSessionSummaryPhaseB()._index_dir(
-            app, memory_dir, namespace="agent-runtime:planner"
+            ctx, memory_dir, namespace="agent-runtime:planner"
         )
 
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
@@ -1201,7 +1595,7 @@ class TestSessionSummaryPhaseB:
         memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
         TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
         await TestSessionSummaryPhaseB()._index_dir(
-            app, memory_dir, namespace="agent-runtime:planner"
+            ctx, memory_dir, namespace="agent-runtime:planner"
         )
 
         await mem_session_end(summary="manual", ctx=ctx)  # type: ignore[arg-type]

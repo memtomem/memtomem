@@ -169,8 +169,10 @@ class StorageBackend(Protocol):
     # ``sum_chunk_content_chars`` returns ``(count, total_content_chars)`` for
     # the same id set + scope filter without materializing a row. The unit is
     # **characters** (SQLite ``LENGTH()`` on TEXT), matching
-    # ``session_summary.max_input_chars``; it is a lower bound on any prompt
-    # built from those rows, never the authoritative limit.
+    # ``session_summary.max_input_chars``. It is not a bound on a formatted
+    # prompt: formatting adds headers while ``str.strip()`` may remove an
+    # arbitrary amount of edge whitespace. The assembled body is the
+    # authoritative limit.
     async def recall_chunks(
         self,
         since: datetime | None = None,

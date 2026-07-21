@@ -52,17 +52,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   in the web UI, wiki install/update, cross-scope transfer and `copy_skill`
   still took the lock without recovering. PR-G4a-3b (above) closed that gap.
 
-- **Sessions record what they wrote** (#1876, PR-A3 of 4) — the seven
+- **Session auto-summary uses what the session actually wrote** (#1876) — the seven
   chunk-creating MCP write tools (`mem_add`, `mem_batch_add`, `mem_index`,
   `mem_fetch`, `mem_agent_share`, `mem_candidate_review`,
   `mem_consolidate_apply`) now append one session event naming the chunk ids
   they created, and `mem_session_start` marks its session as
   provenance-recording. `- Events: N (add:M, index:K)` in the
   `mem_session_end` response therefore reflects real writes for the first
-  time. The auto-summary still picks its inputs by namespace — **PR-B**
-  switches it over to this record and closes #1876, at which point a session
-  whose writes were routed elsewhere by a namespace rule stops silently
-  producing no summary.
+  time. Auto-summary now consumes those marked ids directly instead of
+  inferring inputs from the session row's namespace, so namespace rules may
+  scatter one session's writes without making its summary silently disappear,
+  and concurrent unrelated writes in the same namespace/time window stay out.
+
+  A complete marked session with no write events is authoritative empty; it
+  does not widen into a namespace scan. Sessions created by legacy, CLI, or
+  LangGraph paths, and sessions whose provenance is marked incomplete, retain
+  the previous namespace + start-time fallback. Deleted, scope-hidden, or
+  malformed recorded ids also fall back rather than presenting a short list as
+  exact. ID recall keeps the always-on project-scope gate and hydrates the full
+  recorded set after a cheap count/size preflight; the final formatted prompt
+  size remains the authoritative limit.
 
   Attribution is fixed alongside: a write's session id and its namespace are
   now read in a single lock acquisition, after the file-lock wait, so a
@@ -94,7 +103,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_dedup_merge` and `mem_decay_expire` on its own.
 
   Sessions created by the CLI or the LangGraph adapter carry no marker and
-  are unaffected.
+  continue through the legacy fallback.
 
   One visible change today: indexing a large tree inside a session can
   outlast the 2-second teardown drain, so `mem_session_end` reports

@@ -269,10 +269,10 @@ class SessionMixin:
     async def get_session(self, session_id: str) -> dict | None:
         """Return a single session row by id, or ``None`` if not found.
 
-        Added for the Phase B auto-summary path which needs the
-        session's ``started_at`` and ``namespace`` to scope the
-        recall_chunks lookup. Mirrors the column shape returned by
-        ``list_sessions``.
+        Added for the Phase B auto-summary path. The current consumer
+        reads the provenance marker/completeness document, while legacy
+        fallback still needs ``started_at`` and ``namespace``. Mirrors
+        the column shape returned by ``list_sessions``.
 
         ``metadata`` comes back **decoded to a dict**, matching
         ``get_session_events`` rather than the raw JSON string this used

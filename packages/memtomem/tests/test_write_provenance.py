@@ -726,12 +726,11 @@ class TestProvenanceDrain:
 class TestProvenanceCompletenessSealing:
     """A marked session must never claim completeness it does not have.
 
-    The drain waits only for writes admitted before it started, and the
-    session handle stays live through teardown, so a write can land its
-    event after teardown snapshotted the event list. That was an accepted
-    residual before the session row asserted anything; once it says "this
-    session records provenance", a silent short list becomes a false
-    claim instead of a missing summary.
+    New captures are excluded after the transition claim. A write that
+    captured the session before that seal can still outlast the bounded drain,
+    though, so its eventual event must mark the already-ended row incomplete.
+    Once the row says "this session records provenance", a silent short list
+    is a false claim instead of a missing summary.
     """
 
     @pytest.mark.asyncio

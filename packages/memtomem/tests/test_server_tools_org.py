@@ -763,7 +763,7 @@ class TestRenameNamespaceOtherTables:
     """Namespace identity is ``chunks`` ∪ ``namespace_metadata`` — nothing else."""
 
     async def test_session_namespace_follows_the_rename(self, storage):
-        """A live session filters chunks by its stored namespace."""
+        """A legacy/incomplete session fallback filters by its stored namespace."""
         await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
         await storage.create_session("s1", "alpha", "src-ns")
         await storage.rename_namespace("src-ns", "dst-ns")
