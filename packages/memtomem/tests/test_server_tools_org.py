@@ -366,6 +366,12 @@ class TestRenameNamespaceAtomicity:
 
         with pytest.raises(StorageError, match="open transaction"):
             await storage.rename_namespace("src-ns", "dst-ns")
+
+        # Read through the foreign transaction (same connection, so its
+        # uncommitted rows are visible): the refusal must have written
+        # nothing, not written-then-raised.
+        names = {row[0] for row in db.execute("SELECT DISTINCT namespace FROM chunks").fetchall()}
+        assert names == {"src-ns"}
         db.rollback()
 
     async def test_a_foreign_open_transaction_is_left_untouched(self, storage):
@@ -381,6 +387,11 @@ class TestRenameNamespaceAtomicity:
             await storage.rename_namespace("src-ns", "dst-ns")
 
         assert db.in_transaction, "refusal must not commit or roll back a foreign transaction"
+        # The stranger's own pending row is still there — we neither flushed
+        # nor discarded it.
+        assert db.execute(
+            "SELECT 1 FROM namespace_metadata WHERE namespace='foreign-ns'"
+        ).fetchone()
         db.rollback()
 
     async def test_a_busy_write_lock_surfaces_as_storage_error(self, storage, tmp_path):
@@ -395,10 +406,14 @@ class TestRenameNamespaceAtomicity:
         blocker = sqlite3.connect(db.execute("PRAGMA database_list").fetchone()[2], timeout=0)
         blocker.execute("BEGIN IMMEDIATE")
         blocker.execute("UPDATE chunks SET namespace='x' WHERE 0")
+        # Don't sit out the production connection's 10s busy timeout: the
+        # contention is deterministic, the waiting is not the point.
+        db.execute("PRAGMA busy_timeout=0")
         try:
             with pytest.raises(StorageError, match="write lock"):
                 await storage.rename_namespace("src-ns", "dst-ns")
         finally:
+            db.execute("PRAGMA busy_timeout=10000")
             blocker.rollback()
             blocker.close()
 

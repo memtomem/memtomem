@@ -9,6 +9,7 @@ from typing import cast
 import click
 
 from memtomem.cli._prompts import confirm
+from memtomem.errors import NamespaceConflictError
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
@@ -96,11 +97,19 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
 
         total = 0
         dropped = 0
+        skipped: list[str] = []
         for old, new in mapping:
-            # merge=True: folding a legacy ``agent/{id}`` into an existing
-            # ``agent-runtime:{id}`` is the point of the migration — same
-            # agent, two namespace spellings.
-            result = await comp.storage.rename_namespace(old, new, merge=True)
+            # merge only for the targets the user was shown and agreed to.
+            # A target that appeared *since* the listing was never part of
+            # that consent, so it takes the default refusal instead — the
+            # pair is skipped and named, and re-running picks it up with a
+            # fresh prompt.
+            try:
+                result = await comp.storage.rename_namespace(old, new, merge=new in existing)
+            except NamespaceConflictError:
+                skipped.append(old)
+                click.echo(f"Skipped: {old}  ->  {new}  (target appeared after the listing)")
+                continue
             total += result.chunks_moved
             dropped += result.duplicates_dropped
             suffix = "  (merged)" if result.merged else ""
@@ -112,8 +121,11 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
 
         tail = f", {dropped} duplicate(s) dropped" if dropped else ""
         click.echo(
-            f"\nMigration complete. {len(mapping)} namespace(s), {total} chunk(s) updated{tail}."
+            f"\nMigration complete. {len(mapping) - len(skipped)} namespace(s), "
+            f"{total} chunk(s) updated{tail}."
         )
+        if skipped:
+            click.echo(f"{len(skipped)} skipped — re-run to migrate them.")
 
 
 def _collect_legacy_mapping(rows: list[dict]) -> list[tuple[str, str]]:
