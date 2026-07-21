@@ -661,7 +661,12 @@ async def mem_add(
         force_unsafe: When True, bypass the redaction guard for this call
                       even when content matches a secret pattern. Use only
                       when matches are known false positives (e.g.,
-                      documenting an example credential schema).
+                      documenting an example credential schema). The bypass
+                      is recorded with a ``bypassed`` outcome and an audit
+                      line, and it never applies to
+                      ``scope="project_shared"`` — that combination is
+                      hard-refused, because git history cannot be retracted
+                      from clones.
         scope: Write tier: ``user`` (default), ``project_local``, or
                ``project_shared``.
         confirm_project_shared: Required explicit consent for a Git-tracked
@@ -728,7 +733,11 @@ async def mem_edit(
             blockquote are preserved unless the value starts with ``## ``.
         force_unsafe: When True, bypass the redaction guard for this call
             even when ``new_content`` matches a secret pattern. Use only
-            when matches are known false positives.
+            when matches are known false positives. The bypass is recorded
+            with a ``bypassed`` outcome and an audit line. It does not apply
+            when the edited chunk's own scope is ``project_shared``: that is
+            hard-refused, because git history cannot be retracted from
+            clones.
     """
     if not new_content.strip():
         return "Error: new_content cannot be empty."
@@ -1010,7 +1019,11 @@ async def mem_batch_add(
         namespace: Namespace for all entries (default: config default)
         file: Target .md file.  If omitted, a timestamped file is created.
         force_unsafe: When True, bypass the redaction guard for any flagged
-                      entries. Bypass events are recorded per item.
+                      entries. Each bypass is recorded per item with a
+                      ``bypassed`` outcome and an audit line. It never
+                      applies to ``scope="project_shared"`` — that
+                      combination is hard-refused for the whole batch,
+                      because git history cannot be retracted from clones.
         scope: ADR-0011 scope axis (``user`` / ``project_shared`` /
                ``project_local``). Applies to every entry in the batch.
         confirm_project_shared: Required when ``scope='project_shared'``

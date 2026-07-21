@@ -471,11 +471,18 @@ async def mem_context_detect(
     ``include="skills,agents,commands"`` to also list runtime skill
     directories, sub-agent files, and slash-command files.
 
-    Pass ``include_runtimes=True`` to also report read-only provider-client
-    registration status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B).
-    This is a separate boolean — it is intentionally NOT part of the ``include``
-    set, so the shared sync/generate/init/diff include contract is never
-    widened (``mem_context_sync(include="runtimes")`` still rejects).
+    Args:
+        include: Comma list of extra kinds to report — ``skills``,
+            ``agents``, ``commands``, ``settings``. ``settings`` lists the
+            resolved-scope settings file of each available runtime (Claude,
+            Codex, Gemini, Kimi), including ones not yet created. Empty
+            (default) reports agent files only.
+        include_runtimes: Also report read-only provider-client registration
+            status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B). A
+            separate boolean on purpose — it is NOT part of the ``include``
+            set, so the shared sync/generate/init/diff include contract is
+            never widened (``mem_context_sync(include="runtimes")`` still
+            rejects).
     """
     from memtomem.context.detector import (
         detect_agent_dirs,
@@ -612,12 +619,14 @@ async def mem_context_generate(
             ``project_local``. The same value is also forwarded as the
             ADR-0010 host-write target-scope override for ``settings``
             (mirrors the CLI at ``cli/context_cmd.py:963-987``).
-        allow_host_writes: When ``include="settings"`` writes a settings
-            file outside the project root (today only
-            ``~/.claude/settings.json``), refuse with a
-            ``needs confirmation`` line unless this is ``True``. Re-call
-            with ``allow_host_writes=True`` after surfacing the host
-            paths to the user.
+        allow_host_writes: When ``include="settings"`` resolves to a path
+            outside the project root (``~/.claude/settings.json`` and the
+            Codex / Gemini / Kimi equivalents, depending on the effective
+            scope), refuse with a ``needs confirmation`` line unless this
+            is ``True``. Re-call with ``allow_host_writes=True`` after
+            surfacing the host paths to the user. Same boundary as
+            ``mem_context_sync``; both fan out through the settings
+            generators.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
@@ -928,35 +937,41 @@ async def mem_context_sync(
 ) -> str:
     """Push .memtomem/context.md to all detected agent files.
 
-    Pass ``include="skills,agents,commands,settings"`` to also fan out
-    ``.memtomem/skills/``, ``.memtomem/agents/``, ``.memtomem/commands/``,
-    and ``.memtomem/settings.json`` to their runtime targets (Claude Code,
-    Gemini CLI, Codex CLI).  ``on_drop`` controls the severity when
-    sub-agent / command fields are dropped during conversion: ``ignore``
-    (default), ``warn`` (report but still write), or ``error`` (abort the
-    kind). ``strict=True`` is a legacy alias for ``on_drop="error"``; when
-    both are supplied ``on_drop`` wins unless it is still the default.
-
-    ``scope`` selects the ADR-0011 canonical artifact tier for
-    ``skills``, ``agents``, and ``commands``: ``project_shared``
-    (default), ``user``, or ``project_local``. For ``settings`` the same
-    value is treated as the ADR-0010 host-write target-scope override.
-
-    ``allow_host_writes`` defaults to ``False``: when ``include="settings"``
-    would write to a file outside the project root (today only
-    ``~/.claude/settings.json``), the tool returns a ``needs confirmation``
-    line listing the host path instead of writing. Surface that to the
-    user, then re-call with ``allow_host_writes=True`` to proceed.
-
-    ``label`` (ADR-0022) deploys a frozen version instead of the working
-    canonical for the versioned kinds (``agents`` / ``commands``): pass a label
-    (e.g. ``"production"``) or a bare version tag (``"v2"``) created via
-    ``mem_context_version`` / ``mem_context_promote``. ``""`` (default) /
-    ``"latest"`` fans out the working file (byte-for-byte today's behavior).
-    The label applies only to agents/commands — ineligible included kinds run
-    label-less with a note (invariant 10) — and an unknown/dangling label or a
-    flat-layout artifact is isolated as a per-artifact ``skipped`` row, never a
-    whole-run error. Mirrors the CLI ``mm context sync --label``.
+    Args:
+        include: Comma list of extra kinds to fan out alongside context.md.
+            ``skills`` / ``agents`` / ``commands`` come from
+            ``.memtomem/skills/``, ``.memtomem/agents/``,
+            ``.memtomem/commands/``; ``settings`` comes from the single file
+            ``.memtomem/settings.json``. Targets are the runtimes registered
+            for that kind (Claude Code, Gemini CLI, Codex CLI, Kimi CLI for
+            settings). Empty (default) syncs context.md only.
+        strict: Legacy alias for ``on_drop="error"``. When both are given,
+            ``on_drop`` wins unless it is still at its default.
+        on_drop: Severity when sub-agent / command fields are dropped during
+            conversion — ``ignore`` (default), ``warn`` (report but still
+            write), or ``error`` (abort that kind).
+        scope: One value, two meanings, and two different defaults. For
+            ``skills`` / ``agents`` / ``commands`` it is the ADR-0011
+            canonical artifact tier and defaults to ``project_shared``. For
+            ``settings`` it overrides the ADR-0010 host-write target scope,
+            which otherwise comes from ``hooks.target_scope`` in config
+            (default ``user``). Vocabulary is the same either way:
+            ``user``, ``project_shared``, ``project_local``.
+        allow_host_writes: Consent for writing outside the project root.
+            With ``include="settings"`` a target that resolves to a host
+            path (``~/.claude/settings.json`` and the Codex / Gemini / Kimi
+            equivalents, depending on the effective scope) returns a
+            ``needs confirmation`` line naming the path instead of writing;
+            surface it to the user, then re-call with ``True``.
+        label: ADR-0022 — deploy a frozen version instead of the working
+            canonical for the versioned kinds (``agents`` / ``commands``).
+            Pass a label (``"production"``) or a bare version tag (``"v2"``)
+            created via ``mem_context_version`` / ``mem_context_promote``.
+            ``""`` (default) / ``"latest"`` fans out the working file.
+            Ineligible included kinds run label-less with a note (invariant
+            10); an unknown/dangling label or a flat-layout artifact is
+            isolated as a per-artifact ``skipped`` row, never a whole-run
+            error. Mirrors the CLI ``mm context sync --label``.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
@@ -1312,6 +1327,19 @@ async def mem_context_migrate(
     routed through ``mem_do`` directly: the registry alias
     ``"context_migrate" → "context_memory_migrate"`` (``tools/meta.py``)
     keeps the old ``mem_do`` action name working.
+
+    Args:
+        source: Single markdown file path OR a glob pattern. Forwarded
+            unchanged to ``mem_context_memory_migrate``.
+        from_scope: Source memory tier — ``user``, ``project_shared``, or
+            ``project_local``.
+        to_scope: Target memory tier (same vocabulary); must differ from
+            ``from_scope``.
+        apply: Execute the migration. ``False`` (default) returns a dry-run
+            preview.
+        confirm_project_shared: Required when ``to_scope="project_shared"``;
+            without it the call returns a ``needs confirmation`` message
+            instead of touching disk.
     """
     return await mem_context_memory_migrate(
         source=source,
