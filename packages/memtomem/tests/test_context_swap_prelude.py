@@ -230,9 +230,14 @@ class TestPreludeNameContract:
         invalid name reaching here is a programming error and must crash
         loudly. Pinned so a future caller that iterates raw directory entries
         has to make that choice explicitly rather than inherit this one.
-        """
-        _tree(store / "foo*", "canonical")
 
+        Nothing is created on disk, which is the stronger assertion anyway:
+        validation has to happen BEFORE any filesystem work, since its whole
+        job is to stop a bad name from being joined onto a root. It also has to
+        be this way to run on Windows, where ``*`` is not a legal filename
+        character at all — an earlier version of this test called ``mkdir`` and
+        died with ``WinError 123`` before reaching the assertion.
+        """
         with pytest.raises(InvalidNameError):
             _recover_and_reap_internal_dirs(store / "foo*")
 
