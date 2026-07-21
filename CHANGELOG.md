@@ -7,6 +7,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Every writer of a skill now recovers an interrupted update, not just three**
+  (ADR-0030 §10, PR-G4a-3b) — the follow-up promised below. Skill
+  create/edit/delete in the web UI, `mm context install` / `update` from the
+  wiki, cross-scope transfer, `copy_skill` and the validation seeder all take a
+  skill's canonical lock; none of them recovered a pending transaction, so each
+  could write over one and leave the next recovery deleting the only surviving
+  copy. All of them now run recovery first — **before** their own
+  already-exists / dirty / collision checks, since those decide on what they
+  read, and reading the half-swapped state is how a recoverable crash became a
+  refusal or an overwrite.
+  Each surface reports the ambiguous case in its own vocabulary: HTTP **409**
+  `swap_recovery_pending` on the web API, `refused: swap_recovery_pending:` from
+  the MCP tools, a one-line error (never a traceback) on the CLI, and a per-row
+  failure that lets a batch continue. Nothing is deleted in any of them.
+  A **cross-scope transfer can now reach an artifact mid-swap at all**: source
+  discovery previously reported "not found" while the tree was between renames,
+  which meant the one operation that could repair it refused to look. A live
+  marker now counts as evidence the artifact lives in that scope — read-only, so
+  a dry run still changes nothing — and the transfer re-verifies the full
+  layout under its locks before moving anything.
+  A build-time guard now derives the list of canonical-lock holders **from the
+  source tree** and fails if any is unclassified, so a future writer cannot join
+  the gap quietly. That is deliberate: the hand-written list this PR started
+  from had already missed one of the ten.
+
 - **Interrupted skill updates are now recovered before the next write**
   (ADR-0030 §10, PR-G4a-3a) — PR-G4a-2 shipped the crash-safe directory swap
   and its recovery machine with no caller. **Push, reverse import and Pull**
@@ -23,13 +48,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   In every case the operation you asked for did **not** run — recovery may have
   safely advanced the leftover transaction first, but it never half-applies
   your request and never leaves the artifact worse than it found it.
-  **Not yet every writer.** Skill create/edit/delete in the web UI, wiki
-  install/update, cross-scope transfer and `copy_skill` still take the lock
-  without recovering, so those paths can still overwrite a pending transaction
-  — the pre-existing behavior, unchanged here. Wiring them is a follow-up, and
-  it ships with a build-time guard that finds such writers by analyzing the
-  tree rather than from a hand-written list, because the list is exactly what
-  missed them.
+  **Not yet every writer** at the time this shipped: skill create/edit/delete
+  in the web UI, wiki install/update, cross-scope transfer and `copy_skill`
+  still took the lock without recovering. PR-G4a-3b (above) closed that gap.
 
 - **Sessions record what they wrote** (#1876, PR-A3 of 4) — the seven
   chunk-creating MCP write tools (`mem_add`, `mem_batch_add`, `mem_index`,

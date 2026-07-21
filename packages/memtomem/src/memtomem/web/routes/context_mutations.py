@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from memtomem.context.install import (
@@ -45,6 +45,7 @@ from memtomem.context.install import (
     update_command,
     update_skill,
 )
+from memtomem.context._dir_swap import SwapRecoveryError
 from memtomem.context.lockfile import LockfileError
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.wiki.store import WikiNotFoundError, WikiStore, WikiUnbornHeadError
@@ -68,6 +69,29 @@ router = APIRouter(tags=["context-mutations"])
 #: the handler already returned 503 (the ``context_transfer`` lock-budget
 #: precedent; #1145 / the ``_file_lock`` docstring).
 _INSTALL_LOCK_BUDGET_S = 30.0
+
+
+def _swap_recovery_pending(asset_type: str, name: str) -> HTTPException:
+    """409 for a wiki install/update blocked by an interrupted skills swap.
+
+    Fixed, path-free detail — this module's standing contract for engine errors
+    that embed absolute host paths (the ``UncommittedAssetError`` /
+    ``_privacy_blocked`` arms). The engine message names two internal transient
+    paths under the canonical root; the operator finds them by looking at the
+    Store, and the exception is chained so the server log keeps them.
+
+    Install and update both raise it and both translate it here, in their own
+    ladders — the two are distinct boundaries with distinct engine calls, not
+    one shared handler.
+    """
+    return _error(
+        409,
+        "conflict",
+        f"{asset_type}/{name} has an interrupted directory swap in the Store; "
+        f"it must be resolved before this artifact can be written",
+        reason_code="swap_recovery_pending",
+    )
+
 
 # Plural asset_type (the wiki / StatusRow vocabulary used everywhere on the
 # wire) → the singular-named engine wrappers. Keeping the dispatch here lets the
@@ -175,6 +199,8 @@ async def install_asset(
             f"{asset_type}/{name} is already installed in this project; use update to refresh",
             reason_code="already_installed",
         ) from exc
+    except SwapRecoveryError as exc:
+        raise _swap_recovery_pending(asset_type, name) from exc
     except UncommittedAssetError as exc:
         # Fixed message, NOT ``str(exc)`` — the engine message embeds the
         # absolute wiki root (its raw-git remediation hint), which must not
@@ -293,6 +319,8 @@ async def update_asset(
             "(each edited file is kept as a .bak sibling)",
             reason_code="stale_install",
         ) from exc
+    except SwapRecoveryError as exc:
+        raise _swap_recovery_pending(asset_type, name) from exc
     except UncommittedAssetError as exc:
         # Fixed message, NOT ``str(exc)`` — the engine message embeds the
         # absolute wiki root (its raw-git remediation hint), which must not

@@ -50,6 +50,7 @@ from memtomem.context._atomic import (
     iter_installed_files,
 )
 from memtomem.context._canonical_txn import canonical_lock_shared_budget
+from memtomem.context.skills import run_swap_prelude
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
 from memtomem.context.lockfile import (
@@ -806,6 +807,12 @@ def _install_asset(
     # write + lock.json upsert (canonical → lock.json order, one shared budget)
     # so a concurrent Pull / transfer / migrate can't race the fresh install.
     with canonical_lock_shared_budget(dest.parent, validated, timeout=lock_timeout) as _remaining:
+        # ADR-0030 §10: recovery runs before the re-check below, not just before
+        # the write — the re-check RETURNS (as AlreadyInstalledError) on what it
+        # sees, so classifying a pre-recovery tree would refuse an install whose
+        # destination recovery is about to leave absent, or accept one it is
+        # about to restore.
+        run_swap_prelude(dest.parent, validated, kind=asset_type)
         # ADR-0030 §6: re-check dest + lockfile entry INSIDE C0. The pre-lock
         # check above (has_dest/has_lock) can go stale — a concurrent CRUD /
         # Pull / install could have created the dest or lock.json entry while we
@@ -1603,6 +1610,11 @@ def _apply_update(
     # spans the canonical lock and the ``lock.json`` acquisition (canonical →
     # lock.json order).
     with canonical_lock_shared_budget(dest.parent, name, timeout=lock_timeout) as _remaining:
+        # ADR-0030 §10: recovery first — the dirty re-classification below reads
+        # the destination tree and can RAISE on what it finds, so it must see the
+        # post-recovery state (a half-swapped tree classifies as dirty against a
+        # lock entry that describes the pre-swap bytes).
+        run_swap_prelude(dest.parent, name, kind=asset_type)
         # ADR-0030 §6: re-classify dirtiness INSIDE C0. The pre-lock
         # ``dirty_report`` (and the ``files_to_bak`` derived from it) can go
         # stale — a first-party edit (a CRUD save / Pull, now serialized on this
@@ -2381,6 +2393,9 @@ def _apply_pinned_install(
     # install / update paths. This path has no ``lock_timeout`` axis — it blocks
     # (the historical ``install --all`` behavior); ``_remaining()`` returns None.
     with canonical_lock_shared_budget(dest.parent, name, timeout=None) as _remaining:
+        # ADR-0030 §10: recovery first, for the same reason as _apply_update —
+        # the dirty re-classification below decides on the tree it reads.
+        run_swap_prelude(dest.parent, name, kind=asset_type)
         # ADR-0030 §6: re-classify dirtiness INSIDE C0 (see _apply_update). A
         # first-party edit (CRUD/Pull, now C0-serialized) landing between the
         # pre-lock ``report`` and this acquisition is refused (no --force) or
