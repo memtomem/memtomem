@@ -52,6 +52,7 @@ and the empty-allowlist precedent follow ``test_context_atomic_write_guard.py``.
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -84,77 +85,144 @@ _BACKUP_READS = frozenset({"read_text", "read_bytes"})
 ALLOWED_BACKUP_RESTORE: frozenset[tuple[str, str]] = frozenset()
 
 
-def _binds_a_backup(node: ast.AST) -> bool:
-    """True if ``node`` binds a file's contents (or a copy of it) to a name.
+#: Scopes whose bodies belong to *them*, not to the enclosing function.
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
-    Two shapes, both seen in the wild:
 
-    * ``backup = target.read_text(...)`` / ``.read_bytes(...)`` — including the
-      ``... if target.is_file() else None`` conditional form used in #1892, since
-      the read is still an ``ast.Call`` inside the assigned value.
+def _walk_own_scope(node: ast.AST):
+    """Yield descendants of ``node`` in its OWN lexical scope.
+
+    Unlike ``ast.walk``, does not descend into nested ``def`` / ``lambda`` /
+    ``class`` bodies. Without this, a backup bound in an outer function pairs
+    with an inner function's ``try/finally`` and the offender is reported against
+    the wrong function — and an inner helper that never runs would incriminate
+    its parent. Same helper as ``test_web_invariants_registry.py:426``.
+    """
+    for child in ast.iter_child_nodes(node):
+        yield child
+        if not isinstance(child, _NESTED_SCOPES):
+            yield from _walk_own_scope(child)
+
+
+@dataclass(frozen=True)
+class _Backup:
+    """A local holding a file's contents, and the path it came from."""
+
+    name: str | None
+    source: str | None
+
+
+def _name_of(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _name_of(node.value)
+    return None
+
+
+def _binds_a_backup(node: ast.AST) -> _Backup | None:
+    """The backup a statement binds, if any.
+
+    Shapes, all of which appear in or next to the #1892 code:
+
+    * ``backup = target.read_text(...)`` / ``.read_bytes(...)``, including the
+      ``... if target.is_file() else None`` conditional form actually used.
+    * ``backup: str = target.read_text(...)`` — annotated assignment.
+    * ``backup = await asyncio.to_thread(target.read_text)`` — the offloaded
+      read, which pairs naturally with the offloaded restore below.
     * ``shutil.copy2(target, backup_path)`` — statement form, no assignment.
     """
+    targets: list[ast.expr] = []
+    value: ast.expr | None = None
     if isinstance(node, ast.Assign):
-        for sub in ast.walk(node.value):
+        targets, value = list(node.targets), node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        targets, value = [node.target], node.value
+
+    if value is not None:
+        for sub in ast.walk(value):
+            source: str | None = None
             if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
                 if sub.func.attr in _BACKUP_READS:
-                    return True
-        return False
+                    source = _name_of(sub.func.value)
+            elif isinstance(sub, ast.Attribute) and sub.attr in _BACKUP_READS:
+                # ``asyncio.to_thread(target.read_text)`` — a reference, not a call.
+                source = _name_of(sub.value)
+            if source is not None:
+                return _Backup(name=_name_of(targets[0]) if targets else None, source=source)
+        return None
+
     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
         call = node.value
         if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-            if (call.func.value.id, call.func.attr) in _RESTORE_FUNCS:
-                # A copy *to* a plain name reads as "stash a spare copy here".
-                return any(isinstance(arg, ast.Name) for arg in call.args)
-    return False
+            if (call.func.value.id, call.func.attr) in _RESTORE_FUNCS and len(call.args) >= 2:
+                # copy(src, dst) — the spare copy is the destination.
+                return _Backup(name=_name_of(call.args[1]), source=_name_of(call.args[0]))
+    return None
 
 
-def _restores_in_finally(finalbody: list[ast.stmt]) -> list[str]:
-    """Restore-shaped operations appearing anywhere in a ``finally`` block."""
-    found: list[str] = []
+def _restores_in_finally(finalbody: list[ast.stmt]) -> list[tuple[str, set[str]]]:
+    """``(description, names involved)`` for restore-shaped ops in a ``finally``."""
+    found: list[tuple[str, set[str]]] = []
     for stmt in finalbody:
         for node in ast.walk(stmt):
-            # ATTRIBUTE references, not just calls: the repo has already been
-            # bitten by ``asyncio.to_thread(path.write_text, data)``, where
-            # ``write_text`` is passed as a value and never appears as the func
-            # of a Call. See test_context_atomic_write_guard.py.
-            if isinstance(node, ast.Attribute) and node.attr in _RESTORE_ATTRS:
-                if isinstance(node.value, ast.Name):
-                    found.append(f"{node.value.id}.{node.attr}")
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 func = node.func
+                names = {n for n in (_name_of(a) for a in node.args) if n}
                 if isinstance(func.value, ast.Name):
-                    if (func.value.id, func.attr) in _RESTORE_FUNCS:
-                        if any(isinstance(arg, ast.Name) for arg in node.args):
-                            found.append(f"{func.value.id}.{func.attr}")
+                    if (func.value.id, func.attr) in _RESTORE_FUNCS and names:
+                        found.append((f"{func.value.id}.{func.attr}", names))
+                        continue
+                if func.attr in _RESTORE_ATTRS:
+                    receiver = _name_of(func.value)
+                    if receiver:
+                        found.append((f"{receiver}.{func.attr}", names | {receiver}))
+                    continue
+                # ``asyncio.to_thread(target.write_text, backup)`` — the restore
+                # is an argument, never the func of a Call. The repo has been
+                # bitten by exactly this (test_context_atomic_write_guard.py:74).
+                for arg in node.args:
+                    if isinstance(arg, ast.Attribute) and arg.attr in _RESTORE_ATTRS:
+                        receiver = _name_of(arg.value)
+                        if receiver:
+                            found.append((f"{receiver}.{arg.attr}", names | {receiver}))
     return found
 
 
 def backup_restore_dances(tree: ast.AST) -> list[tuple[str, int, str]]:
     """``(function, lineno, what)`` for each backup-then-restore-in-finally shape.
 
-    A ``finally`` that restores is only reported when the enclosing function also
-    binds a backup *before* the ``try``. Without that pairing a bare
-    ``tmp.unlink()`` in a ``finally`` — ordinary temp cleanup — would be flagged,
-    which would make the guard noise rather than signal.
+    Three conditions, all required — each one removes a class of false positive:
+
+    1. the function binds a backup before the ``try`` (so ordinary
+       ``tmp.unlink()`` cleanup is not flagged),
+    2. the ``finally`` performs a restore-shaped operation, and
+    3. that restore **mentions the backup or the path it came from**. Without (3)
+       any earlier ``.read_text()`` pairs with any later unrelated cleanup — e.g.
+       reading a golden fixture, then unlinking a scratch file in ``finally``.
     """
     offenders: list[tuple[str, int, str]] = []
     for func in ast.walk(tree):
         if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for node in ast.walk(func):
+        for node in _walk_own_scope(func):
             if not isinstance(node, ast.Try) or not node.finalbody:
                 continue
             restores = _restores_in_finally(node.finalbody)
             if not restores:
                 continue
-            has_backup = any(
-                _binds_a_backup(stmt)
-                for stmt in ast.walk(func)
+            backups = [
+                b
+                for stmt in _walk_own_scope(func)
                 if getattr(stmt, "lineno", node.lineno) < node.lineno
-            )
-            if has_backup:
-                offenders.append((func.name, node.lineno, ", ".join(sorted(set(restores)))))
+                and (b := _binds_a_backup(stmt)) is not None
+            ]
+            if not backups:
+                continue
+            related = {n for b in backups for n in (b.name, b.source) if n}
+            matched = sorted({what for what, names in restores if names & related})
+            if matched:
+                offenders.append((func.name, node.lineno, ", ".join(matched)))
     return offenders
 
 
@@ -294,4 +362,60 @@ def test_thing(tmp_path):
     ],
 )
 def test_scanner_discriminates(source: str, expected: int) -> None:
+    assert len(backup_restore_dances(ast.parse(source))) == expected
+
+
+_ANNOTATED_BACKUP = """
+def test_thing():
+    backup: str = target.read_text(encoding="utf-8")
+    try:
+        pass
+    finally:
+        target.write_text(backup)
+"""
+
+_AWAITED_BACKUP = """
+async def test_thing():
+    backup = await asyncio.to_thread(target.read_text)
+    try:
+        pass
+    finally:
+        await asyncio.to_thread(target.write_text, backup)
+"""
+
+_NESTED_SCOPE = """
+def test_thing():
+    backup = target.read_text()
+
+    def helper():
+        try:
+            pass
+        finally:
+            scratch.unlink()
+
+    helper()
+"""
+
+_UNRELATED_CLEANUP = """
+def test_thing(tmp_path):
+    expected = golden.read_text()
+    scratch = tmp_path / "scratch"
+    try:
+        assert run() == expected
+    finally:
+        scratch.unlink()
+"""
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        pytest.param(_ANNOTATED_BACKUP, 1, id="annotated-assignment-backup"),
+        pytest.param(_AWAITED_BACKUP, 1, id="awaited-offloaded-backup"),
+        pytest.param(_NESTED_SCOPE, 0, id="nested-scope-is-not-the-parents-dance"),
+        pytest.param(_UNRELATED_CLEANUP, 0, id="unrelated-read-plus-unrelated-cleanup"),
+    ],
+)
+def test_scanner_precision(source: str, expected: int) -> None:
+    """Shapes Codex found on review of #1902 — three misses and one false positive."""
     assert len(backup_restore_dances(ast.parse(source))) == expected
