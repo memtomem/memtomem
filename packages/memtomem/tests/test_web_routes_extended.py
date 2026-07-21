@@ -672,7 +672,7 @@ class TestSettingsSync:
     """
 
     @pytest.fixture(autouse=True)
-    def _isolated_home(self, monkeypatch, tmp_path):
+    def _isolated_home(self, monkeypatch, tmp_path_factory):
         """Redirect ``Path.home()`` at the env level for this whole class.
 
         These tests used to write the *real* ``~/.claude/settings.json``
@@ -687,9 +687,21 @@ class TestSettingsSync:
         ``set_home`` sets ``USERPROFILE`` as well as ``HOME`` because
         ``Path.home()`` consults it first on Windows, where a bare
         ``HOME`` override is silently ignored.
+
+        The home comes from ``tmp_path_factory``, **not** from ``tmp_path``:
+        most tests here set ``project_root = tmp_path``, and the host-write
+        gate refuses a target only when it is *outside* the project root
+        (``_is_under_project_root``, ``context/settings.py``). A home nested
+        under ``tmp_path`` would sit inside the project root and silently
+        disarm that gate for any future POST-sync test in this class.
+
+        Creating ``.claude/`` is load-bearing, not cosmetic:
+        ``ClaudeSettingsGenerator.is_available()`` probes for that directory,
+        so without it every sync result would come back ``skipped`` — and
+        whether it happened to exist would depend on the machine.
         """
-        home = tmp_path / "home"
-        (home / ".claude").mkdir(parents=True)
+        home = tmp_path_factory.mktemp("settings_sync_home")
+        (home / ".claude").mkdir()
         set_home(monkeypatch, home)
         return home
 
@@ -739,7 +751,6 @@ class TestSettingsSync:
         canonical.write_text(json.dumps(hooks), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(hooks), encoding="utf-8")
         app.state.project_root = tmp_path
 
@@ -884,7 +895,6 @@ class TestSettingsSync:
         canonical.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
 
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
         app.state.project_root = tmp_path
 
@@ -965,7 +975,6 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
             encoding="utf-8",
@@ -992,7 +1001,6 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
             encoding="utf-8",
@@ -1040,7 +1048,6 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps(
                 {
@@ -1112,7 +1119,6 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
             encoding="utf-8",
@@ -1167,7 +1173,6 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo u1")]}}),
             encoding="utf-8",
@@ -1193,7 +1198,6 @@ class TestSettingsSync:
             encoding="utf-8",
         )
         target = Path.home() / ".claude" / "settings.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "echo old")]}}),
             encoding="utf-8",
