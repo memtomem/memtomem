@@ -141,6 +141,21 @@ class StorageBackend(Protocol):
         source_files: Sequence[Path],
         limit_per_file: int = 10000,
     ) -> dict[Path, list[Chunk]]: ...
+    # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
+    # set while keeping every other filter this method applies — notably the
+    # always-on ADR-0011 scope fragment and the ``created_at DESC`` ordering.
+    # Fetching the same rows through ``get_chunks_batch`` would bypass both.
+    #
+    # Presence-gated, not truthiness-gated: ``chunk_ids=None`` means "no id
+    # filter", while an **empty sequence** means "these zero ids" and matches
+    # nothing. Passing a caller's filtered-down list must never silently widen
+    # into an unfiltered scan.
+    #
+    # ``sum_chunk_content_chars`` returns ``(count, total_content_chars)`` for
+    # the same id set + scope filter without materializing a row. The unit is
+    # **characters** (SQLite ``LENGTH()`` on TEXT), matching
+    # ``session_summary.max_input_chars``; it is a lower bound on any prompt
+    # built from those rows, never the authoritative limit.
     async def recall_chunks(
         self,
         since: datetime | None = None,
@@ -152,7 +167,13 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        chunk_ids: Sequence[UUID] | None = None,
     ) -> list[Chunk]: ...
+    async def sum_chunk_content_chars(
+        self,
+        chunk_ids: Sequence[UUID],
+        project_context_root: Path | None = None,
+    ) -> tuple[int, int]: ...
 
     # Audit enumeration (independent of search / recall paths)
     #

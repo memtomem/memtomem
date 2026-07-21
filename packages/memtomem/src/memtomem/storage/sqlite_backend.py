@@ -154,6 +154,23 @@ def _classify_startup_error(exc: BaseException, stage: str) -> StorageStartupErr
     )
 
 
+def _chunk_ids_sql(column_alias: str = "") -> str:
+    """SQL fragment restricting rows to an explicit chunk-id set.
+
+    Uses ``json_each`` over a single bound JSON array rather than an
+    ``IN (?,?,…)`` list, for three reasons: ``placeholders(0)`` raises, so
+    an IN-list cannot express the empty set at all; a large provenance
+    set would otherwise blow past SQLite's bound-variable limit; and one
+    parameter is cheaper to bind than thousands. Mirrors the ``json_each``
+    idiom already used for the tag filter.
+    """
+    return f"{column_alias}id IN (SELECT value FROM json_each(?))"
+
+
+def _chunk_ids_param(chunk_ids: Sequence[UUID]) -> str:
+    return json.dumps([str(cid) for cid in chunk_ids])
+
+
 def _metadata_filter_sql(
     metadata_filter: SearchMetadataFilter | None,
     *,
@@ -2047,11 +2064,15 @@ class SqliteBackend(
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        chunk_ids: Sequence[UUID] | None = None,
     ) -> list[Chunk]:
         db = self._get_read_db()
         conditions: list[str] = []
         params: list[object] = []
 
+        if chunk_ids is not None:
+            conditions.append(_chunk_ids_sql())
+            params.append(_chunk_ids_param(chunk_ids))
         if since is not None:
             conditions.append("created_at >= ?")
             params.append(since.isoformat())
@@ -2099,6 +2120,39 @@ class SqliteBackend(
             params,
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
+
+    async def sum_chunk_content_chars(
+        self,
+        chunk_ids: Sequence[UUID],
+        project_context_root: Path | None = None,
+    ) -> tuple[int, int]:
+        """Return ``(count, total_content_chars)`` without materializing rows.
+
+        Applies the same id filter and always-on ADR-0011 scope fragment
+        ``recall_chunks`` would, so the count agrees with what a recall of
+        the same ids under the same project context would return.
+
+        The character total is a **lower bound** on the prompt a caller
+        will eventually build, not a prediction of it: a formatter that
+        adds headers, source paths, and separators pushes the real length
+        higher, while one that strips content can pull it lower. Use it to
+        reject the obviously-oversized cheaply, never as the authoritative
+        limit. The unit is characters (SQLite ``LENGTH()`` counts
+        characters on TEXT, not UTF-8 bytes), matching the
+        ``max_input_chars`` knob it exists to serve.
+        """
+        db = self._get_read_db()
+        conditions = [_chunk_ids_sql()]
+        params: list[object] = [_chunk_ids_param(chunk_ids)]
+        scope_frag, scope_params = scope_context_sql(None, project_context_root)
+        conditions.append(scope_frag)
+        params.extend(scope_params)
+        row = db.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(LENGTH(content)), 0) FROM chunks "
+            f"WHERE {' AND '.join(conditions)}",
+            params,
+        ).fetchone()
+        return int(row[0]), int(row[1])
 
     async def get_all_source_files(self) -> set[Path]:
         db = self._get_db()

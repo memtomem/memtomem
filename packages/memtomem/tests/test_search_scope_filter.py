@@ -192,6 +192,87 @@ async def test_recall_in_project_context_returns_user_plus_project(storage, tmp_
 
 
 @pytest.mark.asyncio
+async def test_recall_by_chunk_ids_still_honors_the_project_boundary(storage, tmp_path):
+    """Naming a chunk by id does not buy past the scope boundary.
+
+    An id-restricted recall exists so a caller holding explicit ids can
+    fetch exactly those rows — but "I know its id" is not authorization.
+    Routing the fetch through ``recall_chunks`` rather than
+    ``get_chunks_batch`` is what keeps the always-on ADR-0011 fragment in
+    play; this pins that it actually still fires.
+    """
+    proj_a = tmp_path / "proj_a"
+    proj_b = tmp_path / "proj_b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+
+    user_chunk = _make_chunk_at_scope(
+        content="user level note",
+        source_file=tmp_path / "u.md",
+        scope="user",
+        project_root=None,
+    )
+    a_shared = _make_chunk_at_scope(
+        content="proj A team rule",
+        source_file=proj_a / ".memtomem" / "memories" / "rule.md",
+        scope="project_shared",
+        project_root=proj_a,
+    )
+    b_shared = _make_chunk_at_scope(
+        content="proj B team rule",
+        source_file=proj_b / ".memtomem" / "memories" / "rule.md",
+        scope="project_shared",
+        project_root=proj_b,
+    )
+    await storage.upsert_chunks([user_chunk, a_shared, b_shared])
+    every_id = [user_chunk.id, a_shared.id, b_shared.id]
+
+    rows = await storage.recall_chunks(chunk_ids=every_id, limit=10, project_context_root=proj_a)
+
+    contents = {r.content for r in rows}
+    assert contents == {"user level note", "proj A team rule"}
+    assert "proj B team rule" not in contents
+
+
+@pytest.mark.asyncio
+async def test_sum_chunk_content_chars_agrees_with_the_scoped_recall(storage, tmp_path):
+    """The size aggregate must see the same rows the later hydration will.
+
+    It exists to reject an oversized set *before* hydrating, so if it
+    counted rows the recall then filters away, callers would reject work
+    they could have done — and the shortfall arithmetic built on top of
+    it would misattribute the difference.
+    """
+    proj_a = tmp_path / "proj_a"
+    proj_b = tmp_path / "proj_b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+
+    a_shared = _make_chunk_at_scope(
+        content="a" * 40,
+        source_file=proj_a / ".memtomem" / "memories" / "rule.md",
+        scope="project_shared",
+        project_root=proj_a,
+    )
+    b_shared = _make_chunk_at_scope(
+        content="b" * 90,
+        source_file=proj_b / ".memtomem" / "memories" / "rule.md",
+        scope="project_shared",
+        project_root=proj_b,
+    )
+    await storage.upsert_chunks([a_shared, b_shared])
+    every_id = [a_shared.id, b_shared.id]
+
+    count, chars = await storage.sum_chunk_content_chars(every_id, project_context_root=proj_a)
+    hydrated = await storage.recall_chunks(
+        chunk_ids=every_id, limit=10, project_context_root=proj_a
+    )
+
+    assert count == len(hydrated) == 1
+    assert chars == sum(len(c.content) for c in hydrated) == 40
+
+
+@pytest.mark.asyncio
 async def test_recall_explicit_project_shared_no_context_unions_all_projects(storage, tmp_path):
     """Cross-project search: explicit scope=project_shared from no-project context unions every project."""
     proj_a = tmp_path / "proj_a"
