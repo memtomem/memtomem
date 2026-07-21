@@ -25,7 +25,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "server"
 
 
 def _tool_functions() -> list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]]:
-    """Every decorated tool function in ``server/tools`` (public names only)."""
+    """Every ``@mcp.tool()`` / ``@register``-ed function in ``server/tools``."""
     found: list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]] = []
     for path in sorted(_TOOLS_DIR.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -85,6 +85,22 @@ def test_sweep_finds_the_tool_surface() -> None:
     assert len(_tool_functions()) > 90
 
 
+def test_no_docstring_documents_a_parameter_that_does_not_exist() -> None:
+    """The parse must not invent keys, even before register() filters them.
+
+    ``register()`` drops non-signature keys, so ``ACTIONS`` stays clean either
+    way; this asserts the parse itself, which is what a section-termination
+    regression would break first (an ``Examples::`` block following ``Args:``
+    used to be read as a parameter named ``Examples``).
+    """
+    offenders = {
+        f"{filename}::{node.name}": extra
+        for filename, node in _tool_functions()
+        if (extra := sorted(set(_arg_docs(node)) - set(_params(node))))
+    }
+    assert not offenders, f"docstrings parsed into non-existent parameters: {offenders}"
+
+
 def test_every_tool_parameter_is_documented() -> None:
     offenders = {
         f"{filename}::{node.name}": missing
@@ -123,7 +139,23 @@ def _force_unsafe_tools() -> list[tuple[str, ast.AsyncFunctionDef | ast.Function
 
 
 def test_force_unsafe_tools_are_found() -> None:
-    assert len(_force_unsafe_tools()) >= 5
+    """Pin the surface that was actually reviewed, not a lower bound.
+
+    A ``>= 5`` sentinel would not notice four of the nine tools losing the
+    parameter, which is weaker than the signature-derived discovery it guards.
+    """
+    found = sorted(node.name for _, node in _force_unsafe_tools())
+    assert found == [
+        "mem_add",
+        "mem_batch_add",
+        "mem_edit",
+        "mem_fetch",
+        "mem_import",
+        "mem_import_notion",
+        "mem_import_obsidian",
+        "mem_pinned_set",
+        "mem_session_end",
+    ], f"the force_unsafe surface changed: {found}"
 
 
 @pytest.mark.parametrize(
@@ -171,11 +203,22 @@ def test_project_shared_exemptions_are_still_exempt() -> None:
     required and this test says so instead of silently keeping the tool out
     of the check.
     """
-    source = (
-        Path(__file__).resolve().parents[1] / "src" / "memtomem" / "tools" / "export_import.py"
-    ).read_text(encoding="utf-8")
-    assert 'scope="user"' in source, (
-        "tools/export_import.py no longer pins scope='user' — mem_import can now "
-        "reach a scope-aware refusal, so drop it from _NO_PROJECT_SHARED_PATH "
-        "and document the project_shared clause on it"
+    path = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "tools" / "export_import.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # Substring-matching the file would also match the ``scope="user"`` that
+    # appears inside its own docstring, so deleting the real keyword would
+    # leave this green on prose alone — the exact drift it exists to catch.
+    pinned = [
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and ast.unparse(call.func).endswith("enforce_write_guard")
+        and any(
+            kw.arg == "scope" and getattr(kw.value, "value", None) == "user" for kw in call.keywords
+        )
+    ]
+    assert pinned, (
+        "tools/export_import.py no longer calls enforce_write_guard with a literal "
+        "scope='user' — mem_import can now reach a scope-aware refusal, so drop it "
+        "from _NO_PROJECT_SHARED_PATH and document the project_shared clause on it"
     )
