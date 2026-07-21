@@ -110,6 +110,7 @@ __all__ = [
     "recover_pending_swaps",
     "staging_path_for",
     "swap_dir_tree",
+    "swap_failure_text",
 ]
 
 
@@ -443,6 +444,22 @@ def _find_marker(root: Path, name: str) -> Path | None:
             str(root / name),
         )
     return found[0]
+
+
+def swap_failure_text(exc: SwapRecoveryError) -> str:
+    """The sentence a surface should show for *exc*.
+
+    Every raise here uses the three-argument ``OSError`` form, so ``str(exc)``
+    renders as ``[Errno 16] <sentence>: '<path>'`` — an errno nobody acts on in
+    front, and a repeat of a path the sentence already names (quoted, for the
+    redactors) behind. That is what reached the CLI, the 409 body and the MCP
+    line before this existed.
+
+    ``strerror`` is the sentence as written. The fallback keeps a
+    single-argument raise (none today, but the class does not forbid one) from
+    rendering as an empty message.
+    """
+    return exc.strerror or str(exc)
 
 
 def has_pending_swap(root: Path, name: str) -> bool:

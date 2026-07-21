@@ -91,7 +91,7 @@ from memtomem.context.lockfile import (
     digests_from_entry,
 )
 from memtomem.context._canonical_txn import acquire_canonical_locks
-from memtomem.context._dir_swap import SwapRecoveryError
+from memtomem.context._dir_swap import SwapRecoveryError, swap_failure_text
 from memtomem.context.migrate import (
     _DIR_MANIFEST,
     SCOPE_MIGRATABLE_KINDS,
@@ -978,7 +978,7 @@ def transfer_artifact(
             run_swap_prelude(src_store, name, kind=kind)
             run_swap_prelude(dst_store, dst_name, kind=kind)
         except SwapRecoveryError as exc:
-            raise TransferRecoveryError(str(exc)) from exc
+            raise TransferRecoveryError(swap_failure_text(exc)) from exc
 
         # The source must still satisfy the FULL discovery contract under the
         # lock, not merely exist. Discovery may have counted a live swap marker

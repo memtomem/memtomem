@@ -59,7 +59,11 @@ from memtomem.context._canonical_txn import (
     write_canonical_locked,
 )
 from memtomem.context._gate_a import GateStatus
-from memtomem.context._dir_swap import SwapRecoveryError, marker_owns_transient
+from memtomem.context._dir_swap import (
+    SwapRecoveryError,
+    marker_owns_transient,
+    swap_failure_text,
+)
 from memtomem.context._names import Layout, validate_name
 from memtomem.context._runtime_targets import resolve_import_runtimes
 from memtomem.context.pull_preview import (
@@ -736,7 +740,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
         # infrastructure failure for a state that needs an operator's eyes).
         # Must precede any broad ``OSError`` clause added later: this is one.
         return _refusal_for(
-            plan, "swap_recovery_pending", skip_codes.SWAP_RECOVERY_PENDING, str(exc)
+            plan, "swap_recovery_pending", skip_codes.SWAP_RECOVERY_PENDING, swap_failure_text(exc)
         )
     except TimeoutError:
         return _lock_timeout_result(plan)

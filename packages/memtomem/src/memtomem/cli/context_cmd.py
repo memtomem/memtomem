@@ -78,7 +78,7 @@ from memtomem.context.migrate import (
     migrate_one,
     migrate_scope,
 )
-from memtomem.context._dir_swap import SwapRecoveryError
+from memtomem.context._dir_swap import SwapRecoveryError, swap_failure_text
 from memtomem.context.transfer import TransferMode, TransferResult, transfer_artifact
 from memtomem.context.mcp_servers import (
     PROJECT_MCP_CONFIG,
@@ -3050,7 +3050,8 @@ def _run_update_all(
             # gives no hint of that. Still a per-row failure — the other
             # projects in this batch are unaffected.
             click.secho(
-                f"  ✗ {c.project_root}: interrupted directory swap in the Store — {exc}",
+                f"  ✗ {c.project_root}: interrupted directory swap in the Store — "
+                f"{swap_failure_text(exc)}",
                 fg="red",
             )
             failures += 1
@@ -3563,7 +3564,8 @@ def _run_install_all(
         except SwapRecoveryError as exc:
             # Before the broad ``OSError`` — see the update-all batch.
             click.secho(
-                f"  ✗ {c.asset_type}/{c.name}: interrupted directory swap in the Store — {exc}",
+                f"  ✗ {c.asset_type}/{c.name}: interrupted directory swap in the Store — "
+                f"{swap_failure_text(exc)}",
                 fg="red",
             )
             failures += 1
@@ -6293,7 +6295,7 @@ def seed_validation_cmd(directory: Path, force: bool, as_json: bool) -> None:
         # produce a demo project whose state nobody can trust.
         raise click.ClickException(
             f"cannot seed: an interrupted directory swap is pending in the target "
-            f"Store and must be resolved first — {exc}"
+            f"Store and must be resolved first — {swap_failure_text(exc)}"
         ) from exc
 
     if as_json:

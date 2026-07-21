@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
-from memtomem.context._dir_swap import SwapRecoveryError
+from memtomem.context._dir_swap import SwapRecoveryError, swap_failure_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import SKILL_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError, scan_text_content
@@ -92,7 +92,8 @@ def _swap_recovery_error(exc: SwapRecoveryError, project_root: Path) -> HTTPExce
     return _error(
         409,
         "conflict",
-        redact_wire_reason(str(exc), project_root) or "an interrupted swap is pending",
+        redact_wire_reason(swap_failure_text(exc), project_root)
+        or "an interrupted swap is pending",
         reason_code="swap_recovery_pending",
     )
 

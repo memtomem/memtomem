@@ -47,6 +47,7 @@ from memtomem.context._dir_swap import (
     SwapRecoveryError,
     marker_owns_transient,
     recover_pending_swaps,
+    swap_failure_text,
 )
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
@@ -1077,7 +1078,13 @@ def generate_all_skills(
                         _recover_and_reap_internal_dirs(stale_dst)
                     except SwapRecoveryError as exc:
                         blocked_dsts.add(stale_dst)
-                        skipped.append((stale_dst.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (
+                                stale_dst.name,
+                                swap_failure_text(exc),
+                                skip_codes.SWAP_RECOVERY_PENDING,
+                            )
+                        )
                         logger.warning("skip %s: %s", stale_dst, exc)
                 for target, _gen, skill_dir, dst in work:
                     if dst in blocked_dsts:
@@ -1106,7 +1113,13 @@ def generate_all_skills(
                         # unreadable source. Reporting it as PARSE_ERROR would
                         # point the remediation at the skill file instead of at
                         # the interrupted transaction (PR review).
-                        skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (
+                                skill_dir.name,
+                                swap_failure_text(exc),
+                                skip_codes.SWAP_RECOVERY_PENDING,
+                            )
+                        )
                         continue
                     except OSError as exc:
                         skipped.append(
@@ -1253,7 +1266,9 @@ def generate_all_skills(
                 try:
                     _recover_and_reap_internal_dirs(dst)
                 except SwapRecoveryError as exc:
-                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    skipped.append(
+                        (skill_dir.name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                    )
                     logger.warning("skip %s: %s", skill_dir.name, exc)
                     continue
                 # Preflight the promote refusal predicate (same conversion to
@@ -1271,7 +1286,9 @@ def generate_all_skills(
                     staging = _stage_skill(skill_dir, dst, payload_only=True)
                 except SwapRecoveryError as exc:
                     # Before the broad OSError — see the project_shared batch.
-                    skipped.append((skill_dir.name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                    skipped.append(
+                        (skill_dir.name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                    )
                     continue
                 except OSError as exc:
                     skipped.append((skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
@@ -1702,7 +1719,9 @@ def extract_skills_to_canonical(
                     try:
                         _recover_and_reap_internal_dirs(dst)
                     except SwapRecoveryError as exc:
-                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (skill_name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                        )
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
                         # Marked ``seen`` — the wedge is on the DESTINATION, so
                         # the same name from another runtime would hit the same
@@ -1758,7 +1777,9 @@ def extract_skills_to_canonical(
                         # unlike unreadability this is destination-scoped, so
                         # another runtime's copy would hit the same state —
                         # the same reasoning as the prelude's refusal above.
-                        skipped.append((skill_name, str(exc), skip_codes.SWAP_RECOVERY_PENDING))
+                        skipped.append(
+                            (skill_name, swap_failure_text(exc), skip_codes.SWAP_RECOVERY_PENDING)
+                        )
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
                         seen[skill_name] = runtime_label
                         continue
