@@ -468,6 +468,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Context wire redaction no longer relativizes prefix-colliding siblings**
+  (#1889) — a project root such as `/srv/project` previously matched the start
+  of `/srv/project-private`, turning the external path into the relative-looking
+  `.-private/...` before the Web/MCP absolute-path backstops could remove it.
+  Root stripping now requires path-component boundaries and is shared by both
+  wires; colliding sibling paths redact to `<path>` before HOME collapse while
+  genuine project-relative remediation paths keep their existing shape.
+
 - **Context wire redaction now covers single-segment absolute paths** (#1890) —
   a runtime root such as `/secretmount` or `C:\secretmount` can appear in an
   `OSError`, but the shared Web/MCP backstops required two path segments and

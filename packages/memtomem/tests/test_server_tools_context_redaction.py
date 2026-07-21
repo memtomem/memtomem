@@ -41,7 +41,7 @@ exercised here.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -97,6 +97,56 @@ class TestNeutralRedactor:
     def test_empty_reason_is_none(self) -> None:
         assert redact_engine_reason(None, Path("/x")) is None
         assert redact_engine_reason("", Path("/x")) is None
+
+    @pytest.mark.parametrize("suffix", ["-private", "_private", ".private", " private", ":private"])
+    def test_prefix_colliding_sibling_is_scrubbed_on_both_wires(
+        self, tmp_path: Path, suffix: str
+    ) -> None:
+        """A sibling is external, never a root-relative remediation (#1889)."""
+        from memtomem.server.tools.context import _redact_reason
+        from memtomem.web.routes.context_gateway import sanitize_diff_reason
+
+        root = tmp_path / "project"
+        sibling = root.with_name(root.name + suffix) / "team" / "secret.md"
+        reason = f"unreadable: {sibling}"
+
+        assert _redact_reason(reason, root) == "unreadable: <path>"
+        assert sanitize_diff_reason(reason, root) == "unreadable: <path>"
+
+    def test_prefix_collision_is_scrubbed_before_home_collapse(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``~/...`` is normally actionable, but not when born from a collision."""
+        from memtomem.context import error_redact
+        from memtomem.server.tools.context import _redact_reason
+        from memtomem.web.routes.context_gateway import sanitize_diff_reason
+
+        monkeypatch.setattr(error_redact, "_HOME", "/home/alice")
+        root = Path("/home/alice/work/memtomem")
+        reason = "unreadable: /home/alice/work/memtomem-stm/team/secret.md"
+
+        assert _redact_reason(reason, root) == "unreadable: <path>"
+        assert sanitize_diff_reason(reason, root) == "unreadable: <path>"
+
+    def test_windows_prefix_colliding_sibling_is_scrubbed(self) -> None:
+        from memtomem.server.tools.context import _redact_reason
+        from memtomem.web.routes.context_gateway import sanitize_diff_reason
+
+        root = PureWindowsPath(r"C:\project")
+        reason = r"unreadable: C:\project-private\team\secret.md"
+
+        assert _redact_reason(reason, root) == "unreadable: <path>"
+        assert sanitize_diff_reason(reason, root) == "unreadable: <path>"
+
+    def test_root_text_inside_another_absolute_path_is_scrubbed(self) -> None:
+        from memtomem.server.tools.context import _redact_reason
+        from memtomem.web.routes.context_gateway import sanitize_diff_reason
+
+        root = Path("/srv/project")
+        reason = "unreadable: /prefix/srv/project/team/secret.md"
+
+        assert _redact_reason(reason, root) == "unreadable: <path>"
+        assert sanitize_diff_reason(reason, root) == "unreadable: <path>"
 
     def test_message_collapses_home_and_truncates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # ``_HOME`` is frozen at import — patch the module constant to assert the
@@ -501,14 +551,13 @@ async def test_generate_settings_dup_tier_warning_redacts_path_untruncated(
 
 
 class TestWebParityGuard:
-    """Pin ``context.error_redact`` byte-for-byte against the web originals.
+    """Pin the neutral redactor byte-for-byte against the web delegates.
 
-    The neutral leaf duplicates ``web/routes/_errors._redact_message`` and
-    ``context_gateway.sanitize_diff_reason`` (the MCP layer may not import
-    ``memtomem.web.*``). This is a security boundary — a silent drift between
-    the twins reopens the leak on whichever surface got the stale copy — so
-    representative inputs are compared against BOTH implementations until the
-    planned delegation refactor collapses them.
+    ``redact_message`` still mirrors ``web/routes/_errors._redact_message``;
+    ``context_gateway.sanitize_diff_reason`` now delegates root handling to the
+    neutral leaf (the MCP layer may not import ``memtomem.web.*``). This is a
+    security boundary, so representative inputs remain compared against both
+    web entry points.
     """
 
     def test_frozen_constants_match_web(self) -> None:
