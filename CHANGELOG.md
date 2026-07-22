@@ -34,8 +34,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the row authoritative, but only after the summary clears the same redaction
   guard the archive write applies, so secret-shaped model output cannot reach
   the API-exposed column past the block. This is the state a web UI needs to
-  avoid presenting an inferred summary the same way as an exact one (follow-up:
-  render it in the Sessions panel).
+  avoid presenting an inferred summary the same way as an exact one; the
+  Sessions panel rendering shipped later in this same release (entry above).
 
 - **Pulling a skill can now overwrite the Store copy** (ADR-0030 §10, PR-G4b) —
   `mm context pull skills <name> --overwrite` (and the web / MCP equivalents) no
@@ -181,7 +181,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   §9, PR-F1/PR-F2) — a new `GET /api/context/status-global` endpoint reports the
   skills, subagents and commands in your user-tier Store (`~/.memtomem`)
   together with a per-artifact pull-direction verdict (`in sync` / `differs` /
-  `check failed`), and Settings gains a **Global library** section that renders
+  `check failed`), and the web UI's **Context Gateway** group gains a **Global
+  library** section that renders
   it with a drift badge, and a Preview / Pull affordance on each differing
   item whose kind can be pulled. It is a
   read-only detection probe on its own — it never writes; reconciling is still
@@ -289,8 +290,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   editor or shell during the window is never clobbered. Durability degrades to
   process-crash consistency on filesystems that reject directory `fsync`
   (Windows, some network/tmpfs mounts) rather than failing the operation.
-  Shipped callerless — the skills overwrite Pull that will use it is still
-  refused (PR-G4b) — and given its callers later in this same release: every
+  Shipped callerless at first — the skills overwrite Pull that uses it (PR-G4b,
+  above) landed later in this same release — and then given its callers: every
   skill writer now runs its recovery machine inside the canonical lock, before
   any authoritative check or write (PR-G4a-3a / PR-G4a-3b, above).
 
@@ -571,7 +572,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   "sync", as does relational drift state ("in sync" / "out of sync"), which
   describes status rather than the action.
 
-- **`mm context import --overwrite` is snapshot-first and refuses unsafe
+- **`mm context init --overwrite` is snapshot-first and refuses unsafe
   overwrites** (ADR-0030 §6) — importing a runtime copy over an *existing*
   canonical no longer clobbers it blindly. For agents and commands in the
   current directory layout, the existing canonical is first snapshotted into
@@ -580,9 +581,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   point always exists and a concurrent writer can't be lost. A re-import of
   byte-identical content is a no-op (no snapshot is accrued). Two shapes are
   now refused with a typed skip instead of overwriting: an existing **skill**
-  (`skills_overwrite_unsupported` — directory-tree snapshots land in a later
-  release; delete the stored skill first to re-import) and a **flat-layout**
-  agent/command (`snapshot_requires_dir_layout` — it has no version store; run
+  (`skills_overwrite_unsupported` — the batch path does not snapshot skill
+  trees; pull a single skill with `mm context pull skills <name> --overwrite`
+  (PR-G4b, above), or delete the stored skill first to re-import) and a
+  **flat-layout** agent/command
+  (`snapshot_requires_dir_layout` — it has no version store; run
   `mm context migrate` to convert it first). A first-time import (`new`) is
   unchanged.
 
