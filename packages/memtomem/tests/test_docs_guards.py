@@ -47,6 +47,7 @@ _INTEGRATIONS = _GUIDES / "integrations"
 _README = _REPO_ROOT / "README.md"
 _PYPI_README = _REPO_ROOT / "packages" / "memtomem" / "README.md"
 _PLUGIN_README = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "README.md"
+_CODEX_PLUGIN_README = _REPO_ROOT / "plugins" / "memtomem" / "README.md"
 _NOTEBOOKS_README = _REPO_ROOT / "examples" / "notebooks" / "README.md"
 _PLUGIN_CONTRACT = _REPO_ROOT / "packages" / "memtomem-plugin-assets" / "contract.toml"
 _VIBE_GUIDE = _GUIDES / "vibe-coding-getting-started-ko.md"
@@ -798,6 +799,25 @@ class TestPublicReadmeAndExamples:
         assert "~/.memtomem/memories" not in (file_param.help or "")
 
 
+def _vibe_section(guide: str, heading_keyword: str) -> str:
+    """Body of the first ``##`` section whose heading contains ``heading_keyword``."""
+    match = re.search(
+        rf"^##[^\n]*{re.escape(heading_keyword)}[^\n]*$\n(.*?)(?=^## |\Z)",
+        guide,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"vibe guide lost its '{heading_keyword}' section"
+    return match.group(1)
+
+
+def _markdown_link_targets(text: str) -> set[str]:
+    """Markdown link destinations (anchor stripped) — prose/comment URLs don't count."""
+    targets = set()
+    for raw in _LINK.findall(text):
+        targets.add(raw.strip().strip("<>").partition("#")[0])
+    return targets
+
+
 class TestVibeCodingQuickstart:
     def test_public_entrypoints_link_quickstart(self) -> None:
         relative = "vibe-coding-getting-started-ko.md"
@@ -809,14 +829,17 @@ class TestVibeCodingQuickstart:
             _GUIDES / "reference.md",
             _INTEGRATIONS / "claude-code.md",
             _INTEGRATIONS / "codex.md",
+            _PLUGIN_README,
+            _CODEX_PLUGIN_README,
         )
         for entrypoint in entrypoints:
-            assert relative in _read(entrypoint), (
+            targets = _markdown_link_targets(_read(entrypoint))
+            assert any(target.endswith(relative) for target in targets), (
                 f"{entrypoint.relative_to(_REPO_ROOT)} must link the Korean vibe-coding quickstart"
             )
-        assert (f"https://github.com/memtomem/memtomem/blob/main/docs/guides/{relative}") in _read(
-            _PYPI_README
-        )
+        assert (
+            f"https://github.com/memtomem/memtomem/blob/main/docs/guides/{relative}"
+        ) in _markdown_link_targets(_read(_PYPI_README))
 
     def test_plugin_install_commands_match_supported_public_flow(self) -> None:
         guide = _read(_VIBE_GUIDE)
@@ -828,6 +851,85 @@ class TestVibeCodingQuickstart:
         )
         for command in commands:
             assert command in guide
+
+    def test_fresh_store_bootstrap_is_shared_and_precedes_client_branches(self) -> None:
+        version = _plugin_contract()["core"]["version"]
+        bootstrap = (
+            f"uvx --from 'memtomem=={version}' mm init "
+            "--preset minimal --non-interactive --mcp skip"
+        )
+        status = f"uvx --from 'memtomem=={version}' mm status"
+
+        for path in (_VIBE_GUIDE, _PLUGIN_README, _CODEX_PLUGIN_README):
+            text = _read(path)
+            name = path.relative_to(_REPO_ROOT)
+            assert text.count(bootstrap) == 1, f"{name} must keep exactly one shared bootstrap"
+            assert status in text, f"{name} lost the bootstrap status check"
+            # Every documented `mm init` (as opposed to `mm mem init`) must carry
+            # `--mcp skip` — the plugin supplies the MCP server, so a bootstrap
+            # variant without it would register a second server.
+            for line in text.splitlines():
+                if re.search(r"(?<!mem )\bmm init\b", line):
+                    assert "--mcp skip" in line, (
+                        f"{name} documents an `mm init` without `--mcp skip`: {line!r}"
+                    )
+
+        guide = _read(_VIBE_GUIDE)
+        claude_flow = (
+            bootstrap,
+            status,
+            "/plugin marketplace add memtomem/memtomem",
+            "/plugin install memtomem@memtomem",
+            "/memtomem:status",
+            "/memtomem:remember",
+            "/memtomem:search",
+        )
+        codex_flow = (
+            bootstrap,
+            status,
+            "codex plugin marketplace add memtomem/memtomem",
+            "codex plugin add memtomem@memtomem",
+            "$memtomem-status",
+            "$memtomem-remember",
+            "$memtomem-search",
+        )
+        for flow in (claude_flow, codex_flow):
+            positions = [guide.index(step) for step in flow]
+            assert positions == sorted(positions), f"vibe guide onboarding order drifted: {flow}"
+
+    def test_mixed_beginner_path_links_official_client_install_docs(self) -> None:
+        preparation = _vibe_section(_read(_VIBE_GUIDE), "평소 쓰는 도구")
+        targets = _markdown_link_targets(preparation)
+        assert "https://code.claude.com/docs/en/quickstart" in targets
+        assert "https://learn.chatgpt.com/docs/codex/cli" in targets
+
+    def test_first_round_trip_uses_user_scope_and_exact_keyword_search(self) -> None:
+        guide = _read(_VIBE_GUIDE)
+        round_trip = _vibe_section(guide, "첫 기억을 저장")
+        new_session = _vibe_section(guide, "새 세션에서 다시 찾기")
+        memory = "모든 프로젝트에서 설명은 한국어로 받고, 코드 식별자는 원문 표기를 유지한다."
+        claude_search = "/memtomem:search 코드 식별자는 원문"
+        codex_search = '$memtomem-search 스킬로 "코드 식별자는 원문"을 찾고 출처도 보여줘.'
+
+        # The first save targets the default user scope — no project-tier init
+        # inside the round trip or the new-session verification.
+        for section in (round_trip, new_session):
+            assert "mm mem init" not in section
+            assert "project_local" not in section
+
+        assert f"/memtomem:remember {memory}" in round_trip
+        assert f"$memtomem-remember 스킬로 다음 개인 선호를 저장해줘: {memory}" in round_trip
+        assert round_trip.index("/memtomem:remember") < round_trip.index(claude_search)
+        assert round_trip.index("$memtomem-remember") < round_trip.index(codex_search)
+
+        # The new-session check repeats the exact stored keywords for both clients.
+        assert claude_search in new_session
+        assert codex_search in new_session
+
+        # Project-tier init is introduced only after the round trip succeeds.
+        assert guide.index("mm mem init --scope project_local") > guide.index(
+            "새 세션에서 다시 찾기"
+        )
 
     def test_first_success_workflows_match_plugin_contract(self) -> None:
         guide = _read(_VIBE_GUIDE)
