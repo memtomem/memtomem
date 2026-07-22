@@ -1027,8 +1027,13 @@ def _build_overwrite_staging(
     payload = _payload_filtered(captured)
     if not any(rel == SKILL_MANIFEST for rel, _ in payload):
         # A captured tree without a manifest is not a valid skill — refuse rather
-        # than swap in an invalid canonical (parity with ``_stage_captured_tree``).
-        raise StrictTreeError(staging, f"captured skill missing {SKILL_MANIFEST}")
+        # than swap in an invalid canonical (parity with ``_stage_captured_tree``,
+        # which raises the same). Defense-in-depth: prepare already refuses a
+        # manifest-less source (``_read_landing`` → landing_error). ``FileNotFoundError``
+        # (an OSError) so the step-6 handler renders it as ``write_failed`` naming
+        # the CAPTURED runtime tree — NOT ``target_conflict``'s "the Store copy …",
+        # which would blame the wrong tree for a defect in the runtime payload.
+        raise FileNotFoundError(f"the captured runtime skill is missing {SKILL_MANIFEST}")
     write_tree_payload(staging, payload, durable=True)
     overrides_dir = dst / _OVERRIDES_DIRNAME
     if overrides_dir.is_dir():

@@ -683,8 +683,16 @@ _HARDLINK_FALLBACK_ERRNOS: frozenset[int] = frozenset(
 
 
 def _full_fsync_file(path: Path) -> None:
-    """``F_FULLFSYNC`` (macOS) / ``fsync`` a file so its bytes survive a power cut."""
-    fd = os.open(path, os.O_RDONLY)
+    """``F_FULLFSYNC`` (macOS) / ``fsync`` a file so its bytes survive a power cut.
+
+    Opened ``O_RDWR``, not ``O_RDONLY``: on Windows ``os.fsync`` is
+    ``_commit`` → ``FlushFileBuffers``, which requires a writable handle
+    (``GENERIC_WRITE``) and raises ``PermissionError`` on a read-only one. The
+    only caller (:func:`link_or_copy_file`'s copy fallback) has just created a
+    fresh file it owns, so requesting write access is always available and
+    changes nothing on POSIX.
+    """
+    fd = os.open(path, os.O_RDWR)
     try:
         _fsync_fd(fd, full=True)
     finally:

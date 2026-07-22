@@ -293,6 +293,58 @@ def test_skills_overwrite_strips_runtime_side_version_store(home: Path, proj: Pa
     assert "RUNTIME HISTORY" not in (d / "versions.json").read_text(encoding="utf-8")
 
 
+def test_skills_new_pull_strips_runtime_side_version_store(home: Path, proj: Path) -> None:
+    """§6 ingress strip applies to a NEW pull too (PR review #6): a runtime copy
+    carrying its own ``versions/`` / ``versions.json`` must not seed the Store's
+    metadata namespace on a first pull — only the payload lands."""
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "fresh")})
+    runtime_skill_dir = written["claude"].parent
+    (runtime_skill_dir / "versions").mkdir()
+    (runtime_skill_dir / "versions" / "vX.md").write_text("RUNTIME HISTORY\n", encoding="utf-8")
+    (runtime_skill_dir / "versions.json").write_text('{"stray":1}\n', encoding="utf-8")
+
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "applied"
+    assert res.write_outcome == "created"
+    d = _store_skill_dir(proj, "s")
+    assert "fresh" in _store_skill_text(proj, "s")
+    # The runtime's store-owned metadata never landed.
+    assert not (d / "versions").exists()
+    assert not (d / "versions.json").exists()
+
+
+def test_skills_second_overwrite_preserves_v1_and_adds_v2(home: Path, proj: Path) -> None:
+    """PR review #5: a SECOND overwrite hardlink-carries the existing version
+    store — v1 is preserved (same inode, untouched), v2 is added, and both
+    manifest rows survive. Pins the hardlink carry over a non-empty store."""
+    import json as _json
+
+    d = _seed_overwrite_case(proj)
+    # First overwrite → v1 (pre-image "old store").
+    plan1 = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan1, PullPlan)
+    assert commit_pull(plan1).status == "applied"
+    v1_inode = (d / "versions" / "v1" / "SKILL.md").stat().st_ino
+
+    # Change the runtime so the second pull is not an identical no-op, then
+    # overwrite again → v2 (pre-image = the "new" body the first pull landed).
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "newer")})
+    plan2 = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan2, PullPlan)
+    assert commit_pull(plan2).status == "applied"
+
+    assert "newer" in _store_skill_text(proj, "s")
+    # v1 preserved byte-identical AND same inode (carried by hardlink, not recopied).
+    assert "old store" in (d / "versions" / "v1" / "SKILL.md").read_text(encoding="utf-8")
+    assert (d / "versions" / "v1" / "SKILL.md").stat().st_ino == v1_inode
+    # v2 added, holding the first pull's landed body.
+    assert "new" in (d / "versions" / "v2" / "SKILL.md").read_text(encoding="utf-8")
+    manifest = _json.loads((d / "versions.json").read_text(encoding="utf-8"))
+    assert {"v1", "v2"} <= set(manifest["versions"])
+
+
 def _seed_overwrite_case(proj: Path, *, store_body: str = "old store") -> Path:
     """Seed a runtime skill + a store skill so an overwrite-Pull is prepared."""
     seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})

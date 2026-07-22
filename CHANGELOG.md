@@ -59,9 +59,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   runtime copy" as "delete" would have destroyed vendor edits) and `versions/` /
   `versions.json` are carried by hardlink. A runtime copy that happens to carry
   its own `versions/` cannot seed the Store's metadata — only the payload
-  surface is written. An interrupted swap is resolved by the recovery machinery
-  added in PR-G4a; a wedged artifact reports `swap_recovery_pending` rather than
-  a partial write.
+  surface is written, and this now applies to a **new** skill pull as well
+  (previously a runtime copy's stray `versions/` / `versions.json` would land in
+  the Store on a first pull). An interrupted swap is resolved by the recovery
+  machinery added in PR-G4a; a wedged artifact reports `swap_recovery_pending`
+  rather than a partial write.
 
 ## [0.3.12] — 2026-07-22
 
