@@ -284,12 +284,12 @@ def _module_exception_aliases(tree: ast.AST) -> dict[str, str | None]:
                 if is_tuple:
                     members = [canonical_of(elt) for elt in value.elts]  # type: ignore[union-attr]
                     if any(m is not None for m in members) and len(targets) == 1:
-                        _TUPLE_ALIASES.setdefault(id(tree), {})[target.id] = frozenset(
+                        _TUPLE_ALIASES.setdefault(tree, {})[target.id] = frozenset(
                             m for m in members if m is not None
                         )
                 elif member is not None:
                     bind(target.id, member)
-                elif target.id in resolved or target.id in _TUPLE_ALIASES.get(id(tree), {}):
+                elif target.id in resolved or target.id in _TUPLE_ALIASES.get(tree, {}):
                     # A name that WAS an exception alias is now reassigned to
                     # something the analysis cannot resolve to an intercepting
                     # type — poison it fail-closed rather than trust either write.
@@ -305,9 +305,14 @@ def _module_exception_aliases(tree: ast.AST) -> dict[str, str | None]:
 
 
 #: Per-tree tuple aliases (``RECOVERY = (OSError, ClickException)``), keyed by
-#: ``id(tree)`` so :func:`_module_exception_aliases` can record them without
-#: widening its return type. Populated lazily; read only inside the same call.
-_TUPLE_ALIASES: dict[int, dict[str, frozenset[str]]] = {}
+#: the tree OBJECT (identity hash) so :func:`_module_exception_aliases` can
+#: record them without widening its return type. All per-tree caches key on the
+#: tree itself, never ``id(tree)``: an id-keyed entry outlives its GC'd tree and
+#: CPython reuses the id, so a later parse could silently inherit another
+#: module's maps — through :func:`_import_targets` that becomes a wrong
+#: ``_runtime_intercepts`` verdict, i.e. a silently DROPPED site (fail-open,
+#: violating this module's contract). The strong reference is deliberate.
+_TUPLE_ALIASES: dict[ast.AST, dict[str, frozenset[str]]] = {}
 
 
 def _caught_names(handler: ast.ExceptHandler, tree: ast.AST) -> tuple[str, ...]:
@@ -326,7 +331,7 @@ def _caught_names(handler: ast.ExceptHandler, tree: ast.AST) -> tuple[str, ...]:
     :data:`_DYNAMIC`, fail-closed.
     """
     aliases = _alias_cache(tree)
-    tuple_aliases = _TUPLE_ALIASES.get(id(tree), {})
+    tuple_aliases = _TUPLE_ALIASES.get(tree, {})
     imports = _import_targets(tree)
     classdefs = _classdef_names(tree)
 
@@ -384,9 +389,10 @@ def _caught_names(handler: ast.ExceptHandler, tree: ast.AST) -> tuple[str, ...]:
 
 
 #: Set by :func:`handlers_in_source` so relative imports can be resolved.
-_MODULE_REL_BY_TREE: dict[int, str] = {}
-_IMPORTS_BY_TREE: dict[int, dict[str, tuple[str, tuple[str, ...]]]] = {}
-_CLASSDEFS_BY_TREE: dict[int, frozenset[str]] = {}
+#: Tree-object keyed, like every per-tree cache here (see _TUPLE_ALIASES).
+_MODULE_REL_BY_TREE: dict[ast.AST, str] = {}
+_IMPORTS_BY_TREE: dict[ast.AST, dict[str, tuple[str, tuple[str, ...]]]] = {}
+_CLASSDEFS_BY_TREE: dict[ast.AST, frozenset[str]] = {}
 
 _PACKAGE_ROOT = "memtomem"
 
@@ -394,10 +400,10 @@ _PACKAGE_ROOT = "memtomem"
 def _import_targets(tree: ast.AST) -> dict[str, tuple[str, tuple[str, ...]]]:
     """``local name → (module dotted path, attribute chain)`` for every import,
     so a caught name can be resolved to the actual runtime object."""
-    cached = _IMPORTS_BY_TREE.get(id(tree))
+    cached = _IMPORTS_BY_TREE.get(tree)
     if cached is not None:
         return cached
-    rel = _MODULE_REL_BY_TREE.get(id(tree), "")
+    rel = _MODULE_REL_BY_TREE.get(tree, "")
     targets: dict[str, tuple[str, tuple[str, ...]]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -422,15 +428,15 @@ def _import_targets(tree: ast.AST) -> dict[str, tuple[str, tuple[str, ...]]]:
                 if alias.name == "*":
                     continue
                 targets[alias.asname or alias.name] = (module, (alias.name,))
-    _IMPORTS_BY_TREE[id(tree)] = targets
+    _IMPORTS_BY_TREE[tree] = targets
     return targets
 
 
 def _classdef_names(tree: ast.AST) -> frozenset[str]:
-    cached = _CLASSDEFS_BY_TREE.get(id(tree))
+    cached = _CLASSDEFS_BY_TREE.get(tree)
     if cached is None:
         cached = frozenset(node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
-        _CLASSDEFS_BY_TREE[id(tree)] = cached
+        _CLASSDEFS_BY_TREE[tree] = cached
     return cached
 
 
@@ -470,15 +476,14 @@ def _runtime_intercepts(module_dotted: str, attr_chain: tuple[str, ...]) -> bool
 
 
 def _alias_cache(tree: ast.AST) -> dict[str, str | None]:
-    key = id(tree)
-    cached = _ALIAS_BY_TREE.get(key)
+    cached = _ALIAS_BY_TREE.get(tree)
     if cached is None:
         cached = _module_exception_aliases(tree)
-        _ALIAS_BY_TREE[key] = cached
+        _ALIAS_BY_TREE[tree] = cached
     return cached
 
 
-_ALIAS_BY_TREE: dict[int, dict[str, str | None]] = {}
+_ALIAS_BY_TREE: dict[ast.AST, dict[str, str | None]] = {}
 
 
 # ── The discovered handler ───────────────────────────────────────────────
@@ -518,7 +523,7 @@ def handlers_in_source(source: str, module: str) -> tuple[list[_Handler], ast.AS
     synthetic modules (``feedback_pin_test_mutation_validation``).
     """
     tree = ast.parse(source)
-    _MODULE_REL_BY_TREE[id(tree)] = module  # for relative-import resolution
+    _MODULE_REL_BY_TREE[tree] = module  # for relative-import resolution
     _alias_cache(tree)  # prime alias + tuple-alias tables for this tree
     spans = _qualname_index(tree)
     parents = _parent_map(tree)
@@ -2098,7 +2103,13 @@ _GROUP_PRODUCERS = frozenset(
 
 
 def _handler_reraises_bare(handler: ast.ExceptHandler) -> bool:
-    """The handler's control flow always ends in a ``raise`` (bare or ``raise X``)."""
+    """The handler's LAST statement is a ``raise`` (bare or ``raise X``).
+
+    Tripwire-grade, not control-flow analysis: a conditional early ``return``
+    before the trailing ``raise`` would still pass. Every current RERAISES
+    handler is an unconditional cleanup-then-reraise, so the trailing-statement
+    check pins the shape that matters without a CFG.
+    """
     body = handler.body
     return bool(body) and isinstance(body[-1], ast.Raise)
 
@@ -2445,36 +2456,47 @@ def _propagator_host_modules() -> frozenset[str]:
 def _scope_rot_offence(source: str, rel: str) -> str | None:
     """Why an out-of-scope module is a scope gap, or ``None``.
 
-    Two reach forms (G4a-3c re-review Major): ``from m import copy_skill`` (any
-    source module — so a re-export CONSUMER is caught by name) and
-    ``import memtomem.context.skills as s`` + an attribute reference to a raw
-    propagator (``s.copy_skill(…)``). Either is a gap only if the module ALSO
-    catches a supertype — a pure re-export / registration module
-    (server/__init__ wiring the MCP tools) catches nothing and is safe, and a
-    local variable that merely shares a propagator's name (upgrade_cmd's local
-    ``install_cmd``) is neither imported nor a module attribute."""
+    Reach forms (G4a-3c re-review Major; review follow-up widened the second):
+    ``from m import copy_skill`` (any source module — so a re-export CONSUMER is
+    caught by name), and an attribute reference to a raw propagator whose dotted
+    chain resolves through ANY imported module binding to a propagator-hosting
+    module — ``import memtomem.context.skills as s``, ``from memtomem.context
+    import skills``, or plain ``import memtomem.context.skills`` with the fully
+    dotted call. Either is a gap only if the module ALSO catches a supertype — a
+    pure re-export / registration module (server/__init__ wiring the MCP tools)
+    catches nothing and is safe, and a local variable that merely shares a
+    propagator's name (upgrade_cmd's local ``install_cmd``) is neither imported
+    nor a module attribute."""
     tree = ast.parse(source)
     hit = _imported_symbol_names(tree) & _SCOPE_ROT_SYMBOLS
     if not hit:
+        # Reuse the runtime-resolution import index (relative imports included):
+        # every local import binding, flattened back to its dotted path.
+        _MODULE_REL_BY_TREE[tree] = rel
         module_locals = {
-            (alias.asname or alias.name.split(".")[0]): alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
+            local: ".".join([module_dotted, *chain])
+            for local, (module_dotted, chain) in _import_targets(tree).items()
         }
         hosts = _propagator_host_modules()
-        imported_hosts = {local for local, dotted in module_locals.items() if dotted in hosts}
-        if imported_hosts:
-            attr_hits = {
-                sub.attr
-                for sub in ast.walk(tree)
-                if isinstance(sub, ast.Attribute)
-                and isinstance(sub.value, ast.Name)
-                and sub.value.id in imported_hosts
-                and sub.attr in _DIRECT_PROPAGATORS
-            }
-            if attr_hits:
-                hit = attr_hits
+        attr_hits: set[str] = set()
+        for sub in ast.walk(tree):
+            if not (isinstance(sub, ast.Attribute) and sub.attr in _DIRECT_PROPAGATORS):
+                continue
+            # Walk the dotted chain down to its root Name, then substitute the
+            # root's import binding: ``memtomem.context.skills.copy_skill`` and
+            # ``skills.copy_skill`` (either import spelling) both resolve to the
+            # hosting module's dotted path.
+            parts: list[str] = []
+            root: ast.expr = sub.value
+            while isinstance(root, ast.Attribute):
+                parts.append(root.attr)
+                root = root.value
+            if not (isinstance(root, ast.Name) and root.id in module_locals):
+                continue
+            if ".".join([module_locals[root.id], *reversed(parts)]) in hosts:
+                attr_hits.add(sub.attr)
+        if attr_hits:
+            hit = attr_hits
     if not hit:
         return None
     if not handlers_in_source(source, rel)[0]:
@@ -2500,9 +2522,10 @@ def test_scope_rot_no_recovery_symbol_referenced_outside_scope() -> None:
     )
 
 
-def test_scope_rot_detects_both_reach_forms() -> None:
-    """Synthetic negatives for the helper: the from-import form, the
-    module-import + attribute-call form (G4a-3c re-review Major), and the safe
+def test_scope_rot_detects_all_reach_forms() -> None:
+    """Synthetic negatives for the helper: the from-import form, every
+    module-object + attribute-call spelling (G4a-3c re-review Major; the
+    from-module and fully dotted spellings were review follow-ups), and the safe
     shapes (no handlers; local name collision)."""
     from_import = (
         "from memtomem.context.skills import copy_skill\n"
@@ -2515,6 +2538,19 @@ def test_scope_rot_detects_both_reach_forms() -> None:
         "def h():\n    try:\n        skills.copy_skill(a, b)\n    except Exception:\n        pass\n"
     )
     assert _scope_rot_offence(module_attr, "outside/y.py")
+
+    from_module_import = (
+        "from memtomem.context import skills\n"
+        "def h():\n    try:\n        skills.copy_skill(a, b)\n    except OSError:\n        pass\n"
+    )
+    assert _scope_rot_offence(from_module_import, "outside/w.py")
+
+    full_dotted = (
+        "import memtomem.context.skills\n"
+        "def h():\n    try:\n        memtomem.context.skills.copy_skill(a, b)\n"
+        "    except Exception:\n        pass\n"
+    )
+    assert _scope_rot_offence(full_dotted, "outside/v.py")
 
     no_handlers = "from memtomem.context.skills import copy_skill\nX = [copy_skill]\n"
     assert _scope_rot_offence(no_handlers, "outside/reexport.py") is None
