@@ -921,11 +921,14 @@ class TestRegistryAndInstallDocs:
         ]
         offenders: list[str] = []
         for doc in docs:
+            # ``(?<![\w-])`` keeps ``opencode-memtomem==…`` (the npm plugin's
+            # own version) from being compared against the Python package.
             for pinned in re.findall(
-                r"memtomem(?:\[[a-z,]+\])?==([0-9]+\.[0-9]+\.[0-9]+)", _read(doc)
+                r"(?<![\w-])memtomem(?:\[[a-z,]+\])?==([0-9]+\.[0-9]+\.[0-9]+)", _read(doc)
             ):
                 if pinned != version:
-                    offenders.append(f"{doc.name}: =={pinned} (pyproject is {version})")
+                    rel = doc.relative_to(_REPO_ROOT)
+                    offenders.append(f"{rel}: =={pinned} (pyproject is {version})")
         assert not offenders, (
             "Stale memtomem version pins (bump missed an occurrence):\n  "
             + "\n  ".join(sorted(set(offenders)))
@@ -937,7 +940,10 @@ class TestRegistryAndInstallDocs:
         These READMEs open with "on a completely fresh machine or HOME" —
         where ``mm`` is not on ``$PATH`` — so a bare ``mm`` line in a fenced
         block is a copy-paste failure. #1923 fixed the mixed blocks (pinned
-        ``mm init``, bare ``mm status``); this pins the fix.
+        ``mm init``, bare ``mm status``); this pins the fix. Deliberately
+        scans ALL fenced blocks, not just the fresh-env ones: both READMEs
+        are fresh-machine-focused throughout, and guard-defined scope beats
+        an enumerated one.
         """
         offenders: list[str] = []
         for readme in (
