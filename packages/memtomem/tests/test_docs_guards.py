@@ -426,6 +426,42 @@ class TestDocumentedCliExists:
             "memtomem.cli (fix the doc or the command):\n  " + "\n  ".join(sorted(set(offenders)))
         )
 
+    def test_current_release_changelog_mm_commands_resolve(self) -> None:
+        """Every ``mm …`` path in the CURRENT release's CHANGELOG section exists.
+
+        v0.3.12 shipped an entry for ``mm context import --overwrite`` — a
+        command that never existed (the flag lives on ``init``) — and it
+        survived review because nothing walks changelog command mentions
+        against the live Click tree (#1922). Scope: the topmost versioned
+        section only (historical sections legitimately describe commands that
+        have since been renamed or removed), command paths only (flags in
+        prose are often illustrative fragments like ``--summary/--auto``).
+        """
+        changelog = _read(_REPO_ROOT / "CHANGELOG.md")
+        sections = re.split(r"^## \[", changelog, flags=re.MULTILINE)
+        current = next(
+            (s for s in sections[1:] if not s.startswith("Unreleased")),
+            None,
+        )
+        assert current is not None, "CHANGELOG has no versioned section"
+        offenders: list[str] = []
+        for path in _doc_mm_paths(current):
+            node: click.Command = _CLI
+            walked: list[str] = []
+            for tok in path:
+                if not isinstance(node, click.Group):
+                    break  # leaf reached; remaining tokens are arguments
+                if tok not in node.commands:
+                    offenders.append(f"`mm {' '.join([*walked, tok])}`")
+                    break
+                node = node.commands[tok]
+                walked.append(tok)
+        assert not offenders, (
+            "The current release's CHANGELOG section references CLI commands "
+            "that do not exist (fix the entry before shipping the notes):\n  "
+            + "\n  ".join(sorted(set(offenders)))
+        )
+
     def test_documented_mm_flags_resolve(self) -> None:
         """Flags shown on one-line or backslash-continued calls exist live."""
         offenders: list[str] = []
@@ -864,6 +900,76 @@ class TestRegistryAndInstallDocs:
             version = tomllib.load(handle)["project"]["version"]
         pins = set(re.findall(r"memtomem\[all\]==([0-9]+\.[0-9]+\.[0-9]+)", blob))
         assert pins == {version}
+
+    def test_every_memtomem_version_pin_matches_pyproject(self) -> None:
+        """Every ``memtomem==`` / ``memtomem[extra]==`` pin equals pyproject.
+
+        The ``[all]`` check above misses the bare ``memtomem==X.Y.Z`` spelling
+        the plugin READMEs use, and those READMEs sit outside
+        ``_public_markdown()`` — so a release bump that missed one occurrence
+        shipped green (#1923 review nit). Count-independent by design: the
+        release bump may add or remove occurrences freely as long as none is
+        stale.
+        """
+        with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
+            version = tomllib.load(handle)["project"]["version"]
+        docs = [
+            *_public_markdown(),
+            _REPO_ROOT / "plugins" / "memtomem" / "README.md",
+            _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "README.md",
+            _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
+        ]
+        offenders: list[str] = []
+        for doc in docs:
+            # ``(?<![\w-])`` keeps ``opencode-memtomem==…`` (the npm plugin's
+            # own version) from being compared against the Python package.
+            for pinned in re.findall(
+                r"(?<![\w-])memtomem(?:\[[a-z,]+\])?==([0-9]+\.[0-9]+\.[0-9]+)", _read(doc)
+            ):
+                if pinned != version:
+                    rel = doc.relative_to(_REPO_ROOT)
+                    offenders.append(f"{rel}: =={pinned} (pyproject is {version})")
+        assert not offenders, (
+            "Stale memtomem version pins (bump missed an occurrence):\n  "
+            + "\n  ".join(sorted(set(offenders)))
+        )
+
+    def test_plugin_readme_fresh_env_blocks_have_no_bare_mm(self) -> None:
+        """Fresh-machine command blocks in the plugin READMEs pin every call.
+
+        These READMEs open with "on a completely fresh machine or HOME" —
+        where ``mm`` is not on ``$PATH`` — so a bare ``mm`` line in a fenced
+        block is a copy-paste failure. #1923 fixed the mixed blocks (pinned
+        ``mm init``, bare ``mm status``); this pins the fix. Deliberately
+        scans ALL fenced blocks, not just the fresh-env ones: both READMEs
+        are fresh-machine-focused throughout, and guard-defined scope beats
+        an enumerated one.
+        """
+        offenders: list[str] = []
+        for readme in (
+            _PLUGIN_README,
+            _REPO_ROOT / "plugins" / "memtomem" / "README.md",
+        ):
+            for line, in_fence in _iter_code_context(_read(readme)):
+                if in_fence and re.match(r"\s*(?:uv run )?mm ", line):
+                    offenders.append(f"{readme.parent.name}: {line.strip()!r}")
+        assert not offenders, (
+            "Plugin README fenced blocks invoke bare `mm` (not on PATH on a "
+            "fresh machine) — prefix with the pinned uvx form:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_bug_report_template_version_placeholder_is_neutral(self) -> None:
+        """The issue template's version placeholder stays ``x.y.z``.
+
+        A concrete version (``0.1.33`` until #1922) goes stale immediately and
+        invites copy-paste noise in reports.
+        """
+        template = _read(_REPO_ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml")
+        # Scope to the memtomem-version input only: the Python-version field
+        # legitimately shows a concrete example ("3.12.7").
+        block = re.search(r"id: version\n(?:.*\n)*?\s+placeholder: \"([^\"]+)\"", template)
+        assert block is not None, "bug_report.yml lost its `id: version` placeholder"
+        assert block.group(1) == "x.y.z"
 
     def test_runtime_setup_surfaces_use_exact_pinned_uvx(self) -> None:
         with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
