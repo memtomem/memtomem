@@ -86,10 +86,14 @@ VERSIONING_REQUIRES_DIR_LAYOUT: Final = "versioning_requires_dir_layout"
 # refused rather than clobbered:
 #
 # ``SKILLS_OVERWRITE_UNSUPPORTED`` — a skills Store entry already exists and
-# ``overwrite=True`` was requested. Skills are directory trees, so a snapshot is
-# a tree snapshot (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G); until
-# that ships, only a ``new`` skills Pull is allowed. Remediation: delete the
-# canonical skill first, then re-import.
+# ``overwrite=True`` was requested on the BATCH path. Skills are directory
+# trees, so a snapshot is a tree snapshot (ADR-0022 invariant 7 / ADR-0030
+# §10); the single-artifact Pull does that and overwrites fine (PR-G4b,
+# ``pull_apply``), but the batch path does not snapshot trees, so only a
+# ``new`` skills Pull is allowed there. Remediation (per-surface, via
+# ``remediation``): pull the one skill individually — it snapshots the
+# pre-image first, unlike delete-and-re-pull, which would destroy the
+# ``versions/`` history along with the canonical.
 SKILLS_OVERWRITE_UNSUPPORTED: Final = "skills_overwrite_unsupported"
 # ``SNAPSHOT_REQUIRES_DIR_LAYOUT`` — an overwrite-import targets a FLAT-layout
 # agents/commands canonical (``<name>.md``), which has no per-artifact

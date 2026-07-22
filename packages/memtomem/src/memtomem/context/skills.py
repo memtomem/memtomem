@@ -1626,13 +1626,15 @@ def extract_skills_to_canonical(
                     continue
                 # An existing skill Store entry + ``--overwrite``. Overwriting a
                 # skill means snapshotting its whole directory tree first
-                # (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G) — until
-                # that ships, only a ``new`` skills Pull is allowed; refuse
-                # rather than clobber unsnapshotted. Remediation: delete the
-                # canonical skill first, then pull again. Fires for dry-run too.
+                # (ADR-0022 invariant 7 / ADR-0030 §10). The single-artifact
+                # Pull does exactly that (PR-G4b, ``pull_apply``); this batch
+                # path does not, so refuse rather than clobber unsnapshotted.
+                # The engine states the condition only; each surface appends its
+                # own spelling of the per-skill route (#1869, ``remediation``).
+                # Fires for dry-run too.
                 reason = (
-                    "overwriting an existing skill needs directory-tree snapshots "
-                    "(a future release) — delete the canonical skill first, then pull again"
+                    "the batch path does not snapshot skill trees, so an "
+                    "existing skill is not overwritten here"
                 )
                 skipped.append((skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
@@ -1791,12 +1793,13 @@ def extract_skills_to_canonical(
                             )
                             seen[skill_name] = runtime_label
                             continue
-                        # Existing skill + overwrite: refused until tree snapshots
-                        # land (PR-G) — same as the pre-lock preflight.
+                        # Existing skill + overwrite: the batch path does not
+                        # snapshot skill trees — same as the pre-lock preflight;
+                        # the per-skill Pull (PR-G4b) is the supported route,
+                        # named per-surface via ``remediation`` (#1869).
                         reason = (
-                            "overwriting an existing skill needs directory-tree "
-                            "snapshots (a future release) — delete the canonical "
-                            "skill first, then pull again"
+                            "the batch path does not snapshot skill trees, so "
+                            "an existing skill is not overwritten here"
                         )
                         skipped.append(
                             (skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED)

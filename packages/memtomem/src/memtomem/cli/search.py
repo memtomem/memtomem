@@ -42,7 +42,11 @@ from memtomem.server.tools.search import (
     "--as-of",
     "as_of",
     default=None,
-    help="Temporal bound (YYYY-MM-DD or YYYY-QN). Default = now.",
+    help=(
+        "Temporal bound (YYYY-MM-DD or YYYY-QN). Default = now. Filters "
+        "validity windows and anchors time-decay scoring to that instant "
+        "instead of the wall clock."
+    ),
 )
 @click.option(
     "--format",
