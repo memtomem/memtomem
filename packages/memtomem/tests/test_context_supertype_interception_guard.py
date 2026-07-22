@@ -60,7 +60,7 @@ differs between siblings is verified against POSITION or BODY —
 the body shape, ``no_recovery_callee``/``handled_upstream`` re-check the guarded
 calls, and a ``TRANSLATES`` clause moved below a broad sibling trips the
 dead-clause test — while siblings that share one classification (the
-``INFRASTRUCTURE`` trios) are interchangeable by definition. Pinning 226 hashes
+``INFRASTRUCTURE`` trios) are interchangeable by definition. Pinning 232 hashes
 would re-key on every whitespace edit and buy nothing those checks do not.
 """
 
@@ -281,15 +281,30 @@ def _module_exception_aliases(tree: ast.AST) -> dict[str, str | None]:
             for target in targets:
                 if not isinstance(target, ast.Name):
                     continue
-                if is_tuple:
+                if target.id in _TUPLE_ALIASES.get(tree, {}):
+                    # ANY rebind of a recorded tuple alias: EVICT the tuple and
+                    # poison the name. :func:`_caught_names` consults the tuple
+                    # map before the alias map, so a surviving stale entry would
+                    # outrank the poison and misdescribe the runtime value
+                    # (review follow-up F3) — fail closed to <dynamic> instead.
+                    del _TUPLE_ALIASES[tree][target.id]
+                    poisoned.add(target.id)
+                    resolved[target.id] = None
+                elif is_tuple:
                     members = [canonical_of(elt) for elt in value.elts]  # type: ignore[union-attr]
                     if any(m is not None for m in members) and len(targets) == 1:
-                        _TUPLE_ALIASES.setdefault(tree, {})[target.id] = frozenset(
-                            m for m in members if m is not None
-                        )
+                        if target.id in resolved:
+                            # The symmetric crossing (single alias rebound to a
+                            # tuple) poisons the same way.
+                            poisoned.add(target.id)
+                            resolved[target.id] = None
+                        else:
+                            _TUPLE_ALIASES.setdefault(tree, {})[target.id] = frozenset(
+                                m for m in members if m is not None
+                            )
                 elif member is not None:
                     bind(target.id, member)
-                elif target.id in resolved or target.id in _TUPLE_ALIASES.get(tree, {}):
+                elif target.id in resolved:
                     # A name that WAS an exception alias is now reassigned to
                     # something the analysis cannot resolve to an intercepting
                     # type — poison it fail-closed rather than trust either write.
@@ -300,6 +315,7 @@ def _module_exception_aliases(tree: ast.AST) -> dict[str, str | None]:
                 if isinstance(target, ast.Name):
                     poisoned.add(target.id)
                     resolved[target.id] = None
+                    _TUPLE_ALIASES.get(tree, {}).pop(target.id, None)
 
     return resolved
 
@@ -543,7 +559,8 @@ def handlers_in_source(source: str, module: str) -> tuple[list[_Handler], ast.AS
         ]
         for idx, (handler, caught) in enumerate(handler_caught):
             if not _is_site(caught):
-                seen_specific |= {c for c in caught if c in _SPECIFIC}
+                # No _SPECIFIC bookkeeping here: _SPECIFIC ⊆ _INTERCEPTING, so
+                # a specific clause is always a site and takes the other path.
                 continue
             later_specific = any(
                 c in _SPECIFIC for _h, later in handler_caught[idx + 1 :] for c in later
@@ -986,6 +1003,13 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "",
         "THE atomic write: unlink the temp and re-raise on any failure.",
     ),
+    ("context/_atomic.py", "link_or_copy_file", ("OSError",), 0): (
+        _I,
+        "",
+        "The hardlink-or-copy primitive (G4b version carry): EXDEV-class errnos "
+        "dispatch to the copy2 fallback, everything else re-raises — the errno "
+        "dispatch IS the mechanism.",
+    ),
     # ── context/_atomic_reverse.py (reverse/diff engine — read guards) ───
     ("context/_atomic_reverse.py", "import_passthrough_runtime", ("OSError",), 0): (
         _U,
@@ -1327,6 +1351,35 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         _R,
         "bare",
         "Partial-tree cleanup: rmtree staging and re-raise.",
+    ),
+    # G4b overwrite path (#1916) — classified on the post-G4b rebase.
+    ("context/pull_apply.py", "_overwrite_skill_tree", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Strict read-only preflight of the Store copy (lstat walk + carried-"
+        "tree gate) → snapshot_failed; " + _RO,
+    ),
+    ("context/pull_apply.py", "_overwrite_skill_tree", ("OSError",), 1): (
+        _U,
+        "no_recovery_callee",
+        "iter_skill_payload_files read of the Store payload → snapshot_failed; " + _RO,
+    ),
+    ("context/pull_apply.py", "_overwrite_skill_tree", ("OSError",), 2): (
+        _U,
+        "no_recovery_callee",
+        "create_tree_version pre-overwrite snapshot → snapshot_failed (version "
+        "store, no swap path; TimeoutError re-raised by the preceding arm); " + _NONSKILL,
+    ),
+    ("context/pull_apply.py", "_overwrite_skill_tree", ("SwapRecoveryError",), 0): (
+        _R,
+        "bare",
+        "Overwrite swap: discard unowned staging and re-raise — the caller's "
+        "swap_recovery_pending arm translates it (G4b).",
+    ),
+    ("context/pull_apply.py", "_overwrite_skill_tree", ("OSError",), 3): (
+        _P,
+        "swap",
+        "Broad OSError after the SwapRecoveryError arm in the same try → write_failed.",
     ),
     # ── context/pull_preview.py (read-only preview) ─────────────────────
     ("context/pull_preview.py", "_probe_present", ("OSError",), 0): (
@@ -2266,6 +2319,9 @@ _DIRECT_PROPAGATORS = frozenset(
         # propagate by contract; migrate_scope calls transfer_artifact.
         "copy_skill",
         "migrate_scope",
+        # G4b: the overwrite engine re-raises the swap's SwapRecoveryError to
+        # its caller's swap_recovery_pending arm.
+        "_overwrite_skill_tree",
     }
 )
 
@@ -2356,26 +2412,55 @@ def _raw_caught(handler: ast.ExceptHandler) -> set[str]:
 
 def _clause_is_dead(handler: _Handler) -> bool:
     """Whether a same-or-broader-family clause precedes this specific clause in
-    its own try (Python would make it silently unreachable)."""
+    its own try (Python would make it silently unreachable).
+
+    The family sets are the discovery's OWN ancestor sets (review follow-up:
+    a hand-copied subset missed the ``IOError``/``EnvironmentError`` alias
+    spellings and did not treat ``SwapForeignDestination`` as a specific
+    clause), plus the bare ``except:``, which shadows everything.
+    """
     if not isinstance(handler.try_node, ast.Try):
         return False
-    family_swap = {"SwapRecoveryError", "OSError", "Exception", "BaseException"}
-    family_transfer = {
-        "TransferRecoveryError",
-        "TransferCollisionError",
-        "ClickException",
-        "Exception",
-        "BaseException",
-    }
+    specific = set(handler.caught) & _SPECIFIC
+    swap_specific = specific & {"SwapRecoveryError", "SwapForeignDestination"}
+    transfer_specific = specific & {"TransferRecoveryError"}
     for h in handler.try_node.handlers:
         if h.lineno == handler.lineno:
             return False  # reached our own clause with nothing shadowing it
         caught = _raw_caught(h)
-        if "SwapRecoveryError" in handler.caught and (caught & family_swap):
+        if swap_specific and (caught & (_SWAP_ANCESTORS | {_BARE})):
             return True
-        if "TransferRecoveryError" in handler.caught and (caught & family_transfer):
+        if transfer_specific and (caught & (_TRANSFER_ANCESTORS | {_BARE})):
             return True
     return False
+
+
+def test_recovery_ancestor_sets_match_the_real_mro() -> None:
+    """The ancestor name sets are the one hand-list left (review follow-up F1).
+    If the recovery hierarchy later gains an intermediate class, an imported
+    catch of it is still resolved at runtime, but a handler in the DEFINING
+    module hits the ``_classdef_names`` short-circuit and would be silently
+    dropped — so pin the sets to the real MROs: every exception class an
+    instance would satisfy must be spelled in ``_INTERCEPTING``."""
+    from memtomem.context._dir_swap import SwapForeignDestination, SwapRecoveryError
+    from memtomem.context.transfer import TransferRecoveryError
+
+    for rec, ancestors in (
+        (SwapRecoveryError, _SWAP_ANCESTORS),
+        (SwapForeignDestination, _SWAP_ANCESTORS),
+        (TransferRecoveryError, _TRANSFER_ANCESTORS),
+    ):
+        for klass in rec.__mro__:
+            if not (isinstance(klass, type) and issubclass(klass, BaseException)):
+                continue  # object
+            assert klass.__name__ in _INTERCEPTING, (
+                f"{klass.__name__} is in {rec.__name__}.__mro__ but not in _INTERCEPTING — "
+                "a handler catching it in the defining module would be silently dropped"
+            )
+            if klass.__name__ not in _SPECIFIC:
+                assert klass.__name__ in ancestors, (
+                    f"{klass.__name__} missing from the {rec.__name__} family ancestor set"
+                )
 
 
 def test_known_recovery_boundaries_are_discovered_and_translate() -> None:
@@ -2697,6 +2782,30 @@ def h():
         return "dead"
 """
 
+# Alias-spelled shadow of a SUBCLASS specific — the review-F2 gap: ``IOError``
+# is an ``OSError`` alias and ``SwapForeignDestination`` is a specific clause.
+_SYN_DEAD_CLAUSE_ALIAS = """
+def h():
+    try:
+        f()
+    except IOError:
+        return None
+    except SwapForeignDestination:
+        return "dead"
+"""
+
+# A recorded tuple alias later rebound — the review-F3 gap: the stale tuple
+# members must not outrank the poison (fail-closed to <dynamic>).
+_SYN_TUPLE_THEN_REBIND = """
+RECOVERY = (OSError, ValueError)
+RECOVERY = something_else
+def h():
+    try:
+        f()
+    except RECOVERY:
+        return None
+"""
+
 # The fail-closed Blocker cases: a caught name whose runtime type the analysis
 # cannot pin must become <dynamic>, never be silently dropped.
 _SYN_PARAM_DEFAULT = """
@@ -2747,6 +2856,7 @@ def test_discovery_covers_every_spelling() -> None:
         ("assignment-alias tuple", _SYN_ASSIGN_ALIAS, "OSError"),
         ("dynamic caught expr", _SYN_DYNAMIC, _DYNAMIC),
         ("conflicting-rebind poison", _SYN_POISON_CONFLICT, _DYNAMIC),
+        ("tuple-then-rebind poison", _SYN_TUPLE_THEN_REBIND, _DYNAMIC),
         ("exception group", _SYN_GROUP, "ExceptionGroup"),
     ):
         sites = _syn(source)
@@ -2802,6 +2912,12 @@ def test_dead_specific_clause_is_flagged() -> None:
     assert oserr.followed_by_specific is True
     specific = next(s for s in sites if s.caught == ("SwapRecoveryError",))
     assert _clause_is_dead(specific), "a shadowed specific clause was not detected as dead"
+
+    # Review-F2 spellings: an IOError (OSError alias) shadow over the
+    # SwapForeignDestination subclass specific must be flagged too.
+    alias_sites = _syn(_SYN_DEAD_CLAUSE_ALIAS)
+    foreign = next(s for s in alias_sites if s.caught == ("SwapForeignDestination",))
+    assert _clause_is_dead(foreign), "an alias-spelled shadow of a subclass specific was missed"
 
 
 def test_group_producer_defeats_preceded_by_specific() -> None:
