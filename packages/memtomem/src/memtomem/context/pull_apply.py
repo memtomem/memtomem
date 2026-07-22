@@ -147,8 +147,10 @@ class PullApplyResult:
     dst: Path | None = None
     layout: Layout | None = None
     write_outcome: str | None = None  # created / overwritten / identical
-    # Other runtimes whose copy is byte-identical over the full surface — a
-    # disclosure that the auto-selected priority-first source had duplicates.
+    # Other runtimes whose copy shares this Pull's PAYLOAD (§5 grouping is over
+    # the payload, so these land identical bytes even if their store-owned
+    # metadata differs) — a disclosure that the auto-selected priority-first
+    # source had duplicates.
     duplicate_runtimes: tuple[str, ...] = ()
     # refusal payload -------------------------------------------------------
     candidates: tuple[PullCandidate, ...] = ()  # source_conflict rendering
@@ -858,11 +860,13 @@ def _overwrite_skill_tree(
     # a present, non-symlink directory; ``overrides/`` / ``versions/`` a directory
     # and ``versions.json`` a regular file; and NO entry anywhere in the tree a
     # symlink or special file. The whole sequence is wrapped so ANY probe error
-    # maps to a defined result:
-    #   * ``FileNotFoundError`` on ``dst`` → ``plan_stale`` (the Store changed
-    #     since the preview; nothing the user placed caused it);
+    # maps to a defined result, catch order load-bearing:
     #   * ``StrictTreeError`` (wrong type / a symlink / special file) →
-    #     ``target_conflict`` naming the offender;
+    #     ``target_conflict`` naming the offender (NOT an OSError, so first);
+    #   * ``FileNotFoundError`` ANYWHERE — ``dst`` absent at the initial lstat OR
+    #     ``dst``/a child raced away mid-walk → ``plan_stale`` (the Store changed
+    #     since the preview; nothing the user placed caused it). MUST precede the
+    #     broad ``OSError``, of which it is a subclass;
     #   * any other ``OSError`` (``EACCES`` / ``EIO`` while lstatting or walking)
     #     → ``snapshot_failed`` — we cannot safely preserve what we cannot read,
     #     and a raw traceback must never escape the result-coded engine.
@@ -874,15 +878,7 @@ def _overwrite_skill_tree(
     # the step-6 copiers re-validate as they walk (this pass is the read-only one,
     # run BEFORE step 5 mutates the store).
     try:
-        try:
-            dst_mode = os.lstat(dst).st_mode
-        except FileNotFoundError:
-            return _refusal_for(
-                plan,
-                "plan_stale",
-                skip_codes.PLAN_STALE,
-                f"the Store copy of skill '{plan.name}' changed since the preview — re-run.",
-            )
+        dst_mode = os.lstat(dst).st_mode
         if not stat.S_ISDIR(dst_mode):
             raise StrictTreeError(dst, f"the Store entry for skill '{plan.name}' is not a directory")
         gate_reason = _carried_tree_type_gate(dst)
@@ -895,6 +891,15 @@ def _overwrite_skill_tree(
             "target_conflict",
             skip_codes.TARGET_CONFLICT,
             f"the Store copy of skill '{plan.name}' cannot be carried unchanged: {exc}",
+        )
+    except FileNotFoundError:
+        # ``dst`` absent at the initial lstat, OR ``dst``/a child raced away
+        # mid-walk — either way the Store no longer matches the preview.
+        return _refusal_for(
+            plan,
+            "plan_stale",
+            skip_codes.PLAN_STALE,
+            f"the Store copy of skill '{plan.name}' changed since the preview — re-run.",
         )
     except OSError as exc:
         return _refusal_for(

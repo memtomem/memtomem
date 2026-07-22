@@ -101,9 +101,10 @@ The pull preview has its own vocabulary, distinct from the push-diff
   **`requires_unsafe_confirmation`** (force-bypassable tiers), or `null`
   for a `not_importable` or `landing_error` row (nothing scannable). For
   skills the gate scans the **full copier surface** (everything a Pull
-  would land, including a runtime's top-level `overrides/`/`versions/`),
-  not the payload subset used for `content_status` — else a secret under
-  runtime metadata would preview `ok` yet be copied unscanned.
+  would copy into the transaction, including a runtime's top-level
+  `overrides/`/`versions/`), not the payload subset used for
+  `content_status` / §5 grouping — else a secret under runtime metadata
+  would preview `ok` yet be copied unscanned.
 
 A candidate can be `differs` **and** `blocked` at the same time —
 collapsing the axes would lose the drift information §1's probe needs.
@@ -142,8 +143,8 @@ Markdown, not the raw TOML — and not the runtime count:
   drives is enforced by the CLI/Web at apply time (PR-C/PR-D), not by the
   preview.
 
-- All candidates byte-identical (post-conversion): auto-select in the
-  existing priority order and disclose the duplicates.
+- All candidates share one Pull payload (post-conversion): auto-select in
+  the existing priority order and disclose the duplicates.
 - More than one distinct landing content: CLI `--apply` and the Web
   dialog refuse until the user picks a source (`source_conflict`).
 - **Fail closed on incomputable content**: if any content-bearing

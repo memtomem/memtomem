@@ -99,8 +99,9 @@ def read_skill_tree(root: Path) -> list[tuple[str, bytes]]:
     """Full copier surface of a skill dir as sorted ``(posix_relpath, bytes)``.
 
     The WIDE surface (see the module docstring): uses the copier-surface
-    iterator so gate scanning and §5 grouping see the exact bytes a Pull would
-    land. Raises ``OSError`` (fail closed).
+    iterator so gate scanning sees every byte a Pull would copy into the
+    transaction (§5 grouping uses the narrow payload surface instead — what a
+    Pull actually lands). Raises ``OSError`` (fail closed).
     """
     # Imported lazily to avoid import-order coupling with the large skills
     # module (which imports the gate/override leaves this module also uses).

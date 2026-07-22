@@ -608,7 +608,7 @@ def _print_pull_applied(result: PullApplyResult) -> None:
         fg="green",
     )
     if result.duplicate_runtimes:
-        click.echo(f"    (byte-identical copies also in: {', '.join(result.duplicate_runtimes)})")
+        click.echo(f"    (identical Pull payload also in: {', '.join(result.duplicate_runtimes)})")
 
 
 @contextmanager

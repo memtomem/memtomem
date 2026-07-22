@@ -98,8 +98,9 @@ class PullCandidate:
     # None for not_importable (nothing to scan) and landing_error (unscannable).
     gate_status: GateStatus | None
     importable: bool
-    # Candidates sharing a landing_group id would land byte-identical content
-    # over the full copier surface. None for not_importable / landing_error.
+    # Candidates sharing a landing_group id would land identical PAYLOAD bytes
+    # (§5 grouping is over the payload — what a Pull lands — not the full copier
+    # surface). None for not_importable / landing_error.
     landing_group: int | None
     # The candidate's would-land copy equals a vendor override — pulling it
     # would bake the override into the base canonical (ADR-0030 §7). Warn only.
@@ -107,13 +108,14 @@ class PullCandidate:
     # Raw, UNSANITIZED engine text for *_error rows (may embed absolute paths).
     # Web/MCP boundaries sanitize; the CLI prints verbatim (DiffRow contract).
     reason: str | None
-    # The would-land FULL copier surface as sorted ``(posix_relpath, bytes)``,
+    # The would-land PAYLOAD surface as sorted ``(posix_relpath, bytes)``,
     # populated ONLY when ``preview_pull(..., include_content=True)`` (the CLI
-    # ``--diff`` path); ``None`` otherwise. The full surface — not the payload
-    # subset — so a ``--diff`` can show metadata-only divergence
-    # (``overrides/`` / ``versions/``) that drives ``source_conflict`` yet
-    # leaves the payload identical (ADR-0030 §4/§5). CLI-only: the web/MCP wire
-    # boundaries never serialize it (raw bytes, unredacted).
+    # ``--diff`` path); ``None`` otherwise. The payload — not the full copier
+    # surface — because that is what a Pull actually lands after the §10 strip,
+    # and ``store_content`` is likewise the Store payload, so the diff compares
+    # like-for-like instead of showing a store-owned ``versions/`` that is
+    # preserved rather than landed. CLI-only: the web/MCP wire boundaries never
+    # serialize it (raw bytes, unredacted).
     content: tuple[tuple[str, bytes], ...] | None = None
 
 
@@ -155,11 +157,13 @@ class _Cand:
     gate_status: GateStatus | None
     override_warning: bool
     reason: str | None
-    # Full copier surface of the would-land content (for §5 grouping); None
-    # on landing_error / not_importable. Agents/commands are a single
+    # Full copier surface of the would-land content (for Gate A scanning — the
+    # wide surface, so a secret under non-payload metadata is still caught);
+    # None on landing_error / not_importable. Agents/commands are a single
     # ``[("", bytes)]`` entry.
     landing_full: list[tuple[str, bytes]] | None
-    # Payload surface of the would-land content (for the Store comparison).
+    # Payload surface of the would-land content — what a Pull actually lands
+    # (for the Store comparison AND §5 grouping).
     landing_payload: list[tuple[str, bytes]] | None
     landing_group: int | None = None
 

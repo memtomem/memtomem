@@ -10,6 +10,7 @@ captured-tree staging with no leak.
 from __future__ import annotations
 
 import errno
+import shutil
 import sys
 from pathlib import Path
 
@@ -411,8 +412,9 @@ def test_skills_overwrite_survives_hardlink_fallback(
     home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Codex Blocker 2 (integration): when os.link fails cross-device, the
-    version-store carry (versions/ + versions.json) falls back to a durable
-    copy — the overwrite still succeeds and the snapshot survives."""
+    version-store carry (versions/ + versions.json) falls back to a DURABLE
+    copy — the overwrite succeeds, the snapshot survives, and each fallback copy
+    is fsynced (else a power loss after the swap deletes ``old`` loses history)."""
     from memtomem.context import _atomic as _atomic_mod
 
     d = _seed_overwrite_case(proj)
@@ -421,6 +423,14 @@ def test_skills_overwrite_survives_hardlink_fallback(
         raise OSError(errno.EXDEV, "cross-device")
 
     monkeypatch.setattr(_atomic_mod.os, "link", _no_link)
+    fsynced: list[str] = []
+    real_full = _atomic_mod._full_fsync_file
+
+    def _spy(path: Path) -> None:
+        fsynced.append(path.name)
+        real_full(path)
+
+    monkeypatch.setattr(_atomic_mod, "_full_fsync_file", _spy)
     plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
     assert isinstance(plan, PullPlan)
     res = commit_pull(plan)
@@ -430,6 +440,32 @@ def test_skills_overwrite_survives_hardlink_fallback(
     # The snapshot was carried into the swapped-in tree via the copy fallback.
     assert (d / "versions" / "v1" / "SKILL.md").read_text(encoding="utf-8").count("old store") == 1
     assert (d / "versions.json").is_file()
+    # The fallback copies (versions.json + the v1 tree files) were durably fsynced.
+    assert "versions.json" in fsynced
+
+
+def test_skills_overwrite_dst_vanishes_mid_preflight_is_plan_stale(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex Major (round 3): if ``dst`` disappears after the initial lstat but
+    during ``validate_tree_strict``, the FileNotFoundError must map to plan_stale
+    (the Store changed), not snapshot_failed — pinned by injecting the race into
+    the strict walk."""
+    import memtomem.context.pull_apply as pa
+
+    d = _seed_overwrite_case(proj)
+    real_validate = pa.validate_tree_strict
+
+    def _vanish(root: Path) -> None:
+        # Simulate a non-gateway deletion racing the read-only preflight.
+        shutil.rmtree(d)
+        real_validate(root)  # now raises FileNotFoundError on the missing tree
+
+    monkeypatch.setattr(pa, "validate_tree_strict", _vanish)
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "plan_stale"
 
 
 def test_skills_overwrite_does_not_route_through_versioning_op_locked(

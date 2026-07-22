@@ -4,10 +4,10 @@ Read-only preview of what a Pull would land, per runtime candidate, on two
 orthogonal axes (``content_status`` / ``gate_status``) plus the §5 ambiguity
 signal. These tests pin the design decisions the Codex gate converged on:
 
-* content_status compares the PAYLOAD surface vs the Store (overrides/versions
-  excluded) while §5 landing grouping AND the gate scan use the FULL copier
-  surface (so a secret under ``versions/`` is caught and a metadata-only
-  divergence is never auto-selected);
+* content_status AND §5 landing grouping compare the PAYLOAD surface —
+  overrides/versions excluded — since that is what a Pull lands, so a
+  metadata-only divergence is NOT reported as ambiguous; the gate scan uses the
+  wide FULL copier surface, so a secret under ``versions/`` is still caught;
 * landing vs store error phases are distinct and participate in §5 differently;
 * the preview never mutates privacy counters or emits an audit line.
 """
