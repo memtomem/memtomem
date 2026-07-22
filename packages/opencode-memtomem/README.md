@@ -6,9 +6,10 @@ and three read-only skills. It does not add event hooks or automatic indexing.
 
 ## Current status
 
-`opencode-memtomem` is present in this source repository but is not currently
-published to npm. Do not use an `opencode plugin add` command; OpenCode loads
-npm plugins from the singular `plugin` array in `opencode.json`.
+The published npm release is `opencode-memtomem@0.1.1`; this source tree is
+version `0.1.2` (bundling core `0.3.12`), which is not on npm yet. Do not use
+an `opencode plugin add` command; OpenCode loads npm plugins from the singular
+`plugin` array in `opencode.json`.
 
 For a released memtomem installation, configure the local MCP server now:
 
@@ -27,7 +28,7 @@ For a released memtomem installation, configure the local MCP server now:
 }
 ```
 
-After the npm package is published, the plugin form will be:
+After `0.1.2` is published, the plugin form will be:
 
 ```json
 {"plugin": ["opencode-memtomem@0.1.2"]}

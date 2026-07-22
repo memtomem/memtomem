@@ -906,6 +906,18 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 
 Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. MCP sessions use their marked write-event chunk IDs, so writes scattered by namespace rules are included while unrelated chunks from the same namespace and time window are not. Sessions created by legacy, CLI, or LangGraph paths, and sessions marked with incomplete provenance, retain the namespace/time-window fallback. Generated summaries are persisted as `archive:session:<id>` chunks (hidden from default `mem_search`). Skip reasons (`disabled`, `no llm`, `below min_chunks`, `too large`, `empty output`, `llm error`) surface in the `mem_session_end` response so operators can see why auto-summary did not fire.
 
+Each ended session also records *where* its summary came from:
+`summary_provenance` on the session row is `exact` (built from the
+write-provenance chunk set selected by recorded id), `fallback` (the
+namespace/time-window scan was used instead), or `manual` (supplied by the
+caller — `mm session end` with `--summary` or `--auto`, `mm session wrap`, or
+the LangGraph adapter). Absence means unknown (a legacy row, or a session that ended with no
+summary) and carries no claim either way. A separate boolean,
+`provenance_incomplete`, flags sessions whose write tracking is known to be
+partial. The dev-mode web Sessions panel renders these as summary-origin
+badges — *recorded* (exact), *inferred* (fallback), *provided* (manual), plus
+*incomplete*.
+
 ## Session Trace
 
 | Variable | Default | Description |

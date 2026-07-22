@@ -14,8 +14,10 @@ Native Windows has not yet been verified.
 
 ## Install today
 
-The npm plugin is not published yet. Configure memtomem as a local MCP server
-in `opencode.json`:
+The published npm release is `opencode-memtomem@0.1.1`; version `0.1.2` — the
+one this repository's source describes, bundling core `0.3.12` — is not on npm
+yet. Until it is, the manual MCP configuration below is the recommended path.
+Configure memtomem as a local MCP server in `opencode.json`:
 
 ```json
 {
@@ -35,7 +37,7 @@ in `opencode.json`:
 Restart OpenCode and call `memtomem_mem_status`. This manual path exposes the
 MCP tools but not the plugin's bundled slash commands and skills.
 
-After the npm package is published, add it through OpenCode's singular
+After `0.1.2` is published, add it through OpenCode's singular
 `plugin` configuration key (there is no `opencode plugin add` command):
 
 ```json

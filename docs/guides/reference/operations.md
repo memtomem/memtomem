@@ -28,7 +28,7 @@ mm web --dev                   # adds opt-in maintainer pages
 mm web --mode {prod,dev}       # explicit mode (mutually exclusive with --dev)
 ```
 
-`mm web` opens in **Simple** mode by default, showing the Home, Search, Sources, Gateway, Index, and Settings tabs. The **Gateway** tab is the Context Gateway surface (Overview, Projects, Skills, Commands, Subagents, MCP Servers, Hooks, Wiki); the **Settings** tab holds Config, Namespaces, and Reset Database. Flip the header's **Advanced** toggle to reveal the Tags and Timeline tabs, plus the Dedup, Age-out, and Export/Import sections inside Settings. `mm web --dev` — or setting `MEMTOMEM_WEB__MODE=dev` in your shell profile — extends the surface with maintainer pages (Sessions, Working Memory, Procedures, Health Report) and unlocks structural namespace verbs (rename, delete) that are dev-only by ADR-0007.
+`mm web` opens in **Simple** mode by default, showing the Home, Search, Sources, Gateway, Index, and Settings tabs. The **Gateway** tab is the Context Gateway surface (Overview, Projects, Skills, Commands, Subagents, MCP Servers, Hooks, Wiki); the **Settings** tab holds Config, Namespaces, and Reset Database. Flip the header's **Advanced** toggle to reveal the Tags and Timeline tabs, plus the Dedup, Age-out, and Export/Import sections inside Settings. `mm web --dev` — or setting `MEMTOMEM_WEB__MODE=dev` in your shell profile — extends the surface with maintainer pages (Sessions, Search Runs, Quality Lab, Working Memory, Procedures, Health Report) and unlocks structural namespace verbs (rename, delete) that are dev-only by ADR-0007.
 
 Tab classification changes over time — run `mm web --dev` against your installed version to see the complete surface. The API endpoints backing dev-only pages return 404 in `prod` mode; scripts that hit `/api/sessions`, `/api/scratch`, `/api/namespaces/{ns}/rename`, `DELETE /api/namespaces/{ns}`, etc. need `dev` mode. `GET /api/namespaces` (list) and `PATCH /api/namespaces/{ns}` (cosmetic edit — color, description) are prod-tier and respond in both modes.
 
@@ -161,6 +161,33 @@ Running both `memtomem-server` (MCP) and `memtomem-web` simultaneously is suppor
 - **File watcher overlap**: both servers watch `memory_dirs`. A file created by one server may be re-indexed by the other, causing duplicate chunks. Restart the server that has stale data, or force a full re-index (`mem_index(force=True)`) to reconcile.
 - **Orphaned index entries**: interrupted concurrent writes could previously leave orphaned FTS/vec entries causing `constraint failed` errors on subsequent indexing. This is now handled automatically — `upsert_chunks` defensively cleans orphans before INSERT.
 - **Recommendation**: for typical usage, run only the MCP server. Launch the Web UI on-demand when you need visual browsing.
+
+### "swap_recovery_pending" when writing a skill
+
+A skill in the Store is a directory, so replacing it is a two-step rename with
+a durable transaction marker. If a previous update was interrupted (crash,
+kill, power loss), the next write to that skill reports
+`swap_recovery_pending` — as an HTTP `409` from the Web UI, a
+`refused: swap_recovery_pending: …` result from the MCP tools, or a one-line
+error on the CLI. It means **the operation you just requested did not run**,
+and nothing was deleted.
+
+What to do:
+
+1. Retry the write (or run the same Pull/install again). Every skill writer
+   runs the recovery machine first, and in the common cases it converges on
+   its own — completing the interrupted promotion or rolling back to the
+   pre-image — after which your operation proceeds normally.
+2. If the error persists, the machinery has hit the deliberately fail-closed
+   case: two candidate trees survived and which one is the original is
+   ambiguous. The message names both paths — inspect them by hand, keep the
+   one you want at the skill's canonical path, and remove the other.
+3. Do **not** delete transaction artifacts blindly. The
+   `.staging-<name>-*.tmp` / `.old-<name>-*.tmp` directories and the
+   `.swap-<name>-*.json` marker next to the skill are what recovery uses to
+   tell "mid-swap" from "nothing happened"; removing the marker while a
+   `.old-*` tree still exists can strand the only surviving copy. Back the
+   paths up first if you intervene manually.
 
 ---
 

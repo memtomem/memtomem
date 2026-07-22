@@ -379,6 +379,7 @@ mm context sync --runtime claude --include=skills   # fan out to ONE runtime onl
 mm context pull agents my-agent        # PREVIEW what a Pull would land in the Store, per runtime candidate (read-only, source-selectable)
 mm context pull agents my-agent --diff # preview + unified diff of the would-land content vs the current Store
 mm context pull agents my-agent --from gemini --apply --scope project_shared # pull ONE runtime's copy; --from disambiguates divergent candidates (ADR-0030 §5)
+mm context pull skills my-skill --overwrite --apply  # replace a Store-owned skill; the current tree is snapshotted into versions/ first (ADR-0030 §10)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
 mm context update skill <name> --force-head  # deliberately follow older/divergent Wiki HEAD; use --force separately for local edits
