@@ -333,7 +333,7 @@ class TestEveryChunkCreatingSurfaceIsAccountedFor:
         # The session's own summary is an output of teardown, not one of
         # the inputs it summarizes. Instrumenting it would make every
         # session record a write it performed on itself.
-        ("session.py", "_persist_session_summary_chunk"),
+        ("session.py", "_write_summary_archive"),
     }
 
     def test_no_chunk_creating_tool_is_silent(self):

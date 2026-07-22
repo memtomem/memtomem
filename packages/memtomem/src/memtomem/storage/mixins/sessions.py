@@ -113,7 +113,18 @@ class SessionMixin:
             db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute("SELECT metadata FROM sessions WHERE id = ?", (session_id,)).fetchone()
-            merged = {**decode_session_metadata(row[0] if row else None), **metadata}
+            stored = decode_session_metadata(row[0] if row else None)
+            # ``summary`` and ``summary_provenance`` are a pair: this write
+            # replaces the summary column wholesale, so a marker left over
+            # from an earlier summary would now describe text it no longer
+            # matches. Drop the stored marker and let this write's metadata
+            # be the sole authority — present (a manual summary) or absent
+            # (a lifecycle string or an auto summary the caller finalizes
+            # separately). Without this, re-ending a finalized session with
+            # ``summary=None`` would keep an ``exact`` marker over a NULL
+            # summary. See ``finalize_session_summary``.
+            stored.pop("summary_provenance", None)
+            merged = {**stored, **metadata}
             db.execute(
                 "UPDATE sessions SET ended_at = ?, summary = ?, metadata = ? WHERE id = ?",
                 (now, summary, json.dumps(merged), session_id),
@@ -127,6 +138,48 @@ class SessionMixin:
             if owns_transaction:
                 db.rollback()
             raise
+
+    async def finalize_session_summary(self, session_id: str, summary: str, patch: dict) -> bool:
+        """Commit an auto-generated ``summary`` and its ``patch`` in one write.
+
+        The auto-summary path calls :meth:`end_session` first with
+        ``summary=None`` (the text does not exist yet), then generates it.
+        Persisting the text and its ``summary_provenance`` marker in a single
+        atomic ``UPDATE`` is what keeps the two from ever disagreeing on a
+        crash or retry: the end-session phase claim does not re-run, so a
+        second write here that landed the marker without the text — or the
+        text without the marker — would leave a permanently contradictory
+        row. Both columns move together or neither does.
+
+        Returns ``True`` when a row was updated, ``False`` when the session
+        vanished (best-effort, same tolerance as
+        :meth:`update_session_metadata`). The metadata merge is shallow, for
+        the reasons spelled out in :meth:`end_session`.
+        """
+        db = self._get_db()
+        owns_transaction = not self._in_transaction
+        if owns_transaction:
+            # Read-modify-write on metadata: the read and the write are one
+            # unit, or a concurrent writer landing between them is reverted.
+            db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute("SELECT metadata FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row is None:
+                if owns_transaction:
+                    db.execute("COMMIT")
+                return False
+            merged = {**decode_session_metadata(row[0]), **patch}
+            db.execute(
+                "UPDATE sessions SET summary = ?, metadata = ? WHERE id = ?",
+                (summary, json.dumps(merged), session_id),
+            )
+            if owns_transaction:
+                db.execute("COMMIT")
+        except Exception:
+            if owns_transaction:
+                db.rollback()
+            raise
+        return True
 
     async def update_session_metadata(self, session_id: str, patch: dict) -> bool:
         """Merge ``patch`` into a session's metadata, touching nothing else.

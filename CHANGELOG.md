@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **A session now records where its summary came from.** `mem_session_end`
+  stamps `summary_provenance` on the session row — `exact` when the summary was
+  built from the write-provenance chunk set selected by recorded id, `fallback`
+  when the namespace/time-window scan was used instead (a missing or incomplete
+  marker, malformed ids, or a count/hydration shortfall), and `manual` for a
+  caller-supplied or CLI-synthesized summary (`mm session end --summary/--auto`,
+  `mm session wrap`, and the LangGraph adapter). Absence means unknown — a
+  legacy row or a session that ended with no summary — and carries no claim
+  either way (a system `[auto-ended: …]` lifecycle row is one such absent case,
+  not a content summary). A marker and its summary text are a pair: they land in
+  a single atomic write and `end_session` drops any stale marker whenever it
+  rewrites the summary column, so a row can never claim a provenance for a
+  summary it no longer holds. The auto path — which previously left the row's
+  `summary` column empty and kept the text only in the archive chunk — now makes
+  the row authoritative, but only after the summary clears the same redaction
+  guard the archive write applies, so secret-shaped model output cannot reach
+  the API-exposed column past the block. This is the state a web UI needs to
+  avoid presenting an inferred summary the same way as an exact one (follow-up:
+  render it in the Sessions panel).
+
 ## [0.3.12] — 2026-07-22
 
 ### Added

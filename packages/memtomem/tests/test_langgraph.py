@@ -904,7 +904,9 @@ class TestEndSessionAggregation:
         result = await store.end_session(summary="done")
 
         comp.storage.end_session.assert_awaited_once_with(
-            "sess-9", "done", {"event_counts": {"query": 2, "write": 1}}
+            "sess-9",
+            "done",
+            {"event_counts": {"query": 2, "write": 1}, "summary_provenance": "manual"},
         )
         comp.storage.scratch_cleanup.assert_awaited_once_with(session_id="sess-9")
         assert result == {
@@ -1156,3 +1158,40 @@ class TestMemtomemStoreIntegration:
                 "MEMTOMEM_EMBEDDING__DIMENSION",
             ):
                 os.environ.pop(key, None)
+
+
+class TestLangGraphEndSessionProvenance:
+    """``MemtomemStore.end_session`` stamps ``summary_provenance='manual'``
+    (a caller-supplied summary, not the server's write-provenance selection)
+    only when a summary is passed; ending with none leaves it absent (#1913).
+    """
+
+    @staticmethod
+    def _store_with_end_spy():
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        comp = MagicMock()
+        comp.storage.end_session = AsyncMock(return_value=None)
+        comp.storage.get_session_events = AsyncMock(return_value=[])
+        comp.storage.scratch_cleanup = AsyncMock(return_value=0)
+        store._components = comp
+        store._current_session_id = "sess-lg"
+        store._current_agent_id = "planner"
+        return store, comp.storage.end_session
+
+    @pytest.mark.asyncio
+    async def test_summary_records_manual(self):
+        store, end_session = self._store_with_end_spy()
+
+        await store.end_session(summary="run notes")
+
+        assert end_session.await_args.args[2]["summary_provenance"] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_no_summary_records_no_provenance(self):
+        store, end_session = self._store_with_end_spy()
+
+        await store.end_session()
+
+        assert "summary_provenance" not in end_session.await_args.args[2]

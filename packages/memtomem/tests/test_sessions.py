@@ -7,7 +7,12 @@ import pytest
 
 from helpers import make_chunk
 from memtomem.server.context import AppContext
-from memtomem.server.tools._provenance import PROVENANCE_KIND
+from memtomem.server.tools._provenance import (
+    PROVENANCE_KIND,
+    SUMMARY_PROVENANCE_EXACT,
+    SUMMARY_PROVENANCE_FALLBACK,
+    SUMMARY_PROVENANCE_MANUAL,
+)
 from memtomem.server.tools.indexing import mem_index
 from memtomem.server.tools.session import mem_session_end, mem_session_start
 
@@ -418,6 +423,113 @@ class TestUpdateSessionMetadata:
             await storage.update_session_metadata("u7", {"provenance_incomplete": True})
 
         assert "sk-live-not-a-real-key-000" not in caplog.text
+
+
+class TestFinalizeSessionSummary:
+    """``finalize_session_summary`` commits an auto-generated summary and its
+    provenance marker in one atomic write so the two never disagree.
+    """
+
+    @pytest.mark.asyncio
+    async def test_writes_summary_and_patch_together(self, storage):
+        await storage.create_session("f1", "agent", "default", metadata={"title": "Sprint"})
+        await storage.end_session("f1", None, {"event_counts": {"add": 3}})
+
+        assert (
+            await storage.finalize_session_summary(
+                "f1", "auto text", {"summary_provenance": "exact"}
+            )
+            is True
+        )
+
+        row = await storage.get_session("f1")
+        assert row["summary"] == "auto text"
+        assert row["metadata"]["summary_provenance"] == "exact"
+
+    @pytest.mark.asyncio
+    async def test_merges_metadata_shallowly_and_keeps_other_keys(self, storage):
+        await storage.create_session("f2", "agent", "default", metadata={"title": "Sprint"})
+        await storage.end_session("f2", None, {"event_counts": {"add": 1}})
+
+        await storage.finalize_session_summary("f2", "text", {"summary_provenance": "fallback"})
+
+        row = await storage.get_session("f2")
+        assert row["metadata"] == {
+            "title": "Sprint",
+            "event_counts": {"add": 1},
+            "summary_provenance": "fallback",
+        }
+
+    @pytest.mark.asyncio
+    async def test_on_a_missing_session_returns_false(self, storage):
+        assert (
+            await storage.finalize_session_summary("nope", "text", {"summary_provenance": "exact"})
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_end_session_drops_a_stale_marker_when_it_rewrites_summary(self, storage):
+        """``summary`` and ``summary_provenance`` are a pair. Re-ending a
+        finalized session with ``summary=None`` must not keep the old
+        ``exact`` marker over a now-NULL summary — the marker is dropped
+        unless this write supplies one."""
+        await storage.create_session("f5", "agent", "default")
+        await storage.end_session("f5", None, {})
+        await storage.finalize_session_summary("f5", "auto text", {"summary_provenance": "exact"})
+
+        await storage.end_session("f5", None, {"event_counts": {"add": 1}})
+
+        row = await storage.get_session("f5")
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_end_session_lets_this_writes_marker_win(self, storage):
+        """A manual re-end supplies its own marker, which replaces the stale
+        one rather than being dropped with it."""
+        await storage.create_session("f6", "agent", "default")
+        await storage.end_session("f6", None, {})
+        await storage.finalize_session_summary("f6", "auto text", {"summary_provenance": "exact"})
+
+        await storage.end_session("f6", "hand notes", {"summary_provenance": "manual"})
+
+        row = await storage.get_session("f6")
+        assert row["summary"] == "hand notes"
+        assert row["metadata"]["summary_provenance"] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_finalize_leaves_no_partial_write(self, storage):
+        """The write either lands both columns or neither: a failure after
+        ``BEGIN`` rolls back rather than persisting the marker without the
+        summary text. An unserializable patch value raises inside the try,
+        exercising the rollback arm."""
+        await storage.create_session("f3", "agent", "default")
+        await storage.end_session("f3", None, {"event_counts": {"add": 2}})
+
+        with pytest.raises(TypeError):
+            await storage.finalize_session_summary("f3", "text", {"summary_provenance": object()})
+
+        row = await storage.get_session("f3")
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_inside_a_transaction_defers_its_commit(self, storage):
+        """Under a borrowed transaction the write must not commit on its own,
+        or a caller's later failure could not roll the summary back."""
+        await storage.create_session("f4", "agent", "default", metadata={"title": "Sprint"})
+        await storage.end_session("f4", None, {})
+
+        with pytest.raises(RuntimeError):
+            async with storage.transaction():
+                await storage.finalize_session_summary(
+                    "f4", "text", {"summary_provenance": "exact"}
+                )
+                raise RuntimeError("caller fails after finalizing the summary")
+
+        row = await storage.get_session("f4")
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
 
 
 class TestSessionAgentInheritance:
@@ -1608,30 +1720,385 @@ class TestSessionSummaryPhaseB:
             assert link is None, "manual summary path must not write summarizes links"
 
 
-class TestSessionSummaryRedactionGate:
-    """A blocked summary is rejected before its archive file is persisted."""
+class TestSessionSummaryProvenanceRecording:
+    """``mem_session_end`` stamps how the persisted summary was chosen —
+    ``summary_provenance`` in {manual, exact, fallback} — so a consumer can
+    tell an exactly-recorded summary from an inferred one, or an unrecorded
+    origin (absent) from either. The marker and the summary text land in one
+    write, never in disagreeing halves (#1913).
+    """
 
     @pytest.mark.asyncio
-    async def test_blocked_summary_returns_tuple_with_message(self, bm25_only_components):
-        from memtomem.server.tools.session import _persist_session_summary_chunk
+    async def test_manual_summary_records_manual(self, components):
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        await mem_session_end(summary="hand-written notes", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] == "hand-written notes"
+        assert row["metadata"]["summary_provenance"] == SUMMARY_PROVENANCE_MANUAL
+
+    @pytest.mark.asyncio
+    async def test_auto_exact_records_exact_and_writes_the_row_summary(self, components):
+        """The write-provenance path stamps ``exact`` and makes the session
+        row authoritative — the generated text lands on ``summary``, which
+        the auto path historically left ``None``."""
+        components.llm = _FakeLLM(response="The session set up alpha beta gamma notes.")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            ctx, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] == "The session set up alpha beta gamma notes."
+        assert row["metadata"]["summary_provenance"] == SUMMARY_PROVENANCE_EXACT
+
+    @pytest.mark.asyncio
+    async def test_auto_fallback_records_fallback(self, components):
+        """An incomplete marker forces the namespace/time scan — recorded
+        as ``fallback``, not ``exact``."""
+        components.llm = _FakeLLM(response="fallback summary")
+        components.config.session_summary.min_chunks = 1
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        legacy = make_chunk(content="LEGACY-NAMESPACE-INPUT", namespace="agent-runtime:planner")
+        await app.storage.upsert_chunks([legacy])
+        await app.storage.update_session_metadata(session_id, {"provenance_incomplete": True})
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] == "fallback summary"
+        assert row["metadata"]["summary_provenance"] == SUMMARY_PROVENANCE_FALLBACK
+
+    @pytest.mark.asyncio
+    async def test_skipped_summary_records_no_provenance(self, components):
+        """No summary produced → the origin key is absent (unknown), never
+        a marker with nothing to describe."""
+        components.llm = _FakeLLM()
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=2)
+        await TestSessionSummaryPhaseB()._index_dir(
+            ctx, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        assert "below min_chunks" in out
+
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_auto_ended_session_records_no_provenance(self, components):
+        """A superseded session carries the ``[auto-ended: …]`` system line,
+        not a content summary — its origin stays absent."""
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="first", ctx=ctx)  # type: ignore[arg-type]
+        first_id = app.current_session_id
+        assert first_id is not None
+
+        await mem_session_start(agent_id="second", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(first_id)
+        assert row["summary"].startswith("[auto-ended:")
+        assert "summary_provenance" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_finalize_failure_leaves_no_contradictory_row(self, components, monkeypatch):
+        """If the authoritative finalize write fails, the row keeps
+        ``summary=None`` with no marker — absent reads as unknown, never a
+        provenance claim without a summary."""
+        components.llm = _FakeLLM(response="doomed auto summary")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            ctx, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("finalize write failed")
+
+        monkeypatch.setattr(app.storage, "finalize_session_summary", boom)
+
+        # Teardown must still complete despite the best-effort finalize failing.
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+
+
+class TestSessionSummaryRedactionGate:
+    """A blocked summary is rejected before it reaches any surface — the row,
+    the archive file, or the response — by one fail-closed guard decision.
+    """
+
+    def test_guard_blocks_a_secret_shaped_summary(self, bm25_only_components):
+        from memtomem.server.tools.session import _guard_and_prepare_summary
 
         comp, _ = bm25_only_components
         app = AppContext.from_components(comp)
         secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
 
-        line, chunk_id = await _persist_session_summary_chunk(
+        blocked, _prepared = _guard_and_prepare_summary(
             app,
             session_id="redactiontest",
             agent_id="tester",
             summary=f"api token: {secret}",
             event_counts={"note": 1},
+            force_unsafe=False,
+        )
+        assert blocked is True
+
+    def test_guard_scans_the_frontmatter_not_just_the_summary(self, bm25_only_components):
+        """The archive payload embeds ``agent_id`` — a valid-but-possibly
+        secret-shaped field. A clean summary must still block when the
+        frontmatter carries a secret, or a project-shared archive would leak
+        it."""
+        from memtomem.server.tools.session import _guard_and_prepare_summary
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
+
+        blocked, _prepared = _guard_and_prepare_summary(
+            app,
+            session_id="agentidtest",
+            agent_id=secret,
+            summary="an ordinary summary with no secrets in it",
+            event_counts={"note": 1},
+            force_unsafe=False,
+        )
+        assert blocked is True
+
+    def test_guard_passes_clean_text(self, bm25_only_components):
+        from memtomem.server.tools.session import _guard_and_prepare_summary
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+
+        blocked, prepared = _guard_and_prepare_summary(
+            app,
+            session_id="cleantest",
+            agent_id="tester",
+            summary="an ordinary summary with no secrets",
+            event_counts={"note": 1},
+            force_unsafe=False,
+        )
+        assert blocked is False
+        assert prepared is not None  # memory dir configured → archive prepared
+
+    def test_guard_fails_closed_when_evaluation_raises(self, bm25_only_components, monkeypatch):
+        """A guard that cannot render a decision must block, not pass. Proving
+        a summary safe is a precondition for persisting it; an error is not a
+        pass."""
+        from memtomem.server.tools.session import _guard_and_prepare_summary
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("scope resolution failed")
+
+        # _guard_and_prepare_summary imports classify_scope from the source at
+        # call time, so patch it there.
+        monkeypatch.setattr("memtomem.config.classify_scope", boom)
+
+        blocked, prepared = _guard_and_prepare_summary(
+            app,
+            session_id="errtest",
+            agent_id="tester",
+            summary="ordinary text that would otherwise pass",
+            event_counts={"note": 1},
+            force_unsafe=False,
+        )
+        assert blocked is True
+        assert prepared is None
+
+    @pytest.mark.asyncio
+    async def test_blocked_manual_summary_leaves_the_row_absent(self, bm25_only_components):
+        """A blocked manual summary must be withheld from the row too, not
+        just the archive — the row column is exposed over the HTTP API. It is
+        preflighted before the row write, so a block leaves the row absent."""
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        out = await mem_session_end(  # type: ignore[arg-type]
+            summary=f"api token: {secret}", ctx=ctx
         )
 
-        assert chunk_id is None
-        assert line is not None and "no file was written" in line
-        assert secret not in line  # no matched bytes echoed
-        memory_dir = Path(comp.config.indexing.memory_dirs[0])
-        assert not list((memory_dir / "sessions").rglob("redactiontest.md"))
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+        assert secret not in out
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        assert not list((memory_dir / "sessions").rglob(f"{session_id}.md"))
+
+    @pytest.mark.asyncio
+    async def test_manual_summary_row_stays_absent_when_the_guard_raises(
+        self, bm25_only_components, monkeypatch
+    ):
+        """A guard exception on the manual path is fail-closed too: the
+        summary and marker are withheld from the row."""
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("scope resolution failed")
+
+        monkeypatch.setattr("memtomem.config.classify_scope", boom)
+
+        await mem_session_end(summary="ordinary manual notes", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_auto_summary_row_stays_absent_when_the_guard_raises(
+        self, bm25_only_components, monkeypatch
+    ):
+        """End to end: a guard that raises must not let the auto summary reach
+        the row. The fail-closed decision blocks the finalize."""
+        comp, _ = bm25_only_components
+        comp.llm = _FakeLLM(response="a perfectly ordinary auto summary")
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            ctx, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("scope resolution failed")
+
+        monkeypatch.setattr("memtomem.config.classify_scope", boom)
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert comp.llm.calls, "auto path must have fired"
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_blocked_auto_summary_leaves_the_row_absent(self, bm25_only_components):
+        """A secret-shaped LLM summary must not reach the session row: the
+        row's ``summary`` is exposed over the HTTP API, so finalizing it
+        before the redaction guard would leak past the block. Row stays
+        absent — no summary text, no marker — and the text is not echoed."""
+        comp, _ = bm25_only_components
+        secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
+        comp.llm = _FakeLLM(response=f"leaked token {secret}")
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            ctx, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert comp.llm.calls, "auto path must have fired for this test to mean anything"
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+        assert secret not in out
+        assert not list((memory_dir / "sessions").rglob(f"{session_id}.md"))
+
+    @pytest.mark.asyncio
+    async def test_blocked_auto_summary_with_no_memory_dir_still_guards_the_row(
+        self, bm25_only_components
+    ):
+        """A project-only config has no memory dir, so the archive write
+        returns before scanning — the row finalize must scan independently
+        rather than becoming the one unguarded destination."""
+        comp, _ = bm25_only_components
+        secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
+        comp.llm = _FakeLLM(response=f"leaked token {secret}")
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            ctx, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        # Drop the memory dir only now, after the source chunks are indexed,
+        # so the auto path still fires but the archive write short-circuits.
+        app.config.indexing.memory_dirs = []
+
+        out = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert comp.llm.calls, "auto path must have fired for this test to mean anything"
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] is None
+        assert "summary_provenance" not in row["metadata"]
+        assert secret not in out
 
 
 class TestSessionTransitionDrain:

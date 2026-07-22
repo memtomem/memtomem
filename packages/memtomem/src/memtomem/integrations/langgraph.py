@@ -483,10 +483,18 @@ class MemtomemStore:
         for e in events:
             event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
+        end_metadata: dict = {"event_counts": event_counts}
+        # A summary passed here is caller-supplied, not the server's
+        # write-provenance selection — recorded as ``manual``. Ending with no
+        # summary leaves the origin absent (unknown), never a bare marker.
+        if summary:
+            from memtomem.server.tools._provenance import SUMMARY_PROVENANCE_MANUAL
+
+            end_metadata["summary_provenance"] = SUMMARY_PROVENANCE_MANUAL
         await comp.storage.end_session(
             self._current_session_id,
             summary,
-            {"event_counts": event_counts},
+            end_metadata,
         )
         await comp.storage.scratch_cleanup(session_id=self._current_session_id)
 
