@@ -24,7 +24,7 @@ On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
 uvx --from 'memtomem==0.3.12' mm init --preset minimal --non-interactive
-mm status
+uvx --from 'memtomem==0.3.12' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -33,7 +33,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-mm mem init --scope project_local
+uvx --from 'memtomem==0.3.12' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and

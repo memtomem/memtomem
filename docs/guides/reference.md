@@ -121,6 +121,8 @@ In **core** tool mode (default), most features are accessed through `mem_do(acti
 
 Use `mem_do(action="help")` to see all available actions, or `mem_do(action="help", params={"category": "sessions"})` for per-category details with parameter descriptions. Common aliases are supported (e.g. `health_report` → `eval`, `namespace_set` → `ns_set`).
 
+`mem_do(action="version")` returns the server version, a capability map, and a secret-free `runtime_profile` (`schema_version: 1`) describing the *effective* retrieval runtime — embedding/rerank provider and mode, per-dependency availability, and any missing extras — so a client can adapt to a degraded install without probing.
+
 ### Context tool parameters
 
 The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skills, sub-agents, commands, MCP-server definitions — out to AI runtimes. See the [Context Gateway](context-gateway.md) guide for the Store → Push → Runtime model, and [Moving artifacts between tiers and projects](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects) for the `move`/`copy`/`migrate` transfer verbs. The parameter surface:

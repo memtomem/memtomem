@@ -23,7 +23,7 @@ environment variables; it does not re-document those here.
 - [First success — put one skill under Store control](#first-success--put-one-skill-under-store-control)
 - [The model — Store, Runtimes, Push, Pull](#the-model--store-runtimes-push-pull)
 - [Where copies live — the "Stored in" tiers](#where-copies-live--the-stored-in-tiers)
-- [The wiki — a separate global library, not the Store](#the-wiki--a-separate-global-library-not-the-store)
+- [The wiki — a separate git library, not the Store](#the-wiki--a-separate-git-library-not-the-store)
 - [Walkthrough — get this project's skills into your AI tools](#walkthrough--get-this-projects-skills-into-your-ai-tools)
 - [Push vs Pull — reading the status](#push-vs-pull--reading-the-status)
 - [From the Web UI — what the tab shows](#from-the-web-ui--what-the-tab-shows)
@@ -125,6 +125,20 @@ is the single-artifact, choose-your-source path.) The complementary
 `mm context sync --runtime <name>` restricts a Push's fan-out to specific
 runtimes.
 
+Pull can also *update* an artifact the Store already owns. If you edited a
+skill directly in a runtime's directory and want to keep that edit, pull it
+back with `--overwrite` — the Store's current copy is snapshotted into its
+per-artifact version store first, so the overwrite is always recoverable:
+
+```bash
+mm context pull skills my-skill --overwrite            # preview what would land
+mm context pull skills my-skill --overwrite --apply    # snapshot, then replace
+mm context version list skills my-skill                # the pre-overwrite tree is v1, v2, …
+```
+
+Store-owned metadata (`overrides/`, the `versions/` history itself) survives
+the swap; only the payload surface is replaced.
+
 ## Where copies live — the "Stored in" tiers
 
 Every stored artifact sits at one of three tiers (the **Stored in** axis in the
@@ -148,7 +162,7 @@ A few load-bearing details:
   [Privacy and git safety](#privacy-and-git-safety) below) because git history is
   permanent.
 
-## The wiki — a separate global library, not the Store
+## The wiki — a separate git library, not the Store
 
 The names look alike, so state it plainly: **`~/.memtomem-wiki` is not
 `~/.memtomem`.** They are different things.
@@ -300,10 +314,14 @@ button). Map the status to the action that resolves it:
 The rule of thumb: if the Store should win, **Push**; if a tool has something the
 Store is missing, **Pull** it once and then the Store owns it.
 
-When the same artifact exists in more than one runtime, Pull takes the first
-copy it finds, scanning runtimes in a fixed order (Claude first, then
-Antigravity; skills also pull from Codex and Kimi). Other runtimes are
-export-only and are never read back.
+When the same artifact exists in more than one runtime, the two Pull shapes
+behave differently. **Section-level batch Pull** (and `mm context init
+--overwrite`) takes the first copy it finds, scanning runtimes in a fixed order
+(Claude first, then Antigravity; skills also pull from Codex and Kimi).
+**Single-artifact `mm context pull`** never picks silently: if the candidates
+diverge, `--apply` refuses until you name one with `--from <runtime>` (see
+[The model — Store, Runtimes, Push, Pull](#the-model--store-runtimes-push-pull)).
+Other runtimes are export-only and are never read back.
 
 ## From the Web UI — what the tab shows
 

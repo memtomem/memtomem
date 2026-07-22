@@ -18,7 +18,7 @@ On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```sh
 uvx --from 'memtomem==0.3.12' mm init --preset minimal --non-interactive
-mm status
+uvx --from 'memtomem==0.3.12' mm status
 ```
 
 For project-specific memories, keep the terminal in that project and create
@@ -26,7 +26,7 @@ the gitignored local tier explicitly:
 
 ```sh
 cd /path/to/project
-mm mem init --scope project_local
+uvx --from 'memtomem==0.3.12' mm mem init --scope project_local
 ```
 
 The plugin does not self-authorize these trust steps. After initialization,
