@@ -1127,6 +1127,249 @@ class TestOnnxEmbedder:
             assert "queued" not in stats["entries"]
             assert stats["entries"] == ["active"]
 
+    # -- #1804 query priority lane: sub-batch submission -------------------
+
+    @staticmethod
+    def _stepping_model(stats, stats_lock):
+        """A fake fastembed model that blocks each ``embed`` call on its own
+        per-text release event, so a test can drain the executor queue one
+        entry at a time and observe the exact order work reaches the worker.
+        """
+
+        class _SteppingModel:
+            def embed(self, texts, *, batch_size=256):
+                import numpy as np
+
+                key = texts[0] if texts else None
+                with stats_lock:
+                    stats["entries"].append(key)
+                    stats["inflight"] += 1
+                    stats["peak"] = max(stats["peak"], stats["inflight"])
+                    gate = stats["gates"].setdefault(key, threading.Event())
+                assert gate.wait(timeout=10), f"release event for {key!r} never set"
+                with stats_lock:
+                    stats["inflight"] -= 1
+                return iter(np.array([0.0, 0.0]) for _ in texts)
+
+        return _SteppingModel()
+
+    @staticmethod
+    def _release(stats, stats_lock, key):
+        with stats_lock:
+            stats["gates"].setdefault(key, threading.Event()).set()
+
+    @staticmethod
+    def _install_submit_spy(embedder):
+        """Count executor submissions so tests can wait for a work item to be
+        IN the FIFO queue before releasing the running slice — creating the
+        asyncio task alone does not prove its executor work was submitted."""
+        submitted = []
+        real_submit = embedder._infer_executor.submit
+
+        def spy(fn, *args, **kwargs):
+            submitted.append(fn)
+            return real_submit(fn, *args, **kwargs)
+
+        embedder._infer_executor.submit = spy  # type: ignore[method-assign]
+        return submitted
+
+    @pytest.mark.anyio
+    async def test_query_preempts_bulk_between_subbatches(self):
+        """#1804: a query submitted while a bulk slice runs reaches the
+        worker BEFORE the bulk caller's next slice — the FIFO queue drains
+        the query in the gap between sequentially-awaited sub-batches."""
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+        embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
+        stats_lock = threading.Lock()
+        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        embedder._model = self._stepping_model(stats, stats_lock)
+        submitted = self._install_submit_spy(embedder)
+
+        async def _wait_for(predicate):
+            for _ in range(200):
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("condition never became true")
+
+        bulk = asyncio.create_task(embedder.embed_texts(["b0", "b1", "b2"]))
+        await _wait_for(lambda: stats["entries"] == ["b0"])  # b0 holds the worker
+
+        query = asyncio.create_task(embedder.embed_query("q"))
+        # Submission barrier: the query's work item must be IN the executor
+        # queue before b0 is released, or the ordering assertion would be
+        # scheduler-dependent.
+        await _wait_for(lambda: len(submitted) == 2)
+
+        self._release(stats, stats_lock, "b0")
+        await _wait_for(lambda: len(stats["entries"]) >= 2)
+        with stats_lock:
+            assert stats["entries"][:2] == ["b0", "q"], (
+                "queued query must reach the worker before the next bulk slice"
+            )
+        for key in ("q", "b1", "b2"):
+            await _wait_for(lambda k=key: k in stats["entries"])
+            self._release(stats, stats_lock, key)
+
+        assert await asyncio.wait_for(query, timeout=10) == pytest.approx([0.0, 0.0])
+        assert len(await asyncio.wait_for(bulk, timeout=10)) == 3
+        with stats_lock:
+            assert stats["entries"] == ["b0", "q", "b1", "b2"]
+            assert stats["peak"] == 1
+
+    @pytest.mark.anyio
+    async def test_query_bound_with_two_bulk_callers(self):
+        """#1804 weaker bound: with a second, ungated bulk caller the query
+        can wait behind ONE queued slice from each bulk stream — but never
+        more, because sequential submission keeps at most one slice per
+        caller in the queue. Peak concurrent inference stays 1."""
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+        embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
+        stats_lock = threading.Lock()
+        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        embedder._model = self._stepping_model(stats, stats_lock)
+        submitted = self._install_submit_spy(embedder)
+
+        async def _wait_for(predicate):
+            for _ in range(200):
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("condition never became true")
+
+        bulk_a = asyncio.create_task(embedder.embed_texts(["a0", "a1"]))
+        await _wait_for(lambda: stats["entries"] == ["a0"])
+        bulk_c = asyncio.create_task(embedder.embed_texts(["c0", "c1"]))
+        await _wait_for(lambda: len(submitted) == 2)  # c0 queued behind a0
+
+        query = asyncio.create_task(embedder.embed_query("q"))
+        await _wait_for(lambda: len(submitted) == 3)  # q queued behind c0
+        query_submit_position = len(stats["entries"])  # entries seen so far: a0
+
+        for key in ("a0", "c0", "q", "a1", "c1"):
+            await _wait_for(lambda k=key: k in stats["entries"])
+            self._release(stats, stats_lock, key)
+
+        assert await asyncio.wait_for(query, timeout=10) == pytest.approx([0.0, 0.0])
+        await asyncio.wait_for(asyncio.gather(bulk_a, bulk_c), timeout=10)
+        with stats_lock:
+            # The query entered within (remainder of in-flight slice) + one
+            # queued slice per other bulk caller = position ≤ 2 here.
+            assert stats["entries"].index("q") - query_submit_position <= 2
+            assert stats["peak"] == 1
+
+    @pytest.mark.anyio
+    async def test_bulk_split_preserves_order_and_results(self):
+        """Slicing must be invisible in the result: same vectors, same order
+        as an unsplit call, one ``_embed_sync`` per slice."""
+        embedder = OnnxEmbedder(_onnx_config(dimension=1))
+        embedder._subbatch_for = lambda bs: 2  # type: ignore[method-assign]
+        calls: list[list[str]] = []
+
+        def fake_sync(
+            texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        ):
+            calls.append(list(texts))
+            return [[float(t)] for t in texts]
+
+        embedder._embed_sync = fake_sync  # type: ignore[method-assign]
+        result = await embedder.embed_texts(["0", "1", "2", "3", "4"])
+        assert result == [[0.0], [1.0], [2.0], [3.0], [4.0]]
+        assert calls == [["0", "1"], ["2", "3"], ["4"]]
+
+    @pytest.mark.anyio
+    async def test_bulk_slices_pin_entry_batch_size_snapshot(self):
+        """A ``set_onnx_batch_size`` racing a bulk call must not affect that
+        call: every slice's width AND its inference batch size come from the
+        one snapshot taken at ``embed_texts`` entry (numerical parity —
+        moved ORT batch boundaries can shift padding shape and floats)."""
+        embedder = OnnxEmbedder(_onnx_config(dimension=1))
+        seen: list[tuple[int, int | None]] = []
+
+        def fake_sync(
+            texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        ):
+            seen.append((len(texts), batch_size))
+            # Mutate mid-call: later slices must NOT observe this.
+            embedder.set_onnx_batch_size(3)
+            return [[0.0] for _ in texts]
+
+        embedder._embed_sync = fake_sync  # type: ignore[method-assign]
+        assert embedder.onnx_batch_size == 8  # config default
+        await embedder.embed_texts([str(i) for i in range(70)])
+        # _subbatch_for(8) = 32 → slices of 32, 32, 6 — all at batch_size=8.
+        assert seen == [(32, 8), (32, 8), (6, 8)]
+        # The mutation takes effect for the NEXT call.
+        seen.clear()
+        await embedder.embed_texts([str(i) for i in range(5)])
+        assert seen == [(5, 3)]
+
+    @pytest.mark.anyio
+    async def test_bulk_cancel_mid_subbatch_stops_remaining(self):
+        """Cancelling a bulk call while a slice runs stops the split loop:
+        no later slice is ever submitted, and the worker stays capped."""
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+        embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
+        stats_lock = threading.Lock()
+        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        embedder._model = self._stepping_model(stats, stats_lock)
+
+        bulk = asyncio.create_task(embedder.embed_texts(["b0", "b1", "b2"]))
+        for _ in range(200):
+            if stats["entries"] == ["b0"]:
+                break
+            await asyncio.sleep(0.01)
+        bulk.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await bulk
+        self._release(stats, stats_lock, "b0")
+
+        # A query still completes on the intact single worker.
+        self._release(stats, stats_lock, "q")
+        assert await asyncio.wait_for(embedder.embed_query("q"), timeout=10) == pytest.approx(
+            [0.0, 0.0]
+        )
+        await asyncio.sleep(0.1)  # give wrongly-submitted slices their chance
+        with stats_lock:
+            assert stats["entries"] == ["b0", "q"]
+            assert stats["peak"] == 1
+
+    @pytest.mark.anyio
+    async def test_close_mid_split_cancels_remaining_slices(self):
+        """#1804 + teardown: ``close()`` latches ``_closing`` synchronously
+        on the event-loop thread, so a bulk call spanning teardown fails
+        fast with a typed error before submitting another slice — no race
+        against the queued ``_close_sync``/``cancel_futures``."""
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+        embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
+        stats_lock = threading.Lock()
+        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        embedder._model = self._stepping_model(stats, stats_lock)
+
+        bulk = asyncio.create_task(embedder.embed_texts(["b0", "b1", "b2"]))
+        for _ in range(200):
+            if stats["entries"] == ["b0"]:
+                break
+            await asyncio.sleep(0.01)
+
+        close_task = asyncio.create_task(embedder.close())
+        await asyncio.sleep(0)  # run close() to its first await: latch is set
+        assert embedder._closing is True
+        self._release(stats, stats_lock, "b0")
+
+        with pytest.raises(EmbeddingError, match="closing"):
+            await bulk
+        await asyncio.wait_for(close_task, timeout=10)
+
+        assert embedder._closed is True
+        assert embedder._model is None  # no resurrection
+        await asyncio.sleep(0.1)  # give wrongly-submitted slices their chance
+        with stats_lock:
+            assert stats["entries"] == ["b0"], "no slice may be submitted after close()"
+        # Post-close embeds refuse via the load latch as before.
+        with pytest.raises(EmbeddingError):
+            await embedder.embed_query("late")
+
     def test_threads_default_is_four(self):
         """Default caps ONNX at 4 cores so a bulk reindex doesn't pin every
         physical core. #640 follow-up: pre-flip the default was 0 (= ORT
