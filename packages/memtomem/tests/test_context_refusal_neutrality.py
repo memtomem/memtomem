@@ -195,6 +195,42 @@ def test_actionable_codes_have_a_clause_on_every_writing_surface(surface: str) -
     assert not missing, f"no {surface} remediation for: {missing}"
 
 
+def test_skills_overwrite_hint_is_a_runnable_route_per_surface() -> None:
+    """The per-skill route must be executable as written on each surface.
+
+    Round-2 Codex finding on #1869 follow-up: a clause that names a
+    preview-only command (no ``--apply``) or an incomplete MCP call (missing
+    ``name=`` or the consent parameter) reads as remediation but does not run.
+    Pin the load-bearing tokens, not the full prose.
+    """
+    from memtomem.context import remediation
+
+    cli = remediation.action_hint("skills_overwrite_unsupported", "cli")
+    assert "mm context pull skills" in cli
+    assert "--overwrite" in cli
+    assert "--apply" in cli  # without it the command only previews
+
+    mcp = remediation.action_hint("skills_overwrite_unsupported", "mcp")
+    # Every argument must sit INSIDE a mem_context_pull(...) call — apply=True
+    # without an explicit in-call scope is rejected by the tool, so tokens
+    # dangling outside the parentheses read as remediation but do not run
+    # (round-3 Codex finding).
+    calls = re.findall(r"mem_context_pull\(([^)]*)\)", mcp)
+    assert calls, "mcp hint must show a mem_context_pull(...) invocation"
+    for call in calls:
+        assert 'kind="skills"' in call
+        assert 'name="<name>"' in call  # required parameter
+        assert "overwrite=True" in call
+        assert "apply=True" in call
+        assert 'scope="' in call  # apply requires an explicit scope
+    assert any('scope="project_shared"' in c and "confirm_project_shared=True" in c for c in calls)
+    assert any('scope="user"' in c and "allow_host_writes=True" in c for c in calls)
+
+    # Web renders via i18n (settings.ctx.import_skip_skills_overwrite_unsupported);
+    # a non-empty clause here would bypass localization.
+    assert remediation.action_hint("skills_overwrite_unsupported", "web") == ""
+
+
 def test_unknown_code_yields_no_hint() -> None:
     """Fail open to the neutral reason — never guess a remediation."""
     from memtomem.context import remediation
