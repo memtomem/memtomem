@@ -423,11 +423,27 @@ async def test_onnx_numerical_parity_split_vs_unsplit():
     # slice (= one onnx_batch_size per executor task).
     emb_unsplit._subbatch_for = lambda bs: 4096  # type: ignore[method-assign]
     emb_split._subbatch_for = lambda bs: bs  # type: ignore[method-assign]
-    # Mixed lengths crossing several slice boundaries, incl. a long input.
+
+    def _spy_widths(embedder):
+        widths: list[int] = []
+        real = embedder._embed_sync
+
+        def wrapper(texts, *args, **kwargs):
+            widths.append(len(texts))
+            return real(texts, *args, **kwargs)
+
+        embedder._embed_sync = wrapper  # type: ignore[method-assign]
+        return widths
+
+    unsplit_widths = _spy_widths(emb_unsplit)
+    split_widths = _spy_widths(emb_split)
+    # Mixed lengths crossing several slice boundaries, including an input
+    # far past the model's 256-token sequence limit (truncation path).
     texts = [
         f"sentence number {i} " + ("with deliberately repeated padding-skew content " * (i % 7))
-        for i in range(44)
+        for i in range(43)
     ]
+    texts.append("near max sequence probe " + ("token filler well beyond the model limit " * 80))
     try:
         vecs_unsplit = await emb_unsplit.embed_texts(texts)
         vecs_split = await emb_split.embed_texts(texts)
@@ -435,6 +451,10 @@ async def test_onnx_numerical_parity_split_vs_unsplit():
         await emb_unsplit.close()
         await emb_split.close()
 
+    # The forced slicing must actually have fired, or this test compares
+    # identical execution against itself and proves nothing.
+    assert unsplit_widths == [44]
+    assert split_widths == [8, 8, 8, 8, 8, 4]
     assert len(vecs_unsplit) == len(vecs_split) == len(texts)
     assert np.allclose(
         np.array(vecs_unsplit),

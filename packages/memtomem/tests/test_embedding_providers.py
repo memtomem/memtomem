@@ -746,6 +746,31 @@ class TestOnnxEmbedder:
         assert sensitive not in caplog.text
 
     @pytest.mark.anyio
+    async def test_truncation_label_is_file_global_across_slices(self, caplog):
+        """#1804: with the bulk call split into sub-batches, a truncated
+        input in a later slice keeps its file-global number — direct-caller
+        labels are synthesized per slice and must not restart at 1."""
+        import numpy as np
+
+        sensitive = "overlong-direct-input-" * 50
+        model, tokenizer = _make_tokenized_embedding_model([[0.1]], truncated_inputs={sensitive})
+        model.embed.side_effect = lambda texts, batch_size=256: iter(np.array([0.1]) for _ in texts)
+        embedder = OnnxEmbedder(_onnx_config(max_sequence_tokens=1024, dimension=1))
+        embedder._subbatch_for = lambda bs: 2  # type: ignore[method-assign]
+        embedder._model = model
+        embedder._tokenizer = tokenizer
+        embedder._active_max_sequence_tokens = 1024
+
+        with caplog.at_level("WARNING", logger="memtomem.embedding.onnx"):
+            await embedder.embed_texts(["a", "b", "c", sensitive])
+
+        # The truncated input is 4th in the file but 2nd in its slice — the
+        # warning must carry the file-global label, not the slice-local one.
+        assert "inputs=[4]" in caplog.text
+        assert "inputs=[2]" not in caplog.text
+        assert sensitive not in caplog.text
+
+    @pytest.mark.anyio
     async def test_input_context_length_must_match(self):
         embedder = OnnxEmbedder(_onnx_config())
         with pytest.raises(EmbeddingError, match="chunk_indices has 1 entries for 2"):
@@ -1143,6 +1168,10 @@ class TestOnnxEmbedder:
                 key = texts[0] if texts else None
                 with stats_lock:
                     stats["entries"].append(key)
+                    # Full text list per call — lets tests prove the forced
+                    # split actually fired (a one-text slice is otherwise
+                    # indistinguishable from an unsplit call's first text).
+                    stats["calls"].append(list(texts))
                     stats["inflight"] += 1
                     stats["peak"] = max(stats["peak"], stats["inflight"])
                     gate = stats["gates"].setdefault(key, threading.Event())
@@ -1181,7 +1210,7 @@ class TestOnnxEmbedder:
         embedder = OnnxEmbedder(_onnx_config(dimension=2))
         embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
         stats_lock = threading.Lock()
-        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        stats = {"entries": [], "calls": [], "inflight": 0, "peak": 0, "gates": {}}
         embedder._model = self._stepping_model(stats, stats_lock)
         submitted = self._install_submit_spy(embedder)
 
@@ -1226,7 +1255,7 @@ class TestOnnxEmbedder:
         embedder = OnnxEmbedder(_onnx_config(dimension=2))
         embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
         stats_lock = threading.Lock()
-        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        stats = {"entries": [], "calls": [], "inflight": 0, "peak": 0, "gates": {}}
         embedder._model = self._stepping_model(stats, stats_lock)
         submitted = self._install_submit_spy(embedder)
 
@@ -1311,7 +1340,7 @@ class TestOnnxEmbedder:
         embedder = OnnxEmbedder(_onnx_config(dimension=2))
         embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
         stats_lock = threading.Lock()
-        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        stats = {"entries": [], "calls": [], "inflight": 0, "peak": 0, "gates": {}}
         embedder._model = self._stepping_model(stats, stats_lock)
 
         bulk = asyncio.create_task(embedder.embed_texts(["b0", "b1", "b2"]))
@@ -1331,7 +1360,10 @@ class TestOnnxEmbedder:
         )
         await asyncio.sleep(0.1)  # give wrongly-submitted slices their chance
         with stats_lock:
-            assert stats["entries"] == ["b0", "q"]
+            # Full call shapes: proves the forced split fired — the running
+            # call was exactly the one-text slice ["b0"], not an unsplit
+            # ["b0", "b1", "b2"] whose first text merely looks the same.
+            assert stats["calls"] == [["b0"], ["q"]]
             assert stats["peak"] == 1
 
     @pytest.mark.anyio
@@ -1343,7 +1375,7 @@ class TestOnnxEmbedder:
         embedder = OnnxEmbedder(_onnx_config(dimension=2))
         embedder._subbatch_for = lambda bs: 1  # type: ignore[method-assign]
         stats_lock = threading.Lock()
-        stats = {"entries": [], "inflight": 0, "peak": 0, "gates": {}}
+        stats = {"entries": [], "calls": [], "inflight": 0, "peak": 0, "gates": {}}
         embedder._model = self._stepping_model(stats, stats_lock)
 
         bulk = asyncio.create_task(embedder.embed_texts(["b0", "b1", "b2"]))
