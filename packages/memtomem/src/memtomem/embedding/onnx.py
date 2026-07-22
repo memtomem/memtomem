@@ -532,7 +532,11 @@ class OnnxEmbedder:
                     slice_indices = index_list[offset : offset + sub]
                 else:
                     # Synthesize file-global labels so truncation warnings
-                    # from later slices don't restart numbering at 1.
+                    # from later slices don't restart numbering at 1. The
+                    # warning itself now fires per slice (its scan lives in
+                    # ``_embed_sync``), so a heavily-truncated file logs up
+                    # to one WARNING per slice instead of one per file, and
+                    # the ``[:20]`` label cap applies per slice.
                     slice_indices = list(range(offset + 1, offset + 1 + len(slice_texts)))
                 cb: Callable[[int, int], None] | None = None
                 if _thread_cb is not None:
@@ -580,13 +584,15 @@ class OnnxEmbedder:
         # worker can't be interrupted anyway). Once teardown settles, the
         # first cancellation (message included) is re-raised; a teardown
         # failure after cancellation is logged instead of displacing it.
-        # Latch first, synchronously on the event-loop thread: the sub-batch
-        # loop in ``embed_texts`` reads this between awaits on the same
-        # thread, so once close() is called no further slice is ever
-        # submitted — deterministically, independent of when the queued
-        # ``_close_sync`` below actually starts. Never reset.
-        self._closing = True
+        # Latch synchronously on the event-loop thread, before the first
+        # await: the sub-batch loop in ``embed_texts`` reads this between
+        # awaits on the same thread, so once close() is called no further
+        # slice is ever submitted — deterministically, independent of when
+        # the queued ``_close_sync`` below actually starts. Never reset;
+        # resolve the loop first so a (contract-violating) non-async caller
+        # gets its RuntimeError without poisoning the one-way latch.
         loop = asyncio.get_running_loop()
+        self._closing = True
         future = loop.run_in_executor(None, self._close_sync)
         await settle_shielded(future, what="ONNX embedder teardown")
 

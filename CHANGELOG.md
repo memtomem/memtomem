@@ -19,7 +19,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   snapshot, so embeddings are bit-identical to an unsplit call and a runtime
   `onnx_batch_size` change never applies mid-file. `close()` now latches
   synchronously, so a bulk call spanning teardown fails fast with a typed
-  error instead of racing the executor shutdown. (#1804)
+  error instead of racing the executor shutdown. Truncation warnings are
+  now emitted per sub-batch rather than once per file (labels stay
+  file-global). (#1804)
 
 ### Added
 

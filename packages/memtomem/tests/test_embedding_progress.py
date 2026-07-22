@@ -206,7 +206,8 @@ async def test_ollama_progress_callback_exception_swallowed():
 
 
 # ---------------------------------------------------------------------------
-# ONNX (mocked _embed_sync; no fastembed dependency at test time)
+# ONNX (mostly mocked _embed_sync; the two numerical-parity tests below use
+# the real model and skip without fastembed)
 #
 # Note on ONNX progress shape: ``embed_texts`` submits the inference in
 # sub-batches (``_SUBBATCH_TARGET_TEXTS`` rounded to a whole multiple of

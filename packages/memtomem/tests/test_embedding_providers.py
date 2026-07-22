@@ -1273,7 +1273,8 @@ class TestOnnxEmbedder:
 
         query = asyncio.create_task(embedder.embed_query("q"))
         await _wait_for(lambda: len(submitted) == 3)  # q queued behind c0
-        query_submit_position = len(stats["entries"])  # entries seen so far: a0
+        with stats_lock:
+            query_submit_position = len(stats["entries"])  # entries seen so far: a0
 
         for key in ("a0", "c0", "q", "a1", "c1"):
             await _wait_for(lambda k=key: k in stats["entries"])
