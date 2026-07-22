@@ -1744,6 +1744,26 @@ class TestSessionSummaryProvenanceRecording:
         assert row["metadata"]["summary_provenance"] == SUMMARY_PROVENANCE_MANUAL
 
     @pytest.mark.asyncio
+    async def test_manual_summary_records_manual_with_no_memory_dir(self, components):
+        """A project-only config has no memory dir, so the guard scans the raw
+        summary and there is no archive — the row is the only surface. A clean
+        summary still lands with its ``manual`` marker."""
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        app.config.indexing.memory_dirs = []
+
+        await mem_session_end(summary="hand-written notes", ctx=ctx)  # type: ignore[arg-type]
+
+        row = await app.storage.get_session(session_id)
+        assert row["summary"] == "hand-written notes"
+        assert row["metadata"]["summary_provenance"] == SUMMARY_PROVENANCE_MANUAL
+
+    @pytest.mark.asyncio
     async def test_auto_exact_records_exact_and_writes_the_row_summary(self, components):
         """The write-provenance path stamps ``exact`` and makes the session
         row authoritative — the generated text lands on ``summary``, which
@@ -1862,6 +1882,39 @@ class TestSessionSummaryProvenanceRecording:
         row = await app.storage.get_session(session_id)
         assert row["summary"] is None
         assert "summary_provenance" not in row["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_finalize_on_a_vanished_row_is_logged_not_silent(
+        self, components, monkeypatch, caplog
+    ):
+        """A finalize that reports no row (the session vanished mid-teardown —
+        external tampering or a backend bug) drops the generated summary, so
+        it is logged rather than swallowed. Teardown still completes."""
+        components.llm = _FakeLLM(response="an auto summary with nowhere to land")
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        assert session_id is not None
+
+        memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+        TestSessionSummaryPhaseB._seed_chunks(memory_dir, count=6)
+        await TestSessionSummaryPhaseB()._index_dir(
+            ctx, memory_dir, namespace="agent-runtime:planner"
+        )
+
+        async def no_row(*args, **kwargs):
+            return False
+
+        monkeypatch.setattr(app.storage, "finalize_session_summary", no_row)
+
+        with caplog.at_level("WARNING"):
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert components.llm.calls, "auto path must have fired"
+        assert "session_summary_finalize_no_row" in caplog.text
+        assert session_id in caplog.text
 
 
 class TestSessionSummaryRedactionGate:

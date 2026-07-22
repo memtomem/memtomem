@@ -517,11 +517,20 @@ async def _end_session_phase(
             )
             if not summary_blocked and auto_summary_provenance is not None:
                 try:
-                    await app.storage.finalize_session_summary(
+                    finalized = await app.storage.finalize_session_summary(
                         session_id,
                         effective_summary,
                         {"summary_provenance": auto_summary_provenance},
                     )
+                    if not finalized:
+                        # The row vanished between end_session and here —
+                        # external tampering or a backend bug. Nothing
+                        # contradictory persists (there is no row), but the
+                        # generated summary was silently dropped, so say so.
+                        logger.warning(
+                            "session_summary_finalize_no_row session_id=%s",
+                            session_id,
+                        )
                 except Exception:
                     logger.warning(
                         "session_summary_finalize_failed session_id=%s",
