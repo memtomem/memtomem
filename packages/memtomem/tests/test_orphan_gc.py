@@ -501,6 +501,33 @@ class TestOrphanSourcesCli:
         assert "Run with --apply" in result.output
         comp.storage.delete_by_source.assert_not_awaited()
 
+    def test_apply_requires_confirmation(self, monkeypatch, tmp_path):
+        """--apply without --yes prompts, and the default answer is No.
+
+        Blank input (just Enter) must delete nothing — the doctor
+        stale_source finding now points users straight at ``--apply``
+        (#1928), so this default-No gate is the remaining safety net.
+        """
+        missing = tmp_path / "missing.md"
+        invalidate = Mock()
+        comp = SimpleNamespace(
+            storage=SimpleNamespace(delete_by_source=AsyncMock()),
+            search_pipeline=SimpleNamespace(invalidate_cache=invalidate),
+        )
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(
+            monkeypatch,
+            OrphanScanResult(1, 1, [missing]),
+        )
+
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply"], input="\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Delete indexed chunks for 1 missing source file(s)?" in result.output
+        assert "Cleanup cancelled; no chunks were deleted." in result.output
+        comp.storage.delete_by_source.assert_not_awaited()
+        invalidate.assert_not_called()
+
     def test_apply_yes_deletes_and_invalidates(self, monkeypatch, tmp_path):
         missing = tmp_path / "missing.md"
         invalidate = Mock()
