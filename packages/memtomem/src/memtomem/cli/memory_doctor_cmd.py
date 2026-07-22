@@ -981,7 +981,8 @@ def _analyze_dir(
                 severity="error",
                 summary=(
                     f"{len(stale)} DB source file(s) no longer exist on disk — "
-                    "chunks linger after the file was deleted"
+                    "chunks linger after the file was deleted "
+                    "(run `mm gc orphan-sources --apply`)"
                 ),
                 items=sorted(stale),
             )

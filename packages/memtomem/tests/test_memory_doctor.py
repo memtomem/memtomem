@@ -1000,6 +1000,9 @@ async def test_analysis_detects_all_drift_classes(doctor_env):
     assert by["db_coverage"].items == ["gamma.md"]
     assert by["stale_source"].severity == "error"
     assert by["stale_source"].items == [norm_path(mem_dir / "ghost.md")]
+    # #1928: an error-severity finding must name its remediation (the CLI's
+    # own vocabulary — `mm gc orphan-sources`, not the MCP tool name).
+    assert "run `mm gc orphan-sources --apply`" in by["stale_source"].summary
     assert by["convention_violation"].severity == "error"
     assert by["convention_violation"].items == [norm_path(mem_dir / "MEMORY.md")]
     assert by["cold_candidate"].severity == "info"
@@ -1543,6 +1546,8 @@ class TestCli:
         result = CliRunner().invoke(cli, ["memory", "doctor"])
         assert result.exit_code == 1  # stale_source is error-severity
         assert "no longer exist on disk" in result.output
+        # #1928: the rendered finding carries its own remediation command.
+        assert "mm gc orphan-sources --apply" in result.output
 
     def test_json_payload_shape(self, doctor_env, monkeypatch):
         config, mem_dir = doctor_env
@@ -1725,6 +1730,37 @@ def _source_check_severities() -> dict[str, str]:
     return found
 
 
+def _stale_source_summary_tail() -> str:
+    """Extract the constant suffix of the ``stale_source`` summary from the AST.
+
+    The summary is an f-string whose only dynamic part is the leading count;
+    joining the constant parts yields the exact prose the guide duplicates in
+    its example output and JSON example, so the docs assertions below track
+    source edits automatically instead of pinning a second copy of the string.
+    """
+    import ast
+
+    import memtomem.cli.memory_doctor_cmd as mod
+
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "Finding":
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        check = kw.get("check")
+        if not (isinstance(check, ast.Constant) and check.value == "stale_source"):
+            continue
+        summary = kw.get("summary")
+        assert isinstance(summary, ast.JoinedStr), (
+            "stale_source summary is no longer a single f-string — update "
+            "_stale_source_summary_tail to match"
+        )
+        return "".join(p.value for p in summary.values if isinstance(p, ast.Constant))
+    raise AssertionError("no stale_source Finding(...) call site found")
+
+
 class TestDocsParity:
     def test_docs_table_matches_source(self):
         docs = _docs_check_severities()
@@ -1737,6 +1773,28 @@ class TestDocsParity:
         # (independent anchor: catches docs+source drifting together).
         errors = {c for c, s in _docs_check_severities().items() if s == "error"}
         assert errors == {"stale_source", "convention_violation", "broken_link"}
+
+    def test_stale_source_remediation_pinned_across_doc_surfaces(self):
+        # #1928: the remediation hint lives on four surfaces — the source
+        # string, the guide's example output, its JSON example, and the
+        # remediation table row. Bind the three doc surfaces to the summary
+        # extracted from source so none can drift independently.
+        tail = _stale_source_summary_tail()
+        assert "(run `mm gc orphan-sources --apply`)" in tail
+        ref = (
+            Path(__file__).resolve().parents[3]
+            / "docs"
+            / "guides"
+            / "reference"
+            / "organization-maintenance.md"
+        ).read_text(encoding="utf-8")
+        # Example output + JSON example quote the summary verbatim (count-prefixed).
+        assert ref.count(tail) == 2, (
+            "guide example output / JSON example no longer quote the stale_source summary verbatim"
+        )
+        # The remediation table row leads with the same command.
+        row = next(line for line in ref.splitlines() if line.startswith("| `stale_source` |"))
+        assert "`mm gc orphan-sources --apply`" in row
 
     def test_budget_caps_match_documented_numbers(self):
         import memtomem.cli.memory_doctor_cmd as mod

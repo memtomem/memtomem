@@ -224,9 +224,13 @@ mem_decay_expire(max_age_days=90)                   # delete (dry_run=True by de
 Remove chunks whose source files have been deleted:
 
 ```
-mem_do(action="cleanup_orphans")                    # preview (dry_run=True)
-mem_do(action="cleanup_orphans", params={"dry_run": false})  # delete
+mm gc orphan-sources             # preview (dry-run)
+mm gc orphan-sources --apply     # delete, with a confirmation prompt
 ```
+
+Over MCP, the same cleanup is `mem_do(action="cleanup_orphans")` for the
+preview and `mem_do(action="cleanup_orphans", params={"dry_run": false})` to
+delete.
 
 ### Memory hygiene — `mm memory doctor`
 
@@ -261,7 +265,7 @@ mm memory doctor --fix --apply   # remove them from the index file
       - project_roadmap.md
       - feedback_review_style.md
       - user_role.md
-  ✗ 1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted
+  ✗ 1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (run `mm gc orphan-sources --apply`)
       - /Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md
   ! MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)
       - L8
@@ -281,7 +285,7 @@ Each dir header line reads `{category} · [index={index_file} ·] indexed {db_co
 | Check | Severity | What it means | Remediation |
 |-------|----------|---------------|-------------|
 | `db_coverage` | warn | On disk and indexable, but zero chunks in the DB — `mem_search` can't find it. | `mm index <dir>` |
-| `stale_source` | **error** | A DB chunk's source file no longer exists on disk (deleted; chunks linger). | `mem_do(action="cleanup_orphans", params={"dry_run": false})` (see [Orphan cleanup](#orphan-cleanup)) |
+| `stale_source` | **error** | A DB chunk's source file no longer exists on disk (deleted; chunks linger). | `mm gc orphan-sources --apply` (dry-run without `--apply`), or `mem_do(action="cleanup_orphans", params={"dry_run": false})` over MCP (see [Orphan cleanup](#orphan-cleanup)) |
 | `convention_violation` | **error** | An index/meta file (`MEMORY.md` / `README.md` for a `claude-memory` dir) was indexed as searchable content. | `mm purge --matching-excluded --apply` |
 | `broken_link` | **error** | A markdown pointer in the index file (`[title](target.md)`) resolves to a missing target or escapes the memory root. Wikilinks (`[[other-memo]]`) are never pointers — including the `[[memo]](note)` shape, where the parenthetical is prose rather than a destination (recognized only when the raw source accounts for every same-named label; an unattributable mix reports as `ambiguous_index_line` instead) — and are checked separately as `dangling_wikilink`. | `mm memory doctor --fix --apply` removes the `missing_target` subset (see [Fixing broken links](#fixing-broken-links)); fix or remove `outside_root` links by hand. |
 | `db_extra` | warn | A DB source exists on disk but falls outside the current indexable set (unsupported extension or excluded path). | Usually expected. If the path is now excluded, `mm purge --matching-excluded --apply` reclaims it; unsupported-extension residue has no targeted fix yet. |
@@ -325,7 +329,7 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
           "check": "stale_source",
           "severity": "error",
           "count": 1,
-          "summary": "1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted",
+          "summary": "1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (run `mm gc orphan-sources --apply`)",
           "items": ["/Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md"]
         },
         {
