@@ -2882,7 +2882,7 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
                 f"{result.scope} — nothing to pull."
             )
         dupes = (
-            f" (byte-identical copies also in: {', '.join(result.duplicate_runtimes)})"
+            f" (identical Pull payload also in: {', '.join(result.duplicate_runtimes)})"
             if result.duplicate_runtimes
             else ""
         )

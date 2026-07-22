@@ -22,18 +22,19 @@ collapsed:
 Two surfaces, two questions (the load-bearing distinction — Codex design
 gate):
 
-* **Gate scan + §5 landing grouping use the EXACT copier surface**
+* **The Gate scan uses the EXACT copier surface**
   (:func:`~memtomem.context.skill_payload.read_skill_tree` for skills) —
-  everything a Pull actually copies, including a runtime's top-level
+  everything a Pull actually reads, including a runtime's top-level
   ``overrides/`` / ``versions/``. A secret hiding there must be scanned
-  because it would be copied; two candidates whose visible skill content
-  matches but whose metadata differs land *different* trees and must not be
-  auto-selected.
-* **The Store content comparison uses the PAYLOAD surface**
-  (:func:`~memtomem.context.skill_payload.iter_skill_payload_files`) — the
-  actual skill content, excluding Store-owned ``overrides/`` / ``versions/`` /
-  ``versions.json`` the runtime legitimately lacks. Counting them would report
-  every versioned skill as ``differs`` forever.
+  because it would be copied into the transaction.
+* **§5 landing grouping AND the Store content comparison use the PAYLOAD
+  surface** (:func:`~memtomem.context.skill_payload.iter_skill_payload_files`) —
+  the actual skill content, excluding Store-owned ``overrides/`` / ``versions/``
+  / ``versions.json``. That is what a Pull LANDS after the §10 overwrite
+  strip, so two candidates whose payload matches but whose top-level metadata
+  differs land the SAME bytes and must NOT be reported as ambiguous; and
+  counting metadata in the Store comparison would report every versioned skill
+  as ``differs`` forever.
 
 Both surfaces now live in :mod:`memtomem.context.skill_payload` (ADR-0030 §10,
 PR-G2) together with the canonical tree digest; this module consumes them.

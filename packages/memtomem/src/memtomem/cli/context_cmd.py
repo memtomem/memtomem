@@ -532,16 +532,14 @@ def _pull_preview_json(preview: PullPreview) -> dict[str, Any]:
 
 
 def _print_pull_diff(preview: PullPreview, *, only_runtime: str | None = None) -> None:
-    """Unified diff of each candidate's FULL surface vs the Store payload.
+    """Unified diff of each candidate's Pull PAYLOAD vs the Store payload.
 
-    Candidate files outside the Store payload (top-level ``overrides/`` /
-    ``versions/``) show as "would land (runtime metadata)" so a metadata-only
-    divergence — which drives ``source_conflict`` yet leaves the payload
-    identical — is visible (ADR-0030 §4/§5, Codex R1/R2 Major 1). ``only_runtime``
-    (from ``--from``) restricts the diff to the named source.
+    Both sides are the payload surface — the bytes a Pull actually lands after
+    the §10 strip — so the diff shows exactly what would change, never a
+    store-owned ``overrides/`` / ``versions/`` that is preserved rather than
+    landed (ADR-0030 §5/§10). ``only_runtime`` (from ``--from``) restricts the
+    diff to the named source.
     """
-    from memtomem.context.skill_payload import is_payload_relpath
-
     store = dict(preview.store_content or ())
     for cand in preview.candidates:
         if cand.content is None or (only_runtime is not None and cand.runtime != only_runtime):
@@ -554,9 +552,6 @@ def _print_pull_diff(preview: PullPreview, *, only_runtime: str | None = None) -
             if old == new:
                 continue
             label = rel or preview.name
-            if old is None and not is_payload_relpath(rel):
-                click.echo(f"    + would land (runtime metadata): {label}")
-                continue
             if new is None:
                 click.echo(f"    - in store only: {label}")
                 continue
@@ -580,7 +575,7 @@ def _render_pull_plan(plan: PullPlan) -> None:
         f"  Pull {plan.kind}/{plan.name} from {plan.selected_runtime} → {plan.scope} ({action})"
     )
     if plan.duplicate_runtimes:
-        click.echo(f"    (byte-identical copies also in: {', '.join(plan.duplicate_runtimes)})")
+        click.echo(f"    (identical Pull payload also in: {', '.join(plan.duplicate_runtimes)})")
 
 
 def _pull_refusal(result: PullApplyResult) -> click.ClickException:

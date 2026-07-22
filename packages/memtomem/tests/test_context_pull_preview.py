@@ -236,18 +236,27 @@ def test_preview_does_not_mutate_privacy_counters(
 # ── include_content: --diff capture (ADR-0030 PR-C R2 Major 1) ────────────
 
 
-def test_include_content_populates_full_surface_and_store(home: Path, proj: Path) -> None:
-    """``include_content=True`` captures each candidate's FULL copier surface
-    onto ``content`` and the Store payload onto ``store_content`` (the CLI
-    ``--diff`` inputs)."""
-    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "runtime v")})
+def test_include_content_populates_payload_surface_and_store(home: Path, proj: Path) -> None:
+    """``include_content=True`` captures each candidate's PAYLOAD surface onto
+    ``content`` and the Store payload onto ``store_content`` (the CLI ``--diff``
+    inputs) — store-owned metadata a runtime happens to carry is EXCLUDED, so the
+    diff shows only what actually lands (ADR-0030 §10)."""
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "runtime v")})
+    # Contrive runtime-side metadata the §6 strip drops — it must not reach --diff.
+    (written["claude"].parent / "versions.json").write_text('{"x":1}', encoding="utf-8")
+    (written["claude"].parent / "versions").mkdir()
+    (written["claude"].parent / "versions" / "vX.md").write_text("hist\n", encoding="utf-8")
     _seed_store_skill(proj, "s", "store v")
     pv = preview_pull(
         "skills", "s", scope="project_shared", project_root=proj, include_content=True
     )
     cand = _cand(pv, "claude")
     assert cand.content is not None
-    assert any(rel == "SKILL.md" for rel, _ in cand.content)
+    rels = {rel for rel, _ in cand.content}
+    assert "SKILL.md" in rels
+    # The store-owned metadata is absent from the diff content.
+    assert "versions.json" not in rels
+    assert not any(rel.startswith("versions/") for rel in rels)
     assert pv.store_content is not None
     assert any(rel == "SKILL.md" for rel, _ in pv.store_content)
 

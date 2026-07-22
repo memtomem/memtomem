@@ -127,12 +127,20 @@ refusal rule keys off the number of **distinct contents that would land
 in the Store** — for gemini commands that is the converted canonical
 Markdown, not the raw TOML — and not the runtime count:
 
-  Distinctness is judged over the **full copier surface** (everything a
-  Pull lands), not the payload subset: two candidates with matching
-  visible content but differing top-level metadata land different trees
-  and must not be auto-selected. PR-B computes this signal (an
-  `ambiguous` flag + an `auto_source`); the refusal it drives is
-  enforced by the CLI/Web at apply time (PR-C/PR-D), not by the preview.
+  Distinctness is judged over the **Pull payload** — the bytes that would
+  actually land — not the full copier surface. Store-owned metadata is
+  either preserved from the Store (a skill's `overrides/` / `versions/`,
+  §10) or absent from a runtime copy entirely, so two candidates with
+  matching payload but differing top-level `versions.json` land the SAME
+  bytes and must NOT be reported as ambiguous — forcing a source choice
+  there would be spurious. For agents/commands the payload and the full
+  surface are identical, so this is a skills-only refinement (added with
+  the §10 overwrite-Pull, which introduced the payload/metadata split).
+  **Gate A still scans the full copier surface** — a secret hiding under a
+  non-payload path must be caught even though it never lands. PR-B computes
+  this signal (an `ambiguous` flag + an `auto_source`); the refusal it
+  drives is enforced by the CLI/Web at apply time (PR-C/PR-D), not by the
+  preview.
 
 - All candidates byte-identical (post-conversion): auto-select in the
   existing priority order and disclose the duplicates.

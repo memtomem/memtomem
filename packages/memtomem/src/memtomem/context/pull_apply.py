@@ -854,41 +854,40 @@ def _overwrite_skill_tree(
     """
     from memtomem.context.skills import _target_conflict
 
-    # Step 2 — type gate (no-follow). ``dst`` must be a present, non-symlink
-    # directory; absence means the Store changed since the preview (plan_stale,
-    # never target_conflict — nothing the user placed caused it).
+    # Step 2 — type gate (no-follow) + read-only strict preflight. ``dst`` must be
+    # a present, non-symlink directory; ``overrides/`` / ``versions/`` a directory
+    # and ``versions.json`` a regular file; and NO entry anywhere in the tree a
+    # symlink or special file. The whole sequence is wrapped so ANY probe error
+    # maps to a defined result:
+    #   * ``FileNotFoundError`` on ``dst`` → ``plan_stale`` (the Store changed
+    #     since the preview; nothing the user placed caused it);
+    #   * ``StrictTreeError`` (wrong type / a symlink / special file) →
+    #     ``target_conflict`` naming the offender;
+    #   * any other ``OSError`` (``EACCES`` / ``EIO`` while lstatting or walking)
+    #     → ``snapshot_failed`` — we cannot safely preserve what we cannot read,
+    #     and a raw traceback must never escape the result-coded engine.
+    # The strict preflight crucially covers the PAYLOAD, not just the carried
+    # ``overrides/`` + ``versions/``: ``iter_skill_payload_files`` SILENTLY DROPS
+    # symlinks, so a symlinked payload entry would be absent from the snapshot AND
+    # deleted with the old tree by the swap — a silent data loss returning
+    # ``applied``. It is lstat-only, cheap even over a large version store, and
+    # the step-6 copiers re-validate as they walk (this pass is the read-only one,
+    # run BEFORE step 5 mutates the store).
     try:
-        dst_mode = os.lstat(dst).st_mode
-    except FileNotFoundError:
-        return _refusal_for(
-            plan,
-            "plan_stale",
-            skip_codes.PLAN_STALE,
-            f"the Store copy of skill '{plan.name}' changed since the preview — re-run.",
-        )
-    if not stat.S_ISDIR(dst_mode):
-        return _refusal_for(
-            plan,
-            "target_conflict",
-            skip_codes.TARGET_CONFLICT,
-            f"the Store entry for skill '{plan.name}' is not a directory",
-        )
-    gate_reason = _carried_tree_type_gate(dst)
-    if gate_reason is not None:
-        return _refusal_for(plan, "target_conflict", skip_codes.TARGET_CONFLICT, gate_reason)
-    # Read-only strict preflight over the WHOLE tree (step 2 second pass): the
-    # step-6 copiers refuse a nested symlink / special file too, but by then the
-    # snapshot at step 5 has already mutated the store — so an offender must be
-    # discovered here, before anything is written. Crucially this covers the
-    # PAYLOAD, not just the carried overrides/ + versions/: iter_skill_payload_files
-    # SILENTLY DROPS symlinks, so a symlinked payload entry would be absent from
-    # the snapshot AND deleted with the old tree by the swap — a silent data loss
-    # returning ``applied``. Validating the whole tree refuses it instead
-    # (lstat-only, cheap even over a large version store). ``target_conflict``
-    # names the offender; an unreadable subtree fails closed as ``snapshot_failed``
-    # (we cannot safely preserve what we cannot read — never a raw traceback out
-    # of the result-coded engine).
-    try:
+        try:
+            dst_mode = os.lstat(dst).st_mode
+        except FileNotFoundError:
+            return _refusal_for(
+                plan,
+                "plan_stale",
+                skip_codes.PLAN_STALE,
+                f"the Store copy of skill '{plan.name}' changed since the preview — re-run.",
+            )
+        if not stat.S_ISDIR(dst_mode):
+            raise StrictTreeError(dst, f"the Store entry for skill '{plan.name}' is not a directory")
+        gate_reason = _carried_tree_type_gate(dst)
+        if gate_reason is not None:
+            raise StrictTreeError(dst, gate_reason)
         validate_tree_strict(dst)
     except StrictTreeError as exc:
         return _refusal_for(
@@ -1032,7 +1031,10 @@ def _build_overwrite_staging(
         hardlink_tree_strict(versions_dir, staging / _VERSIONS_DIRNAME, durable=True)
     manifest_file = dst / _MANIFEST_FILENAME
     if manifest_file.is_file():
-        link_or_copy_file(manifest_file, staging / _MANIFEST_FILENAME)
+        # durable=True for the same reason as the version hardlinks: on a copy
+        # fallback the manifest bytes must be fsynced before the swap deletes the
+        # original, or a power loss loses version metadata.
+        link_or_copy_file(manifest_file, staging / _MANIFEST_FILENAME, durable=True)
     # The C1 lock file (``.versions.json.lock``) is deliberately NOT carried: it
     # is neither payload nor history. It stays in ``old`` and is removed with it;
     # the next C1 acquisition creates a fresh one. Safe ONLY because every

@@ -379,16 +379,57 @@ def test_skills_overwrite_refuses_symlinked_payload_file(home: Path, proj: Path)
 
 def test_skills_pull_non_portable_runtime_filename_is_landing_error(home: Path, proj: Path) -> None:
     """Codex Major 2: a runtime copy carrying a non-portable payload path (a
-    ``:`` segment) must be refused in prepare as a landing error — the same for
-    new and overwrite pulls — never a raw ValueError out of commit after a
-    snapshot. Here the runtime is the only candidate, so it surfaces as
-    nothing_importable (no computable landing)."""
+    ``:`` segment) is refused in PREPARE as a landing_error — never a raw
+    ValueError out of commit after a snapshot. A sole importable landing_error is
+    fail-closed ambiguous → source_conflict, and the candidate row carries the
+    landing_error so the reason is visible."""
     written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
     (written["claude"].parent / "wei:rd.md").write_text("x\n", encoding="utf-8")
     out = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
     assert isinstance(out, PullApplyResult)
-    # The sole candidate has a landing_error → auto-select is off → not importable.
-    assert out.status in ("nothing_importable", "source_conflict")
+    assert out.status == "source_conflict"
+    assert any(c.content_status == "landing_error" for c in out.candidates)
+
+
+def test_skills_overwrite_non_portable_runtime_filename_takes_no_snapshot(
+    home: Path, proj: Path
+) -> None:
+    """Major 2, overwrite arm: the same non-portable runtime path refuses in
+    prepare BEFORE any snapshot — the Store version store is never created and
+    the payload is untouched (parity with the new-pull arm; no raw ValueError)."""
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
+    (written["claude"].parent / "wei:rd.md").write_text("x\n", encoding="utf-8")
+    d = _seed_overwrite_case(proj)
+    out = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(out, PullApplyResult)
+    assert out.status == "source_conflict"
+    assert not (d / "versions").exists()
+    assert "old store" in _store_skill_text(proj, "s")
+
+
+def test_skills_overwrite_survives_hardlink_fallback(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex Blocker 2 (integration): when os.link fails cross-device, the
+    version-store carry (versions/ + versions.json) falls back to a durable
+    copy — the overwrite still succeeds and the snapshot survives."""
+    from memtomem.context import _atomic as _atomic_mod
+
+    d = _seed_overwrite_case(proj)
+
+    def _no_link(*_a: object, **_k: object) -> None:
+        raise OSError(errno.EXDEV, "cross-device")
+
+    monkeypatch.setattr(_atomic_mod.os, "link", _no_link)
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "applied"
+    assert res.write_outcome == "overwritten"
+    assert "new" in _store_skill_text(proj, "s")
+    # The snapshot was carried into the swapped-in tree via the copy fallback.
+    assert (d / "versions" / "v1" / "SKILL.md").read_text(encoding="utf-8").count("old store") == 1
+    assert (d / "versions.json").is_file()
 
 
 def test_skills_overwrite_does_not_route_through_versioning_op_locked(

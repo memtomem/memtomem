@@ -9,8 +9,8 @@ and fan-out would push internal metadata into runtimes. §10 resolves it with
 
 * :func:`read_skill_tree` — the **WIDE copier surface**: every byte a copy
   would move, Store-owned metadata included. The ingress Gate-A privacy scan
-  and the §5 landing grouping use this one, because a secret hiding under
-  ``overrides/`` would still be copied and must still be caught.
+  uses this one, because a secret hiding under ``overrides/`` would still be
+  copied into the transaction and must still be caught.
 * :func:`iter_skill_payload_files` — the **NARROW payload surface**: the
   artifact *content*, excluding the Store-owned top-level ``overrides/`` /
   ``versions/`` / ``versions.json`` (plus that manifest's lock/temp sidecars)
