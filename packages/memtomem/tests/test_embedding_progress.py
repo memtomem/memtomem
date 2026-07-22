@@ -206,17 +206,26 @@ async def test_ollama_progress_callback_exception_swallowed():
 
 
 # ---------------------------------------------------------------------------
-# ONNX (mocked _embed_sync; no fastembed dependency at test time)
+# ONNX (mostly mocked _embed_sync; the two numerical-parity tests below use
+# the real model and skip without fastembed)
 #
-# Note on ONNX progress shape: the implementation uses a SINGLE
-# ``model.embed(texts, batch_size=onnx_batch_size)`` call. FastEmbed still
-# owns the internal streaming loop, while memtomem explicitly caps each ORT
-# batch at the memory-safe ONNX setting. Per-yield progress is then surfaced
-# via a thread-safe callback. Earlier versions did Python-side chunking
-# at ``config.batch_size``; benchmarking caught a +20% wall-clock
-# regression vs repeated calls, so the implementation switched
-# to streaming. As a result, ``on_progress`` fires per-text (throttled
-# to ~20 ticks per file), NOT per-config.batch_size batch.
+# Note on ONNX progress shape: ``embed_texts`` submits the inference in
+# sub-batches (``_SUBBATCH_TARGET_TEXTS`` rounded to a whole multiple of
+# ``onnx_batch_size``) so a queued ``embed_query`` gets the single worker
+# between slices — the #1804 search-priority lane. Within each slice,
+# ``_embed_sync`` makes one ``model.embed(texts, batch_size=...)`` call:
+# FastEmbed owns the internal streaming loop while memtomem caps each ORT
+# batch at the memory-safe ONNX setting, and per-yield progress is surfaced
+# via a thread-safe callback whose ``done`` count is translated to the
+# file-global value across slices. History: the very first version did
+# Python-side chunking at ``config.batch_size`` (=64), which benchmarking
+# caught as a +20% wall-clock regression against the then-default single
+# fused call — the cost was the ORT ``session.run`` count (#653). #1809
+# later capped the run size everywhere (``onnx_batch_size``), so today's
+# multiple-of-batch slicing adds only the per-call ``model.embed`` re-entry
+# (~+1.6%, #653 variant B vs C) and keeps batch boundaries — and therefore
+# float results — identical. ``on_progress`` still fires per-text (throttled
+# to ~20 ticks per file), NOT per batch or per slice.
 # ---------------------------------------------------------------------------
 
 
@@ -230,7 +239,9 @@ async def test_onnx_streams_progress_per_yield():
     config = _onnx_config()
     embedder = OnnxEmbedder(config)
 
-    def fake_sync(texts, on_progress=None):
+    def fake_sync(
+        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+    ):
         # Mimic the real _embed_sync's per-yield progress fire
         out = []
         total = len(texts)
@@ -267,7 +278,9 @@ async def test_onnx_throttles_thread_hops_for_large_input():
     embedder = OnnxEmbedder(config)
     n = 200
 
-    def fake_sync(texts, on_progress=None):
+    def fake_sync(
+        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+    ):
         out = []
         total = len(texts)
         for t in texts:
@@ -308,7 +321,9 @@ async def test_onnx_no_progress_skips_callback_plumbing():
     embedder = OnnxEmbedder(config)
     received_cb_arg: list = []
 
-    def fake_sync(texts, on_progress=None):
+    def fake_sync(
+        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+    ):
         received_cb_arg.append(on_progress)
         return [[0.0] for _ in texts]
 
@@ -324,7 +339,9 @@ async def test_onnx_progress_callback_exception_swallowed():
     config = _onnx_config()
     embedder = OnnxEmbedder(config)
 
-    def fake_sync(texts, on_progress=None):
+    def fake_sync(
+        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+    ):
         out = []
         total = len(texts)
         for t in texts:
@@ -348,12 +365,104 @@ async def test_onnx_progress_kwarg_omitted_works():
     config = _onnx_config()
     embedder = OnnxEmbedder(config)
 
-    def fake_sync(texts, on_progress=None):
+    def fake_sync(
+        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+    ):
         return [[0.0] for _ in texts]
 
     embedder._embed_sync = fake_sync  # type: ignore[method-assign]
     result = await embedder.embed_texts(["a", "b", "c"])
     assert len(result) == 3
+
+
+@pytest.mark.anyio
+async def test_onnx_progress_spans_subbatches_globally():
+    """#1804: with the bulk call split into sub-batches, ``on_progress``
+    still reports file-global counts — monotonic across slice boundaries,
+    ending with the unthrottled final ``(n, n)`` tick."""
+    config = _onnx_config()
+    embedder = OnnxEmbedder(config)
+    embedder._subbatch_for = lambda bs: 2  # type: ignore[method-assign]
+
+    def fake_sync(
+        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+    ):
+        out = []
+        total = len(texts)
+        for t in texts:
+            out.append([0.0])
+            if on_progress is not None:
+                on_progress(len(out), total)
+        return out
+
+    embedder._embed_sync = fake_sync  # type: ignore[method-assign]
+    calls, cb, done_event = _record_with_done_event()
+    result = await embedder.embed_texts(["a", "b", "c", "d", "e"], on_progress=cb)
+    assert len(result) == 5
+    await asyncio.wait_for(done_event.wait(), timeout=5.0)
+    _assert_progress_contract(calls, total=5, expected_calls=5)
+    # Global, monotonic ``done`` across the 2+2+1 slices — never slice-local.
+    assert [d for d, _ in calls] == [1, 2, 3, 4, 5]
+    assert calls[-1] == (5, 5)
+
+
+@pytest.mark.anyio
+async def test_onnx_numerical_parity_split_vs_unsplit():
+    """#1804: sub-batch submission must not change embeddings. Slice widths
+    are whole multiples of ``onnx_batch_size``, so ORT batch boundaries —
+    and therefore padding shapes and float results — are identical whether
+    a call is split or not. Regular test matrix; skipped without fastembed.
+    """
+    pytest.importorskip("fastembed")
+    pytest.importorskip("numpy")
+    import numpy as np
+
+    config = _onnx_config(model="all-MiniLM-L6-v2", dimension=384)
+    emb_unsplit = OnnxEmbedder(config)
+    emb_split = OnnxEmbedder(config)
+    # One slice for the whole input vs the smallest boundary-preserving
+    # slice (= one onnx_batch_size per executor task).
+    emb_unsplit._subbatch_for = lambda bs: 4096  # type: ignore[method-assign]
+    emb_split._subbatch_for = lambda bs: bs  # type: ignore[method-assign]
+
+    def _spy_widths(embedder):
+        widths: list[int] = []
+        real = embedder._embed_sync
+
+        def wrapper(texts, *args, **kwargs):
+            widths.append(len(texts))
+            return real(texts, *args, **kwargs)
+
+        embedder._embed_sync = wrapper  # type: ignore[method-assign]
+        return widths
+
+    unsplit_widths = _spy_widths(emb_unsplit)
+    split_widths = _spy_widths(emb_split)
+    # Mixed lengths crossing several slice boundaries, including an input
+    # far past the model's 256-token sequence limit (truncation path).
+    texts = [
+        f"sentence number {i} " + ("with deliberately repeated padding-skew content " * (i % 7))
+        for i in range(43)
+    ]
+    texts.append("near max sequence probe " + ("token filler well beyond the model limit " * 80))
+    try:
+        vecs_unsplit = await emb_unsplit.embed_texts(texts)
+        vecs_split = await emb_split.embed_texts(texts)
+    finally:
+        await emb_unsplit.close()
+        await emb_split.close()
+
+    # The forced slicing must actually have fired, or this test compares
+    # identical execution against itself and proves nothing.
+    assert unsplit_widths == [44]
+    assert split_widths == [8, 8, 8, 8, 8, 4]
+    assert len(vecs_unsplit) == len(vecs_split) == len(texts)
+    assert np.allclose(
+        np.array(vecs_unsplit),
+        np.array(vecs_split),
+        rtol=1e-7,
+        atol=1e-8,
+    ), "split and unsplit submission must produce identical embeddings"
 
 
 @pytest.mark.anyio

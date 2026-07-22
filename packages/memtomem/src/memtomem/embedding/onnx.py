@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import threading
 from collections.abc import Callable
@@ -16,6 +17,17 @@ from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.errors import EmbeddingError
 
 logger = logging.getLogger(__name__)
+
+# Bulk ``embed_texts`` submits the inference in sub-batches of about this many
+# texts per executor task (rounded to a whole multiple of ``onnx_batch_size``
+# so ORT batch boundaries — and therefore padding shapes and float results —
+# are identical to a single submission). Between sub-batches the single-worker
+# executor drains any queued ``embed_query``, which is the search-time priority
+# lane (#1804). At the default ``onnx_batch_size=8`` this is 32 texts = 4 ORT
+# runs per task; the per-task ``model.embed`` re-entry cost was measured at
+# ~+1.6% total (#653 benchmark, variant B vs C). Not config: ``onnx_batch_size``
+# already tunes the slice indirectly, and the wait bound scales linearly.
+_SUBBATCH_TARGET_TEXTS = 32
 
 
 def _configure_tokenizer_limit(
@@ -240,6 +252,12 @@ class OnnxEmbedder:
         # the model after close — see ``_get_model`` / ``close``.
         self._load_lock = threading.Lock()
         self._closed = False
+        # Loop-side early latch, set synchronously by ``close()`` before it
+        # queues ``_close_sync`` — ``_closed`` above is the worker-side latch
+        # under ``_load_lock``. The sub-batch loop in ``embed_texts`` checks
+        # this before every slice submission so a bulk call spanning teardown
+        # fails fast with a typed error instead of racing ``cancel_futures``.
+        self._closing = False
         # Dedicated single-worker executor: the hard cap on concurrent ONNX
         # inference, matching ``preferred_concurrency`` above. The engine's
         # asyncio semaphore is only the normal-path scheduler — cancelling a
@@ -257,11 +275,22 @@ class OnnxEmbedder:
         # lone worker), so the cap holds without cancelled work piling up as
         # blocked threads in the process-wide default pool.
         #
-        # Accepted trade-off: ``embed_query`` (search-time) also flows
-        # through this executor, so a query issued mid-reindex waits for the
-        # in-flight file's inference instead of running as an extra
-        # concurrent ``session.run`` — that extra run was part of the
-        # problem, and the wait is bounded by one file's embed.
+        # ``embed_query`` (search-time) also flows through this executor —
+        # never as an extra concurrent ``session.run`` (that extra run was
+        # part of the #1783 problem). Its wait is bounded by sub-batch
+        # submission (#1804): bulk ``embed_texts`` splits a file into
+        # ``_SUBBATCH_TARGET_TEXTS``-sized slices and awaits each before
+        # submitting the next, so at most ONE bulk slice is ever queued per
+        # bulk caller. The worker pulls the next FIFO item the instant a
+        # slice finishes — without waiting for the event loop — so a queued
+        # query runs before the bulk caller can submit its next slice.
+        # Wait bound: the remainder of the in-flight slice, plus one queued
+        # slice per *other* active bulk caller (the engine gates its bulk to
+        # one stream via ``embed_sem``; the ungated callers — dedup, export,
+        # langgraph store — are rare and each contributes at most one slice),
+        # plus any earlier-queued queries. An unbounded query stream could
+        # starve bulk indefinitely; realistic search rates make that a
+        # non-issue and no anti-starvation machinery is warranted.
         self._infer_executor = ThreadPoolExecutor(
             max_workers=self.preferred_concurrency, thread_name_prefix="onnx-embed"
         )
@@ -346,12 +375,25 @@ class OnnxEmbedder:
             raise ValueError("onnx_batch_size must be an integer between 1 and 256")
         self._onnx_batch_size = value
 
+    @staticmethod
+    def _subbatch_for(batch_size: int) -> int:
+        """Texts per executor task: ``_SUBBATCH_TARGET_TEXTS`` rounded to a
+        whole multiple of ``batch_size`` so slicing never moves an ORT batch
+        boundary. Pure function of its argument — ``embed_texts`` snapshots
+        the batch size once and derives both the slice width and the
+        per-slice inference batch from that one value, so a concurrent
+        ``set_onnx_batch_size`` applies to the *next* call, never mid-file.
+        """
+        return batch_size * max(1, _SUBBATCH_TARGET_TEXTS // batch_size)
+
     def _embed_sync(
         self,
         texts: list[str],
         on_progress: Callable[[int, int], None] | None = None,
         source_path: str | None = None,
         chunk_indices: list[int] | None = None,
+        *,
+        batch_size: int | None = None,
     ) -> list[list[float]]:
         """Run inference synchronously — submitted to ``_infer_executor``.
 
@@ -363,9 +405,10 @@ class OnnxEmbedder:
         ``loop.call_soon_threadsafe`` (see ``embed_texts``).
         """
         model = self._get_model()
-        # Snapshot once so a concurrent config update applies to the next
-        # inference call, never halfway through this generator.
-        batch_size = self._onnx_batch_size
+        if batch_size is None:
+            # Direct callers only — ``embed_texts`` always passes its
+            # entry snapshot so every slice of one call shares one value.
+            batch_size = self._onnx_batch_size
         truncated = _truncated_input_indexes(
             self._tokenizer, texts, self._active_max_sequence_tokens
         )
@@ -417,77 +460,109 @@ class OnnxEmbedder:
             )
 
         loop = asyncio.get_running_loop()
+        # One snapshot shapes the whole call: both the slice width and every
+        # slice's inference batch derive from it, so ORT batch boundaries are
+        # identical to a single submission (numerical parity — fastembed pads
+        # per batch, so moved boundaries could shift float results) and a
+        # concurrent ``set_onnx_batch_size`` applies to the next call only.
+        batch_size = self._onnx_batch_size
+        sub = self._subbatch_for(batch_size)
 
-        if on_progress is None:
-            # Fast path — no callback plumbing, no cross-thread hops.
-            try:
-                if source_path is None and index_list is None:
-                    return await loop.run_in_executor(
-                        self._infer_executor, self._embed_sync, text_list, None
-                    )
-                return await loop.run_in_executor(
-                    self._infer_executor,
-                    self._embed_sync,
-                    text_list,
-                    None,
-                    source_path,
-                    index_list,
-                )
-            except EmbeddingError:
-                raise
-            except Exception as exc:
-                raise EmbeddingError(f"ONNX embedding failed: {exc}") from exc
+        _thread_cb: Callable[[int, int], None] | None = None
+        if on_progress is not None:
+            # ``_embed_sync`` runs in a worker thread but ``on_progress``
+            # (e.g. ``queue.put_nowait`` into the SSE stream) is
+            # event-loop-bound and not thread-safe. Wrap with
+            # ``call_soon_threadsafe`` and throttle to at most ~20 ticks per
+            # file so a 1000-text input doesn't fire 1000 cross-thread hops.
+            # Throttle state spans all slices: ``done`` is translated to the
+            # file-global count per slice, so ticks stay monotonic and the
+            # final slice's last yield is ``done == total`` — the unthrottled
+            # final tick the SSE "(N/N)" render contract requires.
+            last_reported = [0]
+            step = max(1, total // 20)
+            progress_warned = [False]
 
-        # ``on_progress`` was provided. ``_embed_sync`` runs in a worker
-        # thread but ``on_progress`` (e.g. ``queue.put_nowait`` into the
-        # SSE stream) is event-loop-bound and not thread-safe. Wrap with
-        # ``call_soon_threadsafe`` and throttle to at most ~20 ticks per
-        # file so a 1000-text input doesn't fire 1000 cross-thread hops.
-        last_reported = [0]
-        step = max(1, total // 20)
-        progress_warned = [False]
+            def _safe_on_progress(done: int, t: int) -> None:
+                try:
+                    on_progress(done, t)
+                except Exception:
+                    if not progress_warned[0]:
+                        progress_warned[0] = True
+                        logger.debug(
+                            "on_progress raised; further failures silenced",
+                            exc_info=True,
+                        )
 
-        def _safe_on_progress(done: int, t: int) -> None:
-            try:
-                on_progress(done, t)
-            except Exception:
-                if not progress_warned[0]:
-                    progress_warned[0] = True
-                    logger.debug(
-                        "on_progress raised; further failures silenced",
-                        exc_info=True,
-                    )
+            def _thread_cb(done: int, t: int) -> None:
+                # Throttle thread→loop hops; always emit the final tick so
+                # the SSE consumer's "(N/N)" final-render contract holds.
+                if done - last_reported[0] < step and done != t:
+                    return
+                last_reported[0] = done
+                try:
+                    loop.call_soon_threadsafe(_safe_on_progress, done, t)
+                except RuntimeError:
+                    # Event loop is closed (shutdown / cancel). Drop the
+                    # tick — embedding work itself continues unaffected.
+                    pass
 
-        def _thread_cb(done: int, t: int) -> None:
-            # Throttle thread→loop hops; always emit the final tick so
-            # the SSE consumer's "(N/N)" final-render contract holds.
-            if done - last_reported[0] < step and done != t:
-                return
-            last_reported[0] = done
-            try:
-                loop.call_soon_threadsafe(_safe_on_progress, done, t)
-            except RuntimeError:
-                # Event loop is closed (shutdown / cancel). Drop the
-                # tick — embedding work itself continues unaffected.
-                pass
-
+        # Submit the inference in sub-batches, awaiting each before
+        # submitting the next, so the single-worker executor's FIFO queue
+        # drains any ``embed_query`` between slices (#1804 — see the
+        # executor comment in ``__init__`` for the wait bound). Never
+        # pre-submit slices: at most one bulk slice may be queued per
+        # caller or the priority lane degrades to whole-file waits.
+        # A slice failure fails the whole call (partial results discarded —
+        # unchanged file-level semantics); cancelling the awaiting coroutine
+        # stops after the in-flight slice (remaining slices are never
+        # submitted), and a queued slice's future is cancelled before it
+        # starts, so the #1792 serialization/cancellation contract holds
+        # per slice.
+        results: list[list[float]] = []
         try:
-            if source_path is None and index_list is None:
-                return await loop.run_in_executor(
-                    self._infer_executor, self._embed_sync, text_list, _thread_cb
+            for offset in range(0, total, sub):
+                if self._closing:
+                    # close() latched (loop-side, synchronous) — fail fast
+                    # with a typed error rather than racing the teardown's
+                    # cancel_futures over the next submission.
+                    raise EmbeddingError("ONNX embedder is closing")
+                slice_texts = text_list[offset : offset + sub]
+                if index_list is not None:
+                    slice_indices = index_list[offset : offset + sub]
+                else:
+                    # Synthesize file-global labels so truncation warnings
+                    # from later slices don't restart numbering at 1. The
+                    # warning itself now fires per slice (its scan lives in
+                    # ``_embed_sync``), so a heavily-truncated file logs up
+                    # to one WARNING per slice instead of one per file, and
+                    # the ``[:20]`` label cap applies per slice.
+                    slice_indices = list(range(offset + 1, offset + 1 + len(slice_texts)))
+                cb: Callable[[int, int], None] | None = None
+                if _thread_cb is not None:
+                    file_cb = _thread_cb
+
+                    def cb(done: int, _t: int, _off: int = offset, _cb=file_cb) -> None:
+                        _cb(_off + done, total)
+
+                results.extend(
+                    await loop.run_in_executor(
+                        self._infer_executor,
+                        functools.partial(
+                            self._embed_sync,
+                            slice_texts,
+                            cb,
+                            source_path,
+                            slice_indices,
+                            batch_size=batch_size,
+                        ),
+                    )
                 )
-            return await loop.run_in_executor(
-                self._infer_executor,
-                self._embed_sync,
-                text_list,
-                _thread_cb,
-                source_path,
-                index_list,
-            )
         except EmbeddingError:
             raise
         except Exception as exc:
             raise EmbeddingError(f"ONNX embedding failed: {exc}") from exc
+        return results
 
     async def embed_query(self, query: str) -> list[float]:
         if not query or not query.strip():
@@ -509,7 +584,15 @@ class OnnxEmbedder:
         # worker can't be interrupted anyway). Once teardown settles, the
         # first cancellation (message included) is re-raised; a teardown
         # failure after cancellation is logged instead of displacing it.
+        # Latch synchronously on the event-loop thread, before the first
+        # await: the sub-batch loop in ``embed_texts`` reads this between
+        # awaits on the same thread, so once close() is called no further
+        # slice is ever submitted — deterministically, independent of when
+        # the queued ``_close_sync`` below actually starts. Never reset;
+        # resolve the loop first so a (contract-violating) non-async caller
+        # gets its RuntimeError without poisoning the one-way latch.
         loop = asyncio.get_running_loop()
+        self._closing = True
         future = loop.run_in_executor(None, self._close_sync)
         await settle_shielded(future, what="ONNX embedder teardown")
 

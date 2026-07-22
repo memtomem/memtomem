@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Search no longer waits behind an entire file's ONNX inference during a
+  reindex.** Bulk embedding now submits its work to the single inference
+  worker in sub-batches (whole multiples of `onnx_batch_size`, ~32 texts per
+  task) and awaits each before submitting the next, so a search-time
+  `embed_query` queued mid-reindex runs in the gap between slices instead of
+  after the whole file. Query wait is bounded by roughly one sub-batch (≈4 ORT
+  runs at defaults, plus one queued slice per additional concurrent bulk
+  caller). The #1792 memory cap is unchanged — peak concurrent `session.run`
+  stays 1 — and slice widths are derived from a single per-call batch-size
+  snapshot, so embeddings are bit-identical to an unsplit call and a runtime
+  `onnx_batch_size` change never applies mid-file. `close()` now latches
+  synchronously, so a bulk call spanning teardown fails fast with a typed
+  error instead of racing the executor shutdown. Truncation warnings are
+  now emitted per sub-batch rather than once per file (labels stay
+  file-global). (#1804)
+
 ### Added
 
 - **The web Sessions panel now shows a session's title and where its summary
