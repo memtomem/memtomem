@@ -125,7 +125,9 @@ async def mem_search(
         as_of: Temporal bound for retroactive search — ``YYYY-MM-DD`` or
             ``YYYY-QN``. Default ``None`` = now. Chunks whose
             ``valid_from`` / ``valid_to`` frontmatter excludes that point are
-            filtered out; chunks without those keys are always valid.
+            filtered out; chunks without those keys are always valid. Time-
+            decay scoring is also anchored to this instant instead of the
+            wall clock.
         bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor them)
         dense_weight: RRF weight for meaning matches (default 1.0; raise to favor them)
         context_window: Expand each result with ±N adjacent chunks (0 = off)

@@ -77,6 +77,19 @@ _HINTS: dict[HintKey, dict[HintSurface, str]] = {
         "false positive (user tier only).",
         "web": "",  # settings.ctx.pull_hint_privacy_blocked
     },
+    "skills_overwrite_unsupported": {
+        "cli": "Pull it individually (the pre-image is snapshotted first): "
+        "mm context pull skills <name> --overwrite --apply, with --scope "
+        "matching this destination tier.",
+        "mcp": "Pull it individually (the pre-image is snapshotted first): "
+        'mem_context_pull(kind="skills", name="<name>", overwrite=True, '
+        'apply=True, scope="project_shared", confirm_project_shared=True) '
+        "for the git-tracked tier, or "
+        'mem_context_pull(kind="skills", name="<name>", overwrite=True, '
+        'apply=True, scope="user", allow_host_writes=True) '
+        "for a user-tier skill.",
+        "web": "",  # settings.ctx.import_skip_skills_overwrite_unsupported
+    },
 }
 
 

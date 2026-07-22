@@ -486,9 +486,10 @@ class TestExtractSkills:
         assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "old"
 
     def test_overwrite_existing_skill_is_refused(self, tmp_path):
-        """Overwriting an existing skill needs directory-tree snapshots (PR-G);
-        until then it is refused at the engine level (ADR-0030 §6) — only a
-        ``new`` skills Pull is allowed. The stored copy is left untouched."""
+        """The batch path does not snapshot skill trees, so overwriting an
+        existing skill is refused at the engine level (ADR-0030 §6) — only a
+        ``new`` skills Pull is allowed here; the single-artifact Pull
+        (PR-G4b) is the overwrite route. The stored copy is left untouched."""
         src = tmp_path / ".claude/skills/existing"
         src.mkdir(parents=True)
         (src / "SKILL.md").write_text("new", encoding="utf-8")

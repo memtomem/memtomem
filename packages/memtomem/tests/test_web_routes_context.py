@@ -1467,9 +1467,11 @@ class TestImportSkills:
     async def test_import_overwrite_existing_skill_refused_on_wire(
         self, client: AsyncClient, tmp_path: Path
     ):
-        # Overwriting an existing skill is refused at the engine level until
-        # tree snapshots land (ADR-0030 §6); the refusal reaches the wire as a
-        # typed skip (the Overwrite checkbox no longer silently clobbers).
+        # The batch import path does not snapshot skill trees, so overwriting
+        # an existing skill is refused at the engine level (ADR-0030 §6; the
+        # single-artifact Pull is the overwrite route). The refusal reaches the
+        # wire as a typed skip (the Overwrite checkbox no longer silently
+        # clobbers).
         _make_skill(tmp_path, "already")
         _make_runtime_skill(tmp_path, ".claude/skills", "already", "# Different\n")
         r = await client.post(
