@@ -1507,6 +1507,28 @@ class TestExtractLock:
         assert [p.name for p in result.imported] == ["bar"]
         assert not list(canonical.glob(".staging-*")), "orphaned staging tree left behind"
 
+    def test_swap_recovery_is_never_a_promote_race(self) -> None:
+        """G4a-3c review: ``_promote_race_conflict`` classifies a
+        ``SwapRecoveryError`` as NOT a race for EVERY errno — including the
+        ENOTEMPTY/EEXIST shapes a plain OSError would demote — so the promote
+        loop's ``if not _promote_race_conflict(exc): raise`` always re-raises an
+        interrupted swap instead of burying it as ``target_conflict``. Stated by
+        type, not by the EBUSY producers currently use."""
+        import errno as _errno
+
+        from memtomem.context._dir_swap import SwapForeignDestination, SwapRecoveryError
+        from memtomem.context.skills import _promote_race_conflict
+
+        for exc in (
+            SwapRecoveryError(_errno.EBUSY, "wedged"),
+            SwapRecoveryError(_errno.EEXIST, "wedged"),
+            SwapRecoveryError(_errno.ENOTEMPTY, "wedged"),
+            SwapForeignDestination(_errno.EEXIST, "foreign"),
+        ):
+            assert _promote_race_conflict(exc) is False, exc
+        # A plain ENOTEMPTY OSError still IS a race (the behavior this preserves).
+        assert _promote_race_conflict(OSError(_errno.ENOTEMPTY, "plain")) is True
+
     def test_promote_nonrace_oserror_reraises_loud(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -764,7 +764,17 @@ def _promote_race_conflict(exc: OSError) -> bool:
     of the original tree is stranded in ``.old-*``. A non-``None``
     ``__cause__`` is that chain's marker (promote errors are otherwise raised
     bare), and demoting it to a skip would bury the operator breadcrumb.
+
+    A :class:`SwapRecoveryError` is NEVER a race, whatever its ``errno``: it
+    signals an interrupted directory swap that needs an operator, and the caller
+    must re-raise it as ``swap_recovery_pending`` rather than skip it as
+    ``target_conflict`` (ADR-0030 §10). Producers use ``EBUSY`` today, but this
+    is stated by TYPE so a future recovery path spelled with ``EEXIST`` /
+    ``ENOTEMPTY`` cannot be silently demoted (supertype-interception guard,
+    G4a-3c review).
     """
+    if isinstance(exc, SwapRecoveryError):
+        return False
     if exc.__cause__ is not None:
         return False
     if isinstance(exc, (IsADirectoryError, NotADirectoryError)):
