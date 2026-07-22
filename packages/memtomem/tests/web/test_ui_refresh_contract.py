@@ -2,10 +2,35 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
 STATIC = Path(__file__).parents[2] / "src" / "memtomem" / "web" / "static"
+
+
+def test_session_event_badge_whitelist_has_matching_css() -> None:
+    """Every event type in ``_SESSION_EVENT_BADGE_TYPES`` must have a
+    ``.badge-<type>`` rule in style.css. A typo or a type added without its
+    class would silently render a real event as a neutral (muted) badge — the
+    exact drift the whitelist exists to prevent. This is one-directional on
+    purpose: the CSS also defines status badges (active, success, muted, …)
+    that are not event types, so the reverse is not a parity error.
+    """
+    js = (STATIC / "settings-harness.js").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    block = re.search(r"_SESSION_EVENT_BADGE_TYPES = new Set\(\[(.*?)\]\)", js, re.DOTALL)
+    assert block, "could not locate _SESSION_EVENT_BADGE_TYPES in settings-harness.js"
+    whitelist = set(re.findall(r"'([^']+)'", block.group(1)))
+    assert whitelist, "the event-type badge whitelist is empty"
+
+    # Capture the whole class suffix (``[a-z0-9_-]+`` including hyphens) so a
+    # compound rule like ``.badge-foo-variant`` yields ``foo-variant``, not a
+    # false ``foo`` that would wrongly satisfy the whitelist.
+    css_badges = set(re.findall(r"\.badge-([a-z0-9_-]+)", css))
+    missing = whitelist - css_badges
+    assert not missing, f"event-type badge classes missing from style.css: {sorted(missing)}"
 
 
 def test_refresh_tokens_cover_color_spacing_shape_focus_and_motion() -> None:
@@ -60,7 +85,7 @@ def test_changed_static_assets_bump_cache_versions() -> None:
 
     assert "/style.css?v=140" in html
     assert "/app.js?v=157" in html
-    assert "/settings-harness.js?v=8" in html
+    assert "/settings-harness.js?v=9" in html
     assert "/settings-config.js?v=19" in html
     # ADR-0030 PR-F: the new Global-library fragment + the pull.js bump that added
     # its defaultTier param must carry fresh cache versions. v=3 adds the

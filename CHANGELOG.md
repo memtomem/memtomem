@@ -7,6 +7,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **The web Sessions panel now shows a session's title and where its summary
+  came from.** Each row renders the `title` recorded at session start and a
+  summary-origin badge — *recorded* (exact), *inferred* (fallback), or
+  *provided* (manual) — plus an *incomplete* badge when the provenance is
+  marked short. A legacy row or a session with no summary shows nothing, making
+  no claim either way. This completes the #1897 motivation: an inferred summary
+  is no longer presented the same as an exactly-recorded one.
+
+### Fixed
+
+- **Hardened the dev Sessions panel against stored-value injection.** The
+  sessions table and its event detail interpolated caller-controlled values
+  (agent id, namespace, summary, the session id — which embeds a caller-supplied
+  source — and each event's content, type, and JSON metadata) straight into the
+  DOM. Every sink now escapes; the event-type badge class is whitelisted; and
+  the metadata toggle moved from an inline `onclick` (blocked by the panel's
+  `script-src` CSP, so it silently did nothing in a real browser) to the
+  existing delegated `data-action` handler. Panel strings are localized and
+  re-render live on a language toggle.
+
+### Added
+
 - **A session now records where its summary came from.** `mem_session_end`
   stamps `summary_provenance` on the session row — `exact` when the summary was
   built from the write-provenance chunk set selected by recorded id, `fallback`

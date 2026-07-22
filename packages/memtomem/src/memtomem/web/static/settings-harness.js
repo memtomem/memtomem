@@ -66,74 +66,213 @@ function toggleHelp() {
 }
 
 // ── Harness: Sessions ──
+//
+// Every server-derived value is caller-controlled and reaches innerHTML, so
+// each goes through escapeHtml (text), escapeAttr (attributes), or a fixed
+// whitelist (the event-type badge class). The session id embeds a
+// caller-supplied ``source`` (formation.py), so it is escaped like any other
+// field, not treated as safe because it is an id. Rendering is split from
+// fetching so ``langchange`` can re-localize from cached data without a
+// round-trip.
 
-async function loadHarnessSessions() {
+// Event types that have a ``.badge-<type>`` rule in style.css. Anything else
+// (an unknown or hostile ``event_type``) renders as a neutral badge rather
+// than interpolating arbitrary text into a class attribute.
+const _SESSION_EVENT_BADGE_TYPES = new Set([
+  'add', 'query', 'edit', 'delete', 'tool_call',
+  'subagent_start', 'subagent_stop', 'decision', 'retrieval', 'error',
+]);
+
+function _sessionEventBadgeClass(eventType) {
+  return _SESSION_EVENT_BADGE_TYPES.has(eventType)
+    ? `badge badge-${eventType}`
+    : 'badge badge-muted';
+}
+
+// How the persisted summary was chosen (#1913). Absent = unknown, rendered as
+// nothing — a legacy row or a session with no summary makes no claim either
+// way. ``provenance_incomplete`` is orthogonal and can accompany any origin.
+function _sessionOriginBadges(metadata) {
+  if (!metadata || typeof metadata !== 'object') return '';
+  const badges = [];
+  const origin = metadata.summary_provenance;
+  if (origin === 'exact') {
+    badges.push(`<span class="badge badge-success">${escapeHtml(t('settings.sessions.origin_exact'))}</span>`);
+  } else if (origin === 'fallback') {
+    badges.push(`<span class="badge badge-warning">${escapeHtml(t('settings.sessions.origin_fallback'))}</span>`);
+  } else if (origin === 'manual') {
+    badges.push(`<span class="badge badge-muted">${escapeHtml(t('settings.sessions.origin_manual'))}</span>`);
+  }
+  if (metadata.provenance_incomplete) {
+    badges.push(`<span class="badge badge-danger">${escapeHtml(t('settings.sessions.provenance_incomplete'))}</span>`);
+  }
+  return badges.join(' ');
+}
+
+// Current render state of each surface, so ``langchange`` re-paints whatever
+// is on screen — table, empty, error, or loading — in the new language, not
+// just a populated table. ``null`` means the surface was never rendered.
+let _sessionsView = null;
+let _eventsView = null;
+// Monotonic tokens: a response that resolves after a newer request started (a
+// second refresh click, a different session opened, the panel closed) is
+// dropped, so a slow earlier fetch can never paint over a newer result.
+let _sessionsSeq = 0;
+let _eventsSeq = 0;
+// The active event-type filter, remembered so a langchange repaint keeps the
+// user's selection instead of snapping back to "all". Reset when a different
+// session's events load.
+let _eventsFilter = 'all';
+
+function _renderSessionsTable(sessions) {
+  return '<table class="harness-table"><thead><tr>' +
+    `<th>${escapeHtml(t('settings.sessions.col_id'))}</th>` +
+    `<th>${escapeHtml(t('settings.sessions.col_title'))}</th>` +
+    `<th>${escapeHtml(t('settings.sessions.col_agent'))}</th>` +
+    `<th>${escapeHtml(t('settings.sessions.col_namespace'))}</th>` +
+    `<th>${escapeHtml(t('settings.sessions.col_started'))}</th>` +
+    `<th>${escapeHtml(t('settings.sessions.col_ended'))}</th>` +
+    `<th>${escapeHtml(t('settings.sessions.col_summary'))}</th>` +
+    '<th></th>' +
+    '</tr></thead><tbody>' +
+    sessions.map(s => {
+      const meta = s.metadata;
+      const rawTitle = meta && typeof meta.title === 'string' ? meta.title.trim() : '';
+      const title = rawTitle ? escapeHtml(truncate(rawTitle, 40)) : '—';
+      const ended = s.ended_at
+        ? relativeTime(s.ended_at)
+        : `<span class="badge badge-active">${escapeHtml(t('settings.sessions.active'))}</span>`;
+      const originBadges = _sessionOriginBadges(meta);
+      const summaryText = s.summary ? escapeHtml(truncate(s.summary, 60)) : '—';
+      const summary = originBadges ? `${summaryText} ${originBadges}` : summaryText;
+      return `<tr>
+        <td class="mono">${escapeHtml(s.id.slice(0, 8))}</td>
+        <td>${title}</td>
+        <td>${escapeHtml(s.agent_id)}</td>
+        <td>${escapeHtml(s.namespace)}</td>
+        <td>${relativeTime(s.started_at)}</td>
+        <td>${ended}</td>
+        <td>${summary}</td>
+        <td><button class="btn-ghost btn-xs" data-action="session-events" data-id="${escapeAttr(s.id)}">${escapeHtml(t('settings.sessions.events'))}</button></td>
+      </tr>`;
+    }).join('') +
+    '</tbody></table>';
+}
+
+// Paint the sessions list from ``_sessionsView`` in the current language.
+function _paintSessions() {
   const list = qs('sessions-list');
-  renderPageState(list, { kind: 'loading', message: t('common.loading') });
-  try {
-    const data = await api('GET', '/api/sessions?limit=50');
-    if (!data.sessions.length) {
-      renderPageState(list, { kind: 'empty', message: t('settings.sessions.empty') });
-      return;
-    }
-    list.innerHTML = '<table class="harness-table"><thead><tr>' +
-      '<th>ID</th><th>Agent</th><th>Namespace</th><th>Started</th><th>Ended</th><th>Summary</th><th></th>' +
-      '</tr></thead><tbody>' +
-      data.sessions.map(s => {
-        const ended = s.ended_at ? relativeTime(s.ended_at) : '<span class="badge badge-active">active</span>';
-        const summary = s.summary ? truncate(s.summary, 60) : '—';
-        return `<tr>
-          <td class="mono">${s.id.slice(0, 8)}</td>
-          <td>${s.agent_id}</td>
-          <td>${s.namespace}</td>
-          <td>${relativeTime(s.started_at)}</td>
-          <td>${ended}</td>
-          <td>${summary}</td>
-          <td><button class="btn-ghost btn-xs" data-action="session-events" data-id="${s.id}">Events</button></td>
-        </tr>`;
-      }).join('') +
-      '</tbody></table>';
-  } catch (e) {
-    renderPageState(list, { kind: 'error', message: t('settings.sessions.load_failed'), detail: e.message, retry: loadHarnessSessions });
+  if (!list || !_sessionsView) return;
+  const v = _sessionsView;
+  if (v.kind === 'loading') {
+    renderPageState(list, { kind: 'loading', message: t('common.loading') });
+  } else if (v.kind === 'empty') {
+    renderPageState(list, { kind: 'empty', message: t('settings.sessions.empty') });
+  } else if (v.kind === 'error') {
+    renderPageState(list, { kind: 'error', message: t('settings.sessions.load_failed'), detail: v.detail, retry: loadHarnessSessions });
+  } else if (v.kind === 'ready') {
+    list.innerHTML = _renderSessionsTable(v.sessions);
   }
 }
 
-let _sessionEventsCache = [];
+async function loadHarnessSessions() {
+  const seq = ++_sessionsSeq;
+  _sessionsView = { kind: 'loading' };
+  _paintSessions();
+  try {
+    const data = await api('GET', '/api/sessions?limit=50');
+    if (seq !== _sessionsSeq) return;  // a newer refresh superseded this one
+    _sessionsView = data.sessions.length
+      ? { kind: 'ready', sessions: data.sessions }
+      : { kind: 'empty' };
+  } catch (e) {
+    if (seq !== _sessionsSeq) return;
+    _sessionsView = { kind: 'error', detail: e.message };
+  }
+  _paintSessions();
+}
+
+function _sessionEventsTitle(sessionId) {
+  return `${t('settings.sessions.events_title')}: ${sessionId.slice(0, 8)}...`;
+}
+
+// An external session id can contain ``/`` (formation.py derives it from a
+// caller source). Percent-encode the whole id — the ``:path`` route accepts a
+// ``%2F``, which the ASGI server decodes back to ``/`` before Starlette
+// routing. Leaving the slash literal instead would expose an id like
+// ``external:a/../b:<hash>`` to the browser's path canonicalization, which
+// collapses the ``/../`` and would request a different session entirely.
+function _sessionEventsUrl(sessionId) {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/events`;
+}
+
+// Paint the events panel from ``_eventsView`` in the current language. The
+// title always reflects the view's own session id, so a re-paint can never
+// show one session's events under another's heading.
+function _paintEvents() {
+  const list = qs('session-events-list');
+  const v = _eventsView;
+  if (!list || !v) return;
+  qs('session-events-title').textContent = _sessionEventsTitle(v.sessionId);
+  if (v.kind === 'loading') {
+    list.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
+  } else if (v.kind === 'empty') {
+    renderPageState(list, { kind: 'empty', message: t('settings.sessions.events_empty') });
+  } else if (v.kind === 'error') {
+    renderPageState(list, { kind: 'error', message: t('settings.sessions.events_load_failed'), detail: v.detail, retry: () => showSessionEvents(v.sessionId) });
+  } else if (v.kind === 'ready') {
+    list.innerHTML = _renderSessionEventsList(v.events);
+    _wireSessionEventFilter(list);
+  }
+}
 
 async function showSessionEvents(sessionId) {
-  const panel = qs('session-events-panel');
-  const list = qs('session-events-list');
-  qs('session-events-title').textContent = `Events: ${sessionId.slice(0, 8)}...`;
-  show(panel);
-  list.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
+  const seq = ++_eventsSeq;
+  _eventsFilter = 'all';  // a freshly opened session starts unfiltered
+  _eventsView = { kind: 'loading', sessionId };
+  show(qs('session-events-panel'));
+  _paintEvents();
   try {
-    const data = await api('GET', `/api/sessions/${sessionId}/events`);
-    _sessionEventsCache = data.events;
-    if (!data.events.length) {
-      renderPageState(list, { kind: 'empty', message: t('settings.sessions.events_empty') });
-      return;
-    }
-    const types = [...new Set(data.events.map(e => e.event_type))];
-    const filterHtml = types.length > 1
-      ? `<div class="harness-event-filter">
-          <button class="active" data-filter="all">all (${data.events.length})</button>
-          ${types.map(t => `<button data-filter="${t}">${t} (${data.events.filter(e => e.event_type === t).length})</button>`).join('')}
-        </div>`
-      : '';
-    list.innerHTML = filterHtml + _renderSessionEvents(data.events);
-    list.querySelectorAll('.harness-event-filter button').forEach(btn => {
-      btn.addEventListener('click', () => {
-        list.querySelectorAll('.harness-event-filter button').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        const f = btn.dataset.filter;
-        const filtered = f === 'all' ? _sessionEventsCache : _sessionEventsCache.filter(e => e.event_type === f);
-        const eventsContainer = list.querySelector('.harness-events-body');
-        if (eventsContainer) eventsContainer.innerHTML = _renderSessionEventRows(filtered);
-      });
-    });
+    const data = await api('GET', _sessionEventsUrl(sessionId));
+    if (seq !== _eventsSeq) return;  // superseded by a newer open / close
+    _eventsView = data.events.length
+      ? { kind: 'ready', sessionId, events: data.events }
+      : { kind: 'empty', sessionId };
   } catch (e) {
-    renderPageState(list, { kind: 'error', message: t('settings.sessions.events_load_failed'), detail: e.message, retry: () => showSessionEvents(sessionId) });
+    if (seq !== _eventsSeq) return;
+    _eventsView = { kind: 'error', sessionId, detail: e.message };
   }
+  _paintEvents();
+}
+
+function _renderSessionEventsList(events) {
+  const types = [...new Set(events.map(e => e.event_type))];
+  // A remembered filter that this session's events don't contain (a langchange
+  // on a differently-typed session, or a stale value) falls back to "all".
+  if (_eventsFilter !== 'all' && !types.includes(_eventsFilter)) _eventsFilter = 'all';
+  const activeCls = (f) => (f === _eventsFilter ? ' class="active"' : '');
+  const filterHtml = types.length > 1
+    ? `<div class="harness-event-filter">
+        <button${activeCls('all')} data-filter="all">${escapeHtml(t('settings.sessions.filter_all'))} (${events.length})</button>
+        ${types.map(ty => `<button${activeCls(ty)} data-filter="${escapeAttr(ty)}">${escapeHtml(ty)} (${events.filter(e => e.event_type === ty).length})</button>`).join('')}
+      </div>`
+    : '';
+  const shown = _eventsFilter === 'all' ? events : events.filter(e => e.event_type === _eventsFilter);
+  return filterHtml + _renderSessionEvents(shown);
+}
+
+function _wireSessionEventFilter(list) {
+  list.querySelectorAll('.harness-event-filter button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      list.querySelectorAll('.harness-event-filter button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      _eventsFilter = btn.dataset.filter;
+      const all = _eventsView && _eventsView.kind === 'ready' ? _eventsView.events : [];
+      const filtered = _eventsFilter === 'all' ? all : all.filter(e => e.event_type === _eventsFilter);
+      const eventsContainer = list.querySelector('.harness-events-body');
+      if (eventsContainer) eventsContainer.innerHTML = _renderSessionEventRows(filtered);
+    });
+  });
 }
 
 function _renderSessionEvents(events) {
@@ -144,15 +283,18 @@ function _renderSessionEventRows(events) {
   return events.map(e => {
     const hasMeta = e.metadata && Object.keys(e.metadata).length > 0;
     const metaHtml = hasMeta
-      ? `<div class="harness-event-meta" hidden>${JSON.stringify(e.metadata, null, 2)}</div>`
+      ? `<div class="harness-event-meta" hidden>${escapeHtml(JSON.stringify(e.metadata, null, 2))}</div>`
       : '';
+    // data-action="toggle-next" over an inline onclick: the panel enforces a
+    // strict script-src CSP, so an inline handler is blocked in a real
+    // browser. The delegated handler in app.js toggles nextElementSibling.
     const metaBtn = hasMeta
-      ? `<button class="btn-ghost btn-xs" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden" title="Toggle metadata">{ }</button>`
+      ? `<button class="btn-ghost btn-xs" data-action="toggle-next" title="${escapeAttr(t('settings.sessions.toggle_metadata'))}">{ }</button>`
       : '';
     return `<div class="harness-event">
-      <span class="badge badge-${e.event_type}">${e.event_type}</span>
+      <span class="${_sessionEventBadgeClass(e.event_type)}">${escapeHtml(e.event_type)}</span>
       <span class="harness-event-content">
-        ${truncate(e.content, 120)}
+        ${escapeHtml(truncate(e.content, 120))}
         ${metaBtn}${metaHtml}
       </span>
       <span class="muted-sm">${relativeTime(e.created_at)}</span>
@@ -160,8 +302,26 @@ function _renderSessionEventRows(events) {
   }).join('');
 }
 
-qs('session-events-close')?.addEventListener('click', () => hide(qs('session-events-panel')));
+qs('session-events-close')?.addEventListener('click', () => {
+  // Bump the token so a still-in-flight fetch for the closing session cannot
+  // repaint the panel after it is hidden, and drop the cached view.
+  _eventsSeq++;
+  _eventsView = null;
+  hide(qs('session-events-panel'));
+});
 qs('sessions-refresh-btn')?.addEventListener('click', loadHarnessSessions);
+
+// Re-localize the imperatively-rendered Sessions surfaces on a language
+// toggle from cached state — table, empty, error, or loading — with no
+// round-trip and nothing to lose. Registered after app.js's langchange
+// listener, which runs applyDOM() and would otherwise reset the open
+// events-panel title's data-i18n value and drop its session id; re-painting
+// last wins, and each surface's title comes from its own view state.
+window.addEventListener('langchange', () => {
+  _paintSessions();
+  const panel = qs('session-events-panel');
+  if (panel && !panel.hidden && _eventsView) _paintEvents();
+});
 
 // ── Harness: Search Runs (Quality Lab #1801) ──
 //
