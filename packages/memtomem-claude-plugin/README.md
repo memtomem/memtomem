@@ -23,11 +23,13 @@ write-time indexing.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem==0.3.12' mm init --preset minimal --non-interactive
+uvx --from 'memtomem==0.3.12' mm init --preset minimal --non-interactive --mcp skip
 uvx --from 'memtomem==0.3.12' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
+`--mcp skip` keeps the bootstrap from adding a second MCP registration because
+the plugin already supplies the server.
 For project-specific memories, preserve the project root and create the
 gitignored local tier explicitly:
 
@@ -46,6 +48,8 @@ plugin-managed server.
 
 ## Docs
 
+- [Korean Claude Code/Codex vibe-coding quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)
+  — initialize one store, install one plugin, and verify a memory round trip
 - [Claude Code integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/claude-code.md)
   — setup, optional automation, and CLAUDE.md guidelines
 - [memtomem README](https://github.com/memtomem/memtomem) — project overview
