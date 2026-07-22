@@ -355,6 +355,42 @@ def test_skills_overwrite_colon_payload_name_is_snapshot_failed(home: Path, proj
     assert "old store" in _store_skill_text(proj, "s")  # untouched
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink type gate")
+def test_skills_overwrite_refuses_symlinked_payload_file(home: Path, proj: Path) -> None:
+    """Codex Blocker 1: a symlink in the PAYLOAD (not just overrides/versions)
+    must be refused before the snapshot. ``iter_skill_payload_files`` silently
+    drops symlinks, so without the whole-tree preflight the link would be absent
+    from v1 AND deleted by the swap — a silent data loss reported as applied."""
+    d = _seed_overwrite_case(proj)
+    (d / "scripts").mkdir()
+    outside = proj / "target.py"
+    outside.write_text("print('x')\n", encoding="utf-8")
+    (d / "scripts" / "helper.py").symlink_to(outside)  # nested payload symlink
+
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "target_conflict"
+    # No snapshot, store payload (incl. the symlink) untouched.
+    assert not (d / "versions").exists()
+    assert (d / "scripts" / "helper.py").is_symlink()
+    assert "old store" in _store_skill_text(proj, "s")
+
+
+def test_skills_pull_non_portable_runtime_filename_is_landing_error(home: Path, proj: Path) -> None:
+    """Codex Major 2: a runtime copy carrying a non-portable payload path (a
+    ``:`` segment) must be refused in prepare as a landing error — the same for
+    new and overwrite pulls — never a raw ValueError out of commit after a
+    snapshot. Here the runtime is the only candidate, so it surfaces as
+    nothing_importable (no computable landing)."""
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
+    (written["claude"].parent / "wei:rd.md").write_text("x\n", encoding="utf-8")
+    out = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
+    assert isinstance(out, PullApplyResult)
+    # The sole candidate has a landing_error → auto-select is off → not importable.
+    assert out.status in ("nothing_importable", "source_conflict")
+
+
 def test_skills_overwrite_does_not_route_through_versioning_op_locked(
     home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

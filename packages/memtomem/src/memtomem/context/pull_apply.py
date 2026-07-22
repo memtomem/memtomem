@@ -854,9 +854,6 @@ def _overwrite_skill_tree(
     """
     from memtomem.context.skills import _target_conflict
 
-    overrides_dir = dst / _OVERRIDES_DIRNAME
-    versions_dir = dst / _VERSIONS_DIRNAME
-
     # Step 2 — type gate (no-follow). ``dst`` must be a present, non-symlink
     # directory; absence means the Store changed since the preview (plan_stale,
     # never target_conflict — nothing the user placed caused it).
@@ -879,21 +876,33 @@ def _overwrite_skill_tree(
     gate_reason = _carried_tree_type_gate(dst)
     if gate_reason is not None:
         return _refusal_for(plan, "target_conflict", skip_codes.TARGET_CONFLICT, gate_reason)
-    # Read-only strict preflight (step 2 second pass): the step-6 copiers refuse
-    # a nested symlink / special file too, but by then the snapshot at step 5 has
-    # already mutated the store — so an offending entry must be discovered here,
-    # before anything is written. ``target_conflict`` naming the offender.
+    # Read-only strict preflight over the WHOLE tree (step 2 second pass): the
+    # step-6 copiers refuse a nested symlink / special file too, but by then the
+    # snapshot at step 5 has already mutated the store — so an offender must be
+    # discovered here, before anything is written. Crucially this covers the
+    # PAYLOAD, not just the carried overrides/ + versions/: iter_skill_payload_files
+    # SILENTLY DROPS symlinks, so a symlinked payload entry would be absent from
+    # the snapshot AND deleted with the old tree by the swap — a silent data loss
+    # returning ``applied``. Validating the whole tree refuses it instead
+    # (lstat-only, cheap even over a large version store). ``target_conflict``
+    # names the offender; an unreadable subtree fails closed as ``snapshot_failed``
+    # (we cannot safely preserve what we cannot read — never a raw traceback out
+    # of the result-coded engine).
     try:
-        if overrides_dir.is_dir():
-            validate_tree_strict(overrides_dir)
-        if versions_dir.is_dir():
-            validate_tree_strict(versions_dir)
+        validate_tree_strict(dst)
     except StrictTreeError as exc:
         return _refusal_for(
             plan,
             "target_conflict",
             skip_codes.TARGET_CONFLICT,
             f"the Store copy of skill '{plan.name}' cannot be carried unchanged: {exc}",
+        )
+    except OSError as exc:
+        return _refusal_for(
+            plan,
+            "snapshot_failed",
+            skip_codes.SNAPSHOT_FAILED,
+            f"could not read the current Store skill to preserve it before overwrite: {exc}",
         )
 
     # Step 3 — read the Store payload ONCE. The digest is the plan precondition

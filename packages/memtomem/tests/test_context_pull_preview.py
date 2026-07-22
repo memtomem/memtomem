@@ -295,17 +295,22 @@ def test_gate_scans_secret_under_versions_dir(home: Path, proj: Path) -> None:
     assert _cand(pv, "claude").gate_status == "blocked"
 
 
-def test_landing_group_splits_on_metadata_only_divergence(home: Path, proj: Path) -> None:
-    """Two candidates with identical payload but different top-level
-    ``versions.json`` land different trees → two groups → ambiguous. Proves §5
-    grouping is the full copier surface, not the payload."""
+def test_landing_group_ignores_metadata_only_divergence(home: Path, proj: Path) -> None:
+    """Two candidates with identical PAYLOAD but different top-level
+    ``versions.json`` land the SAME bytes (the §6 strip drops store-owned
+    metadata), so they group together — one distinct landing, not ambiguous, and
+    auto-source resolves. Grouping is over the payload surface, not the full
+    copier surface: forcing a source choice here would be spurious (ADR-0030 §10
+    / Codex Major). Gate A still scans the wide surface (see the versions/-secret
+    test above)."""
     body = _skill_body("s", "same payload")
     written = seed_multi_runtime(proj, "skills", "s", {"claude": body, "codex": body})
     (written["claude"].parent / "versions.json").write_text('{"a":1}', encoding="utf-8")
     (written["codex"].parent / "versions.json").write_text('{"b":2}', encoding="utf-8")
     pv = preview_pull("skills", "s", scope="project_shared", project_root=proj)
-    assert pv.distinct_landing_count == 2
-    assert pv.ambiguous is True
+    assert pv.distinct_landing_count == 1
+    assert pv.ambiguous is False
+    assert pv.auto_source == "claude"
 
 
 # ── error phases + fail-closed presence ──────────────────────────────────

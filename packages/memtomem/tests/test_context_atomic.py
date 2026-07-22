@@ -13,14 +13,19 @@ import pytest
 
 from memtomem.context import _atomic as _atomic_mod
 from memtomem.context._atomic import (
+    StrictTreeError,
     _file_lock,
     _fsync_fd,
     _lock_path_for,
     atomic_write_bytes,
     atomic_write_text,
+    copy_tree_strict,
     fsync_dir,
+    hardlink_tree_strict,
     iter_installed_files,
+    link_or_copy_file,
     rename_no_replace,
+    validate_tree_strict,
     write_tree_payload,
 )
 
@@ -521,3 +526,101 @@ class TestRenameNoReplace:
         rename_no_replace(src, dst)
         assert (dst / "f.md").read_text() == "new"
         assert not src.exists()
+
+
+class TestStrictTreeWalkers:
+    """The carry-then-delete strict walkers — REFUSE symlinks/special files
+    (unlike copy_tree_atomic's skip-and-warn), guard their root, and keep the
+    hardlink copy fallback durable (ADR-0030 PR-G4b + Codex gate)."""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+    def test_validate_refuses_a_nested_symlink(self, tmp_path: Path) -> None:
+        root = tmp_path / "tree"
+        (root / "sub").mkdir(parents=True)
+        (root / "ok.md").write_text("x")
+        (root / "sub" / "link.md").symlink_to(tmp_path / "outside.md")
+        with pytest.raises(StrictTreeError) as exc:
+            validate_tree_strict(root)
+        assert exc.value.path == root / "sub" / "link.md"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX FIFO")
+    def test_validate_refuses_a_fifo(self, tmp_path: Path) -> None:
+        root = tmp_path / "tree"
+        root.mkdir()
+        os.mkfifo(root / "pipe")
+        with pytest.raises(StrictTreeError):
+            validate_tree_strict(root)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+    def test_walkers_refuse_a_symlinked_root(self, tmp_path: Path) -> None:
+        """Codex Major 1: a symlinked ROOT must be refused, not followed — the
+        recursive walkers only lstat CHILDREN, so without a depth-zero guard the
+        link's target would be walked, escaping the named tree."""
+        real = tmp_path / "real"
+        (real).mkdir()
+        (real / "f.md").write_text("x")
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        for fn in (
+            lambda: validate_tree_strict(link),
+            lambda: copy_tree_strict(link, tmp_path / "cp"),
+            lambda: hardlink_tree_strict(link, tmp_path / "hl"),
+        ):
+            with pytest.raises(StrictTreeError):
+                fn()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+    def test_copy_strict_refuses_symlink_instead_of_skipping(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "real.md").write_text("x")
+        (src / "link.md").symlink_to(tmp_path / "outside.md")
+        with pytest.raises(StrictTreeError):
+            copy_tree_strict(src, tmp_path / "dst")
+
+    def test_copy_strict_mirrors_a_clean_tree(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        (src / "sub").mkdir(parents=True)
+        (src / "a.md").write_text("A")
+        (src / "sub" / "b.md").write_text("B")
+        copy_tree_strict(src, tmp_path / "dst", durable=True)
+        assert (tmp_path / "dst" / "a.md").read_text() == "A"
+        assert (tmp_path / "dst" / "sub" / "b.md").read_text() == "B"
+        # New inodes, not hardlinks.
+        assert (tmp_path / "dst" / "a.md").stat().st_ino != (src / "a.md").stat().st_ino
+
+    def test_hardlink_tree_links_files(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        (src / "v1").mkdir(parents=True)
+        (src / "v1" / "s.md").write_text("hist")
+        hardlink_tree_strict(src, tmp_path / "dst", durable=True)
+        # Same inode (hardlink), dirs recreated.
+        assert (tmp_path / "dst" / "v1" / "s.md").stat().st_ino == (
+            src / "v1" / "s.md"
+        ).stat().st_ino
+
+    def test_link_or_copy_fallback_is_fsynced_when_durable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex Blocker 2: when os.link fails cross-device, the copy2 fallback
+        must be fsynced under durable=True — else the swap deletes the original
+        and a power loss loses the copied version history."""
+        src = tmp_path / "src.md"
+        src.write_text("history")
+        dst = tmp_path / "dst.md"
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise OSError(errno.EXDEV, "cross-device")
+
+        monkeypatch.setattr(os, "link", _boom)
+        fsynced: list[str] = []
+        real_fsync = _atomic_mod._fsync_fd
+
+        def _spy(fd: int, *, full: bool) -> None:
+            fsynced.append("full" if full else "plain")
+            real_fsync(fd, full=full)
+
+        monkeypatch.setattr(_atomic_mod, "_fsync_fd", _spy)
+        link_or_copy_file(src, dst, durable=True)
+        assert dst.read_text() == "history"
+        assert "full" in fsynced  # the fallback copy was full_fsync'd

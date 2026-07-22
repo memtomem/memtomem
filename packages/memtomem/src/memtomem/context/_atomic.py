@@ -682,13 +682,28 @@ _HARDLINK_FALLBACK_ERRNOS: frozenset[int] = frozenset(
 )
 
 
-def link_or_copy_file(src: Path, dst: Path) -> None:
+def _full_fsync_file(path: Path) -> None:
+    """``F_FULLFSYNC`` (macOS) / ``fsync`` a file so its bytes survive a power cut."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        _fsync_fd(fd, full=True)
+    finally:
+        os.close(fd)
+
+
+def link_or_copy_file(src: Path, dst: Path, *, durable: bool = False) -> None:
     """Hardlink *src* → *dst*, falling back to :func:`shutil.copy2` on a
     cross-device or link-unsupported errno.
 
     NO ``st_dev`` pre-check: a Linux bind mount reports the same ``st_dev`` as
     its origin yet ``os.link`` across it returns ``EXDEV``, so the only reliable
     signal is the syscall's own errno. Any other ``OSError`` propagates.
+
+    A hardlink needs no per-file flush — it shares the source inode, whose data
+    is already durable. The COPY fallback writes a fresh inode, so ``durable``
+    fsyncs it: without that, a caller that fsyncs only directories afterward
+    (the version-store carry) could lose the copied bytes to a power cut once
+    the original is deleted by the swap.
     """
     try:
         os.link(src, dst)
@@ -697,13 +712,31 @@ def link_or_copy_file(src: Path, dst: Path) -> None:
             import shutil
 
             shutil.copy2(src, dst)
+            if durable:
+                _full_fsync_file(dst)
         else:
             raise
 
 
+def _require_strict_root(root: Path) -> None:
+    """Depth-zero guard for the strict walkers: the root itself must be a real
+    directory, not a symlink.
+
+    The recursive walks below only ``lstat`` a root's CHILDREN, so a symlinked
+    root would be followed and its target walked — silently escaping the tree
+    the caller named, exactly the traversal the strict posture exists to
+    prevent. Every public strict walker calls this first.
+    """
+    mode = os.lstat(root).st_mode
+    if stat.S_ISLNK(mode):
+        raise StrictTreeError(root, "refusing to walk a symlinked root")
+    if not stat.S_ISDIR(mode):
+        raise StrictTreeError(root, "strict walk root is not a directory")
+
+
 def validate_tree_strict(root: Path) -> None:
-    """Read-only preflight: raise :class:`StrictTreeError` if *root* holds a
-    symlink or a non-regular special file at any depth.
+    """Read-only preflight: raise :class:`StrictTreeError` if *root* — or any
+    entry beneath it — is a symlink or a non-regular special file.
 
     Directories and regular files pass; a symlink (even to a directory), FIFO,
     socket or device node is refused, naming the first offender. Run BEFORE an
@@ -713,12 +746,17 @@ def validate_tree_strict(root: Path) -> None:
     solely so the first discovery is read-only. Propagates ``OSError`` (fail
     closed on an unreadable subtree).
     """
+    _require_strict_root(root)
+    _validate_tree_strict(root)
+
+
+def _validate_tree_strict(root: Path) -> None:
     for entry in sorted(root.iterdir()):
         mode = os.lstat(entry).st_mode
         if stat.S_ISLNK(mode):
             raise StrictTreeError(entry, "refusing to carry a symlink")
         if stat.S_ISDIR(mode):
-            validate_tree_strict(entry)
+            _validate_tree_strict(entry)
         elif not stat.S_ISREG(mode):
             raise StrictTreeError(entry, "refusing to carry a non-regular file")
 
@@ -736,8 +774,9 @@ def copy_tree_strict(src: Path, dst: Path, *, mode: int = 0o644, durable: bool =
     ``durable`` upgrades each file write to ``full_fsync`` and fsyncs every
     directory this call created, deepest first — so the tree is on stable
     storage before a caller renames it into place. Raises
-    :class:`StrictTreeError` (offending entry) or ``OSError``.
+    :class:`StrictTreeError` (offending entry, or a symlinked root) or ``OSError``.
     """
+    _require_strict_root(src)
     dst.mkdir(parents=True, exist_ok=True)
     created: list[Path] = [dst]
     _copy_tree_strict(src, dst, mode=mode, durable=durable, created=created)
@@ -773,20 +812,22 @@ def hardlink_tree_strict(src: Path, dst: Path, *, durable: bool = False) -> None
     back to a copy on a cross-device / link-unsupported errno). Refuses symlinks
     and special files (:class:`StrictTreeError`), like :func:`copy_tree_strict`.
 
-    ``durable`` fsyncs every directory this call created, deepest first. The
-    linked files need no per-file fsync: they share inodes with an already
-    durable source (the version snapshot was written with ``full_fsync``); only
-    the new directory ENTRIES pointing at them must be flushed.
+    ``durable`` fsyncs every directory this call created, deepest first, and —
+    for any file that took the :func:`link_or_copy_file` COPY fallback — the
+    copied inode itself. A true hardlink needs no per-file fsync (it shares an
+    already durable source inode); only the new directory ENTRIES must be
+    flushed.
     """
+    _require_strict_root(src)
     dst.mkdir(parents=True, exist_ok=True)
     created: list[Path] = [dst]
-    _hardlink_tree_strict(src, dst, created=created)
+    _hardlink_tree_strict(src, dst, created=created, durable=durable)
     if durable:
         for directory in sorted(created, key=lambda p: len(p.parts), reverse=True):
             fsync_dir(directory)
 
 
-def _hardlink_tree_strict(src: Path, dst: Path, *, created: list[Path]) -> None:
+def _hardlink_tree_strict(src: Path, dst: Path, *, created: list[Path], durable: bool) -> None:
     for entry in sorted(src.iterdir()):
         st = os.lstat(entry)
         target = dst / entry.name
@@ -795,9 +836,9 @@ def _hardlink_tree_strict(src: Path, dst: Path, *, created: list[Path]) -> None:
         if stat.S_ISDIR(st.st_mode):
             target.mkdir(exist_ok=True)
             created.append(target)
-            _hardlink_tree_strict(entry, target, created=created)
+            _hardlink_tree_strict(entry, target, created=created, durable=durable)
         elif stat.S_ISREG(st.st_mode):
-            link_or_copy_file(entry, target)
+            link_or_copy_file(entry, target, durable=durable)
         else:
             raise StrictTreeError(entry, "refusing to carry a non-regular file")
 
