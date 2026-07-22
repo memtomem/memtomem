@@ -1000,6 +1000,9 @@ async def test_analysis_detects_all_drift_classes(doctor_env):
     assert by["db_coverage"].items == ["gamma.md"]
     assert by["stale_source"].severity == "error"
     assert by["stale_source"].items == [norm_path(mem_dir / "ghost.md")]
+    # #1928: an error-severity finding must name its remediation (the CLI's
+    # own vocabulary — `mm gc orphan-sources`, not the MCP tool name).
+    assert "run `mm gc orphan-sources --apply`" in by["stale_source"].summary
     assert by["convention_violation"].severity == "error"
     assert by["convention_violation"].items == [norm_path(mem_dir / "MEMORY.md")]
     assert by["cold_candidate"].severity == "info"
@@ -1543,6 +1546,8 @@ class TestCli:
         result = CliRunner().invoke(cli, ["memory", "doctor"])
         assert result.exit_code == 1  # stale_source is error-severity
         assert "no longer exist on disk" in result.output
+        # #1928: the rendered finding carries its own remediation command.
+        assert "mm gc orphan-sources --apply" in result.output
 
     def test_json_payload_shape(self, doctor_env, monkeypatch):
         config, mem_dir = doctor_env
