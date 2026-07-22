@@ -177,6 +177,21 @@ def test_opencode_plugin_matches_contract() -> None:
         assert compatibility in skill.read_text(encoding="utf-8")
 
 
+def test_opencode_package_lock_matches_contract() -> None:
+    """package-lock.json versions track the contract like package.json does.
+
+    ``npm publish`` reads package.json, but a lockfile left behind on a bump
+    ships a wrong version claim in-tree and breaks ``npm ci`` for anyone
+    developing the plugin (#1923 audit: the lockfile was unguarded).
+    """
+    contract = _contract()
+    lock = _json("packages/opencode-memtomem/package-lock.json")
+    expected = contract["plugins"]["opencode_version"]
+    assert lock["version"] == expected
+    assert lock["packages"][""]["version"] == expected
+    assert lock["name"] == contract["opencode"]["package"]
+
+
 def test_every_plugin_version_is_semver() -> None:
     contract = _contract()
     for version in contract["plugins"].values():
