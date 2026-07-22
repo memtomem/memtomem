@@ -752,6 +752,21 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             try:
                 staging = _stage_captured_tree(_payload_filtered(plan.captured), dst)
                 _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
+            except SwapRecoveryError as exc:
+                # A pending directory swap already claims this staging path
+                # (``_stage_captured_tree`` raises ``SwapRecoveryError`` when
+                # ``marker_owns_transient``). It is an ``OSError`` subclass, so
+                # it MUST precede the broad ``except OSError`` below — otherwise
+                # a wedged swap is demoted to ``write_failed``/``target_conflict``
+                # and the operator never sees ``swap_recovery_pending`` (ADR-0030
+                # §10; supertype-interception guard, G4a-3c). Same status the
+                # prelude refusal at the outer ``try`` emits.
+                return _refusal_for(
+                    plan,
+                    "swap_recovery_pending",
+                    skip_codes.SWAP_RECOVERY_PENDING,
+                    swap_failure_text(exc),
+                )
             except OSError as exc:
                 if _promote_race_conflict(exc):
                     return _refusal_for(

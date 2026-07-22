@@ -734,6 +734,40 @@ def test_write_failed_on_promote_error_no_staging_leak(
         assert leftovers == []
 
 
+def test_staging_swap_collision_maps_to_swap_recovery_pending(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G4a-3c: ``_stage_captured_tree`` raises ``SwapRecoveryError`` when a
+    pending directory swap already claims the staging path (``marker_owns_
+    transient``). That is an ``OSError`` subclass, so before the fix the inner
+    ``except OSError`` demoted it to ``write_failed``; the inserted
+    ``except SwapRecoveryError`` (which must precede the OSError arm) surfaces it
+    as ``swap_recovery_pending`` instead — an operator's problem, not a write
+    failure. ``fired`` keeps the pin honest: without the double the status is
+    ``applied``, so both assertions would hold vacuously.
+    """
+    from memtomem.context import pull_apply
+    from memtomem.context._dir_swap import SwapRecoveryError
+
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "v")})
+    fired: list[bool] = []
+
+    def _wedged(*_a: object, **_k: object) -> None:
+        fired.append(True)
+        raise SwapRecoveryError(
+            errno.EBUSY, "a pending directory swap already claims this staging path"
+        )
+
+    monkeypatch.setattr(pull_apply, "_stage_captured_tree", _wedged)
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert fired == [True]
+    assert res.status == "swap_recovery_pending"
+    assert res.reason_code == "swap_recovery_pending"
+    assert not _store_skill_dir(proj, "s").exists()
+
+
 def test_post_promote_reap_failure_still_applies_and_records(
     home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
