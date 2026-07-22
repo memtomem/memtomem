@@ -2308,6 +2308,29 @@ class TestSessions:
         assert resp.status_code == 200
         assert resp.json()["sessions"][0]["metadata"] == {}
 
+    async def test_get_events_routes_a_slash_bearing_session_id(self, app, client: AsyncClient):
+        """An external-proposal id embeds a caller-supplied ``source`` that can
+        contain ``/`` (``formation.py``). The ``:path`` converter must route it
+        to the handler intact rather than 404 on the slash."""
+        from urllib.parse import quote
+
+        session_id = "external:proj/sub:0123456789abcdef01234567"
+        app.state.storage.get_session_events.return_value = [
+            {
+                "event_type": "add",
+                "content": "x",
+                "chunk_ids": [],
+                "created_at": "2026-01-01T00:00:00Z",
+                "metadata": {},
+            }
+        ]
+
+        resp = await client.get(f"/api/sessions/{quote(session_id, safe='/')}/events")
+
+        assert resp.status_code == 200
+        assert resp.json()["session_id"] == session_id
+        app.state.storage.get_session_events.assert_awaited_with(session_id)
+
 
 # ---------------------------------------------------------------------------
 # POST /api/add

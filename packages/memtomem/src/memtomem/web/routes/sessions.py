@@ -28,12 +28,18 @@ async def list_sessions(
     return SessionsListResponse(sessions=sessions, total=len(sessions))
 
 
-@router.get("/{session_id}/events", response_model=SessionEventsResponse)
+@router.get("/{session_id:path}/events", response_model=SessionEventsResponse)
 async def get_session_events(
     session_id: str,
     storage=Depends(get_storage),
 ) -> SessionEventsResponse:
-    """Get events for a specific session."""
+    """Get events for a specific session.
+
+    ``:path`` rather than the default string converter: an external-proposal
+    session id embeds a caller-supplied ``source`` (``formation.py``) that can
+    contain ``/``, and the default converter 404s on those. The id is only ever
+    a SQL parameter here, never a filesystem path, so matching slashes is safe.
+    """
     events = await storage.get_session_events(session_id)
     out = [SessionEventOut(**e) for e in events]
     return SessionEventsResponse(session_id=session_id, events=out, total=len(out))
