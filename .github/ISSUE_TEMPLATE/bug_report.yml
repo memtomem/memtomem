@@ -72,7 +72,7 @@ body:
     attributes:
       label: memtomem version
       description: Output of `mm --version` (or `uv run mm --version` in a dev checkout).
-      placeholder: "0.1.33"
+      placeholder: "x.y.z"
     validations:
       required: true
 
