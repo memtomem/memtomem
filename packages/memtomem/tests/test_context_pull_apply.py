@@ -440,8 +440,12 @@ def test_skills_overwrite_survives_hardlink_fallback(
     # The snapshot was carried into the swapped-in tree via the copy fallback.
     assert (d / "versions" / "v1" / "SKILL.md").read_text(encoding="utf-8").count("old store") == 1
     assert (d / "versions.json").is_file()
-    # The fallback copies (versions.json + the v1 tree files) were durably fsynced.
-    assert "versions.json" in fsynced
+    # EVERY fallback copy was durably fsynced — both the manifest AND the nested
+    # version-tree file (v1/SKILL.md). Asserting only versions.json would pass
+    # even if the recursive hardlink walker dropped durable=True, since the
+    # manifest link fsyncs independently. On a first overwrite the carried version
+    # store is exactly {versions.json, versions/v1/SKILL.md}.
+    assert set(fsynced) == {"versions.json", "SKILL.md"}
 
 
 def test_skills_overwrite_dst_vanishes_mid_preflight_is_plan_stale(

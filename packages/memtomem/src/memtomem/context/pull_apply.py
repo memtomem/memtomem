@@ -880,7 +880,9 @@ def _overwrite_skill_tree(
     try:
         dst_mode = os.lstat(dst).st_mode
         if not stat.S_ISDIR(dst_mode):
-            raise StrictTreeError(dst, f"the Store entry for skill '{plan.name}' is not a directory")
+            raise StrictTreeError(
+                dst, f"the Store entry for skill '{plan.name}' is not a directory"
+            )
         gate_reason = _carried_tree_type_gate(dst)
         if gate_reason is not None:
             raise StrictTreeError(dst, gate_reason)
