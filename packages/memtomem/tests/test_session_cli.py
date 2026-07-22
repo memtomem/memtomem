@@ -384,6 +384,76 @@ class TestSessionWrapNamespaceDerivation:
         assert call_args[2] == "default"
 
 
+class TestSessionEndSummaryProvenance:
+    """``mm session end`` and ``mm session wrap`` record a summary's origin
+    as ``manual`` (caller-supplied or CLI-synthesized, not the server's
+    write-provenance selection) — but only when there is a summary to
+    describe. Ending with none leaves the origin absent (#1913)."""
+
+    @staticmethod
+    def _end_spy_comp(events=None):
+        end_session = AsyncMock(return_value=None)
+        comp = SimpleNamespace(
+            storage=SimpleNamespace(
+                end_session=end_session,
+                get_session_events=AsyncMock(return_value=list(events or [])),
+                scratch_cleanup=AsyncMock(return_value=0),
+                create_session=AsyncMock(return_value=None),
+            )
+        )
+        return comp, end_session
+
+    @staticmethod
+    def _end_metadata(end_session: AsyncMock) -> dict:
+        return end_session.await_args.args[2]
+
+    def test_explicit_summary_records_manual(self, runner, monkeypatch):
+        comp, end_session = self._end_spy_comp()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-1")
+        monkeypatch.setattr("memtomem.cli.session_cmd._clear_current_session", lambda: None)
+
+        result = runner.invoke(cli, ["session", "end", "--summary", "hand notes"])
+        assert result.exit_code == 0, result.output
+        assert self._end_metadata(end_session)["summary_provenance"] == "manual"
+
+    def test_auto_built_summary_records_manual(self, runner, monkeypatch):
+        comp, end_session = self._end_spy_comp(
+            events=[{"event_type": "add"}, {"event_type": "add"}]
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-1")
+        monkeypatch.setattr("memtomem.cli.session_cmd._clear_current_session", lambda: None)
+
+        result = runner.invoke(cli, ["session", "end", "--auto"])
+        assert result.exit_code == 0, result.output
+        assert self._end_metadata(end_session)["summary_provenance"] == "manual"
+
+    def test_no_summary_records_no_provenance(self, runner, monkeypatch):
+        comp, end_session = self._end_spy_comp()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-1")
+        monkeypatch.setattr("memtomem.cli.session_cmd._clear_current_session", lambda: None)
+
+        result = runner.invoke(cli, ["session", "end"])
+        assert result.exit_code == 0, result.output
+        assert "summary_provenance" not in self._end_metadata(end_session)
+
+    def test_wrap_synthesized_summary_records_manual(self, runner, monkeypatch):
+        comp, end_session = self._end_spy_comp()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._write_current_session", lambda _id: None)
+        monkeypatch.setattr("memtomem.cli.session_cmd._clear_current_session", lambda: None)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
+
+        result = runner.invoke(cli, ["session", "wrap", "--", "true"])
+        assert result.exit_code == 0, result.output
+        assert self._end_metadata(end_session)["summary_provenance"] == "manual"
+
+
 class TestSessionStartIdempotent:
     """``mm session start --idempotent`` / ``--auto-end-stale`` / ``--json``
     are the SessionStart hook primitives defined in

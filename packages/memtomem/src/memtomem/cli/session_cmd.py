@@ -386,7 +386,16 @@ async def _end(session_id: str, summary: str | None, auto_summary: bool) -> tupl
                 else "Session ended (no events)"
             )
 
-        metadata = {"event_count": len(events)}
+        metadata: dict = {"event_count": len(events)}
+        # A summary here is caller-supplied (``--summary``) or CLI-synthesized
+        # from the event counts (``--auto``) — either way not the server's
+        # write-provenance selection, so it is recorded as ``manual``. Stamp
+        # only when there is text: ending with neither flag leaves the origin
+        # absent (unknown), never a marker without a summary.
+        if summary:
+            from memtomem.server.tools._provenance import SUMMARY_PROVENANCE_MANUAL
+
+            metadata["summary_provenance"] = SUMMARY_PROVENANCE_MANUAL
         await comp.storage.end_session(session_id, summary, metadata)
 
     _clear_current_session()
@@ -724,5 +733,11 @@ async def _wrap_end(session_id: str, summary: str, exit_code: int) -> None:
 
     async with cli_components() as comp:
         events = await comp.storage.get_session_events(session_id)
-        metadata = {"event_count": len(events), "exit_code": exit_code}
+        metadata: dict = {"event_count": len(events), "exit_code": exit_code}
+        # ``summary`` is always the synthesized "Command: … Exit code: …"
+        # line, never empty here — a CLI-authored summary, recorded manual.
+        if summary:
+            from memtomem.server.tools._provenance import SUMMARY_PROVENANCE_MANUAL
+
+            metadata["summary_provenance"] = SUMMARY_PROVENANCE_MANUAL
         await comp.storage.end_session(session_id, summary, metadata)

@@ -63,6 +63,22 @@ logger = logging.getLogger(__name__)
 
 PROVENANCE_KIND = "write-v1"
 
+# How a persisted session summary was chosen. Written on the session row so a
+# consumer can tell an exactly-recorded summary from an inferred one without
+# re-deriving it. Absence means unknown/unrecorded — a legacy row, a producer
+# not yet instrumented, or a session that ended with no summary — and carries
+# no claim either way.
+#
+# ``EXACT``    the summary text came from the write-provenance chunk set,
+#              selected by recorded id.
+# ``FALLBACK`` the write-provenance path was unavailable (marker absent or
+#              incomplete, ids malformed, or a count/hydration shortfall) and
+#              the summary came from the namespace/time-window scan instead.
+# ``MANUAL``   the summary text was supplied by the caller, not derived here.
+SUMMARY_PROVENANCE_EXACT = "exact"
+SUMMARY_PROVENANCE_FALLBACK = "fallback"
+SUMMARY_PROVENANCE_MANUAL = "manual"
+
 # Cap on ids carried by a single event. ``chunk_ids`` is TEXT, so 10k
 # UUID strings (~370 KB) fits without a row-size problem, and a write
 # that large already trips the summary's own input-size gate. The cost

@@ -7,6 +7,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 from uuid import UUID, uuid4
 
 from memtomem.constants import (
@@ -20,7 +21,12 @@ from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.tools._provenance import PROVENANCE_KIND
+from memtomem.server.tools._provenance import (
+    PROVENANCE_KIND,
+    SUMMARY_PROVENANCE_EXACT,
+    SUMMARY_PROVENANCE_FALLBACK,
+    SUMMARY_PROVENANCE_MANUAL,
+)
 from memtomem.summarization import SessionTooLargeError, summarize_session
 
 logger = logging.getLogger(__name__)
@@ -439,7 +445,35 @@ async def _end_session_phase(
     if not drained:
         end_metadata["provenance_incomplete"] = True
 
-    await app.storage.end_session(session_id, summary, end_metadata)
+    # The summary text reaches three surfaces — the API-exposed session-row
+    # ``summary`` column, the archive file, and the tool response — so one
+    # fail-closed redaction decision gates all three. It scans the exact
+    # archive payload (frontmatter included: ``agent_id`` is a valid-but-
+    # possibly-secret-shaped field), or the raw summary when no memory dir
+    # is configured and only the row can receive it.
+    summary_blocked = False
+    prepared_archive: _SummaryArchive | None = None
+
+    # Manual path: known before the row write, so preflight the guard and
+    # withhold both the summary and its marker on a block — a blocked
+    # summary must not reach the row any more than the archive. On a pass
+    # the summary and ``manual`` marker land in this one durable write.
+    row_summary = summary
+    if summary:
+        summary_blocked, prepared_archive = _guard_and_prepare_summary(
+            app,
+            session_id=session_id,
+            agent_id=agent_id,
+            summary=summary,
+            event_counts=event_counts,
+            force_unsafe=force_unsafe,
+        )
+        if summary_blocked:
+            row_summary = None
+        else:
+            end_metadata["summary_provenance"] = SUMMARY_PROVENANCE_MANUAL
+
+    await app.storage.end_session(session_id, row_summary, end_metadata)
 
     # Read the final row after end_session merged ``end_metadata``. In
     # particular, a drain timeout writes ``provenance_incomplete`` above;
@@ -457,6 +491,7 @@ async def _end_session_phase(
             effective_summary,
             auto_summary_skip_reason,
             auto_source_chunks,
+            auto_summary_provenance,
         ) = await _maybe_auto_summarize(
             app,
             session_id=session_id,
@@ -464,18 +499,56 @@ async def _end_session_phase(
             events=events,
             transition_incomplete=not drained,
         )
-
-    summary_chunk_line: str | None = None
-    summary_chunk_id = None
-    if effective_summary:
-        try:
-            summary_chunk_line, summary_chunk_id = await _persist_session_summary_chunk(
+        # Auto path: end_session above wrote summary=None (the text did not
+        # exist yet). Guard it, then make the row authoritative in one atomic
+        # UPDATE — but only on a pass. Finalizing a blocked summary would leak
+        # secret-shaped model output past the guard into the API-exposed
+        # column; on a block the row stays absent (nothing to leak), and on a
+        # finalize failure it also stays absent — an honest unknown, never a
+        # provenance marker over a summary the row does not hold.
+        if effective_summary:
+            summary_blocked, prepared_archive = _guard_and_prepare_summary(
                 app,
                 session_id=session_id,
                 agent_id=agent_id,
                 summary=effective_summary,
                 event_counts=event_counts,
                 force_unsafe=force_unsafe,
+            )
+            if not summary_blocked and auto_summary_provenance is not None:
+                try:
+                    finalized = await app.storage.finalize_session_summary(
+                        session_id,
+                        effective_summary,
+                        {"summary_provenance": auto_summary_provenance},
+                    )
+                    if not finalized:
+                        # The row vanished between end_session and here —
+                        # external tampering or a backend bug. Nothing
+                        # contradictory persists (there is no row), but the
+                        # generated summary was silently dropped, so say so.
+                        logger.warning(
+                            "session_summary_finalize_no_row session_id=%s",
+                            session_id,
+                        )
+                except Exception:
+                    logger.warning(
+                        "session_summary_finalize_failed session_id=%s",
+                        session_id,
+                        exc_info=True,
+                    )
+
+    # Archive file: the same guarded payload, written only on a pass. The
+    # guard already scanned ``prepared_archive.content``, so the write does
+    # not re-scan.
+    summary_chunk_line: str | None = None
+    summary_chunk_id = None
+    if effective_summary and summary_blocked:
+        summary_chunk_line = "Session summary blocked by the redaction guard; no file was written."
+    elif effective_summary and prepared_archive is not None:
+        try:
+            summary_chunk_line, summary_chunk_id = await _write_summary_archive(
+                app, prepared_archive
             )
         except Exception:
             logger.warning(
@@ -514,7 +587,7 @@ async def _end_session_phase(
     if not drained:
         # Say so rather than presenting a short count as complete.
         lines.append("- Warning: writes still in flight — event counts may be short")
-    if effective_summary:
+    if effective_summary and not summary_blocked:
         prefix = "Summary" if summary else "Auto summary"
         lines.append(f"- {prefix}: {effective_summary[:100]}...")
     elif auto_summary_skip_reason:
@@ -533,7 +606,7 @@ async def _maybe_auto_summarize(
     session_row: dict | None,
     events: list[dict],
     transition_incomplete: bool,
-) -> tuple[str | None, str | None, list]:
+) -> tuple[str | None, str | None, list, str | None]:
     """Run the Phase B auto-summary path when prerequisites are met.
 
     A complete ``write-v1`` session selects its marked event ids exactly.
@@ -541,15 +614,19 @@ async def _maybe_auto_summarize(
     inference. A marked session with no write events is authoritative empty,
     not a request to widen back to the legacy scan.
 
-    Returns ``(summary_text, skip_reason, source_chunks)``. When the
-    auto path produced text, ``skip_reason`` is ``None`` and
-    ``source_chunks`` carries the chunks fed to the LLM (newest first)
-    so the caller can write Phase B-2 ``chunk_links`` rows. When the
-    path was skipped, ``summary_text`` is ``None``, ``skip_reason``
-    carries a short label suitable for the tool response (``"disabled"``,
-    ``"no llm"``, ``"no session row"``, ``"no started_at"``,
-    ``"below min_chunks"``, ``"too large"``, ``"empty output"``, or
-    ``"llm error"``), and ``source_chunks`` is an empty list.
+    Returns ``(summary_text, skip_reason, source_chunks, summary_provenance)``.
+    When the auto path produced text, ``skip_reason`` is ``None``,
+    ``source_chunks`` carries the chunks fed to the LLM (newest first) so
+    the caller can write Phase B-2 ``chunk_links`` rows, and
+    ``summary_provenance`` is :data:`SUMMARY_PROVENANCE_EXACT` when the
+    write-provenance ids were used or :data:`SUMMARY_PROVENANCE_FALLBACK`
+    when the namespace/time-window scan was used instead. When the path was
+    skipped, ``summary_text`` is ``None``, ``skip_reason`` carries a short
+    label suitable for the tool response (``"disabled"``, ``"no llm"``,
+    ``"no session row"``, ``"no started_at"``, ``"below min_chunks"``,
+    ``"too large"``, ``"empty output"``, or ``"llm error"``),
+    ``source_chunks`` is an empty list, and ``summary_provenance`` is
+    ``None``.
 
     Failures inside the LLM call are caught and surfaced as
     ``"llm error"`` so a misconfigured provider does not block
@@ -557,14 +634,14 @@ async def _maybe_auto_summarize(
     """
     cfg = app.config.session_summary
     if not cfg.auto:
-        return None, "disabled", []
+        return None, "disabled", [], None
 
     llm = app.llm_provider
     if llm is None:
-        return None, "no llm", []
+        return None, "no llm", [], None
 
     if session_row is None:
-        return None, "no session row", []
+        return None, "no session row", [], None
 
     # ADR-0011 PR-D round 9: thread project context onto the always-on
     # scope filter for both provenance recall and the legacy namespace
@@ -611,7 +688,7 @@ async def _maybe_auto_summarize(
                 )
                 use_provenance = False
             elif chunk_count < cfg.min_chunks:
-                return None, "below min_chunks", []
+                return None, "below min_chunks", [], None
             else:
                 chunks = await app.storage.recall_chunks(
                     chunk_ids=chunk_ids,
@@ -636,7 +713,7 @@ async def _maybe_auto_summarize(
         started_at_str = session_row.get("started_at")
         namespace = session_row.get("namespace") or "default"
         if not started_at_str:
-            return None, "no started_at", []
+            return None, "no started_at", [], None
 
         try:
             started_at = datetime.fromisoformat(started_at_str)
@@ -646,7 +723,7 @@ async def _maybe_auto_summarize(
                 session_id,
                 started_at_str,
             )
-            return None, "no started_at", []
+            return None, "no started_at", [], None
         if started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=timezone.utc)
 
@@ -658,7 +735,7 @@ async def _maybe_auto_summarize(
         )
 
     if len(chunks) < cfg.min_chunks:
-        return None, "below min_chunks", []
+        return None, "below min_chunks", [], None
 
     try:
         summary = await summarize_session(
@@ -670,18 +747,19 @@ async def _maybe_auto_summarize(
         )
     except SessionTooLargeError as exc:
         logger.info("auto_summary_skipped session_id=%s reason=%s", session_id, exc)
-        return None, "too large", []
+        return None, "too large", [], None
     except Exception:
         logger.warning(
             "auto_summary_llm_failed session_id=%s",
             session_id,
             exc_info=True,
         )
-        return None, "llm error", []
+        return None, "llm error", [], None
 
     if not summary:
-        return None, "empty output", []
-    return summary, None, chunks
+        return None, "empty output", [], None
+    provenance = SUMMARY_PROVENANCE_EXACT if use_provenance else SUMMARY_PROVENANCE_FALLBACK
+    return summary, None, chunks, provenance
 
 
 def _collect_provenance_chunk_ids(events: list[dict]) -> tuple[list[UUID], str | None]:
@@ -731,42 +809,42 @@ def _collect_provenance_chunk_ids(events: list[dict]) -> tuple[list[UUID], str |
     return chunk_ids, None
 
 
-async def _persist_session_summary_chunk(
+class _SummaryArchive(NamedTuple):
+    """The exact bytes a session summary would write to its archive file,
+    plus where. Built once so the redaction guard scans the same payload the
+    write persists — including the frontmatter, where ``agent_id`` is a
+    valid-but-possibly-secret-shaped field the raw summary text does not
+    carry."""
+
+    content: str
+    target: Path
+    namespace: str
+
+
+def _prepare_summary_archive(
     app: AppContext,
     *,
     session_id: str,
     agent_id: str | None,
     summary: str,
     event_counts: dict[str, int],
-    force_unsafe: bool = False,
-) -> tuple[str | None, UUID | None]:
-    """Promote a session summary to a first-class chunk.
-
-    Writes the markdown file at
-    ``<memory_dir>/sessions/<YYYY-MM>/<session_id>.md`` and indexes it
-    under ``archive:session:<session_id>``. The ``archive:`` prefix is
-    a default system namespace, so the chunk is hidden from
-    ``mem_search`` unless the caller passes an explicit
-    ``namespace_filter``. Returns ``(status_line, summary_chunk_id)``;
-    both are ``None`` when no memory directory is configured or when
-    the indexer rejected the file (zero chunks). When the summary
-    body landed as multiple chunks (uncommon for a short narrative),
-    the returned id is the first one — Phase B-2's link writer attaches
-    its rows to that anchor.
-    """
+) -> _SummaryArchive | None:
+    """Build the archive payload for a session summary, or ``None`` when no
+    memory dir is configured (a project-only setup writes no archive; the
+    row still receives the summary on a guard pass)."""
     memory_dirs = app.config.indexing.memory_dirs
     if not memory_dirs:
-        return None, None
+        return None
 
-    # Validate the derived namespace before doing any I/O so an invalid
-    # session_id (defensive — uuid4 is safe in practice) can't leave a
-    # half-written file behind.
+    # Validate the derived namespace before building a target so an invalid
+    # session_id (defensive — uuid4 is safe in practice) surfaces here
+    # rather than half-way through a write.
     namespace = f"archive:session:{session_id}"
     validate_namespace(namespace)
 
-    # Primary memory dir: when multiple are configured, summaries land
-    # under the first one. Keeps the location predictable across runs;
-    # users with multi-dir setups can re-home via memory_dirs ordering.
+    # Primary memory dir: when multiple are configured, summaries land under
+    # the first one. Keeps the location predictable across runs; users with
+    # multi-dir setups can re-home via memory_dirs ordering.
     base = Path(memory_dirs[0]).expanduser().resolve()
     now = datetime.now(timezone.utc)
     target = base / "sessions" / now.strftime("%Y-%m") / f"{session_id}.md"
@@ -779,42 +857,108 @@ async def _persist_session_summary_chunk(
         event_total=event_total,
         summary=summary,
     )
+    return _SummaryArchive(content=content, target=target, namespace=namespace)
 
+
+def _guard_and_prepare_summary(
+    app: AppContext,
+    *,
+    session_id: str,
+    agent_id: str | None,
+    summary: str,
+    event_counts: dict[str, int],
+    force_unsafe: bool,
+) -> tuple[bool, _SummaryArchive | None]:
+    """One fail-closed redaction decision for a session summary, plus the
+    archive payload it scanned.
+
+    Returns ``(blocked, prepared)``. The scan covers the exact bytes the
+    archive would write (``prepared.content``, frontmatter included) when a
+    memory dir is configured, or the raw summary when none is — the only
+    surface then is the API-exposed row. This is a dedicated step, not a
+    byproduct of the best-effort archive write, so an exception in that
+    write cannot swallow the decision. **Fail-closed**: any exception
+    building the payload, resolving scope, or scanning returns
+    ``(True, None)`` — proving a summary safe is a precondition for
+    persisting it, and an error is not a pass.
+
+    Scope follows where the archive would land: a project memory dir makes
+    it ``project_shared`` (git-tracked, where the force-unsafe valve is
+    hard-refused), otherwise ``user``.
+    """
     from memtomem.config import classify_scope
-    from memtomem.context._atomic import atomic_write_text
     from memtomem.privacy import enforce_write_guard
 
-    scope, _ = classify_scope(target, app.config.indexing.project_memory_dirs)
-    guard = enforce_write_guard(
-        content,
-        surface="mcp_session_end",
-        force_unsafe=force_unsafe,
-        scope=scope,
-        audit_context={"session_id": session_id},
-    )
-    if guard.decision.startswith("blocked"):
-        return (
-            "Session summary blocked by the redaction guard; no file was written.",
-            None,
+    try:
+        prepared = _prepare_summary_archive(
+            app,
+            session_id=session_id,
+            agent_id=agent_id,
+            summary=summary,
+            event_counts=event_counts,
         )
-    await asyncio.to_thread(atomic_write_text, target, content, 0o600)
-    stats = await app.index_engine.index_file(target, namespace=namespace, already_scanned=True)
+        if prepared is None:
+            scan_text = summary
+            scope = "user"
+        else:
+            scan_text = prepared.content
+            scope, _ = classify_scope(prepared.target, app.config.indexing.project_memory_dirs)
+        guard = enforce_write_guard(
+            scan_text,
+            surface="mcp_session_end",
+            force_unsafe=force_unsafe,
+            scope=scope,
+            audit_context={"session_id": session_id},
+        )
+    except Exception:
+        logger.warning(
+            "session_summary_guard_errored_failing_closed session_id=%s",
+            session_id,
+            exc_info=True,
+        )
+        return True, None
+    return guard.decision.startswith("blocked"), prepared
+
+
+async def _write_summary_archive(
+    app: AppContext,
+    prepared: _SummaryArchive,
+) -> tuple[str | None, UUID | None]:
+    """Persist a pre-built, already-guarded summary archive as a chunk.
+
+    The caller ran :func:`_guard_and_prepare_summary` and only reaches here
+    on a pass, so this does no redaction scan of its own (``already_scanned``
+    on the index call). Writes the markdown file and indexes it under
+    ``archive:session:<session_id>`` (an ``archive:`` default system
+    namespace, hidden from ``mem_search`` without an explicit
+    ``namespace_filter``). Returns ``(status_line, summary_chunk_id)``; both
+    ``None`` when the indexer rejected the file (zero chunks). A body that
+    landed as multiple chunks (uncommon for a short narrative) yields the
+    first id — Phase B-2's link writer anchors its rows there.
+    """
+    from memtomem.context._atomic import atomic_write_text
+
+    await asyncio.to_thread(atomic_write_text, prepared.target, prepared.content, 0o600)
+    stats = await app.index_engine.index_file(
+        prepared.target, namespace=prepared.namespace, already_scanned=True
+    )
     app.search_pipeline.invalidate_cache()
 
     if not stats.indexed_chunks:
         # File written but indexer produced no chunks (empty body, dedup
-        # collision, or a chunker reject). Surface the path so an
-        # operator can investigate; suppress the misleading "0 chunks"
-        # status line in the tool response.
+        # collision, or a chunker reject). Surface the path so an operator
+        # can investigate; suppress the misleading "0 chunks" status line.
         logger.warning(
-            "session_summary_chunk_indexed_zero session_id=%s path=%s",
-            session_id,
-            target,
+            "session_summary_chunk_indexed_zero path=%s",
+            prepared.target,
         )
         return None, None
 
     summary_chunk_id = stats.new_chunk_ids[0] if stats.new_chunk_ids else None
-    return f"- Summary chunk: {namespace} ({stats.indexed_chunks} chunks)", summary_chunk_id
+    return (
+        f"- Summary chunk: {prepared.namespace} ({stats.indexed_chunks} chunks)",
+        summary_chunk_id,
+    )
 
 
 async def _write_summary_links(
