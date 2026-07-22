@@ -430,6 +430,7 @@ def test_skills_overwrite_refuses_symlinked_payload_file(home: Path, proj: Path)
     assert "old store" in _store_skill_text(proj, "s")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="colon is illegal in a Windows filename")
 def test_skills_pull_non_portable_runtime_filename_is_landing_error(home: Path, proj: Path) -> None:
     """Codex Major 2: a runtime copy carrying a non-portable payload path (a
     ``:`` segment) is refused in PREPARE as a landing_error — never a raw
@@ -444,6 +445,7 @@ def test_skills_pull_non_portable_runtime_filename_is_landing_error(home: Path, 
     assert any(c.content_status == "landing_error" for c in out.candidates)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="colon is illegal in a Windows filename")
 def test_skills_overwrite_non_portable_runtime_filename_takes_no_snapshot(
     home: Path, proj: Path
 ) -> None:
