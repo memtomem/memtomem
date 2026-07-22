@@ -224,9 +224,13 @@ mem_decay_expire(max_age_days=90)                   # delete (dry_run=True by de
 Remove chunks whose source files have been deleted:
 
 ```
-mem_do(action="cleanup_orphans")                    # preview (dry_run=True)
-mem_do(action="cleanup_orphans", params={"dry_run": false})  # delete
+mm gc orphan-sources             # preview (dry-run)
+mm gc orphan-sources --apply     # delete, with a confirmation prompt
 ```
+
+Over MCP, the same cleanup is `mem_do(action="cleanup_orphans")` for the
+preview and `mem_do(action="cleanup_orphans", params={"dry_run": false})` to
+delete.
 
 ### Memory hygiene — `mm memory doctor`
 
