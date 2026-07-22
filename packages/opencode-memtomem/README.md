@@ -4,14 +4,22 @@ Safe, configuration-only memtomem integration for OpenCode 1.17.18 through the
 current v1 line. It adds an exact-pinned local MCP server, six slash commands,
 and three read-only skills. It does not add event hooks or automatic indexing.
 
-## Current status
+## Install
 
-The published npm release is `opencode-memtomem@0.1.1`; this source tree is
-version `0.1.2` (bundling core `0.3.12`), which is not on npm yet. Do not use
-an `opencode plugin add` command; OpenCode loads npm plugins from the singular
-`plugin` array in `opencode.json`.
+The published npm release is `opencode-memtomem@0.1.2` (bundling core
+`0.3.12`). Do not use an `opencode plugin add` command; OpenCode loads npm
+plugins from the singular `plugin` array in `opencode.json`:
 
-For a released memtomem installation, configure the local MCP server now:
+```json
+{"plugin": ["opencode-memtomem@0.1.2"]}
+```
+
+Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
+`uvx` must be available on `PATH`; the plugin starts the exact-pinned
+`memtomem[all]==0.3.12` runtime on demand.
+
+If you only need the MCP tools — without the bundled commands and skills —
+configure the local MCP server directly instead:
 
 ```json
 {
@@ -27,16 +35,6 @@ For a released memtomem installation, configure the local MCP server now:
   }
 }
 ```
-
-After `0.1.2` is published, the plugin form will be:
-
-```json
-{"plugin": ["opencode-memtomem@0.1.2"]}
-```
-
-Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
-`uvx` must be available on `PATH`. The manual configuration above starts the
-exact-pinned `memtomem[all]==0.3.12` runtime on demand.
 
 The plugin supports macOS, Linux, and Windows through WSL. Native Windows has
 not been verified.
