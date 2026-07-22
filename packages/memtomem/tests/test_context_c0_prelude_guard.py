@@ -362,10 +362,13 @@ def discover_sites() -> list[_Site]:
 #: how an unexamined site sneaks in wearing a classification.
 C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
     # ── RUNS_SWAP_PRELUDE — C0 over a skills canonical ──────────────────
-    ("context/pull_apply.py", "_commit_skills", 0, "canonical_sidecar_lock"): (
+    ("context/pull_apply.py", "_commit_skills", 0, "canonical_lock_shared_budget"): (
         RUNS_SWAP_PRELUDE,
         "first",
-        "Pull commit writes the skills canonical; wired in G4a-3a.",
+        "Pull commit writes the skills canonical (new + overwrite); prelude leads "
+        "the locked body, then the overwrite branch forwards the shared C0→C1 "
+        "budget to the snapshot. Was canonical_sidecar_lock until PR-G4b needed "
+        "the remaining-budget callable for create_tree_version.",
     ),
     ("context/skills.py", "copy_skill", 0, "_file_lock"): (
         RUNS_SWAP_PRELUDE,

@@ -9,8 +9,8 @@ and fan-out would push internal metadata into runtimes. §10 resolves it with
 
 * :func:`read_skill_tree` — the **WIDE copier surface**: every byte a copy
   would move, Store-owned metadata included. The ingress Gate-A privacy scan
-  and the §5 landing grouping use this one, because a secret hiding under
-  ``overrides/`` would still be copied and must still be caught.
+  uses this one, because a secret hiding under ``overrides/`` would still be
+  copied into the transaction and must still be caught.
 * :func:`iter_skill_payload_files` — the **NARROW payload surface**: the
   artifact *content*, excluding the Store-owned top-level ``overrides/`` /
   ``versions/`` / ``versions.json`` (plus that manifest's lock/temp sidecars)
@@ -99,8 +99,9 @@ def read_skill_tree(root: Path) -> list[tuple[str, bytes]]:
     """Full copier surface of a skill dir as sorted ``(posix_relpath, bytes)``.
 
     The WIDE surface (see the module docstring): uses the copier-surface
-    iterator so gate scanning and §5 grouping see the exact bytes a Pull would
-    land. Raises ``OSError`` (fail closed).
+    iterator so gate scanning sees every byte a Pull would copy into the
+    transaction (§5 grouping uses the narrow payload surface instead — what a
+    Pull actually lands). Raises ``OSError`` (fail closed).
     """
     # Imported lazily to avoid import-order coupling with the large skills
     # module (which imports the gate/override leaves this module also uses).

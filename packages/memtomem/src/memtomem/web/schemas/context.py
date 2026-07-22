@@ -552,7 +552,6 @@ class ContextPullApplyResponse(BaseModel):
         "nothing_importable",
         "selected_landing_error",
         "canonical_exists",
-        "skills_overwrite_unsupported",
         "snapshot_requires_dir_layout",
         "target_conflict",
         "gate_blocked",

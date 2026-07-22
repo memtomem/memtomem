@@ -22,18 +22,19 @@ collapsed:
 Two surfaces, two questions (the load-bearing distinction — Codex design
 gate):
 
-* **Gate scan + §5 landing grouping use the EXACT copier surface**
+* **The Gate scan uses the EXACT copier surface**
   (:func:`~memtomem.context.skill_payload.read_skill_tree` for skills) —
-  everything a Pull actually copies, including a runtime's top-level
+  everything a Pull actually reads, including a runtime's top-level
   ``overrides/`` / ``versions/``. A secret hiding there must be scanned
-  because it would be copied; two candidates whose visible skill content
-  matches but whose metadata differs land *different* trees and must not be
-  auto-selected.
-* **The Store content comparison uses the PAYLOAD surface**
-  (:func:`~memtomem.context.skill_payload.iter_skill_payload_files`) — the
-  actual skill content, excluding Store-owned ``overrides/`` / ``versions/`` /
-  ``versions.json`` the runtime legitimately lacks. Counting them would report
-  every versioned skill as ``differs`` forever.
+  because it would be copied into the transaction.
+* **§5 landing grouping AND the Store content comparison use the PAYLOAD
+  surface** (:func:`~memtomem.context.skill_payload.iter_skill_payload_files`) —
+  the actual skill content, excluding Store-owned ``overrides/`` / ``versions/``
+  / ``versions.json``. That is what a Pull LANDS after the §10 overwrite
+  strip, so two candidates whose payload matches but whose top-level metadata
+  differs land the SAME bytes and must NOT be reported as ambiguous; and
+  counting metadata in the Store comparison would report every versioned skill
+  as ``differs`` forever.
 
 Both surfaces now live in :mod:`memtomem.context.skill_payload` (ADR-0030 §10,
 PR-G2) together with the canonical tree digest; this module consumes them.
@@ -56,6 +57,7 @@ from typing import Literal
 
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
+from memtomem.context._atomic import _validate_payload_relpath
 from memtomem.context._gate_a import GateStatus, classify_gate_status
 from memtomem.context._runtime_targets import (
     IMPORT_SOURCE_RUNTIMES,
@@ -96,8 +98,9 @@ class PullCandidate:
     # None for not_importable (nothing to scan) and landing_error (unscannable).
     gate_status: GateStatus | None
     importable: bool
-    # Candidates sharing a landing_group id would land byte-identical content
-    # over the full copier surface. None for not_importable / landing_error.
+    # Candidates sharing a landing_group id would land identical PAYLOAD bytes
+    # (§5 grouping is over the payload — what a Pull lands — not the full copier
+    # surface). None for not_importable / landing_error.
     landing_group: int | None
     # The candidate's would-land copy equals a vendor override — pulling it
     # would bake the override into the base canonical (ADR-0030 §7). Warn only.
@@ -105,13 +108,14 @@ class PullCandidate:
     # Raw, UNSANITIZED engine text for *_error rows (may embed absolute paths).
     # Web/MCP boundaries sanitize; the CLI prints verbatim (DiffRow contract).
     reason: str | None
-    # The would-land FULL copier surface as sorted ``(posix_relpath, bytes)``,
+    # The would-land PAYLOAD surface as sorted ``(posix_relpath, bytes)``,
     # populated ONLY when ``preview_pull(..., include_content=True)`` (the CLI
-    # ``--diff`` path); ``None`` otherwise. The full surface — not the payload
-    # subset — so a ``--diff`` can show metadata-only divergence
-    # (``overrides/`` / ``versions/``) that drives ``source_conflict`` yet
-    # leaves the payload identical (ADR-0030 §4/§5). CLI-only: the web/MCP wire
-    # boundaries never serialize it (raw bytes, unredacted).
+    # ``--diff`` path); ``None`` otherwise. The payload — not the full copier
+    # surface — because that is what a Pull actually lands after the §10 strip,
+    # and ``store_content`` is likewise the Store payload, so the diff compares
+    # like-for-like instead of showing a store-owned ``versions/`` that is
+    # preserved rather than landed. CLI-only: the web/MCP wire boundaries never
+    # serialize it (raw bytes, unredacted).
     content: tuple[tuple[str, bytes], ...] | None = None
 
 
@@ -153,11 +157,13 @@ class _Cand:
     gate_status: GateStatus | None
     override_warning: bool
     reason: str | None
-    # Full copier surface of the would-land content (for §5 grouping); None
-    # on landing_error / not_importable. Agents/commands are a single
+    # Full copier surface of the would-land content (for Gate A scanning — the
+    # wide surface, so a secret under non-payload metadata is still caught);
+    # None on landing_error / not_importable. Agents/commands are a single
     # ``[("", bytes)]`` entry.
     landing_full: list[tuple[str, bytes]] | None
-    # Payload surface of the would-land content (for the Store comparison).
+    # Payload surface of the would-land content — what a Pull actually lands
+    # (for the Store comparison AND §5 grouping).
     landing_payload: list[tuple[str, bytes]] | None
     landing_group: int | None = None
 
@@ -249,6 +255,15 @@ def _read_landing(
             # refuses a manifest-less source).
             raise FileNotFoundError(f"source skill missing {manifest_name}: {skill_dir}")
         payload = [(rel, data) for rel, data in full if is_payload_relpath(rel)]
+        # Reject a non-portable payload path (a POSIX ``:`` or backslash name)
+        # HERE, where the caller maps it to ``landing_error``, rather than
+        # letting it reach ``write_tree_payload`` during commit as a raw
+        # ``ValueError`` AFTER the pre-overwrite snapshot has been taken. This is
+        # the same guard the canonical write applies (``_validate_payload_relpath``),
+        # so a runtime copy that cannot be safely landed is refused identically
+        # for new and overwrite pulls, before any write.
+        for rel, _ in payload:
+            _validate_payload_relpath(rel)
         return full, payload, manifest
     if kind == "commands" and runtime == "gemini":
         from memtomem.context.commands import _gemini_toml_to_canonical
@@ -532,10 +547,14 @@ def preview_pull(
     ``kind`` must be a key of :data:`IMPORT_SOURCE_RUNTIMES` (the caller — the
     web route — validates and 400s otherwise; a bad kind here is a KeyError).
 
-    ``include_content=True`` additionally captures the FULL copier surface onto
-    each candidate's ``content`` and the Store payload onto ``store_content``
-    for the CLI ``--diff`` — CLI-only; the web/MCP wire boundaries never
-    serialize those raw-byte fields (they default ``None``).
+    ``include_content=True`` additionally captures the PAYLOAD surface onto each
+    candidate's ``content`` and the Store payload onto ``store_content`` for the
+    CLI ``--diff`` — CLI-only; the web/MCP wire boundaries never serialize those
+    raw-byte fields (they default ``None``). The payload (not the full copier
+    surface) because that is what a Pull actually lands after the §6 strip, and
+    ``store_content`` is already the Store payload — so the diff compares
+    like-for-like instead of showing a store-owned ``versions/`` that would never
+    be written.
     """
     collected = _collect(kind, name, scope=scope, project_root=project_root)
     distinct, ambiguous, auto_source = _group_and_resolve(collected.working)
@@ -549,7 +568,9 @@ def preview_pull(
             override_warning=c.override_warning,
             reason=c.reason,
             content=(
-                tuple(c.landing_full) if include_content and c.landing_full is not None else None
+                tuple(c.landing_payload)
+                if include_content and c.landing_payload is not None
+                else None
             ),
         )
         for c in collected.working
@@ -585,14 +606,23 @@ def _content_status(
 
 
 def _group_and_resolve(working: list[_Cand]) -> tuple[int, bool, str | None]:
-    """Assign landing_group ids over the FULL copier surface; compute §5 signal.
+    """Assign landing_group ids over the PAYLOAD surface; compute §5 signal.
 
-    Groups importable candidates whose landing was computable (``landing_full``
+    Groups importable candidates whose landing was computable (``landing_payload``
     is set — includes ``store_error`` rows, excludes ``landing_error`` and
     ``not_importable``). Grouping is in-memory structural equality (no digest).
     ``ambiguous`` is >1 distinct group OR any importable ``landing_error``
     (fail-closed). ``auto_source`` is the priority-first runtime of the single
     group when unambiguous.
+
+    The grouping surface is the PAYLOAD, not the full copier surface: a Pull
+    writes only the payload (the §6 ingress strip drops a runtime-side
+    ``versions/`` / ``versions.json``), so two runtime copies that differ ONLY in
+    that store-owned metadata land identical bytes and must NOT be reported as a
+    ``source_conflict`` that forces the user to choose a source when it makes no
+    difference. Gate A stays WIDE (``_gate_landing`` over ``landing_full``) — a
+    secret hiding under a non-payload path must still be caught. For
+    agents/commands the two surfaces are identical, so this changes nothing.
     """
     groups: list[list[tuple[str, bytes]]] = []
     has_landing_error = False
@@ -600,15 +630,15 @@ def _group_and_resolve(working: list[_Cand]) -> tuple[int, bool, str | None]:
         if cand.content_status == "landing_error" and cand.importable:
             has_landing_error = True
             continue
-        if cand.landing_full is None:
+        if cand.landing_payload is None:
             continue  # not_importable
         for gid, rep in enumerate(groups):
-            if rep == cand.landing_full:
+            if rep == cand.landing_payload:
                 cand.landing_group = gid
                 break
         else:
             cand.landing_group = len(groups)
-            groups.append(cand.landing_full)
+            groups.append(cand.landing_payload)
 
     distinct = len(groups)
     ambiguous = distinct > 1 or has_landing_error

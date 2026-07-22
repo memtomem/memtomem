@@ -12,8 +12,9 @@ these tests pin the MCP *translation*:
 * prefix-coded refusals (``error:`` / ``refused:`` / ``needs confirmation:`` /
   ``privacy block:``) matching the web ``_finalize_pull`` status routing — every
   ``PullApplyStatus`` maps to a rendering branch (parity pin);
-* the ``skills_overwrite_unsupported`` refusal surfaces cleanly as ``refused:``
-  text today (the PR-G independence guard — MCP inherits it, no PR-G needed);
+* a skills overwrite-Pull refuses cleanly (``refused: canonical_exists``) without
+  ``overwrite`` and succeeds with it (ADR-0030 §10 / PR-G4b) — MCP inherits the
+  engine transaction with no MCP-side change;
 * consent gates return ``needs confirmation`` (MCP cannot prompt) only once a
   write is imminent, and redact the disclosed host path;
 * ``force_unsafe_import`` opens the Gate A valve for a LITERAL ``True`` only —
@@ -228,12 +229,30 @@ async def test_apply_identical_noop(proj: Path) -> None:
     assert not out.startswith(("error:", "refused:"))
 
 
-# ── skills overwrite — the PR-G independence guard ─────────────────────────────
+# ── skills overwrite (ADR-0030 §10 / PR-G4b) ───────────────────────────────────
 
 
-async def test_skills_overwrite_refused_cleanly(proj: Path) -> None:
-    """A skills Pull over an existing Store entry is a clean ``refused:`` today
-    (``skills_overwrite_unsupported``) — MCP inherits it with no PR-G work."""
+async def test_skills_overwrite_without_flag_is_refused(proj: Path) -> None:
+    """A skills Pull over an existing Store entry WITHOUT ``overwrite`` is a
+    clean ``refused: canonical_exists`` — the same posture as agents/commands."""
+    d = canonical_artifact_dir("skills", "project_shared", proj) / "s"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: s\n---\nold\n", encoding="utf-8")
+    seed_multi_runtime(proj, "skills", "s", {"claude": "---\nname: s\n---\nnew\n"})
+    out = await mem_context_pull(
+        kind="skills",
+        name="s",
+        scope="project_shared",
+        apply=True,
+        confirm_project_shared=True,
+    )
+    assert out.startswith("refused:")
+    assert "canonical_exists" in out or "will not replace it" in out
+
+
+async def test_skills_overwrite_succeeds_over_mcp(proj: Path) -> None:
+    """With ``overwrite=True`` the skills Pull snapshots the pre-image and swaps
+    the runtime copy in — MCP inherits the engine transaction with no MCP work."""
     d = canonical_artifact_dir("skills", "project_shared", proj) / "s"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: s\n---\nold\n", encoding="utf-8")
@@ -246,8 +265,9 @@ async def test_skills_overwrite_refused_cleanly(proj: Path) -> None:
         overwrite=True,
         confirm_project_shared=True,
     )
-    assert out.startswith("refused:")
-    assert "not yet supported" in out or "delete the canonical" in out
+    assert not out.startswith(("error:", "refused:", "privacy block:"))
+    assert "new" in (d / "SKILL.md").read_text(encoding="utf-8")
+    assert (d / "versions" / "v1").is_dir()
 
 
 # ── consent gates (needs confirmation:) ───────────────────────────────────────

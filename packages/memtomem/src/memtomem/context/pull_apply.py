@@ -46,6 +46,8 @@ import logging
 import os
 import secrets
 import shutil
+import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -53,15 +55,27 @@ from typing import Literal
 from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context._atomic import (
+    StrictTreeError,
+    copy_tree_strict,
+    fsync_dir,
+    hardlink_tree_strict,
+    link_or_copy_file,
+    validate_tree_strict,
+    write_tree_payload,
+)
 from memtomem.context._canonical_txn import (
     SnapshotError,
-    canonical_sidecar_lock,
+    canonical_lock_shared_budget,
     write_canonical_locked,
 )
 from memtomem.context._gate_a import GateStatus
 from memtomem.context._dir_swap import (
     SwapRecoveryError,
     marker_owns_transient,
+    new_swap_suffix,
+    staging_path_for,
+    swap_dir_tree,
     swap_failure_text,
 )
 from memtomem.context._names import Layout, validate_name
@@ -74,7 +88,17 @@ from memtomem.context.pull_preview import (
     _runtime_candidate_path,
 )
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
-from memtomem.context.skill_payload import iter_skill_payload_files, payload_digest
+from memtomem.context.skill_payload import (
+    _OVERRIDES_DIRNAME,
+    is_payload_relpath,
+    iter_skill_payload_files,
+    payload_digest,
+)
+from memtomem.context.versioning import (
+    _MANIFEST_FILENAME,
+    _VERSIONS_DIRNAME,
+    create_tree_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +115,6 @@ PullApplyStatus = Literal[
     "nothing_importable",  # no importable+computable candidate / --from names an absent copy
     "selected_landing_error",  # the SELECTED --from candidate's bytes could not be computed
     "canonical_exists",  # dst present, no --overwrite
-    "skills_overwrite_unsupported",  # skills dst present (tree snapshots deferred, PR-G)
     "snapshot_requires_dir_layout",  # agents/commands flat-layout overwrite refused
     "target_conflict",  # skills dst holds non-skill content
     "gate_blocked",  # Gate A refused (project_shared hard, or bypassable tier w/o force)
@@ -124,8 +147,10 @@ class PullApplyResult:
     dst: Path | None = None
     layout: Layout | None = None
     write_outcome: str | None = None  # created / overwritten / identical
-    # Other runtimes whose copy is byte-identical over the full surface — a
-    # disclosure that the auto-selected priority-first source had duplicates.
+    # Other runtimes whose copy shares this Pull's PAYLOAD (§5 grouping is over
+    # the payload, so these land identical bytes even if their store-owned
+    # metadata differs) — a disclosure that the auto-selected priority-first
+    # source had duplicates.
     duplicate_runtimes: tuple[str, ...] = ()
     # refusal payload -------------------------------------------------------
     candidates: tuple[PullCandidate, ...] = ()  # source_conflict rendering
@@ -434,28 +459,20 @@ def prepare_pull(
         )
 
     # Store-present preflight (advisory — commit re-checks authoritatively).
-    # Ordered BEFORE the Gate A scan so a canonical_exists / skills-overwrite
-    # refusal never scans-and-records an ingress (mirrors the extract engines'
-    # exists-before-gate order).
-    if collected.store_present:
-        if kind == "skills":
-            # Skills overwrite lands with tree snapshots (ADR-0030 §10, PR-G);
-            # until then only a `new` skills pull is allowed, whether or not
-            # --overwrite was passed (--overwrite cannot help here).
-            return _refuse(
-                "skills_overwrite_unsupported",
-                skip_codes.SKILLS_OVERWRITE_UNSUPPORTED,
-                f"the Store already has skill '{name}'; overwriting skills lands with "
-                f"tree snapshots (ADR-0030 §10), not yet supported — delete the "
-                f"canonical skill first, then pull.",
-            )
-        if not overwrite:
-            return _refuse(
-                "canonical_exists",
-                skip_codes.CANONICAL_EXISTS,
-                f"the Store already has {kind}/{name}; a plain pull will not replace it "
-                f"(an overwrite snapshots the current canonical first).",
-            )
+    # Ordered BEFORE the Gate A scan so a canonical_exists refusal never
+    # scans-and-records an ingress (mirrors the extract engines' exists-before-
+    # gate order). Skills overwrite is now supported (ADR-0030 §10 / PR-G4): the
+    # commit path snapshots the current payload tree into ``versions/vN/`` and
+    # swaps in the new one, preserving Store-owned ``overrides/`` / ``versions/``.
+    # So a store-present skill takes the same ``canonical_exists`` (needs
+    # --overwrite) path as agents/commands rather than a hard refusal.
+    if collected.store_present and not overwrite:
+        return _refuse(
+            "canonical_exists",
+            skip_codes.CANONICAL_EXISTS,
+            f"the Store already has {kind}/{name}; a plain pull will not replace it "
+            f"(an overwrite snapshots the current canonical first).",
+        )
 
     # Gate A — ONE audited decision for the whole Pull, over the captured bytes
     # (so the bytes that were judged are the bytes committed). A block is
@@ -655,10 +672,35 @@ def _commit_atomic(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
     return _map_write_outcome(plan, outcome, dst, layout)
 
 
+def _payload_filtered(
+    captured: tuple[tuple[str, bytes], ...],
+) -> tuple[tuple[str, bytes], ...]:
+    """The captured WIDE copier surface narrowed to the PAYLOAD surface (§6).
+
+    ``_stage_captured_tree`` and the overwrite staging build write this into the
+    canonical, and after PR-G4 that store is load-bearing: a runtime dir that
+    happens to carry ``versions/`` or ``versions.json`` would otherwise seed the
+    Store's own metadata namespace (``v2`` containing ``v1``, or a Push diff that
+    never converges). Gate A stays WIDE — it scanned ``captured`` in prepare, and
+    the written bytes are a strict subset of the scanned bytes, so filtering here
+    cannot open a privacy hole.
+    """
+    return tuple((rel, data) for rel, data in captured if is_payload_relpath(rel))
+
+
 def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyResult:
-    """Commit a skills pull — new-only, captured tree staged then exclusively
-    promoted, all under the canonical name-lock (skills do not use
-    ``write_canonical_locked``; Gate A was decided in ``prepare_pull``)."""
+    """Commit a skills pull under the canonical name-lock (skills do not use
+    ``write_canonical_locked``; Gate A was decided in ``prepare_pull``).
+
+    Two paths, chosen by the plan's intent:
+
+    * **new** — no Store entry: the captured payload tree is staged then
+      exclusively promoted (no snapshot, no swap);
+    * **overwrite** (``plan.overwrite and plan.store_present``, ADR-0030 §10 /
+      PR-G4) — the current payload is snapshotted into ``versions/vN/`` and the
+      new tree is swapped in, preserving Store-owned ``overrides/`` / ``versions/``
+      — see :func:`_overwrite_skill_tree`.
+    """
     from memtomem.context.skills import (
         _promote_race_conflict,
         _promote_staging,
@@ -670,9 +712,19 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
     dst = canonical_root / plan.name
 
     try:
-        with canonical_sidecar_lock(canonical_root, plan.name, timeout=lock_timeout):
+        with canonical_lock_shared_budget(
+            canonical_root, plan.name, timeout=lock_timeout
+        ) as remaining:
             _recover_and_reap_internal_dirs(dst)
 
+            if plan.overwrite and plan.store_present:
+                # Overwrite — the snapshot-first directory swap runs its own
+                # precondition/type gate and returns a result. Its
+                # SwapRecoveryError / TimeoutError propagate to the handlers
+                # below (the same mapping the new path needs).
+                return _overwrite_skill_tree(plan, dst, remaining)
+
+            # New skill — captured tree staged then exclusively promoted.
             # Destination precondition (R3/R4 Major): the state the user
             # previewed must still hold.
             present = dst.is_dir()
@@ -698,7 +750,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
 
             staging: Path | None = None
             try:
-                staging = _stage_captured_tree(plan.captured, dst)
+                staging = _stage_captured_tree(_payload_filtered(plan.captured), dst)
                 _promote_staging(staging, dst, replace_existing=False, reap_move_aside=True)
             except OSError as exc:
                 if _promote_race_conflict(exc):
@@ -722,9 +774,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
                 # does, so once a swap is in flight here, deleting it would
                 # collapse the fail-closed "all three present" recovery row into
                 # the "dst + old" row, whose action then deletes ``old`` — the
-                # only copy of the artifact. Unreachable until the overwrite
-                # transaction lands (nothing writes a marker yet); wired now
-                # because the failure it prevents is silent and permanent.
+                # only copy of the artifact.
                 if staging is not None and staging.exists() and not marker_owns_transient(staging):
                     shutil.rmtree(staging, ignore_errors=True)
 
@@ -732,13 +782,13 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             if plan.gate is not None:
                 _record_gate_success(plan.gate, plan.surface)
     except SwapRecoveryError as exc:
-        # The prelude refused to resolve an interrupted directory swap
-        # (ADR-0030 §10). Its own status, deliberately NOT ``target_conflict``
-        # (nothing the user put at the destination caused this, and "remove it
-        # and re-run" is the wrong advice) and not ``write_failed`` (nothing
-        # was written — the artifact is wedged, and a 500 would report an
-        # infrastructure failure for a state that needs an operator's eyes).
-        # Must precede any broad ``OSError`` clause added later: this is one.
+        # The prelude (or the overwrite swap) refused to resolve an interrupted
+        # directory swap (ADR-0030 §10). Its own status, deliberately NOT
+        # ``target_conflict`` (nothing the user put at the destination caused
+        # this, and "remove it and re-run" is the wrong advice) and not
+        # ``write_failed`` (nothing was written — the artifact is wedged, and a
+        # 500 would report an infrastructure failure for a state that needs an
+        # operator's eyes). Must precede any broad ``OSError`` clause: this is one.
         return _refusal_for(
             plan, "swap_recovery_pending", skip_codes.SWAP_RECOVERY_PENDING, swap_failure_text(exc)
         )
@@ -746,6 +796,267 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
         return _lock_timeout_result(plan)
 
     return _applied_result(plan, "created", dst, "dir")
+
+
+def _carried_tree_type_gate(dst: Path) -> str | None:
+    """Top-level no-follow type gate for the Store entries an overwrite carries.
+
+    ``overrides/`` and ``versions/`` must be absent or a (non-symlink)
+    directory; ``versions.json`` must be absent or a regular file — a FIFO there
+    passes a symlink-only check and then BLOCKS inside
+    ``versioning.load_manifest()`` with C0 AND C1 held. A symlinked entry would
+    make ``create_tree_version``'s ``is_dir()`` (which follows symlinks) and the
+    step-6 copiers traverse OUTSIDE the canonical root. Returns an offending
+    description (→ ``target_conflict``), or ``None`` when every entry is a safe
+    type. ``dst`` itself is gated by the caller.
+    """
+    checks: tuple[tuple[Path, str, str], ...] = (
+        (dst / _OVERRIDES_DIRNAME, _OVERRIDES_DIRNAME, "dir"),
+        (dst / _VERSIONS_DIRNAME, _VERSIONS_DIRNAME, "dir"),
+        (dst / _MANIFEST_FILENAME, _MANIFEST_FILENAME, "file"),
+    )
+    for path, label, expected in checks:
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
+            return f"the Store entry '{label}' is a symlink; refusing to carry it"
+        if expected == "dir" and not stat.S_ISDIR(mode):
+            return f"the Store entry '{label}' is not a directory"
+        if expected == "file" and not stat.S_ISREG(mode):
+            return f"the Store entry '{label}' is not a regular file"
+    return None
+
+
+def _discard_unowned_staging(staging: Path) -> None:
+    """``rmtree`` *staging* unless a live swap marker claims it (ADR-0030 §4.1).
+
+    A nested rename-2 unwind failure leaves marker + ``old`` + ``staging`` on
+    disk deliberately (the only breadcrumb pointing at ``old``); deleting the
+    marker-owned staging here would collapse that fail-closed recovery row into
+    one whose next recovery removes the original tree.
+    """
+    if staging.exists() and not marker_owns_transient(staging):
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _overwrite_skill_tree(
+    plan: PullPlan, dst: Path, remaining: Callable[[], float | None]
+) -> PullApplyResult:
+    """Overwrite an existing Store skill's payload (ADR-0030 §10 / the G4 design).
+
+    Runs under C0 (held by :func:`_commit_skills` via
+    ``canonical_lock_shared_budget``). The design's §2 steps, in order: recover
+    (already done by the caller), type-gate + read-only strict preflight of the
+    carried trees, read the Store payload ONCE, ``target_conflict``, snapshot the
+    pre-image into ``versions/vN/``, build the replacement staging tree, swap it
+    in, record the deferred Gate A counter. ``SwapRecoveryError`` / ``TimeoutError``
+    propagate to the caller's handlers.
+    """
+    from memtomem.context.skills import _target_conflict
+
+    # Step 2 — type gate (no-follow) + read-only strict preflight. ``dst`` must be
+    # a present, non-symlink directory; ``overrides/`` / ``versions/`` a directory
+    # and ``versions.json`` a regular file; and NO entry anywhere in the tree a
+    # symlink or special file. The whole sequence is wrapped so ANY probe error
+    # maps to a defined result, catch order load-bearing:
+    #   * ``StrictTreeError`` (wrong type / a symlink / special file) →
+    #     ``target_conflict`` naming the offender (NOT an OSError, so first);
+    #   * ``FileNotFoundError`` ANYWHERE — ``dst`` absent at the initial lstat OR
+    #     ``dst``/a child raced away mid-walk → ``plan_stale`` (the Store changed
+    #     since the preview; nothing the user placed caused it). MUST precede the
+    #     broad ``OSError``, of which it is a subclass;
+    #   * any other ``OSError`` (``EACCES`` / ``EIO`` while lstatting or walking)
+    #     → ``snapshot_failed`` — we cannot safely preserve what we cannot read,
+    #     and a raw traceback must never escape the result-coded engine.
+    # The strict preflight crucially covers the PAYLOAD, not just the carried
+    # ``overrides/`` + ``versions/``: ``iter_skill_payload_files`` SILENTLY DROPS
+    # symlinks, so a symlinked payload entry would be absent from the snapshot AND
+    # deleted with the old tree by the swap — a silent data loss returning
+    # ``applied``. It is lstat-only, cheap even over a large version store, and
+    # the step-6 copiers re-validate as they walk (this pass is the read-only one,
+    # run BEFORE step 5 mutates the store).
+    try:
+        dst_mode = os.lstat(dst).st_mode
+        if not stat.S_ISDIR(dst_mode):
+            raise StrictTreeError(
+                dst, f"the Store entry for skill '{plan.name}' is not a directory"
+            )
+        gate_reason = _carried_tree_type_gate(dst)
+        if gate_reason is not None:
+            raise StrictTreeError(dst, gate_reason)
+        validate_tree_strict(dst)
+    except StrictTreeError as exc:
+        return _refusal_for(
+            plan,
+            "target_conflict",
+            skip_codes.TARGET_CONFLICT,
+            f"the Store copy of skill '{plan.name}' cannot be carried unchanged: {exc}",
+        )
+    except FileNotFoundError:
+        # ``dst`` absent at the initial lstat, OR ``dst``/a child raced away
+        # mid-walk — either way the Store no longer matches the preview.
+        return _refusal_for(
+            plan,
+            "plan_stale",
+            skip_codes.PLAN_STALE,
+            f"the Store copy of skill '{plan.name}' changed since the preview — re-run.",
+        )
+    except OSError as exc:
+        return _refusal_for(
+            plan,
+            "snapshot_failed",
+            skip_codes.SNAPSHOT_FAILED,
+            f"could not read the current Store skill to preserve it before overwrite: {exc}",
+        )
+
+    # Step 3 — read the Store payload ONCE. The digest is the plan precondition
+    # AND the exact tuple handed to the snapshot: re-reading the tree at step 5
+    # would let a non-gateway writer slip a different state into the snapshot than
+    # the one whose precondition passed (the capture-once discipline PR-C applies
+    # to the runtime side, here applied to the Store side).
+    try:
+        store_payload = iter_skill_payload_files(dst)
+    except OSError as exc:
+        return _refusal_for(
+            plan,
+            "snapshot_failed",
+            skip_codes.SNAPSHOT_FAILED,
+            f"could not read the current Store payload to snapshot before overwrite: {exc}",
+        )
+    if (True, payload_digest(store_payload)) != (plan.store_present, plan.expected_store_digest):
+        return _refusal_for(
+            plan,
+            "plan_stale",
+            skip_codes.PLAN_STALE,
+            f"the Store copy of skill '{plan.name}' changed since the preview — re-run.",
+        )
+
+    # Step 4 — dst holds non-skill content. AFTER plan_stale: plan_stale outranks
+    # target_conflict here (the order the new path uses), the INVERSE of
+    # ``extract_skills_to_canonical`` which checks ``_target_conflict`` first —
+    # the batch importer has no plan to be stale against, while a Pull whose
+    # preview no longer describes the disk must refuse before reporting anything
+    # about that disk.
+    conflict = _target_conflict(dst)
+    if conflict is not None:
+        return _refusal_for(plan, "target_conflict", skip_codes.TARGET_CONFLICT, str(conflict))
+
+    # Step 5 — snapshot the pre-image into ``versions/vN/`` BEFORE the swap, so
+    # the overwrite is recoverable and the new vN travels into the replacement at
+    # step 6. Called DIRECTLY (not via ``versioning_op_locked``): we already hold
+    # C0, and ``_file_lock`` is non-reentrant, so wrapping it would self-deadlock
+    # (see ``versioning.create_tree_version``'s LOCKING note). ``lock_timeout``
+    # is the SHARED budget so C0→C1 spans one monotonic deadline. Catch order is
+    # load-bearing: ``TimeoutError`` is an ``OSError`` subclass (the versions.json
+    # child lock was unavailable) → re-raise to the caller's ``lock_timeout``;
+    # ``VersionError`` is a ``ValueError`` subclass, and a ``:``-bearing payload
+    # filename raises a bare ``ValueError`` from the write primitive — both fail
+    # closed as ``snapshot_failed`` (never a raw traceback, never ``write_failed``
+    # for a write that never happened).
+    try:
+        create_tree_version(
+            dst,
+            store_payload,
+            note=f"pre-overwrite snapshot (pull from {plan.selected_runtime})",
+            lock_timeout=remaining(),
+        )
+    except TimeoutError:
+        raise
+    except (ValueError, OSError) as exc:
+        return _refusal_for(
+            plan,
+            "snapshot_failed",
+            skip_codes.SNAPSHOT_FAILED,
+            f"could not snapshot the current Store skill before overwrite: {exc}",
+        )
+
+    # Steps 6-7 — build the replacement staging tree (new payload + preserved
+    # overrides/versions) and swap it into place. The swap's commit point is
+    # rename 2; failures BEFORE it unwind cleanly, a nested unwind failure leaves
+    # a marker-owned residue (handled by ``_discard_unowned_staging`` +
+    # ``swap_recovery_pending``).
+    suffix = new_swap_suffix()
+    staging = staging_path_for(dst, suffix)
+    try:
+        _build_overwrite_staging(staging, dst, plan.captured)
+        swap_dir_tree(staging, dst)
+    except SwapRecoveryError:
+        _discard_unowned_staging(staging)
+        raise
+    except StrictTreeError as exc:
+        _discard_unowned_staging(staging)
+        return _refusal_for(
+            plan,
+            "target_conflict",
+            skip_codes.TARGET_CONFLICT,
+            f"the Store copy of skill '{plan.name}' cannot be carried unchanged: {exc}",
+        )
+    except OSError as exc:
+        _discard_unowned_staging(staging)
+        return _refusal_for(
+            plan,
+            "write_failed",
+            skip_codes.WRITE_FAILED,
+            f"could not install the overwritten skill tree: {exc}",
+        )
+
+    # Step 8 — rename 2 committed; the new tree IS the canonical. Record the
+    # deferred Gate A pass/bypassed counter once, now that the write landed.
+    if plan.gate is not None:
+        _record_gate_success(plan.gate, plan.surface)
+    return _applied_result(plan, "overwritten", dst, "dir")
+
+
+def _build_overwrite_staging(
+    staging: Path, dst: Path, captured: tuple[tuple[str, bytes], ...]
+) -> None:
+    """Build the replacement tree for an overwrite swap under ``dst.parent``.
+
+    The new runtime payload (payload-filtered, §6) plus Store-owned metadata
+    preserved: ``overrides/`` as an independent deep copy (fan-out strips
+    overrides, so "absent in source" must NOT mean "delete" — that would destroy
+    the user's vendor edits), ``versions/`` + ``versions.json`` via hardlink
+    (immutable history; linking avoids copying an unbounded store). Runs AFTER
+    step 5, so the freshly-snapshotted ``vN`` is included. The whole tree is made
+    durable before :func:`swap_dir_tree` writes the marker.
+    """
+    from memtomem.context.skills import SKILL_MANIFEST
+
+    payload = _payload_filtered(captured)
+    if not any(rel == SKILL_MANIFEST for rel, _ in payload):
+        # A captured tree without a manifest is not a valid skill — refuse rather
+        # than swap in an invalid canonical (parity with ``_stage_captured_tree``,
+        # which raises the same). Defense-in-depth: prepare already refuses a
+        # manifest-less source (``_read_landing`` → landing_error). ``FileNotFoundError``
+        # (an OSError) so the step-6 handler renders it as ``write_failed`` naming
+        # the CAPTURED runtime tree — NOT ``target_conflict``'s "the Store copy …",
+        # which would blame the wrong tree for a defect in the runtime payload.
+        raise FileNotFoundError(f"the captured runtime skill is missing {SKILL_MANIFEST}")
+    write_tree_payload(staging, payload, durable=True)
+    overrides_dir = dst / _OVERRIDES_DIRNAME
+    if overrides_dir.is_dir():
+        copy_tree_strict(overrides_dir, staging / _OVERRIDES_DIRNAME, durable=True)
+    versions_dir = dst / _VERSIONS_DIRNAME
+    if versions_dir.is_dir():
+        hardlink_tree_strict(versions_dir, staging / _VERSIONS_DIRNAME, durable=True)
+    manifest_file = dst / _MANIFEST_FILENAME
+    if manifest_file.is_file():
+        # durable=True for the same reason as the version hardlinks: on a copy
+        # fallback the manifest bytes must be fsynced before the swap deletes the
+        # original, or a power loss loses version metadata.
+        link_or_copy_file(manifest_file, staging / _MANIFEST_FILENAME, durable=True)
+    # The C1 lock file (``.versions.json.lock``) is deliberately NOT carried: it
+    # is neither payload nor history. It stays in ``old`` and is removed with it;
+    # the next C1 acquisition creates a fresh one. Safe ONLY because every
+    # first-party ``versions.json`` mutation takes C0 first (ADR-0030 §6) and we
+    # hold C0 across the whole transaction, so no writer can hold C1 without C0.
+    #
+    # Flush the staging ROOT so its new top-level entries (overrides, versions,
+    # versions.json) reach stable storage before the marker is written — the
+    # sub-tree copiers fsync their own subdirs but not this parent.
+    fsync_dir(staging)
 
 
 def _stage_captured_tree(

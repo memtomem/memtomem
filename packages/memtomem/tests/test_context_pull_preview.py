@@ -4,10 +4,10 @@ Read-only preview of what a Pull would land, per runtime candidate, on two
 orthogonal axes (``content_status`` / ``gate_status``) plus the §5 ambiguity
 signal. These tests pin the design decisions the Codex gate converged on:
 
-* content_status compares the PAYLOAD surface vs the Store (overrides/versions
-  excluded) while §5 landing grouping AND the gate scan use the FULL copier
-  surface (so a secret under ``versions/`` is caught and a metadata-only
-  divergence is never auto-selected);
+* content_status AND §5 landing grouping compare the PAYLOAD surface —
+  overrides/versions excluded — since that is what a Pull lands, so a
+  metadata-only divergence is NOT reported as ambiguous; the gate scan uses the
+  wide FULL copier surface, so a secret under ``versions/`` is still caught;
 * landing vs store error phases are distinct and participate in §5 differently;
 * the preview never mutates privacy counters or emits an audit line.
 """
@@ -236,18 +236,27 @@ def test_preview_does_not_mutate_privacy_counters(
 # ── include_content: --diff capture (ADR-0030 PR-C R2 Major 1) ────────────
 
 
-def test_include_content_populates_full_surface_and_store(home: Path, proj: Path) -> None:
-    """``include_content=True`` captures each candidate's FULL copier surface
-    onto ``content`` and the Store payload onto ``store_content`` (the CLI
-    ``--diff`` inputs)."""
-    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "runtime v")})
+def test_include_content_populates_payload_surface_and_store(home: Path, proj: Path) -> None:
+    """``include_content=True`` captures each candidate's PAYLOAD surface onto
+    ``content`` and the Store payload onto ``store_content`` (the CLI ``--diff``
+    inputs) — store-owned metadata a runtime happens to carry is EXCLUDED, so the
+    diff shows only what actually lands (ADR-0030 §10)."""
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "runtime v")})
+    # Contrive runtime-side metadata the §6 strip drops — it must not reach --diff.
+    (written["claude"].parent / "versions.json").write_text('{"x":1}', encoding="utf-8")
+    (written["claude"].parent / "versions").mkdir()
+    (written["claude"].parent / "versions" / "vX.md").write_text("hist\n", encoding="utf-8")
     _seed_store_skill(proj, "s", "store v")
     pv = preview_pull(
         "skills", "s", scope="project_shared", project_root=proj, include_content=True
     )
     cand = _cand(pv, "claude")
     assert cand.content is not None
-    assert any(rel == "SKILL.md" for rel, _ in cand.content)
+    rels = {rel for rel, _ in cand.content}
+    assert "SKILL.md" in rels
+    # The store-owned metadata is absent from the diff content.
+    assert "versions.json" not in rels
+    assert not any(rel.startswith("versions/") for rel in rels)
     assert pv.store_content is not None
     assert any(rel == "SKILL.md" for rel, _ in pv.store_content)
 
@@ -295,17 +304,22 @@ def test_gate_scans_secret_under_versions_dir(home: Path, proj: Path) -> None:
     assert _cand(pv, "claude").gate_status == "blocked"
 
 
-def test_landing_group_splits_on_metadata_only_divergence(home: Path, proj: Path) -> None:
-    """Two candidates with identical payload but different top-level
-    ``versions.json`` land different trees → two groups → ambiguous. Proves §5
-    grouping is the full copier surface, not the payload."""
+def test_landing_group_ignores_metadata_only_divergence(home: Path, proj: Path) -> None:
+    """Two candidates with identical PAYLOAD but different top-level
+    ``versions.json`` land the SAME bytes (the §6 strip drops store-owned
+    metadata), so they group together — one distinct landing, not ambiguous, and
+    auto-source resolves. Grouping is over the payload surface, not the full
+    copier surface: forcing a source choice here would be spurious (ADR-0030 §10
+    / Codex Major). Gate A still scans the wide surface (see the versions/-secret
+    test above)."""
     body = _skill_body("s", "same payload")
     written = seed_multi_runtime(proj, "skills", "s", {"claude": body, "codex": body})
     (written["claude"].parent / "versions.json").write_text('{"a":1}', encoding="utf-8")
     (written["codex"].parent / "versions.json").write_text('{"b":2}', encoding="utf-8")
     pv = preview_pull("skills", "s", scope="project_shared", project_root=proj)
-    assert pv.distinct_landing_count == 2
-    assert pv.ambiguous is True
+    assert pv.distinct_landing_count == 1
+    assert pv.ambiguous is False
+    assert pv.auto_source == "claude"
 
 
 # ── error phases + fail-closed presence ──────────────────────────────────
