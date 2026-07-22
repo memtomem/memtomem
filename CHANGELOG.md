@@ -5,23 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-### Fixed
-
-- **Search no longer waits behind an entire file's ONNX inference during a
-  reindex.** Bulk embedding now submits its work to the single inference
-  worker in sub-batches (whole multiples of `onnx_batch_size`, ~32 texts per
-  task) and awaits each before submitting the next, so a search-time
-  `embed_query` queued mid-reindex runs in the gap between slices instead of
-  after the whole file. Query wait is bounded by roughly one sub-batch (≈4 ORT
-  runs at defaults, plus one queued slice per additional concurrent bulk
-  caller). The #1792 memory cap is unchanged — peak concurrent `session.run`
-  stays 1 — and slice widths are derived from a single per-call batch-size
-  snapshot, so embeddings are bit-identical to an unsplit call and a runtime
-  `onnx_batch_size` change never applies mid-file. `close()` now latches
-  synchronously, so a bulk call spanning teardown fails fast with a typed
-  error instead of racing the executor shutdown. Truncation warnings are
-  now emitted per sub-batch rather than once per file (labels stay
-  file-global). (#1804)
+## [0.3.12] — 2026-07-22
 
 ### Added
 
@@ -32,20 +16,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   marked short. A legacy row or a session with no summary shows nothing, making
   no claim either way. This completes the #1897 motivation: an inferred summary
   is no longer presented the same as an exactly-recorded one.
-
-### Fixed
-
-- **Hardened the dev Sessions panel against stored-value injection.** The
-  sessions table and its event detail interpolated caller-controlled values
-  (agent id, namespace, summary, the session id — which embeds a caller-supplied
-  source — and each event's content, type, and JSON metadata) straight into the
-  DOM. Every sink now escapes; the event-type badge class is whitelisted; and
-  the metadata toggle moved from an inline `onclick` (blocked by the panel's
-  `script-src` CSP, so it silently did nothing in a real browser) to the
-  existing delegated `data-action` handler. Panel strings are localized and
-  re-render live on a language toggle.
-
-### Added
 
 - **A session now records where its summary came from.** `mem_session_end`
   stamps `summary_provenance` on the session row — `exact` when the summary was
@@ -82,10 +52,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the Store on a first pull). An interrupted swap is resolved by the recovery
   machinery added in PR-G4a; a wedged artifact reports `swap_recovery_pending`
   rather than a partial write.
-
-## [0.3.12] — 2026-07-22
-
-### Added
 
 - **Every writer of a skill now recovers an interrupted update, not just three**
   (ADR-0030 §10, PR-G4a-3b) — the follow-up promised below. Skill
@@ -244,6 +210,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `index_orphan`, nor `--fix`.
 
 ### Fixed
+
+- **Search no longer waits behind an entire file's ONNX inference during a
+  reindex.** Bulk embedding now submits its work to the single inference
+  worker in sub-batches (whole multiples of `onnx_batch_size`, ~32 texts per
+  task) and awaits each before submitting the next, so a search-time
+  `embed_query` queued mid-reindex runs in the gap between slices instead of
+  after the whole file. Query wait is bounded by roughly one sub-batch (≈4 ORT
+  runs at defaults, plus one queued slice per additional concurrent bulk
+  caller). The #1792 memory cap is unchanged — peak concurrent `session.run`
+  stays 1 — and slice widths are derived from a single per-call batch-size
+  snapshot, so embeddings are bit-identical to an unsplit call and a runtime
+  `onnx_batch_size` change never applies mid-file. `close()` now latches
+  synchronously, so a bulk call spanning teardown fails fast with a typed
+  error instead of racing the executor shutdown. Truncation warnings are
+  now emitted per sub-batch rather than once per file (labels stay
+  file-global). (#1804)
+
+- **Hardened the dev Sessions panel against stored-value injection.** The
+  sessions table and its event detail interpolated caller-controlled values
+  (agent id, namespace, summary, the session id — which embeds a caller-supplied
+  source — and each event's content, type, and JSON metadata) straight into the
+  DOM. Every sink now escapes; the event-type badge class is whitelisted; and
+  the metadata toggle moved from an inline `onclick` (blocked by the panel's
+  `script-src` CSP, so it silently did nothing in a real browser) to the
+  existing delegated `data-action` handler. Panel strings are localized and
+  re-render live on a language toggle.
 
 - **SQLite transaction contexts now own a real, task-affine write
   transaction** (#1896) — `transaction()` takes `BEGIN IMMEDIATE` before its
