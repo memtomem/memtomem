@@ -25,6 +25,7 @@ import errno
 import hashlib
 import logging
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -41,15 +42,20 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "COPY_SKIP_NAMES",
     "DIRTY_SKIP_SUFFIXES",
+    "StrictTreeError",
     "async_file_lock",
     "atomic_write_bytes",
     "atomic_write_text",
     "copy_tree_atomic",
+    "copy_tree_strict",
     "fsync_dir",
+    "hardlink_tree_strict",
     "installed_at_from_dest",
     "is_copy_skipped_rel",
     "iter_installed_files",
+    "link_or_copy_file",
     "rename_no_replace",
+    "validate_tree_strict",
     "write_tree_payload",
 ]
 
@@ -646,6 +652,154 @@ def write_tree_payload(
     for directory in sorted(created_dirs, key=lambda p: len(p.parts), reverse=True):
         fsync_dir(directory)
     fsync_dir(dst_dir)
+
+
+class StrictTreeError(Exception):
+    """A tree an exclusive transaction must carry contains an entry it refuses
+    to move: a symlink (even to a directory) or a non-regular special file
+    (FIFO, socket, device node), at any depth.
+
+    Deliberately NOT an ``OSError``: a caller maps it to a domain refusal
+    (``target_conflict``, naming the offender) while still catching genuine
+    I/O errors — disk full, ``EACCES`` — as a separate ``write_failed``. If it
+    subclassed ``OSError`` the two would collapse into one ``except`` and the
+    wrong result would ship. Carries the offending path.
+    """
+
+    def __init__(self, path: Path, detail: str) -> None:
+        super().__init__(f"{detail}: {path}")
+        #: The first offending entry, so a refusal can name it.
+        self.path = path
+
+
+#: ``os.link`` errnos that mean "linking is impossible here, copy instead" —
+#: a cross-device link (``EXDEV``, which a Linux bind mount returns even though
+#: it reports the SAME ``st_dev``, so an ``st_dev`` pre-check would wrongly
+#: attempt the link) or a filesystem that forbids hardlinks outright
+#: (``EPERM`` on some FUSE/overlay mounts, ``ENOTSUP`` / ``EOPNOTSUPP``).
+_HARDLINK_FALLBACK_ERRNOS: frozenset[int] = frozenset(
+    {errno.EXDEV, errno.EPERM, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+)
+
+
+def link_or_copy_file(src: Path, dst: Path) -> None:
+    """Hardlink *src* → *dst*, falling back to :func:`shutil.copy2` on a
+    cross-device or link-unsupported errno.
+
+    NO ``st_dev`` pre-check: a Linux bind mount reports the same ``st_dev`` as
+    its origin yet ``os.link`` across it returns ``EXDEV``, so the only reliable
+    signal is the syscall's own errno. Any other ``OSError`` propagates.
+    """
+    try:
+        os.link(src, dst)
+    except OSError as exc:
+        if exc.errno in _HARDLINK_FALLBACK_ERRNOS:
+            import shutil
+
+            shutil.copy2(src, dst)
+        else:
+            raise
+
+
+def validate_tree_strict(root: Path) -> None:
+    """Read-only preflight: raise :class:`StrictTreeError` if *root* holds a
+    symlink or a non-regular special file at any depth.
+
+    Directories and regular files pass; a symlink (even to a directory), FIFO,
+    socket or device node is refused, naming the first offender. Run BEFORE an
+    exclusive carry that has already mutated the store (e.g. taken a version
+    snapshot), so an offending nested entry is discovered before — not during —
+    the copy. The strict copiers below re-check as they walk; this pass exists
+    solely so the first discovery is read-only. Propagates ``OSError`` (fail
+    closed on an unreadable subtree).
+    """
+    for entry in sorted(root.iterdir()):
+        mode = os.lstat(entry).st_mode
+        if stat.S_ISLNK(mode):
+            raise StrictTreeError(entry, "refusing to carry a symlink")
+        if stat.S_ISDIR(mode):
+            validate_tree_strict(entry)
+        elif not stat.S_ISREG(mode):
+            raise StrictTreeError(entry, "refusing to carry a non-regular file")
+
+
+def copy_tree_strict(src: Path, dst: Path, *, mode: int = 0o644, durable: bool = False) -> None:
+    """Deep-copy *src* → *dst* into NEW inodes, REFUSING any symlink or special file.
+
+    Unlike :func:`copy_tree_atomic`, which SKIPS symlinks with a warning — the
+    right posture for best-effort fan-out mirroring where the source is
+    retained — this REFUSES them (:class:`StrictTreeError`). For a
+    carry-then-delete transaction a silently skipped ``overrides/`` entry would
+    be a silent DELETION of the user's edit once the source is removed. New
+    inodes (not hardlinks) because the copy is a live, editable tree.
+
+    ``durable`` upgrades each file write to ``full_fsync`` and fsyncs every
+    directory this call created, deepest first — so the tree is on stable
+    storage before a caller renames it into place. Raises
+    :class:`StrictTreeError` (offending entry) or ``OSError``.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = [dst]
+    _copy_tree_strict(src, dst, mode=mode, durable=durable, created=created)
+    if durable:
+        for directory in sorted(created, key=lambda p: len(p.parts), reverse=True):
+            fsync_dir(directory)
+
+
+def _copy_tree_strict(
+    src: Path, dst: Path, *, mode: int, durable: bool, created: list[Path]
+) -> None:
+    for entry in sorted(src.iterdir()):
+        st = os.lstat(entry)
+        target = dst / entry.name
+        if stat.S_ISLNK(st.st_mode):
+            raise StrictTreeError(entry, "refusing to carry a symlink")
+        if stat.S_ISDIR(st.st_mode):
+            target.mkdir(exist_ok=True)
+            created.append(target)
+            _copy_tree_strict(entry, target, mode=mode, durable=durable, created=created)
+        elif stat.S_ISREG(st.st_mode):
+            atomic_write_bytes(target, entry.read_bytes(), mode=mode, full_fsync=durable)
+        else:
+            raise StrictTreeError(entry, "refusing to carry a non-regular file")
+
+
+def hardlink_tree_strict(src: Path, dst: Path, *, durable: bool = False) -> None:
+    """Recreate *src*'s directory structure under *dst*, HARDLINKING each file.
+
+    History is immutable, so linking avoids copying a version store that grows
+    without bound. Directories cannot be hardlinked (``EPERM``), so they are
+    recreated and their files linked via :func:`link_or_copy_file` (which falls
+    back to a copy on a cross-device / link-unsupported errno). Refuses symlinks
+    and special files (:class:`StrictTreeError`), like :func:`copy_tree_strict`.
+
+    ``durable`` fsyncs every directory this call created, deepest first. The
+    linked files need no per-file fsync: they share inodes with an already
+    durable source (the version snapshot was written with ``full_fsync``); only
+    the new directory ENTRIES pointing at them must be flushed.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = [dst]
+    _hardlink_tree_strict(src, dst, created=created)
+    if durable:
+        for directory in sorted(created, key=lambda p: len(p.parts), reverse=True):
+            fsync_dir(directory)
+
+
+def _hardlink_tree_strict(src: Path, dst: Path, *, created: list[Path]) -> None:
+    for entry in sorted(src.iterdir()):
+        st = os.lstat(entry)
+        target = dst / entry.name
+        if stat.S_ISLNK(st.st_mode):
+            raise StrictTreeError(entry, "refusing to carry a symlink")
+        if stat.S_ISDIR(st.st_mode):
+            target.mkdir(exist_ok=True)
+            created.append(target)
+            _hardlink_tree_strict(entry, target, created=created)
+        elif stat.S_ISREG(st.st_mode):
+            link_or_copy_file(entry, target)
+        else:
+            raise StrictTreeError(entry, "refusing to carry a non-regular file")
 
 
 def rename_no_replace(staging: Path, dst: Path) -> None:

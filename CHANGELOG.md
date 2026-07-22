@@ -49,6 +49,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   avoid presenting an inferred summary the same way as an exact one (follow-up:
   render it in the Sessions panel).
 
+- **Pulling a skill can now overwrite the Store copy** (ADR-0030 §10, PR-G4b) —
+  `mm context pull skills <name> --overwrite` (and the web / MCP equivalents) no
+  longer refuse when the Store already holds the skill. The current payload tree
+  is snapshotted into `versions/v1/` first — so the overwrite is recoverable and
+  shows up in `mm context version list` — and the runtime copy is swapped in
+  atomically. Store-owned metadata survives the swap: `overrides/` is preserved
+  as an independent copy (fan-out strips overrides, so treating "absent in the
+  runtime copy" as "delete" would have destroyed vendor edits) and `versions/` /
+  `versions.json` are carried by hardlink. A runtime copy that happens to carry
+  its own `versions/` cannot seed the Store's metadata — only the payload
+  surface is written. An interrupted swap is resolved by the recovery machinery
+  added in PR-G4a; a wedged artifact reports `swap_recovery_pending` rather than
+  a partial write.
+
 ## [0.3.12] — 2026-07-22
 
 ### Added

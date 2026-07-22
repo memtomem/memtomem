@@ -1092,18 +1092,20 @@ class TestMarkerOwnsTransient:
         assert marker_owns_transient(p["staging"]) is False
 
 
-class TestNoCallerYet:
-    def test_the_primitive_exists_but_skills_overwrite_is_still_refused(self) -> None:
-        """PR-G4a-2 ships the swap primitive and wires NO caller — PR-G4b's
-        history-preserving transaction is the only thing that will ever call it.
+class TestSwapPrimitiveIsWired:
+    def test_pull_apply_now_drives_the_swap_and_the_refusal_is_gone(self) -> None:
+        """PR-G4b wires the swap primitive into the skills overwrite-Pull commit
+        (``pull_apply``), the first and only caller of ``swap_dir_tree``.
 
-        Pinned so "the swap protocol exists" can never be mistaken for "skills
-        overwrite works". The behavioural half of this pin lives in
-        ``test_context_pull_apply.py``; this half asserts the module is
-        importable without changing any engine decision.
+        The inverse of the old ``TestNoCallerYet`` pin: the primitive is no
+        longer caller-less, and ``skills_overwrite_unsupported`` is no longer a
+        Pull status. The behavioural half — that an overwrite actually snapshots
+        and swaps — lives in ``test_context_pull_apply.py``.
         """
         from memtomem.context import pull_apply
 
         assert callable(swap_dir_tree)
         assert callable(recover_pending_swaps)
-        assert "skills_overwrite_unsupported" in str(pull_apply.PullApplyStatus)
+        # pull_apply imports the primitive at module scope now that it drives it.
+        assert pull_apply.swap_dir_tree is swap_dir_tree
+        assert "skills_overwrite_unsupported" not in str(pull_apply.PullApplyStatus)

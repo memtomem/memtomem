@@ -10,6 +10,7 @@ captured-tree staging with no leak.
 from __future__ import annotations
 
 import errno
+import sys
 from pathlib import Path
 
 import pytest
@@ -221,41 +222,159 @@ def test_agents_store_present_without_overwrite_is_canonical_exists(home: Path, 
     assert out.status == "canonical_exists"
 
 
-def test_skills_store_present_is_overwrite_unsupported(home: Path, proj: Path) -> None:
+def test_skills_store_present_without_overwrite_is_canonical_exists(home: Path, proj: Path) -> None:
     seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
     d = _store_skill_dir(proj, "s")
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(_skill_body("s", "old store"), encoding="utf-8")
-    out = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    out = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
     assert isinstance(out, PullApplyResult)
-    assert out.status == "skills_overwrite_unsupported"
+    assert out.status == "canonical_exists"
 
 
-def test_skills_overwrite_still_refused_after_tree_storage_landed(home: Path, proj: Path) -> None:
-    """PR-G3 ships the tree-snapshot WRITER but wires no caller — PR-G4's
-    history-preserving transaction is the only thing that will ever call it.
-
-    Pinned so "the storage layer exists" can never be mistaken for "skills
-    overwrite works": the engine must keep refusing, and it must do so WITHOUT
-    having created a version store as a side effect.
+def test_skills_overwrite_snapshots_the_preimage_and_swaps(home: Path, proj: Path) -> None:
+    """ADR-0030 §10 / PR-G4b: a skills overwrite-Pull snapshots the current
+    payload tree into ``versions/v1/`` and swaps the runtime copy in, preserving
+    the Store-owned ``overrides/`` (which fan-out strips, so "absent in source"
+    must NOT be read as "delete").
     """
-    from memtomem.context import versioning
-
     seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
     d = _store_skill_dir(proj, "s")
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(_skill_body("s", "old store"), encoding="utf-8")
+    # A Store-owned override the runtime copy does not carry — must survive.
+    (d / "overrides").mkdir()
+    (d / "overrides" / "vendor.md").write_text("VENDOR EDIT\n", encoding="utf-8")
 
-    # The writer is importable and functional…
-    assert callable(versioning.create_tree_version)
-    # …and the Pull path still refuses, leaving no version store behind.
-    out = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
-    assert isinstance(out, PullApplyResult)
-    assert out.status == "skills_overwrite_unsupported"
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "applied"
+    assert res.write_outcome == "overwritten"
+
+    # New payload landed.
+    assert "new" in _store_skill_text(proj, "s")
+    # Pre-image snapshotted as v1 (tree layout), containing the OLD bytes.
+    v1_skill = d / "versions" / "v1" / "SKILL.md"
+    assert v1_skill.is_file()
+    assert "old store" in v1_skill.read_text(encoding="utf-8")
+    assert (d / "versions.json").is_file()
+    # Store-owned override preserved byte-identical.
+    assert (d / "overrides" / "vendor.md").read_text(encoding="utf-8") == "VENDOR EDIT\n"
+    # No swap residue left behind.
+    assert not any(p.name.startswith((".old-", ".staging-", ".swap-")) for p in d.parent.iterdir())
+
+
+def test_skills_overwrite_strips_runtime_side_version_store(home: Path, proj: Path) -> None:
+    """§6 ingress strip: a runtime skill that happens to carry ``versions/`` /
+    ``versions.json`` must not seed the Store's own metadata namespace — the
+    swapped-in payload is the NARROW surface, and the Store's own snapshot is
+    the only ``versions/`` that survives.
+    """
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
+    runtime_skill_dir = written["claude"].parent
+    # Contrive a runtime-side version store (fan-out normally strips these).
+    (runtime_skill_dir / "versions").mkdir()
+    (runtime_skill_dir / "versions" / "vX.md").write_text("RUNTIME HISTORY\n", encoding="utf-8")
+    (runtime_skill_dir / "versions.json").write_text("{}\n", encoding="utf-8")
+
+    d = _store_skill_dir(proj, "s")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(_skill_body("s", "old store"), encoding="utf-8")
+
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "applied"
+    # The runtime's versions/vX.md never landed; only the Store's own v1 exists.
+    assert not (d / "versions" / "vX.md").exists()
+    assert (d / "versions" / "v1").is_dir()
+    assert "RUNTIME HISTORY" not in (d / "versions.json").read_text(encoding="utf-8")
+
+
+def _seed_overwrite_case(proj: Path, *, store_body: str = "old store") -> Path:
+    """Seed a runtime skill + a store skill so an overwrite-Pull is prepared."""
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "new")})
+    d = _store_skill_dir(proj, "s")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(_skill_body("s", store_body), encoding="utf-8")
+    return d
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink type gate")
+def test_skills_overwrite_refuses_symlinked_versions_json(home: Path, proj: Path) -> None:
+    """§2.3 type gate: a symlinked ``versions.json`` is refused (target_conflict)
+    BEFORE any snapshot — it would otherwise block inside ``load_manifest`` with
+    both locks held, or read the manifest through a link outside the root."""
+    d = _seed_overwrite_case(proj)
+    outside = proj / "outside.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    (d / "versions.json").symlink_to(outside)
+
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "target_conflict"
+    # No snapshot was taken and the store payload is untouched.
     assert not (d / "versions").exists()
-    assert not (d / "versions.json").exists()
-    # Store intact.
     assert "old store" in _store_skill_text(proj, "s")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink type gate")
+def test_skills_overwrite_refuses_nested_symlink_in_overrides(home: Path, proj: Path) -> None:
+    """§2.3 strict preflight: a symlink nested inside a genuine ``overrides/``
+    is refused rather than silently skipped (which would delete the override on
+    the swap). Refused BEFORE the snapshot."""
+    d = _seed_overwrite_case(proj)
+    (d / "overrides").mkdir()
+    outside = proj / "secret.md"
+    outside.write_text("SECRET\n", encoding="utf-8")
+    (d / "overrides" / "link.md").symlink_to(outside)
+
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "target_conflict"
+    assert not (d / "versions").exists()
+    assert "old store" in _store_skill_text(proj, "s")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="colon is illegal in a Windows filename")
+def test_skills_overwrite_colon_payload_name_is_snapshot_failed(home: Path, proj: Path) -> None:
+    """Step-5 translation: a Store payload file whose name contains ``:`` is
+    legal on POSIX but rejected as non-portable by the write primitive — the
+    resulting ``ValueError`` must fail closed as ``snapshot_failed``, never a
+    raw traceback and never ``write_failed`` (nothing was written)."""
+    d = _seed_overwrite_case(proj)
+    (d / "wei:rd.md").write_text("colon payload\n", encoding="utf-8")
+
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "snapshot_failed"
+    assert "old store" in _store_skill_text(proj, "s")  # untouched
+
+
+def test_skills_overwrite_does_not_route_through_versioning_op_locked(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deadlock regression: ``_commit_skills`` already holds C0, so the snapshot
+    must call ``create_tree_version`` DIRECTLY. Routing through
+    ``versioning_op_locked`` would re-acquire the non-reentrant C0 and
+    self-deadlock — pin it by making that helper explode and asserting the
+    overwrite still succeeds."""
+    from memtomem.context import _canonical_txn
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("versioning_op_locked must not be called under C0")
+
+    monkeypatch.setattr(_canonical_txn, "versioning_op_locked", _boom)
+    d = _seed_overwrite_case(proj)
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "applied"
+    assert (d / "versions" / "v1").is_dir()
 
 
 # ── plan_stale (R3/R4 Major) ──────────────────────────────────────────────────

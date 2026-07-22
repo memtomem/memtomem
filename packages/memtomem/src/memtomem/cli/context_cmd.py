@@ -502,13 +502,7 @@ def _print_pull_preview(
     else:
         summary = f"store: {store} · nothing pullable"
     click.echo(f"  {summary}")
-    if preview.store_present and preview.kind == "skills":
-        click.secho(
-            "  note: the Store already has this skill; overwriting skills is not yet "
-            "supported (ADR-0030 §10) — delete the canonical skill first.",
-            fg="yellow",
-        )
-    elif preview.store_present and not overwrite:
+    if preview.store_present and not overwrite:
         click.secho("  note: --apply needs --overwrite (the Store already has it).", fg="yellow")
 
 
@@ -1455,8 +1449,9 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     "--overwrite",
     is_flag=True,
     help=(
-        "Allow replacing an existing Store entry (agents/commands: the current "
-        "canonical is snapshotted first; skills: not yet supported)."
+        "Allow replacing an existing Store entry; the current canonical is "
+        "snapshotted first (agents/commands into versions/vN.md, skills into a "
+        "versions/vN/ tree, preserving Store-owned overrides/ and versions/)."
     ),
 )
 @click.option(

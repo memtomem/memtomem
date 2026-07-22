@@ -2751,7 +2751,6 @@ _PULL_REFUSAL_STATUSES = frozenset(
         "nothing_importable",
         "selected_landing_error",
         "canonical_exists",
-        "skills_overwrite_unsupported",
         "snapshot_requires_dir_layout",
         "target_conflict",
     }
@@ -2840,12 +2839,7 @@ def _format_pull_preview(
         lines.append(f"  store: {store} · auto-source: {preview.auto_source}")
     else:
         lines.append(f"  store: {store} · nothing pullable")
-    if preview.store_present and preview.kind == "skills":
-        lines.append(
-            "  note: the Store already has this skill; overwriting skills is not yet "
-            "supported (ADR-0030 §10) — delete the canonical skill first."
-        )
-    elif preview.store_present and not overwrite:
+    if preview.store_present and not overwrite:
         lines.append("  note: apply=True needs overwrite=True (the Store already has it).")
     lines.append("  Re-call with apply=True to execute.")
     return "\n".join(lines)
@@ -2971,9 +2965,10 @@ async def mem_context_pull(
             (default ``project_shared``). ``apply=True`` into ``project_shared``
             requires this passed explicitly (ADR-0030 §11); ``project_local`` is
             rejected (no runtime fan-out to pull from — ADR-0011 §3).
-        overwrite: Allow replacing an existing Store entry (agents/commands: the
-            current canonical is snapshotted first; skills: not yet supported —
-            ADR-0030 §10).
+        overwrite: Allow replacing an existing Store entry. The current canonical
+            is snapshotted first (agents/commands into ``versions/vN.md``; skills
+            into a ``versions/vN/`` tree, preserving Store-owned ``overrides/`` /
+            ``versions/`` — ADR-0030 §10).
         apply: Execute the pull. Default ``False`` returns a dry-run preview.
         force_unsafe_import: Bypass Gate A for a reviewed false positive — user
             tier only (``project_shared`` hard-refuses regardless, ADR-0011 §5).

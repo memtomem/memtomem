@@ -190,7 +190,9 @@ def test_apply_identical_noop(proj: Path) -> None:
     assert "already identical" in res.output
 
 
-def test_skills_overwrite_message(proj: Path) -> None:
+def test_skills_overwrite_succeeds(proj: Path) -> None:
+    """ADR-0030 §10 / PR-G4b: a skills overwrite-Pull now snapshots the pre-image
+    into ``versions/v1/`` and swaps the runtime copy in (was a hard refusal)."""
     d = canonical_artifact_dir("skills", "project_shared", proj) / "s"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: s\n---\nold\n", encoding="utf-8")
@@ -198,8 +200,9 @@ def test_skills_overwrite_message(proj: Path) -> None:
     res = _invoke(
         ["pull", "skills", "s", "--apply", "--overwrite", "--scope", "project_shared", "--yes"]
     )
-    assert res.exit_code != 0
-    assert "not yet supported" in res.output or "delete the canonical" in res.output
+    assert res.exit_code == 0, res.output
+    assert "new" in (d / "SKILL.md").read_text(encoding="utf-8")
+    assert (d / "versions" / "v1").is_dir()
 
 
 # ── scope explicitness + Gate B (R1 Blocker 2) ────────────────────────────────
