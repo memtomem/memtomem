@@ -337,8 +337,11 @@ class TestPluginManualCoexistenceCallout:
         )
 
     def test_mcp_clients_links_the_coexistence_check(self, mcp_clients: str) -> None:
-        assert "two" in mcp_clients and "servers" in mcp_clients
-        assert "integrations/claude-code.md" in mcp_clients
+        # Collapse prose wrapping so the phrase pins don't depend on line breaks.
+        flat = " ".join(mcp_clients.split())
+        assert "differ from the plugin's pinned launch command" in flat
+        assert "runs **two** servers against the same store" in flat
+        assert "integrations/claude-code.md" in flat
 
 
 class TestNoJsoncFenceInPublicGuides:
