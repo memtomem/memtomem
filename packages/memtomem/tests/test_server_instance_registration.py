@@ -168,6 +168,54 @@ class TestPublicationAndRelease:
         # process-exit backstop still applies; release manually for hygiene
         reg_inst.cleanup()
 
+    @pytest.mark.asyncio
+    async def test_double_close_after_failed_storage_close_keeps_retaining(
+        self, components
+    ) -> None:
+        """A second ``close()`` sees no components left; that absence must
+        never be read as a confirmed storage close — the retained
+        sentinel stays retained."""
+        components.storage = MagicMock()
+        components.storage.close = AsyncMock(side_effect=RuntimeError("close failed"))
+        ctx = await _init_flagged(components)
+        (sentinel,) = _sentinels()
+        await ctx.close()
+        await ctx.close()  # components are gone now — must not release
+        assert _sentinels() == [sentinel]
+        reg_inst = ctx._instance_registration
+        assert reg_inst is not None
+        reg_inst.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_rollback_with_failed_close_then_lifespan_close_keeps_retaining(
+        self, components, monkeypatch
+    ) -> None:
+        """Startup rollback with an unconfirmed storage close retains the
+        sentinel; the lifespan's subsequent ``ctx.close()`` (no
+        components) must not release it either."""
+        from memtomem.indexing import watcher as watcher_mod
+
+        components.storage = MagicMock()
+        components.storage.close = AsyncMock(side_effect=RuntimeError("close failed"))
+
+        def _broken_watcher(*_a: object, **_k: object) -> object:
+            fake = MagicMock()
+            fake.start = AsyncMock(side_effect=RuntimeError("watcher exploded"))
+            fake.stop = AsyncMock()
+            return fake
+
+        monkeypatch.setattr(watcher_mod, "FileWatcher", _broken_watcher)
+        ctx = AppContext(config=components.config, register_server_instance=True)
+        with patch("memtomem.server.component_factory.create_components", return_value=components):
+            with pytest.raises(RuntimeError, match="watcher exploded"):
+                await ctx.ensure_initialized()
+        (sentinel,) = _sentinels()  # retained by the rollback
+        await ctx.close()  # lifespan shutdown after failed init
+        assert _sentinels() == [sentinel]
+        reg_inst = ctx._instance_registration
+        assert reg_inst is not None
+        reg_inst.cleanup()
+
 
 class TestCancellation:
     @pytest.mark.asyncio

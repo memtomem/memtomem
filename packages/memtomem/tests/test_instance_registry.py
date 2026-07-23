@@ -121,6 +121,25 @@ def _child_register_and_enumerate(rt_str: str, db_str: str, q, release) -> None:
     q.put(("done",))
 
 
+def _child_register_fork_grandchild(rt_str: str, db_str: str, q, release) -> None:
+    import sys
+
+    _reg = _child_setup(rt_str)
+    inst = _reg.register_instance(Path(db_str))
+    grand = os.fork()
+    if grand == 0:
+        # normal interpreter exit — the inherited atexit stack (incl. the
+        # registry handler over the inherited active dict) must run and,
+        # thanks to the pid guard, leave the parent's sentinel alone
+        sys.exit(0)
+    _, status = os.waitpid(grand, 0)
+    survived = inst is not None and inst.path.exists()
+    q.put(("forked", survived, os.waitstatus_to_exitcode(status), os.getpid()))
+    release.wait(60)
+    if inst is not None:
+        inst.cleanup()
+
+
 def _child_hold_sidecar(rt_str: str, q, release) -> None:
     import portalocker
 
@@ -517,29 +536,91 @@ class TestCrossProcess:
 
 @pytest.mark.skipif(os.name == "nt", reason="fork is POSIX-only")
 class TestForkContract:
-    def test_forked_child_inherited_cleanup_cannot_unlink_parent_sentinel(self, rt, db):
-        """The child runs the inherited module atexit handler (directly —
-        running the whole pytest process's atexit stack in a fork would
-        drag unrelated handlers along) and exits; the pid guard makes it
-        a no-op, so the parent's sentinel survives locked."""
+    def test_forked_child_normal_exit_cannot_unlink_parent_sentinel(self, rt, db):
+        """Real interpreter-exit path: a spawned worker registers, forks,
+        and the forked grandchild exits *normally* (``sys.exit(0)`` →
+        the inherited atexit stack, including the registry handler,
+        runs). The pid guard makes the inherited cleanup a no-op, so the
+        worker's sentinel must survive and stay live."""
+        q = _CTX.Queue()
+        release = _CTX.Event()
+        worker = _CTX.Process(
+            target=_child_register_fork_grandchild, args=(str(rt), str(db), q, release)
+        )
+        worker.start()
+        try:
+            _, survived, grand_code, worker_pid = _drain_until(q, "forked")
+            assert grand_code == 0
+            assert survived, "sentinel must survive the grandchild's normal exit"
+            # cross-process view: the worker's registration is still live
+            result = reg.enumerate_live_instances(reg.store_digest_for(db))
+            assert [i.pid for i in result.instances] == [worker_pid]
+        finally:
+            release.set()
+            worker.join(timeout=30)
+            _stop(worker)
+
+
+class TestListingUnderMutationLock:
+    def test_both_probes_list_the_directory_only_while_holding_the_lock(self, rt, db, monkeypatch):
+        """A directory snapshot taken outside the mutation lock can miss a
+        registrar that publishes right after it (uninstall would judge
+        NONE from a stale view). Pin the ordering structurally: every
+        ``instances_dir()`` resolution inside the probes happens while
+        the intra-process mutation lock is held."""
         inst = reg.register_instance(db)
         assert inst is not None
         try:
-            pid = os.fork()
-            if pid == 0:
-                # ── child ──
-                try:
-                    reg._atexit_cleanup()
-                    code = 0 if inst.path.exists() else 1
-                except BaseException:
-                    code = 2
-                os._exit(code)
-            _, status = os.waitpid(pid, 0)
-            assert os.waitstatus_to_exitcode(status) == 0
-            assert inst.path.exists()
-            assert reg._active.get(inst.path) is inst
-            # still live: the parent's flock was never released
+            real_dir = reg.instances_dir
+            held: list[bool] = []
+
+            def spying_dir():
+                held.append(reg._mutation_thread_lock.locked())
+                return real_dir()
+
+            monkeypatch.setattr(reg, "instances_dir", spying_dir)
+            assert reg.probe_all_for_uninstall() == "LIVE"
             result = reg.enumerate_live_instances(reg.store_digest_for(db))
-            assert [i.pid for i in result.instances] == [os.getpid()]
+            assert result.complete
         finally:
             inst.cleanup()
+        assert held and all(held)
+
+    def test_probe_lock_oserror_is_unknown_not_live(self, rt, db, monkeypatch):
+        """A generic I/O failure during the flock probe is uncertainty —
+        claiming 'live' would fabricate a concurrent-writer warning."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'e' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+
+        real_lock = reg.portalocker.lock
+
+        def flaky_lock(fp, flags):
+            if getattr(fp, "name", "").endswith("bbbbbbbb.lock"):
+                raise OSError("disk went away")
+            return real_lock(fp, flags)
+
+        monkeypatch.setattr(reg.portalocker, "lock", flaky_lock)
+        assert reg._probe_entry(entry) == "unknown"
+        assert reg.probe_all_for_uninstall() == "UNKNOWN"
+        result = reg.enumerate_live_instances("e" * 16)
+        assert not result.complete
+        assert result.instances == ()
+
+
+class TestSymlinkedRegistryDir:
+    def test_symlinked_instances_dir_is_never_trusted_or_traversed(self, rt, tmp_path):
+        victim_dir = tmp_path / "victim"
+        victim_dir.mkdir()
+        (victim_dir / "precious.txt").write_text("do not touch")
+        reg.ensure_runtime_dir()
+        try:
+            reg.instances_dir().symlink_to(victim_dir)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        assert reg.probe_all_for_uninstall() == "UNKNOWN"
+        result = reg.enumerate_live_instances("0" * 16)
+        assert not result.complete
+        assert result.instances == ()
+        assert (victim_dir / "precious.txt").read_text() == "do not touch"

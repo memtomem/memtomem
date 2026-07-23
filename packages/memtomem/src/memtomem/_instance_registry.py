@@ -308,12 +308,20 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
                 fp.close()
                 return None
             inst = RegisteredInstance(path=path, pid=pid, _fp=fp)
-        with _state_guard:
-            _active[path] = inst
-            global _atexit_installed
-            if not _atexit_installed:
-                atexit.register(_atexit_cleanup)
-                _atexit_installed = True
+            # Publish into the active dict while STILL holding the
+            # mutation lock: the on-disk sentinel must never be visible
+            # to a same-process enumeration before the in-memory record
+            # exists, or the self-probe skip fails and Windows (where a
+            # second same-process handle can acquire the flock) would
+            # misread the fresh registration as stale. ``_state_guard``
+            # nests inside the mutation lock here; no path nests them in
+            # the opposite order, so there is no inversion.
+            with _state_guard:
+                _active[path] = inst
+                global _atexit_installed
+                if not _atexit_installed:
+                    atexit.register(_atexit_cleanup)
+                    _atexit_installed = True
         return inst
     except Exception:
         logger.debug("instance registration failed", exc_info=True)
@@ -337,6 +345,13 @@ def _probe_entry(path: Path) -> Literal["live", "stale", "gone", "unknown"]:
     """Flock-probe one sentinel. The lock, not the recorded pid, is
     authoritative (pid reuse — see ``cli/_liveness.py``). On ``stale``
     the caller decides about GC; the probe itself releases immediately.
+
+    Contention and uncertainty are distinct here: only the known
+    contention shapes (POSIX ``BlockingIOError``, portalocker's Windows
+    ``LockException``) mean ``live``; any other ``OSError`` is an I/O
+    failure and reports ``unknown`` — claiming ``live`` on it would let
+    a transient error fabricate a concurrent-writer warning (the status
+    surface is fail-open) or a false uninstall refusal.
     """
     try:
         fp = open(path, "rb+")
@@ -347,12 +362,30 @@ def _probe_entry(path: Path) -> Literal["live", "stale", "gone", "unknown"]:
     try:
         try:
             portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-        except _LOCK_CONTENDED:
+        except (portalocker.LockException, BlockingIOError):
             return "live"
+        except OSError:
+            return "unknown"
         portalocker.unlock(fp)
         return "stale"
     finally:
         fp.close()
+
+
+def _real_dir(path: Path) -> bool:
+    """True only for an actual directory — never follow a symlink.
+
+    A symlinked ``instances/`` would redirect probing (and, worse, the
+    uninstall staging that trusts these probes) into unrelated files;
+    both probes treat it as uncertainty, not as an empty registry.
+    """
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode)
 
 
 def _gc_stale_entry(path: Path) -> None:
@@ -402,18 +435,25 @@ def enumerate_live_instances(store_digest: str) -> EnumerationResult:
         if info is not None and info.digest == store_digest:
             results.append(info)
 
-    directory = instances_dir()
-    try:
-        entries = sorted(directory.iterdir())
-    except FileNotFoundError:
-        return EnumerationResult(_sorted(results), True)
-    except OSError:
-        return EnumerationResult(_sorted(results), False)
-
+    # The directory is checked and listed only UNDER the mutation lock,
+    # with the deadline started before acquisition: an unlocked snapshot
+    # could miss a registrar that publishes right after it (a live server
+    # invisible for this pass), and the deadline must bound acquisition
+    # plus traversal as one budget.
     complete = True
     deadline = time.monotonic() + _LOCK_TIMEOUT_S
     try:
         with _mutation_lock(deadline):
+            directory = instances_dir()
+            if not _real_dir(directory):
+                if not directory.exists():
+                    return EnumerationResult(_sorted(results), True)
+                # exists but symlink / non-dir — uncertainty, fail open
+                return EnumerationResult(_sorted(results), False)
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                return EnumerationResult(_sorted(results), False)
             for entry in entries:
                 if entry in own:
                     continue
@@ -458,16 +498,23 @@ def probe_all_for_uninstall() -> Literal["NONE", "LIVE", "UNKNOWN"]:
     with _state_guard:
         if _active:
             return "LIVE"
-    directory = instances_dir()
-    try:
-        entries = list(directory.iterdir())
-    except FileNotFoundError:
-        return "NONE"
-    except OSError:
-        return "UNKNOWN"
+    # Same rule as enumeration: the directory is checked and listed only
+    # under the mutation lock, deadline started before acquisition — an
+    # unlocked snapshot (or an unlocked missing-dir fast path) can race a
+    # registrar mid-critical-section and judge NONE against a stale view.
     deadline = time.monotonic() + _LOCK_TIMEOUT_S
     try:
         with _mutation_lock(deadline):
+            directory = instances_dir()
+            if not _real_dir(directory):
+                if not directory.exists():
+                    return "NONE"
+                # symlink / non-dir — never trust it, never traverse it
+                return "UNKNOWN"
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                return "UNKNOWN"
             for entry in entries:
                 if time.monotonic() >= deadline:
                     return "UNKNOWN"
@@ -476,9 +523,9 @@ def probe_all_for_uninstall() -> Literal["NONE", "LIVE", "UNKNOWN"]:
                     return "LIVE"
                 if state == "unknown":
                     return "UNKNOWN"
+            return "NONE"
     except _MutationLockTimeout:
         return "UNKNOWN"
     except Exception:
         logger.debug("uninstall registry probe failed", exc_info=True)
         return "UNKNOWN"
-    return "NONE"

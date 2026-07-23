@@ -200,7 +200,9 @@ def _collect_concurrent_writers(db_path: Path) -> dict | None:
         "MCP client and restart it — see the coexistence guide.",
         "doc": "docs/guides/mcp-clients.md#one-server-at-a-time",
     }
-    ppids = {info.ppid for info in result.instances}
+    # Per-GROUP representatives, matching the grouping semantics above —
+    # a second registration inside one process contributes no extra vote.
+    ppids = {info.ppid for info in ordered}  # type: ignore[attr-defined]
     if len(ppids) == 1:
         # Observation, not a verdict: equal recorded parent pids suggest —
         # but do not prove — one client launched both (pid reuse and

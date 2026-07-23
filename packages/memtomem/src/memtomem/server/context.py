@@ -515,16 +515,25 @@ class AppContext:
                         self.config.scheduler.default_timezone,
                     )
             except BaseException:
-                await _stop_quietly(watchdog, "health_watchdog")
-                await _stop_quietly(policy_scheduler, "policy_scheduler")
-                await _stop_quietly(scheduler, "scheduler")
-                await _stop_quietly(watcher, "watcher")
+                # Same accumulate-and-defer discipline as ``close()``: a
+                # cancellation arriving during one of these stops must not
+                # skip the component close and sentinel settlement below.
+                # The original exception re-raises regardless (when the
+                # trigger *was* a cancellation, it is that same instance).
+                for resource, stage in (
+                    (watchdog, "health_watchdog"),
+                    (policy_scheduler, "policy_scheduler"),
+                    (scheduler, "scheduler"),
+                    (watcher, "watcher"),
+                ):
+                    try:
+                        await _stop_quietly(resource, stage)
+                    except asyncio.CancelledError:
+                        logger.warning("rollback stop '%s' cancelled — continuing", stage)
                 teardown = await close_components(comp)
                 # Release the sentinel only when storage provably closed —
                 # a failed close leaves a possibly-open store, which must
-                # stay advertised (#1935). The original exception wins over
-                # any cancellation caught while releasing (it usually *is*
-                # that cancellation).
+                # stay advertised (#1935).
                 await self._release_instance_registration(teardown.storage_closed)
                 self._components = None
                 self._owns_components = False
@@ -666,7 +675,15 @@ class AppContext:
                 if first_cancel is None:
                     first_cancel = exc
 
-        storage_closed = True
+        # Default is UNCONFIRMED: only a teardown that actually ran and
+        # reported success flips this. A bare ``True`` for the
+        # no-components case would let a second ``close()`` — after an
+        # earlier failed storage close already cleared ``_components``
+        # but retained the sentinel — release that sentinel without any
+        # confirmed close. With no held registration the flag is inert
+        # (release no-ops), so unflagged/from_components contexts are
+        # unaffected.
+        storage_closed = False
         if self._components is not None and self._owns_components:
             teardown = await close_components(self._components)
             storage_closed = teardown.storage_closed

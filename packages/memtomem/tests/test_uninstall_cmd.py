@@ -1326,3 +1326,32 @@ class TestInstanceRegistryInventory:
         assert result.exit_code == 0, result.output
         assert sidecar.exists(), "the mutation sidecar must never be deleted"
         assert "instances.registry.lock" not in result.output
+
+
+class TestInstanceRegistrySymlinkGuard:
+    """A symlinked ``instances/`` must never be trusted or staged through
+    (#1935 review): the fail-closed probe reports UNKNOWN → refusal, and
+    the inventory/prune side never lists across the link."""
+
+    def test_symlinked_instances_dir_refuses_and_touches_nothing(
+        self, home, registry_at_runtime_dir, tmp_path
+    ):
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        victim_dir = tmp_path / "victim"
+        victim_dir.mkdir()
+        victim = victim_dir / "precious.txt"
+        victim.write_text("do not touch", encoding="utf-8")
+        reg.ensure_runtime_dir()
+        try:
+            reg.instances_dir().symlink_to(victim_dir)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert victim.read_text(encoding="utf-8") == "do not touch"
+        assert "precious" not in result.output, "inventory must not list across the link"
+        assert (state / "memtomem.db").exists()

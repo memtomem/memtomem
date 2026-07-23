@@ -40,6 +40,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -68,14 +69,36 @@ _DB_SIBLING_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _OWNED_SUBDIRS = ("config.d", "memories", "uploads")
 
 
+def _real_registry_dir() -> Path | None:
+    """The sentinel directory iff it is an actual directory.
+
+    ``lstat`` semantics — a symlinked ``instances/`` is treated as
+    absent here so the inventory and the prune below can never traverse
+    or stage through it into unrelated files (the fail-closed refusal
+    for that case comes from ``probe_all_for_uninstall`` returning
+    ``UNKNOWN``; this guard keeps the *listing* side inert too).
+    """
+    d = _instances_dir()
+    try:
+        st = os.stat(d, follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return d
+
+
 def _registry_has_sentinels() -> bool:
     """True when the instance-registry sentinel directory has any entries.
 
     Sidecar-only leftovers return ``False`` (the sidecar lives outside
     the directory and is retained infrastructure, #1935).
     """
+    d = _real_registry_dir()
+    if d is None:
+        return False
     try:
-        return any(_instances_dir().iterdir())
+        return any(d.iterdir())
     except OSError:
         return False
 
@@ -244,12 +267,12 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     # live by the time staging runs. The mutation sidecar
     # (``instances.registry.lock``, *outside* this directory) is
     # deliberately absent — retained infrastructure, see module docstring.
-    reg_dir = _instances_dir()
-    try:
-        if reg_dir.is_dir():
+    reg_dir = _real_registry_dir()
+    if reg_dir is not None:
+        try:
             other.extend(sorted(p for p in reg_dir.iterdir() if p.is_file()))
-    except OSError:
-        pass
+        except OSError:
+            pass
 
     return _Inventory(
         state_dir=state_dir,
@@ -743,8 +766,8 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # away. The runtime-dir prune below then usually still finds the
     # retained ``instances.registry.lock`` sidecar and no-ops — expected;
     # the runtime dir is volatile and self-cleans.
-    reg_dir = _instances_dir()
-    if reg_dir.exists() and reg_dir.is_dir() and not any(reg_dir.iterdir()):
+    reg_dir = _real_registry_dir()
+    if reg_dir is not None and not any(reg_dir.iterdir()):
         try:
             reg_dir.rmdir()
         except OSError:
