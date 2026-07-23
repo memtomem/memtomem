@@ -13,7 +13,7 @@
       "name": "memtomem",
       "source": "./packages/memtomem-claude-plugin",
       "description": "Safe memory search, recall, persistence, and indexing workflows",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "author": { "name": "memtomem" },
       "repository": "https://github.com/memtomem/memtomem",
       "license": "Apache-2.0",

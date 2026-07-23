@@ -27,6 +27,16 @@ codex plugin add memtomem@memtomem
 Start a new Codex thread after installation so the marketplace snapshot,
 skills, and MCP server are reloaded.
 
+> **Already registered in `~/.codex/config.toml`?** Codex resolves MCP
+> servers by name, and a `config.toml` entry takes precedence: with a manual
+> `[mcp_servers.memtomem]` section present, the plugin's bundled server is
+> not started and your manual entry keeps serving the tools — only one
+> server runs (measured on codex-cli 0.145.0 via the merged `codex mcp
+> list`). Remove the manual section to switch to the plugin's pinned
+> server. A manual entry under any *other* name (say
+> `[mcp_servers.memtomem-local]`) is not deduplicated — both servers would
+> run against the same store — so keep the name `memtomem`.
+
 ## Included skills
 
 | Skill | Behavior | Invocation policy |
