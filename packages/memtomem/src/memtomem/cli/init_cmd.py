@@ -1135,6 +1135,9 @@ def _step_mcp(state: dict) -> None:
     click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
     click.echo("        copy into your editor's config file for Cursor / Windsurf / others)")
     click.echo("    [3] Skip — I'll configure it manually")
+    click.echo("        (pick this if the memtomem Claude Code *plugin* is installed —")
+    click.echo("        it already bundles the server, and a manual entry would run a")
+    click.echo("        second copy against the same store)")
     click.echo("    [4] Kimi CLI (write ~/.kimi/mcp.json or $KIMI_SHARE_DIR/mcp.json)")
     state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
     click.echo()
@@ -2443,6 +2446,13 @@ def _write_config_and_summary(
             result = _run(claude_cmd, timeout=10)
             if result.returncode == 0:
                 click.secho("  Claude Code: configured (user scope)", fg="green")
+                # The wizard cannot see plugin installs (they are not recorded
+                # in ~/.claude.json), so it cannot detect the pair itself —
+                # point at the observable session-side check instead.
+                click.echo("  Note: if the memtomem Claude Code plugin is also installed, this")
+                click.echo("  manual entry runs a second server against the same store. Check")
+                click.echo("  /mcp for two memtomem servers; keep one (claude mcp remove")
+                click.echo("  memtomem, or /plugin uninstall memtomem@memtomem).")
             elif "already exists" in (result.stderr or ""):
                 # Brittle by design: depends on Claude Code's stderr wording
                 # ("MCP server <name> already exists in user config") staying
