@@ -2906,6 +2906,13 @@ class TestMcpChoiceOneClaudeAddBranches:
         # success path must NOT also write the .mcp.json fallback.
         assert not (tmp_path / ".mcp.json").exists()
         assert "MCP config: wrote ./.mcp.json" not in out
+        # The manual entry coexists with (and duplicates) the plugin-bundled
+        # server — the wizard can't detect plugin installs, so the success
+        # message must carry the session-side check and both remediations,
+        # each command whole on its own line (terminal copy-paste).
+        assert "second server against the same store" in out
+        assert "claude mcp remove memtomem" in out
+        assert "/plugin uninstall memtomem@memtomem" in out
 
     def test_already_exists_stderr_skips_fallback(
         self,
@@ -2937,6 +2944,9 @@ class TestMcpChoiceOneClaudeAddBranches:
 
         out = unstyle(capsys.readouterr().out)
         assert "Claude Code: already registered (user scope) — skipped" in out
+        # A pre-existing manual entry pairs with an installed plugin exactly
+        # the same way a fresh one would — the coexistence note fires here too.
+        assert "second server against the same store" in out
         # Regression: the old wording must not leak back in.
         assert "'claude' not found" not in out
         # No fallback file should be written — Claude Code already has the
@@ -7204,6 +7214,10 @@ class TestPresetMcpFlagPreAnswer:
         out = result.output
         assert "Connect to AI Editor" in out
         assert "Claude Code (run 'claude mcp add' automatically)" in out
+        # The skip option must steer plugin users away from creating a
+        # duplicate manual registration (see the claude-code.md coexistence
+        # callout — the wizard's command differs from the plugin's pin).
+        assert "it already bundles the server" in out
 
     def test_step_mcp_unit_skips_when_mcp_choice_preset(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
