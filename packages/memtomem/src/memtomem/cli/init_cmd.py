@@ -1157,6 +1157,21 @@ def _claude_desktop_config_hint() -> str:
     return "~/.config/Claude/claude_desktop_config.json"
 
 
+def _emit_plugin_coexistence_note() -> None:
+    """Warn that a manual user-scope entry duplicates the plugin's server.
+
+    The wizard cannot see plugin installs (they are not recorded in
+    ``~/.claude.json``), so it cannot detect the pair itself — point at the
+    observable session-side check instead. Each remediation command stays on
+    its own line so a terminal copy-paste grabs the whole command.
+    """
+    click.echo("  Note: if the memtomem Claude Code plugin is also installed, this")
+    click.echo("  manual entry runs a second server against the same store. Check")
+    click.echo("  /mcp for two memtomem servers; keep one:")
+    click.echo("    claude mcp remove memtomem            (keep the plugin)")
+    click.echo("    /plugin uninstall memtomem@memtomem   (keep this manual entry)")
+
+
 def _emit_mcp_paste_hints() -> None:
     """Print per-editor paste targets for the generated ``.mcp.json``.
 
@@ -2446,13 +2461,7 @@ def _write_config_and_summary(
             result = _run(claude_cmd, timeout=10)
             if result.returncode == 0:
                 click.secho("  Claude Code: configured (user scope)", fg="green")
-                # The wizard cannot see plugin installs (they are not recorded
-                # in ~/.claude.json), so it cannot detect the pair itself —
-                # point at the observable session-side check instead.
-                click.echo("  Note: if the memtomem Claude Code plugin is also installed, this")
-                click.echo("  manual entry runs a second server against the same store. Check")
-                click.echo("  /mcp for two memtomem servers; keep one (claude mcp remove")
-                click.echo("  memtomem, or /plugin uninstall memtomem@memtomem).")
+                _emit_plugin_coexistence_note()
             elif "already exists" in (result.stderr or ""):
                 # Brittle by design: depends on Claude Code's stderr wording
                 # ("MCP server <name> already exists in user config") staying
@@ -2466,6 +2475,9 @@ def _write_config_and_summary(
                     "  Claude Code: already registered (user scope) — skipped",
                     fg="green",
                 )
+                # The pre-existing manual entry pairs with an installed plugin
+                # exactly the same way a fresh one would — same note applies.
+                _emit_plugin_coexistence_note()
             else:
                 stderr_line = (result.stderr or "").strip().splitlines()[0:1]
                 detail = stderr_line[0] if stderr_line else f"exit {result.returncode}"
