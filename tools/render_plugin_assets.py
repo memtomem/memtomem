@@ -180,7 +180,16 @@ def expected_files() -> dict[Path, str]:
     }
     for workflow in contract["workflows"]:
         body = (ASSETS / "workflows" / f"{workflow['id']}.md").read_text(encoding="utf-8")
-        files[CLAUDE_ROOT / "skills" / workflow["id"] / "SKILL.md"] = _claude_skill(workflow, body)
+        # Optional Claude-only appendix: workflows/<id>.claude.md is appended to the
+        # Claude skill body only, so plugin-namespace guidance never leaks into the
+        # Codex/OpenCode renders (guarded by test_plugin_assets leak checks).
+        claude_body = body
+        sidecar = ASSETS / "workflows" / f"{workflow['id']}.claude.md"
+        if sidecar.is_file():
+            claude_body = body.strip() + "\n\n" + sidecar.read_text(encoding="utf-8")
+        files[CLAUDE_ROOT / "skills" / workflow["id"] / "SKILL.md"] = _claude_skill(
+            workflow, claude_body
+        )
         codex_dir = CODEX_ROOT / "skills" / workflow["codex_name"]
         files[codex_dir / "SKILL.md"] = _codex_skill(workflow, body)
         files[codex_dir / "agents" / "openai.yaml"] = _openai_yaml(workflow)
