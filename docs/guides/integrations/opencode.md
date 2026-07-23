@@ -71,7 +71,11 @@ OpenCode prefixes MCP tools with the server name, so prompts use names such as
 The plugin allows the dedicated read tools, asks before add/index, and denies
 the broad `memtomem_mem_do` dispatcher. Existing memtomem-specific permission
 rules, an existing `mcp.memtomem`, same-name commands, and same-name user
-skills take precedence.
+skills take precedence. That precedence is keyed on the exact `memtomem`
+name: a manual server registered under any other key (say
+`mcp."memtomem-local"`) is not deduplicated — both servers would run against
+the same store, with tools under both prefixes — so keep manual entries named
+`memtomem`.
 
 OpenCode's `--auto` option approves `ask` decisions. Agent-level permissions
 can also override global permissions, so review both before using write
