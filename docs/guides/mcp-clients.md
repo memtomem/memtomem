@@ -262,6 +262,12 @@ args = []
 
 Restart Codex CLI after configuration.
 
+A manual `[mcp_servers.memtomem]` section also takes precedence over the
+plugin from Option A: with both present, only the manual entry's server runs
+(name-keyed; measured on codex-cli 0.145.0). Registering the manual entry
+under a different name instead would run both servers — see the
+[Codex integration guide](integrations/codex.md) for details.
+
 > Codex MCP tools default to **serialized** calls. memtomem is safe to
 > run in parallel — opt in by adding `supports_parallel_tool_calls = true`
 > alongside `command`/`args`. Other server-level knobs documented by
