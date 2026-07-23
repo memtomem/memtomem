@@ -302,7 +302,7 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
             # refuse instead (same trust rule as the probes; the 0700
             # runtime dir plus the held mutation lock make the
             # lstat→open window practically inert).
-            if not _real_dir(directory):
+            if _dir_state(directory) != "dir":
                 return None
             path = directory / name
             # The nonce makes this filename fresh — never reuse/unlink an
@@ -379,20 +379,24 @@ def _probe_entry(path: Path) -> Literal["live", "stale", "gone", "unknown"]:
         fp.close()
 
 
-def _real_dir(path: Path) -> bool:
-    """True only for an actual directory — never follow a symlink.
+def _dir_state(path: Path) -> Literal["dir", "missing", "untrusted"]:
+    """No-follow tri-state for the sentinel directory.
 
-    A symlinked ``instances/`` would redirect probing (and, worse, the
-    uninstall staging that trusts these probes) into unrelated files;
-    both probes treat it as uncertainty, not as an empty registry.
+    Only ``FileNotFoundError`` means *missing* (an empty registry). A
+    symlink, a non-directory, or any other stat failure is *untrusted*:
+    a symlinked ``instances/`` would redirect probing (and, worse, the
+    uninstall staging that trusts these probes) into unrelated files —
+    and a *dangling* symlink must not collapse into "missing" via a
+    follow-the-link ``exists()`` check, or the fail-closed uninstall
+    probe would answer NONE against a registry it cannot actually see.
     """
     try:
         st = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
-        return False
+        return "missing"
     except OSError:
-        return False
-    return stat.S_ISDIR(st.st_mode)
+        return "untrusted"
+    return "dir" if stat.S_ISDIR(st.st_mode) else "untrusted"
 
 
 def _gc_stale_entry(path: Path) -> None:
@@ -453,10 +457,11 @@ def enumerate_live_instances(store_digest: str) -> EnumerationResult:
                 if info is not None and info.digest == store_digest:
                     results.append(info)
             directory = instances_dir()
-            if not _real_dir(directory):
-                if not directory.exists():
-                    return EnumerationResult(_sorted(results), True)
-                # exists but symlink / non-dir — uncertainty, fail open
+            dir_state = _dir_state(directory)
+            if dir_state == "missing":
+                return EnumerationResult(_sorted(results), True)
+            if dir_state == "untrusted":
+                # symlink (dangling included) / non-dir — fail open
                 return EnumerationResult(_sorted(results), False)
             try:
                 entries = sorted(directory.iterdir())
@@ -515,10 +520,12 @@ def probe_all_for_uninstall() -> Literal["NONE", "LIVE", "UNKNOWN"]:
                 if _active:
                     return "LIVE"
             directory = instances_dir()
-            if not _real_dir(directory):
-                if not directory.exists():
-                    return "NONE"
-                # symlink / non-dir — never trust it, never traverse it
+            dir_state = _dir_state(directory)
+            if dir_state == "missing":
+                return "NONE"
+            if dir_state == "untrusted":
+                # symlink (dangling included) / non-dir — never trust,
+                # never traverse, never call it empty
                 return "UNKNOWN"
             try:
                 entries = list(directory.iterdir())

@@ -624,3 +624,20 @@ class TestSymlinkedRegistryDir:
         assert not result.complete
         assert result.instances == ()
         assert (victim_dir / "precious.txt").read_text() == "do not touch"
+
+
+class TestDanglingSymlinkedRegistryDir:
+    def test_dangling_symlink_is_untrusted_not_missing(self, rt, tmp_path):
+        """A dangling ``instances`` symlink must read as uncertainty:
+        collapsing it into 'missing' (via a follow-the-link exists())
+        would let the fail-closed uninstall probe answer NONE against a
+        registry it cannot actually see."""
+        reg.ensure_runtime_dir()
+        try:
+            reg.instances_dir().symlink_to(tmp_path / "no-such-target")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        assert reg.probe_all_for_uninstall() == "UNKNOWN"
+        result = reg.enumerate_live_instances("0" * 16)
+        assert not result.complete
+        assert result.instances == ()

@@ -1446,3 +1446,25 @@ class TestRegistrationSymlinkGuard:
         db.write_bytes(b"x")
         assert reg.register_instance(db) is None
         assert list(victim_dir.iterdir()) == [], "no sentinel may land in the link target"
+
+    def test_db_lock_going_live_between_probe_and_delete_refuses(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._db_lock import DbLockState
+
+        state = _seed_state(home)
+        calls: list[int] = []
+
+        def flapping_db_lock(_path):
+            calls.append(1)
+            return DbLockState(locked=len(calls) > 1, probe_error=None)
+
+        monkeypatch.setattr(uninstall_cmd, "_check_db_lock", flapping_db_lock)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert len(calls) == 2
+        assert (state / "memtomem.db").exists()
+        assert (state / "config.json").exists()
