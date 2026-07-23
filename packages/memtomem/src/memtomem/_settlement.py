@@ -31,6 +31,43 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def settle_shielded_result(
+    future: asyncio.Future, *, what: str
+) -> tuple[object | None, asyncio.CancelledError | None]:
+    """Like :func:`settle_shielded`, but hand back the outcome instead of raising.
+
+    Returns ``(result, first_cancellation)`` once *future* settles:
+    ``result`` is the future's value (``None`` when it failed — the
+    failure is logged, never re-raised) and ``first_cancellation`` is the
+    first :class:`asyncio.CancelledError` caught while settling, or
+    ``None``. Callers that must order compensating work *before*
+    propagating cancellation (e.g. instance-registry settlement, which
+    may only release its sentinel after storage close is confirmed —
+    #1935) use this variant and re-raise the cancellation themselves
+    after that work; :func:`settle_shielded` stays the right call when
+    re-raise-immediately is the correct order.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(future)
+            break
+        except asyncio.CancelledError as exc:
+            if cancelled is None:
+                cancelled = exc
+            if future.done():
+                break
+        except BaseException:
+            # The future settled by failing — captured below via result().
+            break
+    result: object | None = None
+    try:
+        result = future.result()
+    except BaseException:
+        logger.warning("%s failed while settling", what, exc_info=True)
+    return result, cancelled
+
+
 async def settle_shielded(future: asyncio.Future, *, what: str) -> None:
     """Await *future* until it settles, surviving repeated cancellation.
 

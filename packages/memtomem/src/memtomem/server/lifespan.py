@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import logging.config
 import os
@@ -124,7 +125,12 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
             from memtomem.server.webhooks import WebhookManager
 
             webhook_mgr = WebhookManager(config.webhook)
-        ctx = AppContext(config=config, webhook_manager=webhook_mgr)
+        # ``register_server_instance`` is the server-only opt-in for the
+        # instance registry (#1935): the lifespan is the one construction
+        # site that is definitionally the MCP server, so the flag is set
+        # here and nowhere else (CLI / web / integrations build contexts
+        # through other paths and stay unregistered).
+        ctx = AppContext(config=config, webhook_manager=webhook_mgr, register_server_instance=True)
     except BaseException:
         # ``AppContext()`` is allocation-only and never touches storage,
         # so the webhook is the only thing that could be partially
@@ -140,5 +146,21 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
             ctx._warmup_task = spawn_warmup(ctx)
         yield ctx
     finally:
-        await _stop_quietly(webhook_mgr, "webhook_manager")
-        await _stop_quietly(ctx, "app_context")
+        # Accumulate-and-defer (#1935): a cancellation during the webhook
+        # stop must not skip ``ctx.close()`` — the context owns the
+        # instance-registry settlement, which has to run. The first caught
+        # cancellation re-raises only when no exception is already in
+        # flight (raising inside ``finally`` would mask the original —
+        # typically the very cancellation that triggered shutdown).
+        first_cancel: BaseException | None = None
+        try:
+            await _stop_quietly(webhook_mgr, "webhook_manager")
+        except asyncio.CancelledError as exc:
+            first_cancel = exc
+        try:
+            await _stop_quietly(ctx, "app_context")
+        except asyncio.CancelledError as exc:
+            if first_cancel is None:
+                first_cancel = exc
+        if first_cancel is not None and sys.exc_info()[1] is None:
+            raise first_cancel

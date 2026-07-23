@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from memtomem.config import Mem2MemConfig
-from memtomem.server.component_factory import Components
+from memtomem.server.component_factory import Components, TeardownResult
 from memtomem.server.context import AppContext
 
 
@@ -186,8 +186,9 @@ async def test_ensure_initialized_closes_components_if_post_factory_step_raises(
     ctx = AppContext(config=fake_components.config)
     close_calls: list[Components] = []
 
-    async def fake_close(comp: Components) -> None:
+    async def fake_close(comp: Components) -> TeardownResult:
         close_calls.append(comp)
+        return TeardownResult(storage_closed=True)
 
     def exploding_dedup(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("post-factory boom")
@@ -254,6 +255,7 @@ async def test_close_after_ensure_initialized_closes_components(
     assert ctx._owns_components is True
 
     with patch("memtomem.server.component_factory.close_components") as mock_close:
+        mock_close.return_value = TeardownResult(storage_closed=True)
         await ctx.close()
 
     mock_close.assert_called_once_with(fake_components)
@@ -326,7 +328,8 @@ async def test_close_stops_started_watcher(fake_components: Components) -> None:
     started_watcher = ctx._watcher
     assert started_watcher is not None
 
-    with patch("memtomem.server.component_factory.close_components"):
+    with patch("memtomem.server.component_factory.close_components") as mock_close:
+        mock_close.return_value = TeardownResult(storage_closed=True)
         await ctx.close()
 
     started_watcher.stop.assert_awaited_once()  # type: ignore[attr-defined]
@@ -350,8 +353,9 @@ async def test_ensure_initialized_rolls_back_components_when_watcher_start_fails
     ctx = AppContext(config=fake_components.config)
     close_calls: list[Components] = []
 
-    async def fake_close(comp: Components) -> None:
+    async def fake_close(comp: Components) -> TeardownResult:
         close_calls.append(comp)
+        return TeardownResult(storage_closed=True)
 
     with (
         patch(

@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mem_status` / `mm status` now detect two live servers writing one
+  store** (#1935). Every MCP server that opens storage registers a flock
+  sentinel in a per-user instance registry; when two or more live server
+  processes share a store, the status report adds a
+  `concurrent_server_writers` warning listing their pids (plus a
+  `same_parent` observation when all recorded the same parent PID). The
+  wording is client-agnostic and cause-neutral — multiple editor sessions
+  legitimately produce the same state; with a single session it usually
+  means one client has two memtomem registrations (manual + plugin, see
+  the #1930–#1934 coexistence docs).
+
+### Changed
+
+- **`mm uninstall` refuses while a registered server instance is live**,
+  even with `--force` — a held sentinel is positive evidence of a running
+  server (a secondary owns no `server.pid`; an idle server holds no
+  SQLite write lock), and an inconclusive registry probe is fail-closed.
+  Leftover stale sentinels are inventoried and cleaned like other
+  transient runtime files.
+
 ## [0.3.12] — 2026-07-22
 
 ### Added

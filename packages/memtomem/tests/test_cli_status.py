@@ -615,3 +615,173 @@ class TestStatusJson:
 
         assert result.exit_code != 0
         assert "boom" in result.output
+
+
+class TestConcurrentWriters:
+    """#1935: ``concurrent_server_writers`` warning from the instance registry.
+
+    The registry seams (``_store_digest_for`` / ``_enumerate_live_instances``)
+    are monkeypatched — the real registry's cross-process behavior is covered
+    by ``test_instance_registry.py``; these tests pin the warning contract:
+    procid grouping, scalar-only values, no paths/digests in the payload,
+    fail-open silence, and the CLI/MCP-shared rendering.
+    """
+
+    @staticmethod
+    def _seed(monkeypatch, instances, *, complete: bool = True, digest: str | None = "d" * 16):
+        from memtomem._instance_registry import EnumerationResult
+        from memtomem.server.tools import status_config
+
+        monkeypatch.setattr(status_config, "_store_digest_for", lambda _p: digest)
+        monkeypatch.setattr(
+            status_config,
+            "_enumerate_live_instances",
+            lambda _d: EnumerationResult(tuple(instances), complete),
+        )
+
+    @staticmethod
+    def _info(pid: int, ppid: int, procid: str):
+        from memtomem._instance_registry import InstanceInfo
+
+        return InstanceInfo(
+            pid=pid, ppid=ppid, digest="d" * 16, procid=procid, path=Path(f"/x/{pid}")
+        )
+
+    def test_two_processes_emit_warning_with_stable_keys(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._seed(monkeypatch, [self._info(100, 1, "aaaaaaaa"), self._info(200, 2, "bbbbbbbb")])
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        (warning,) = json.loads(result.output)["warnings"]
+        assert set(warning) == {"kind", "detail", "fix", "doc"}
+        assert warning["kind"] == "concurrent_server_writers"
+        assert "pids 100, 200" in warning["detail"]
+        assert "multiple editor sessions" in warning["detail"]
+        assert warning["doc"] == "docs/guides/mcp-clients.md#one-server-at-a-time"
+        # Induced gates (#1929): scalar-only values (the generic text
+        # renderer KeyErrors on non-embedding dicts), and no filesystem
+        # paths / store digests on the wire.
+        assert all(isinstance(v, str) for v in warning.values())
+        assert "/" not in warning["detail"]
+        assert "d" * 16 not in json.dumps(warning)
+
+        text = runner.invoke(cli, ["status"])
+        assert text.exit_code == 0, text.output
+        assert "- kind:       concurrent_server_writers" in text.output
+
+    def test_unanimous_ppid_adds_same_parent_observation(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._seed(monkeypatch, [self._info(100, 7, "aaaaaaaa"), self._info(200, 7, "bbbbbbbb")])
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        (warning,) = json.loads(result.output)["warnings"]
+        assert set(warning) == {"kind", "detail", "fix", "doc", "same_parent"}
+        assert warning["same_parent"] == "true"  # scalar string, not bool
+        assert warning["detail"].endswith("All entries recorded the same parent PID.")
+        # Observation only — the issue-title cause never appears as a
+        # machine value (it would accuse legitimate multi-session users).
+        assert "duplicate_client_registration" not in json.dumps(warning)
+
+        text = runner.invoke(cli, ["status"])
+        assert text.exit_code == 0, text.output
+        assert "same_parent: true" in text.output
+
+    def test_equal_pids_different_procids_are_two_processes(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # pid-namespace collision: same recorded pid, distinct procids —
+        # grouping is procid-based, and the pid list keeps one entry per
+        # group (repeats allowed).
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._seed(monkeypatch, [self._info(123, 1, "aaaaaaaa"), self._info(123, 2, "bbbbbbbb")])
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        (warning,) = json.loads(result.output)["warnings"]
+        assert "2 live memtomem-server processes (pids 123, 123)" in warning["detail"]
+
+    def test_one_process_two_registrations_no_warning(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two flagged contexts in one process share a procid → one group.
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._seed(monkeypatch, [self._info(100, 1, "aaaaaaaa"), self._info(100, 1, "aaaaaaaa")])
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["warnings"] == []
+
+    def test_single_instance_no_warning(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._seed(monkeypatch, [self._info(100, 1, "aaaaaaaa")])
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["warnings"] == []
+
+    def test_incomplete_enumeration_fails_open(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # complete=False is a lower bound, not evidence — never warn on it.
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._seed(
+            monkeypatch,
+            [self._info(100, 1, "aaaaaaaa"), self._info(200, 2, "bbbbbbbb")],
+            complete=False,
+        )
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["warnings"] == []
+
+    def test_missing_store_digest_skips_probe(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.server.tools import status_config
+
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr(status_config, "_store_digest_for", lambda _p: None)
+
+        def _boom(_digest):
+            raise AssertionError("enumeration must not run without a digest")
+
+        monkeypatch.setattr(status_config, "_enumerate_live_instances", _boom)
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["warnings"] == []
+
+    def test_probe_failure_leaves_report_intact(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.server.tools import status_config
+
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr(status_config, "_store_digest_for", lambda _p: "d" * 16)
+
+        def _boom(_digest):
+            raise RuntimeError("registry exploded")
+
+        monkeypatch.setattr(status_config, "_enumerate_live_instances", _boom)
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["warnings"] == []
+        assert data["index"]["total_chunks"] == 1
