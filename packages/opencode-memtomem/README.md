@@ -45,7 +45,10 @@ not been verified.
 - Add and index require confirmation.
 - The broad `mem_do` dispatcher is denied.
 - An existing `mcp.memtomem`, command of the same name, same-named user skill,
-  or memtomem-specific permission rule wins over the plugin default.
+  or memtomem-specific permission rule wins over the plugin default. The
+  dedup is keyed on the exact `memtomem` name — a manual server under any
+  other key is not deduplicated and both servers would run, so keep manual
+  entries named `memtomem`.
 
 OpenCode's `--auto` mode approves `ask` decisions, and agent-level permissions
 can override global settings. Review those settings before using write commands.
