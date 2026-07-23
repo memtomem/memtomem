@@ -60,16 +60,35 @@ memtomem==<version>` pin, so [uv](https://docs.astral.sh/uv/) must be on your
 PATH. BM25 works with the default `embedding.provider=none`; embeddings are
 optional.
 
-> **Already registered via `claude mcp add`?** Nothing runs twice —
-> Claude Code detects that the plugin bundles the same server command
-> and suppresses the plugin-managed copy, so your manual registration
-> keeps winning and tools keep their `mcp__memtomem__mem_*` names.
-> To switch to the plugin-managed server (tools become
-> `mcp__plugin_memtomem_memtomem__mem_*`), remove the manual entry:
+> **Already registered via `claude mcp add`?** What happens depends on
+> whether your manual entry launches the server with the **same command and
+> arguments** as the plugin — `uvx --from memtomem==0.3.12 memtomem-server`
+> (environment variables are not compared; measured on Claude Code 2.1.218):
 >
-> ```bash
-> claude mcp remove memtomem
-> ```
+> - **Same command** — Claude Code suppresses the plugin-managed copy, your
+>   manual registration keeps winning, and tools keep their
+>   `mcp__memtomem__mem_*` names. Only one server runs.
+> - **Different command** — and the manual registrations this guide and
+>   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
+>   environment, or `uvx --isolated --from "memtomem[all]==0.3.12"
+>   memtomem-server`) *are* different — **both servers run**: two processes
+>   write the same store, and the tool list doubles under
+>   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
+>
+> To check which case you are in, run `/mcp`: two memtomem servers — or both
+> tool namespaces in the tool list — means both are running. Then pick one:
+>
+> - **Keep the plugin** (recommended) — remove the manual entry; tools become
+>   `mcp__plugin_memtomem_memtomem__mem_*`:
+>
+>   ```bash
+>   claude mcp remove memtomem   # add -s user for a user-scope entry
+>   ```
+>
+> - **Keep the manual entry** (you need the `[all]` extras or a source
+>   checkout) — run `/plugin uninstall memtomem@memtomem`, or re-add the
+>   manual entry with the plugin's exact command above so the plugin copy is
+>   suppressed and the bundled slash commands stay.
 >
 > Either way the bundled slash commands work — their allowlists cover both
 > tool namespaces. If your own settings

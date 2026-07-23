@@ -300,6 +300,47 @@ class TestOptionalClaudeAutomationDocs:
                     assert 0 < handler["timeout"] <= 120
 
 
+class TestPluginManualCoexistenceCallout:
+    """The Claude guide must describe BOTH plugin/manual coexistence cases.
+
+    Claude Code suppresses the plugin-bundled MCP server only when a manual
+    ``claude mcp add`` entry launches the *same command and arguments*
+    (measured on 2.1.218: env vars are not compared; suppression logs
+    ``Suppressing plugin MCP server ... duplicates manually-configured``).
+    The manual registrations our own guides teach (bare ``memtomem-server``,
+    ``uvx --isolated --from "memtomem[all]==<ver>"``) use a *different*
+    command, so plugin-on-top-of-manual runs two servers against one store.
+    An unconditional "nothing runs twice" promise was wrong for exactly the
+    users who followed our docs — keep both cases and the migration
+    commands in the callout, and keep the false promise from coming back.
+    """
+
+    def test_callout_names_both_namespaces_and_the_remediation(self, claude_code: str) -> None:
+        assert "mcp__plugin_memtomem_memtomem__mem_" in claude_code
+        assert "mcp__memtomem__mem_" in claude_code
+        assert "claude mcp remove memtomem" in claude_code
+        assert "/plugin uninstall memtomem@memtomem" in claude_code
+
+    def test_callout_documents_the_duplicate_case(self, claude_code: str) -> None:
+        assert "both servers run" in claude_code
+        assert "same command" in claude_code.lower()
+
+    def test_no_doc_promises_unconditional_suppression(self) -> None:
+        offenders = [
+            str(path.relative_to(_REPO_ROOT))
+            for path in (*_GUIDES.rglob("*.md"), _PLUGIN_README, _README, _PYPI_README)
+            if "nothing runs twice" in path.read_text(encoding="utf-8").lower()
+        ]
+        assert not offenders, (
+            "Unconditional suppression promise reappeared (only true for same-signature "
+            f"manual entries; see claude-code.md coexistence callout): {offenders}"
+        )
+
+    def test_mcp_clients_links_the_coexistence_check(self, mcp_clients: str) -> None:
+        assert "two" in mcp_clients and "servers" in mcp_clients
+        assert "integrations/claude-code.md" in mcp_clients
+
+
 class TestNoJsoncFenceInPublicGuides:
     """Public guides must not use ```` ```jsonc ```` fences.
 

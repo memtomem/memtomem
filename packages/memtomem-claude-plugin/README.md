@@ -41,10 +41,16 @@ uvx --from 'memtomem==0.3.12' mm mem init --scope project_local
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and
 verifies search. One-shot indexing does not add a watched source directory.
 
-If you previously registered the server manually, Claude Code suppresses
-the plugin-managed copy (nothing runs twice) and your manual entry keeps
-winning. Remove it (`claude mcp remove memtomem`) to switch to the
-plugin-managed server.
+If you previously registered the server manually, what happens depends on
+the manual entry's command. If it matches the plugin's exact launch command
+(`uvx --from memtomem==0.3.12 memtomem-server`), Claude Code suppresses the
+plugin-managed copy and your manual entry keeps winning. Any other command —
+including a bare `memtomem-server` registration — runs **both** servers
+against the same store and doubles the tool list. Keep one: remove the
+manual entry (`claude mcp remove memtomem`) to switch to the plugin-managed
+server, or `/plugin uninstall memtomem@memtomem` to keep your manual setup.
+The [Claude Code integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/claude-code.md)
+shows how to check which case you are in.
 
 ## Docs
 

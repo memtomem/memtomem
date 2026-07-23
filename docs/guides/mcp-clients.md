@@ -87,7 +87,11 @@ intentionally do not install memtomem, replace `memtomem-server` with `uvx
 For the safe plugin experience (bundled MCP server plus six focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
 indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
-See the [Claude Code integration guide](integrations/claude-code.md).
+Note that both manual commands above differ from the plugin's pinned launch
+command (`uvx --from memtomem==0.3.12 memtomem-server`), so installing the
+plugin on top of a manual entry runs **two** servers against the same store.
+The [Claude Code integration guide](integrations/claude-code.md) shows how to
+check for the duplicate and which registration to keep.
 
 ### Project scope — commit a `.mcp.json`
 
