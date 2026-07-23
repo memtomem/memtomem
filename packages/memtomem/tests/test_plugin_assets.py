@@ -74,6 +74,52 @@ def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
     assert re.search(r"`mem_[a-z_]+`", opencode_text) is None
     assert "$ARGUMENTS" not in opencode_text
 
+    # Non-implicit workflows have no OpenCode SKILL.md — their OpenCode render
+    # lives only in generated.ts command templates, so the sidecar leak check
+    # must cover that file too, not just the skill globs above.
+    generated_ts = (_ROOT / "packages/opencode-memtomem/src/generated.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "mcp__" not in generated_ts
+    sidecars = sorted((_ROOT / "packages/memtomem-plugin-assets/workflows").glob("*.claude.md"))
+    assert sidecars, "expected at least the setup.claude.md Claude-only appendix"
+    for sidecar in sidecars:
+        marker = next(
+            line for line in sidecar.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+        for text, label in (
+            (codex_text, "codex skills"),
+            (opencode_text, "opencode skills"),
+            (generated_ts, "generated.ts"),
+        ):
+            assert marker not in text, f"Claude-only sidecar {sidecar.name} leaked into {label}"
+
+
+def test_claude_setup_skill_carries_the_registration_check() -> None:
+    """The Claude setup skill must keep the duplicate-registration check.
+
+    Manual `claude mcp add` entries that don't match the plugin's exact launch
+    command coexist with the plugin's server (both run, tool list doubles under
+    both namespaces — measured on Claude Code 2.1.218). The session itself is
+    the only place the pair is reliably observable, so the setup skill carries
+    the check and names the remediation inline; it must never remove a
+    registration itself.
+    """
+    setup = (_ROOT / "packages/memtomem-claude-plugin/skills/setup/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    # Past frontmatter (allowed-tools also names both prefixes); collapse the
+    # prose wrapping so phrase asserts don't depend on line-break positions.
+    body = " ".join(setup.split("---", 2)[2].split())
+    assert "mcp__plugin_memtomem_memtomem__mem_" in body
+    assert "mcp__memtomem__mem_" in body
+    assert "claude mcp remove memtomem" in body
+    assert "/plugin uninstall memtomem@memtomem" in body
+    assert "Never remove either registration yourself" in body
+
+    sidecar = _ROOT / "packages/memtomem-plugin-assets/workflows/setup.claude.md"
+    assert sidecar.is_file(), "Claude-only appendix moved; update the renderer sidecar path"
+
 
 def test_generated_plugin_assets_are_in_sync() -> None:
     completed = subprocess.run(
