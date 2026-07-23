@@ -975,6 +975,27 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             click.echo("Cancelled — no files were touched.")
             sys.exit(1)
 
+    # #1935: liveness was sampled before the inventory print and — in the
+    # interactive flow — a confirmation prompt the user can sit on for
+    # minutes. Re-run every probe at the destructive boundary so a server
+    # that started (or registered) meanwhile is refused instead of having
+    # its live state staged. ``--force`` keeps exactly the authority it
+    # had above: the POSIX stale-pid/db-lock heuristics, never registry
+    # evidence and never Windows open-handle reality.
+    server = _check_server_liveness()
+    db_lock = _check_db_lock(db_path)
+    registry_state = _probe_registry_liveness()
+    heuristics_block = (server.alive or db_lock.locked) and (not force or is_windows)
+    if registry_state != "NONE" or heuristics_block:
+        click.echo("")
+        click.secho(
+            "A memtomem process became active while uninstall was waiting for "
+            "confirmation. Refusing to delete state — stop it and re-run "
+            "mm uninstall.",
+            fg="red",
+        )
+        sys.exit(2)
+
     try:
         summary = _delete_inventory(inv, keep_config=keep_config, keep_data=keep_data)
     except _UninstallCrossFsError as exc:

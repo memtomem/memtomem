@@ -297,6 +297,13 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
         with _mutation_lock(time.monotonic() + _LOCK_TIMEOUT_S):
             directory = instances_dir()
             directory.mkdir(mode=0o700, exist_ok=True)
+            # ``exist_ok=True`` accepts a symlink-to-directory, and the
+            # sentinel open below would then land in the link's target —
+            # refuse instead (same trust rule as the probes; the 0700
+            # runtime dir plus the held mutation lock make the
+            # lstat→open window practically inert).
+            if not _real_dir(directory):
+                return None
             path = directory / name
             # The nonce makes this filename fresh — never reuse/unlink an
             # existing entry here (a same-pid leftover may belong to a
@@ -426,24 +433,25 @@ def enumerate_live_instances(store_digest: str) -> EnumerationResult:
     unlocked+grace rule. Fails open: any uncertainty yields
     ``complete=False`` and the caller must not warn.
     """
-    with _state_guard:
-        own = dict(_active)
-
+    # Both the directory AND the own-registration snapshot are taken only
+    # UNDER the mutation lock, deadline started before acquisition: an
+    # unlocked directory snapshot could miss a registrar that publishes
+    # right after it, and an unlocked ``_active`` snapshot could miss a
+    # same-process registration that publishes while we wait for the lock
+    # — on Windows the later scan would then probe our own fresh sentinel
+    # and misread it as stale (second same-process handles can acquire).
+    # Ordering is mutation lock → ``_state_guard``, same as registration.
     results: list[InstanceInfo] = []
-    for path in own:
-        info = _parse_entry(path)
-        if info is not None and info.digest == store_digest:
-            results.append(info)
-
-    # The directory is checked and listed only UNDER the mutation lock,
-    # with the deadline started before acquisition: an unlocked snapshot
-    # could miss a registrar that publishes right after it (a live server
-    # invisible for this pass), and the deadline must bound acquisition
-    # plus traversal as one budget.
     complete = True
     deadline = time.monotonic() + _LOCK_TIMEOUT_S
     try:
         with _mutation_lock(deadline):
+            with _state_guard:
+                own = dict(_active)
+            for path in own:
+                info = _parse_entry(path)
+                if info is not None and info.digest == store_digest:
+                    results.append(info)
             directory = instances_dir()
             if not _real_dir(directory):
                 if not directory.exists():
@@ -495,16 +503,17 @@ def probe_all_for_uninstall() -> Literal["NONE", "LIVE", "UNKNOWN"]:
     live sentinels. Unlike the status path this performs no GC — an
     uninstall should not mutate the registry it is about to judge.
     """
-    with _state_guard:
-        if _active:
-            return "LIVE"
-    # Same rule as enumeration: the directory is checked and listed only
-    # under the mutation lock, deadline started before acquisition — an
-    # unlocked snapshot (or an unlocked missing-dir fast path) can race a
-    # registrar mid-critical-section and judge NONE against a stale view.
+    # Same rule as enumeration: the ``_active`` check and the directory
+    # listing both happen only under the mutation lock, deadline started
+    # before acquisition — an unlocked snapshot (or an unlocked
+    # missing-dir fast path) can race a registrar mid-critical-section
+    # and judge NONE against a stale view.
     deadline = time.monotonic() + _LOCK_TIMEOUT_S
     try:
         with _mutation_lock(deadline):
+            with _state_guard:
+                if _active:
+                    return "LIVE"
             directory = instances_dir()
             if not _real_dir(directory):
                 if not directory.exists():
