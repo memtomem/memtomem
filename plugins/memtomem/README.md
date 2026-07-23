@@ -24,6 +24,13 @@ uvx --from 'memtomem==0.3.12' mm status
 `--mcp skip` keeps the bootstrap from adding a second MCP registration because
 the plugin already supplies the server.
 
+If `~/.codex/config.toml` already has a hand-written `[mcp_servers.memtomem]`
+section, that entry takes precedence and the plugin's bundled server is not
+started (name-keyed; measured on codex-cli 0.145.0). Remove the section to use
+the plugin's pinned server, and avoid registering memtomem under any other
+name — a differently named entry is not deduplicated and both servers would
+run.
+
 For project-specific memories, keep the terminal in that project and create
 the gitignored local tier explicitly:
 
