@@ -44,6 +44,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -60,9 +61,6 @@ from memtomem._instance_registry import (
 )
 from memtomem._instance_registry import (
     probe_all_for_uninstall as _probe_registry_liveness,
-)
-from memtomem._instance_registry import (
-    store_digest_for as _store_digest_for,
 )
 from memtomem._settlement import settle_shielded_value
 from memtomem.cli._db_lock import check_db_lock, sqlite_file_uri
@@ -274,6 +272,28 @@ def _release_or_retain(barrier: HeldBarrier, close_confirmed: bool) -> None:
     )
 
 
+def _store_fingerprint(db_path: Path) -> tuple[int, int, int, int] | None:
+    """A consent-integrity fingerprint of the DB file, or ``None`` if it
+    is absent / not a regular file.
+
+    Richer than ``store_digest_for``'s ``(st_dev, st_ino)`` on purpose:
+    a same-path replacement created after this process unlinks the
+    original commonly *reuses* the just-freed inode, so identity alone
+    would accept the swap. Adding ``st_size`` and ``st_mtime_ns`` catches
+    that — an independently written replacement differs in at least one.
+    Still best-effort defense-in-depth behind the barrier and the
+    registry gate; a durable handle is not an option here because holding
+    one across the confirmation prompt is the very shape #1936 rejected.
+    """
+    try:
+        st = os.stat(db_path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def _backup_db(db_path: Path) -> Path:
     """Snapshot ``db_path`` to a timestamped ``.bak`` sibling.
 
@@ -372,10 +392,11 @@ async def _run(
             # raises ``SystemExit`` before construction, releasing normally.
             await storage.close()
             close_confirmed = True
-        # Store identity as it was when we counted (and the user will
-        # consent). ``(st_dev, st_ino)`` — a same-path replacement after
-        # the prompt is a *different* file and gets a different digest.
-        store_digest = _store_digest_for(db_path)
+        # Fingerprint the store as it was when we counted (and the user
+        # will consent). ``None`` here means the file vanished between the
+        # close above and this stat — already the removed-during-window
+        # case; the Phase B check below fails it closed.
+        store_fp = _store_fingerprint(db_path)
     finally:
         _release_or_retain(barrier, close_confirmed)
 
@@ -421,11 +442,13 @@ async def _run(
         # the confirmation no longer describes what is on disk — wiping
         # now would destroy a database the user never saw, and
         # ``initialize()`` below would resurrect one uninstall just
-        # removed. Not ``--force``-overridable: it is a consent-integrity
-        # check, not a liveness heuristic.
-        current_digest = _store_digest_for(db_path)
-        if current_digest != store_digest:
-            gone = current_digest is None
+        # removed. Fail closed unless BOTH fingerprints are present and
+        # equal: a ``None`` on either side cannot confirm same-file, so a
+        # match by absence (``None == None``) must not proceed. Not
+        # ``--force``-overridable: consent integrity is not a heuristic.
+        current_fp = _store_fingerprint(db_path)
+        if current_fp is None or store_fp is None or current_fp != store_fp:
+            gone = current_fp is None
             _refuse(
                 "The database changed while you were deciding — it was "
                 + ("removed" if gone else "replaced")

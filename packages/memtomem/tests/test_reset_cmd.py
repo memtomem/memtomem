@@ -892,6 +892,37 @@ class TestResetRevalidatesStoreIdentity:
         assert data["ok"] is False
         assert "different database" in data["reason"]
 
+    def test_none_fingerprints_fail_closed(self, home, reg, monkeypatch):
+        """A ``None`` fingerprint on either side means 'cannot confirm
+        same file' — it must refuse, never match by absence
+        (``None == None``), which would silently disable the gate."""
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+        monkeypatch.setattr(reset_cmd, "_store_fingerprint", lambda _p: None)
+
+        result = runner.invoke(cli, ["reset", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert "different database" in result.output
+
+    def test_inode_reuse_replacement_refuses(self, home, reg, monkeypatch):
+        """The #1945 round-4 hardening: a replacement that reuses the
+        freed inode (same st_dev/st_ino) is still caught, because the
+        fingerprint also carries st_size/st_mtime_ns. Simulated by
+        forcing both stats to share device+inode but differ in size."""
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+        seq = iter([(7, 42, 100, 1000), (7, 42, 200, 2000)])  # same dev+ino
+        monkeypatch.setattr(reset_cmd, "_store_fingerprint", lambda _p: next(seq))
+
+        result = runner.invoke(cli, ["reset", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert "replaced" in result.output
+        assert _count(db_path, "chunks") >= 1, "an inode-reuse swap was wiped"
+
 
 class TestResetAlwaysReleasesTheBarrier:
     """Every exit path frees the barrier — proven via a spawned child's
