@@ -29,6 +29,13 @@ class ServerState:
     pid_file: Path | None
     port: int | None = None
     started: str | None = None
+    # #1949: set only when ``alive=True`` is a fail-closed *assumption* —
+    # the probe could not inspect the lock file at all (``exists()`` or
+    # ``open()`` raised) — never when a held flock was actually observed.
+    # Callers that print "flock is held by an active writer" must check
+    # this first: that claim is evidence-based, and a failed probe has no
+    # evidence. ``None`` means the ``alive`` verdict is real.
+    probe_error: str | None = None
 
 
 def _parse_pid_payload(text: str) -> tuple[int | None, int | None, str | None]:
@@ -65,7 +72,23 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     POSIX and ``LockFileEx`` on Windows. Replaces the prior conservative
     "pid file exists → assume alive" Windows fallback (see #448, #625).
     """
-    if not pid_file.exists():
+    try:
+        present = pid_file.exists()
+    except OSError as exc:
+        # #1949: on py3.12 ``Path.exists()`` propagates errors outside its
+        # ignore-set (e.g. ``EACCES`` for a pid file linked through an
+        # unsearchable directory). Fail *closed* — same as the ``open()``
+        # failure below: "cannot inspect the lock file" is not "no writer."
+        # ``probe_error`` records that ``alive`` is an assumption so callers
+        # refuse honestly instead of claiming a held flock. A dangling pid
+        # link stays ``alive=False`` (ENOENT is in the ignore-set).
+        return ServerState(
+            alive=True,
+            pid=None,
+            pid_file=pid_file,
+            probe_error=f"{type(exc).__name__}: {exc}",
+        )
+    if not present:
         return ServerState(alive=False, pid=None, pid_file=None)
 
     pid: int | None
@@ -84,8 +107,19 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     # already user-owned, so always opening R/W keeps both backends happy.
     try:
         fp = open(pid_file, "rb+")
-    except OSError:
-        return ServerState(alive=True, pid=pid, pid_file=pid_file, port=port, started=started)
+    except OSError as exc:
+        # Cannot open the lock file to probe it — fail closed as before,
+        # but record why so uninstall can refuse honestly rather than
+        # assert an observed flock (#1949). ``pid``/``port``/``started``
+        # (if the earlier read_text succeeded) are still forwarded.
+        return ServerState(
+            alive=True,
+            pid=pid,
+            pid_file=pid_file,
+            port=port,
+            started=started,
+            probe_error=f"{type(exc).__name__}: {exc}",
+        )
 
     try:
         try:

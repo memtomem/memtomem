@@ -69,7 +69,19 @@ def check_db_lock(db_path: Path) -> DbLockState:
     ``probe_error`` set. The callers are recovery paths (uninstall,
     reset) and must not be blocked by unrelated DB integrity issues.
     """
-    if not db_path.exists():
+    try:
+        present = db_path.exists()
+    except OSError as exc:
+        # #1949: on py3.12 ``Path.exists()`` propagates errors outside its
+        # ignore-set (e.g. ``EACCES`` when the db path is a link routed
+        # through an unsearchable directory) instead of returning False.
+        # Fail open with ``probe_error`` set — same contract as every
+        # branch below: a recovery caller must not be blocked by an FS
+        # fault it can do nothing about, and the header-gate ``open()``
+        # would only fail the same way. A genuinely-absent db (ENOENT, in
+        # the ignore-set) still returns cleanly with ``probe_error=None``.
+        return DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
+    if not present:
         return DbLockState(locked=False, probe_error=None)
 
     # Header gate: only probe real SQLite files. Opening a corrupt /
