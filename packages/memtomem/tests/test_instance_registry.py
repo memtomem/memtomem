@@ -10,6 +10,7 @@ fail-open/fail-closed decision logic.
 
 from __future__ import annotations
 
+import errno
 import multiprocessing as mp
 import os
 import time
@@ -397,11 +398,16 @@ class TestUninstallProbeInProcess:
         assert verdict.state == "UNKNOWN"
         assert verdict.untrusted_path is None
 
-    def test_unreadable_entry_is_unknown(self, rt, monkeypatch):
+    def test_entry_verdict_unknown_propagates_as_unknown(self, rt, monkeypatch):
+        """A generic ``"unknown"`` entry verdict (transient I/O failure)
+        stays UNKNOWN — only the *persistent* ``"untrusted"`` entry
+        verdict is promoted to UNTRUSTED (#1938)."""
         reg.instances_dir().mkdir(parents=True, exist_ok=True)
         (reg.instances_dir() / "entry").touch()
         monkeypatch.setattr(reg, "_probe_entry", lambda _p: "unknown")
-        assert reg.probe_all_for_uninstall().state == "UNKNOWN"
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNKNOWN"
+        assert verdict.untrusted_path is None
 
     def test_runtime_dir_refusal_is_untrusted_not_unknown(self, rt, monkeypatch):
         """``ensure_runtime_dir`` refusing its own directory (symlink,
@@ -463,6 +469,317 @@ class TestUninstallProbeInProcess:
         verdict = reg.probe_all_for_uninstall()
         assert verdict.state == "UNKNOWN"
         assert verdict.untrusted_path is None
+
+    def test_stray_subdirectory_entry_is_untrusted_with_entry_path(self, rt):
+        """A stray subdirectory inside ``instances/`` is not a probeable
+        sentinel and never ages out — persistent, so it must read
+        UNTRUSTED naming the entry (kind ``"unprobeable"``), not collapse
+        into UNKNOWN's "retry" advice (#1938). No platform skip: the
+        no-follow stat classifies it before the open, so the POSIX
+        ``IsADirectoryError`` vs Windows ``PermissionError`` split at
+        ``open`` never comes into play."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        subdir = d / "stray-subdir"
+        subdir.mkdir()
+        assert reg._probe_entry(subdir) == "untrusted"
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNTRUSTED"
+        assert verdict.untrusted_path == subdir
+        assert verdict.untrusted_kind == "unprobeable"
+
+    def test_symlinked_entry_is_untrusted_never_probed_through(self, rt, tmp_path):
+        """A symlinked entry would follow silently and flock an
+        *unrelated* file, fabricating a live/stale verdict on a foreign
+        path. The no-follow stat classifies it UNTRUSTED first, and the
+        victim is never opened (#1938)."""
+        victim = tmp_path / "victim.lock"
+        victim.write_text("do not touch")
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        try:
+            entry.symlink_to(victim)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        assert reg._probe_entry(entry) == "untrusted"
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNTRUSTED"
+        assert verdict.untrusted_path == entry
+        assert verdict.untrusted_kind == "unprobeable"
+        assert victim.read_text() == "do not touch"
+
+    @pytest.mark.skipif(os.name == "nt", reason="chmod bits are a no-op on Windows")
+    def test_unreadable_entry_file_is_untrusted_with_entry_path(self, rt):
+        """A mode-000 (or root-owned) sentinel raises ``PermissionError``
+        at open *for that exact entry* — persistent and precisely
+        attributable, so UNTRUSTED naming the entry, not UNKNOWN (#1938).
+        Distinct from a sidecar/unlock ``PermissionError``, which proves
+        nothing about the entry and stays UNKNOWN (#1942)."""
+        if getattr(os, "geteuid", lambda: 1)() == 0:
+            pytest.skip("root ignores file modes")
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+        entry.chmod(0o000)
+        try:
+            assert reg._probe_entry(entry) == "untrusted"
+            verdict = reg.probe_all_for_uninstall()
+            assert verdict.state == "UNTRUSTED"
+            assert verdict.untrusted_path == entry
+            assert verdict.untrusted_kind == "unprobeable"
+        finally:
+            entry.chmod(0o600)
+
+    @pytest.mark.skipif(os.name == "nt", reason="chmod bits are a no-op on Windows")
+    def test_unlistable_instances_dir_is_untrusted_with_dir_path(self, rt):
+        """A real private ``instances/`` that cannot be *listed* (mode-000
+        / ACL-denied) fails ``iterdir`` with ``PermissionError`` —
+        persistent, and the offending path is the directory itself. It is
+        a real directory, so it carries kind ``"unprobeable"`` (the
+        "cannot be probed" wording), not ``"redirected"`` (#1938)."""
+        if getattr(os, "geteuid", lambda: 1)() == 0:
+            pytest.skip("root ignores directory modes")
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "entry").touch()
+        d.chmod(0o000)
+        try:
+            verdict = reg.probe_all_for_uninstall()
+            assert verdict.state == "UNTRUSTED"
+            assert verdict.untrusted_path == d
+            assert verdict.untrusted_kind == "unprobeable"
+        finally:
+            d.chmod(0o700)
+
+    def test_untrusted_entry_beats_earlier_unknown_entry(self, rt, monkeypatch):
+        """Verdict precedence LIVE > UNTRUSTED > UNKNOWN: a transient
+        ``unknown`` on an entry visited *first* must not mask a
+        persistent ``untrusted`` entry visited later — otherwise the user
+        is told to "retry" a condition only removal can clear (#1938).
+        Iteration order is pinned by sorting so the unknown entry leads."""
+        real_iterdir = reg.Path.iterdir
+
+        def sorted_iterdir(self):
+            return iter(sorted(real_iterdir(self)))
+
+        monkeypatch.setattr(reg.Path, "iterdir", sorted_iterdir)
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        unknown_entry = d / f"00-12345-1-{'e' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        unknown_entry.touch()
+        subdir = d / "99-stray-subdir"
+        subdir.mkdir()
+
+        real_lock = reg.portalocker.lock
+
+        def flaky_lock(fp, flags):
+            if getattr(fp, "name", "").endswith("bbbbbbbb.lock"):
+                raise OSError("disk went away")
+            return real_lock(fp, flags)
+
+        monkeypatch.setattr(reg.portalocker, "lock", flaky_lock)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNTRUSTED"
+        assert verdict.untrusted_path == subdir
+        assert verdict.untrusted_kind == "unprobeable"
+
+    def test_probe_entry_open_generic_oserror_stays_unknown(self, rt, monkeypatch):
+        """A non-``ELOOP``, non-``PermissionError`` ``OSError`` at open is a
+        transient I/O failure, not a persistent untrusted entry — it must
+        stay ``"unknown"`` so the classification is not over-broad (#1938)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+
+        real_os_open = os.open
+
+        def flaky_open(path, *args, **kwargs):
+            if str(path).endswith("bbbbbbbb.lock"):
+                raise OSError(errno.EIO, "disk went away")
+            return real_os_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", flaky_open)
+        assert reg._probe_entry(entry) == "unknown"
+
+    def test_probe_entry_open_sharing_violation_stays_unknown(self, rt, monkeypatch):
+        """A Windows sharing/lock violation at open (``winerror`` 32/33) is
+        *transient* contention — it must stay ``"unknown"`` and never
+        become a persistent ``"untrusted"`` prescribing remove/repair for
+        a file another handle is merely holding for a moment (#1938)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+
+        real_os_open = os.open
+
+        def flaky_open(path, *args, **kwargs):
+            if str(path).endswith("bbbbbbbb.lock"):
+                exc = PermissionError("sharing violation")
+                exc.winerror = 32  # ERROR_SHARING_VIOLATION
+                raise exc
+            return real_os_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", flaky_open)
+        assert reg._probe_entry(entry) == "unknown"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory search-bit semantics")
+    def test_search_denied_dir_entry_is_untrusted_not_unknown(self, rt):
+        """A listable-but-unsearchable ``instances/`` (mode ``0o400``):
+        ``iterdir`` yields the entry name, but statting the entry needs
+        the directory's *search* bit and raises ``PermissionError`` —
+        persistent, so ``UNTRUSTED`` naming the entry, not the transient
+        "retry" verdict (#1938). This is the pre-open-``stat`` denial the
+        mode-000 tests (which deny at ``open``) do not reach."""
+        if getattr(os, "geteuid", lambda: 1)() == 0:
+            pytest.skip("root bypasses directory permission bits")
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+        d.chmod(0o400)
+        try:
+            verdict = reg.probe_all_for_uninstall()
+            assert verdict.state == "UNTRUSTED"
+            assert verdict.untrusted_path == entry
+            assert verdict.untrusted_kind == "unprobeable"
+        finally:
+            d.chmod(0o700)
+
+    def test_probe_entry_pre_stat_sharing_violation_stays_unknown(self, rt, monkeypatch):
+        """A Windows sharing/lock violation at the *pre-open* stat is
+        transient, exactly as at open — it must stay ``"unknown"``, not
+        become a persistent ``"untrusted"`` (#1938)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+        real_stat = os.stat
+
+        def denying_stat(p, *, follow_symlinks=True):
+            if os.fspath(p) == os.fspath(entry) and not follow_symlinks:
+                exc = PermissionError("sharing violation")
+                exc.winerror = 33  # ERROR_LOCK_VIOLATION
+                raise exc
+            return real_stat(p, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(os, "stat", denying_stat)
+        assert reg._probe_entry(entry) == "unknown"
+
+    def test_probe_entry_open_eloop_is_untrusted(self, rt, monkeypatch):
+        """A regular file swapped for a symlink *between* the no-follow stat
+        and the open trips ``O_NOFOLLOW`` (``ELOOP``) — persistent, so
+        ``"untrusted"``, closing the TOCTOU the stat alone leaves open
+        (#1938)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+
+        real_os_open = os.open
+
+        def flaky_open(path, *args, **kwargs):
+            if str(path).endswith("bbbbbbbb.lock"):
+                raise OSError(errno.ELOOP, "too many symbolic links")
+            return real_os_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", flaky_open)
+        assert reg._probe_entry(entry) == "untrusted"
+
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            lambda: PermissionError("unlock denied"),
+            lambda: reg.portalocker.LockException("unlock denied"),
+        ],
+        ids=["oserror", "lockexception"],
+    )
+    def test_untrusted_entry_survives_later_entry_unlock_failure(
+        self, rt, monkeypatch, exc_factory
+    ):
+        """Precedence UNTRUSTED > UNKNOWN must hold even when a *later*
+        entry's unlock/close raises: the escaping error is absorbed as
+        that entry's ``unknown``, not allowed to unwind the loop and
+        discard an ``untrusted`` already seen (#1938). Order-independent —
+        both entries are always visited, so correct code yields UNTRUSTED
+        regardless of which is probed first. Covers both the POSIX
+        ``OSError`` shape and portalocker's Windows ``LockException``
+        (which is *not* an ``OSError``)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        subdir = d / "stray-subdir"
+        subdir.mkdir()
+        sentinel = d / f"12345-1-{'f' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        sentinel.touch()
+
+        def _bad_unlock(_fp):
+            raise exc_factory()
+
+        monkeypatch.setattr(reg.portalocker, "unlock", _bad_unlock)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNTRUSTED"
+        assert verdict.untrusted_path == subdir
+        assert verdict.untrusted_kind == "unprobeable"
+
+    def test_entry_swapped_after_stat_is_untrusted_by_identity(self, rt, monkeypatch):
+        """A redirect that slips past ``O_NOFOLLOW`` (a no-op on Windows)
+        opens a *different* inode than the no-follow stat saw — the
+        post-open ``fstat`` identity check catches it as ``untrusted``,
+        so a foreign file is never flock-probed as if it were the
+        sentinel (#1938). Simulated by making ``fstat`` report a
+        different regular file's ``st_dev``/``st_ino``."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+        other = d / "other-regular-file"
+        other.write_text("x")
+        other_stat = os.stat(other)
+
+        monkeypatch.setattr(os, "fstat", lambda _fd: other_stat)
+        assert reg._probe_entry(entry) == "untrusted"
+
+    def test_entry_diverging_post_open_path_stat_is_untrusted(self, rt, monkeypatch):
+        """The identity check is enforced from the *path* side too: if the
+        post-open no-follow ``stat`` of the path diverges from the open
+        descriptor (a redirect swapped in past ``O_NOFOLLOW``, which is a
+        no-op on Windows — a symlink has its own distinct inode), the
+        entry is ``untrusted``, never flock-probed (#1938). Simulated by
+        making the post-open re-stat report a different object so no
+        symlink privilege is needed."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        entry = d / f"12345-1-{'a' * 16}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+        diverging = os.stat(d, follow_symlinks=False)  # a different inode
+        real_stat = os.stat
+        seen = {"n": 0}
+
+        def fake_stat(p, *, follow_symlinks=True):
+            if os.fspath(p) == os.fspath(entry) and not follow_symlinks:
+                seen["n"] += 1
+                if seen["n"] >= 2:  # the post-open re-stat, not the pre-open gate
+                    return diverging
+            return real_stat(p, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(os, "stat", fake_stat)
+        assert reg._probe_entry(entry) == "untrusted"
+
+    def test_enumerate_with_untrusted_entry_is_incomplete(self, rt):
+        """The fail-open status path treats an untrusted entry as
+        uncertainty (``complete=False``) and never GC's it — only
+        ``"stale"`` reaches ``_gc_stale_entry`` (#1938)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        subdir = d / "stray-subdir"
+        subdir.mkdir()
+        result = reg.enumerate_live_instances("0" * 16)
+        assert not result.complete
+        assert result.instances == ()
+        assert subdir.exists()
 
 
 # ------------------------------------------------------------ cross-process
@@ -717,9 +1034,10 @@ class TestDanglingSymlinkedRegistryDir:
 
 
 class TestUninstallProbeResultInvariant:
-    """``untrusted_path`` <-> ``UNTRUSTED``, and ``detail`` only alongside
-    it, enforced at construction (#1948). Each guard is asserted on its
-    own so a sibling cannot mask a regression."""
+    """``untrusted_path`` <-> ``UNTRUSTED``, and ``untrusted_kind`` /
+    ``detail`` only alongside it, enforced at construction (#1948,
+    #1938). Each guard is asserted on its own so a sibling cannot mask a
+    regression."""
 
     def test_untrusted_without_path_is_rejected(self):
         with pytest.raises(ValueError):
@@ -732,6 +1050,16 @@ class TestUninstallProbeResultInvariant:
     def test_detail_without_untrusted_state_is_rejected(self):
         with pytest.raises(ValueError):
             reg.UninstallProbeResult("UNKNOWN", detail="whatever")
+
+    def test_kind_without_untrusted_state_is_rejected(self):
+        with pytest.raises(ValueError):
+            reg.UninstallProbeResult("UNKNOWN", untrusted_kind="unprobeable")
+
+    def test_untrusted_with_path_and_kind_is_accepted(self):
+        result = reg.UninstallProbeResult(
+            "UNTRUSTED", untrusted_path=Path("/x"), untrusted_kind="unprobeable"
+        )
+        assert result.untrusted_kind == "unprobeable"
 
     def test_untrusted_with_path_and_detail_is_accepted(self):
         result = reg.UninstallProbeResult("UNTRUSTED", untrusted_path=Path("/x"), detail="cause")

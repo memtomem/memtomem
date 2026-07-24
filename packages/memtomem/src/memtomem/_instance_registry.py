@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import errno
 import hashlib
 import logging
 import os
@@ -116,6 +117,13 @@ _BARRIER_TIMEOUT_S = 2.0
 # POSIX raises ``BlockingIOError``; portalocker's Windows backend wraps
 # Win32 errors as ``LockException``.
 _LOCK_CONTENDED = (portalocker.LockException, BlockingIOError, OSError)
+
+# Windows ``PermissionError.winerror`` codes that mean *transient*
+# contention, not durable denial: ERROR_SHARING_VIOLATION (32) and
+# ERROR_LOCK_VIOLATION (33). A sentinel briefly held by antivirus or
+# another handle takes this path and must stay ``unknown`` (retry can
+# clear it), unlike a mode-000 / root-owned entry (#1938).
+_WIN_TRANSIENT_SHARING = frozenset({32, 33})
 
 
 def instances_dir() -> Path:
@@ -177,37 +185,51 @@ class EnumerationResult:
 
 @dataclass(frozen=True)
 class UninstallProbeResult:
-    """Fail-closed verdict for ``mm uninstall`` (#1935, #1942).
+    """Fail-closed verdict for ``mm uninstall`` (#1935, #1942, #1938).
 
     ``UNKNOWN`` and ``UNTRUSTED`` both refuse, but they prescribe
     opposite remediations: ``UNKNOWN`` is *transient* (lock timeout, a
-    racing registrar, an unreadable entry) and retrying can succeed;
-    ``UNTRUSTED`` is *persistent* (a probe path is redirected or
-    otherwise not a private real directory) and retrying cannot change
-    the answer until ``untrusted_path`` is removed or repaired.
+    racing registrar, a mid-write entry) and retrying can succeed;
+    ``UNTRUSTED`` is *persistent* (a probe path is redirected, or a
+    sentinel entry is not a probeable private regular file — a stray
+    subdirectory, link, or permission-denied path) and retrying cannot
+    change the answer until ``untrusted_path`` is removed or repaired.
     Collapsing the two sends the user into a retry loop against a
     condition that never resolves itself.
 
     ``untrusted_path`` is set exactly when ``state == "UNTRUSTED"`` and
-    names the offending path — the sentinel directory, or the runtime
-    dir that anchors it. ``detail`` is optional even then: only the
-    runtime-dir producer sets it, carrying the exact ``ensure_runtime_dir``
-    refusal (cause, expected value, and removal hint) that the generic
-    redirected-path sentence cannot express — wrong owner or unsafe mode
-    name a uid/mode the CLI would otherwise hide (#1948). Every
-    ``ensure_runtime_dir`` refusal carries it, including a symlinked or
-    junctioned *runtime* dir; only the redirected ``instances/`` directory
-    (caught before the lock, not via ``_RuntimeDirRefused``) leaves it
-    ``None``, since its cause is already in the generic wording.
+    names the offending path — the sentinel directory, the runtime dir
+    that anchors it, or a single entry inside it. ``untrusted_kind``
+    (also set then; ``None`` defaults to ``"redirected"`` at the surface)
+    selects the remediation vocabulary, *not* the path kind:
+    ``"redirected"`` for a path that is a symlink / junction /
+    non-directory (the surface says "redirected path"), and
+    ``"unprobeable"`` for a real path the probe cannot read through — a
+    stray subdirectory entry, a permission-denied entry, or an
+    ``instances/`` that cannot be listed (the surface says "cannot be
+    probed"). The unlistable directory is a *real* private directory, so
+    it carries ``"unprobeable"`` despite ``untrusted_path`` being a
+    directory — hence keying on the message, not the path shape.
+
+    ``detail`` is optional even then: only the runtime-dir producer sets
+    it, carrying the exact ``ensure_runtime_dir`` refusal (cause,
+    expected value, and removal hint) that the generic redirected-path
+    sentence cannot express — wrong owner or unsafe mode name a uid/mode
+    the CLI would otherwise hide (#1948). Every ``ensure_runtime_dir``
+    refusal carries it, including a symlinked or junctioned *runtime*
+    dir; only the redirected ``instances/`` directory (caught before the
+    lock, not via ``_RuntimeDirRefused``) and the entry-level unprobeable
+    causes leave it ``None``, since their cause is already in the wording.
 
     ``__post_init__`` enforces the ``untrusted_path`` <-> ``UNTRUSTED``
-    invariant (and ``detail`` only alongside it) at construction, so a
-    future producer cannot silently emit a path without the refusing
-    state or vice versa.
+    invariant (and ``untrusted_kind`` / ``detail`` only alongside it) at
+    construction, so a future producer cannot silently emit a path
+    without the refusing state or vice versa.
     """
 
     state: Literal["NONE", "LIVE", "UNKNOWN", "UNTRUSTED"]
     untrusted_path: Path | None = None
+    untrusted_kind: Literal["redirected", "unprobeable"] | None = None
     detail: str | None = None
 
     def __post_init__(self) -> None:
@@ -216,6 +238,11 @@ class UninstallProbeResult:
             raise ValueError(
                 "untrusted_path is set exactly when state == 'UNTRUSTED' "
                 f"(state={self.state!r}, untrusted_path={self.untrusted_path!r})"
+            )
+        if self.untrusted_kind is not None and not untrusted:
+            raise ValueError(
+                "untrusted_kind is only meaningful when state == 'UNTRUSTED' "
+                f"(state={self.state!r}, untrusted_kind={self.untrusted_kind!r})"
             )
         if self.detail is not None and not untrusted:
             raise ValueError(
@@ -593,25 +620,126 @@ def _parse_entry(path: Path) -> InstanceInfo | None:
     )
 
 
-def _probe_entry(path: Path) -> Literal["live", "stale", "gone", "unknown"]:
+def _nofollow_opener(path: str, flags: int) -> int:
+    """``open`` opener that refuses a symlink final component (#1938).
+
+    ``O_NOFOLLOW`` is a no-op fallback (``0``) where the platform lacks
+    it (Windows); its junction/symlink redirects are caught by
+    :func:`_dir_state` and the leading no-follow ``stat`` instead.
+    """
+    return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0))
+
+
+def _denial_verdict(exc: PermissionError) -> Literal["unknown", "untrusted"]:
+    """Classify a ``PermissionError`` accessing a sentinel (#1938).
+
+    Durable denial — a mode-000 / root-owned entry, or a listable but
+    *unsearchable* (``0o400``) ``instances/`` that ``iterdir`` enumerates
+    yet blocks the per-entry ``stat`` — is persistent: ``untrusted``, so
+    the caller names the path instead of prescribing "retry". A Windows
+    sharing / lock violation (``winerror`` 32/33) is transient contention
+    and stays ``unknown``.
+    """
+    if getattr(exc, "winerror", None) in _WIN_TRANSIENT_SHARING:
+        return "unknown"
+    return "untrusted"
+
+
+def _probe_entry(path: Path) -> Literal["live", "stale", "gone", "unknown", "untrusted"]:
     """Flock-probe one sentinel. The lock, not the recorded pid, is
     authoritative (pid reuse — see ``cli/_liveness.py``). On ``stale``
     the caller decides about GC; the probe itself releases immediately.
 
     Contention and uncertainty are distinct here: only the known
     contention shapes (POSIX ``BlockingIOError``, portalocker's Windows
-    ``LockException``) mean ``live``; any other ``OSError`` is an I/O
-    failure and reports ``unknown`` — claiming ``live`` on it would let
-    a transient error fabricate a concurrent-writer warning (the status
-    surface is fail-open) or a false uninstall refusal.
+    ``LockException``) mean ``live``; any other ``OSError`` at lock time
+    is an I/O failure and reports ``unknown`` — claiming ``live`` on it
+    would let a transient error fabricate a concurrent-writer warning
+    (the status surface is fail-open) or a false uninstall refusal.
+
+    A no-follow ``stat`` gates the open, mirroring :func:`_dir_state`
+    one level down (#1938): a sentinel must be a regular file. Anything
+    else — a stray subdirectory, a symlink (a healthy one would follow
+    silently and flock an *unrelated* file, fabricating live/stale), a
+    fifo (whose ``open`` could even block), a junction — is
+    ``untrusted``: a *persistent* cause the caller names and asks the
+    user to remove, not "retry". The stat→open pair is a TOCTOU window
+    (an entry could be swapped for a symlink between them), closed on two
+    fronts: the open adds ``O_NOFOLLOW`` (``ELOOP`` → ``untrusted`` on
+    POSIX; a no-op where the platform lacks it, e.g. Windows), and after
+    opening, the descriptor must be a regular file whose ``st_dev``/
+    ``st_ino`` match a fresh no-follow ``stat`` of the path. That catches
+    a redirect slipping past ``O_NOFOLLOW``: a symlink swapped in — even
+    one pointing back at the original inode — has its own distinct inode
+    under the no-follow ``stat``, so the identity check fails; a
+    fifo/device swap fails ``S_ISREG`` on the descriptor.
+    ``NotADirectoryError`` is unreachable: the parent was already
+    validated as a real directory by :func:`_dir_state` under the same
+    mutation lock.
+
+    Only *durable* denial is ``untrusted`` (see :func:`_denial_verdict`).
+    A ``PermissionError`` accessing this exact entry — at the pre-open
+    ``stat`` (an unsearchable ``0o400`` ``instances/`` that still lists
+    the name) or at the open (mode-000 / root-owned entry) — is
+    persistent and precisely attributable, so ``untrusted``. That does
+    not violate #1942's rule that an arbitrary ``PermissionError``
+    (sidecar open, an entry's unlock/close) stays ``unknown`` — that rule
+    guards against blaming a path that may be fine, whereas these are
+    raised *for the entry itself*. A Windows sharing / lock violation, by
+    contrast, *is* transient (antivirus or another handle holding the
+    file for a moment) and stays ``unknown`` so the caller does not
+    prescribe remove/repair for a condition retrying can clear (#1938).
+    Post-open failures (lock-time ``OSError``, unlock/close) also stay
+    ``unknown``; the caller's loop absorbs any escaping exception so a
+    later entry cannot demote an ``untrusted`` already seen.
     """
     try:
-        fp = open(path, "rb+")
+        st = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return "gone"
+    except PermissionError as exc:
+        # An unsearchable ``instances/`` (``0o400``) lists the entry but
+        # denies this per-entry stat — durable, so ``untrusted`` (#1938).
+        return _denial_verdict(exc)
     except OSError:
         return "unknown"
+    if not stat.S_ISREG(st.st_mode):
+        return "untrusted"
     try:
+        # ``opener`` injects ``O_NOFOLLOW`` while keeping ``open``'s file
+        # object (so ``fp.name`` stays the path, not a bare fd).
+        fp = open(path, "rb+", opener=_nofollow_opener)
+    except FileNotFoundError:
+        return "gone"
+    except PermissionError as exc:
+        # Durable denial (mode-000 / root-owned) is persistent; a Windows
+        # sharing/lock violation is transient.
+        return _denial_verdict(exc)
+    except OSError as exc:
+        # ``ELOOP`` — a symlink raced in after the stat and ``O_NOFOLLOW``
+        # refused it; persistent. Any other ``OSError`` is a transient
+        # I/O failure.
+        if exc.errno == errno.ELOOP:
+            return "untrusted"
+        return "unknown"
+    try:
+        try:
+            fst = os.fstat(fp.fileno())
+            lst = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return "unknown"
+        # The open descriptor must be a regular file *and* the same inode
+        # the current no-follow path resolves to. A redirect that slips
+        # past ``O_NOFOLLOW`` (a no-op on Windows) is caught here rather
+        # than flock-probed: a symlink swapped in — even one pointing back
+        # at the original inode — has its *own* distinct inode under the
+        # no-follow ``stat``, so ``fst != lst``; a fifo/device swap fails
+        # ``S_ISREG(fst)`` after the open returns (#1938).
+        if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (
+            lst.st_dev,
+            lst.st_ino,
+        ):
+            return "untrusted"
         try:
             portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
         except (portalocker.LockException, BlockingIOError):
@@ -733,7 +861,13 @@ def enumerate_live_instances(store_digest: str) -> EnumerationResult:
                 elif state == "stale":
                     if _aged(entry):
                         _gc_stale_entry(entry)
-                elif state == "unknown":
+                elif state in ("unknown", "untrusted"):
+                    # Both are uncertainty for the fail-open status path —
+                    # an untrusted entry (stray subdir, link, unreadable
+                    # file) is no more probeable than a transient failure,
+                    # and is never GC'd (only ``"stale"`` reaches
+                    # ``_gc_stale_entry`` — never delete what you cannot
+                    # judge).
                     complete = False
                 # "gone": deleted concurrently — nothing to do
     except _MutationLockTimeout:
@@ -754,15 +888,25 @@ def probe_all_for_uninstall() -> UninstallProbeResult:
     ``LIVE`` — at least one held sentinel (any store; deleting the
     registry under a live server is never acceptable, whatever store it
     has open). ``UNKNOWN`` — the pass could not complete (lock timeout,
-    unreadable entry/dir, deadline): uninstall must refuse, a timeout
+    a transient I/O failure, deadline): uninstall must refuse, a timeout
     never means "empty". ``UNTRUSTED`` — a probe path is not a private
     real directory (symlinked/junctioned ``instances/``, or a runtime
-    dir ``ensure_runtime_dir`` refuses): uninstall must refuse *and*
-    tell the user which path to remove or repair — "retry" is wrong
-    advice for this cause (#1942). ``NONE`` — a fully completed pass
-    found zero live sentinels. Unlike the status path this performs no
-    GC — an uninstall should not mutate the registry it is about to
-    judge.
+    dir ``ensure_runtime_dir`` refuses), *or* the directory cannot be
+    listed, *or* a single entry is not a probeable regular file (stray
+    subdirectory, link, permission-denied path — #1938): uninstall must
+    refuse *and* tell the user which path to remove or repair — "retry"
+    is wrong advice for these causes (#1942). ``NONE`` — a fully
+    completed pass found zero live sentinels. Unlike the status path
+    this performs no GC — an uninstall should not mutate the registry it
+    is about to judge.
+
+    Verdict precedence within the entry scan is LIVE > UNTRUSTED >
+    UNKNOWN: a live sentinel returns immediately, but a transient
+    ``unknown`` on an earlier entry must not mask a persistent
+    ``untrusted`` on a later one — that would send the user back into
+    the retry loop against a condition that never clears. So the loop
+    remembers the first untrusted path and any unknown, and resolves by
+    precedence at loop end and at deadline expiry alike.
     """
     # Same rule as enumeration: the ``_active`` check and the directory
     # listing both happen only under the mutation lock, deadline started
@@ -782,19 +926,55 @@ def probe_all_for_uninstall() -> UninstallProbeResult:
             if dir_state == "untrusted":
                 # symlink (dangling included) / non-dir — never trust,
                 # never traverse, never call it empty
-                return UninstallProbeResult("UNTRUSTED", untrusted_path=directory)
+                return UninstallProbeResult(
+                    "UNTRUSTED", untrusted_path=directory, untrusted_kind="redirected"
+                )
             try:
                 entries = list(directory.iterdir())
+            except PermissionError:
+                # A real private directory we cannot list (mode-000 /
+                # ACL-denied) — persistent, and the offending path is
+                # exactly this directory. Any other listing OSError is a
+                # transient failure and stays UNKNOWN below.
+                return UninstallProbeResult(
+                    "UNTRUSTED", untrusted_path=directory, untrusted_kind="unprobeable"
+                )
             except OSError:
                 return UninstallProbeResult("UNKNOWN")
+            untrusted_entry: Path | None = None
+            saw_unknown = False
             for entry in entries:
                 if time.monotonic() >= deadline:
-                    return UninstallProbeResult("UNKNOWN")
-                state = _probe_entry(entry)
+                    saw_unknown = True
+                    break
+                try:
+                    state = _probe_entry(entry)
+                except (OSError, portalocker.LockException):
+                    # ``_probe_entry`` is nearly total, but an unlock/close
+                    # can still escape — as ``OSError`` on POSIX or (per
+                    # portalocker's Windows backend) ``LockException``,
+                    # which is not an ``OSError``. Absorb either as this
+                    # entry's ``unknown`` so it cannot unwind the loop and
+                    # demote an ``untrusted`` already seen on an earlier
+                    # entry (#1938 precedence).
+                    logger.debug("entry probe raised, treating as unknown", exc_info=True)
+                    saw_unknown = True
+                    continue
                 if state == "live":
                     return UninstallProbeResult("LIVE")
-                if state == "unknown":
-                    return UninstallProbeResult("UNKNOWN")
+                if state == "untrusted":
+                    if untrusted_entry is None:
+                        untrusted_entry = entry
+                elif state == "unknown":
+                    saw_unknown = True
+            if untrusted_entry is not None:
+                return UninstallProbeResult(
+                    "UNTRUSTED",
+                    untrusted_path=untrusted_entry,
+                    untrusted_kind="unprobeable",
+                )
+            if saw_unknown:
+                return UninstallProbeResult("UNKNOWN")
             return UninstallProbeResult("NONE")
     except _MutationLockTimeout:
         return UninstallProbeResult("UNKNOWN")
@@ -810,7 +990,12 @@ def probe_all_for_uninstall() -> UninstallProbeResult:
         # CLI can surface owner/mode specifics the generic sentence hides
         # (#1948).
         logger.debug("uninstall registry probe refused runtime dir", exc_info=True)
-        return UninstallProbeResult("UNTRUSTED", untrusted_path=runtime_dir(), detail=str(exc))
+        return UninstallProbeResult(
+            "UNTRUSTED",
+            untrusted_path=runtime_dir(),
+            untrusted_kind="redirected",
+            detail=str(exc),
+        )
     except Exception:
         logger.debug("uninstall registry probe failed", exc_info=True)
         return UninstallProbeResult("UNKNOWN")
