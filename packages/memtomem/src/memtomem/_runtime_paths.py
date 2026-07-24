@@ -53,9 +53,38 @@ Security posture for the runtime directory itself:
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import tempfile
 from pathlib import Path
+
+
+def _hint_quote(target: Path) -> str:
+    """Quote *target* for embedding in a suggested removal command.
+
+    The remediation hints below splice ``target`` into a copy-pasteable
+    ``rm``/``rmdir`` invocation. ``target`` derives from the environment
+    (``$XDG_RUNTIME_DIR``/``$TMPDIR``); a path with whitespace or shell
+    metacharacters would otherwise yield a command that deletes the wrong
+    path when pasted (``rm -rf /tmp/my dir/memtomem-501`` splits into two
+    args). Quote the *command* portion only — the human-readable
+    ``runtime dir {target}`` prefix stays raw prose.
+
+    :func:`shlex.quote` is POSIX-shell quoting. On PowerShell its
+    single-quote form is also the literal (no ``$``/backtick expansion), so
+    the hint stays paste-safe there too. ``cmd.exe`` is out of scope: it
+    expands ``%VAR%`` regardless of any quoting and has no ``rm``, so these
+    Unix-shaped hints are illustrative rather than literally executable
+    there — a Windows-native rewrite is a separate change (see #1956).
+
+    Quoting alone is not enough for a leading-hyphen path:
+    ``shlex.quote("-rf/memtomem")`` returns it unchanged, and ``rm`` would
+    then read it as options, not an operand. The call sites pair this with
+    a ``--`` end-of-options marker so the quoted path is always treated as
+    a filename (a relative ``$XDG_RUNTIME_DIR``/``$TMPDIR`` can begin with
+    ``-``; an absolute one never does).
+    """
+    return shlex.quote(str(target))
 
 
 def _is_safe_dir(path: Path) -> bool:
@@ -132,7 +161,8 @@ def ensure_runtime_dir() -> Path:
     if st is not None:
         if stat.S_ISLNK(st.st_mode):
             raise PermissionError(
-                f"runtime dir {target} is a symlink; refusing to follow. Remove it: rm -f {target}"
+                f"runtime dir {target} is a symlink; refusing to follow. "
+                f"Remove it: rm -f -- {_hint_quote(target)}"
             )
         # Windows junctions redirect exactly like a symlink but keep
         # ``S_IFDIR``, so ``S_ISLNK`` above never sees them. Without this
@@ -140,17 +170,20 @@ def ensure_runtime_dir() -> Path:
         # uninstall path stages and deletes what it finds there.
         if target.is_junction():
             raise PermissionError(
-                f"runtime dir {target} is a junction; refusing to follow. Remove it: rmdir {target}"
+                f"runtime dir {target} is a junction; refusing to follow. "
+                f"Remove it: rmdir -- {_hint_quote(target)}"
             )
         if not stat.S_ISDIR(st.st_mode):
             raise PermissionError(
-                f"runtime dir {target} exists but is not a directory. Remove it: rm -f {target}"
+                f"runtime dir {target} exists but is not a directory. "
+                f"Remove it: rm -f -- {_hint_quote(target)}"
             )
         if os.name != "nt":
             if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
                 raise PermissionError(
                     f"runtime dir {target} is owned by uid {st.st_uid} "
-                    f"(expected {os.geteuid()}). Remove it and retry: rm -rf {target}"
+                    f"(expected {os.geteuid()}). "
+                    f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
                 )
             unsafe = stat.S_IMODE(st.st_mode) & 0o077
             if unsafe:
@@ -158,7 +191,7 @@ def ensure_runtime_dir() -> Path:
                     f"runtime dir {target} has unsafe permissions "
                     f"0o{stat.S_IMODE(st.st_mode):o} (expected 0o700, "
                     f"group/world bits: 0o{unsafe:o}). "
-                    f"Remove it and retry: rm -rf {target}"
+                    f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
                 )
         return target
 
