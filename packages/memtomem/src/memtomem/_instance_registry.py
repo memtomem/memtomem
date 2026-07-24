@@ -36,10 +36,32 @@ Layout (all under :func:`memtomem._runtime_paths.runtime_dir`):
     orphaned inode while newcomers lock a fresh one). The runtime dir is
     volatile (``$XDG_RUNTIME_DIR`` / per-user tmp), so it self-cleans.
 
+``lifecycle.lock``
+    The lifecycle barrier (#1936), also outside the scanned directory and
+    also retained infrastructure — never parsed, probed, GC'd, staged, or
+    deleted. A reader/writer flock closing the window between "a server
+    opens the store" and "that server publishes its sentinel above": the
+    server takes it **shared** before storage opens and holds it for the
+    process lifetime, while ``mm uninstall`` takes it **exclusive** across
+    its final liveness re-probe and the whole staging of state. Both
+    sides fail closed — a barrier that cannot be acquired means a
+    destructive operation may be in flight, and neither startup nor
+    deletion may proceed on a guess. Lock ordering is always **barrier →
+    mutation sidecar**; no path acquires them the other way round.
+
+    Scope, stated honestly: the barrier only closes the race between
+    peers that *both* implement it. A pre-#1936 server ignores this file
+    entirely, and a secondary server deliberately continues after losing
+    the ``server.pid`` flock, so an older binary can still open the store
+    inside uninstall's window. No mechanism can teach an already-shipped
+    binary; for stale peers the residual window is the pre-existing
+    #1936 bug, unchanged.
+
 Failure polarity is per-surface: the status path **fails open** (an
 incomplete enumeration produces no warning — a degraded advisory, never
-a hang or a guess), while :func:`probe_all_for_uninstall` **fails
-closed** (any live sentinel or any uncertainty refuses deletion).
+a hang or a guess), while :func:`probe_all_for_uninstall` and both
+barrier acquisitions **fail closed** (any live sentinel, any contention,
+or any uncertainty refuses).
 
 Fork contract: forking a process that holds a registration is
 **unsupported** — the server never forks (no ``os.fork`` /
@@ -84,6 +106,10 @@ _STALE_GRACE_S = 60.0
 
 _ENTRY_RE = re.compile(r"^(\d+)-(\d+)-([0-9a-f]{16})-([0-9a-f]{8})-([0-9a-f]{8})\.lock$")
 
+# Separate budget from ``_LOCK_TIMEOUT_S`` so the barrier's wait can be
+# tuned (and shortened in tests) without touching the mutation lock's.
+_BARRIER_TIMEOUT_S = 2.0
+
 # Exception tuple matching ``cli/_liveness.py:probe_pid_file`` (#817):
 # POSIX raises ``BlockingIOError``; portalocker's Windows backend wraps
 # Win32 errors as ``LockException``.
@@ -98,6 +124,11 @@ def instances_dir() -> Path:
 def registry_sidecar_path() -> Path:
     """Return the mutation-sidecar path (outside :func:`instances_dir`)."""
     return runtime_dir() / "instances.registry.lock"
+
+
+def lifecycle_barrier_path() -> Path:
+    """Return the lifecycle-barrier path (outside :func:`instances_dir`)."""
+    return runtime_dir() / "lifecycle.lock"
 
 
 def store_digest_for(db_path: Path | str) -> str | None:
@@ -151,6 +182,9 @@ class _MutationLockTimeout(Exception):
 # installation — pure in-memory work, never held across file I/O.
 _state_guard = threading.Lock()
 _active: dict[Path, "RegisteredInstance"] = {}
+# Identity set — several shared barrier holders share one path, so a
+# path-keyed dict (as ``_active`` uses) could not hold them all.
+_active_barriers: set["HeldBarrier"] = set()
 _procid: str | None = None
 _atexit_installed = False
 
@@ -206,6 +240,136 @@ def _mutation_lock(deadline: float):
             with contextlib.suppress(Exception):
                 fp.close()
         _mutation_thread_lock.release()
+
+
+class BarrierTimeout(Exception):
+    """The lifecycle barrier could not be acquired before its deadline.
+
+    Raised on contention *and* on infrastructure failure — both mean the
+    caller cannot prove that no destructive operation is in flight, and
+    both surfaces fail closed. The distinction is not actionable, but the
+    underlying error is chained for the log.
+    """
+
+
+@dataclass(eq=False)
+class HeldBarrier:
+    """A held lifecycle-barrier flock: its path, handle, and owner pid.
+
+    ``eq=False`` keeps the default identity hash: several shared holders
+    coexist in one process (two ``AppContext``s), they all share one path,
+    and :data:`_active_barriers` is an identity set. A value-comparing
+    dataclass would be unhashable and ``set.add`` would raise *after* the
+    flock was taken — leaking a hold nothing can release.
+    """
+
+    path: Path
+    pid: int
+    _fp: IO[bytes] = field(repr=False)
+    _closed: bool = field(default=False, repr=False)
+
+    def release(self) -> None:
+        """Drop this hold. Idempotent; never raises; never unlinks.
+
+        The pid guard mirrors :meth:`RegisteredInstance.cleanup`: a forked
+        child inherits the descriptor, and closing it there would release
+        a barrier the parent still relies on. The file itself is retained
+        infrastructure — unlinking a lock file lets a blocked waiter
+        acquire the orphaned inode while newcomers lock a fresh one.
+        """
+        if os.getpid() != self.pid:
+            return
+        with _state_guard:
+            if self._closed:
+                return
+            self._closed = True
+            _active_barriers.discard(self)
+        with contextlib.suppress(Exception):
+            portalocker.unlock(self._fp)
+        with contextlib.suppress(Exception):
+            self._fp.close()
+
+
+def _acquire_barrier(flags: int, timeout_s: float | None) -> HeldBarrier:
+    """Acquire the lifecycle barrier with ``flags``, bounded by a deadline.
+
+    One fresh descriptor per acquisition — flock conflicts are per open
+    file description, so shared holders never block each other while an
+    exclusive request still conflicts with every one of them. There is
+    deliberately no intra-process ``threading.Lock`` layer (unlike
+    :func:`_mutation_lock`): shared holders in one process *must* be
+    allowed to coexist.
+    """
+    budget = _BARRIER_TIMEOUT_S if timeout_s is None else timeout_s
+    deadline = time.monotonic() + budget
+    # Outside the poll loop on purpose: a runtime dir that cannot be
+    # created or a barrier path that cannot be opened is not contention,
+    # and the original error (``PermissionError`` naming the path, with
+    # its remediation hint) must reach the caller unwrapped.
+    ensure_runtime_dir()
+    # Resolved once: the module-level resolvers are monkeypatchable seams,
+    # and a second call could raise (or answer differently) *after* the
+    # flock is held — leaving the lock owned by a descriptor no one tracks.
+    path = lifecycle_barrier_path()
+    # ``a+b`` for the same reason as the mutation sidecar — portalocker's
+    # Windows backend needs a writable handle and ``w`` would truncate.
+    fp = open(path, "a+b")
+    # Everything from here to the successful return runs under one
+    # ownership block: until the tracked ``HeldBarrier`` exists, nothing
+    # but this handler can release the lock, so no failure may escape it.
+    locked = False
+    try:
+        while True:
+            try:
+                portalocker.lock(fp, flags | portalocker.LOCK_NB)
+                locked = True
+                break
+            except _LOCK_CONTENDED as exc:
+                if time.monotonic() >= deadline:
+                    raise BarrierTimeout(f"lifecycle barrier busy after {budget:.1f}s") from exc
+                time.sleep(0.05)
+        barrier = HeldBarrier(path=path, pid=os.getpid(), _fp=fp)
+        with _state_guard:
+            _active_barriers.add(barrier)
+    except BaseException:
+        # A hold nobody can release is worse than no hold: drop it and
+        # fail closed rather than leaning on descriptor finalization.
+        if locked:
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fp)
+        with contextlib.suppress(Exception):
+            fp.close()
+        raise
+    return barrier
+
+
+def acquire_server_lifecycle_barrier(timeout_s: float | None = None) -> HeldBarrier:
+    """Take the barrier **shared**, before the server opens storage.
+
+    Held for the process lifetime and released only once storage close is
+    confirmed, so a server whose registration failed — or whose close
+    failed — still blocks uninstall instead of going invisible. Raises
+    :class:`BarrierTimeout` (contention or unusable runtime dir) or the
+    original :class:`OSError`; the caller must not proceed to open the
+    store on failure.
+
+    ``timeout_s=None`` resolves :data:`_BARRIER_TIMEOUT_S` at call time —
+    a default argument would freeze the value at import and silently
+    ignore any later tuning.
+    """
+    return _acquire_barrier(portalocker.LOCK_SH, timeout_s)
+
+
+def acquire_uninstall_lifecycle_barrier(timeout_s: float | None = None) -> HeldBarrier:
+    """Take the barrier **exclusive**, across uninstall's destructive phase.
+
+    Held through the final liveness re-probe *and* the staging of state,
+    so a server cannot open the store in between. Raises
+    :class:`BarrierTimeout` on contention: a held flock is never stale
+    (the kernel releases it when its holder dies), so this refusal is not
+    ``--force``-overridable.
+    """
+    return _acquire_barrier(portalocker.LOCK_EX, timeout_s)
 
 
 @dataclass

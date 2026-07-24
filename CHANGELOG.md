@@ -26,6 +26,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   SQLite write lock), and an inconclusive registry probe is fail-closed.
   Leftover stale sentinels are inventoried and cleaned like other
   transient runtime files.
+- **`mm uninstall` can no longer stage a database a server opened moments
+  earlier** (#1936). Liveness used to be a snapshot, leaving a window
+  between the last check and the first file move. A lifecycle barrier now
+  spans it: the server takes it shared before opening storage and holds it
+  until its storage close is confirmed, while uninstall holds it exclusive
+  across its final liveness check and the whole staging phase. Uninstall
+  refuses (exit 2) when it cannot take the barrier within ~2 s, and
+  `--force` does not override that — a held lock is never stale, since the
+  kernel releases it when its holder dies.
+
+  Two consequences worth knowing. Server *storage initialization* now fails
+  closed if the barrier is unavailable at all (an unusable runtime
+  directory, say) rather than degrading quietly; the MCP handshake still
+  succeeds and the error surfaces on the first tool call that initializes,
+  and a later call retries. And the per-user runtime directory is no longer
+  pruned by uninstall, because the retained barrier file keeps it non-empty
+  — that directory is volatile and self-cleans.
+
+  Scope: the barrier only closes the race between peers that both
+  implement it. A server from an older release ignores it, so for a
+  mixed-version setup the original window remains.
 
 ## [0.3.12] — 2026-07-22
 

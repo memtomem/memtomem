@@ -49,6 +49,10 @@ from typing import Iterable
 
 import click
 
+from memtomem._instance_registry import BarrierTimeout as _BarrierTimeout
+from memtomem._instance_registry import (
+    acquire_uninstall_lifecycle_barrier as _acquire_lifecycle_barrier,
+)
 from memtomem._instance_registry import instances_dir as _instances_dir
 from memtomem._instance_registry import (
     probe_all_for_uninstall as _probe_registry_liveness,
@@ -325,9 +329,12 @@ def _collect_inventory(db_path: Path) -> _Inventory:
         other.append(runtime_pid)
     # #1935: instance-registry sentinels are transient runtime files like
     # the pid files above; the refusal gate guarantees none of them is
-    # live by the time staging runs. The mutation sidecar
-    # (``instances.registry.lock``, *outside* this directory) is
-    # deliberately absent — retained infrastructure, see module docstring.
+    # live by the time staging runs. The two lock files outside that
+    # directory — the mutation sidecar ``instances.registry.lock`` and the
+    # ``lifecycle.lock`` barrier this very command is holding (#1936) — are
+    # deliberately absent: retained infrastructure, see module docstring.
+    # Inventorying the barrier would also mean staging a file with an open
+    # handle, which Windows refuses outright.
     reg_dir = _real_registry_dir()
     if reg_dir is not None:
         try:
@@ -835,11 +842,13 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
         completed.append("state dir")
 
     # #1935: prune the sentinel directory once its contents are staged
-    # away. The runtime-dir prune below then usually still finds the
-    # retained ``instances.registry.lock`` sidecar and no-ops — expected;
-    # the runtime dir is volatile and self-cleans. ``_real_registry_dir``
-    # already refuses a symlinked ``instances/``; ``_prune_if_empty`` is
-    # what keeps every prune here off directory links in general.
+    # away. The runtime-dir prune below then no-ops: the retained
+    # ``instances.registry.lock`` sidecar and the ``lifecycle.lock``
+    # barrier still held by this command (#1936) both keep it non-empty.
+    # Expected — the runtime dir is volatile and self-cleans.
+    # ``_real_registry_dir`` already refuses a symlinked ``instances/``;
+    # ``_prune_if_empty`` is what keeps every prune here off directory
+    # links in general.
     reg_dir = _real_registry_dir()
     if reg_dir is not None:
         _prune_if_empty(reg_dir)
@@ -1048,21 +1057,48 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     # its live state staged. ``--force`` keeps exactly the authority it
     # had above: the POSIX stale-pid/db-lock heuristics, never registry
     # evidence and never Windows open-handle reality.
-    server = _check_server_liveness()
-    db_lock = _check_db_lock(db_path)
-    registry_state = _probe_registry_liveness()
-    heuristics_block = (server.alive or db_lock.locked) and (not force or is_windows)
-    if registry_state != "NONE" or heuristics_block:
+    #
+    # #1936: the re-probe alone is still a snapshot — a server could open
+    # the store between it and the first ``os.replace`` below. Take the
+    # lifecycle barrier *exclusive* first and hold it across both, so a
+    # starting server either blocks (it takes the barrier shared before
+    # opening storage) or is already visible to the probes. Acquired only
+    # here, never around the earlier probe: that one runs before a
+    # confirmation prompt a user can sit on for minutes, and holding the
+    # barrier there would fail-close legitimate server startups.
+    try:
+        barrier = _acquire_lifecycle_barrier()
+    except (_BarrierTimeout, OSError) as exc:
         click.echo("")
         click.secho(
-            "A memtomem process became active while uninstall was waiting for "
-            "confirmation. Refusing to delete state — stop it and re-run "
-            "mm uninstall.",
+            f"A memtomem process is starting or holding the lifecycle "
+            f"barrier ({exc}). Refusing to delete state — stop it and "
+            "re-run mm uninstall.",
             fg="red",
         )
+        # Deliberately no ``--force`` hint: a held flock is never stale
+        # (the kernel releases it when its holder dies), so there is
+        # nothing here for --force to legitimately override.
         sys.exit(2)
 
+    # ``finally`` is load-bearing: every refusal below raises ``SystemExit``
+    # through it, and an in-process ``CliRunner`` invocation would otherwise
+    # leak the exclusive hold into the surrounding process.
     try:
+        server = _check_server_liveness()
+        db_lock = _check_db_lock(db_path)
+        registry_state = _probe_registry_liveness()
+        heuristics_block = (server.alive or db_lock.locked) and (not force or is_windows)
+        if registry_state != "NONE" or heuristics_block:
+            click.echo("")
+            click.secho(
+                "A memtomem process became active while uninstall was waiting for "
+                "confirmation. Refusing to delete state — stop it and re-run "
+                "mm uninstall.",
+                fg="red",
+            )
+            sys.exit(2)
+
         summary = _delete_inventory(inv, keep_config=keep_config, keep_data=keep_data)
     except _UninstallCrossFsError as exc:
         click.echo("")
@@ -1103,6 +1139,8 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             for root in exc.staging_roots:
                 click.secho(f"  Staging dir: {_format_path(root)}", fg="red")
         sys.exit(2)
+    finally:
+        barrier.release()
 
     click.secho(f"\nRemoved: {summary}.", fg="green")
     click.echo("Run the binary uninstall command above to complete removal.")

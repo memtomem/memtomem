@@ -1926,3 +1926,340 @@ class TestPruneIsFailureSafe:
         assert _prune_if_empty(junction) is False
         assert junction.is_junction()
         assert target.is_dir()
+
+
+# ------------------------------------------------------------------- #1936
+
+
+def _bar_child_setup(rt_str: str):
+    """Point a spawned child's registry module at ``rt_str``."""
+    import memtomem._instance_registry as _reg
+
+    target = Path(rt_str)
+
+    def _rt() -> Path:
+        return target
+
+    def _ensure() -> Path:
+        target.mkdir(mode=0o700, exist_ok=True)
+        return target
+
+    _reg.runtime_dir = _rt
+    _reg.ensure_runtime_dir = _ensure
+    return _reg
+
+
+def _child_try_exclusive_barrier(rt_str: str, q) -> None:
+    """Attempt the conflicting acquire from a separate process."""
+    _reg = _bar_child_setup(rt_str)
+    try:
+        _reg.acquire_uninstall_lifecycle_barrier(timeout_s=1.0).release()
+    except Exception as exc:  # noqa: BLE001 — the type name is the signal
+        q.put(("refused", type(exc).__name__))
+        return
+    q.put(("acquired", ""))
+
+
+def _child_hold_shared_barrier(rt_str: str, q, release) -> None:
+    """Stand in for a live server holding the barrier shared."""
+    _reg = _bar_child_setup(rt_str)
+    barrier = _reg.acquire_server_lifecycle_barrier()
+    q.put(("held",))
+    release.wait(60)
+    barrier.release()
+
+
+def _child_uninstall_blocking_in_staging(home_str: str, rt_str: str, q, release) -> None:
+    """Run a *real* ``mm uninstall`` that parks inside its staging phase.
+
+    The barrier is only useful if uninstall keeps holding it across the
+    deletion — a child that merely grabs the lock would pass the same
+    assertions even if production released it right after probing.
+
+    The runtime dir is **injected as the parent's already-resolved path**,
+    never re-derived from the environment. Letting the child recompute it
+    put the two processes on different barrier files on Windows, where
+    ``runtime_dir()`` ignores ``$XDG_RUNTIME_DIR`` entirely and falls
+    through to ``tempfile.gettempdir()`` — so the parent's acquire
+    succeeded and the test claimed a refusal that never happened.
+    """
+    import os
+
+    os.environ["HOME"] = home_str
+    os.environ["USERPROFILE"] = home_str  # ``Path.home()`` on Windows
+
+    from click.testing import CliRunner
+
+    from memtomem.cli import cli
+    from memtomem.cli import uninstall_cmd as _uninstall
+    from memtomem.cli import _bootstrap
+    import memtomem._instance_registry as _reg
+
+    rt = Path(rt_str)
+
+    def _rt() -> Path:
+        return rt
+
+    def _ensure_rt() -> Path:
+        rt.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return rt
+
+    # Every seam that resolves the runtime dir, because they are separate
+    # module-level imports: the registry resolves the barrier path, while
+    # uninstall holds its own for the staging anchor / prune and for the
+    # pid file it inventories. Leaving ``server_pid_path`` unpatched would
+    # point the child's inventory at the *real* runtime dir, outside the
+    # test sandbox — staging a file this test never created.
+    _reg.runtime_dir = _rt
+    _reg.ensure_runtime_dir = _ensure_rt
+    _uninstall.runtime_dir = _rt
+    _uninstall.server_pid_path = lambda: rt / "server.pid"
+
+    home = Path(home_str)
+    _bootstrap._CONFIG_PATH = home / ".memtomem" / "config.json"
+    _uninstall._DEFAULT_STATE_DIR = home / ".memtomem"
+
+    real_stage = _uninstall._stage_inventory
+
+    def blocking_stage(*args, **kwargs):
+        q.put(("staging",))
+        release.wait(60)
+        return real_stage(*args, **kwargs)
+
+    _uninstall._stage_inventory = blocking_stage
+    result = CliRunner().invoke(cli, ["uninstall", "-y"])
+    q.put(("done", result.exit_code))
+
+
+class TestLifecycleBarrierRefusesUninstall:
+    """A server holding the barrier blocks deletion even when nothing
+    else can see it (#1936).
+
+    Deliberately seeds **no sentinel**: that isolates the barrier from
+    the #1935 registry gate, and it is the real-world case the lifetime
+    hold exists for — a server whose ``register_instance`` failed has an
+    open store that nothing advertises.
+    """
+
+    def test_shared_holder_refuses_deletion(self, home, registry_at_runtime_dir, monkeypatch):
+        import multiprocessing as mp
+
+        from memtomem.cli import uninstall_cmd
+
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        monkeypatch.setattr(reg, "_BARRIER_TIMEOUT_S", 0.3)
+
+        ctx = mp.get_context("spawn")
+        q, release = ctx.Queue(), ctx.Event()
+        holder = ctx.Process(
+            target=_child_hold_shared_barrier, args=(str(reg.runtime_dir()), q, release)
+        )
+        holder.start()
+        try:
+            assert q.get(timeout=30)[0] == "held"
+            assert reg.probe_all_for_uninstall() == "NONE", "no sentinel — registry sees nothing"
+
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+            assert result.exit_code == 2, result.output
+            assert "lifecycle barrier" in result.output
+            assert (state / "memtomem.db").exists()
+            assert (state / "config.json").exists()
+        finally:
+            release.set()
+            holder.join(timeout=30)
+            if holder.is_alive():
+                holder.kill()
+                holder.join(timeout=30)
+        assert uninstall_cmd is not None  # import pin
+
+    def test_force_does_not_override_the_barrier(self, home, registry_at_runtime_dir, monkeypatch):
+        """A held flock is never stale — the kernel releases it when its
+        holder dies — so there is nothing here for ``--force`` to
+        legitimately override, and the output must not suggest otherwise.
+        """
+        import multiprocessing as mp
+
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        monkeypatch.setattr(reg, "_BARRIER_TIMEOUT_S", 0.3)
+
+        ctx = mp.get_context("spawn")
+        q, release = ctx.Queue(), ctx.Event()
+        holder = ctx.Process(
+            target=_child_hold_shared_barrier, args=(str(reg.runtime_dir()), q, release)
+        )
+        holder.start()
+        try:
+            assert q.get(timeout=30)[0] == "held"
+
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+            assert result.exit_code == 2, result.output
+            assert "--force" not in result.output
+            assert (state / "memtomem.db").exists()
+        finally:
+            release.set()
+            holder.join(timeout=30)
+            if holder.is_alive():
+                holder.kill()
+                holder.join(timeout=30)
+
+
+class TestUninstallHoldsBarrierThroughStaging:
+    """The other schedule: a real uninstall inside staging fails a server
+    start *before* it opens the store."""
+
+    def test_server_init_refused_while_uninstall_stages(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        import multiprocessing as mp
+
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+        # Hand the child the *resolved* path — see the helper's docstring
+        # for why re-deriving it from env put the two processes on
+        # different barrier files on Windows.
+        rt = str(reg.ensure_runtime_dir())
+        monkeypatch.setattr(reg, "_BARRIER_TIMEOUT_S", 0.3)
+
+        ctx = mp.get_context("spawn")
+        q, release = ctx.Queue(), ctx.Event()
+        worker = ctx.Process(
+            target=_child_uninstall_blocking_in_staging, args=(str(home), rt, q, release)
+        )
+        worker.start()
+        try:
+            assert q.get(timeout=60)[0] == "staging", "uninstall never reached staging"
+            # Uninstall is parked *inside* staging, still holding the
+            # barrier: a server starting now must be refused.
+            with pytest.raises(reg.BarrierTimeout):
+                reg.acquire_server_lifecycle_barrier(timeout_s=0.3)
+        finally:
+            release.set()
+            worker.join(timeout=60)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=30)
+
+
+class TestUninstallAlwaysReleasesTheBarrier:
+    """Every exit path frees the barrier.
+
+    These re-acquire **inside the test**: the autouse fixture sweeps
+    leaked barriers at teardown, so a later green test would say nothing
+    about whether production released anything.
+    """
+
+    @staticmethod
+    def _assert_free(reg) -> None:
+        """Prove the barrier is free from another *process*.
+
+        Same-process re-acquisition is the weaker check: Windows can grant
+        a second handle in the owning process, so a dropped ``release()``
+        could pass there and then be hidden by the autouse sweep.
+        """
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn")
+        q = ctx.Queue()
+        child = ctx.Process(target=_child_try_exclusive_barrier, args=(str(reg.runtime_dir()), q))
+        child.start()
+        try:
+            outcome, detail = q.get(timeout=30)
+        finally:
+            child.join(timeout=30)
+            if child.is_alive():
+                child.kill()
+                child.join(timeout=30)
+        assert outcome == "acquired", f"uninstall left the barrier held ({detail})"
+
+    def test_released_after_successful_delete(self, home, registry_at_runtime_dir):
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        self._assert_free(reg)
+
+    def test_released_after_late_refusal(self, home, registry_at_runtime_dir, monkeypatch):
+        """The boundary re-probe exits with ``SystemExit`` from inside the
+        held region — the ``finally`` must still run."""
+        from memtomem.cli import uninstall_cmd
+
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+        calls: list[int] = []
+
+        def flapping_probe():
+            calls.append(1)
+            return "NONE" if len(calls) == 1 else "LIVE"
+
+        monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert len(calls) == 2
+        self._assert_free(reg)
+
+    def test_released_after_staging_failure(self, home, registry_at_runtime_dir, monkeypatch):
+        from memtomem.cli import uninstall_cmd
+
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+
+        def boom(*_a, **_k):
+            raise uninstall_cmd._UninstallStagingError(
+                failing_path=Path("x"),
+                original=OSError("nope"),
+                rollback_errors=[],
+                staging_roots=[],
+            )
+
+        monkeypatch.setattr(uninstall_cmd, "_delete_inventory", boom)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        self._assert_free(reg)
+
+
+class TestBarrierIsRetainedInfrastructure:
+    """Production layout: the barrier file survives uninstall and is never
+    inventoried — and, as a consequence, the runtime dir stops being
+    pruned. Pinned with ``registry_at_runtime_dir`` because the suite-wide
+    isolation would otherwise park the barrier outside every staging
+    anchor and hide all of this.
+    """
+
+    def test_barrier_survives_and_keeps_the_runtime_dir(self, home, registry_at_runtime_dir):
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        barrier = reg.lifecycle_barrier_path()
+        assert barrier.exists(), "retained infrastructure must not be deleted"
+        assert str(barrier) not in result.output, "barrier must never be inventoried"
+        assert reg.runtime_dir().exists(), (
+            "the retained barrier keeps the runtime dir non-empty — expected; "
+            "the runtime dir is volatile and self-cleans"
+        )
+
+    def test_barrier_only_state_still_takes_the_empty_state_fast_path(
+        self, home, registry_at_runtime_dir
+    ):
+        """A leftover ``lifecycle.lock`` alone is not user state."""
+        reg = registry_at_runtime_dir
+        reg.ensure_runtime_dir()
+        reg.acquire_server_lifecycle_barrier(timeout_s=5.0).release()
+        assert reg.lifecycle_barrier_path().exists()
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert "No memtomem state to remove" in result.output

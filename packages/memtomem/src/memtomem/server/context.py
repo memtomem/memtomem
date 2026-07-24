@@ -16,7 +16,7 @@ from memtomem.config import Mem2MemConfig
 from memtomem.constants import validate_namespace
 
 if TYPE_CHECKING:
-    from memtomem._instance_registry import RegisteredInstance
+    from memtomem._instance_registry import HeldBarrier, RegisteredInstance
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.indexing.engine import IndexEngine
     from memtomem.indexing.watcher import FileWatcher
@@ -153,6 +153,12 @@ class AppContext:
     # Held instance-registry sentinel (#1935); populated only when
     # ``register_server_instance`` is set and storage init succeeded.
     _instance_registration: RegisteredInstance | None = field(default=None, init=False, repr=False)
+    # Held lifecycle barrier (#1936), taken *before* storage opens and
+    # kept for the process lifetime — released on the same confirmed-close
+    # gate as the sentinel above. Holding it past sentinel publication is
+    # what covers the case where registration itself failed: the store is
+    # open, nothing advertises it, and only this hold refuses uninstall.
+    _lifecycle_barrier: HeldBarrier | None = field(default=None, init=False, repr=False)
     # per-session, scoped to AppContext lifetime. Gate to emit a dim-mismatch
     # hint only once per MCP session so repeated mem_add / mem_search calls
     # do not spam the same notice. Writes go through ``_config_lock``.
@@ -450,6 +456,15 @@ class AppContext:
             from memtomem.search.dedup import DedupScanner
             from memtomem.server.component_factory import close_components, create_components
 
+            # #1936: take the lifecycle barrier BEFORE storage opens, so a
+            # concurrent ``mm uninstall`` either has not started staging
+            # (we hold shared, its exclusive acquire refuses) or is already
+            # staging (our acquire refuses and the store is never opened).
+            # Failure propagates — proceeding here on an unproven barrier
+            # would reopen exactly the TOCTOU this closes.
+            if self.register_server_instance and self._lifecycle_barrier is None:
+                await self._acquire_lifecycle_barrier()
+
             comp = await create_components(self.config)
             # Expose storage/embedder via the property accessors *before*
             # constructing schedulers — they reach into ``ctx.storage`` etc.,
@@ -545,6 +560,7 @@ class AppContext:
                 # a failed close leaves a possibly-open store, which must
                 # stay advertised (#1935).
                 await self._release_instance_registration(teardown.storage_closed)
+                self._release_lifecycle_barrier(teardown.storage_closed)
                 self._components = None
                 self._owns_components = False
                 raise
@@ -555,6 +571,73 @@ class AppContext:
             self._policy_scheduler = policy_scheduler
             self._health_watchdog = watchdog
             return comp
+
+    async def _acquire_lifecycle_barrier(self) -> None:
+        """Take the shared lifecycle barrier before storage opens (#1936).
+
+        Offloaded via ``asyncio.to_thread`` (bounded cross-process lock —
+        forbidden directly on the event loop) and settled through
+        :func:`settle_shielded_value`, *not* ``settle_shielded_result``:
+        that variant swallows worker failures, which here would let a
+        ``BarrierTimeout`` vanish and startup continue into
+        ``create_components`` — reopening the race. Settlement hands back
+        a handle acquired just as a cancellation lands so it can never be
+        dropped on the floor.
+
+        On cancellation that handle is **released**, not retained — the
+        opposite of :meth:`_acquire_instance_registration`, and the
+        asymmetry is deliberate. Registration happens *inside* the block
+        whose rollback releases it; this runs before that block even
+        starts, so storage never opened and no retry has anything to
+        reuse. Retaining here would leave a barrier that outlives the
+        cancelled attempt and blocks ``mm uninstall`` on behalf of a
+        server that never opened the store, with no release path short of
+        process exit.
+
+        Initialization is lazy, so a failure here does not abort the MCP
+        handshake: it surfaces on the first initializing tool call (and
+        ``spawn_warmup`` logs it). The field stays ``None``, so a later
+        call retries — correct, since the uninstall may have finished.
+        """
+        from memtomem._instance_registry import HeldBarrier, acquire_server_lifecycle_barrier
+        from memtomem._settlement import settle_shielded_value
+
+        future = asyncio.ensure_future(asyncio.to_thread(acquire_server_lifecycle_barrier))
+        # On failure nothing was acquired — the acquire helper closes its
+        # own handle — so the exception simply propagates.
+        result, cancelled = await settle_shielded_value(future, what="lifecycle barrier")
+        if not isinstance(result, HeldBarrier):
+            # Fail closed rather than silently continuing unbarriered: the
+            # settlement helper erases the result type to ``object``, so
+            # only this check stands between a contract change and an
+            # unprotected storage open.
+            raise RuntimeError(
+                f"lifecycle barrier returned {type(result).__name__}, not HeldBarrier"
+            )
+        if cancelled is not None:
+            result.release()
+            raise cancelled
+        self._lifecycle_barrier = result
+
+    def _release_lifecycle_barrier(self, storage_closed: bool) -> None:
+        """Drop the barrier after a *confirmed* storage close (#1936).
+
+        Same polarity as :meth:`_release_instance_registration`: an
+        unconfirmed close leaves a possibly-open store, which must keep
+        blocking uninstall until this process exits (the kernel releases
+        the flock then). ``release()`` only closes a descriptor — no
+        cross-process lock — so it needs no thread offload.
+        """
+        barrier = self._lifecycle_barrier
+        if barrier is None:
+            return
+        if not storage_closed:
+            logger.warning(
+                "storage close unconfirmed — retaining lifecycle barrier %s", barrier.path
+            )
+            return
+        self._lifecycle_barrier = None
+        barrier.release()
 
     async def _acquire_instance_registration(self, comp: Components) -> None:
         """Register this server in the instance registry (#1935).
@@ -700,6 +783,7 @@ class AppContext:
             if first_cancel is None:
                 first_cancel = teardown.cancelled
         cancelled = await self._release_instance_registration(storage_closed)
+        self._release_lifecycle_barrier(storage_closed)
         if first_cancel is None:
             first_cancel = cancelled
         self._components = None
