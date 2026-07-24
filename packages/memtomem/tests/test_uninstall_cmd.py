@@ -1402,6 +1402,28 @@ class TestInstanceRegistrySymlinkGuard:
         assert entry.exists(), "a junctioned registry must never be staged"
         assert entry.name not in result.output, "inventory must not list across the junction"
 
+    def test_junctioned_runtime_anchor_refuses_and_stages_nothing(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """Guarding only the leaf leaves the whole chain open one level
+        up: a junctioned *runtime dir* holds an ordinary ``instances/``
+        inside the target, which passes every check made on the leaf.
+        Both the probe (via ``ensure_runtime_dir``) and the inventory
+        (via ``_real_registry_dir``'s anchor check) must refuse."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        anchor = reg.instances_dir().parent
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == anchor)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert (state / "memtomem.db").exists()
+        assert entry.exists(), "a junctioned runtime anchor must never be staged"
+        assert entry.name not in result.output, "inventory must not list under the junction"
+
     @_windows_only
     def test_junctioned_instances_dir_refuses_and_touches_nothing(
         self, home, registry_at_runtime_dir, tmp_path
@@ -1663,7 +1685,29 @@ class TestPruneIsFailureSafe:
         assert _prune_if_empty(link) is False
         assert link.is_symlink()
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="junctions are NTFS-only")
+    def test_junction_refusal_precedes_listing_and_rmdir(self, tmp_path, monkeypatch):
+        """The ordering contract on the *junction* axis, runnable
+        everywhere. The symlink rig above cannot carry it — that case
+        still passes with the junction check moved below the listing —
+        and the real-junction case only runs on the Windows shard."""
+        d = tmp_path / "plain"
+        d.mkdir()
+
+        def _reached(step):
+            def _fail(_self, *_a, **_kw):
+                raise AssertionError(f"{step} reached for a junction")
+
+            return _fail
+
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == d)
+        monkeypatch.setattr(Path, "iterdir", _reached("iterdir"))
+        monkeypatch.setattr(Path, "rmdir", _reached("rmdir"))
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert _prune_if_empty(d) is False
+        assert d.is_dir()
+
+    @_windows_only
     def test_never_prunes_a_junction(self, tmp_path):
         """Junctions are the case ``is_symlink()`` alone misses: Windows
         tags them ``IO_REPARSE_TAG_MOUNT_POINT``, so they stay

@@ -69,6 +69,21 @@ _DB_SIBLING_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _OWNED_SUBDIRS = ("config.d", "memories", "uploads")
 
 
+def _is_dir_link(path: Path) -> bool:
+    """True when *path* redirects: a symlink or an NTFS junction.
+
+    Both checks are needed. Windows tags junctions
+    ``IO_REPARSE_TAG_MOUNT_POINT``, so ``is_symlink()`` — like ``lstat``
+    + ``S_ISDIR`` — reports ``False`` for one while it stays
+    directory-shaped. Unreadable counts as a redirect: every caller uses
+    this to decide whether to *stop*, so the safe answer is "yes".
+    """
+    try:
+        return path.is_symlink() or path.is_junction()
+    except OSError:
+        return True
+
+
 def _real_registry_dir() -> Path | None:
     """The sentinel directory iff it is an actual directory.
 
@@ -83,13 +98,21 @@ def _real_registry_dir() -> Path | None:
     explicit check ``_collect_inventory`` would list the *target's*
     files, stage them with ``os.replace``, and delete them with the
     staging tree — data loss outside the registry, not a read-only leak.
+
+    The *anchor* is checked as well, not just the final component: a
+    junctioned runtime dir leaves an ordinary ``instances/`` inside the
+    target, which passes every check made on the leaf alone.
+    ``ensure_runtime_dir`` refuses that anchor too, but this path must
+    not depend on something else having run first.
     """
     d = _instances_dir()
+    if _is_dir_link(d.parent):
+        return None
     try:
         st = os.stat(d, follow_symlinks=False)
     except OSError:
         return None
-    if not stat.S_ISDIR(st.st_mode) or d.is_junction():
+    if not stat.S_ISDIR(st.st_mode) or _is_dir_link(d):
         return None
     return d
 
@@ -125,13 +148,13 @@ def _prune_if_empty(path: Path) -> bool:
     while POSIX ``rmdir`` then fails with ``ENOTDIR``, Windows
     ``RemoveDirectoryW`` removes the reparse point and leaves the target,
     so an empty ``config.d`` or ``memories`` *link* would be deleted out
-    from under ``--keep-config`` / ``--keep-data``. Both checks are
-    needed: Windows tags junctions differently from symlinks, so
-    ``is_symlink()`` (like ``lstat`` + ``S_ISDIR``) reports ``False`` for
-    a junction, which stays directory-shaped.
+    from under ``--keep-config`` / ``--keep-data``. The check must come
+    before the listing: below it, a link to a non-empty directory would
+    refuse for the wrong reason and a link to an empty one would be
+    pruned outright.
     """
     try:
-        if path.is_symlink() or path.is_junction():
+        if _is_dir_link(path):
             return False
         if not path.is_dir() or any(path.iterdir()):
             return False

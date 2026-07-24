@@ -129,6 +129,14 @@ def ensure_runtime_dir() -> Path:
             raise PermissionError(
                 f"runtime dir {target} is a symlink; refusing to follow. Remove it: rm -f {target}"
             )
+        # Windows junctions redirect exactly like a symlink but keep
+        # ``S_IFDIR``, so ``S_ISLNK`` above never sees them. Without this
+        # every consumer treats the *target* as the runtime dir — and the
+        # uninstall path stages and deletes what it finds there.
+        if target.is_junction():
+            raise PermissionError(
+                f"runtime dir {target} is a junction; refusing to follow. Remove it: rmdir {target}"
+            )
         if not stat.S_ISDIR(st.st_mode):
             raise PermissionError(
                 f"runtime dir {target} exists but is not a directory. Remove it: rm -f {target}"
