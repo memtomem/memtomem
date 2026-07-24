@@ -375,27 +375,31 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     config_json = state_dir / "config.json"
     config_files = [config_json] if config_json.exists() else []
 
-    # A dangling owned-subdir link never lists via ``_dir_total`` (the
-    # follow-based ``is_dir()`` is False), yet it is deletable state: show
-    # the link entry itself so the inventory, the byte total, and the
-    # keep-flag gating all see it (#1946). ``_file_size`` follows and gets
-    # OSError, so the row reads 0 B.
+    # An owned-subdir entry that stages but lists no files must still show
+    # a row, or the inventory prints "(nothing found)" and the user is then
+    # asked to confirm — and afterwards sees "Removed:" — for state the
+    # report just denied existed. Three fileless-but-stageable shapes:
+    # a dangling link (``_dir_total`` no-ops, target gone), an empty owned
+    # directory, and a live link to an empty target. Substitute the entry
+    # itself so the report, the byte total, and the keep-flag gating all
+    # see it (#1946). ``_file_size`` follows: a dangling link OSErrors to
+    # 0 B; a real/live dir reads its own inode size.
+    def _owned_group(subdir: Path) -> list[Path]:
+        files, _ = _dir_total(subdir)
+        if not files and _stageable_dir_entry(subdir):
+            return [subdir]
+        return files
+
     fragment_dir = state_dir / "config.d"
-    fragments, _ = _dir_total(fragment_dir)
-    if _is_dangling_link(fragment_dir):
-        fragments = [fragment_dir]
+    fragments = _owned_group(fragment_dir)
 
     backups = sorted(state_dir.glob("config.json.bak-*")) if state_dir.exists() else []
 
     memory_dir = state_dir / "memories"
-    memories, _ = _dir_total(memory_dir)
-    if _is_dangling_link(memory_dir):
-        memories = [memory_dir]
+    memories = _owned_group(memory_dir)
 
     upload_dir = state_dir / "uploads"
-    uploads, _ = _dir_total(upload_dir)
-    if _is_dangling_link(upload_dir):
-        uploads = [upload_dir]
+    uploads = _owned_group(upload_dir)
 
     other: list[Path] = []
     # ``.config.json.lock`` is the sidecar lock for config.json read-modify-write
@@ -1130,7 +1134,11 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     # link (#1946), a live link to an empty directory, or an empty owned
     # directory is deletable state that contributes zero listed bytes and
     # zero listed files while ``_build_stage_plan`` still stages its
-    # entry. ``_entry_present`` keeps the probe no-follow.
+    # entry. ``_entry_present`` keeps the probe no-follow. This plan is
+    # intentionally thrown away: ``_stage_inventory`` re-derives its own
+    # after the confirmation prompt (which can sit for minutes), so the
+    # destructive boundary probes fresh state — don't fold the two builds
+    # into one shared value.
     gate_plan = _build_stage_plan(inv, keep_config=keep_config, keep_data=keep_data)
     if not any(_entry_present(p) for _, paths in gate_plan for p in paths):
         click.echo("\nNothing to delete with the current flags.")
