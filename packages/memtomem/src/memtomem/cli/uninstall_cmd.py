@@ -1252,7 +1252,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     # barrier there would fail-close legitimate server startups.
     try:
         barrier = _acquire_lifecycle_barrier()
-    except (_BarrierTimeout, OSError) as exc:
+    except _BarrierTimeout as exc:
         click.echo("")
         click.secho(
             f"A memtomem process is starting or holding the lifecycle "
@@ -1263,6 +1263,26 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         # Deliberately no ``--force`` hint: a held flock is never stale
         # (the kernel releases it when its holder dies), so there is
         # nothing here for --force to legitimately override.
+        sys.exit(2)
+    except OSError as exc:
+        # Not contention: ``_acquire_barrier`` calls ``ensure_runtime_dir``
+        # and opens the barrier file *outside* its poll loop, so a refused
+        # runtime dir or an unopenable barrier path escapes here unwrapped.
+        # There is no process to stop — "stop it and re-run" would send the
+        # user hunting for one that does not exist (#1870, #1951). Mirrors
+        # ``mm reset``'s split (``reset_cmd._acquire_barrier_or_refuse``).
+        click.echo("")
+        click.secho(
+            f"The lifecycle barrier could not be used ({exc}). Refusing to delete state.",
+            fg="red",
+        )
+        click.secho(
+            "  Repair the reported path, then retry — this is an "
+            "infrastructure failure, not a running process.",
+            fg="red",
+        )
+        # Deliberately no ``--force`` hint here either: an unusable barrier
+        # path is infrastructure, not a stale heuristic to override.
         sys.exit(2)
 
     # ``finally`` is load-bearing: every refusal below raises ``SystemExit``
