@@ -64,6 +64,7 @@ from memtomem._instance_registry import (
 from memtomem._runtime_paths import runtime_dir, server_pid_path
 from memtomem.cli._db_lock import DbLockState as _DbLockState  # noqa: F401  (test seam)
 from memtomem.cli._db_lock import check_db_lock as _check_db_lock
+from memtomem.cli._liveness import ServerState
 from memtomem.cli._liveness import check_server_liveness as _check_server_liveness
 from memtomem.cli._liveness import probe_pid_file as _probe_pid_file  # noqa: F401  (test seam)
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
@@ -92,35 +93,6 @@ def _is_dir_link(path: Path) -> bool:
         return True
 
 
-def _is_dangling_link(path: Path) -> bool:
-    """True when *path* is a symlink/junction whose target is gone.
-
-    A dangling ``config.d`` / ``memories`` / ``uploads`` link under the
-    state dir is our own leftover: it must be inventoried and its
-    *entry* unlinked with the rest (#1946). Refusing to *follow* a link
-    (#1940) is not the same as refusing to remove the link entry itself
-    — removal happens exclusively via the staged ``os.replace``, which
-    operates on the entry; ``_prune_if_empty`` keeps refusing links.
-
-    Junction-aware for free: ``_is_dir_link`` checks ``is_junction()``
-    (reparse-tag based), and a dangling junction — ``lstat``-reported
-    ``S_IFDIR`` while the follow-based ``is_dir()`` is False — lands
-    here like a dangling symlink. An unresolvable link also classifies
-    as dangling — ``Path.exists()`` propagates errors outside its
-    ignore-set (e.g. ``EACCES`` when the target sits beneath an
-    unsearchable directory), and "cannot be followed" is exactly the
-    condition this helper names. Either way we *attempt* the staged
-    move and a real failure surfaces through rollback +
-    ``_UninstallStagingError`` instead of today's silent leftover.
-    """
-    if not _is_dir_link(path):
-        return False
-    try:
-        return not path.exists()
-    except OSError:
-        return True
-
-
 def _entry_present(path: Path) -> bool:
     """No-follow existence where only genuine absence counts as absent.
 
@@ -138,19 +110,30 @@ def _entry_present(path: Path) -> bool:
     return True
 
 
-def _stageable_dir_entry(path: Path) -> bool:
-    """Real dir, live dir link (whole-entry move, #1943), or dangling link.
+def _stageable_owned_entry(path: Path) -> bool:
+    """Any *present* entry at an owned-subdir name is stageable.
 
-    ``is_dir()`` follows, so — like ``exists()`` above — it propagates
-    e.g. ``EACCES`` for an unresolvable link; that case falls through to
-    the dangling classifier rather than aborting plan construction.
+    ``config.d`` / ``memories`` / ``uploads`` are names we own. Whatever
+    occupies one is our leftover and is removed as a single entry-level
+    ``os.replace`` (never a follow), so keep flags gate the *name*, not
+    the shape, and a live link's target is untouched:
+
+    - a real directory, or an empty owned skeleton;
+    - a live dir link (whole-entry move, #1943) or dangling dir
+      link/junction (#1946) — the target-follow ``is_dir()`` these used
+      to need would raise ``EACCES`` for an unresolvable link and abort
+      plan construction;
+    - a plain regular file or a live *file* symlink squatting at the
+      name (#1949) — ``is_dir()`` followed to a file → ``False`` and the
+      old dangling classifier gated on ``is_symlink``, so both slipped
+      through unstaged, leaving the state dir un-prunable.
+
+    Presence is ``_entry_present``'s no-follow contract: only
+    ENOENT/ENOTDIR decline to stage; an unreadable entry answers True so
+    the move is attempted and a real failure surfaces via rollback +
+    exit 2 instead of a silent leftover.
     """
-    try:
-        if path.is_dir():
-            return True
-    except OSError:
-        pass
-    return _is_dangling_link(path)
+    return _entry_present(path)
 
 
 def _real_registry_dir() -> Path | None:
@@ -319,8 +302,14 @@ def _file_size(path: Path) -> int:
     # or a live link (we remove the link entry, never the target's bytes) —
     # free nothing, so they must not inflate "Total to delete". Every other
     # caller passes a regular file, so this only affects substitute rows.
+    #
+    # ``follow_symlinks=False`` (#1949): a live *file*-link squatting at an
+    # owned name is staged as a substitute row, and following it would bill
+    # the target's bytes to a deletion that only unlinks the link entry —
+    # the target is never touched. ``S_ISLNK`` fails ``S_ISREG`` → 0, same
+    # as the dir/dangling cases. Regular files are unaffected.
     try:
-        st = path.stat()
+        st = os.stat(path, follow_symlinks=False)
     except OSError:
         return 0
     return st.st_size if stat.S_ISREG(st.st_mode) else 0
@@ -360,7 +349,7 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     db_paths: list[Path] = []
     for suffix in _DB_SIBLING_SUFFIXES:
         candidate = db_path.with_name(db_path.name + suffix) if suffix else db_path
-        if candidate.exists():
+        if _entry_present(candidate):
             db_paths.append(candidate)
 
     # Per-install provenance HMAC key sidecar (ADR-0006 Axis F.3). It is a
@@ -372,7 +361,7 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     from memtomem import provenance
 
     key_path = provenance.key_path_for_db(db_path)
-    if key_path.exists():
+    if _entry_present(key_path):
         db_paths.append(key_path)
 
     # ``mm reset --backup`` snapshots (``<db-name>.pre-reset-<ts>.bak``,
@@ -380,30 +369,50 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     # suffix loop above misses; group them with the database so they're
     # data-gated (``--keep-data`` preserves, default wipes) and don't
     # silently survive uninstall keeping the state dir non-empty.
-    db_paths.extend(sorted(db_path.parent.glob(db_path.name + ".pre-reset-*.bak")))
+    #
+    # #1949: on py3.12 ``Path.glob`` pre-checks ``is_dir()`` on the parent,
+    # which raises (not returns empty) when the db dir is linked through an
+    # unsearchable ancestor — wrap so a custom storage path can't crash the
+    # inventory. A dangling ``.bak`` link is still listed by name (glob does
+    # not stat matches) and flows into staging like any other entry.
+    try:
+        db_paths.extend(sorted(db_path.parent.glob(db_path.name + ".pre-reset-*.bak")))
+    except OSError:
+        pass
 
     config_json = state_dir / "config.json"
-    config_files = [config_json] if config_json.exists() else []
+    config_files = [config_json] if _entry_present(config_json) else []
 
     # An owned-subdir entry that stages but lists no files must still show
     # a row, or the inventory prints "(nothing found)" and the user is then
     # asked to confirm — and afterwards sees "Removed:" — for state the
-    # report just denied existed. Three fileless-but-stageable shapes:
-    # a dangling link (``_dir_total`` no-ops, target gone), an empty owned
-    # directory, and a live link to an empty target. Substitute the entry
-    # itself so the report, the byte total, and the keep-flag gating all
-    # see it (#1946). ``_file_size`` follows: a dangling link OSErrors to
-    # 0 B; a real/live dir reads its own inode size.
+    # report just denied existed. Fileless-but-stageable shapes: a dangling
+    # link (``_dir_total`` no-ops, target gone), an empty owned directory,
+    # a live link to an empty target, and a squatter — a plain regular file
+    # or a live *file* symlink at the name (#1949), which ``_dir_total``
+    # lists no files for (``is_dir()`` follows to a non-dir → 0). Substitute
+    # the entry itself so the report, the byte total, and the keep-flag
+    # gating all see it (#1946). ``_file_size`` is no-follow: a dangling or
+    # file link reads 0 B; a real/live dir reads its own inode size.
     def _owned_group(subdir: Path) -> list[Path]:
         files, _ = _dir_total(subdir)
-        if not files and _stageable_dir_entry(subdir):
+        if not files and _stageable_owned_entry(subdir):
             return [subdir]
         return files
 
     fragment_dir = state_dir / "config.d"
     fragments = _owned_group(fragment_dir)
 
-    backups = sorted(state_dir.glob("config.json.bak-*")) if state_dir.exists() else []
+    # #1949: same py3.12 glob-raises-on-unsearchable-parent guard as the
+    # pre-reset snapshots above; gate on the no-follow ``_entry_present`` so
+    # a dangling/unresolvable state-dir link routes to the slow path instead
+    # of crashing here.
+    backups: list[Path] = []
+    if _entry_present(state_dir):
+        try:
+            backups = sorted(state_dir.glob("config.json.bak-*"))
+        except OSError:
+            pass
 
     memory_dir = state_dir / "memories"
     memories = _owned_group(memory_dir)
@@ -419,14 +428,14 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     # keep the directory non-empty after uninstall.
     for name in (".current_session", ".server.pid", ".config.json.lock"):
         candidate = state_dir / name
-        if candidate.exists():
+        if _entry_present(candidate):
             other.append(candidate)
     # New-location pid file lives outside state_dir (#412: on
     # ``$XDG_RUNTIME_DIR/memtomem/`` or a per-user temp subdir). Include
     # it in the transient "other" group so it's cleaned with the legacy
     # ``.server.pid`` and the user sees a single row per file.
     runtime_pid = server_pid_path()
-    if runtime_pid.exists():
+    if _entry_present(runtime_pid):
         other.append(runtime_pid)
     # #1935: instance-registry sentinels are transient runtime files like
     # the pid files above; the refusal gate guarantees none of them is
@@ -476,14 +485,16 @@ def _probe_external_integrations() -> list[_External]:
         if kimi_share_mcp not in candidates:
             candidates.append(kimi_share_mcp)
 
-    cwd_local = Path.cwd() / ".mcp.json"
-    if cwd_local.exists():
-        candidates.append(cwd_local)
+    # #1949: no ``exists()`` precheck here or in the loop below — on py3.12
+    # it raises (not returns False) for a candidate linked through an
+    # unsearchable directory, and this probe is report-only. Append the
+    # project-local path unconditionally; the ``read_text`` OSError guard
+    # already skips every absent/unreadable shape (dangling → ENOENT,
+    # unresolvable → EACCES, directory → EISDIR).
+    candidates.append(Path.cwd() / ".mcp.json")
 
     found: list[_External] = []
     for path in candidates:
-        if not path.exists():
-            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -660,6 +671,38 @@ def _refuse_unknown_registry() -> None:
     )
 
 
+def _refuse_unverifiable_liveness(server: ServerState, *, is_windows: bool) -> None:
+    """Refusal lines when the server liveness probe could not run (#1949).
+
+    Distinct from every other liveness message on purpose: ``alive=True``
+    with ``probe_error`` set is a fail-closed *assumption*, not an observed
+    flock, so the "Server still running (… flock is held by an active
+    writer …)" wording would assert evidence the probe never had. Name the
+    unreadable path and the failure instead. The cause is persistent
+    (a broken/permission-denied path), so — unlike the transient registry
+    UNKNOWN case — "retry" is not the remedy; repairing the path is.
+
+    ``--force`` keeps exactly its existing heuristic authority: on POSIX it
+    overrides this (the caller gates on ``not force``), so the hint offers
+    it; on Windows it cannot (#730), so it is not advertised.
+    """
+    where = _format_path(server.pid_file) if server.pid_file is not None else "the pid file"
+    click.secho(
+        "Cannot verify whether a memtomem server is running: probing "
+        f"{where} failed ({server.probe_error}). Refusing to delete state.",
+        fg="red",
+    )
+    if is_windows:
+        click.secho("  Repair or remove that path, then retry.", fg="red")
+    else:
+        click.secho(
+            "  Repair or remove that path (inspect it and its parent "
+            "directories with `ls -l`), then retry — or pass --force if you "
+            "are sure no server is running.",
+            fg="red",
+        )
+
+
 def _print_group(group: _Group) -> None:
     if not group.paths:
         return
@@ -817,18 +860,18 @@ def _build_stage_plan(
 
     if not keep_config:
         fragment_dir = state_dir / "config.d"
-        if _stageable_dir_entry(fragment_dir):
+        if _stageable_owned_entry(fragment_dir):
             plan.append(("fragments", [fragment_dir]))
         plan.append(("backups", list(inv.backup_files.paths)))
         plan.append(("config.json", list(inv.config_files.paths)))
 
     if not keep_data:
         memory_dir = state_dir / "memories"
-        if _stageable_dir_entry(memory_dir):
+        if _stageable_owned_entry(memory_dir):
             plan.append(("memories", [memory_dir]))
 
     upload_dir = state_dir / "uploads"
-    if _stageable_dir_entry(upload_dir):
+    if _stageable_owned_entry(upload_dir):
         plan.append(("uploads", [upload_dir]))
 
     if not keep_data:
@@ -1005,7 +1048,14 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     staging_roots, completed = _stage_inventory(inv, keep_config=keep_config, keep_data=keep_data)
 
     for root in staging_roots:
-        if not root.exists():
+        # #1949: ``_entry_present`` (no-follow) not ``root.exists()`` — this
+        # runs *after* the atomic stage moved user data into ``root``, so a
+        # py3.12 ``exists()`` that raises (anchor turned unsearchable) would
+        # escape as a traceback with the data hidden in staging and no
+        # summary. A genuinely-absent root (ENOENT) is still skipped; an
+        # unreadable one falls through to ``rmtree``, whose ``OSError`` guard
+        # turns it into the "could not remove staging dir" warning below.
+        if not _entry_present(root):
             continue
         try:
             shutil.rmtree(root)
@@ -1085,10 +1135,16 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     # ``_registry_has_sentinels`` answers False because it cannot *see*
     # the registry, not because the registry is empty — "No state" would
     # silently bypass the refusal (and its remediation) below (#1942).
+    #
+    # #1949: ``_entry_present`` (no-follow) not ``exists()`` — "No memtomem
+    # state" may only be claimed on genuine absence (ENOENT/ENOTDIR). A
+    # present-but-unresolvable ``~/.memtomem`` or db link routes to the slow
+    # path, where the inventory/stage machinery either removes it or names
+    # the real failure — never a traceback, never a false "no state".
     if (
         registry_state.state == "NONE"
-        and not state_dir.exists()
-        and not db_path.exists()
+        and not _entry_present(state_dir)
+        and not _entry_present(db_path)
         and not _registry_has_sentinels()
     ):
         click.echo("No memtomem state to remove (~/.memtomem/ does not exist).")
@@ -1141,6 +1197,18 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             )
         else:
             _refuse_unknown_registry()
+        sys.exit(2)
+
+    # #1949: an unprobeable pid file fails *closed* (alive=True) with
+    # ``probe_error`` set. It must refuse here — before the observed-writer
+    # messages below, which would falsely claim "flock is held by an active
+    # writer" — and name the unreadable path instead. ``--force`` keeps its
+    # existing heuristic authority: POSIX overrides (falls through to the
+    # ``not force`` gate below), Windows never does (#730), which is exactly
+    # ``(not force or is_windows)``.
+    if server.alive and server.probe_error is not None and (not force or is_windows):
+        click.echo("")
+        _refuse_unverifiable_liveness(server, is_windows=is_windows)
         sys.exit(2)
 
     # Windows can't unlink files held by an open handle (WinError 32), so
@@ -1336,6 +1404,21 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             # evidence the probe does not have — keep the retry advice.
             click.echo("")
             _refuse_unknown_registry()
+            sys.exit(2)
+        if (
+            server.alive
+            and server.probe_error is not None
+            and registry_state.state != "LIVE"
+            and (not force or is_windows)
+        ):
+            # #1949: a pid path that turned unprobeable while the user sat
+            # on the prompt is a persistent fault, not "a process became
+            # active" — name the path, don't claim an observed writer. Guard
+            # on ``!= "LIVE"`` so positive (non-overridable) registry
+            # evidence still wins: otherwise this gate's POSIX ``--force``
+            # hint would advertise an override the LIVE refusal below forbids.
+            click.echo("")
+            _refuse_unverifiable_liveness(server, is_windows=is_windows)
             sys.exit(2)
         if registry_state.state == "LIVE" or heuristics_block:
             click.echo("")

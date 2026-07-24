@@ -2829,3 +2829,472 @@ class TestBarrierIsRetainedInfrastructure:
 
         assert result.exit_code == 0, result.output
         assert "No memtomem state to remove" in result.output
+
+
+# ------------------------------------------------------------- #1949
+# File-level link probes: crash-safety, dangling-skip, and squatters.
+
+
+@contextlib.contextmanager
+def _link_through_locked_dir(
+    home: Path, link_path: Path, *, target: str = "gone"
+) -> Iterator[Path]:
+    """Point *link_path* at a target beneath a mode-000 directory.
+
+    On py3.12 ``Path.exists()``/``is_dir()``/``glob()`` propagate the
+    resulting ``EACCES`` (it is outside their ENOENT/ENOTDIR ignore-set)
+    instead of returning False, so any probe that gates on one of them
+    crashes the recovery command. POSIX-only (needs real permission bits);
+    restores ``0o700`` so the tmp tree can be cleaned up.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX permission bits required")
+    locked = home / "locked"
+    inner = locked / "inner"
+    inner.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(link_path):
+        if os.path.isdir(link_path) and not os.path.islink(link_path):
+            shutil.rmtree(link_path)
+        else:
+            os.unlink(link_path)
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link_path.symlink_to(inner / target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    os.chmod(locked, 0o000)
+    # Verify the mode-000 barrier actually blocks *this* process before
+    # relying on it. A CI runner executing with privileges that ignore owner
+    # mode bits (observed on the GitHub macOS runner) traverses ``locked``
+    # anyway, so ``link_path.exists()`` resolves to the *missing* target and
+    # returns False (ENOENT) instead of raising ``EACCES`` — the unresolvable
+    # scenario never materializes. Skip rather than assert a false negative.
+    barrier_holds = False
+    try:
+        link_path.exists()
+    except OSError:
+        barrier_holds = True
+    if not barrier_holds:
+        os.chmod(locked, 0o700)
+        pytest.skip("mode-000 barrier not enforced for this process (e.g. CI as root)")
+    try:
+        yield link_path
+    finally:
+        os.chmod(locked, 0o700)
+
+
+def _no_traceback(result) -> bool:
+    """A clean exit — no uncaught exception leaked through CliRunner."""
+    return result.exception is None or isinstance(result.exception, SystemExit)
+
+
+class TestUnresolvableLinkProbes:
+    """py3.12 ``Path.exists()`` propagates EACCES for a link routed through
+    an unsearchable ancestor; a recovery command must never die with a
+    traceback (#1949). Each probe applies its documented policy instead."""
+
+    def test_unresolvable_db_link_does_not_crash_db_lock_probe(self, home):
+        state = _seed_state(home)
+        with _link_through_locked_dir(home, state / "memtomem.db") as link:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert _no_traceback(result), result.exception
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_unresolvable_legacy_pid_link_refuses_honestly(self, home):
+        state = _seed_state(home)
+        with _link_through_locked_dir(home, state / ".server.pid"):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert _no_traceback(result), result.exception
+        assert "Cannot verify whether a memtomem server is running" in result.output
+        # The honest message must NOT assert an observed flock.
+        assert "flock is held by an active writer" not in result.output
+        # State preserved — refusal fires before any deletion.
+        assert (state / "memtomem.db").exists()
+
+    def test_unresolvable_legacy_pid_link_force_overrides_and_removes_it(self, home):
+        if sys.platform == "win32":
+            pytest.skip("POSIX --force contract; Windows refuses regardless (#730)")
+        state = _seed_state(home)
+        with _link_through_locked_dir(home, state / ".server.pid") as link:
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_unresolvable_config_json_link_inventoried_and_removed(self, home):
+        state = _seed_state(home)
+        with _link_through_locked_dir(home, state / "config.json") as link:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert _no_traceback(result), result.exception
+        assert "Config" in result.output
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_dangling_config_json_symlink_removed_and_state_pruned(self, home):
+        """A dangling file-level link reads absent via ``exists()`` and used
+        to survive uninstall, keeping the state dir non-empty (#1949)."""
+        state = _seed_state(home)
+        (state / "config.json").unlink()
+        try:
+            (state / "config.json").symlink_to(state / "no-such-target")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(state / "config.json")
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_dangling_db_and_backup_links_removed(self, home):
+        state = _seed_state(home)
+        (state / "memtomem.db-wal").unlink()
+        try:
+            (state / "memtomem.db-wal").symlink_to(state / "gone-wal")
+            (state / "config.json.bak-2026-05-05T00-00-00").symlink_to(state / "gone-bak")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(state / "memtomem.db-wal")
+        assert not os.path.lexists(state / "config.json.bak-2026-05-05T00-00-00")
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_unresolvable_state_dir_link_does_not_crash_fast_path(self, home):
+        """No state seeded; ``~/.memtomem`` itself is an unresolvable link.
+        The empty-state fast path must not claim "No state" nor crash: the
+        no-follow ``_entry_present`` sees the link entry, so it routes to
+        the slow path. There the legacy pid probe (``~/.memtomem/.server.pid``,
+        reached *through* the same link) fails closed, and the command
+        refuses honestly with exit 2 — not a traceback, not "No state"."""
+        with _link_through_locked_dir(home, home / ".memtomem") as link:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert _no_traceback(result), result.exception
+        assert "No memtomem state to remove" not in result.output
+        assert "Cannot verify whether a memtomem server is running" in result.output
+        assert os.path.lexists(link)
+
+    def test_dangling_state_dir_link_reports_nothing_to_delete(self, home):
+        """A dangling ``~/.memtomem`` link lives in $HOME (not ours to
+        stage): the slow path finds nothing to delete and the link is left
+        in place — pinned as the deliberate out-of-scope boundary."""
+        try:
+            (home / ".memtomem").symlink_to(home / "no-such-target")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" in result.output
+        assert os.path.lexists(home / ".memtomem")
+
+    def test_unresolvable_external_candidate_is_skipped_not_crashed(self, home):
+        state = _seed_state(home)
+        with _link_through_locked_dir(home, home / ".claude.json") as link:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert _no_traceback(result), result.exception
+        assert os.path.lexists(link), "the external config link must be untouched"
+        assert not state.exists()
+
+
+class TestOwnedSubdirSquatters:
+    """A plain regular file or a live *file* symlink squatting at an
+    owned-subdir name (config.d/memories/uploads) used to be neither
+    inventoried nor staged — exit 0 with the state dir left un-prunable
+    (#1949). It is now staged and removed, keep-flag gated, target
+    untouched (mirrors the dangling-link contract, #1946)."""
+
+    def test_plain_file_at_config_d_removed(self, home):
+        state = _seed_state(home, with_fragments=False)
+        (state / "config.d").write_text("i am not a directory", encoding="utf-8")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "fragments" in _removed_line(result.output)
+        assert not os.path.lexists(state / "config.d")
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_plain_file_at_config_d_retained_under_keep_config(self, home):
+        state = _seed_state(home, with_fragments=False)
+        (state / "config.d").write_text("squatter", encoding="utf-8")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-config"])
+        assert result.exit_code == 0, result.output
+        assert os.path.lexists(state / "config.d"), "--keep-config must retain the name"
+        assert "fragments" not in _removed_line(result.output)
+
+    def test_live_file_symlink_at_memories_removed_target_untouched(self, home):
+        state = _seed_state(home)
+        shutil.rmtree(state / "memories")
+        target = home / "real.md"
+        target.write_text("keep me", encoding="utf-8")
+        try:
+            (state / "memories").symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "memories" in _removed_line(result.output)
+        assert not os.path.lexists(state / "memories"), "the link entry must go"
+        assert target.read_text(encoding="utf-8") == "keep me", "the target must be untouched"
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_live_file_symlink_at_memories_retained_under_keep_data(self, home):
+        state = _seed_state(home)
+        shutil.rmtree(state / "memories")
+        target = home / "real.md"
+        target.write_text("keep me", encoding="utf-8")
+        try:
+            (state / "memories").symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-data"])
+        assert result.exit_code == 0, result.output
+        assert os.path.lexists(state / "memories"), "--keep-data must retain the name"
+        assert "memories" not in _removed_line(result.output)
+
+    def test_plain_file_at_uploads_removed_even_with_both_keep_flags(self, home):
+        state = _seed_state(home)
+        (state / "uploads").write_text("squatter", encoding="utf-8")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-config", "--keep-data"])
+        assert result.exit_code == 0, result.output
+        assert "uploads" in _removed_line(result.output)
+        assert not os.path.lexists(state / "uploads"), "uploads has no keep flag"
+        assert (state / "memtomem.db").exists()
+
+    def test_squatter_alone_is_not_nothing_to_delete(self, home):
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memories").write_text("squatter", encoding="utf-8")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" not in result.output
+        assert not os.path.lexists(state / "memories")
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_live_file_link_row_does_not_count_target_bytes(self, home):
+        """The staged link entry frees only itself; ``_file_size`` must not
+        follow it and bill the target's bytes to the delete total (#1949)."""
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memtomem.db").write_bytes(b"1234")  # 4 B of real state
+        big = home / "big.bin"
+        big.write_bytes(b"x" * 100_000)
+        try:
+            (state / "uploads").symlink_to(big)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "uploads" in result.output
+        assert "Total to delete: ~4 B" in result.output, result.output
+        assert big.exists() and big.stat().st_size == 100_000, "target untouched"
+
+
+class TestLivenessDbLockProbeHardening:
+    """Direct unit pins for the probe policy split (#1949)."""
+
+    def test_check_db_lock_unresolvable_path_fails_open(self, home):
+        from memtomem.cli._db_lock import check_db_lock
+
+        with _link_through_locked_dir(home, home / "db-link") as link:
+            state = check_db_lock(link)
+        assert state.locked is False
+        assert state.probe_error is not None
+        assert "PermissionError" in state.probe_error
+
+    def test_probe_pid_file_unresolvable_path_fails_closed(self, home):
+        from memtomem.cli._liveness import probe_pid_file
+
+        with _link_through_locked_dir(home, home / "pid-link") as link:
+            state = probe_pid_file(link)
+        assert state.alive is True, "an unprobeable pid file must fail closed"
+        assert state.pid is None
+        assert state.pid_file == link
+        assert state.probe_error is not None
+
+    def test_probe_pid_file_dangling_link_reads_dead(self, home):
+        from memtomem.cli._liveness import probe_pid_file
+
+        link = home / "pid-dangling"
+        try:
+            link.symlink_to(home / "no-such-pid")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        state = probe_pid_file(link)
+        assert state.alive is False, "a dangling pid link is genuinely absent (ENOENT)"
+        assert state.probe_error is None
+
+    def test_unverifiable_liveness_refusal_is_honest_and_force_overrides(self, home, monkeypatch):
+        """Seam-level pin (no FS tricks — runs on Windows too): a
+        fail-closed alive+probe_error refuses with the honest message, and
+        POSIX --force overrides it."""
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        fake = ServerState(
+            alive=True,
+            pid=None,
+            pid_file=state / ".server.pid",
+            probe_error="PermissionError: [Errno 13] Permission denied",
+        )
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", lambda: fake)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "Cannot verify whether a memtomem server is running" in result.output
+        assert "flock is held by an active writer" not in result.output
+        assert (state / "memtomem.db").exists()
+
+        if sys.platform == "win32":
+            return  # Windows --force cannot override (#730); POSIX-only below.
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+        assert result.exit_code == 0, result.output
+        assert not state.exists()
+
+
+class TestUnverifiableLivenessBoundaryAndModes:
+    """Follow-up coverage (#1949 review): the destructive-boundary honesty
+    gate, both printer branches, and the probe_pid_file failure-mode split."""
+
+    def test_boundary_reprobe_refuses_when_pid_becomes_unprobeable(self, home, monkeypatch):
+        """Pre-confirmation probe is clean; the boundary reprobe returns
+        alive+probe_error. The *boundary* honesty gate must refuse honestly
+        (the pre-confirmation gate saw a dead server and passed)."""
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        calls = {"n": 0}
+        clean = ServerState(alive=False, pid=None, pid_file=None)
+        broken = ServerState(
+            alive=True,
+            pid=None,
+            pid_file=state / ".server.pid",
+            probe_error="PermissionError: [Errno 13] Permission denied",
+        )
+
+        def _seq():
+            calls["n"] += 1
+            return clean if calls["n"] == 1 else broken
+
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", _seq)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert calls["n"] >= 2, "the destructive-boundary reprobe must run"
+        assert result.exit_code == 2, result.output
+        assert "Cannot verify whether a memtomem server is running" in result.output
+        assert "flock is held by an active writer" not in result.output
+        assert "became active while uninstall was waiting" not in result.output
+        assert (state / "memtomem.db").exists()
+
+    def test_refuse_unverifiable_liveness_printer_branches(self, capsys):
+        """Windows omits the --force remedy it cannot honor (#730); POSIX
+        offers it (this heuristic is force-overridable there)."""
+        from memtomem.cli._liveness import ServerState
+        from memtomem.cli.uninstall_cmd import _refuse_unverifiable_liveness
+
+        fake = ServerState(
+            alive=True,
+            pid=None,
+            pid_file=Path.home() / ".memtomem" / ".server.pid",
+            probe_error="PermissionError: denied",
+        )
+
+        _refuse_unverifiable_liveness(fake, is_windows=True)
+        win = capsys.readouterr().out
+        assert "Cannot verify whether a memtomem server is running" in win
+        assert "--force" not in win
+        assert "Repair or remove that path" in win
+
+        _refuse_unverifiable_liveness(fake, is_windows=False)
+        posix = capsys.readouterr().out
+        assert "--force" in posix
+
+    def test_probe_pid_file_open_failure_fails_closed_with_error(self, home):
+        """A pid *path* that exists but cannot be opened ``rb+`` (here a
+        directory) fails closed with ``probe_error`` set."""
+        from memtomem.cli._liveness import probe_pid_file
+
+        pid_as_dir = home / "pid-as-dir"
+        pid_as_dir.mkdir()
+        state = probe_pid_file(pid_as_dir)
+        assert state.alive is True
+        assert state.probe_error is not None
+
+    def test_probe_pid_file_contention_is_positive_evidence(self, home, monkeypatch):
+        """``AlreadyLocked`` is observed contention → alive with NO
+        probe_error (the honest 'writer holds the lock' path)."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid = home / "pid-contended"
+        pid.write_text("123", encoding="utf-8")
+
+        def _already_locked(*a, **k):
+            raise portalocker.AlreadyLocked("held by another handle")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", _already_locked)
+        state = _liveness.probe_pid_file(pid)
+        assert state.alive is True
+        assert state.probe_error is None, "observed contention must not read as unverifiable"
+
+    def test_probe_pid_file_noncontention_lock_error_fails_closed_honestly(self, home, monkeypatch):
+        """A bare ``LockException`` (I/O error, ENOLCK, NFS EOF, non-lock
+        Win32 error) is NOT contention → alive WITH probe_error, so the
+        refusal names the probe failure instead of asserting a held flock."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid = home / "pid-ioerror"
+        pid.write_text("123", encoding="utf-8")
+
+        def _io_error(*a, **k):
+            raise portalocker.LockException("simulated I/O failure")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", _io_error)
+        state = _liveness.probe_pid_file(pid)
+        assert state.alive is True
+        assert state.probe_error is not None
+        assert "LockException" in state.probe_error
+
+    def test_boundary_live_registry_wins_over_unverifiable_pid(self, home, monkeypatch):
+        """When the boundary reprobe finds BOTH an unprobeable pid and a LIVE
+        registry, the non-overridable LIVE refusal must win — the honesty
+        gate's POSIX --force hint would advertise an override LIVE forbids
+        (#1949 review). Pre-confirmation is clean so both gates are reached
+        only at the boundary."""
+        from memtomem._instance_registry import UninstallProbeResult
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        srv_calls = {"n": 0}
+        reg_calls = {"n": 0}
+        clean = ServerState(alive=False, pid=None, pid_file=None)
+        broken = ServerState(
+            alive=True,
+            pid=None,
+            pid_file=state / ".server.pid",
+            probe_error="PermissionError: denied",
+        )
+
+        def _srv_seq():
+            srv_calls["n"] += 1
+            return clean if srv_calls["n"] == 1 else broken
+
+        def _reg_seq():
+            reg_calls["n"] += 1
+            return UninstallProbeResult("NONE" if reg_calls["n"] == 1 else "LIVE")
+
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", _srv_seq)
+        monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", _reg_seq)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "became active while uninstall was waiting" in result.output
+        assert "Cannot verify whether a memtomem server is running" not in result.output
+        assert "--force" not in result.output
+        assert (state / "memtomem.db").exists()
