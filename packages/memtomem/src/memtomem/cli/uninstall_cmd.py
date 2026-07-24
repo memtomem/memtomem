@@ -77,13 +77,19 @@ def _real_registry_dir() -> Path | None:
     or stage through it into unrelated files (the fail-closed refusal
     for that case comes from ``probe_all_for_uninstall`` returning
     ``UNKNOWN``; this guard keeps the *listing* side inert too).
+
+    Junctions must be refused by name: on Windows they redirect like a
+    symlink while ``lstat`` still reports ``S_IFDIR``, so without the
+    explicit check ``_collect_inventory`` would list the *target's*
+    files, stage them with ``os.replace``, and delete them with the
+    staging tree — data loss outside the registry, not a read-only leak.
     """
     d = _instances_dir()
     try:
         st = os.stat(d, follow_symlinks=False)
     except OSError:
         return None
-    if not stat.S_ISDIR(st.st_mode):
+    if not stat.S_ISDIR(st.st_mode) or d.is_junction():
         return None
     return d
 

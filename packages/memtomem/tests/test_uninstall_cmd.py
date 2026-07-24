@@ -1328,6 +1328,21 @@ class TestInstanceRegistryInventory:
         assert "instances.registry.lock" not in result.output
 
 
+def _make_junction(link: Path, target: Path) -> None:
+    """Create an NTFS junction at *link* pointing at *target*.
+
+    Junctions are the Windows-only redirect that ``lstat`` still reports
+    as ``S_IFDIR``, so they slip past every symlink-shaped guard. No
+    elevation needed, unlike Windows symlinks.
+    """
+    import _winapi
+
+    _winapi.CreateJunction(str(target), str(link))
+
+
+_windows_only = pytest.mark.skipif(sys.platform != "win32", reason="junctions are NTFS-only")
+
+
 class TestInstanceRegistrySymlinkGuard:
     """A symlinked ``instances/`` must never be trusted or staged through
     (#1935 review): the fail-closed probe reports UNKNOWN → refusal, and
@@ -1354,6 +1369,56 @@ class TestInstanceRegistrySymlinkGuard:
         assert "did not complete" in result.output
         assert victim.read_text(encoding="utf-8") == "do not touch"
         assert "precious" not in result.output, "inventory must not list across the link"
+        assert (state / "memtomem.db").exists()
+
+    def test_junction_verdict_refuses_and_stages_nothing(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """The junction *wiring*, pinned where CI actually runs it. The
+        case above only executes on the Windows shard, which is exactly
+        how the earlier link claim shipped untested; here a real
+        ``instances/`` is made to answer ``is_junction()`` so the whole
+        chain — untrusted → UNKNOWN → refuse, nothing staged — is proven
+        on every platform. What stays Windows-only is the narrow fact
+        that a real junction answers True."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        instances = reg.instances_dir()
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == instances)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert (state / "memtomem.db").exists()
+        assert entry.exists(), "a junctioned registry must never be staged"
+
+    @_windows_only
+    def test_junctioned_instances_dir_refuses_and_touches_nothing(
+        self, home, registry_at_runtime_dir, tmp_path
+    ):
+        """The same contract for the redirect ``lstat`` cannot see. Before
+        the junction check, ``_real_registry_dir`` handed the *target's*
+        files to ``_collect_inventory``, which staged them with
+        ``os.replace`` and deleted them with the staging tree — this case
+        loses unrelated user files, it does not merely leak their names."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        victim_dir = tmp_path / "victim"
+        victim_dir.mkdir()
+        victim = victim_dir / "precious.txt"
+        victim.write_text("do not touch", encoding="utf-8")
+        reg.ensure_runtime_dir()
+        _make_junction(reg.instances_dir(), victim_dir)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert victim.read_text(encoding="utf-8") == "do not touch"
+        assert list(victim_dir.iterdir()) == [victim]
+        assert "precious" not in result.output, "inventory must not list across the junction"
         assert (state / "memtomem.db").exists()
 
 
@@ -1446,6 +1511,23 @@ class TestRegistrationSymlinkGuard:
         db.write_bytes(b"x")
         assert reg.register_instance(db) is None
         assert list(victim_dir.iterdir()) == [], "no sentinel may land in the link target"
+
+    @_windows_only
+    def test_registration_refuses_junctioned_instances_dir(
+        self, home, registry_at_runtime_dir, tmp_path
+    ):
+        """``_dir_state`` gates registration as well as the uninstall
+        probe, so its junction blindness let sentinels be written into an
+        unrelated directory."""
+        reg = registry_at_runtime_dir
+        victim_dir = tmp_path / "victim-target"
+        victim_dir.mkdir()
+        reg.ensure_runtime_dir()
+        _make_junction(reg.instances_dir(), victim_dir)
+        db = tmp_path / "s.db"
+        db.write_bytes(b"x")
+        assert reg.register_instance(db) is None
+        assert list(victim_dir.iterdir()) == [], "no sentinel may land in the junction target"
 
     def test_db_lock_going_live_between_probe_and_delete_refuses(
         self, home, registry_at_runtime_dir, monkeypatch

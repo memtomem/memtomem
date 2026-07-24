@@ -389,6 +389,10 @@ def _dir_state(path: Path) -> Literal["dir", "missing", "untrusted"]:
     and a *dangling* symlink must not collapse into "missing" via a
     follow-the-link ``exists()`` check, or the fail-closed uninstall
     probe would answer NONE against a registry it cannot actually see.
+
+    ``lstat`` alone does not carry that rule on Windows: a junction
+    redirects exactly like a symlink but keeps ``S_IFDIR``, so it needs
+    its own reparse-tag check to land in *untrusted*.
     """
     try:
         st = os.stat(path, follow_symlinks=False)
@@ -396,7 +400,9 @@ def _dir_state(path: Path) -> Literal["dir", "missing", "untrusted"]:
         return "missing"
     except OSError:
         return "untrusted"
-    return "dir" if stat.S_ISDIR(st.st_mode) else "untrusted"
+    if not stat.S_ISDIR(st.st_mode) or path.is_junction():
+        return "untrusted"
+    return "dir"
 
 
 def _gc_stale_entry(path: Path) -> None:
