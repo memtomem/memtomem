@@ -2118,10 +2118,16 @@ class TestDanglingOwnedSubdirLinks:
         state.mkdir()
         (state / "memtomem.db").write_bytes(b"x")
         (state / "memories").mkdir()
+        # config.json is config-side, so --keep-data deletes it: staging
+        # proceeds and _delete_inventory (hence the prune loop) actually
+        # runs — without it the gate short-circuits and the prune is never
+        # reached, so the keep-flag guard would pass for the wrong reason.
+        (state / "config.json").write_text("{}", encoding="utf-8")
         result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-data"])
         assert result.exit_code == 0, result.output
         assert (state / "memories").is_dir(), "--keep-data must retain empty memories"
         assert (state / "memtomem.db").exists()
+        assert not (state / "config.json").exists()
 
     def test_substitute_dir_row_reads_zero_bytes(self, home):
         """A live link to an empty external dir shows the entry, but its
