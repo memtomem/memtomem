@@ -317,16 +317,24 @@ def _file_size(path: Path) -> int:
 
 
 def _dir_total(path: Path) -> tuple[list[Path], int]:
-    # ``is_dir()`` follows links and propagates errors outside its
-    # ignore-set (e.g. EACCES for an unresolvable link) — an unlistable
-    # candidate contributes nothing rather than aborting the inventory;
-    # the dangling-link classification below still surfaces the entry.
+    # ``is_dir()``/``is_file()`` follow links and propagate errors outside
+    # their ignore-set (e.g. EACCES for an unresolvable link — at the top
+    # level or nested anywhere ``rglob`` reaches) — an unlistable entry
+    # contributes nothing rather than aborting the inventory. The listing
+    # is display-only: owned dirs are staged as whole entries, so a
+    # skipped nested link is still removed with its tree.
+    def _is_listable_file(p: Path) -> bool:
+        try:
+            return p.is_file()
+        except OSError:
+            return False
+
     try:
         if not path.is_dir():
             return [], 0
     except OSError:
         return [], 0
-    files = sorted(p for p in path.rglob("*") if p.is_file())
+    files = sorted(p for p in path.rglob("*") if _is_listable_file(p))
     return files, sum(_file_size(p) for p in files)
 
 

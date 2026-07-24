@@ -2037,6 +2037,30 @@ class TestDanglingOwnedSubdirLinks:
         assert not os.path.lexists(link)
         assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
 
+    def test_unresolvable_link_nested_in_owned_dir_does_not_abort(self, home):
+        """``rglob`` listing hits ``is_file()`` on a nested unresolvable
+        link — the inventory must skip it, and the whole-dir stage move
+        still removes it with its tree."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX permission bits required")
+        state = _seed_state(home)
+        locked = home / "locked"
+        inner = locked / "inner"
+        inner.mkdir(parents=True)
+        nested = state / "memories" / "bad"
+        try:
+            nested.symlink_to(inner / "gone")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        os.chmod(locked, 0o000)
+        try:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        finally:
+            os.chmod(locked, 0o700)
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(nested)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
     def test_live_link_to_empty_dir_is_not_nothing_to_delete(self, home):
         """Zero listed files, zero bytes — but the plan stages the link
         entry, so a byte/file-count gate would falsely short-circuit."""
