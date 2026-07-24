@@ -345,7 +345,10 @@ class TestPollLoopClassifier:
         assert time.monotonic() - started < 2.0, "I/O failure must not wait out the deadline"
         assert excinfo.value.errno == errno.EIO
         assert "disk I/O error" in str(excinfo.value)
-        assert str(reg.lifecycle_barrier_path()) in str(excinfo.value)
+        # ``filename``, not a message substring: ``str(OSError(errno, msg,
+        # filename))`` renders the path via ``repr`` (backslash-escaped on
+        # Windows), so a raw ``str(path) in str(exc)`` check is false there.
+        assert excinfo.value.filename == str(reg.lifecycle_barrier_path())
         assert excinfo.value.__cause__ is exc
 
     def test_lockexception_eoferror_cause_escapes_as_oserror(self, rt, monkeypatch):
