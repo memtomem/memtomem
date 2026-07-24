@@ -1544,11 +1544,14 @@ class TestPruneIsFailureSafe:
         assert link.is_symlink()
         assert target.is_dir()
 
-    def test_link_refusal_does_not_reach_rmdir(self, tmp_path, monkeypatch):
-        """Runs the Windows contract on POSIX: with ``rmdir`` rigged to
-        succeed, only the link check can produce the refusal. Without it
-        this suite would pass on ``ENOTDIR`` alone and keep claiming a
-        safety the Windows shard disproves."""
+    def test_link_refusal_precedes_listing_and_rmdir(self, tmp_path, monkeypatch):
+        """Runs the Windows contract on POSIX: only the link check can
+        produce the refusal here, since both later steps are rigged to
+        fail the test if reached. Without that rigging the case passes on
+        ``ENOTDIR`` alone and keeps claiming a safety the Windows shard
+        disproves. ``iterdir`` is rigged too so the guard cannot drift
+        below the listing, where a link to a *non-empty* directory would
+        refuse for the wrong reason and an empty one would be pruned."""
         target = tmp_path / "target"
         target.mkdir()
         link = tmp_path / "link"
@@ -1557,10 +1560,14 @@ class TestPruneIsFailureSafe:
         except OSError:
             pytest.skip("symlinks unavailable")
 
-        def _fail(_self):
-            raise AssertionError("rmdir reached for a directory link")
+        def _reached(step):
+            def _fail(_self, *_a, **_kw):
+                raise AssertionError(f"{step} reached for a directory link")
 
-        monkeypatch.setattr(Path, "rmdir", _fail)
+            return _fail
+
+        monkeypatch.setattr(Path, "iterdir", _reached("iterdir"))
+        monkeypatch.setattr(Path, "rmdir", _reached("rmdir"))
         from memtomem.cli.uninstall_cmd import _prune_if_empty
 
         assert _prune_if_empty(link) is False
