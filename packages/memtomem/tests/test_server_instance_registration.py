@@ -108,8 +108,15 @@ class TestOptIn:
     """
 
     def test_exactly_one_opt_in_keyword_package_wide(self) -> None:
+        # Deliberately callee-agnostic and value-agnostic when *counting*:
+        # every occurrence of the keyword is a hit, including
+        # ``register_server_instance=False`` on some unrelated call. That
+        # over-counts by design — a keyword with this name is a thing a
+        # human should look at, wherever it appears — so the failure
+        # message says "occurrence", not "opt-in", to keep a false
+        # positive from reading as an accusation.
         src = Path(memtomem.__file__).parent
-        opt_ins = [
+        occurrences = [
             (rel, kw.value)
             for rel, tree in _package_trees(src)
             for node in ast.walk(tree)
@@ -117,9 +124,12 @@ class TestOptIn:
             for kw in node.keywords
             if kw.arg == _OPT_IN
         ]
-        assert len(opt_ins) == 1, f"expected one opt-in, found {[r for r, _ in opt_ins]}. {_REMEDY}"
-        rel, value = opt_ins[0]
-        assert rel == "server/lifespan.py", f"opt-in moved to {rel}. {_REMEDY}"
+        assert len(occurrences) == 1, (
+            f"expected one `{_OPT_IN}=` keyword in the package, found "
+            f"{[r for r, _ in occurrences]}. {_REMEDY}"
+        )
+        rel, value = occurrences[0]
+        assert rel == "server/lifespan.py", f"the `{_OPT_IN}=` keyword moved to {rel}. {_REMEDY}"
         # Pin the value, not just the keyword: ``=False`` would silently
         # disable the whole feature while satisfying a name-only search.
         assert isinstance(value, ast.Constant) and value.value is True, (
