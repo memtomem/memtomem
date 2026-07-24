@@ -10,6 +10,7 @@ the security contract (symlink / owner / mode).
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import tempfile
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from memtomem._runtime_paths import (
+    _hint_quote,
     ensure_runtime_dir,
     legacy_server_pid_path,
     runtime_dir,
@@ -240,6 +242,173 @@ class TestEnsureRuntimeDir:
 
         with pytest.raises(PermissionError, match="not a directory"):
             ensure_runtime_dir()
+
+
+def _make_spacey_xdg(tmp_path: Path) -> Path:
+    """Like :func:`_make_safe_xdg` but the base name contains a space, so
+    the resolved ``target`` (``<base>/memtomem``) has whitespace — the
+    case that makes an unquoted ``rm``/``rmdir`` hint dangerous to paste
+    (#1956)."""
+    xdg = tmp_path / "x dg"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)
+    return xdg
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="drives the refusal branches through POSIX chmod/geteuid fixtures; "
+    "the quoting helper itself is pinned platform-agnostically in TestHintQuote",
+)
+class TestRemovalHintQuoting:
+    """#1956 — ``ensure_runtime_dir`` splices ``target`` into a
+    copy-pasteable ``rm``/``rmdir`` command. When the runtime path carries
+    whitespace or a shell metacharacter (it derives from
+    ``$XDG_RUNTIME_DIR``/``$TMPDIR``), an unquoted hint would delete the
+    wrong path on paste. Each hint site is pinned separately — sibling
+    guards don't vouch for each other, and the quote could regress at one
+    call site while the others stay correct.
+    """
+
+    @pytest.mark.requires_symlinks
+    def test_symlink_hint_quotes_spacey_path(self, tmp_path, monkeypatch):
+        xdg = _make_spacey_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        target = tmp_path / "real-target"
+        target.mkdir(mode=0o700)
+        os.symlink(target, xdg / "memtomem")
+
+        with pytest.raises(PermissionError) as exc:
+            ensure_runtime_dir()
+        expected = f"rm -f -- {shlex.quote(str(xdg / 'memtomem'))}"
+        assert expected in str(exc.value)
+
+    def test_non_directory_hint_quotes_spacey_path(self, tmp_path, monkeypatch):
+        xdg = _make_spacey_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        (xdg / "memtomem").write_text("accidentally a file")
+
+        with pytest.raises(PermissionError) as exc:
+            ensure_runtime_dir()
+        expected = f"rm -f -- {shlex.quote(str(xdg / 'memtomem'))}"
+        assert expected in str(exc.value)
+
+    def test_loose_mode_hint_quotes_spacey_path(self, tmp_path, monkeypatch):
+        xdg = _make_spacey_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        (xdg / "memtomem").mkdir(mode=0o755)
+        os.chmod(xdg / "memtomem", 0o755)  # neutralize umask
+
+        with pytest.raises(PermissionError) as exc:
+            ensure_runtime_dir()
+        expected = f"rm -rf -- {shlex.quote(str(xdg / 'memtomem'))}"
+        assert expected in str(exc.value)
+
+    @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="owner check is POSIX-only")
+    def test_wrong_owner_hint_quotes_spacey_path(self, tmp_path, monkeypatch):
+        """Owner-mismatch branch, routed through the ``TMPDIR`` fallback so
+        the uid stub doesn't flip resolution before the existing-dir stat
+        (same reasoning as ``test_refuses_existing_wrong_owner``). The temp
+        base carries a space so the ``rm -rf`` hint must quote it."""
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        tmp_tmp = tmp_path / "t mp"
+        tmp_tmp.mkdir()
+        os.chmod(tmp_tmp, 0o700)
+        monkeypatch.setenv("TMPDIR", str(tmp_tmp))
+        tempfile.tempdir = None
+
+        real_uid = os.geteuid()
+        stubbed_uid = real_uid + 1
+        target = tmp_tmp / f"memtomem-{stubbed_uid}"
+        target.mkdir(mode=0o700)
+        monkeypatch.setattr(os, "geteuid", lambda: stubbed_uid)
+
+        try:
+            with pytest.raises(PermissionError) as exc:
+                ensure_runtime_dir()
+            expected = f"rm -rf -- {shlex.quote(str(target))}"
+            assert expected in str(exc.value)
+        finally:
+            tempfile.tempdir = None
+
+    def test_junction_hint_quotes_spacey_path(self, tmp_path, monkeypatch):
+        """POSIX filesystems can't create a real junction, so stub
+        ``Path.is_junction`` to reach the junction branch. A normal dir
+        passes the symlink check and lands there; the ``rmdir`` hint must
+        quote the whitespace path."""
+        xdg = _make_spacey_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        (xdg / "memtomem").mkdir(mode=0o700)
+        monkeypatch.setattr(Path, "is_junction", lambda self: True)
+
+        with pytest.raises(PermissionError) as exc:
+            ensure_runtime_dir()
+        expected = f"rmdir -- {shlex.quote(str(xdg / 'memtomem'))}"
+        assert expected in str(exc.value)
+
+    def test_control_char_in_path_is_shell_quoted(self, tmp_path, monkeypatch):
+        """A path with an embedded control character (ESC) must land inside
+        the ``shlex.quote`` form so the suggested command is execution-safe
+        rather than splicing a raw escape sequence into the command line."""
+        xdg = tmp_path / "x\x1bdg"
+        xdg.mkdir()
+        os.chmod(xdg, 0o700)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        (xdg / "memtomem").mkdir(mode=0o755)
+        os.chmod(xdg / "memtomem", 0o755)
+
+        with pytest.raises(PermissionError) as exc:
+            ensure_runtime_dir()
+        expected = f"rm -rf -- {shlex.quote(str(xdg / 'memtomem'))}"
+        assert expected in str(exc.value)
+
+    def test_leading_hyphen_path_tokenizes_as_operand(self, tmp_path, monkeypatch):
+        """A relative ``$XDG_RUNTIME_DIR`` beginning with ``-`` resolves to a
+        ``-rf/memtomem``-shaped target. ``shlex.quote`` leaves it unchanged
+        (no metacharacters), so without the ``--`` end-of-options marker the
+        pasted ``rm -rf -rf/memtomem`` would read the path as options. Assert
+        the command tokenizes with the path as a trailing operand after
+        ``--``, not as flags."""
+        monkeypatch.chdir(tmp_path)
+        base = tmp_path / "-rf"
+        base.mkdir()
+        os.chmod(base, 0o700)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", "-rf")  # relative, hyphen-leading
+        (base / "memtomem").mkdir(mode=0o755)
+        os.chmod(base / "memtomem", 0o755)
+
+        with pytest.raises(PermissionError) as exc:
+            ensure_runtime_dir()
+        msg = str(exc.value)
+        assert "rm -rf -- -rf/memtomem" in msg
+        # The command portion must tokenize so the path is a lone operand.
+        command = msg.split("Remove it and retry: ", 1)[1]
+        tokens = shlex.split(command)
+        assert tokens == ["rm", "-rf", "--", "-rf/memtomem"]
+        assert tokens[-1] == "-rf/memtomem"  # operand, not an option bundle
+
+
+class TestHintQuote:
+    """Unit coverage for the quoting helper itself — an unconditional
+    :func:`shlex.quote` wrap. Assertions are on the *contract* (the result
+    is one shell token equal to the path), not the exact quoted string:
+    ``str(Path(...))`` uses ``\\`` on Windows, so a hard-coded POSIX string
+    would spuriously fail there while the helper is in fact correct."""
+
+    def test_whitespace_path_becomes_a_single_operand(self):
+        """A path with a space must not stay a bare word (it would split
+        into two args); quoting collapses it back to exactly one operand."""
+        p = Path("/tmp/my dir/memtomem-501")
+        quoted = _hint_quote(p)
+        assert quoted != str(p)  # the space forced quoting
+        assert shlex.split(quoted) == [str(p)]  # ...to one token, the path
+
+    def test_ordinary_path_is_a_single_operand(self):
+        """The quoted operand always tokenizes back to the exact path — the
+        property the uninstall side relies on when it forwards the producer's
+        ``detail`` verbatim (#1948/#1955)."""
+        p = Path("/run/user/501/memtomem")
+        assert shlex.split(_hint_quote(p)) == [str(p)]
 
 
 @pytest.mark.skipif(
