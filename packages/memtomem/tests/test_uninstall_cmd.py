@@ -498,6 +498,51 @@ class TestBinaryHintPerOrigin:
         assert result.exit_code == 0, result.output
         assert expected_substring in result.output
 
+    def test_venv_hint_shell_quotes_a_whitespace_path(self, home, monkeypatch):
+        """A workspace venv under a path with a space must reach the
+        ``rm -rf`` fallback hint quoted and behind ``--``, so the
+        suggested command targets the real dir instead of splitting on
+        the space (#1956 follow-up; same shape as the runtime-dir
+        hints)."""
+        from memtomem.cli import init_cmd
+        from memtomem.cli import uninstall_cmd
+
+        fake_profile = init_cmd.RuntimeProfile(
+            cwd_install_type="pypi",
+            cwd_install_dir=None,
+            runtime_interpreter=Path("python3"),
+            workspace_venv_path=Path("My Project/.venv"),
+            mm_binary_origin="venv-relative",
+            runtime_matches_workspace=True,
+        )
+        monkeypatch.setattr(uninstall_cmd, "_runtime_profile", lambda: fake_profile)
+
+        result = CliRunner().invoke(cli, ["uninstall"])
+        assert result.exit_code == 0, result.output
+        assert "rm -rf -- 'My Project/.venv'" in result.output
+
+    def test_venv_hint_scrubs_control_chars_from_label_and_command(self, home, monkeypatch):
+        """A venv path carrying an ESC byte must not reach the terminal
+        raw — neither via the ``workspace venv (...)`` prose label nor
+        via the ``rm -rf`` hint (#1956 follow-up)."""
+        from memtomem.cli import init_cmd
+        from memtomem.cli import uninstall_cmd
+
+        fake_profile = init_cmd.RuntimeProfile(
+            cwd_install_type="pypi",
+            cwd_install_dir=None,
+            runtime_interpreter=Path("python3"),
+            workspace_venv_path=Path("ws\x1bdir/.venv"),
+            mm_binary_origin="venv-relative",
+            runtime_matches_workspace=True,
+        )
+        monkeypatch.setattr(uninstall_cmd, "_runtime_profile", lambda: fake_profile)
+
+        result = CliRunner().invoke(cli, ["uninstall"])
+        assert result.exit_code == 0, result.output
+        assert "rm -rf -- $'ws\\x1bdir/.venv'" in result.output
+        assert "\x1b" not in result.output
+
 
 # -------------------------------------------------------------------- 9
 
