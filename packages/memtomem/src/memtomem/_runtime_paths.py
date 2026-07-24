@@ -24,12 +24,17 @@ Resolution order:
 
 Security posture for the runtime directory itself:
 
-- Never follow a symlink — an attacker on a shared ``/tmp`` could
-  pre-create ``memtomem-{uid}`` as a link into the user's home, and a
-  naive ``mkdir`` would silently no-op through it. ``os.stat`` with
-  ``follow_symlinks=False`` catches this. Enforced on every platform
-  (Windows symlinks require Developer Mode/admin to create but exist
-  and are exploitable the same way once present).
+- Never follow a directory link — an attacker on a shared ``/tmp``
+  could pre-create ``memtomem-{uid}`` as a link into the user's home,
+  and a naive ``mkdir`` would silently no-op through it. Worse, the
+  uninstall path stages and deletes what it finds under this directory,
+  so a redirect here costs the user files outside it. ``os.stat`` with
+  ``follow_symlinks=False`` catches symlinks, on every platform (Windows
+  symlinks need Developer Mode/admin to create but are exploitable the
+  same way once present). Junctions need their own check: they redirect
+  identically while keeping ``S_IFDIR``, so ``S_ISLNK`` never sees one.
+  Only this directory is judged — an ancestor may be a junction
+  (``%TEMP%`` itself is on some machines) without being refused.
 - POSIX only — refuse any pre-existing directory not owned by the
   effective uid or not at mode ``0o700``. This trades convenience for a
   predictable contract: a ``root``-owned leftover from ``sudo mm …`` or
@@ -103,9 +108,9 @@ def runtime_dir() -> Path:
 def ensure_runtime_dir() -> Path:
     """Return the runtime directory, creating it with ``mode=0o700`` if missing.
 
-    A pre-existing directory is validated: symlink, wrong owner, or any
-    group/world bit set raises :class:`PermissionError` with a
-    ``rm -rf <path>`` hint. We never ``chmod`` an existing directory
+    A pre-existing directory is validated: symlink, junction, wrong
+    owner, or any group/world bit set raises :class:`PermissionError`
+    with a removal hint. We never ``chmod`` an existing directory
     (silent permission changes would hide the underlying misconfiguration
     — and bypass any audit a sysadmin might run against the parent).
 
