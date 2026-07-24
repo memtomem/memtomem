@@ -742,6 +742,50 @@ class TestResetAlwaysReleasesTheBarrier:
         assert len(calls) == 2, "the Phase A hold must re-probe, not reuse the snapshot"
         _assert_barrier_free(reg)
 
+    def test_phase_a_reprobe_fires_before_initialize(self, home, reg, monkeypatch):
+        """Registry evidence appearing between the un-barriered pass and
+        the Phase A hold must refuse *before* ``initialize()`` writes —
+        a refusal that only fired at Phase B would already have created
+        (and possibly migrated) the DB."""
+        _patch_liveness(monkeypatch)
+        calls: list[int] = []
+
+        def flapping_probe() -> UninstallProbeResult:
+            calls.append(1)
+            return UninstallProbeResult("NONE" if len(calls) == 1 else "LIVE")
+
+        monkeypatch.setattr(reset_cmd, "_probe_registry_liveness", flapping_probe)
+
+        result = CliRunner().invoke(cli, ["reset", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert len(calls) == 2
+        assert not (home / ".memtomem" / "memtomem.db").exists(), (
+            "initialize() ran despite LIVE evidence at the Phase A boundary"
+        )
+
+    def test_phase_b_reprobe_fires_before_wipe(self, home, reg, monkeypatch):
+        """Registry evidence appearing after Phase A (e.g. while a ``-y``
+        run raced a registrar, or during the prompt) must be re-checked
+        under the Phase B hold — the wipe may not trust the Phase A
+        snapshot."""
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+        calls: list[int] = []
+
+        def flapping_probe() -> UninstallProbeResult:
+            calls.append(1)
+            return UninstallProbeResult("NONE" if len(calls) <= 2 else "LIVE")
+
+        monkeypatch.setattr(reset_cmd, "_probe_registry_liveness", flapping_probe)
+
+        result = runner.invoke(cli, ["reset", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert len(calls) == 3
+        assert _count(db_path, "chunks") >= 1, "the wipe outran the Phase B re-probe"
+
     def test_released_after_backup_failure(self, home, reg, monkeypatch):
         """A backup abort exits from inside the Phase B hold."""
         _patch_liveness(monkeypatch)
