@@ -190,11 +190,38 @@ class UninstallProbeResult:
 
     ``untrusted_path`` is set exactly when ``state == "UNTRUSTED"`` and
     names the offending path — the sentinel directory, or the runtime
-    dir that anchors it.
+    dir that anchors it. ``detail`` is optional even then: only the
+    runtime-dir producer sets it, carrying the exact ``ensure_runtime_dir``
+    refusal (cause, expected value, and removal hint) that the generic
+    redirected-path sentence cannot express — wrong owner or unsafe mode
+    name a uid/mode the CLI would otherwise hide (#1948). Every
+    ``ensure_runtime_dir`` refusal carries it, including a symlinked or
+    junctioned *runtime* dir; only the redirected ``instances/`` directory
+    (caught before the lock, not via ``_RuntimeDirRefused``) leaves it
+    ``None``, since its cause is already in the generic wording.
+
+    ``__post_init__`` enforces the ``untrusted_path`` <-> ``UNTRUSTED``
+    invariant (and ``detail`` only alongside it) at construction, so a
+    future producer cannot silently emit a path without the refusing
+    state or vice versa.
     """
 
     state: Literal["NONE", "LIVE", "UNKNOWN", "UNTRUSTED"]
     untrusted_path: Path | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        untrusted = self.state == "UNTRUSTED"
+        if (self.untrusted_path is not None) != untrusted:
+            raise ValueError(
+                "untrusted_path is set exactly when state == 'UNTRUSTED' "
+                f"(state={self.state!r}, untrusted_path={self.untrusted_path!r})"
+            )
+        if self.detail is not None and not untrusted:
+            raise ValueError(
+                "detail is only meaningful when state == 'UNTRUSTED' "
+                f"(state={self.state!r}, detail={self.detail!r})"
+            )
 
 
 class _MutationLockTimeout(Exception):
@@ -761,16 +788,19 @@ def probe_all_for_uninstall() -> UninstallProbeResult:
             return UninstallProbeResult("NONE")
     except _MutationLockTimeout:
         return UninstallProbeResult("UNKNOWN")
-    except _RuntimeDirRefused:
+    except _RuntimeDirRefused as exc:
         # ``ensure_runtime_dir`` refused the runtime dir itself —
         # symlink, junction, wrong owner, unsafe mode (#1940).
         # Persistent until the user removes/repairs it, so it must not
         # collapse into UNKNOWN's "retry" advice. Only this translated
         # signal is attributed: any other error inside the lock (sidecar
         # open, an entry's unlock/close) proves nothing about the
-        # runtime dir and stays UNKNOWN below.
+        # runtime dir and stays UNKNOWN below. Carry the exception's
+        # message (the precise cause + removal hint) as ``detail`` so the
+        # CLI can surface owner/mode specifics the generic sentence hides
+        # (#1948).
         logger.debug("uninstall registry probe refused runtime dir", exc_info=True)
-        return UninstallProbeResult("UNTRUSTED", untrusted_path=runtime_dir())
+        return UninstallProbeResult("UNTRUSTED", untrusted_path=runtime_dir(), detail=str(exc))
     except Exception:
         logger.debug("uninstall registry probe failed", exc_info=True)
         return UninstallProbeResult("UNKNOWN")
