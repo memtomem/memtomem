@@ -417,6 +417,22 @@ class TestUninstallProbeInProcess:
         assert verdict.state == "UNTRUSTED"
         assert verdict.untrusted_path == rt
 
+    def test_runtime_dir_refusal_carries_the_cause_detail(self, rt, monkeypatch):
+        """The exact ``ensure_runtime_dir`` message — the owner/mode cause
+        and its removal hint that the generic redirected-path sentence
+        cannot name — must survive into ``detail`` for the CLI to surface
+        (#1948), not vanish into the debug log."""
+        message = (
+            f"runtime dir {rt} is owned by uid 501 (expected 0). Remove it and retry: rm -rf {rt}"
+        )
+
+        def _refuse() -> Path:
+            raise PermissionError(message)
+
+        monkeypatch.setattr(reg, "ensure_runtime_dir", _refuse)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.detail == message
+
     def test_sidecar_failure_is_unknown_not_untrusted(self, rt, monkeypatch):
         """A ``PermissionError`` from the sidecar layer proves nothing
         about the runtime dir — attributing it there would tell the user
@@ -669,6 +685,10 @@ class TestSymlinkedRegistryDir:
         verdict = reg.probe_all_for_uninstall()
         assert verdict.state == "UNTRUSTED"
         assert verdict.untrusted_path == reg.instances_dir()
+        # detail is producer-scoped: only the runtime-dir refusal sets it.
+        # The redirected instances dir's cause is already in the generic
+        # sentence, so it stays None (#1948).
+        assert verdict.detail is None
         result = reg.enumerate_live_instances("0" * 16)
         assert not result.complete
         assert result.instances == ()
@@ -694,3 +714,35 @@ class TestDanglingSymlinkedRegistryDir:
         result = reg.enumerate_live_instances("0" * 16)
         assert not result.complete
         assert result.instances == ()
+
+
+class TestUninstallProbeResultInvariant:
+    """``untrusted_path`` <-> ``UNTRUSTED``, and ``detail`` only alongside
+    it, enforced at construction (#1948). Each guard is asserted on its
+    own so a sibling cannot mask a regression."""
+
+    def test_untrusted_without_path_is_rejected(self):
+        with pytest.raises(ValueError):
+            reg.UninstallProbeResult("UNTRUSTED")
+
+    def test_path_without_untrusted_state_is_rejected(self):
+        with pytest.raises(ValueError):
+            reg.UninstallProbeResult("NONE", untrusted_path=Path("/x"))
+
+    def test_detail_without_untrusted_state_is_rejected(self):
+        with pytest.raises(ValueError):
+            reg.UninstallProbeResult("UNKNOWN", detail="whatever")
+
+    def test_untrusted_with_path_and_detail_is_accepted(self):
+        result = reg.UninstallProbeResult("UNTRUSTED", untrusted_path=Path("/x"), detail="cause")
+        assert result.untrusted_path == Path("/x")
+        assert result.detail == "cause"
+
+    def test_untrusted_with_path_and_no_detail_is_accepted(self):
+        assert reg.UninstallProbeResult("UNTRUSTED", untrusted_path=Path("/x")).detail is None
+
+    @pytest.mark.parametrize("state", ["NONE", "LIVE", "UNKNOWN"])
+    def test_non_untrusted_states_construct_bare(self, state):
+        result = reg.UninstallProbeResult(state)
+        assert result.untrusted_path is None
+        assert result.detail is None

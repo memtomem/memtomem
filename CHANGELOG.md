@@ -47,6 +47,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Scope: the barrier only closes the race between peers that both
   implement it. A server from an older release ignores it, so for a
   mixed-version setup the original window remains.
+- **`mm uninstall` on a machine with no memtomem state now exits 2 with a
+  refusal** — instead of exit 0 and "No memtomem state to remove" — when the
+  instance registry cannot be probed or trusted, e.g. a misconfigured
+  `XDG_RUNTIME_DIR` (#1947). Correct fail-closed direction, but scripts that
+  run `mm uninstall` on clean machines with an unreadable registry will see
+  the new exit code. The refusal now also names the precise cause the
+  runtime-dir check found — the wrong owner or unsafe mode and the expected
+  value — not only the generic redirected-path sentence (#1948).
 
 ## [0.3.12] — 2026-07-22
 

@@ -1509,6 +1509,37 @@ class TestInstanceRegistryGateRefuses:
         assert "No memtomem state to remove" not in result.output
         assert "Retry in a moment" in result.output
 
+    def test_runtime_dir_refusal_prints_the_cause_detail(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """A runtime-dir refusal carries the specific owner/mode cause the
+        generic redirected-path sentence cannot name — the CLI must print
+        it as a ``Cause:`` line, alongside (not instead of) that sentence
+        and the remediation (#1948)."""
+        from memtomem._instance_registry import UninstallProbeResult
+        from memtomem.cli import uninstall_cmd
+
+        detail = (
+            "runtime dir /run/user/501/memtomem is owned by uid 501 "
+            "(expected 0). Remove it and retry: rm -rf /run/user/501/memtomem"
+        )
+        monkeypatch.setattr(
+            uninstall_cmd,
+            "_probe_registry_liveness",
+            lambda: UninstallProbeResult(
+                "UNTRUSTED", untrusted_path=Path("/run/user/501/memtomem"), detail=detail
+            ),
+        )
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert "Cause: " in result.output
+        assert "owned by uid 501 (expected 0)" in result.output
+        # the generic sentence and the remediation stay put
+        assert "not a private real directory" in result.output
+        assert "Remove or repair" in result.output
+
     def test_force_still_overrides_pid_heuristic_when_registry_empty(
         self, home, registry_at_runtime_dir
     ):
@@ -1750,11 +1781,15 @@ class TestDestructiveBoundaryReprobe:
         state = _seed_state(home)
         calls: list[int] = []
 
+        detail = f"runtime dir {reg.instances_dir()} has unsafe permissions 0o777 (expected 0o700"
+
         def flapping_probe():
             calls.append(1)
             if len(calls) == 1:
                 return UninstallProbeResult("NONE")
-            return UninstallProbeResult("UNTRUSTED", untrusted_path=reg.instances_dir())
+            return UninstallProbeResult(
+                "UNTRUSTED", untrusted_path=reg.instances_dir(), detail=detail
+            )
 
         monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
 
@@ -1764,6 +1799,9 @@ class TestDestructiveBoundaryReprobe:
         assert str(reg.instances_dir()) in result.output, "refusal must name the path"
         assert "Remove or repair" in result.output
         assert "became active" not in result.output
+        # the cause detail surfaces at the boundary re-probe too (#1948)
+        assert "Cause: " in result.output
+        assert "unsafe permissions 0o777" in result.output
         assert (state / "memtomem.db").exists()
 
     def test_registry_turning_unknown_at_boundary_keeps_retry_advice(

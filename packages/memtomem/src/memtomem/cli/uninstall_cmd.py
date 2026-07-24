@@ -585,7 +585,7 @@ def _format_path(p: Path) -> str:
     return s.replace(home, "~", 1) if s.startswith(home) else s
 
 
-def _refuse_untrusted_registry(untrusted_path: Path | None) -> None:
+def _refuse_untrusted_registry(untrusted_path: Path | None, detail: str | None = None) -> None:
     """Refusal lines for an untrusted registry path (#1942).
 
     Deliberately distinct from the UNKNOWN wording: "retry in a moment"
@@ -593,6 +593,13 @@ def _refuse_untrusted_registry(untrusted_path: Path | None) -> None:
     nothing changes until the named path is removed or repaired. Path
     text is printed verbatim by design: this is the CLI surface, where
     the canonical-path redaction rule (#1385, #1550) does not apply.
+
+    ``detail`` — present only for a runtime-dir refusal — is the exact
+    ``ensure_runtime_dir`` message: the specific cause (wrong owner,
+    unsafe mode) and its removal hint, which the generic sentence below
+    cannot name. Printed after it, and verbatim for the same reason;
+    the message already carries its own actionable remediation (#1948,
+    #1870).
     """
     where = _format_path(untrusted_path) if untrusted_path is not None else "its path"
     click.secho(
@@ -601,6 +608,8 @@ def _refuse_untrusted_registry(untrusted_path: Path | None) -> None:
         "delete state — liveness cannot be judged through a redirected path.",
         fg="red",
     )
+    if detail:
+        click.secho(f"  Cause: {detail}", fg="red")
     click.secho(
         "  Remove or repair that path, then retry — retrying without fixing "
         "it cannot succeed. --force does not override this check.",
@@ -1102,7 +1111,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 fg="red",
             )
         elif registry_state.state == "UNTRUSTED":
-            _refuse_untrusted_registry(registry_state.untrusted_path)
+            _refuse_untrusted_registry(registry_state.untrusted_path, registry_state.detail)
         else:
             _refuse_unknown_registry()
         sys.exit(2)
@@ -1269,7 +1278,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             # same persistent cause as above — "stop it and re-run" would be
             # as unactionable here as "retry in a moment" (#1942).
             click.echo("")
-            _refuse_untrusted_registry(registry_state.untrusted_path)
+            _refuse_untrusted_registry(registry_state.untrusted_path, registry_state.detail)
             sys.exit(2)
         if registry_state.state == "UNKNOWN":
             # Transient here too: "a process became active" would claim
