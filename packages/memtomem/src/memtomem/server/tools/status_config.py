@@ -560,12 +560,10 @@ async def mem_status(
 
     Configuration drift adds a ``Warnings`` block. Each entry has ``kind``
     (an open enum — tolerate unrecognised values rather than erroring),
-    ``fix`` (the CLI command to run) and an optional ``doc`` link into
-    ``docs/guides/``. Embedding-mismatch entries also carry ``stored`` and
-    ``configured`` sub-blocks echoing DB vs runtime provider/model/dimension.
-    ``concurrent_server_writers`` entries (two live servers with this store
-    open) may carry an extra ``same_parent`` key. These keys are stable
-    across versions, so probes and dashboards can pattern-match on them.
+    ``fix`` and an optional ``doc`` link. Some kinds add their own keys:
+    embedding mismatches carry ``stored``/``configured``;
+    ``concurrent_server_writers`` may carry ``same_parent``. These keys are
+    stable across versions, so probes can pattern-match on them.
     """
     app = await _get_app_initialized(ctx)
     return await format_status_report(app)
