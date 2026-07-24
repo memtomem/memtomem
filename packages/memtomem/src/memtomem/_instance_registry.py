@@ -194,9 +194,11 @@ class UninstallProbeResult:
     runtime-dir producer sets it, carrying the exact ``ensure_runtime_dir``
     refusal (cause, expected value, and removal hint) that the generic
     redirected-path sentence cannot express — wrong owner or unsafe mode
-    name a uid/mode the CLI would otherwise hide (#1948). The symlinked/
-    junctioned cases leave it ``None``; their cause is already in the
-    generic wording.
+    name a uid/mode the CLI would otherwise hide (#1948). Every
+    ``ensure_runtime_dir`` refusal carries it, including a symlinked or
+    junctioned *runtime* dir; only the redirected ``instances/`` directory
+    (caught before the lock, not via ``_RuntimeDirRefused``) leaves it
+    ``None``, since its cause is already in the generic wording.
 
     ``__post_init__`` enforces the ``untrusted_path`` <-> ``UNTRUSTED``
     invariant (and ``detail`` only alongside it) at construction, so a
