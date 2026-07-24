@@ -283,7 +283,7 @@ mm embedding-reset                     # check/resolve embedding model mismatch
 mm reset                               # delete all data and reinitialize the DB (refuses while the server or web UI is running)
 mm reset --yes                         # skip confirmation prompt (safety gates still apply)
 mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.bak before wiping
-mm reset --force                       # bypass the liveness/write-lock gates (stale-pid recovery)
+mm reset --force                       # bypass only the stale pid/web/DB-lock heuristics (not registry or barrier evidence)
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
 mm upgrade                             # uv-tool installs: stop services and reinstall with --refresh
 mm upgrade --version 0.3.12 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
