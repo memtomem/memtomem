@@ -173,6 +173,28 @@ class EnumerationResult:
     complete: bool
 
 
+@dataclass(frozen=True)
+class UninstallProbeResult:
+    """Fail-closed verdict for ``mm uninstall`` (#1935, #1942).
+
+    ``UNKNOWN`` and ``UNTRUSTED`` both refuse, but they prescribe
+    opposite remediations: ``UNKNOWN`` is *transient* (lock timeout, a
+    racing registrar, an unreadable entry) and retrying can succeed;
+    ``UNTRUSTED`` is *persistent* (a probe path is redirected or
+    otherwise not a private real directory) and retrying cannot change
+    the answer until ``untrusted_path`` is removed or repaired.
+    Collapsing the two sends the user into a retry loop against a
+    condition that never resolves itself.
+
+    ``untrusted_path`` is set exactly when ``state == "UNTRUSTED"`` and
+    names the offending path — the sentinel directory, or the runtime
+    dir that anchors it.
+    """
+
+    state: Literal["NONE", "LIVE", "UNKNOWN", "UNTRUSTED"]
+    untrusted_path: Path | None = None
+
+
 class _MutationLockTimeout(Exception):
     """Bounded registry-lock acquisition expired."""
 
@@ -667,16 +689,21 @@ def _sorted(results: list[InstanceInfo]) -> tuple[InstanceInfo, ...]:
     return tuple(sorted(results, key=lambda i: (i.pid, i.procid)))
 
 
-def probe_all_for_uninstall() -> Literal["NONE", "LIVE", "UNKNOWN"]:
+def probe_all_for_uninstall() -> UninstallProbeResult:
     """All-store, fail-closed probe for ``mm uninstall``.
 
     ``LIVE`` — at least one held sentinel (any store; deleting the
     registry under a live server is never acceptable, whatever store it
     has open). ``UNKNOWN`` — the pass could not complete (lock timeout,
     unreadable entry/dir, deadline): uninstall must refuse, a timeout
-    never means "empty". ``NONE`` — a fully completed pass found zero
-    live sentinels. Unlike the status path this performs no GC — an
-    uninstall should not mutate the registry it is about to judge.
+    never means "empty". ``UNTRUSTED`` — a probe path is not a private
+    real directory (symlinked/junctioned ``instances/``, or a runtime
+    dir ``ensure_runtime_dir`` refuses): uninstall must refuse *and*
+    tell the user which path to remove or repair — "retry" is wrong
+    advice for this cause (#1942). ``NONE`` — a fully completed pass
+    found zero live sentinels. Unlike the status path this performs no
+    GC — an uninstall should not mutate the registry it is about to
+    judge.
     """
     # Same rule as enumeration: the ``_active`` check and the directory
     # listing both happen only under the mutation lock, deadline started
@@ -688,30 +715,40 @@ def probe_all_for_uninstall() -> Literal["NONE", "LIVE", "UNKNOWN"]:
         with _mutation_lock(deadline):
             with _state_guard:
                 if _active:
-                    return "LIVE"
+                    return UninstallProbeResult("LIVE")
             directory = instances_dir()
             dir_state = _dir_state(directory)
             if dir_state == "missing":
-                return "NONE"
+                return UninstallProbeResult("NONE")
             if dir_state == "untrusted":
                 # symlink (dangling included) / non-dir — never trust,
                 # never traverse, never call it empty
-                return "UNKNOWN"
+                return UninstallProbeResult("UNTRUSTED", untrusted_path=directory)
             try:
                 entries = list(directory.iterdir())
             except OSError:
-                return "UNKNOWN"
+                return UninstallProbeResult("UNKNOWN")
             for entry in entries:
                 if time.monotonic() >= deadline:
-                    return "UNKNOWN"
+                    return UninstallProbeResult("UNKNOWN")
                 state = _probe_entry(entry)
                 if state == "live":
-                    return "LIVE"
+                    return UninstallProbeResult("LIVE")
                 if state == "unknown":
-                    return "UNKNOWN"
-            return "NONE"
+                    return UninstallProbeResult("UNKNOWN")
+            return UninstallProbeResult("NONE")
     except _MutationLockTimeout:
-        return "UNKNOWN"
+        return UninstallProbeResult("UNKNOWN")
+    except PermissionError:
+        # ``ensure_runtime_dir`` (inside ``_mutation_lock``) refused the
+        # runtime dir itself — symlink, junction, wrong owner, unsafe
+        # mode (#1940). Persistent until the user removes/repairs it, so
+        # it must not collapse into UNKNOWN's "retry" advice. Everything
+        # inside the with-body traps its own OSErrors, so a
+        # PermissionError escaping to here is the runtime-dir anchor
+        # (or its sidecar, which that same removal fixes).
+        logger.debug("uninstall registry probe refused runtime dir", exc_info=True)
+        return UninstallProbeResult("UNTRUSTED", untrusted_path=runtime_dir())
     except Exception:
         logger.debug("uninstall registry probe failed", exc_info=True)
-        return "UNKNOWN"
+        return UninstallProbeResult("UNKNOWN")

@@ -95,7 +95,7 @@ def _real_registry_dir() -> Path | None:
     absent here so the inventory and the prune below can never traverse
     or stage through it into unrelated files (the fail-closed refusal
     for that case comes from ``probe_all_for_uninstall`` returning
-    ``UNKNOWN``; this guard keeps the *listing* side inert too).
+    ``UNTRUSTED``; this guard keeps the *listing* side inert too).
 
     Junctions must be refused by name: on Windows they redirect like a
     symlink while ``lstat`` still reports ``S_IFDIR``, so without the
@@ -484,6 +484,29 @@ def _format_path(p: Path) -> str:
     home = str(Path.home())
     s = str(p)
     return s.replace(home, "~", 1) if s.startswith(home) else s
+
+
+def _refuse_untrusted_registry(untrusted_path: Path | None) -> None:
+    """Refusal lines for an untrusted registry path (#1942).
+
+    Deliberately distinct from the UNKNOWN wording: "retry in a moment"
+    is correct for a transient probe failure and provably wrong here —
+    nothing changes until the named path is removed or repaired. Path
+    text is printed verbatim by design: this is the CLI surface, where
+    the canonical-path redaction rule (#1385, #1550) does not apply.
+    """
+    where = _format_path(untrusted_path) if untrusted_path is not None else "its path"
+    click.secho(
+        f"The instance registry cannot be trusted: {where} is a symlink, "
+        "junction, or otherwise not a private real directory. Refusing to "
+        "delete state — liveness cannot be judged through a redirected path.",
+        fg="red",
+    )
+    click.secho(
+        "  Remove or repair that path, then retry — retrying without fixing "
+        "it cannot succeed. --force does not override this check.",
+        fg="red",
+    )
 
 
 def _print_group(group: _Group) -> None:
@@ -912,13 +935,15 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     # runs before any ``--force`` handling on every platform. A held
     # sentinel is positive evidence of a live server even when it owns
     # neither ``server.pid`` (a secondary) nor a SQLite write lock (an
-    # idle server); UNKNOWN (probe timeout / unreadable entry) is
-    # fail-closed — a timeout never means "empty". No ``--force`` hint is
-    # printed here: advertising an override that does not apply would be
-    # false remediation.
-    if registry_state != "NONE":
+    # idle server); UNKNOWN (probe timeout / unreadable entry) and
+    # UNTRUSTED (redirected/invalid probe path, #1942) are both
+    # fail-closed — a timeout never means "empty" — but they prescribe
+    # different remediations: only UNKNOWN can be fixed by retrying. No
+    # ``--force`` hint is printed here: advertising an override that
+    # does not apply would be false remediation.
+    if registry_state.state != "NONE":
         click.echo("")
-        if registry_state == "LIVE":
+        if registry_state.state == "LIVE":
             click.secho(
                 "A live memtomem-server instance is registered for this user. "
                 "Refusing to delete state — an active server holds the store "
@@ -930,6 +955,8 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 "memtomem) and retry. --force does not override this check.",
                 fg="red",
             )
+        elif registry_state.state == "UNTRUSTED":
+            _refuse_untrusted_registry(registry_state.untrusted_path)
         else:
             click.secho(
                 "Could not determine whether a memtomem-server instance is "
@@ -1089,7 +1116,14 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         db_lock = _check_db_lock(db_path)
         registry_state = _probe_registry_liveness()
         heuristics_block = (server.alive or db_lock.locked) and (not force or is_windows)
-        if registry_state != "NONE" or heuristics_block:
+        if registry_state.state == "UNTRUSTED":
+            # A link that appeared while the user sat on the prompt is the
+            # same persistent cause as above — "stop it and re-run" would be
+            # as unactionable here as "retry in a moment" (#1942).
+            click.echo("")
+            _refuse_untrusted_registry(registry_state.untrusted_path)
+            sys.exit(2)
+        if registry_state.state != "NONE" or heuristics_block:
             click.echo("")
             click.secho(
                 "A memtomem process became active while uninstall was waiting for "

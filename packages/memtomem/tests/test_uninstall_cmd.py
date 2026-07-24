@@ -1461,6 +1461,10 @@ class TestInstanceRegistryGateRefuses:
             result = CliRunner().invoke(cli, ["uninstall", "-y"])
         assert result.exit_code == 2
         assert "did not complete" in result.output
+        # A timeout is transient — "retry" stays the right advice here,
+        # and the persistent-cause wording must not leak in (#1942).
+        assert "Retry in a moment" in result.output
+        assert "Remove or repair" not in result.output
         assert "--force does not override" in result.output
         assert (state / "memtomem.db").exists()
 
@@ -1545,8 +1549,10 @@ _windows_only = pytest.mark.skipif(sys.platform != "win32", reason="junctions ar
 
 class TestInstanceRegistrySymlinkGuard:
     """A symlinked ``instances/`` must never be trusted or staged through
-    (#1935 review): the fail-closed probe reports UNKNOWN → refusal, and
-    the inventory/prune side never lists across the link."""
+    (#1935 review): the fail-closed probe reports UNTRUSTED → refusal
+    that names the offending path and prescribes removing/repairing it —
+    not "retry in a moment", which can never resolve a link (#1942) —
+    and the inventory/prune side never lists across the link."""
 
     def test_symlinked_instances_dir_refuses_and_touches_nothing(
         self, home, registry_at_runtime_dir, tmp_path
@@ -1566,7 +1572,10 @@ class TestInstanceRegistrySymlinkGuard:
         result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
 
         assert result.exit_code == 2
-        assert "did not complete" in result.output
+        assert str(reg.instances_dir()) in result.output, "refusal must name the path"
+        assert "Remove or repair" in result.output
+        assert "Retry in a moment" not in result.output
+        assert "--force does not override" in result.output
         assert victim.read_text(encoding="utf-8") == "do not touch"
         assert "precious" not in result.output, "inventory must not list across the link"
         assert (state / "memtomem.db").exists()
@@ -1578,9 +1587,9 @@ class TestInstanceRegistrySymlinkGuard:
         case above only executes on the Windows shard, which is exactly
         how the earlier link claim shipped untested; here a real
         ``instances/`` is made to answer ``is_junction()`` so the whole
-        chain — untrusted → UNKNOWN → refuse, nothing staged — is proven
-        on every platform. What stays Windows-only is the narrow fact
-        that a real junction answers True.
+        chain — untrusted → UNTRUSTED → refuse naming the path, nothing
+        staged — is proven on every platform. What stays Windows-only is
+        the narrow fact that a real junction answers True.
 
         Both guards are covered, and they fail differently: the probe
         (``_dir_state``) is what refuses, while ``_real_registry_dir`` is
@@ -1597,7 +1606,9 @@ class TestInstanceRegistrySymlinkGuard:
         result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
 
         assert result.exit_code == 2
-        assert "did not complete" in result.output
+        assert str(instances) in result.output, "refusal must name the path"
+        assert "Remove or repair" in result.output
+        assert "Retry in a moment" not in result.output
         assert (state / "memtomem.db").exists()
         assert entry.exists(), "a junctioned registry must never be staged"
         assert entry.name not in result.output, "inventory must not list across the junction"
@@ -1619,7 +1630,9 @@ class TestInstanceRegistrySymlinkGuard:
         result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
 
         assert result.exit_code == 2
-        assert "did not complete" in result.output
+        assert str(anchor) in result.output, "refusal must name the runtime dir"
+        assert "Remove or repair" in result.output
+        assert "Retry in a moment" not in result.output
         assert (state / "memtomem.db").exists()
         assert entry.exists(), "a junctioned runtime anchor must never be staged"
         assert entry.name not in result.output, "inventory must not list under the junction"
@@ -1645,7 +1658,9 @@ class TestInstanceRegistrySymlinkGuard:
         result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
 
         assert result.exit_code == 2
-        assert "did not complete" in result.output
+        assert str(reg.instances_dir()) in result.output, "refusal must name the path"
+        assert "Remove or repair" in result.output
+        assert "Retry in a moment" not in result.output
         assert victim.read_text(encoding="utf-8") == "do not touch"
         assert list(victim_dir.iterdir()) == [victim]
         assert "precious" not in result.output, "inventory must not list across the junction"
@@ -1660,6 +1675,7 @@ class TestDestructiveBoundaryReprobe:
     def test_registry_going_live_between_probe_and_delete_refuses(
         self, home, registry_at_runtime_dir, monkeypatch
     ):
+        from memtomem._instance_registry import UninstallProbeResult
         from memtomem.cli import uninstall_cmd
 
         state = _seed_state(home)
@@ -1667,7 +1683,7 @@ class TestDestructiveBoundaryReprobe:
 
         def flapping_probe():
             calls.append(1)
-            return "NONE" if len(calls) == 1 else "LIVE"
+            return UninstallProbeResult("NONE" if len(calls) == 1 else "LIVE")
 
         monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
 
@@ -1678,6 +1694,36 @@ class TestDestructiveBoundaryReprobe:
         assert "became active while uninstall was waiting" in result.output
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
+
+    def test_registry_turning_untrusted_at_boundary_names_the_path(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """A link that appears while the user sits on the prompt is the
+        persistent cause, not a process that "became active" — the
+        boundary refusal must give the same remove-or-repair remediation
+        as the first gate (#1942)."""
+        from memtomem._instance_registry import UninstallProbeResult
+        from memtomem.cli import uninstall_cmd
+
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        calls: list[int] = []
+
+        def flapping_probe():
+            calls.append(1)
+            if len(calls) == 1:
+                return UninstallProbeResult("NONE")
+            return UninstallProbeResult("UNTRUSTED", untrusted_path=reg.instances_dir())
+
+        monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert str(reg.instances_dir()) in result.output, "refusal must name the path"
+        assert "Remove or repair" in result.output
+        assert "became active" not in result.output
+        assert (state / "memtomem.db").exists()
 
     def test_server_going_live_between_probe_and_delete_refuses(
         self, home, registry_at_runtime_dir, monkeypatch
