@@ -103,7 +103,17 @@ class AppContext:
     # ``mm web``, the LangGraph integration, and quality experiments all
     # build components through that factory and must never register as
     # server instances.
-    register_server_instance: bool = False
+    #
+    # ``kw_only`` is load-bearing, not style. ``AppContext`` is a public
+    # re-export whose positional order shipped in v0.3.x (``config,
+    # webhook_manager, current_session_id, …``); declaring this field
+    # here WITHOUT ``kw_only`` would splice a server-registration flag
+    # into slot 3 of that order, and the AST guard in
+    # ``test_server_instance_registration.py`` — which audits opt-ins by
+    # enumerating ``register_server_instance=`` keywords — would never
+    # see a positional one. Keyword-only keeps the released positional
+    # surface byte-for-byte and makes the keyword the only spelling.
+    register_server_instance: bool = field(default=False, kw_only=True)
     # Backing field for the ``current_namespace`` property below. Kept off
     # ``__init__`` so callers go through the setter (which validates) and
     # cannot smuggle a hostile shape via ``AppContext(current_namespace=

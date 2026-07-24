@@ -10,7 +10,9 @@ the per-test isolated runtime dir (conftest ``_isolated_instance_registry``).
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,17 +73,124 @@ async def _init_flagged(components: Components) -> AppContext:
     return ctx
 
 
+_OPT_IN = "register_server_instance"
+_REMEDY = (
+    "Registering as an MCP server instance (#1935) is a lifespan-only "
+    "privilege: only a process that IS the MCP server may advertise the "
+    "store it holds open. If you genuinely need a second opt-in, say so "
+    "in the PR and update this guard deliberately — do not widen it to "
+    "make a red test pass."
+)
+
+
+def _package_trees(src: Path):
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        yield path.relative_to(src).as_posix(), tree
+
+
 class TestOptIn:
-    def test_flag_is_set_only_by_the_lifespan(self) -> None:
-        """The guard makes the scope: sweep the whole package for the flag
-        so a future call site can't opt into registration unnoticed."""
+    """The registry opt-in must have exactly one call site, and the guard
+    proving it must catch every *conventional* spelling of a second one.
+
+    An earlier version grepped the package text for
+    ``register_server_instance=True``; a variable value, a positional
+    argument, or a post-hoc assignment all evaded it. These checks parse
+    instead, and deliberately ignore the callee name — a keyword reaches
+    the flag through an alias, a factory wrapper, or
+    ``dataclasses.replace`` just as well as through ``AppContext(...)``.
+
+    Scope, stated honestly: this is a mistake-guard, not an adversary-
+    guard. It catches the flag's name as a keyword (any call), as an
+    attribute-assignment target, and as a string literal (``setattr`` /
+    ``__dict__`` / dict-key spellings). A name computed at runtime evades
+    it — that is review territory, not test territory.
+    """
+
+    def test_exactly_one_opt_in_keyword_package_wide(self) -> None:
+        # Deliberately callee-agnostic and value-agnostic when *counting*:
+        # every occurrence of the keyword is a hit, including
+        # ``register_server_instance=False`` on some unrelated call. That
+        # over-counts by design — a keyword with this name is a thing a
+        # human should look at, wherever it appears — so the failure
+        # message says "occurrence", not "opt-in", to keep a false
+        # positive from reading as an accusation.
         src = Path(memtomem.__file__).parent
-        hits = sorted(
-            p.relative_to(src).as_posix()
-            for p in src.rglob("*.py")
-            if "register_server_instance=True" in p.read_text(encoding="utf-8")
+        occurrences = [
+            (rel, kw.value)
+            for rel, tree in _package_trees(src)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == _OPT_IN
+        ]
+        assert len(occurrences) == 1, (
+            f"expected one `{_OPT_IN}=` keyword in the package, found "
+            f"{[r for r, _ in occurrences]}. {_REMEDY}"
         )
-        assert hits == ["server/lifespan.py"]
+        rel, value = occurrences[0]
+        assert rel == "server/lifespan.py", f"the `{_OPT_IN}=` keyword moved to {rel}. {_REMEDY}"
+        # Pin the value, not just the keyword: ``=False`` would silently
+        # disable the whole feature while satisfying a name-only search.
+        assert isinstance(value, ast.Constant) and value.value is True, (
+            "the opt-in must pass a literal True — a variable makes the flag "
+            "runtime-dependent and unauditable"
+        )
+
+    def test_flag_is_never_assigned_after_construction(self) -> None:
+        src = Path(memtomem.__file__).parent
+        writes = [
+            (rel, node.lineno)
+            for rel, tree in _package_trees(src)
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == _OPT_IN
+                and isinstance(node.ctx, ast.Store)
+            )
+        ]
+        assert writes == [], f"post-construction opt-in at {writes}. {_REMEDY}"
+
+    def test_flag_name_never_appears_as_a_string_literal(self) -> None:
+        """``setattr(ctx, "register_server_instance", True)``, a
+        ``__dict__`` write, and ``AppContext(**{"register_server_…": x})``
+        all smuggle the flag without a keyword or an attribute node —
+        but each one has to spell the name as a string constant."""
+        src = Path(memtomem.__file__).parent
+        mentions = [
+            (rel, node.lineno)
+            for rel, tree in _package_trees(src)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and node.value == _OPT_IN
+        ]
+        assert mentions == [], f"flag name as a string literal at {mentions}. {_REMEDY}"
+
+    def test_opt_in_is_keyword_only_and_released_positional_order_is_intact(self) -> None:
+        """Keyword-only is what makes the keyword scan complete — a
+        positional opt-in would never spell the name. Equally load-bearing
+        in the other direction: the flag must NOT occupy a positional
+        slot, because ``AppContext``'s positional order (``config,
+        webhook_manager, current_session_id, …``) shipped in v0.3.x and
+        splicing the flag into slot 3 would re-bind released call shapes.
+        """
+        params = inspect.signature(AppContext.__init__).parameters
+        assert params[_OPT_IN].kind is inspect.Parameter.KEYWORD_ONLY
+        positional = [
+            n
+            for n, p in params.items()
+            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD and n != "self"
+        ]
+        assert positional[:4] == [
+            "config",
+            "webhook_manager",
+            "current_session_id",
+            "current_agent_id",
+        ]
+
+    def test_released_positional_call_shape_still_binds_session_id(self) -> None:
+        ctx = AppContext(Mem2MemConfig(), None, "sess-id")
+        assert ctx.current_session_id == "sess-id"
+        assert ctx.register_server_instance is False
 
     @pytest.mark.asyncio
     async def test_unflagged_context_never_registers(self, components) -> None:
