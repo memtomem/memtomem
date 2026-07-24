@@ -1468,3 +1468,77 @@ class TestRegistrationSymlinkGuard:
         assert len(calls) == 2
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
+
+
+class TestPruneIsFailureSafe:
+    """``_delete_inventory``'s directory prunes run *after* the staging
+    move, so a directory that vanishes underneath one of them must not
+    raise and skip the prunes that follow (#1937 review follow-up)."""
+
+    def test_vanished_registry_dir_does_not_abort_the_prune_sequence(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """The stat→listing window, made deterministic: hand the prune a
+        directory that no longer exists. The pre-fix shape evaluated
+        ``any(reg_dir.iterdir())`` outside its ``try`` and propagated
+        ``FileNotFoundError`` out of ``_delete_inventory``, losing the
+        runtime-dir prune and the success summary with it."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        ghost = home / "gone-instances"
+        monkeypatch.setattr(uninstall_cmd, "_real_registry_dir", lambda: ghost)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert result.exception is None
+        assert not state.exists()
+
+    def test_unreadable_dir_reports_not_pruned_instead_of_raising(self, tmp_path, monkeypatch):
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        d = tmp_path / "d"
+        d.mkdir()
+
+        def _boom(_self):
+            raise PermissionError("nope")
+
+        monkeypatch.setattr(Path, "iterdir", _boom)
+        assert _prune_if_empty(d) is False
+        assert d.exists()
+
+    def test_prunes_empty_removes_and_reports(self, tmp_path):
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        d = tmp_path / "empty"
+        d.mkdir()
+        assert _prune_if_empty(d) is True
+        assert not d.exists()
+
+    def test_leaves_non_empty_and_missing_alone(self, tmp_path):
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        full = tmp_path / "full"
+        full.mkdir()
+        (full / "x").write_text("x", encoding="utf-8")
+        assert _prune_if_empty(full) is False
+        assert full.exists()
+
+        assert _prune_if_empty(tmp_path / "missing") is False
+
+    def test_never_prunes_a_symlinked_dir_target(self, tmp_path):
+        """``rmdir`` on a symlink fails (ENOTDIR); the guard must report
+        'not pruned' and leave both the link and its target intact."""
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert _prune_if_empty(link) is False
+        assert link.is_symlink()
+        assert target.is_dir()

@@ -103,6 +103,27 @@ def _registry_has_sentinels() -> bool:
         return False
 
 
+def _prune_if_empty(path: Path) -> bool:
+    """``rmdir`` *path* when it is an existing, empty directory.
+
+    Returns whether it was removed; never raises. The directory check,
+    the emptiness listing, and the ``rmdir`` all sit inside one ``try``
+    on purpose: these prunes run *after* the staging move, so the data is
+    already out of the way and a directory that disappears underneath us
+    (a concurrent cleanup, the volatile runtime dir, a racing second
+    uninstall) must degrade to "not pruned" rather than raise and skip
+    every prune that follows. Guarding only the ``rmdir`` — the shape
+    this replaced — left the listing able to abort the sequence.
+    """
+    try:
+        if not path.is_dir() or any(path.iterdir()):
+            return False
+        path.rmdir()
+        return True
+    except OSError:
+        return False
+
+
 def _isatty() -> bool:
     """Indirection so tests can monkeypatch the TTY check.
 
@@ -744,41 +765,22 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # ``--keep-data`` left a now-empty subdir behind (we whole-dir-stage
     # everything else, so those subdirs are gone via the rmtree above).
     for subdir in _OWNED_SUBDIRS:
-        candidate = _DEFAULT_STATE_DIR / subdir
-        if candidate.exists() and candidate.is_dir() and not any(candidate.iterdir()):
-            try:
-                candidate.rmdir()
-            except OSError:
-                pass
+        _prune_if_empty(_DEFAULT_STATE_DIR / subdir)
 
-    if (
-        _DEFAULT_STATE_DIR.exists()
-        and not any(_DEFAULT_STATE_DIR.iterdir())
-        and inv.db_path.parent == _DEFAULT_STATE_DIR
-    ):
-        try:
-            _DEFAULT_STATE_DIR.rmdir()
-            completed.append("state dir")
-        except OSError:
-            pass
+    if inv.db_path.parent == _DEFAULT_STATE_DIR and _prune_if_empty(_DEFAULT_STATE_DIR):
+        completed.append("state dir")
 
     # #1935: prune the sentinel directory once its contents are staged
     # away. The runtime-dir prune below then usually still finds the
     # retained ``instances.registry.lock`` sidecar and no-ops — expected;
-    # the runtime dir is volatile and self-cleans.
+    # the runtime dir is volatile and self-cleans. ``_real_registry_dir``
+    # already refused a symlinked ``instances/``, so this never prunes
+    # across a link.
     reg_dir = _real_registry_dir()
-    if reg_dir is not None and not any(reg_dir.iterdir()):
-        try:
-            reg_dir.rmdir()
-        except OSError:
-            pass
+    if reg_dir is not None:
+        _prune_if_empty(reg_dir)
 
-    rt = runtime_dir()
-    if rt.exists() and rt.is_dir() and not any(rt.iterdir()):
-        try:
-            rt.rmdir()
-        except OSError:
-            pass
+    _prune_if_empty(runtime_dir())
 
     return ", ".join(completed) if completed else "nothing"
 
