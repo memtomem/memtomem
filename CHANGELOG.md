@@ -55,6 +55,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the new exit code. The refusal now also names the precise cause the
   runtime-dir check found — the wrong owner or unsafe mode and the expected
   value — not only the generic redirected-path sentence (#1948).
+- **`mm web` now takes the lifecycle barrier before opening storage** (#1952).
+  Previously only the MCP server participated in the #1936 barrier, so the
+  exclusive hold of `mm uninstall` / `mm reset` did not exclude a `mm web`
+  that opened the store concurrently — its under-barrier liveness re-probe is
+  a snapshot, and a web startup that landed just after it raced the wipe. The
+  web lifespan now acquires the barrier shared before `create_components()`
+  and refuses to start (logging an actionable message) when a destructive
+  command holds it exclusive. Release keeps the #1936 polarity: an unconfirmed
+  storage close retains the hold until the process exits.
 
 ## [0.3.12] — 2026-07-22
 

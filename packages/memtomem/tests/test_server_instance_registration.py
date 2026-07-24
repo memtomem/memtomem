@@ -469,8 +469,11 @@ class TestLifecycleBarrierOwnership:
 
     @pytest.mark.asyncio
     async def test_unflagged_context_never_takes_the_barrier(self, components) -> None:
-        """CLI / ``mm web`` / LangGraph build components through the same
-        factory and must stay out of the barrier protocol entirely."""
+        """CLI / LangGraph build components through the same factory without a
+        flagged ``AppContext`` and must stay out of the barrier protocol here.
+
+        (``mm web`` *does* participate as of #1952, but through its own
+        lifespan acquire, not via ``AppContext`` — see ``test_web_lifespan``.)"""
         ctx = AppContext(config=components.config)
         with patch("memtomem.server.component_factory.create_components", return_value=components):
             await ctx.ensure_initialized()
