@@ -1328,6 +1328,21 @@ class TestInstanceRegistryInventory:
         assert "instances.registry.lock" not in result.output
 
 
+def _make_junction(link: Path, target: Path) -> None:
+    """Create an NTFS junction at *link* pointing at *target*.
+
+    Junctions are the Windows-only redirect that ``lstat`` still reports
+    as ``S_IFDIR``, so they slip past every symlink-shaped guard. No
+    elevation needed, unlike Windows symlinks.
+    """
+    import _winapi
+
+    _winapi.CreateJunction(str(target), str(link))
+
+
+_windows_only = pytest.mark.skipif(sys.platform != "win32", reason="junctions are NTFS-only")
+
+
 class TestInstanceRegistrySymlinkGuard:
     """A symlinked ``instances/`` must never be trusted or staged through
     (#1935 review): the fail-closed probe reports UNKNOWN → refusal, and
@@ -1354,6 +1369,86 @@ class TestInstanceRegistrySymlinkGuard:
         assert "did not complete" in result.output
         assert victim.read_text(encoding="utf-8") == "do not touch"
         assert "precious" not in result.output, "inventory must not list across the link"
+        assert (state / "memtomem.db").exists()
+
+    def test_junction_verdict_refuses_and_stages_nothing(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """The junction *wiring*, pinned where CI actually runs it. The
+        case above only executes on the Windows shard, which is exactly
+        how the earlier link claim shipped untested; here a real
+        ``instances/`` is made to answer ``is_junction()`` so the whole
+        chain — untrusted → UNKNOWN → refuse, nothing staged — is proven
+        on every platform. What stays Windows-only is the narrow fact
+        that a real junction answers True.
+
+        Both guards are covered, and they fail differently: the probe
+        (``_dir_state``) is what refuses, while ``_real_registry_dir`` is
+        what keeps the *listing* out of the inventory — and inventory
+        collection runs before the refusal block, so without it the
+        target's filenames reach the user's screen even on a refused
+        run."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        instances = reg.instances_dir()
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == instances)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert (state / "memtomem.db").exists()
+        assert entry.exists(), "a junctioned registry must never be staged"
+        assert entry.name not in result.output, "inventory must not list across the junction"
+
+    def test_junctioned_runtime_anchor_refuses_and_stages_nothing(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """Guarding only the leaf leaves the whole chain open one level
+        up: a junctioned *runtime dir* holds an ordinary ``instances/``
+        inside the target, which passes every check made on the leaf.
+        Both the probe (via ``ensure_runtime_dir``) and the inventory
+        (via ``_real_registry_dir``'s anchor check) must refuse."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        anchor = reg.instances_dir().parent
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == anchor)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert (state / "memtomem.db").exists()
+        assert entry.exists(), "a junctioned runtime anchor must never be staged"
+        assert entry.name not in result.output, "inventory must not list under the junction"
+
+    @_windows_only
+    def test_junctioned_instances_dir_refuses_and_touches_nothing(
+        self, home, registry_at_runtime_dir, tmp_path
+    ):
+        """The same contract for the redirect ``lstat`` cannot see. Before
+        the junction check, ``_real_registry_dir`` handed the *target's*
+        files to ``_collect_inventory``, which staged them with
+        ``os.replace`` and deleted them with the staging tree — this case
+        loses unrelated user files, it does not merely leak their names."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        victim_dir = tmp_path / "victim"
+        victim_dir.mkdir()
+        victim = victim_dir / "precious.txt"
+        victim.write_text("do not touch", encoding="utf-8")
+        reg.ensure_runtime_dir()
+        _make_junction(reg.instances_dir(), victim_dir)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert victim.read_text(encoding="utf-8") == "do not touch"
+        assert list(victim_dir.iterdir()) == [victim]
+        assert "precious" not in result.output, "inventory must not list across the junction"
         assert (state / "memtomem.db").exists()
 
 
@@ -1447,6 +1542,23 @@ class TestRegistrationSymlinkGuard:
         assert reg.register_instance(db) is None
         assert list(victim_dir.iterdir()) == [], "no sentinel may land in the link target"
 
+    @_windows_only
+    def test_registration_refuses_junctioned_instances_dir(
+        self, home, registry_at_runtime_dir, tmp_path
+    ):
+        """``_dir_state`` gates registration as well as the uninstall
+        probe, so its junction blindness let sentinels be written into an
+        unrelated directory."""
+        reg = registry_at_runtime_dir
+        victim_dir = tmp_path / "victim-target"
+        victim_dir.mkdir()
+        reg.ensure_runtime_dir()
+        _make_junction(reg.instances_dir(), victim_dir)
+        db = tmp_path / "s.db"
+        db.write_bytes(b"x")
+        assert reg.register_instance(db) is None
+        assert list(victim_dir.iterdir()) == [], "no sentinel may land in the junction target"
+
     def test_db_lock_going_live_between_probe_and_delete_refuses(
         self, home, registry_at_runtime_dir, monkeypatch
     ):
@@ -1468,3 +1580,149 @@ class TestRegistrationSymlinkGuard:
         assert len(calls) == 2
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
+
+
+class TestPruneIsFailureSafe:
+    """``_delete_inventory``'s directory prunes run *after* the staging
+    move, so a directory that vanishes underneath one of them must not
+    raise and skip the prunes that follow (#1937 review follow-up)."""
+
+    def test_vanished_registry_dir_does_not_abort_the_prune_sequence(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """The stat→listing window, made deterministic: hand the prune a
+        directory that no longer exists. The pre-fix shape evaluated
+        ``any(reg_dir.iterdir())`` outside its ``try`` and propagated
+        ``FileNotFoundError`` out of ``_delete_inventory``, losing the
+        runtime-dir prune and the success summary with it."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        ghost = home / "gone-instances"
+        monkeypatch.setattr(uninstall_cmd, "_real_registry_dir", lambda: ghost)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert result.exception is None
+        assert not state.exists()
+
+    def test_unreadable_dir_reports_not_pruned_instead_of_raising(self, tmp_path, monkeypatch):
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        d = tmp_path / "d"
+        d.mkdir()
+
+        def _boom(_self):
+            raise PermissionError("nope")
+
+        monkeypatch.setattr(Path, "iterdir", _boom)
+        assert _prune_if_empty(d) is False
+        assert d.exists()
+
+    def test_prunes_empty_removes_and_reports(self, tmp_path):
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        d = tmp_path / "empty"
+        d.mkdir()
+        assert _prune_if_empty(d) is True
+        assert not d.exists()
+
+    def test_leaves_non_empty_and_missing_alone(self, tmp_path):
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        full = tmp_path / "full"
+        full.mkdir()
+        (full / "x").write_text("x", encoding="utf-8")
+        assert _prune_if_empty(full) is False
+        assert full.exists()
+
+        assert _prune_if_empty(tmp_path / "missing") is False
+
+    def test_never_prunes_a_symlinked_dir_target(self, tmp_path):
+        """The refusal must come from the link check, not from POSIX luck:
+        ``rmdir`` on a symlink fails with ``ENOTDIR`` here, but Windows
+        ``RemoveDirectoryW`` would happily unlink the reparse point."""
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert _prune_if_empty(link) is False
+        assert link.is_symlink()
+        assert target.is_dir()
+
+    def test_link_refusal_precedes_listing_and_rmdir(self, tmp_path, monkeypatch):
+        """Runs the Windows contract on POSIX: only the link check can
+        produce the refusal here, since both later steps are rigged to
+        fail the test if reached. Without that rigging the case passes on
+        ``ENOTDIR`` alone and keeps claiming a safety the Windows shard
+        disproves. ``iterdir`` is rigged too so the guard cannot drift
+        below the listing, where a link to a *non-empty* directory would
+        refuse for the wrong reason and an empty one would be pruned."""
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        def _reached(step):
+            def _fail(_self, *_a, **_kw):
+                raise AssertionError(f"{step} reached for a directory link")
+
+            return _fail
+
+        monkeypatch.setattr(Path, "iterdir", _reached("iterdir"))
+        monkeypatch.setattr(Path, "rmdir", _reached("rmdir"))
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert _prune_if_empty(link) is False
+        assert link.is_symlink()
+
+    def test_junction_refusal_precedes_listing_and_rmdir(self, tmp_path, monkeypatch):
+        """The ordering contract on the *junction* axis, runnable
+        everywhere. The symlink rig above cannot carry it — that case
+        still passes with the junction check moved below the listing —
+        and the real-junction case only runs on the Windows shard."""
+        d = tmp_path / "plain"
+        d.mkdir()
+
+        def _reached(step):
+            def _fail(_self, *_a, **_kw):
+                raise AssertionError(f"{step} reached for a junction")
+
+            return _fail
+
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == d)
+        monkeypatch.setattr(Path, "iterdir", _reached("iterdir"))
+        monkeypatch.setattr(Path, "rmdir", _reached("rmdir"))
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert _prune_if_empty(d) is False
+        assert d.is_dir()
+
+    @_windows_only
+    def test_never_prunes_a_junction(self, tmp_path):
+        """Junctions are the case ``is_symlink()`` alone misses: Windows
+        tags them ``IO_REPARSE_TAG_MOUNT_POINT``, so they stay
+        directory-shaped to ``lstat`` and to ``is_symlink()`` while
+        ``rmdir`` still removes the link."""
+        import _winapi
+
+        target = tmp_path / "target"
+        target.mkdir()
+        junction = tmp_path / "junction"
+        _winapi.CreateJunction(str(target), str(junction))
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert junction.is_junction()
+        assert not junction.is_symlink()
+        assert _prune_if_empty(junction) is False
+        assert junction.is_junction()
+        assert target.is_dir()
