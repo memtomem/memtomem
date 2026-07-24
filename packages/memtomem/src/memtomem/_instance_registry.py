@@ -42,9 +42,11 @@ Layout (all under :func:`memtomem._runtime_paths.runtime_dir`):
     deleted. A reader/writer flock closing the window between "a server
     opens the store" and "that server publishes its sentinel above": the
     server takes it **shared** before storage opens and holds it for the
-    process lifetime, while ``mm uninstall`` takes it **exclusive** across
-    its final liveness re-probe and the whole staging of state. Both
-    sides fail closed — a barrier that cannot be acquired means a
+    process lifetime, while the destructive CLIs take it **exclusive**
+    across their final liveness re-probe and their write phase:
+    ``mm uninstall`` over the whole staging of state, ``mm reset`` (#1945)
+    over each of its two write boundaries (``initialize`` and the wipe).
+    Both sides fail closed — a barrier that cannot be acquired means a
     destructive operation may be in flight, and neither startup nor
     deletion may proceed on a guess. Lock ordering is always **barrier →
     mutation sidecar**; no path acquires them the other way round.
@@ -399,13 +401,17 @@ def acquire_server_lifecycle_barrier(timeout_s: float | None = None) -> HeldBarr
 
 
 def acquire_uninstall_lifecycle_barrier(timeout_s: float | None = None) -> HeldBarrier:
-    """Take the barrier **exclusive**, across uninstall's destructive phase.
+    """Take the barrier **exclusive**, across a destructive phase.
 
-    Held through the final liveness re-probe *and* the staging of state,
-    so a server cannot open the store in between. Raises
+    The exclusive side of the barrier, shared by every destructive CLI
+    that must keep servers out of the store while it writes: ``mm
+    uninstall`` across its staging, ``mm reset`` (#1945) across each of
+    its two write boundaries. Held through the final liveness re-probe
+    *and* the write, so a server cannot open the store in between. Raises
     :class:`BarrierTimeout` on contention: a held flock is never stale
     (the kernel releases it when its holder dies), so this refusal is not
-    ``--force``-overridable.
+    ``--force``-overridable. (Name kept for API stability; not
+    uninstall-specific.)
     """
     return _acquire_barrier(portalocker.LOCK_EX, timeout_s)
 
