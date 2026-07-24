@@ -2863,6 +2863,20 @@ def _link_through_locked_dir(
     except OSError:
         pytest.skip("symlinks unavailable")
     os.chmod(locked, 0o000)
+    # Verify the mode-000 barrier actually blocks *this* process before
+    # relying on it. A CI runner executing with privileges that ignore owner
+    # mode bits (observed on the GitHub macOS runner) traverses ``locked``
+    # anyway, so ``link_path.exists()`` resolves to the *missing* target and
+    # returns False (ENOENT) instead of raising ``EACCES`` — the unresolvable
+    # scenario never materializes. Skip rather than assert a false negative.
+    barrier_holds = False
+    try:
+        link_path.exists()
+    except OSError:
+        barrier_holds = True
+    if not barrier_holds:
+        os.chmod(locked, 0o700)
+        pytest.skip("mode-000 barrier not enforced for this process (e.g. CI as root)")
     try:
         yield link_path
     finally:
