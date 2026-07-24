@@ -12,10 +12,14 @@ gate ordering, not the wipe itself (``reset_all`` is covered in
   deliberately user-wide (an unrelated-store server also refuses);
 * the lifecycle barrier (#1936, #1945) is taken exclusive around both
   write boundaries — ``initialize()`` and backup + ``reset_all()`` — is
-  never ``--force``-overridable, and is released on every exit path
+  never ``--force``-overridable, and is released after a confirmed (or
+  never-opened) storage close but *retained* on an unconfirmed one
   (proven from a separate process: the autouse
   ``_isolated_instance_registry`` sweep and Windows same-process
   reacquire both make in-process checks false evidence);
+* the store identity counted in Phase A is revalidated under the Phase B
+  barrier, so a database removed or swapped during the prompt is refused
+  rather than wiped or resurrected on stale consent;
 * ``--backup`` snapshots via the sqlite3 backup API, so WAL-resident
   commits survive — the failure a plain file copy would silently cause;
 * a failed backup aborts without wiping.
@@ -810,6 +814,83 @@ class TestResetLifecycleBarrier:
         assert "Repair the reported path" in result.output
         assert "Stop it and re-run" not in result.output
         assert "--force" not in result.output
+
+
+class TestResetRevalidatesStoreIdentity:
+    """Consent is for the file counted in Phase A (#1945, Codex round 3).
+    A database removed or swapped at the same path during the prompt must
+    be refused under the Phase B barrier — not wiped on stale consent,
+    and not resurrected after a racing uninstall removed it."""
+
+    def _prompt_mutates_db(self, monkeypatch, action) -> None:
+        """Run ``action()`` from inside ``_confirm``, then confirm."""
+
+        def confirm_and_mutate(*_a, **_k) -> bool:
+            action()
+            return True
+
+        monkeypatch.setattr(reset_cmd, "_confirm", confirm_and_mutate)
+
+    def test_removed_during_prompt_refuses(self, home, reg, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+
+        self._prompt_mutates_db(monkeypatch, lambda: db_path.unlink())
+        result = runner.invoke(cli, ["reset"])
+
+        assert result.exit_code == 2, result.output
+        assert "removed" in result.output
+        assert "different database" in result.output
+        # initialize() must not have resurrected it.
+        assert not db_path.exists(), "reset recreated a database removed during the prompt"
+
+    def test_replaced_during_prompt_refuses(self, home, reg, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+
+        def swap() -> None:
+            # A *different* file at the same path — new inode, new digest.
+            db_path.unlink()
+            replacement = sqlite3.connect(db_path)
+            replacement.execute("CREATE TABLE chunks (id INTEGER)")
+            replacement.execute("INSERT INTO chunks VALUES (1), (2), (3)")
+            replacement.commit()
+            replacement.close()
+
+        self._prompt_mutates_db(monkeypatch, swap)
+        result = runner.invoke(cli, ["reset"])
+
+        assert result.exit_code == 2, result.output
+        assert "replaced" in result.output
+        # The swapped-in database was NOT wiped on the old consent.
+        assert _count(db_path, "chunks") == 3, "reset wiped a replacement DB on stale consent"
+
+    def test_unchanged_db_proceeds(self, home, reg, monkeypatch):
+        """The revalidation must not false-refuse the ordinary path: an
+        untouched DB has the same identity and resets normally."""
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+
+        result = runner.invoke(cli, ["reset", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert _count(db_path, "chunks") == 0
+
+    def test_identity_refusal_json_shape(self, home, reg, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+
+        self._prompt_mutates_db(monkeypatch, lambda: db_path.unlink())
+        result = runner.invoke(cli, ["reset", "--json"])
+
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert "different database" in data["reason"]
 
 
 class TestResetAlwaysReleasesTheBarrier:

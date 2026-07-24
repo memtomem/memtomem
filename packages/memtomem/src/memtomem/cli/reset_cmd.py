@@ -61,6 +61,9 @@ from memtomem._instance_registry import (
 from memtomem._instance_registry import (
     probe_all_for_uninstall as _probe_registry_liveness,
 )
+from memtomem._instance_registry import (
+    store_digest_for as _store_digest_for,
+)
 from memtomem._settlement import settle_shielded_value
 from memtomem.cli._db_lock import check_db_lock, sqlite_file_uri
 from memtomem.cli._liveness import check_server_liveness, check_web_liveness
@@ -369,6 +372,10 @@ async def _run(
             # raises ``SystemExit`` before construction, releasing normally.
             await storage.close()
             close_confirmed = True
+        # Store identity as it was when we counted (and the user will
+        # consent). ``(st_dev, st_ino)`` — a same-path replacement after
+        # the prompt is a *different* file and gets a different digest.
+        store_digest = _store_digest_for(db_path)
     finally:
         _release_or_retain(barrier, close_confirmed)
 
@@ -407,6 +414,26 @@ async def _run(
     close_confirmed = True  # nothing open until the wipe backend below
     try:
         _check_gates(db_path, force=force, as_json=as_json)
+
+        # Consent was given for the file we counted in Phase A. If it
+        # vanished (a racing ``mm uninstall`` during the prompt) or was
+        # swapped for a different file at the same path, the ``total`` in
+        # the confirmation no longer describes what is on disk — wiping
+        # now would destroy a database the user never saw, and
+        # ``initialize()`` below would resurrect one uninstall just
+        # removed. Not ``--force``-overridable: it is a consent-integrity
+        # check, not a liveness heuristic.
+        current_digest = _store_digest_for(db_path)
+        if current_digest != store_digest:
+            gone = current_digest is None
+            _refuse(
+                "The database changed while you were deciding — it was "
+                + ("removed" if gone else "replaced")
+                + f" at {db_path}. Refusing to reset: the confirmation you "
+                "gave was for a different database.",
+                "Re-run mm reset to reset the database that is there now.",
+                as_json=as_json,
+            )
 
         backup_path: Path | None = None
         if backup:
