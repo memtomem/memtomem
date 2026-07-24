@@ -11,6 +11,7 @@ the per-test isolated runtime dir (conftest ``_isolated_instance_registry``).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -72,16 +73,34 @@ async def _init_flagged(components: Components) -> AppContext:
 
 
 class TestOptIn:
-    def test_flag_is_set_only_by_the_lifespan(self) -> None:
+    def test_flag_is_mentioned_only_where_it_is_defined_and_set(self) -> None:
         """The guard makes the scope: sweep the whole package for the flag
-        so a future call site can't opt into registration unnoticed."""
+        so a future call site can't opt into registration unnoticed.
+
+        Sweeping the bare *name* rather than the ``=True`` literal is
+        deliberate — ``register_server_instance=some_flag`` opts in just
+        as effectively and the narrower search read it as absence. The
+        two legitimate mentions are the definition and the single
+        opt-in; anything else fails here and has to justify itself.
+        """
         src = Path(memtomem.__file__).parent
         hits = sorted(
             p.relative_to(src).as_posix()
             for p in src.rglob("*.py")
-            if "register_server_instance=True" in p.read_text(encoding="utf-8")
+            if "register_server_instance" in p.read_text(encoding="utf-8")
         )
-        assert hits == ["server/lifespan.py"]
+        assert hits == ["server/context.py", "server/lifespan.py"]
+
+    def test_opt_in_is_keyword_only(self) -> None:
+        """The textual sweep above is only exhaustive because the flag is
+        keyword-only: a positional opt-in would never spell the field
+        name and would sweep clean. ``AppContext`` has several positional
+        init fields after it, so dropping ``kw_only`` does not merely
+        shift this argument — it lets a positional call set the flag
+        while the sweep still reports one call site.
+        """
+        param = inspect.signature(AppContext.__init__).parameters["register_server_instance"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
 
     @pytest.mark.asyncio
     async def test_unflagged_context_never_registers(self, components) -> None:

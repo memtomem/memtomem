@@ -103,7 +103,14 @@ class AppContext:
     # ``mm web``, the LangGraph integration, and quality experiments all
     # build components through that factory and must never register as
     # server instances.
-    register_server_instance: bool = False
+    #
+    # ``kw_only`` is load-bearing, not style: the sweep guard in
+    # ``test_server_instance_registration.py`` proves the opt-in has
+    # exactly one call site by searching the package for the field name,
+    # and a positional ``AppContext(cfg, None, True)`` would opt in
+    # without ever writing it. Keyword-only makes that spelling
+    # impossible, so the textual sweep is exhaustive.
+    register_server_instance: bool = field(default=False, kw_only=True)
     # Backing field for the ``current_namespace`` property below. Kept off
     # ``__init__`` so callers go through the setter (which validates) and
     # cannot smuggle a hostile shape via ``AppContext(current_namespace=
