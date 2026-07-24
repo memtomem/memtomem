@@ -622,6 +622,76 @@ class TestResetRegistryGate:
         assert "cannot be probed" in data["reason"]
         assert str(entry) in data["reason"]
 
+    def test_runtime_dir_refusal_prints_the_cause_detail(self, home, monkeypatch):
+        """A runtime-dir refusal carries the specific owner/mode cause the
+        generic redirected-path sentence cannot name — reset must print it
+        as a ``Cause:`` line, alongside (not instead of) that sentence and
+        the remediation, matching uninstall (#1948/#1960)."""
+        detail = (
+            "runtime dir /run/user/501/memtomem is owned by uid 501 "
+            "(expected 0). Remove it and retry: rm -rf /run/user/501/memtomem"
+        )
+        monkeypatch.setattr(
+            reset_cmd,
+            "_probe_registry_liveness",
+            lambda: UninstallProbeResult(
+                "UNTRUSTED",
+                untrusted_path=Path("/run/user/501/memtomem"),
+                untrusted_kind="redirected",
+                detail=detail,
+            ),
+        )
+        result = CliRunner().invoke(cli, ["reset", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "Cause: " in result.output
+        assert "owned by uid 501 (expected 0)" in result.output
+        # the generic sentence and the remediation stay put
+        assert "not a private real directory" in result.output
+        assert "Remove or repair" in result.output
+        assert "--force does not override" in result.output
+
+    def test_runtime_dir_refusal_json_reason_carries_cause(self, home, monkeypatch):
+        """The ``--json`` ``reason`` carries the ``Cause:`` detail too, in
+        the same position as the text path, so the machine-readable surface
+        does not drift vaguer than the text one (#1960)."""
+        detail = (
+            "runtime dir /run/user/501/memtomem is owned by uid 501 "
+            "(expected 0). Remove it and retry: rm -rf /run/user/501/memtomem"
+        )
+        monkeypatch.setattr(
+            reset_cmd,
+            "_probe_registry_liveness",
+            lambda: UninstallProbeResult(
+                "UNTRUSTED",
+                untrusted_path=Path("/run/user/501/memtomem"),
+                untrusted_kind="redirected",
+                detail=detail,
+            ),
+        )
+        result = CliRunner().invoke(cli, ["reset", "-y", "--json"])
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert "Cause: " in data["reason"]
+        assert "owned by uid 501 (expected 0)" in data["reason"]
+        assert "not a private real directory" in data["reason"]
+
+    def test_unprobeable_refusal_has_no_cause_line(self, home, monkeypatch):
+        """The ``Cause:`` line appears only when the runtime-dir producer
+        set a detail — an unprobeable entry leaves ``detail=None``, so no
+        cause line is emitted (#1960)."""
+        entry = Path("/runtime/instances/stray-subdir")
+        monkeypatch.setattr(
+            reset_cmd,
+            "_probe_registry_liveness",
+            lambda: UninstallProbeResult(
+                "UNTRUSTED", untrusted_path=entry, untrusted_kind="unprobeable"
+            ),
+        )
+        result = CliRunner().invoke(cli, ["reset", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "Cause:" not in result.output
+
     def test_registry_refusal_json_shape(self, home, monkeypatch):
         """Registry refusals keep the write-command JSON contract: exit 1
         with ``ok: false`` on stdout, not the text path's exit 2."""
