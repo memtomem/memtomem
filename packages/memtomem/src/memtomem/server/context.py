@@ -95,6 +95,20 @@ class AppContext:
     then hit already-closed storage / embedder.
     """
 
+    # ``config`` and ``webhook_manager`` are the only positional
+    # parameters; every init field below is keyword-only. That boundary is
+    # load-bearing, not style. ``AppContext`` is a public re-export
+    # (``from memtomem.server import AppContext``), and inserting
+    # ``register_server_instance`` (#1935) into the middle of the
+    # positional order made argument 3 ambiguous: keyword-only for that
+    # field alone would have silently re-bound an existing
+    # ``AppContext(cfg, hook, x)`` from the opt-in flag to
+    # ``current_session_id`` instead of failing. Everything past the
+    # webhook is either session state or an internal lock — nothing a
+    # caller should be passing by position — so making the whole tail
+    # keyword-only turns any such call into a loud ``TypeError`` and
+    # leaves exactly one spelling of the opt-in for the AST guard in
+    # ``test_server_instance_registration.py`` to enumerate.
     config: Mem2MemConfig
     webhook_manager: object | None = None
     # Server-only opt-in for the instance registry (#1935): only the MCP
@@ -103,13 +117,6 @@ class AppContext:
     # ``mm web``, the LangGraph integration, and quality experiments all
     # build components through that factory and must never register as
     # server instances.
-    #
-    # ``kw_only`` is load-bearing, not style: the sweep guard in
-    # ``test_server_instance_registration.py`` proves the opt-in has
-    # exactly one call site by searching the package for the field name,
-    # and a positional ``AppContext(cfg, None, True)`` would opt in
-    # without ever writing it. Keyword-only makes that spelling
-    # impossible, so the textual sweep is exhaustive.
     register_server_instance: bool = field(default=False, kw_only=True)
     # Backing field for the ``current_namespace`` property below. Kept off
     # ``__init__`` so callers go through the setter (which validates) and
@@ -119,7 +126,7 @@ class AppContext:
     # of ``mem_ns_set``) are caught here even if a future tool were added
     # that mutates app state without re-running ``validate_namespace``.
     _current_namespace: str | None = field(default=None, init=False, repr=False)
-    current_session_id: str | None = None
+    current_session_id: str | None = field(default=None, kw_only=True)
     # Set by ``mem_session_start(agent_id=...)`` and reset by
     # ``mem_session_end``. ``mem_agent_search(agent_id=None)`` falls back to
     # this value before falling back to ``current_namespace`` — so an agent
@@ -127,7 +134,7 @@ class AppContext:
     # tool call. Lives on a separate ``_session_lock`` (not ``_config_lock``)
     # because session state has a different lifetime / mutation cadence than
     # config — mixing the two locks would entangle their contention paths.
-    current_agent_id: str | None = None
+    current_agent_id: str | None = field(default=None, kw_only=True)
     # Internal state — not part of the public ``__init__`` surface; populated
     # by ``ensure_initialized`` / ``from_components``. The watcher /
     # scheduler / policy_scheduler / health_watchdog handles are populated
@@ -153,14 +160,14 @@ class AppContext:
     # per-session, scoped to AppContext lifetime. Gate to emit a dim-mismatch
     # hint only once per MCP session so repeated mem_add / mem_search calls
     # do not spam the same notice. Writes go through ``_config_lock``.
-    _dim_mismatch_announced: bool = False
-    _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _dim_mismatch_announced: bool = field(default=False, kw_only=True)
+    _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock, kw_only=True)
+    _init_lock: asyncio.Lock = field(default_factory=asyncio.Lock, kw_only=True)
     # Guards mutations of ``current_session_id`` + ``current_agent_id`` and
     # ``_ending_session_ids``.
     # Kept distinct from ``_config_lock`` so a long-running config write
     # cannot block a session start, and vice versa.
-    _session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _session_lock: asyncio.Lock = field(default_factory=asyncio.Lock, kw_only=True)
     # Per-resolved-source-file locks that serialize the memory-file
     # read → rewrite → re-index → rollback span in the MCP CRUD tools
     # (``mem_edit`` / ``mem_delete`` / ``mem_add`` / ``mem_batch_add``).

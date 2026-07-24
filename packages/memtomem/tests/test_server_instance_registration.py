@@ -10,6 +10,7 @@ the per-test isolated runtime dir (conftest ``_isolated_instance_registry``).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import time
@@ -72,35 +73,116 @@ async def _init_flagged(components: Components) -> AppContext:
     return ctx
 
 
-class TestOptIn:
-    def test_flag_is_mentioned_only_where_it_is_defined_and_set(self) -> None:
-        """The guard makes the scope: sweep the whole package for the flag
-        so a future call site can't opt into registration unnoticed.
+_OPT_IN = "register_server_instance"
+_REMEDY = (
+    "Registering as an MCP server instance (#1935) is a lifespan-only "
+    "privilege: only a process that IS the MCP server may advertise the "
+    "store it holds open. If you genuinely need a second opt-in, say so "
+    "in the PR and update this guard deliberately — do not widen it to "
+    "make a red test pass."
+)
 
-        Sweeping the bare *name* rather than the ``=True`` literal is
-        deliberate — ``register_server_instance=some_flag`` opts in just
-        as effectively and the narrower search read it as absence. The
-        two legitimate mentions are the definition and the single
-        opt-in; anything else fails here and has to justify itself.
-        """
+
+def _iter_appcontext_calls(src: Path):
+    """Yield ``(relpath, ast.Call)`` for every ``AppContext(...)`` in the package."""
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name == "AppContext":
+                yield path.relative_to(src).as_posix(), node
+
+
+def _iter_opt_in_writes(src: Path):
+    """Yield ``(relpath, lineno)`` for every *assignment* to the flag attribute.
+
+    Construction is not the only way in: ``ctx.register_server_instance =
+    True`` after the fact opts in just as well, and no guard that only
+    inspects call sites would see it.
+    """
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == _OPT_IN
+                and isinstance(node.ctx, ast.Store)
+            ):
+                yield path.relative_to(src).as_posix(), node.lineno
+
+
+class TestOptIn:
+    """The registry opt-in must have exactly one call site, and the guard
+    proving it must not be evadable by rewording.
+
+    An earlier version searched the package text for
+    ``register_server_instance=True``. That let three spellings through —
+    a variable (``=some_flag``), a positional argument, and a post-hoc
+    attribute assignment — and widening it to the bare field name traded
+    those for a different hole: it stopped pinning the *value*, so
+    flipping the lifespan to ``=False`` (disabling registration entirely)
+    kept the guard green. Parsing is what makes the check say what it
+    means.
+    """
+
+    def test_exactly_one_opt_in_call_site_passing_a_literal_true(self) -> None:
         src = Path(memtomem.__file__).parent
-        hits = sorted(
-            p.relative_to(src).as_posix()
-            for p in src.rglob("*.py")
-            if "register_server_instance" in p.read_text(encoding="utf-8")
+        opt_ins = [
+            (rel, kw.value)
+            for rel, call in _iter_appcontext_calls(src)
+            for kw in call.keywords
+            if kw.arg == _OPT_IN
+        ]
+        assert len(opt_ins) == 1, f"expected one opt-in, found {[r for r, _ in opt_ins]}. {_REMEDY}"
+        rel, value = opt_ins[0]
+        assert rel == "server/lifespan.py", f"opt-in moved to {rel}. {_REMEDY}"
+        # Pin the value, not just the keyword: ``=False`` would silently
+        # disable the whole feature while satisfying a name-only search.
+        assert isinstance(value, ast.Constant) and value.value is True, (
+            "the opt-in must pass a literal True — a variable makes the flag "
+            "runtime-dependent and unauditable"
         )
-        assert hits == ["server/context.py", "server/lifespan.py"]
+
+    def test_no_appcontext_call_smuggles_kwargs(self) -> None:
+        """``AppContext(**mapping)`` can carry the flag without naming it,
+        which would make the enumeration above a lower bound."""
+        src = Path(memtomem.__file__).parent
+        spreads = [
+            rel
+            for rel, call in _iter_appcontext_calls(src)
+            for kw in call.keywords
+            if kw.arg is None
+        ]
+        assert spreads == [], f"``**`` spread into AppContext() in {spreads}. {_REMEDY}"
+
+    def test_flag_is_never_assigned_after_construction(self) -> None:
+        writes = list(_iter_opt_in_writes(Path(memtomem.__file__).parent))
+        assert writes == [], f"post-construction opt-in at {writes}. {_REMEDY}"
 
     def test_opt_in_is_keyword_only(self) -> None:
-        """The textual sweep above is only exhaustive because the flag is
-        keyword-only: a positional opt-in would never spell the field
-        name and would sweep clean. ``AppContext`` has several positional
-        init fields after it, so dropping ``kw_only`` does not merely
-        shift this argument — it lets a positional call set the flag
-        while the sweep still reports one call site.
+        """What makes the call-site enumeration exhaustive: with a
+        positional slot the flag could be set without appearing as a
+        keyword at all.
+
+        The whole tail past ``webhook_manager`` is keyword-only, so an old
+        three-positional call raises instead of silently re-binding to
+        ``current_session_id`` — see the field block in ``context.py``.
         """
-        param = inspect.signature(AppContext.__init__).parameters["register_server_instance"]
-        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        params = inspect.signature(AppContext.__init__).parameters
+        assert params[_OPT_IN].kind is inspect.Parameter.KEYWORD_ONLY
+        positional = [
+            n
+            for n, p in params.items()
+            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD and n != "self"
+        ]
+        assert positional == ["config", "webhook_manager"]
+
+    def test_old_three_positional_call_raises(self) -> None:
+        with pytest.raises(TypeError):
+            AppContext(Mem2MemConfig(), None, True)  # type: ignore[misc]
 
     @pytest.mark.asyncio
     async def test_unflagged_context_never_registers(self, components) -> None:
