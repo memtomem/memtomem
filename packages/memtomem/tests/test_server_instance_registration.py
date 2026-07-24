@@ -83,57 +83,38 @@ _REMEDY = (
 )
 
 
-def _iter_appcontext_calls(src: Path):
-    """Yield ``(relpath, ast.Call)`` for every ``AppContext(...)`` in the package."""
+def _package_trees(src: Path):
     for path in sorted(src.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name == "AppContext":
-                yield path.relative_to(src).as_posix(), node
-
-
-def _iter_opt_in_writes(src: Path):
-    """Yield ``(relpath, lineno)`` for every *assignment* to the flag attribute.
-
-    Construction is not the only way in: ``ctx.register_server_instance =
-    True`` after the fact opts in just as well, and no guard that only
-    inspects call sites would see it.
-    """
-    for path in sorted(src.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Attribute)
-                and node.attr == _OPT_IN
-                and isinstance(node.ctx, ast.Store)
-            ):
-                yield path.relative_to(src).as_posix(), node.lineno
+        yield path.relative_to(src).as_posix(), tree
 
 
 class TestOptIn:
     """The registry opt-in must have exactly one call site, and the guard
-    proving it must not be evadable by rewording.
+    proving it must catch every *conventional* spelling of a second one.
 
-    An earlier version searched the package text for
-    ``register_server_instance=True``. That let three spellings through —
-    a variable (``=some_flag``), a positional argument, and a post-hoc
-    attribute assignment — and widening it to the bare field name traded
-    those for a different hole: it stopped pinning the *value*, so
-    flipping the lifespan to ``=False`` (disabling registration entirely)
-    kept the guard green. Parsing is what makes the check say what it
-    means.
+    An earlier version grepped the package text for
+    ``register_server_instance=True``; a variable value, a positional
+    argument, or a post-hoc assignment all evaded it. These checks parse
+    instead, and deliberately ignore the callee name — a keyword reaches
+    the flag through an alias, a factory wrapper, or
+    ``dataclasses.replace`` just as well as through ``AppContext(...)``.
+
+    Scope, stated honestly: this is a mistake-guard, not an adversary-
+    guard. It catches the flag's name as a keyword (any call), as an
+    attribute-assignment target, and as a string literal (``setattr`` /
+    ``__dict__`` / dict-key spellings). A name computed at runtime evades
+    it — that is review territory, not test territory.
     """
 
-    def test_exactly_one_opt_in_call_site_passing_a_literal_true(self) -> None:
+    def test_exactly_one_opt_in_keyword_package_wide(self) -> None:
         src = Path(memtomem.__file__).parent
         opt_ins = [
             (rel, kw.value)
-            for rel, call in _iter_appcontext_calls(src)
-            for kw in call.keywords
+            for rel, tree in _package_trees(src)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
             if kw.arg == _OPT_IN
         ]
         assert len(opt_ins) == 1, f"expected one opt-in, found {[r for r, _ in opt_ins]}. {_REMEDY}"
@@ -146,30 +127,41 @@ class TestOptIn:
             "runtime-dependent and unauditable"
         )
 
-    def test_no_appcontext_call_smuggles_kwargs(self) -> None:
-        """``AppContext(**mapping)`` can carry the flag without naming it,
-        which would make the enumeration above a lower bound."""
-        src = Path(memtomem.__file__).parent
-        spreads = [
-            rel
-            for rel, call in _iter_appcontext_calls(src)
-            for kw in call.keywords
-            if kw.arg is None
-        ]
-        assert spreads == [], f"``**`` spread into AppContext() in {spreads}. {_REMEDY}"
-
     def test_flag_is_never_assigned_after_construction(self) -> None:
-        writes = list(_iter_opt_in_writes(Path(memtomem.__file__).parent))
+        src = Path(memtomem.__file__).parent
+        writes = [
+            (rel, node.lineno)
+            for rel, tree in _package_trees(src)
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == _OPT_IN
+                and isinstance(node.ctx, ast.Store)
+            )
+        ]
         assert writes == [], f"post-construction opt-in at {writes}. {_REMEDY}"
 
-    def test_opt_in_is_keyword_only(self) -> None:
-        """What makes the call-site enumeration exhaustive: with a
-        positional slot the flag could be set without appearing as a
-        keyword at all.
+    def test_flag_name_never_appears_as_a_string_literal(self) -> None:
+        """``setattr(ctx, "register_server_instance", True)``, a
+        ``__dict__`` write, and ``AppContext(**{"register_server_…": x})``
+        all smuggle the flag without a keyword or an attribute node —
+        but each one has to spell the name as a string constant."""
+        src = Path(memtomem.__file__).parent
+        mentions = [
+            (rel, node.lineno)
+            for rel, tree in _package_trees(src)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and node.value == _OPT_IN
+        ]
+        assert mentions == [], f"flag name as a string literal at {mentions}. {_REMEDY}"
 
-        The whole tail past ``webhook_manager`` is keyword-only, so an old
-        three-positional call raises instead of silently re-binding to
-        ``current_session_id`` — see the field block in ``context.py``.
+    def test_opt_in_is_keyword_only_and_released_positional_order_is_intact(self) -> None:
+        """Keyword-only is what makes the keyword scan complete — a
+        positional opt-in would never spell the name. Equally load-bearing
+        in the other direction: the flag must NOT occupy a positional
+        slot, because ``AppContext``'s positional order (``config,
+        webhook_manager, current_session_id, …``) shipped in v0.3.x and
+        splicing the flag into slot 3 would re-bind released call shapes.
         """
         params = inspect.signature(AppContext.__init__).parameters
         assert params[_OPT_IN].kind is inspect.Parameter.KEYWORD_ONLY
@@ -178,11 +170,17 @@ class TestOptIn:
             for n, p in params.items()
             if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD and n != "self"
         ]
-        assert positional == ["config", "webhook_manager"]
+        assert positional[:4] == [
+            "config",
+            "webhook_manager",
+            "current_session_id",
+            "current_agent_id",
+        ]
 
-    def test_old_three_positional_call_raises(self) -> None:
-        with pytest.raises(TypeError):
-            AppContext(Mem2MemConfig(), None, True)  # type: ignore[misc]
+    def test_released_positional_call_shape_still_binds_session_id(self) -> None:
+        ctx = AppContext(Mem2MemConfig(), None, "sess-id")
+        assert ctx.current_session_id == "sess-id"
+        assert ctx.register_server_instance is False
 
     @pytest.mark.asyncio
     async def test_unflagged_context_never_registers(self, components) -> None:
