@@ -12,6 +12,7 @@ import contextlib
 import errno
 import json
 import os
+import shutil
 import sqlite3
 import time
 import sys
@@ -2037,6 +2038,307 @@ class TestPruneIsFailureSafe:
         assert _prune_if_empty(junction) is False
         assert junction.is_junction()
         assert target.is_dir()
+
+
+# ------------------------------------------------------------------- #1946
+
+
+def _dangling_link(state: Path, name: str) -> Path:
+    """Replace ``state/name`` (if seeded) with a dangling symlink."""
+    link = state / name
+    if link.is_dir():
+        shutil.rmtree(link)
+    try:
+        link.symlink_to(state / "no-such-target")
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    return link
+
+
+def _removed_line(output: str) -> str:
+    return next(line for line in output.splitlines() if line.startswith("Removed:"))
+
+
+class TestDanglingOwnedSubdirLinks:
+    """A dangling ``config.d``/``memories``/``uploads`` link is our own
+    leftover (#1946): inventoried, staged as an entry move, gone on a
+    normal uninstall — and retained under the matching keep flag. A live
+    dir link keeps the entry-moves/target-untouched behavior (#1940/#1943).
+    """
+
+    def test_dangling_config_d_symlink_inventoried_and_removed(self, home):
+        state = _seed_state(home, with_fragments=False)
+        link = _dangling_link(state, "config.d")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "config.d" in result.output, "dangling link missing from the inventory"
+        removed = _removed_line(result.output)
+        assert "fragments" in removed and "state dir" in removed
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_dangling_memories_symlink_removed_and_state_pruned(self, home):
+        state = _seed_state(home)
+        link = _dangling_link(state, "memories")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "memories" in _removed_line(result.output)
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_dangling_uploads_symlink_removed_even_with_both_keep_flags(self, home):
+        state = _seed_state(home)
+        link = _dangling_link(state, "uploads")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-config", "--keep-data"])
+        assert result.exit_code == 0, result.output
+        assert "uploads" in _removed_line(result.output)
+        assert not os.path.lexists(link), "uploads has no keep flag — the link must go"
+        assert (state / "config.json").exists()
+        assert (state / "memtomem.db").exists()
+
+    def test_dangling_config_d_symlink_retained_under_keep_config(self, home):
+        state = _seed_state(home, with_fragments=False)
+        link = _dangling_link(state, "config.d")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-config"])
+        assert result.exit_code == 0, result.output
+        assert os.path.lexists(link), "--keep-config must retain the config.d entry"
+        assert "fragments" not in _removed_line(result.output)
+
+    def test_dangling_memories_symlink_retained_under_keep_data(self, home):
+        state = _seed_state(home)
+        link = _dangling_link(state, "memories")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-data"])
+        assert result.exit_code == 0, result.output
+        assert os.path.lexists(link), "--keep-data must retain the memories entry"
+        assert "memories" not in _removed_line(result.output)
+
+    def test_only_a_dangling_link_is_not_nothing_to_delete(self, home):
+        """The issue's exact trap: bytes total is 0, so a byte-based gate
+        prints "Nothing to delete" and exits 0 with the link in place."""
+        state = home / ".memtomem"
+        state.mkdir()
+        link = _dangling_link(state, "config.d")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" not in result.output
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_unresolvable_link_target_is_treated_as_dangling_and_removed(self, home):
+        """``Path.exists()`` propagates ``EACCES`` (target beneath an
+        unsearchable directory) instead of returning False — the
+        classifier must call that dangling, not crash the inventory."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX permission bits required")
+        state = _seed_state(home)
+        locked = home / "locked"
+        inner = locked / "inner"
+        inner.mkdir(parents=True)
+        link = state / "uploads"
+        try:
+            link.symlink_to(inner / "gone")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        os.chmod(locked, 0o000)
+        try:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        finally:
+            os.chmod(locked, 0o700)
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_unresolvable_link_nested_in_owned_dir_does_not_abort(self, home):
+        """``rglob`` listing hits ``is_file()`` on a nested unresolvable
+        link — the inventory must skip it, and the whole-dir stage move
+        still removes it with its tree."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX permission bits required")
+        state = _seed_state(home)
+        locked = home / "locked"
+        inner = locked / "inner"
+        inner.mkdir(parents=True)
+        nested = state / "memories" / "bad"
+        try:
+            nested.symlink_to(inner / "gone")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        os.chmod(locked, 0o000)
+        try:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        finally:
+            os.chmod(locked, 0o700)
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(nested)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_live_link_to_empty_dir_is_not_nothing_to_delete(self, home):
+        """Zero listed files, zero bytes — but the plan stages the link
+        entry, so a byte/file-count gate would falsely short-circuit."""
+        state = home / ".memtomem"
+        state.mkdir()
+        target = home / "empty-target"
+        target.mkdir()
+        link = state / "uploads"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" not in result.output
+        # The staged entry must show a row, not "(nothing found)" — the
+        # user is asked to confirm deleting it.
+        assert "nothing found" not in result.output
+        assert "uploads" in result.output
+        assert not os.path.lexists(link)
+        assert target.is_dir(), "the linked-to directory must be untouched"
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_empty_owned_dir_alone_is_deleted_not_nothing(self, home):
+        """An empty real owned dir is our own skeleton: staged and gone,
+        not "Nothing to delete" with the state dir left behind."""
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memories").mkdir()
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" not in result.output
+        # Shown, not "(nothing found)" — the confirmation asks about it.
+        assert "nothing found" not in result.output
+        assert "memories" in result.output
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_empty_config_d_retained_under_keep_config(self, home):
+        """The prune backstop must honor keep flags: an empty config.d is
+        retained state under --keep-config, not swept as a stray skeleton.
+        config.json is seeded so staging proceeds (the run isn't a no-op)."""
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "config.json").write_text("{}", encoding="utf-8")
+        (state / "config.d").mkdir()
+        (state / "uploads").mkdir()  # no keep flag → still removed
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-config"])
+        assert result.exit_code == 0, result.output
+        assert (state / "config.d").is_dir(), "--keep-config must retain empty config.d"
+        assert (state / "config.json").exists()
+        assert not (state / "uploads").exists(), "uploads has no keep flag"
+
+    def test_empty_memories_retained_under_keep_data(self, home):
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memtomem.db").write_bytes(b"x")
+        (state / "memories").mkdir()
+        # config.json is config-side, so --keep-data deletes it: staging
+        # proceeds and _delete_inventory (hence the prune loop) actually
+        # runs — without it the gate short-circuits and the prune is never
+        # reached, so the keep-flag guard would pass for the wrong reason.
+        (state / "config.json").write_text("{}", encoding="utf-8")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-data"])
+        assert result.exit_code == 0, result.output
+        assert (state / "memories").is_dir(), "--keep-data must retain empty memories"
+        assert (state / "memtomem.db").exists()
+        assert not (state / "config.json").exists()
+
+    def test_substitute_dir_row_reads_zero_bytes(self, home):
+        """A live link to an empty external dir shows the entry, but its
+        follow-stat inode size must not inflate the delete total — we
+        remove only the link, never the target's bytes."""
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memtomem.db").write_bytes(b"1234")  # 4 B of real deletable state
+        target = home / "empty-target"
+        target.mkdir()
+        link = state / "uploads"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "uploads" in result.output
+        # Total reflects only the db's 4 B, not the target dir's inode size.
+        assert "Total to delete: ~4 B" in result.output, result.output
+
+    def test_entry_probe_calls_only_genuine_absence_absent(self, home, monkeypatch):
+        """``lexists`` semantics (every lstat error → absent) would let
+        the staging loop silently skip a planned entry; only ENOENT /
+        ENOTDIR may read as absent."""
+        from memtomem.cli import uninstall_cmd
+
+        assert uninstall_cmd._entry_present(home / "nope") is False
+
+        def _eacces(path):
+            raise PermissionError(errno.EACCES, "denied")
+
+        monkeypatch.setattr(uninstall_cmd.os, "lstat", _eacces)
+        assert uninstall_cmd._entry_present(home / "nope") is True
+
+    def test_mid_stage_failure_rolls_dangling_link_back(self, home, monkeypatch):
+        """Uploads stage before the database in the plan, so failing the
+        db move exercises rollback of an already-staged dangling link."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        link = _dangling_link(state, "uploads")
+
+        real_replace = os.replace
+
+        def _fail_on_db(src, dst, **kwargs):
+            if uninstall_cmd._STAGING_PREFIX in str(dst) and Path(src).name == "memtomem.db":
+                raise OSError(errno.EACCES, "fake stage failure")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _fail_on_db)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert os.path.lexists(link), "rollback must restore the link entry"
+        assert (state / "memtomem.db").exists()
+
+    def test_live_dir_link_entry_moved_target_untouched(self, home):
+        """Success-path pin of the #1940/#1943 contract: the link *entry*
+        is deleted, the linked-to content is not."""
+        state = _seed_state(home)
+        target = home / "elsewhere"
+        target.mkdir()
+        (target / "keep.md").write_text("# keep", encoding="utf-8")
+        link = state / "uploads"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(link)
+        assert (target / "keep.md").exists(), "uninstall followed the link into the target"
+
+    @_windows_only
+    def test_dangling_junction_config_d_removed(self, home):
+        """A dangling junction is lstat-``S_IFDIR`` while ``is_dir()`` is
+        False — the shape ``is_symlink()``-only detection misses."""
+        state = _seed_state(home, with_fragments=False)
+        victim = home / "victim"
+        victim.mkdir()
+        junction = state / "config.d"
+        _make_junction(junction, victim)
+        victim.rmdir()
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(junction)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    @_windows_only
+    def test_dangling_junction_retained_under_keep_config(self, home):
+        state = _seed_state(home, with_fragments=False)
+        victim = home / "victim"
+        victim.mkdir()
+        junction = state / "config.d"
+        _make_junction(junction, victim)
+        victim.rmdir()
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-config"])
+        assert result.exit_code == 0, result.output
+        assert os.path.lexists(junction), "--keep-config must retain the config.d entry"
 
 
 # ------------------------------------------------------------------- #1936
