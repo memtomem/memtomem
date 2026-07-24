@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -9,7 +10,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Literal, TypeGuard, get_args
+from typing import TYPE_CHECKING, Literal, TypeGuard, get_args
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +56,9 @@ from memtomem.web.routes import (
     wiki_mutations,
 )
 from memtomem.web.routes._sync_phase import register_sync_phase_error_handler
+
+if TYPE_CHECKING:
+    from memtomem._instance_registry import HeldBarrier
 
 logger = logging.getLogger(__name__)
 
@@ -347,13 +351,45 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     return app
 
 
+async def _acquire_lifecycle_barrier_settled() -> HeldBarrier:
+    """Shared lifecycle-barrier acquire, offloaded and cancellation-settled.
+
+    The web-lifespan copy of ``AppContext._acquire_lifecycle_barrier``
+    (``server/context.py``) and ``reset_cmd._acquire_barrier_settled`` — the
+    three are deliberately separate (release polarity and error routing differ
+    per caller), so this mirrors their shape rather than sharing a helper. The
+    blocking flock wait is forbidden directly on the event loop, and the
+    settlement must be :func:`settle_shielded_value`, not
+    ``settle_shielded_result`` — that variant swallows worker failures, which
+    here would let a ``BarrierTimeout`` vanish and ``mm web`` continue into
+    ``create_components`` unbarriered. A handle acquired just as a cancellation
+    lands is released and the cancellation re-raised, never dropped on the
+    floor as a hold nothing can release.
+    """
+    from memtomem._instance_registry import HeldBarrier, acquire_server_lifecycle_barrier
+    from memtomem._settlement import settle_shielded_value
+
+    future = asyncio.ensure_future(asyncio.to_thread(acquire_server_lifecycle_barrier))
+    result, cancelled = await settle_shielded_value(future, what="lifecycle barrier")
+    if not isinstance(result, HeldBarrier):
+        # Fail closed on a contract change — the settlement helper erases
+        # the result type to ``object``.
+        raise RuntimeError(f"lifecycle barrier returned {type(result).__name__}, not HeldBarrier")
+    if cancelled is not None:
+        result.release()
+        raise cancelled
+    return result
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    from memtomem._instance_registry import BarrierTimeout
     from memtomem.indexing.watcher import FileWatcher
     from memtomem.server.component_factory import close_components, create_components
     from memtomem.web import hot_reload
 
     comp = None
+    barrier: HeldBarrier | None = None
     watcher: FileWatcher | None = None
     published = False
     failed = False
@@ -361,6 +397,31 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.startup_reason_code = None
 
     try:
+        # Take the shared lifecycle barrier BEFORE storage opens, the same
+        # ordering AppContext.ensure_initialized uses for the MCP server
+        # (#1936), so the exclusive hold of ``mm uninstall`` (#1944) / ``mm
+        # reset`` (#1945) excludes a concurrently-starting ``mm web`` instead
+        # of racing its under-barrier liveness re-probe (#1952). Fail closed:
+        # starting unbarriered would reopen exactly the TOCTOU this closes.
+        try:
+            barrier = await _acquire_lifecycle_barrier_settled()
+        except BarrierTimeout as exc:
+            logger.error(
+                "A memtomem process is starting or holding the lifecycle barrier (%s). "
+                "Refusing to start the Web UI — a destructive command (mm uninstall / "
+                "mm reset) may be running. Wait for it to finish, then re-run mm web.",
+                exc,
+            )
+            raise
+        except OSError as exc:
+            logger.error(
+                "The lifecycle barrier could not be used (%s). Refusing to start the "
+                "Web UI. Repair the reported path, then retry — this is an "
+                "infrastructure failure, not a running process.",
+                exc,
+            )
+            raise
+
         comp = await create_components()
 
         from memtomem.context.scope_resolver import find_project_root
@@ -450,8 +511,31 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await watcher.stop()
             except BaseException as exc:
                 logger.warning("file watcher stop failed: %s", exc)
+        # Release the barrier only on a *confirmed* storage close (#1936
+        # polarity): an unconfirmed close leaves a possibly-open store, which
+        # must keep blocking uninstall until this process exits. Default to
+        # unconfirmed — only a ``TeardownResult(storage_closed=True)`` earns a
+        # release. ``comp is None`` gives no such confirmation: either the
+        # barrier acquire failed (then ``barrier`` is None too, so the release
+        # branch is skipped anyway), or ``create_components`` raised — and its
+        # rollback closes storage best-effort, discarding any close failure
+        # (``component_factory._close_resource``), so the store may still be
+        # open in this doomed process. Retaining until exit is the safe
+        # ordering: the kernel frees the flock exactly when the process — and
+        # thus storage — is gone. Matches ``AppContext.close``'s no-components
+        # default.
+        storage_closed = False
         if comp is not None:
-            await close_components(comp)
+            teardown = await close_components(comp)
+            storage_closed = bool(teardown.storage_closed)
+        if barrier is not None:
+            if storage_closed:
+                barrier.release()
+            else:
+                logger.warning(
+                    "storage close unconfirmed — retaining lifecycle barrier %s until process exit",
+                    barrier.path,
+                )
         if published:
             for name in (
                 "project_root",
