@@ -23,9 +23,11 @@ Design notes:
   evidence of a live server — a secondary owns no ``server.pid``, and an
   idle server holds no SQLite write lock, so the two probes above can
   both miss it — and an inconclusive registry probe is fail-closed
-  (a timeout never means "empty"). LIVE/UNKNOWN registry evidence refuses
-  unconditionally; ``--force``'s contract covers the stale-*pid*
-  heuristic, not positive liveness. The registry's mutation sidecar
+  (a timeout never means "empty"). LIVE/UNKNOWN/UNTRUSTED registry
+  evidence refuses unconditionally, each with its own remediation
+  (#1942: an untrusted probe path names itself and asks to be removed
+  or repaired — "retry" cannot fix a link); ``--force``'s contract
+  covers the stale-*pid* heuristic, not positive liveness. The registry's mutation sidecar
   (``instances.registry.lock``) is retained infrastructure: never
   inventoried or deleted (unlinking a lock file re-opens the waiter
   race); it lives in the volatile runtime dir, which self-cleans.
@@ -509,6 +511,26 @@ def _refuse_untrusted_registry(untrusted_path: Path | None) -> None:
     )
 
 
+def _refuse_unknown_registry() -> None:
+    """Refusal lines for a probe that could not complete (transient).
+
+    "Retry in a moment" is the correct remediation here and only here —
+    both refusal gates share this wording so the transient and the
+    persistent (:func:`_refuse_untrusted_registry`) causes cannot drift
+    into each other's advice (#1942).
+    """
+    click.secho(
+        "Could not determine whether a memtomem-server instance is "
+        "still running (instance-registry probe did not complete). "
+        "Refusing to delete state.",
+        fg="red",
+    )
+    click.secho(
+        "  Retry in a moment. --force does not override this check.",
+        fg="red",
+    )
+
+
 def _print_group(group: _Group) -> None:
     if not group.paths:
         return
@@ -912,7 +934,16 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     # (#1935 — they must be inventoried and offered for deletion); the
     # retained registry sidecar alone does not, so a post-uninstall rerun
     # with only ``instances.registry.lock`` remaining still lands here.
-    if not state_dir.exists() and not db_path.exists() and not _registry_has_sentinels():
+    # Gated on a clean probe: with an UNKNOWN/UNTRUSTED registry,
+    # ``_registry_has_sentinels`` answers False because it cannot *see*
+    # the registry, not because the registry is empty — "No state" would
+    # silently bypass the refusal (and its remediation) below (#1942).
+    if (
+        registry_state.state == "NONE"
+        and not state_dir.exists()
+        and not db_path.exists()
+        and not _registry_has_sentinels()
+    ):
         click.echo("No memtomem state to remove (~/.memtomem/ does not exist).")
         label, lines = _binary_uninstall_hint(profile)
         _print_binary_hint(label, lines)
@@ -958,16 +989,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         elif registry_state.state == "UNTRUSTED":
             _refuse_untrusted_registry(registry_state.untrusted_path)
         else:
-            click.secho(
-                "Could not determine whether a memtomem-server instance is "
-                "still running (instance-registry probe did not complete). "
-                "Refusing to delete state.",
-                fg="red",
-            )
-            click.secho(
-                "  Retry in a moment. --force does not override this check.",
-                fg="red",
-            )
+            _refuse_unknown_registry()
         sys.exit(2)
 
     # Windows can't unlink files held by an open handle (WinError 32), so
@@ -1123,7 +1145,13 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             click.echo("")
             _refuse_untrusted_registry(registry_state.untrusted_path)
             sys.exit(2)
-        if registry_state.state != "NONE" or heuristics_block:
+        if registry_state.state == "UNKNOWN":
+            # Transient here too: "a process became active" would claim
+            # evidence the probe does not have — keep the retry advice.
+            click.echo("")
+            _refuse_unknown_registry()
+            sys.exit(2)
+        if registry_state.state == "LIVE" or heuristics_block:
             click.echo("")
             click.secho(
                 "A memtomem process became active while uninstall was waiting for "

@@ -199,6 +199,19 @@ class _MutationLockTimeout(Exception):
     """Bounded registry-lock acquisition expired."""
 
 
+class _RuntimeDirRefused(Exception):
+    """``ensure_runtime_dir`` refused the runtime dir itself (#1940).
+
+    Raised only from :func:`_mutation_lock`'s translation of that one
+    call — a symlinked/junctioned runtime dir, wrong owner, or unsafe
+    mode. Kept distinct from every other failure inside the lock so the
+    uninstall probe can attribute UNTRUSTED to the runtime dir without
+    guessing: an arbitrary ``PermissionError`` (sidecar open, an entry's
+    unlock/close) does not prove the runtime dir is at fault and must
+    stay UNKNOWN (#1942).
+    """
+
+
 # ── module state ─────────────────────────────────────────────────────────
 # ``_state_guard`` covers the procid, the active dict, and atexit
 # installation — pure in-memory work, never held across file I/O.
@@ -241,7 +254,10 @@ def _mutation_lock(deadline: float):
         raise _MutationLockTimeout
     fp: IO[bytes] | None = None
     try:
-        ensure_runtime_dir()
+        try:
+            ensure_runtime_dir()
+        except PermissionError as exc:
+            raise _RuntimeDirRefused(str(exc)) from exc
         # ``a+b`` — portalocker's Windows backend needs a writable handle
         # (``msvcrt.locking`` rejects read-only ones), and ``w`` would
         # truncate; see ``cli/_liveness.py``. Don't simplify.
@@ -739,14 +755,14 @@ def probe_all_for_uninstall() -> UninstallProbeResult:
             return UninstallProbeResult("NONE")
     except _MutationLockTimeout:
         return UninstallProbeResult("UNKNOWN")
-    except PermissionError:
-        # ``ensure_runtime_dir`` (inside ``_mutation_lock``) refused the
-        # runtime dir itself — symlink, junction, wrong owner, unsafe
-        # mode (#1940). Persistent until the user removes/repairs it, so
-        # it must not collapse into UNKNOWN's "retry" advice. Everything
-        # inside the with-body traps its own OSErrors, so a
-        # PermissionError escaping to here is the runtime-dir anchor
-        # (or its sidecar, which that same removal fixes).
+    except _RuntimeDirRefused:
+        # ``ensure_runtime_dir`` refused the runtime dir itself —
+        # symlink, junction, wrong owner, unsafe mode (#1940).
+        # Persistent until the user removes/repairs it, so it must not
+        # collapse into UNKNOWN's "retry" advice. Only this translated
+        # signal is attributed: any other error inside the lock (sidecar
+        # open, an entry's unlock/close) proves nothing about the
+        # runtime dir and stays UNKNOWN below.
         logger.debug("uninstall registry probe refused runtime dir", exc_info=True)
         return UninstallProbeResult("UNTRUSTED", untrusted_path=runtime_dir())
     except Exception:

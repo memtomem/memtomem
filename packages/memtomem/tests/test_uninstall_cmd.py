@@ -1403,7 +1403,8 @@ def _seed_sentinel(reg, *, aged: bool = False) -> Path:
 
 
 class TestInstanceRegistryGateRefuses:
-    """LIVE/UNKNOWN registry evidence refuses unconditionally (#1935).
+    """LIVE/UNKNOWN/UNTRUSTED registry evidence refuses unconditionally
+    (#1935, #1942).
 
     This closes the two probes' blind spot: a *secondary* server owns no
     ``server.pid``, and an *idle* server holds no SQLite write lock, so
@@ -1467,6 +1468,45 @@ class TestInstanceRegistryGateRefuses:
         assert "Remove or repair" not in result.output
         assert "--force does not override" in result.output
         assert (state / "memtomem.db").exists()
+
+    def test_no_state_with_untrusted_registry_still_refuses(self, home, registry_at_runtime_dir):
+        """The empty-state fast path must not outrun the registry gate:
+        an untrusted registry makes ``_registry_has_sentinels`` answer
+        False because it cannot *see* the registry — "No state" + exit 0
+        would silently bypass the refusal and its remediation (#1942)."""
+        reg = registry_at_runtime_dir
+        reg.ensure_runtime_dir()
+        try:
+            reg.instances_dir().symlink_to(home / "nowhere")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert "No memtomem state to remove" not in result.output
+        assert str(reg.instances_dir()) in result.output, "refusal must name the path"
+        assert "Remove or repair" in result.output
+
+    def test_no_state_with_unknown_registry_still_refuses(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """Same fast-path gate for the transient cause: refuse with the
+        retry advice instead of claiming there is nothing to remove."""
+        from memtomem._instance_registry import UninstallProbeResult
+        from memtomem.cli import uninstall_cmd
+
+        monkeypatch.setattr(
+            uninstall_cmd,
+            "_probe_registry_liveness",
+            lambda: UninstallProbeResult("UNKNOWN"),
+        )
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert "No memtomem state to remove" not in result.output
+        assert "Retry in a moment" in result.output
 
     def test_force_still_overrides_pid_heuristic_when_registry_empty(
         self, home, registry_at_runtime_dir
@@ -1722,6 +1762,31 @@ class TestDestructiveBoundaryReprobe:
         assert result.exit_code == 2
         assert str(reg.instances_dir()) in result.output, "refusal must name the path"
         assert "Remove or repair" in result.output
+        assert "became active" not in result.output
+        assert (state / "memtomem.db").exists()
+
+    def test_registry_turning_unknown_at_boundary_keeps_retry_advice(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """A transient probe failure at the boundary is not evidence
+        that "a process became active" — the refusal must keep the
+        retry remediation, mirroring the first gate (#1942)."""
+        from memtomem._instance_registry import UninstallProbeResult
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        calls: list[int] = []
+
+        def flapping_probe():
+            calls.append(1)
+            return UninstallProbeResult("NONE" if len(calls) == 1 else "UNKNOWN")
+
+        monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert "Retry in a moment" in result.output
         assert "became active" not in result.output
         assert (state / "memtomem.db").exists()
 
@@ -2104,7 +2169,9 @@ class TestLifecycleBarrierRefusesUninstall:
         holder.start()
         try:
             assert q.get(timeout=30)[0] == "held"
-            assert reg.probe_all_for_uninstall() == "NONE", "no sentinel — registry sees nothing"
+            assert reg.probe_all_for_uninstall().state == "NONE", (
+                "no sentinel — registry sees nothing"
+            )
 
             result = CliRunner().invoke(cli, ["uninstall", "-y"])
 
@@ -2233,6 +2300,7 @@ class TestUninstallAlwaysReleasesTheBarrier:
     def test_released_after_late_refusal(self, home, registry_at_runtime_dir, monkeypatch):
         """The boundary re-probe exits with ``SystemExit`` from inside the
         held region — the ``finally`` must still run."""
+        from memtomem._instance_registry import UninstallProbeResult
         from memtomem.cli import uninstall_cmd
 
         reg = registry_at_runtime_dir
@@ -2241,7 +2309,7 @@ class TestUninstallAlwaysReleasesTheBarrier:
 
         def flapping_probe():
             calls.append(1)
-            return "NONE" if len(calls) == 1 else "LIVE"
+            return UninstallProbeResult("NONE" if len(calls) == 1 else "LIVE")
 
         monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
 

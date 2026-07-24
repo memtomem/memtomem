@@ -417,6 +417,37 @@ class TestUninstallProbeInProcess:
         assert verdict.state == "UNTRUSTED"
         assert verdict.untrusted_path == rt
 
+    def test_sidecar_failure_is_unknown_not_untrusted(self, rt, monkeypatch):
+        """A ``PermissionError`` from the sidecar layer proves nothing
+        about the runtime dir — attributing it there would tell the user
+        to remove a directory that may be fine. Only the translated
+        ``ensure_runtime_dir`` refusal maps to UNTRUSTED (#1942)."""
+
+        def _bad_sidecar() -> Path:
+            raise PermissionError("sidecar open denied")
+
+        monkeypatch.setattr(reg, "registry_sidecar_path", _bad_sidecar)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNKNOWN"
+        assert verdict.untrusted_path is None
+
+    def test_entry_unlock_failure_is_unknown_not_untrusted(self, rt, monkeypatch):
+        """``portalocker.unlock`` / ``close`` on a sentinel are the one
+        unguarded spot inside the probe loop — an escaping
+        ``PermissionError`` there must read as UNKNOWN, never as an
+        untrusted runtime dir (#1942)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"12345-1-{'f' * 16}-aaaaaaaa-bbbbbbbb.lock").touch()
+
+        def _bad_unlock(_fp):
+            raise PermissionError("unlock denied")
+
+        monkeypatch.setattr(reg.portalocker, "unlock", _bad_unlock)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNKNOWN"
+        assert verdict.untrusted_path is None
+
 
 # ------------------------------------------------------------ cross-process
 
