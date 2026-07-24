@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import asyncio
 import inspect
 import logging
 
@@ -28,19 +29,51 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-async def _close_resource(resource: object | None, label: str) -> None:
-    """Best-effort close used by both startup rollback and normal shutdown."""
+async def _close_resource(
+    resource: object | None, label: str
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """Best-effort close used by both startup rollback and normal shutdown.
+
+    Returns ``(closed, cancelled)``: ``closed`` is ``True`` only when the
+    close completed without error — callers that gate follow-up work on a
+    *confirmed* close (the instance-registry release must not advertise a
+    closed store while the sqlite handle may still be open, #1935) branch
+    on it. ``cancelled`` carries a :class:`asyncio.CancelledError` caught
+    mid-close so teardown orchestrators can defer and re-raise it after
+    settlement instead of silently swallowing it (the pre-#1935 behavior
+    of the bare ``except BaseException``).
+    """
     if resource is None:
-        return
+        return True, None
     close = getattr(resource, "close", None)
     if not callable(close):
-        return
+        return True, None
     try:
         result = close()
         if inspect.isawaitable(result):
             await result
+        return True, None
+    except asyncio.CancelledError as exc:
+        _log.warning("Cancelled while closing %s", label)
+        return False, exc
     except BaseException:
         _log.warning("Failed to close %s", label, exc_info=True)
+        return False, None
+
+
+@dataclass(frozen=True)
+class TeardownResult:
+    """Outcome of :func:`close_components`.
+
+    ``storage_closed`` is the load-bearing bit: only a confirmed storage
+    close permits releasing the instance-registry sentinel (a failed or
+    cancelled storage close retains it — a possibly-open store must stay
+    advertised). ``cancelled`` is the first cancellation caught across
+    the close sequence, deferred to the caller.
+    """
+
+    storage_closed: bool
+    cancelled: asyncio.CancelledError | None = None
 
 
 @dataclass
@@ -227,9 +260,18 @@ async def create_components(
         raise
 
 
-async def close_components(comp: Components) -> None:
+async def close_components(comp: Components) -> TeardownResult:
     """Shut down every component even when an earlier close fails."""
-    await _close_resource(comp.search_pipeline, "search pipeline")
-    await _close_resource(comp.llm, "LLM provider")
-    await _close_resource(comp.embedder, "embedder")
-    await _close_resource(comp.storage, "storage")
+    first_cancel: asyncio.CancelledError | None = None
+    for resource, label in (
+        (comp.search_pipeline, "search pipeline"),
+        (comp.llm, "LLM provider"),
+        (comp.embedder, "embedder"),
+    ):
+        _, cancelled = await _close_resource(resource, label)
+        if first_cancel is None:
+            first_cancel = cancelled
+    storage_closed, cancelled = await _close_resource(comp.storage, "storage")
+    if first_cancel is None:
+        first_cancel = cancelled
+    return TeardownResult(storage_closed=storage_closed, cancelled=first_cancel)

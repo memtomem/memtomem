@@ -18,6 +18,17 @@ Design notes:
   file under WAL mode risks corruption. ``--force`` overrides. The
   write-lock probe uses ``BEGIN IMMEDIATE`` to catch writers the pid
   file doesn't know about (see ``_check_db_lock``).
+* Exception to the ``--force`` override (#1935): the instance registry
+  (``instances/`` under the runtime dir). A held sentinel is *positive*
+  evidence of a live server — a secondary owns no ``server.pid``, and an
+  idle server holds no SQLite write lock, so the two probes above can
+  both miss it — and an inconclusive registry probe is fail-closed
+  (a timeout never means "empty"). LIVE/UNKNOWN registry evidence refuses
+  unconditionally; ``--force``'s contract covers the stale-*pid*
+  heuristic, not positive liveness. The registry's mutation sidecar
+  (``instances.registry.lock``) is retained infrastructure: never
+  inventoried or deleted (unlinking a lock file re-opens the waiter
+  race); it lives in the volatile runtime dir, which self-cleans.
 * If config.json is corrupted we fall back to defaults rather than
   aborting — uninstall is itself a recovery path, so it cannot depend on
   a valid config.
@@ -29,6 +40,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -37,6 +49,10 @@ from typing import Iterable
 
 import click
 
+from memtomem._instance_registry import instances_dir as _instances_dir
+from memtomem._instance_registry import (
+    probe_all_for_uninstall as _probe_registry_liveness,
+)
 from memtomem._runtime_paths import runtime_dir, server_pid_path
 from memtomem.cli._db_lock import DbLockState as _DbLockState  # noqa: F401  (test seam)
 from memtomem.cli._db_lock import check_db_lock as _check_db_lock
@@ -51,6 +67,40 @@ _DB_SIBLING_SUFFIXES = ("", "-wal", "-shm", "-journal")
 # their contents are wiped (otherwise the state dir's empty-prune check
 # at the end fails and we leave behind dead skeleton dirs).
 _OWNED_SUBDIRS = ("config.d", "memories", "uploads")
+
+
+def _real_registry_dir() -> Path | None:
+    """The sentinel directory iff it is an actual directory.
+
+    ``lstat`` semantics — a symlinked ``instances/`` is treated as
+    absent here so the inventory and the prune below can never traverse
+    or stage through it into unrelated files (the fail-closed refusal
+    for that case comes from ``probe_all_for_uninstall`` returning
+    ``UNKNOWN``; this guard keeps the *listing* side inert too).
+    """
+    d = _instances_dir()
+    try:
+        st = os.stat(d, follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return d
+
+
+def _registry_has_sentinels() -> bool:
+    """True when the instance-registry sentinel directory has any entries.
+
+    Sidecar-only leftovers return ``False`` (the sidecar lives outside
+    the directory and is retained infrastructure, #1935).
+    """
+    d = _real_registry_dir()
+    if d is None:
+        return False
+    try:
+        return any(d.iterdir())
+    except OSError:
+        return False
 
 
 def _isatty() -> bool:
@@ -212,6 +262,17 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     runtime_pid = server_pid_path()
     if runtime_pid.exists():
         other.append(runtime_pid)
+    # #1935: instance-registry sentinels are transient runtime files like
+    # the pid files above; the refusal gate guarantees none of them is
+    # live by the time staging runs. The mutation sidecar
+    # (``instances.registry.lock``, *outside* this directory) is
+    # deliberately absent — retained infrastructure, see module docstring.
+    reg_dir = _real_registry_dir()
+    if reg_dir is not None:
+        try:
+            other.extend(sorted(p for p in reg_dir.iterdir() if p.is_file()))
+        except OSError:
+            pass
 
     return _Inventory(
         state_dir=state_dir,
@@ -701,6 +762,17 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
         except OSError:
             pass
 
+    # #1935: prune the sentinel directory once its contents are staged
+    # away. The runtime-dir prune below then usually still finds the
+    # retained ``instances.registry.lock`` sidecar and no-ops — expected;
+    # the runtime dir is volatile and self-cleans.
+    reg_dir = _real_registry_dir()
+    if reg_dir is not None and not any(reg_dir.iterdir()):
+        try:
+            reg_dir.rmdir()
+        except OSError:
+            pass
+
     rt = runtime_dir()
     if rt.exists() and rt.is_dir() and not any(rt.iterdir()):
         try:
@@ -720,7 +792,9 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
 @click.option(
     "--force",
     is_flag=True,
-    help="Bypass the running-server safety check (use only if you know the pid is stale).",
+    help="Bypass the stale-pid/db-lock safety heuristics (use only if you know "
+    "the pid is stale). Does NOT override instance-registry evidence of a "
+    "live server — that check is positive liveness, not a heuristic.",
 )
 @click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt.")
 def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> None:
@@ -734,9 +808,13 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
 
     server = _check_server_liveness()
     db_lock = _check_db_lock(db_path)
+    registry_state = _probe_registry_liveness()
 
-    # Empty-state fast path.
-    if not state_dir.exists() and not db_path.exists():
+    # Empty-state fast path. Leftover registry *sentinels* count as state
+    # (#1935 — they must be inventoried and offered for deletion); the
+    # retained registry sidecar alone does not, so a post-uninstall rerun
+    # with only ``instances.registry.lock`` remaining still lands here.
+    if not state_dir.exists() and not db_path.exists() and not _registry_has_sentinels():
         click.echo("No memtomem state to remove (~/.memtomem/ does not exist).")
         label, lines = _binary_uninstall_hint(profile)
         _print_binary_hint(label, lines)
@@ -754,6 +832,41 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     _print_binary_hint(label, lines)
 
     is_windows = sys.platform == "win32"
+
+    # #1935: registry evidence is not operator-overridable — this block
+    # runs before any ``--force`` handling on every platform. A held
+    # sentinel is positive evidence of a live server even when it owns
+    # neither ``server.pid`` (a secondary) nor a SQLite write lock (an
+    # idle server); UNKNOWN (probe timeout / unreadable entry) is
+    # fail-closed — a timeout never means "empty". No ``--force`` hint is
+    # printed here: advertising an override that does not apply would be
+    # false remediation.
+    if registry_state != "NONE":
+        click.echo("")
+        if registry_state == "LIVE":
+            click.secho(
+                "A live memtomem-server instance is registered for this user. "
+                "Refusing to delete state — an active server holds the store "
+                "open and deleting it risks corruption.",
+                fg="red",
+            )
+            click.secho(
+                "  Stop every memtomem-server (close editor sessions using "
+                "memtomem) and retry. --force does not override this check.",
+                fg="red",
+            )
+        else:
+            click.secho(
+                "Could not determine whether a memtomem-server instance is "
+                "still running (instance-registry probe did not complete). "
+                "Refusing to delete state.",
+                fg="red",
+            )
+            click.secho(
+                "  Retry in a moment. --force does not override this check.",
+                fg="red",
+            )
+        sys.exit(2)
 
     # Windows can't unlink files held by an open handle (WinError 32), so
     # `--force` cannot override a live writer — pretending it does would
@@ -861,6 +974,27 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         if not click.confirm("\nProceed with state deletion?", default=False):
             click.echo("Cancelled — no files were touched.")
             sys.exit(1)
+
+    # #1935: liveness was sampled before the inventory print and — in the
+    # interactive flow — a confirmation prompt the user can sit on for
+    # minutes. Re-run every probe at the destructive boundary so a server
+    # that started (or registered) meanwhile is refused instead of having
+    # its live state staged. ``--force`` keeps exactly the authority it
+    # had above: the POSIX stale-pid/db-lock heuristics, never registry
+    # evidence and never Windows open-handle reality.
+    server = _check_server_liveness()
+    db_lock = _check_db_lock(db_path)
+    registry_state = _probe_registry_liveness()
+    heuristics_block = (server.alive or db_lock.locked) and (not force or is_windows)
+    if registry_state != "NONE" or heuristics_block:
+        click.echo("")
+        click.secho(
+            "A memtomem process became active while uninstall was waiting for "
+            "confirmation. Refusing to delete state — stop it and re-run "
+            "mm uninstall.",
+            fg="red",
+        )
+        sys.exit(2)
 
     try:
         summary = _delete_inventory(inv, keep_config=keep_config, keep_data=keep_data)

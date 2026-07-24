@@ -13,6 +13,7 @@ import errno
 import json
 import os
 import sqlite3
+import time
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -1161,3 +1162,309 @@ class TestTransactionalStaging:
 # POSIX-only imports — fcntl, pwd, grp, termios, resource. The earlier
 # regex covered only ``cli/uninstall_cmd.py``, which is exactly why
 # PR #623's regression in ``context/_atomic.py`` slipped past it.
+
+
+# ------------------------------------------------------------------- #1935
+
+
+@pytest.fixture
+def registry_at_runtime_dir(home, monkeypatch):
+    """Anchor the instance registry at the *same* runtime dir uninstall
+    stages against.
+
+    The conftest ``_isolated_instance_registry`` default points the
+    registry at its own tmp dir, which is outside every staging anchor —
+    correct for hermeticity, wrong for these tests, which exercise the
+    production layout where ``instances/`` lives under
+    ``_runtime_paths.runtime_dir()`` (here: the ``home`` fixture's
+    isolated ``$XDG_RUNTIME_DIR``).
+    """
+    import memtomem._instance_registry as reg
+    from memtomem._runtime_paths import ensure_runtime_dir, runtime_dir
+
+    monkeypatch.setattr(reg, "runtime_dir", runtime_dir)
+    monkeypatch.setattr(reg, "ensure_runtime_dir", ensure_runtime_dir)
+    return reg
+
+
+def _seed_sentinel(reg, *, aged: bool = False) -> Path:
+    """Create one parseable sentinel file (unlocked unless the caller
+    locks it) in the registry's sentinel dir."""
+    reg.ensure_runtime_dir()  # 0o700 — a bare mkdir(parents=True) would
+    # create the runtime dir 0o755 and trip the safety validator later
+    d = reg.instances_dir()
+    d.mkdir(mode=0o700, exist_ok=True)
+    entry = d / f"12345-1-{'d' * 16}-aaaaaaaa-bbbbbbbb.lock"
+    entry.write_bytes(b"")
+    if aged:
+        old = time.time() - reg._STALE_GRACE_S - 10
+        os.utime(entry, (old, old))
+    return entry
+
+
+class TestInstanceRegistryGateRefuses:
+    """LIVE/UNKNOWN registry evidence refuses unconditionally (#1935).
+
+    This closes the two probes' blind spot: a *secondary* server owns no
+    ``server.pid``, and an *idle* server holds no SQLite write lock, so
+    only the sentinel flock proves it is alive.
+    """
+
+    def test_live_sentinel_refuses(self, home, registry_at_runtime_dir):
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        with _hold_pid_lock(entry):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2
+        assert "live memtomem-server instance is registered" in result.output
+        assert (state / "memtomem.db").exists()
+        assert entry.exists()
+
+    def test_live_sentinel_refuses_despite_force(self, home, registry_at_runtime_dir):
+        """--force covers the stale-pid heuristic, not positive liveness —
+        and the refusal must not advertise an override that doesn't apply."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        with _hold_pid_lock(entry):
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+        assert result.exit_code == 2
+        assert "--force does not override" in result.output
+        assert "pass --force" not in result.output
+        assert (state / "memtomem.db").exists()
+
+    def test_live_sentinel_refuses_despite_force_keep_data(self, home, registry_at_runtime_dir):
+        """The round-8 gate case: ``--force --keep-data`` preserves the DB
+        but would stage the live sentinel — must refuse before staging."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        with _hold_pid_lock(entry):
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force", "--keep-data"])
+        assert result.exit_code == 2
+        assert entry.exists(), "a live sentinel must never be staged"
+        assert (state / "memtomem.db").exists()
+
+    def test_sidecar_timeout_is_unknown_and_refuses(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """Fail-closed: a probe that cannot complete never means 'empty'."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        _seed_sentinel(reg)
+        monkeypatch.setattr(reg, "_LOCK_TIMEOUT_S", 0.2)
+        reg.ensure_runtime_dir()
+        sidecar = reg.registry_sidecar_path()
+        sidecar.write_bytes(b"")
+        with _hold_pid_lock(sidecar):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert "--force does not override" in result.output
+        assert (state / "memtomem.db").exists()
+
+    def test_force_still_overrides_pid_heuristic_when_registry_empty(
+        self, home, registry_at_runtime_dir
+    ):
+        """The pre-existing ``--force`` contract survives: with no registry
+        evidence, a held ``server.pid`` is still overridable (POSIX)."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX --force contract; Windows mirror exists elsewhere")
+        state = _seed_state(home)
+        pid_file = state / ".server.pid"
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        with _hold_pid_lock(pid_file):
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+        assert result.exit_code == 0, result.output
+        assert not state.exists()
+
+
+class TestInstanceRegistryInventory:
+    """Stale sentinels are ordinary transient state: inventoried, staged,
+    deleted; the sidecar is retained infrastructure."""
+
+    def test_stale_sentinels_deleted_and_dir_pruned(self, home, registry_at_runtime_dir):
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+        entry = _seed_sentinel(reg, aged=True)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert not entry.exists()
+        assert not reg.instances_dir().exists(), "emptied sentinel dir must be pruned"
+
+    def test_registry_only_leftover_is_offered_not_no_state(self, home, registry_at_runtime_dir):
+        """A crashed server's leftover sentinel with no other state must
+        not hit the 'No state' fast path — it is real removable state."""
+        reg = registry_at_runtime_dir
+        entry = _seed_sentinel(reg, aged=True)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "No memtomem state to remove" not in result.output
+        assert not entry.exists()
+
+    def test_sidecar_only_state_hits_no_state_fast_path(self, home, registry_at_runtime_dir):
+        """Second-uninstall scenario: only the retained sidecar remains —
+        it is infrastructure, not state, so the fast path still fires and
+        the sidecar survives."""
+        reg = registry_at_runtime_dir
+        reg.ensure_runtime_dir()
+        sidecar = reg.registry_sidecar_path()
+        sidecar.write_bytes(b"")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "No memtomem state to remove" in result.output
+        assert sidecar.exists()
+
+    def test_sidecar_never_inventoried_with_real_state(self, home, registry_at_runtime_dir):
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+        reg.ensure_runtime_dir()
+        sidecar = reg.registry_sidecar_path()
+        sidecar.write_bytes(b"")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert sidecar.exists(), "the mutation sidecar must never be deleted"
+        assert "instances.registry.lock" not in result.output
+
+
+class TestInstanceRegistrySymlinkGuard:
+    """A symlinked ``instances/`` must never be trusted or staged through
+    (#1935 review): the fail-closed probe reports UNKNOWN → refusal, and
+    the inventory/prune side never lists across the link."""
+
+    def test_symlinked_instances_dir_refuses_and_touches_nothing(
+        self, home, registry_at_runtime_dir, tmp_path
+    ):
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        victim_dir = tmp_path / "victim"
+        victim_dir.mkdir()
+        victim = victim_dir / "precious.txt"
+        victim.write_text("do not touch", encoding="utf-8")
+        reg.ensure_runtime_dir()
+        try:
+            reg.instances_dir().symlink_to(victim_dir)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert "did not complete" in result.output
+        assert victim.read_text(encoding="utf-8") == "do not touch"
+        assert "precious" not in result.output, "inventory must not list across the link"
+        assert (state / "memtomem.db").exists()
+
+
+class TestDestructiveBoundaryReprobe:
+    """#1935 review round 2: liveness is re-sampled after confirmation,
+    at the destructive boundary — a server that registers while the user
+    sits on the prompt must refuse, not have its live state staged."""
+
+    def test_registry_going_live_between_probe_and_delete_refuses(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        calls: list[int] = []
+
+        def flapping_probe():
+            calls.append(1)
+            return "NONE" if len(calls) == 1 else "LIVE"
+
+        monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert len(calls) == 2, "the probe must run again at the destructive boundary"
+        assert "became active while uninstall was waiting" in result.output
+        assert (state / "memtomem.db").exists()
+        assert (state / "config.json").exists()
+
+    def test_server_going_live_between_probe_and_delete_refuses(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        calls: list[int] = []
+
+        def flapping_liveness():
+            calls.append(1)
+            if len(calls) == 1:
+                return ServerState(alive=False, pid=None, pid_file=None)
+            return ServerState(alive=True, pid=4242, pid_file=state / ".server.pid")
+
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", flapping_liveness)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert len(calls) == 2
+        assert (state / "memtomem.db").exists()
+
+    def test_reprobe_keeps_posix_force_authority_over_pid_heuristic(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """--force retains exactly its prior authority at the boundary:
+        the POSIX pid/db-lock heuristics stay overridable there too."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX --force contract")
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        monkeypatch.setattr(
+            uninstall_cmd,
+            "_check_server_liveness",
+            lambda: ServerState(alive=True, pid=4242, pid_file=state / ".server.pid"),
+        )
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 0, result.output
+        assert not state.exists()
+
+
+class TestRegistrationSymlinkGuard:
+    def test_registration_refuses_symlinked_instances_dir(
+        self, home, registry_at_runtime_dir, tmp_path
+    ):
+        reg = registry_at_runtime_dir
+        victim_dir = tmp_path / "victim-target"
+        victim_dir.mkdir()
+        reg.ensure_runtime_dir()
+        try:
+            reg.instances_dir().symlink_to(victim_dir)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        db = tmp_path / "s.db"
+        db.write_bytes(b"x")
+        assert reg.register_instance(db) is None
+        assert list(victim_dir.iterdir()) == [], "no sentinel may land in the link target"
+
+    def test_db_lock_going_live_between_probe_and_delete_refuses(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._db_lock import DbLockState
+
+        state = _seed_state(home)
+        calls: list[int] = []
+
+        def flapping_db_lock(_path):
+            calls.append(1)
+            return DbLockState(locked=len(calls) > 1, probe_error=None)
+
+        monkeypatch.setattr(uninstall_cmd, "_check_db_lock", flapping_db_lock)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert len(calls) == 2
+        assert (state / "memtomem.db").exists()
+        assert (state / "config.json").exists()

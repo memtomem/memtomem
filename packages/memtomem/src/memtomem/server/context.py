@@ -16,6 +16,7 @@ from memtomem.config import Mem2MemConfig
 from memtomem.constants import validate_namespace
 
 if TYPE_CHECKING:
+    from memtomem._instance_registry import RegisteredInstance
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.indexing.engine import IndexEngine
     from memtomem.indexing.watcher import FileWatcher
@@ -96,6 +97,13 @@ class AppContext:
 
     config: Mem2MemConfig
     webhook_manager: object | None = None
+    # Server-only opt-in for the instance registry (#1935): only the MCP
+    # lifespan sets this. It deliberately lives here — NOT inside the
+    # shared ``create_components`` factory — because CLI commands,
+    # ``mm web``, the LangGraph integration, and quality experiments all
+    # build components through that factory and must never register as
+    # server instances.
+    register_server_instance: bool = False
     # Backing field for the ``current_namespace`` property below. Kept off
     # ``__init__`` so callers go through the setter (which validates) and
     # cannot smuggle a hostile shape via ``AppContext(current_namespace=
@@ -132,6 +140,9 @@ class AppContext:
     # so ``close()`` can cancel an in-flight warmup *before* components
     # shut down under it. ``from_components`` contexts leave it ``None``.
     _warmup_task: asyncio.Task | None = field(default=None, init=False, repr=False)
+    # Held instance-registry sentinel (#1935); populated only when
+    # ``register_server_instance`` is set and storage init succeeded.
+    _instance_registration: RegisteredInstance | None = field(default=None, init=False, repr=False)
     # per-session, scoped to AppContext lifetime. Gate to emit a dim-mismatch
     # hint only once per MCP session so repeated mem_add / mem_search calls
     # do not spam the same notice. Writes go through ``_config_lock``.
@@ -444,6 +455,14 @@ class AppContext:
             policy_scheduler: object | None = None
             watchdog: object | None = None
             try:
+                # #1935: advertise this server in the instance registry once
+                # storage is provably open (the DB file exists and this is
+                # the finalized config). Registration itself never raises;
+                # settlement re-raises a caught cancellation so the rollback
+                # below runs with the published sentinel recoverable.
+                if self.register_server_instance:
+                    await self._acquire_instance_registration(comp)
+
                 dedup = DedupScanner(storage=comp.storage, embedder=comp.embedder)
 
                 # Skip background loops in degraded mode (issue #349) — the
@@ -496,11 +515,26 @@ class AppContext:
                         self.config.scheduler.default_timezone,
                     )
             except BaseException:
-                await _stop_quietly(watchdog, "health_watchdog")
-                await _stop_quietly(policy_scheduler, "policy_scheduler")
-                await _stop_quietly(scheduler, "scheduler")
-                await _stop_quietly(watcher, "watcher")
-                await close_components(comp)
+                # Same accumulate-and-defer discipline as ``close()``: a
+                # cancellation arriving during one of these stops must not
+                # skip the component close and sentinel settlement below.
+                # The original exception re-raises regardless (when the
+                # trigger *was* a cancellation, it is that same instance).
+                for resource, stage in (
+                    (watchdog, "health_watchdog"),
+                    (policy_scheduler, "policy_scheduler"),
+                    (scheduler, "scheduler"),
+                    (watcher, "watcher"),
+                ):
+                    try:
+                        await _stop_quietly(resource, stage)
+                    except asyncio.CancelledError:
+                        logger.warning("rollback stop '%s' cancelled — continuing", stage)
+                teardown = await close_components(comp)
+                # Release the sentinel only when storage provably closed —
+                # a failed close leaves a possibly-open store, which must
+                # stay advertised (#1935).
+                await self._release_instance_registration(teardown.storage_closed)
                 self._components = None
                 self._owns_components = False
                 raise
@@ -511,6 +545,54 @@ class AppContext:
             self._policy_scheduler = policy_scheduler
             self._health_watchdog = watchdog
             return comp
+
+    async def _acquire_instance_registration(self, comp: Components) -> None:
+        """Register this server in the instance registry (#1935).
+
+        Offloaded via ``asyncio.to_thread`` (the registry takes a bounded
+        cross-process lock — forbidden directly on the event loop) and
+        settled through :func:`settle_shielded_result`: cancelling the
+        awaiting task cannot abandon a worker that is about to publish a
+        sentinel. A published handle is stored *before* the caught
+        cancellation re-raises, so the rollback path can release it with
+        correct close-before-cleanup ordering.
+        """
+        from memtomem._instance_registry import RegisteredInstance, register_instance
+        from memtomem._settlement import settle_shielded_result
+
+        db_path = Path(comp.config.storage.sqlite_path).expanduser().resolve()
+        future = asyncio.ensure_future(asyncio.to_thread(register_instance, db_path))
+        result, cancelled = await settle_shielded_result(future, what="instance registration")
+        if isinstance(result, RegisteredInstance):
+            self._instance_registration = result
+        if cancelled is not None:
+            raise cancelled
+
+    async def _release_instance_registration(
+        self, storage_closed: bool
+    ) -> asyncio.CancelledError | None:
+        """Release the held sentinel after a *confirmed* storage close.
+
+        ``storage_closed=False`` conservatively retains the registration —
+        a possibly-open store must stay advertised; process-exit flock
+        release remains the backstop. Returns (never raises) the first
+        cancellation caught while releasing so callers can fold it into
+        their own accumulate-and-defer sequencing.
+        """
+        reg = self._instance_registration
+        if reg is None:
+            return None
+        if not storage_closed:
+            logger.warning(
+                "storage close unconfirmed — retaining instance registration %s", reg.path
+            )
+            return None
+        self._instance_registration = None
+        from memtomem._settlement import settle_shielded_result
+
+        future = asyncio.ensure_future(asyncio.to_thread(reg.cleanup))
+        _, cancelled = await settle_shielded_result(future, what="instance-registry cleanup")
+        return cancelled
 
     @classmethod
     def from_components(cls, components: Components) -> AppContext:
@@ -549,29 +631,67 @@ class AppContext:
         Contexts built via :meth:`from_components` never started those
         loops, so the corresponding fields are ``None`` and the stop
         calls are no-ops.
+
+        Cancellation is accumulated and deferred (#1935): a
+        ``CancelledError`` caught at any stage (warmup settle, background
+        loop stops, component close, sentinel release) no longer aborts
+        the remaining stages — teardown always reaches the instance-
+        registry settlement, and the *first* caught cancellation re-raises
+        once state is cleared. Without this, a cancellation during e.g.
+        the watcher stop would skip the component close and leave the
+        sentinel advertising an open store.
         """
         from memtomem.server.component_factory import close_components
 
+        first_cancel: asyncio.CancelledError | None = None
+
         # Cancel an in-flight warmup first so it can't race the component
         # teardown below (loading a model into a closing embedder). The
-        # await also blocks until any in-flight loader *thread* settles —
+        # shielded wait blocks until the loader *thread* settles —
         # ``_warm_one`` waits for its executor future on cancellation,
-        # since a thread can't be interrupted. The task body swallows its
-        # own errors, so awaiting after cancel can only surface the
-        # CancelledError suppressed here.
+        # since a thread can't be interrupted — and survives external
+        # cancellation of ``close()`` itself (deferred, not swallowed).
+        # The task body swallows its own errors, so no result is read.
         if self._warmup_task is not None:
-            self._warmup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._warmup_task
+            task = self._warmup_task
+            task.cancel()
+            while not task.done():
+                try:
+                    await asyncio.shield(asyncio.wait({task}))
+                except asyncio.CancelledError as exc:
+                    if first_cancel is None:
+                        first_cancel = exc
             self._warmup_task = None
 
-        await _stop_quietly(self._health_watchdog, "health_watchdog")
-        await _stop_quietly(self._policy_scheduler, "policy_scheduler")
-        await _stop_quietly(self._scheduler, "scheduler")
-        await _stop_quietly(self._watcher, "watcher")
+        for resource, stage in (
+            (self._health_watchdog, "health_watchdog"),
+            (self._policy_scheduler, "policy_scheduler"),
+            (self._scheduler, "scheduler"),
+            (self._watcher, "watcher"),
+        ):
+            try:
+                await _stop_quietly(resource, stage)
+            except asyncio.CancelledError as exc:
+                if first_cancel is None:
+                    first_cancel = exc
 
+        # Default is UNCONFIRMED: only a teardown that actually ran and
+        # reported success flips this. A bare ``True`` for the
+        # no-components case would let a second ``close()`` — after an
+        # earlier failed storage close already cleared ``_components``
+        # but retained the sentinel — release that sentinel without any
+        # confirmed close. With no held registration the flag is inert
+        # (release no-ops), so unflagged/from_components contexts are
+        # unaffected.
+        storage_closed = False
         if self._components is not None and self._owns_components:
-            await close_components(self._components)
+            teardown = await close_components(self._components)
+            storage_closed = teardown.storage_closed
+            if first_cancel is None:
+                first_cancel = teardown.cancelled
+        cancelled = await self._release_instance_registration(storage_closed)
+        if first_cancel is None:
+            first_cancel = cancelled
         self._components = None
         self._owns_components = False
         self._dedup_scanner = None
@@ -579,6 +699,8 @@ class AppContext:
         self._scheduler = None
         self._policy_scheduler = None
         self._health_watchdog = None
+        if first_cancel is not None:
+            raise first_cancel
 
 
 CtxType = Context[ServerSession, AppContext] | None

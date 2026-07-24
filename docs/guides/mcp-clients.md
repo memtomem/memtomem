@@ -770,6 +770,26 @@ and leaves the primary server's pid file in place. If you need both MCP
 and Web UI access concurrently, see the [Concurrent MCP + Web server]
 section in the reference guide.
 
+When two live server processes have the **same store** open, `mem_status`
+and `mm status` add a warning with `kind: concurrent_server_writers`
+listing both pids. Two readings, both real:
+
+- **Multiple editor sessions are open.** One MCP server per session is
+  normal — several Claude Code windows against one user store will show
+  this warning, and no action is needed.
+- **One client has two memtomem registrations** (e.g. a manual
+  `claude mcp add` entry *and* the plugin — see the client sections
+  above). With a single editor session open, this is the likely cause:
+  keep exactly one registration and restart the client.
+
+The warning may carry an extra `same_parent: true` field when every
+registered server recorded the same parent PID — an observation that the
+processes were launched by one parent, which makes the
+duplicate-registration reading more likely (it is not proof; one editor
+parent can also legitimately spawn several workspace servers). The signal
+covers `memtomem-server` processes that have opened storage; `mm web` and
+ad-hoc sqlite consumers are not registered and stay invisible to it.
+
 [Concurrent MCP + Web server]: reference/operations.md#concurrent-mcp--web-server
 
 ---
@@ -805,6 +825,17 @@ mm embedding-reset                          # check status
 mm embedding-reset --mode apply-current     # reset to current model
 mm index ~/notes                            # re-index
 ```
+
+### Two servers writing the same store
+
+`mm status` (or the `mem_status` tool) shows a `concurrent_server_writers`
+warning. See [One server at a time](#one-server-at-a-time) for the two
+readings. If you have only one editor session open, one client almost
+certainly has two memtomem registrations — for Claude Code, the
+[plugin setup section](integrations/claude-code.md#option-a-install-the-safe-base-plugin)
+walks through resolving a manual + plugin pair; for other clients, check
+each config location listed in that client's section above and keep
+exactly one entry, then restart the client.
 
 ---
 

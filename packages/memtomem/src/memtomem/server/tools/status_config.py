@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import importlib.util
 from importlib.metadata import PackageNotFoundError, version as distribution_version
@@ -12,6 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem import __version__
+from memtomem._instance_registry import (
+    enumerate_live_instances as _enumerate_live_instances,
+    store_digest_for as _store_digest_for,
+)
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
@@ -154,6 +159,59 @@ async def mem_stats(
     return out
 
 
+def _collect_concurrent_writers(db_path: Path) -> dict | None:
+    """Build the ``concurrent_server_writers`` warning, or ``None``.
+
+    Runs in a worker thread (registry probing takes a bounded
+    cross-process lock). Live registrations are grouped by ``procid`` —
+    the per-process random identity — because pid values can collide
+    across pid namespaces while two flagged contexts in one process must
+    still count as one server. The kind is deliberately cause-neutral:
+    two live servers on one store is *also* the documented-legitimate
+    multi-editor-session state ("One server at a time" in
+    ``docs/guides/mcp-clients.md``), so the wording names both readings
+    and the machine fields carry observations only. Values are scalar
+    strings (the generic warning renderer requires it) and contain pids
+    only — no paths, no digests.
+    """
+    digest = _store_digest_for(db_path)
+    if digest is None:
+        return None
+    result = _enumerate_live_instances(digest)
+    if not result.complete:
+        return None
+    groups: dict[str, object] = {}
+    for info in result.instances:
+        groups.setdefault(info.procid, info)
+    if len(groups) < 2:
+        return None
+    ordered = sorted(groups.values(), key=lambda i: (i.pid, i.procid))  # type: ignore[attr-defined]
+    pids = ", ".join(str(i.pid) for i in ordered)  # type: ignore[attr-defined]
+    detail = (
+        f"{len(groups)} live memtomem-server processes (pids {pids}) have this "
+        "store open. Expected when multiple editor sessions are open; with a "
+        "single session it often means one client has two memtomem "
+        "registrations (e.g. manual + plugin)."
+    )
+    warning: dict = {
+        "kind": "concurrent_server_writers",
+        "detail": detail,
+        "fix": "If unintended, keep exactly one memtomem registration in your "
+        "MCP client and restart it — see the coexistence guide.",
+        "doc": "docs/guides/mcp-clients.md#one-server-at-a-time",
+    }
+    # Per-GROUP representatives, matching the grouping semantics above —
+    # a second registration inside one process contributes no extra vote.
+    ppids = {info.ppid for info in ordered}  # type: ignore[attr-defined]
+    if len(ppids) == 1:
+        # Observation, not a verdict: equal recorded parent pids suggest —
+        # but do not prove — one client launched both (pid reuse and
+        # namespaces exist). The cause hypothesis stays in prose above.
+        warning["same_parent"] = "true"
+        warning["detail"] = detail + " All entries recorded the same parent PID."
+    return warning
+
+
 async def collect_status_report(app: AppContext) -> dict:
     """Gather the status report as a structured dict.
 
@@ -236,6 +294,8 @@ async def collect_status_report(app: AppContext) -> dict:
         except Exception:
             logger.debug("dense coverage query failed", exc_info=True)
 
+    db_path_resolved = Path(config.storage.sqlite_path).expanduser().resolve()
+
     warnings: list[dict] = []
     if config.scheduler.enabled and not config.health_watchdog.enabled:
         warnings.append(
@@ -278,10 +338,21 @@ async def collect_status_report(app: AppContext) -> dict:
             }
         )
 
+    # #1935: two live memtomem-server processes with this store open. The
+    # registry probe is filesystem work behind a bounded cross-process
+    # lock, so it runs off the event loop; any failure or incomplete pass
+    # yields no warning (fail-open — this is an advisory, never a guess).
+    try:
+        concurrent = await asyncio.to_thread(_collect_concurrent_writers, db_path_resolved)
+        if concurrent is not None:
+            warnings.append(concurrent)
+    except Exception:
+        logger.debug("concurrent-writer detection failed", exc_info=True)
+
     return {
         "config": {
             "storage_backend": config.storage.backend,
-            "db_path": str(Path(config.storage.sqlite_path).expanduser().resolve()),
+            "db_path": str(db_path_resolved),
             "embedding": embedding,
             "top_k": config.search.default_top_k,
             "rrf_k": config.search.rrf_k,
@@ -448,7 +519,15 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
                 else:
                     text = str(value)
                 prefix = "- " if i == 0 else "  "
-                lines.append(StatusLine("warning_kv", key=prefix + f"{key}:".ljust(12), value=text))
+                # ``ljust`` alone loses the key/value separator once the
+                # key reaches the pad width (``same_parent:`` is exactly
+                # 12 chars — #1935); guarantee at least one space while
+                # keeping shorter keys byte-identical to the historic
+                # layout.
+                padded = f"{key}:".ljust(12)
+                if not padded.endswith(" "):
+                    padded += " "
+                lines.append(StatusLine("warning_kv", key=prefix + padded, value=text))
 
     return lines
 
@@ -481,11 +560,10 @@ async def mem_status(
 
     Configuration drift adds a ``Warnings`` block. Each entry has ``kind``
     (an open enum — tolerate unrecognised values rather than erroring),
-    ``fix`` (the CLI command to run) and an optional ``doc`` link into
-    ``docs/guides/``. Embedding-mismatch entries also carry ``stored`` and
-    ``configured`` sub-blocks echoing DB vs runtime provider/model/dimension.
-    These keys are stable across versions, so probes and dashboards can
-    pattern-match on them.
+    ``fix`` and an optional ``doc`` link. Some kinds add their own keys:
+    embedding mismatches carry ``stored``/``configured``;
+    ``concurrent_server_writers`` may carry ``same_parent``. These keys are
+    stable across versions, so probes can pattern-match on them.
     """
     app = await _get_app_initialized(ctx)
     return await format_status_report(app)

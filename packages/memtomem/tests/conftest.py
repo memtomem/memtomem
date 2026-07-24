@@ -228,6 +228,53 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_instance_registry(
+    tmp_path,
+    _real_home_write_guard: None,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Point the instance registry (#1935) at a per-test directory suite-wide.
+
+    The registry lives under ``_runtime_paths.runtime_dir()`` — the
+    developer's *real* per-user runtime dir on macOS (tempdir-based, no
+    ``XDG_RUNTIME_DIR``). Without isolation, any test that drives
+    ``collect_status_report`` against a real DB file, or a lifespan test
+    that reaches ``ensure_initialized``, would probe (and its stale-GC
+    would *mutate*) the real registry — including a genuinely live
+    server's sentinels on a dev machine. Patching the two path resolvers
+    inside ``_instance_registry`` redirects every consumer (status seam,
+    uninstall probe, registration) because they all share these module
+    globals. Module state (active dict, procid) is swapped per test so a
+    registration leaked by one test can never make ``mm uninstall``
+    tests see a phantom LIVE server. Tests that need the registry
+    anchored elsewhere (uninstall staging) re-patch the same attributes,
+    which overrides this default cleanly.
+    """
+    import memtomem._instance_registry as _reg
+
+    rt = tmp_path / "mm-runtime"
+
+    def _rt():
+        return rt
+
+    def _ensure_rt():
+        rt.mkdir(mode=0o700, exist_ok=True)
+        return rt
+
+    active: dict = {}
+    monkeypatch.setattr(_reg, "runtime_dir", _rt)
+    monkeypatch.setattr(_reg, "ensure_runtime_dir", _ensure_rt)
+    monkeypatch.setattr(_reg, "_active", active)
+    monkeypatch.setattr(_reg, "_procid", None)
+    yield
+    # Release any registration a test made and forgot to clean — leaked
+    # flock handles would otherwise pile up for the pytest process
+    # lifetime and the shared atexit handler would walk a stale dict.
+    for inst in list(active.values()):
+        inst.cleanup()
+
+
+@pytest.fixture(autouse=True)
 def _csrf_observe_only_default(
     _real_home_write_guard: None,
     monkeypatch: pytest.MonkeyPatch,
