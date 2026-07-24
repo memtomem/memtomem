@@ -124,16 +124,34 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     try:
         try:
             portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-        except (portalocker.LockException, BlockingIOError, OSError):
-            # POSIX raises BlockingIOError; portalocker's Windows backend
-            # wraps Win32 errors as LockException. Treat any of them as
-            # "another holder, server is alive."
+        except (portalocker.AlreadyLocked, BlockingIOError):
+            # Genuine contention: another handle holds the lock. Every
+            # portalocker 3.x backend maps a *lock-failed* Win32/POSIX error
+            # to ``AlreadyLocked`` (a ``LockException`` subclass) — POSIX
+            # EACCES/EAGAIN, Windows ``LOCK_FAILED`` — so this is observed
+            # evidence, not an assumption. ``probe_error`` stays None.
+            # ``BlockingIOError`` is kept as a defensive raw-``flock`` signal.
             return ServerState(
                 alive=True,
                 pid=pid,
                 pid_file=pid_file,
                 port=port,
                 started=started,
+            )
+        except (portalocker.LockException, OSError) as exc:
+            # A *non-contention* lock failure (I/O error, ENOLCK, NFS
+            # EOFError, a Windows error outside the lock-failed set) — the
+            # probe could not decide. Fail closed as before, but record why
+            # so uninstall refuses honestly instead of asserting a held
+            # flock it never observed (#1949). Portalocker wraps these as a
+            # bare ``LockException``, distinct from ``AlreadyLocked`` above.
+            return ServerState(
+                alive=True,
+                pid=pid,
+                pid_file=pid_file,
+                port=port,
+                started=started,
+                probe_error=f"{type(exc).__name__}: {exc}",
             )
         portalocker.unlock(fp)
         return ServerState(alive=False, pid=pid, pid_file=pid_file, port=port, started=started)

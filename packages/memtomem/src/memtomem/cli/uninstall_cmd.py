@@ -1048,7 +1048,14 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     staging_roots, completed = _stage_inventory(inv, keep_config=keep_config, keep_data=keep_data)
 
     for root in staging_roots:
-        if not root.exists():
+        # #1949: ``_entry_present`` (no-follow) not ``root.exists()`` — this
+        # runs *after* the atomic stage moved user data into ``root``, so a
+        # py3.12 ``exists()`` that raises (anchor turned unsearchable) would
+        # escape as a traceback with the data hidden in staging and no
+        # summary. A genuinely-absent root (ENOENT) is still skipped; an
+        # unreadable one falls through to ``rmtree``, whose ``OSError`` guard
+        # turns it into the "could not remove staging dir" warning below.
+        if not _entry_present(root):
             continue
         try:
             shutil.rmtree(root)
@@ -1398,10 +1405,18 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             click.echo("")
             _refuse_unknown_registry()
             sys.exit(2)
-        if server.alive and server.probe_error is not None and (not force or is_windows):
+        if (
+            server.alive
+            and server.probe_error is not None
+            and registry_state.state != "LIVE"
+            and (not force or is_windows)
+        ):
             # #1949: a pid path that turned unprobeable while the user sat
             # on the prompt is a persistent fault, not "a process became
-            # active" — name the path, don't claim an observed writer.
+            # active" — name the path, don't claim an observed writer. Guard
+            # on ``!= "LIVE"`` so positive (non-overridable) registry
+            # evidence still wins: otherwise this gate's POSIX ``--force``
+            # hint would advertise an override the LIVE refusal below forbids.
             click.echo("")
             _refuse_unverifiable_liveness(server, is_windows=is_windows)
             sys.exit(2)

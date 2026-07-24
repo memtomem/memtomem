@@ -3139,3 +3139,148 @@ class TestLivenessDbLockProbeHardening:
         result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
         assert result.exit_code == 0, result.output
         assert not state.exists()
+
+
+class TestUnverifiableLivenessBoundaryAndModes:
+    """Follow-up coverage (#1949 review): the destructive-boundary honesty
+    gate, both printer branches, and the probe_pid_file failure-mode split."""
+
+    def test_boundary_reprobe_refuses_when_pid_becomes_unprobeable(self, home, monkeypatch):
+        """Pre-confirmation probe is clean; the boundary reprobe returns
+        alive+probe_error. The *boundary* honesty gate must refuse honestly
+        (the pre-confirmation gate saw a dead server and passed)."""
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        calls = {"n": 0}
+        clean = ServerState(alive=False, pid=None, pid_file=None)
+        broken = ServerState(
+            alive=True,
+            pid=None,
+            pid_file=state / ".server.pid",
+            probe_error="PermissionError: [Errno 13] Permission denied",
+        )
+
+        def _seq():
+            calls["n"] += 1
+            return clean if calls["n"] == 1 else broken
+
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", _seq)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert calls["n"] >= 2, "the destructive-boundary reprobe must run"
+        assert result.exit_code == 2, result.output
+        assert "Cannot verify whether a memtomem server is running" in result.output
+        assert "flock is held by an active writer" not in result.output
+        assert "became active while uninstall was waiting" not in result.output
+        assert (state / "memtomem.db").exists()
+
+    def test_refuse_unverifiable_liveness_printer_branches(self, capsys):
+        """Windows omits the --force remedy it cannot honor (#730); POSIX
+        offers it (this heuristic is force-overridable there)."""
+        from memtomem.cli._liveness import ServerState
+        from memtomem.cli.uninstall_cmd import _refuse_unverifiable_liveness
+
+        fake = ServerState(
+            alive=True,
+            pid=None,
+            pid_file=Path.home() / ".memtomem" / ".server.pid",
+            probe_error="PermissionError: denied",
+        )
+
+        _refuse_unverifiable_liveness(fake, is_windows=True)
+        win = capsys.readouterr().out
+        assert "Cannot verify whether a memtomem server is running" in win
+        assert "--force" not in win
+        assert "Repair or remove that path" in win
+
+        _refuse_unverifiable_liveness(fake, is_windows=False)
+        posix = capsys.readouterr().out
+        assert "--force" in posix
+
+    def test_probe_pid_file_open_failure_fails_closed_with_error(self, home):
+        """A pid *path* that exists but cannot be opened ``rb+`` (here a
+        directory) fails closed with ``probe_error`` set."""
+        from memtomem.cli._liveness import probe_pid_file
+
+        pid_as_dir = home / "pid-as-dir"
+        pid_as_dir.mkdir()
+        state = probe_pid_file(pid_as_dir)
+        assert state.alive is True
+        assert state.probe_error is not None
+
+    def test_probe_pid_file_contention_is_positive_evidence(self, home, monkeypatch):
+        """``AlreadyLocked`` is observed contention → alive with NO
+        probe_error (the honest 'writer holds the lock' path)."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid = home / "pid-contended"
+        pid.write_text("123", encoding="utf-8")
+
+        def _already_locked(*a, **k):
+            raise portalocker.AlreadyLocked("held by another handle")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", _already_locked)
+        state = _liveness.probe_pid_file(pid)
+        assert state.alive is True
+        assert state.probe_error is None, "observed contention must not read as unverifiable"
+
+    def test_probe_pid_file_noncontention_lock_error_fails_closed_honestly(self, home, monkeypatch):
+        """A bare ``LockException`` (I/O error, ENOLCK, NFS EOF, non-lock
+        Win32 error) is NOT contention → alive WITH probe_error, so the
+        refusal names the probe failure instead of asserting a held flock."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid = home / "pid-ioerror"
+        pid.write_text("123", encoding="utf-8")
+
+        def _io_error(*a, **k):
+            raise portalocker.LockException("simulated I/O failure")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", _io_error)
+        state = _liveness.probe_pid_file(pid)
+        assert state.alive is True
+        assert state.probe_error is not None
+        assert "LockException" in state.probe_error
+
+    def test_boundary_live_registry_wins_over_unverifiable_pid(self, home, monkeypatch):
+        """When the boundary reprobe finds BOTH an unprobeable pid and a LIVE
+        registry, the non-overridable LIVE refusal must win — the honesty
+        gate's POSIX --force hint would advertise an override LIVE forbids
+        (#1949 review). Pre-confirmation is clean so both gates are reached
+        only at the boundary."""
+        from memtomem._instance_registry import UninstallProbeResult
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        srv_calls = {"n": 0}
+        reg_calls = {"n": 0}
+        clean = ServerState(alive=False, pid=None, pid_file=None)
+        broken = ServerState(
+            alive=True,
+            pid=None,
+            pid_file=state / ".server.pid",
+            probe_error="PermissionError: denied",
+        )
+
+        def _srv_seq():
+            srv_calls["n"] += 1
+            return clean if srv_calls["n"] == 1 else broken
+
+        def _reg_seq():
+            reg_calls["n"] += 1
+            return UninstallProbeResult("NONE" if reg_calls["n"] == 1 else "LIVE")
+
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", _srv_seq)
+        monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", _reg_seq)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "became active while uninstall was waiting" in result.output
+        assert "Cannot verify whether a memtomem server is running" not in result.output
+        assert "--force" not in result.output
+        assert (state / "memtomem.db").exists()
