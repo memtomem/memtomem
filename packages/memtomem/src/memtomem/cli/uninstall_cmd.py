@@ -1362,9 +1362,11 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     except OSError as exc:
         # Not contention: ``_acquire_barrier`` calls ``ensure_runtime_dir``
         # and opens the barrier file *outside* its poll loop, so a refused
-        # runtime dir or an unopenable barrier path escapes here unwrapped.
-        # There is no process to stop — "stop it and re-run" would send the
-        # user hunting for one that does not exist (#1870, #1951). Mirrors
+        # runtime dir or an unopenable barrier path escapes here unwrapped —
+        # and a non-contention lock-*call* I/O failure inside the poll loop
+        # is normalized to ``OSError`` and escapes here too (#1957). There
+        # is no process to stop — "stop it and re-run" would send the user
+        # hunting for one that does not exist (#1870, #1951). Mirrors
         # ``mm reset``'s split (``reset_cmd._acquire_barrier_or_refuse``).
         click.echo("")
         click.secho(

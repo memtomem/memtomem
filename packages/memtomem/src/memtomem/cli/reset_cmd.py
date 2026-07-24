@@ -247,10 +247,11 @@ async def _acquire_barrier_or_refuse(*, as_json: bool = False) -> HeldBarrier:
     never stale — the kernel releases it when its holder dies — and an
     unusable barrier path is infrastructure, not a heuristic. The two
     causes prescribe different remediations (#1870): contention is fixed
-    by stopping the holder, a direct ``OSError`` (unusable runtime dir,
-    barrier-file permissions) only by repairing the reported path —
-    "stop it" would send that user hunting for a process that does not
-    exist.
+    by stopping the holder, an ``OSError`` (unusable runtime dir,
+    barrier-file permissions, or a non-contention lock-call I/O failure
+    normalized in the poll loop, #1957) only by repairing the reported
+    path — "stop it" would send that user hunting for a process that does
+    not exist.
     """
     try:
         return await _acquire_barrier_settled()

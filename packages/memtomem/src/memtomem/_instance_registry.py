@@ -91,7 +91,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Literal
+from typing import IO, Literal, NoReturn
 
 import portalocker
 
@@ -115,7 +115,13 @@ _BARRIER_TIMEOUT_S = 2.0
 
 # Exception tuple matching ``cli/_liveness.py:probe_pid_file`` (#817):
 # POSIX raises ``BlockingIOError``; portalocker's Windows backend wraps
-# Win32 errors as ``LockException``.
+# Win32 errors as ``LockException``. This is the *catch* set — every shape
+# a non-blocking ``portalocker.lock`` can produce, contention or not.
+# ``_acquire_barrier`` narrows it further with ``_is_lock_contention``
+# (#1957); the other call sites (mutation lock, ``register_instance``,
+# ``_gc_stale_entry``) deliberately keep treating the whole tuple as one
+# bucket — their fail-open/fail-closed contracts absorb a lock-call I/O
+# error exactly as they do contention, and must not be split here.
 _LOCK_CONTENDED = (portalocker.LockException, BlockingIOError, OSError)
 
 # Windows ``PermissionError.winerror`` codes that mean *transient*
@@ -124,6 +130,43 @@ _LOCK_CONTENDED = (portalocker.LockException, BlockingIOError, OSError)
 # another handle takes this path and must stay ``unknown`` (retry can
 # clear it), unlike a mode-000 / root-owned entry (#1938).
 _WIN_TRANSIENT_SHARING = frozenset({32, 33})
+
+# Non-blocking-lock errnos that mean "held by someone else": POSIX
+# ``fcntl.flock`` documents both ``EACCES`` and ``EAGAIN`` for a held
+# lock, and portalocker's own backends map exactly this pair to
+# ``AlreadyLocked``. Which *exception type* carries them varies across the
+# supported ``portalocker>=3.0`` range (``AlreadyLocked`` vs a bare
+# ``LockException``, the #1944 gate note), so contention is judged by
+# errno on the exception or its chained cause — never by
+# ``isinstance(exc, AlreadyLocked)`` alone.
+_CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
+
+# Windows ``ERROR_LOCK_VIOLATION`` — the one ``pywintypes.error`` code the
+# Win32 backend maps to contention. ``pywintypes.error`` carries
+# ``.winerror`` and *no* ``.errno`` (#1957 comment), so the errno gate
+# above cannot see it. Numeric on purpose: importing pywin32 here would
+# add a Windows-only dependency for a single integer.
+_WINERROR_LOCK_VIOLATION = 33
+
+# The barrier poll loop's catch set. On Windows the Win32 backend maps
+# ``ERROR_LOCK_VIOLATION`` to ``AlreadyLocked`` but re-raises every *other*
+# ``pywintypes.error`` **raw** — and that type derives from ``Exception``,
+# not ``OSError``, so ``_LOCK_CONTENDED`` alone would let a non-contention
+# Win32 lock failure escape ``_acquire_barrier`` unhandled, past the CLIs'
+# ``except OSError`` repair branch (#1957). Catch it here so the classifier
+# routes it too. Barrier-only: the other ``_LOCK_CONTENDED`` sites keep
+# their narrower catch (a raw ``pywintypes.error`` there is out of scope).
+# The ``import`` is Windows-only and best-effort — absent pywin32, portalocker
+# could not have raised it, so the POSIX tuple is complete.
+try:
+    import pywintypes as _pywintypes
+
+    _BARRIER_LOCK_ERRORS: tuple[type[BaseException], ...] = (
+        *_LOCK_CONTENDED,
+        _pywintypes.error,
+    )
+except ImportError:
+    _BARRIER_LOCK_ERRORS = _LOCK_CONTENDED
 
 
 def instances_dir() -> Path:
@@ -347,10 +390,14 @@ class BarrierTimeout(Exception):
     a repair-the-path remediation instead (#1945, #1951). Both fail closed;
     the last flock error is chained for the log.
 
-    Known gap (#1957): the poll-loop classifier still treats a lock-*call*
-    I/O error (portalocker wraps e.g. ``EIO``/``ENOLCK`` in a bare
-    ``LockException``) as contention, so such an error currently surfaces
-    here rather than as ``OSError``.
+    A lock-*call* I/O failure inside the poll loop is not contention
+    either (#1957): portalocker wraps e.g. ``EIO``/``ENOLCK`` — and an NFS
+    ``EOFError`` — in a bare ``LockException`` (not an ``OSError``), and
+    :func:`_is_lock_contention` splits those out so they escape as
+    ``OSError`` immediately, without waiting out the deadline. Only a
+    genuinely held lock (``AlreadyLocked`` / ``BlockingIOError`` / an
+    ``EACCES``-``EAGAIN`` cause / a Windows lock-violation cause) reaches
+    this timeout.
     """
 
 
@@ -392,6 +439,79 @@ class HeldBarrier:
             self._fp.close()
 
 
+def _is_lock_contention(exc: BaseException) -> bool:
+    """True when a non-blocking ``portalocker.lock`` failure means "held by
+    someone else" rather than "the lock call itself failed" (#1957).
+
+    The barrier-side sibling of :func:`_probe_entry`'s live/unknown split,
+    but barrier-only: a ``False`` here escapes as ``OSError``, whereas
+    ``_probe_entry`` maps its own I/O uncertainty to ``"unknown"``. Do not
+    reuse this verdict there without that translation.
+
+    Across the supported range (portalocker 3.0/3.1/3.2, source-verified)
+    genuine contention is *always* the ``AlreadyLocked`` subclass — POSIX
+    ``EACCES``/``EAGAIN`` and Windows ``ERROR_LOCK_VIOLATION`` alike — so
+    the ``isinstance`` check below catches it regardless of how the
+    original error is chained. The errno/winerror probes are defensive:
+    the cause probes cover a future version that might raise a bare
+    ``LockException`` for a held lock (the #1944 type-drift note), and the
+    ``winerror``-on-``exc`` probe covers a *raw* ``pywintypes.error``
+    (which the Win32 backend only ever re-raises for non-lock-violation
+    codes, so in practice it is always non-contention — but a leaked raw
+    code 33 must still read as contention, not as a path to repair). A
+    lock-call I/O failure (``EIO``, ``ENOLCK``, ``EBADF``, an NFS
+    ``EOFError``, a non-33 ``pywintypes.error``) matches none of these.
+    """
+    if isinstance(exc, (portalocker.AlreadyLocked, BlockingIOError)):
+        return True
+    # A raw ``EACCES``/``EAGAIN`` ``OSError`` leaking straight out of some
+    # portalocker version is fcntl-documented contention; classify it as
+    # such rather than as a path to repair (a deliberate superset of the
+    # cause-based check below).
+    if isinstance(exc, OSError) and exc.errno in _CONTENTION_ERRNOS:
+        return True
+    # ``pywintypes.error`` exposes ``.winerror`` but no ``.errno`` (#1957
+    # comment): probe it on the raw exception and on the chained cause.
+    if getattr(exc, "winerror", None) == _WINERROR_LOCK_VIOLATION:
+        return True
+    cause = exc.__cause__
+    if isinstance(cause, OSError) and cause.errno in _CONTENTION_ERRNOS:
+        return True
+    return getattr(cause, "winerror", None) == _WINERROR_LOCK_VIOLATION
+
+
+def _raise_lock_io_failure(exc: BaseException, path: Path) -> NoReturn:
+    """Normalize a non-contention lock-call failure to ``OSError`` (#1957).
+
+    The destructive CLIs route an ``OSError`` from barrier acquisition to
+    their repair-the-path remediation (#1951, #1959); any other type would
+    be flattened into :class:`BarrierTimeout`'s stop-the-holder advice,
+    sending the user hunting for a process that does not exist (#1870). A
+    chained ``OSError`` cause donates its errno/strerror/filename to a
+    *fresh* ``OSError`` rather than being re-raised itself: ``raise cause
+    from exc`` would make the pair each other's ``__cause__``/``__context__``
+    — a reference cycle the caller's log does not need.
+
+    ``path`` (the resolved barrier file) backfills the filename: a lock
+    syscall operates on a descriptor, so ``OSError.filename`` is usually
+    ``None`` and the ``EOFError`` fallback is always pathless — leaving the
+    CLI to advise "repair the reported path" without naming one. The
+    barrier path is the only actionable path there is.
+    """
+    if isinstance(exc, OSError):
+        # Mutate in place rather than re-wrap: keeps the precise subtype
+        # (``FileNotFoundError`` etc.) while naming the path in ``str(exc)``.
+        if exc.filename is None:
+            exc.filename = str(path)
+        raise exc
+    cause = exc.__cause__
+    if isinstance(cause, OSError) and cause.errno is not None:
+        err = OSError(cause.errno, cause.strerror or str(cause))
+        err.filename = cause.filename or str(path)
+        raise err from exc
+    raise OSError(f"lifecycle barrier lock failed at {path}: {exc}") from exc
+
+
 def _acquire_barrier(flags: int, timeout_s: float | None) -> HeldBarrier:
     """Acquire the lifecycle barrier with ``flags``, bounded by a deadline.
 
@@ -426,7 +546,13 @@ def _acquire_barrier(flags: int, timeout_s: float | None) -> HeldBarrier:
                 portalocker.lock(fp, flags | portalocker.LOCK_NB)
                 locked = True
                 break
-            except _LOCK_CONTENDED as exc:
+            except _BARRIER_LOCK_ERRORS as exc:
+                # Split before the deadline check: a lock-*call* I/O failure
+                # is infrastructure, not contention — retrying cannot help,
+                # and waiting out the budget would only delay (and, at the
+                # deadline, mislabel) the repair advice (#1957).
+                if not _is_lock_contention(exc):
+                    _raise_lock_io_failure(exc, path)
                 if time.monotonic() >= deadline:
                     raise BarrierTimeout(f"lifecycle barrier busy after {budget:.1f}s") from exc
                 time.sleep(0.05)
@@ -451,9 +577,10 @@ def acquire_server_lifecycle_barrier(timeout_s: float | None = None) -> HeldBarr
     Held for the process lifetime and released only once storage close is
     confirmed, so a server whose registration failed — or whose close
     failed — still blocks uninstall instead of going invisible. Raises
-    :class:`BarrierTimeout` on contention, or the original :class:`OSError`
-    on an unusable runtime dir / barrier path; the caller must not proceed
-    to open the store on failure.
+    :class:`BarrierTimeout` on contention, or an :class:`OSError` on an
+    unusable runtime dir / barrier path *or* a non-contention lock-call
+    I/O failure (#1957); the caller must not proceed to open the store on
+    failure.
 
     ``timeout_s=None`` resolves :data:`_BARRIER_TIMEOUT_S` at call time —
     a default argument would freeze the value at import and silently
@@ -472,10 +599,10 @@ def acquire_uninstall_lifecycle_barrier(timeout_s: float | None = None) -> HeldB
     *and* the write, so a server cannot open the store in between. Raises
     :class:`BarrierTimeout` on contention — a held flock is never stale
     (the kernel releases it when its holder dies), so that refusal is not
-    ``--force``-overridable — or the original :class:`OSError` on an
-    unusable runtime dir / barrier path, which the CLIs route to a
-    repair-the-path remediation (#1951). (Name kept for API stability;
-    not uninstall-specific.)
+    ``--force``-overridable — or an :class:`OSError` on an unusable runtime
+    dir / barrier path *or* a non-contention lock-call I/O failure (#1957),
+    which the CLIs route to a repair-the-path remediation (#1951). (Name
+    kept for API stability; not uninstall-specific.)
     """
     return _acquire_barrier(portalocker.LOCK_EX, timeout_s)
 
