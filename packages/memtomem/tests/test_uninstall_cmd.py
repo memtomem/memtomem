@@ -1527,7 +1527,10 @@ class TestInstanceRegistryGateRefuses:
             uninstall_cmd,
             "_probe_registry_liveness",
             lambda: UninstallProbeResult(
-                "UNTRUSTED", untrusted_path=Path("/run/user/501/memtomem"), detail=detail
+                "UNTRUSTED",
+                untrusted_path=Path("/run/user/501/memtomem"),
+                untrusted_kind="redirected",
+                detail=detail,
             ),
         )
 
@@ -1539,6 +1542,52 @@ class TestInstanceRegistryGateRefuses:
         # the generic sentence and the remediation stay put
         assert "not a private real directory" in result.output
         assert "Remove or repair" in result.output
+
+    def test_stray_subdir_entry_refuses_names_path_not_retry(self, home, registry_at_runtime_dir):
+        """A stray subdirectory inside ``instances/`` is a *persistent*
+        cause — the fail-closed probe reports UNTRUSTED naming the entry,
+        so the refusal must prescribe remove/repair and never "retry in a
+        moment", which can never clear it (#1938). Nothing is staged."""
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        reg.ensure_runtime_dir()
+        d = reg.instances_dir()
+        d.mkdir(mode=0o700, exist_ok=True)
+        subdir = d / "stray-subdir"
+        subdir.mkdir()
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+
+        assert result.exit_code == 2
+        assert str(subdir) in result.output, "refusal must name the entry"
+        assert "cannot be probed" in result.output
+        assert "Remove or repair" in result.output
+        assert "Retry in a moment" not in result.output
+        assert "--force does not override" in result.output
+        assert (state / "memtomem.db").exists()
+        assert subdir.exists(), "a refused run must stage nothing"
+
+    @pytest.mark.skipif(os.name == "nt", reason="chmod bits are a no-op on Windows")
+    def test_unreadable_entry_refuses_with_remove_or_repair(self, home, registry_at_runtime_dir):
+        """A mode-000 sentinel is persistent and precisely attributable —
+        UNTRUSTED naming the entry, not the transient retry advice
+        (#1938)."""
+        if getattr(os, "geteuid", lambda: 1)() == 0:
+            pytest.skip("root ignores file modes")
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg)
+        entry.chmod(0o000)
+        try:
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+            assert result.exit_code == 2
+            assert str(entry) in result.output, "refusal must name the entry"
+            assert "cannot be probed" in result.output
+            assert "Remove or repair" in result.output
+            assert "Retry in a moment" not in result.output
+            assert (state / "memtomem.db").exists()
+        finally:
+            entry.chmod(0o600)
 
     def test_force_still_overrides_pid_heuristic_when_registry_empty(
         self, home, registry_at_runtime_dir
@@ -1802,6 +1851,40 @@ class TestDestructiveBoundaryReprobe:
         # the cause detail surfaces at the boundary re-probe too (#1948)
         assert "Cause: " in result.output
         assert "unsafe permissions 0o777" in result.output
+        assert (state / "memtomem.db").exists()
+
+    def test_registry_turning_unprobeable_at_boundary_names_the_entry(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """An unprobeable entry that appears while the user sits on the
+        prompt is the persistent cause too — the boundary refusal must
+        name the entry and say "cannot be probed", not claim a process
+        "became active" (#1938)."""
+        from memtomem._instance_registry import UninstallProbeResult
+        from memtomem.cli import uninstall_cmd
+
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = reg.instances_dir() / "stray-subdir"
+        calls: list[int] = []
+
+        def flapping_probe():
+            calls.append(1)
+            if len(calls) == 1:
+                return UninstallProbeResult("NONE")
+            return UninstallProbeResult(
+                "UNTRUSTED", untrusted_path=entry, untrusted_kind="unprobeable"
+            )
+
+        monkeypatch.setattr(uninstall_cmd, "_probe_registry_liveness", flapping_probe)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert str(entry) in result.output, "refusal must name the entry"
+        assert "cannot be probed" in result.output
+        assert "Remove or repair" in result.output
+        assert "became active" not in result.output
         assert (state / "memtomem.db").exists()
 
     def test_registry_turning_unknown_at_boundary_keeps_retry_advice(

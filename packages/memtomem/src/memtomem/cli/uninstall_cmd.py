@@ -25,8 +25,10 @@ Design notes:
   both miss it — and an inconclusive registry probe is fail-closed
   (a timeout never means "empty"). LIVE/UNKNOWN/UNTRUSTED registry
   evidence refuses unconditionally, each with its own remediation
-  (#1942: an untrusted probe path names itself and asks to be removed
-  or repaired — "retry" cannot fix a link); ``--force``'s contract
+  (#1942, #1938: an untrusted probe path — a redirected registry
+  directory, or an unprobeable entry inside it — names itself and asks
+  to be removed or repaired; "retry" cannot fix a link or a stray
+  subdirectory); ``--force``'s contract
   covers the stale-*pid* heuristic, not positive liveness. The registry's mutation sidecar
   (``instances.registry.lock``) is retained infrastructure: never
   inventoried or deleted (unlinking a lock file re-opens the waiter
@@ -47,7 +49,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import click
 
@@ -585,8 +587,12 @@ def _format_path(p: Path) -> str:
     return s.replace(home, "~", 1) if s.startswith(home) else s
 
 
-def _refuse_untrusted_registry(untrusted_path: Path | None, detail: str | None = None) -> None:
-    """Refusal lines for an untrusted registry path (#1942).
+def _refuse_untrusted_registry(
+    untrusted_path: Path | None,
+    kind: Literal["redirected", "unprobeable"] | None = None,
+    detail: str | None = None,
+) -> None:
+    """Refusal lines for an untrusted registry path (#1942, #1938, #1948).
 
     Deliberately distinct from the UNKNOWN wording: "retry in a moment"
     is correct for a transient probe failure and provably wrong here —
@@ -594,20 +600,37 @@ def _refuse_untrusted_registry(untrusted_path: Path | None, detail: str | None =
     text is printed verbatim by design: this is the CLI surface, where
     the canonical-path redaction rule (#1385, #1550) does not apply.
 
-    ``detail`` — present only for a runtime-dir refusal — is the exact
-    ``ensure_runtime_dir`` message: the specific cause (wrong owner,
-    unsafe mode) and its removal hint, which the generic sentence below
-    cannot name. Printed after it, and verbatim for the same reason;
-    the message already carries its own actionable remediation (#1948,
-    #1870).
+    ``kind`` selects the first line. ``"redirected"`` (default) — the
+    path is a symlink / junction / non-directory that redirects probing.
+    ``"unprobeable"`` (#1938) — a *real* path the probe cannot read
+    through: a stray subdirectory entry, a permission-denied entry, or
+    an ``instances/`` that cannot be listed.
+
+    ``detail`` — present only for a runtime-dir refusal (always the
+    ``"redirected"`` kind) — is the exact ``ensure_runtime_dir`` message:
+    the specific cause (wrong owner, unsafe mode) and its removal hint,
+    which the generic sentence cannot name. Printed after it, verbatim
+    for the same reason; the message carries its own actionable
+    remediation (#1948, #1870). The shared second line is identical for
+    both kinds so the flavors cannot drift.
     """
     where = _format_path(untrusted_path) if untrusted_path is not None else "its path"
-    click.secho(
-        f"The instance registry cannot be trusted: {where} is a symlink, "
-        "junction, or otherwise not a private real directory. Refusing to "
-        "delete state — liveness cannot be judged through a redirected path.",
-        fg="red",
-    )
+    if kind == "unprobeable":
+        click.secho(
+            f"The instance registry cannot be trusted: {where} cannot be "
+            "probed — it is a stray subdirectory, link, or permission-denied "
+            "path in the sentinel registry. Refusing to delete state — "
+            "liveness cannot be judged while any part of the registry is "
+            "unreadable.",
+            fg="red",
+        )
+    else:
+        click.secho(
+            f"The instance registry cannot be trusted: {where} is a symlink, "
+            "junction, or otherwise not a private real directory. Refusing to "
+            "delete state — liveness cannot be judged through a redirected path.",
+            fg="red",
+        )
     if detail:
         click.secho(f"  Cause: {detail}", fg="red")
     click.secho(
@@ -1111,7 +1134,11 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 fg="red",
             )
         elif registry_state.state == "UNTRUSTED":
-            _refuse_untrusted_registry(registry_state.untrusted_path, registry_state.detail)
+            _refuse_untrusted_registry(
+                registry_state.untrusted_path,
+                registry_state.untrusted_kind,
+                registry_state.detail,
+            )
         else:
             _refuse_unknown_registry()
         sys.exit(2)
@@ -1298,7 +1325,11 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             # same persistent cause as above — "stop it and re-run" would be
             # as unactionable here as "retry in a moment" (#1942).
             click.echo("")
-            _refuse_untrusted_registry(registry_state.untrusted_path, registry_state.detail)
+            _refuse_untrusted_registry(
+                registry_state.untrusted_path,
+                registry_state.untrusted_kind,
+                registry_state.detail,
+            )
             sys.exit(2)
         if registry_state.state == "UNKNOWN":
             # Transient here too: "a process became active" would claim

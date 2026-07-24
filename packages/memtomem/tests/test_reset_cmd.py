@@ -586,6 +586,42 @@ class TestResetRegistryGate:
         assert "Remove or repair" in result.output
         assert "Retry in a moment" not in result.output
 
+    def test_untrusted_unprobeable_entry_refuses_naming_path(self, home, reg):
+        """A stray subdirectory inside ``instances/`` is a persistent
+        *unprobeable* cause — the refusal names the entry and says it
+        "cannot be probed" (not the redirected-path wording), and never
+        "Retry in a moment" (#1938, reset mirrors uninstall's gate)."""
+        reg.ensure_runtime_dir()
+        d = reg.instances_dir()
+        d.mkdir(mode=0o700, exist_ok=True)
+        subdir = d / "stray-subdir"
+        subdir.mkdir()
+        result = CliRunner().invoke(cli, ["reset", "-y"])
+        assert result.exit_code == 2, result.output
+        assert str(subdir) in result.output, "refusal must name the entry"
+        assert "cannot be probed" in result.output
+        assert "Remove or repair" in result.output
+        assert "Retry in a moment" not in result.output
+
+    def test_untrusted_unprobeable_json_shape(self, home, monkeypatch):
+        """The unprobeable refusal keeps the write-command JSON contract
+        (exit 1, ``ok: false``) and carries the "cannot be probed" cause
+        rather than the redirected-path wording (#1938)."""
+        entry = Path("/runtime/instances/stray-subdir")
+        monkeypatch.setattr(
+            reset_cmd,
+            "_probe_registry_liveness",
+            lambda: UninstallProbeResult(
+                "UNTRUSTED", untrusted_path=entry, untrusted_kind="unprobeable"
+            ),
+        )
+        result = CliRunner().invoke(cli, ["reset", "-y", "--json"])
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert "cannot be probed" in data["reason"]
+        assert str(entry) in data["reason"]
+
     def test_registry_refusal_json_shape(self, home, monkeypatch):
         """Registry refusals keep the write-command JSON contract: exit 1
         with ``ok: false`` on stdout, not the text path's exit 2."""

@@ -132,10 +132,25 @@ def _refuse_registry(probe: UninstallProbeResult, *, as_json: bool = False) -> N
         )
     elif probe.state == "UNTRUSTED":
         where = str(probe.untrusted_path) if probe.untrusted_path is not None else "its path"
+        # Two flavors, keyed on the remediation vocabulary like uninstall's
+        # ``_refuse_untrusted_registry`` (#1938): a redirected probe path
+        # vs. a real-but-unprobeable entry (stray subdirectory,
+        # permission-denied path, unlistable ``instances/``).
+        if probe.untrusted_kind == "unprobeable":
+            message = (
+                f"The instance registry cannot be trusted: {where} cannot be "
+                "probed — it is a stray subdirectory, link, or permission-denied "
+                "path in the sentinel registry. Refusing to reset — liveness "
+                "cannot be judged while any part of the registry is unreadable."
+            )
+        else:
+            message = (
+                f"The instance registry cannot be trusted: {where} is a symlink, "
+                "junction, or otherwise not a private real directory. Refusing "
+                "to reset — liveness cannot be judged through a redirected path."
+            )
         _refuse(
-            f"The instance registry cannot be trusted: {where} is a symlink, "
-            "junction, or otherwise not a private real directory. Refusing "
-            "to reset — liveness cannot be judged through a redirected path.",
+            message,
             "Remove or repair that path, then retry — retrying without "
             "fixing it cannot succeed. --force does not override this check.",
             as_json=as_json,
