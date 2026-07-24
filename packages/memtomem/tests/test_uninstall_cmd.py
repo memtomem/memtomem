@@ -2098,6 +2098,51 @@ class TestDanglingOwnedSubdirLinks:
         assert "memories" in result.output
         assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
 
+    def test_empty_config_d_retained_under_keep_config(self, home):
+        """The prune backstop must honor keep flags: an empty config.d is
+        retained state under --keep-config, not swept as a stray skeleton.
+        config.json is seeded so staging proceeds (the run isn't a no-op)."""
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "config.json").write_text("{}", encoding="utf-8")
+        (state / "config.d").mkdir()
+        (state / "uploads").mkdir()  # no keep flag → still removed
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-config"])
+        assert result.exit_code == 0, result.output
+        assert (state / "config.d").is_dir(), "--keep-config must retain empty config.d"
+        assert (state / "config.json").exists()
+        assert not (state / "uploads").exists(), "uploads has no keep flag"
+
+    def test_empty_memories_retained_under_keep_data(self, home):
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memtomem.db").write_bytes(b"x")
+        (state / "memories").mkdir()
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-data"])
+        assert result.exit_code == 0, result.output
+        assert (state / "memories").is_dir(), "--keep-data must retain empty memories"
+        assert (state / "memtomem.db").exists()
+
+    def test_substitute_dir_row_reads_zero_bytes(self, home):
+        """A live link to an empty external dir shows the entry, but its
+        follow-stat inode size must not inflate the delete total — we
+        remove only the link, never the target's bytes."""
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memtomem.db").write_bytes(b"1234")  # 4 B of real deletable state
+        target = home / "empty-target"
+        target.mkdir()
+        link = state / "uploads"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "uploads" in result.output
+        # Total reflects only the db's 4 B, not the target dir's inode size.
+        assert "Total to delete: ~4 B" in result.output, result.output
+
     def test_entry_probe_calls_only_genuine_absence_absent(self, home, monkeypatch):
         """``lexists`` semantics (every lstat error → absent) would let
         the staging loop silently skip a planned entry; only ENOENT /

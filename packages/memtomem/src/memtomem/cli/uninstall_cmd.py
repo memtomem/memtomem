@@ -310,10 +310,16 @@ def _load_config_safely() -> tuple[Path, str | None]:
 
 
 def _file_size(path: Path) -> int:
+    # Bytes freed by deleting this path. Non-regular entries — a directory
+    # (the substitute owned-subdir row, #1946, is only emitted when empty)
+    # or a live link (we remove the link entry, never the target's bytes) —
+    # free nothing, so they must not inflate "Total to delete". Every other
+    # caller passes a regular file, so this only affects substitute rows.
     try:
-        return path.stat().st_size
+        st = path.stat()
     except OSError:
         return 0
+    return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
 
 def _dir_total(path: Path) -> tuple[list[Path], int]:
@@ -592,8 +598,14 @@ def _print_group(group: _Group) -> None:
         )
 
 
-def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> int:
-    """Print inventory grouped + return total bytes that will be deleted."""
+def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> None:
+    """Print the grouped inventory + the "Total to delete" line.
+
+    Returns nothing: the "anything to delete?" decision is made on the
+    stage plan (``_entry_present`` over ``_build_stage_plan``), not on a
+    byte total — a dangling link or empty owned dir frees zero bytes yet
+    is deletable (#1946). Don't re-add a byte return and gate on it.
+    """
     click.echo("memtomem state inventory:")
     if inv.db_path.parent != _DEFAULT_STATE_DIR:
         click.echo(f"  (custom storage path: {_format_path(inv.db_path.parent)})")
@@ -632,7 +644,6 @@ def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> 
         click.echo("  (nothing found)")
     else:
         click.echo(f"\nTotal to delete: ~{_human_size(will_delete_total)}")
-    return will_delete_total
 
 
 def _print_externals(externals: list[_External]) -> None:
@@ -929,10 +940,17 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
                 fg="yellow",
             )
 
-    # Owned-subdir prune — only matters when ``--keep-config`` /
-    # ``--keep-data`` left a now-empty subdir behind (we whole-dir-stage
-    # everything else, so those subdirs are gone via the rmtree above).
+    # Owned-subdir prune. Everything not under a keep flag is whole-dir
+    # staged (empty or not) and already gone via the rmtree above, so this
+    # loop is a backstop for a stray empty skeleton. It must honor the keep
+    # flags: an empty ``config.d`` under ``--keep-config`` (or ``memories``
+    # under ``--keep-data``) is retained state — the inventory shows it as a
+    # kept 0 B row, so pruning it here would delete what the report just
+    # said we're keeping. ``uploads`` has no keep flag, so it always prunes.
+    _owned_kept = {"config.d": keep_config, "memories": keep_data, "uploads": False}
     for subdir in _OWNED_SUBDIRS:
+        if _owned_kept.get(subdir, False):
+            continue
         _prune_if_empty(_DEFAULT_STATE_DIR / subdir)
 
     if inv.db_path.parent == _DEFAULT_STATE_DIR and _prune_if_empty(_DEFAULT_STATE_DIR):
