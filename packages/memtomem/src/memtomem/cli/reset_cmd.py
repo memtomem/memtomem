@@ -98,13 +98,17 @@ def reset(yes: bool, backup: bool, force: bool, as_json: bool) -> None:
     asyncio.run(_run(yes, backup=backup, force=force, as_json=as_json))
 
 
-def _refuse(message: str, hint: str, *, as_json: bool = False) -> None:
+def _refuse(message: str, hint: str, *, cause: str | None = None, as_json: bool = False) -> None:
     if as_json:
         # Write-command JSON error shape (CONTRIBUTING): keep stdout
         # machine-readable while signaling the handled failure via exit 1.
-        click.echo(json.dumps({"ok": False, "reason": f"{message} {hint}"}))
+        parts = [message, f"Cause: {cause}" if cause else None, hint]
+        reason = " ".join(p for p in parts if p)
+        click.echo(json.dumps({"ok": False, "reason": reason}))
         sys.exit(1)
     click.secho(message, fg="red")
+    if cause:
+        click.secho(f"  Cause: {cause}", fg="red")
     click.secho(f"  {hint}", fg="red")
     sys.exit(2)
 
@@ -153,6 +157,7 @@ def _refuse_registry(probe: UninstallProbeResult, *, as_json: bool = False) -> N
             message,
             "Remove or repair that path, then retry — retrying without "
             "fixing it cannot succeed. --force does not override this check.",
+            cause=probe.detail,
             as_json=as_json,
         )
     else:
