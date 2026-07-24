@@ -720,19 +720,18 @@ def _stage_inventory(
         # Best-effort cleanup of empty staging trees. If rollback
         # partially failed, the not-rolled-back content survives — and
         # the user is told the staging root path so they can recover.
+        # That survivor is why this prunes through ``_prune_if_empty``
+        # rather than a bare ``rmdir``: the tree being walked is then the
+        # user's own data, and a directory *link* inside it answers
+        # ``is_dir()`` while Windows ``RemoveDirectoryW`` deletes the
+        # reparse point — destroying part of what the recovery message
+        # just promised was still recoverable.
         for root in list(roots.values()):
             if not root.exists():
                 continue
             for sub in sorted(root.rglob("*"), reverse=True):
-                if sub.is_dir():
-                    try:
-                        sub.rmdir()
-                    except OSError:
-                        pass
-            try:
-                root.rmdir()
-            except OSError:
-                pass
+                _prune_if_empty(sub)
+            _prune_if_empty(root)
         return errors
 
     completed_labels: list[str] = []

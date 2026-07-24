@@ -1129,6 +1129,58 @@ class TestTransactionalStaging:
             "user must be told the staging dir path for manual recovery"
         )
 
+    def test_failed_rollback_cleanup_spares_directory_links(self, home, monkeypatch):
+        """The staging cleanup walks *user data* once rollback fails, so
+        it must not treat a directory link as a prunable directory.
+
+        POSIX survives this by accident (``rmdir`` on a symlink is
+        ENOTDIR), so the assertion is on the call itself: no ``rmdir``
+        may target the link. On Windows the accident does not hold —
+        ``RemoveDirectoryW`` removes the reparse point — and the run
+        would silently eat part of the tree the error message tells the
+        user to recover by hand."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        outside = home / "outside-target"
+        outside.mkdir()
+        (outside / "keep.md").write_text("# keep", encoding="utf-8")
+        link = state / "memories" / "linked"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        real_replace = os.replace
+
+        def _broken_replace(src, dst, **kwargs):
+            if uninstall_cmd._STAGING_PREFIX in str(dst):
+                if Path(src).name == "memtomem.db":
+                    raise OSError(errno.EACCES, "fake stage failure")
+                return real_replace(src, dst, **kwargs)
+            if uninstall_cmd._STAGING_PREFIX in str(src):
+                raise OSError(errno.EACCES, "fake rollback failure")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _broken_replace)
+
+        real_rmdir = Path.rmdir
+        rmdir_targets: list[str] = []
+
+        def _recording_rmdir(self):
+            rmdir_targets.append(self.name)
+            return real_rmdir(self)
+
+        monkeypatch.setattr(Path, "rmdir", _recording_rmdir)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert "linked" not in rmdir_targets, (
+            f"cleanup tried to rmdir a directory link; targets={rmdir_targets}"
+        )
+        assert (outside / "keep.md").exists(), "link target must be untouched"
+
     def test_cross_fs_layout_refused_cleanly(self, home, monkeypatch):
         """Simulate EXDEV from os.replace and assert the user sees a
         cross-filesystem refusal — not a generic stage-failed error —
