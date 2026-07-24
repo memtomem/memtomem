@@ -239,7 +239,7 @@ mm embedding-reset --mode revert-to-stored  # switch runtime to match DB
 
 ## CLI Reference
 
-The complete v0.3.12 top-level command catalog is grouped below. Run `mm
+The complete v0.3.13 top-level command catalog is grouped below. Run `mm
 <command> --help` for its subcommands and flags.
 
 | Area | Top-level commands |
@@ -286,7 +286,7 @@ mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.
 mm reset --force                       # bypass only the stale pid/web/DB-lock heuristics (not registry or barrier evidence)
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
 mm upgrade                             # uv-tool installs: stop services and reinstall with --refresh
-mm upgrade --version 0.3.12 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
+mm upgrade --version 0.3.13 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
 
 # Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)
 mm tags list                           # list every tag with its chunk count

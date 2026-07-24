@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.13] — 2026-07-24
+
 ### Added
 
 - **`mem_status` / `mm status` now detect two live servers writing one
@@ -17,6 +19,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   legitimately produce the same state; with a single session it usually
   means one client has two memtomem registrations (manual + plugin, see
   the #1930–#1934 coexistence docs).
+- **`mm init` and the Claude Code plugin now steer users away from a
+  duplicate manual + plugin registration** (#1934, #1931). The wizard's
+  Claude Code step tells plugin users to pick *Skip* — the plugin already
+  bundles the server, and a manual entry would run a second one against
+  the same store — and prints the same coexistence note after writing a
+  manual user-scope entry, because the wizard cannot see plugin installs.
+  On the plugin side, the setup skill now checks for an existing manual
+  `claude mcp add` entry and names both remediations (remove the manual
+  entry, or uninstall the plugin) instead of silently doubling up.
 
 ### Changed
 
@@ -47,6 +58,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Scope: the barrier only closes the race between peers that both
   implement it. A server from an older release ignores it, so for a
   mixed-version setup the original window remains.
+- **`mm reset` now runs behind the same instance-registry gate and
+  lifecycle barrier as `mm uninstall`** (#1954). Reset used to sample
+  liveness once — skippable wholesale by `--force` — then migrate, prompt,
+  and wipe with nothing held: the same snapshot-vs-server-startup race
+  #1936 closed for uninstall, minus the registry gate entirely, so a
+  secondary server (no `server.pid`) or an idle one (no SQLite write
+  lock) was invisible to it. Now the registry gate runs first and
+  unconditionally — LIVE, UNKNOWN, and UNTRUSTED all refuse, `--force`
+  does not override it, and each cause carries its own remediation — and
+  the exclusive barrier spans both write boundaries with a fresh liveness
+  re-probe under each hold: one span covers `initialize()` (which may
+  migrate, i.e. write) through storage close, the other covers backup
+  plus the wipe itself. The confirmation prompt deliberately runs with
+  nothing open and nothing held — holding the barrier across a prompt a
+  user can sit on for minutes would fail-close legitimate server
+  startups. Like the probe it builds on, the gate is per-user, not
+  per-store: a live server on an *unrelated* custom store also refuses
+  reset.
 - **`mm uninstall` on a machine with no memtomem state now exits 2 with a
   refusal** — instead of exit 0 and "No memtomem state to remove" — when the
   instance registry cannot be probed or trusted, e.g. a misconfigured
@@ -64,6 +93,89 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and refuses to start (logging an actionable message) when a destructive
   command holds it exclusive. Release keeps the #1936 polarity: an unconfirmed
   storage close retains the hold until the process exits.
+
+### Fixed
+
+- **A server that loses a startup race no longer disappears from the
+  concurrent-writer signal** (#1939). Registration ran once per process and
+  gave up on the first sidecar-lock timeout — and the registry's mutation
+  sidecar is legitimately held for a whole enumeration pass on the same 2 s
+  budget — so a server that lost that race once stayed invisible to the
+  #1935 `concurrent_server_writers` warning for its entire lifetime.
+  Registration now retries the timeout in a bounded loop (three attempts,
+  a fresh sentinel name each attempt, so no partial on-disk state is ever
+  reused); every other failure stays one-shot and the never-raise contract
+  is unchanged.
+- **Lock-call I/O failures are classified as infrastructure errors, not
+  contention** (#1957, #1959). An `EIO` / `ENOLCK` / stale-NFS failure
+  inside the lifecycle barrier's poll loop used to be folded into the 2 s
+  timeout and reported as "a memtomem process is starting or holding the
+  lifecycle barrier" — sending the user hunting for a process that does
+  not exist. It now escapes immediately, and `mm uninstall` / `mm reset`
+  split their refusals accordingly: contention says stop the process and
+  re-run, while a barrier that could not be *used* at all (a refused
+  runtime dir, an unopenable barrier path, a lock-call I/O failure) says
+  repair the reported path and retry. Both refusals still exit 2 and
+  neither offers `--force`.
+- **A persistent unprobeable instance-registry entry now names itself
+  instead of advising retry forever** (#1953). The registry probe is
+  fail-closed, but every entry-level failure used to collapse into
+  UNKNOWN → "Retry in a moment" — permanently, for causes retrying cannot
+  fix: a stray subdirectory or link where a sentinel should be, a
+  mode-000 or root-owned entry, an unsearchable or unlistable
+  `instances/` directory. Those now classify as UNTRUSTED, and the
+  refusal names the offending path and asks for it to be removed or
+  repaired; only genuinely transient failures (a racing registrar, a
+  mid-write entry, a Windows sharing violation) keep the retry advice.
+  `mm reset`'s registry refusal also surfaces the runtime-dir `Cause:`
+  detail the probe found, matching uninstall's (#1961).
+- **`mm uninstall` no longer follows — or silently skips — links under
+  the state directory** (#1940, #1943, #1950). Empty-directory prunes are
+  failure-safe and refuse links outright: `is_dir()` follows a link, so a
+  prune pointed at a `config.d` or `memories` *link* would have deleted a
+  directory out from under its real owner (#1940). The failed-rollback
+  cleanup keeps off directory links too — a live directory link is
+  removed as an entry, never by recursing into its target (#1943). And a
+  *dangling* `config.d` / `memories` / `uploads` link or junction, which
+  every follow-links classification stage read as absent — so it was
+  never inventoried, silently survived, blocked the state-dir prune, and
+  the command still printed "Removed: …" and exited 0 — is now
+  inventoried as the link entry itself, planned under the same keep-flag
+  gates, and removed via the staged move (#1950).
+- **A file squatting at an owned-directory name is staged as itself, and
+  an uninspectable pid file refuses honestly** (#1958). A plain regular
+  file or a live *file* symlink sitting where uninstall expects a
+  directory slipped both the dir and the dangling-link classifiers and
+  silently survived; it is now staged and removed as the single entry it
+  is — deletion only unlinks the link entry, never the target's bytes.
+  The shared liveness/db-lock probes also no longer crash on a pid or db
+  path routed through an unsearchable ancestor: the db-lock probe fails
+  open with the error recorded, while a pid file that cannot be inspected
+  is reported as an assumption (`probe_error`) rather than an observed
+  flock, and the refusal says so instead of claiming a held lock.
+- **Runtime-directory removal hints are safe to copy-paste** (#1965,
+  #1966). The `Remove it: rm -f -- <path>` hints printed by
+  `ensure_runtime_dir` refusals now shell-quote the path behind a `--`
+  end-of-options marker (a path spelled `-rf/…` can no longer be parsed
+  as flags), and non-printable bytes — terminal escape sequences smuggled
+  into a path component — render as `$'\xNN'` escapes of the filesystem
+  bytes instead of reaching the terminal raw. The refusal prose around
+  the command is scrubbed the same way.
+- **`mm memory doctor` names the fix in its `stale_source` finding**
+  (#1929): the finding now says to run `mm gc orphan-sources --apply`
+  instead of leaving the remediation implicit.
+- **Stale context-gateway refusal text and `--as-of` help corrected**
+  (#1924). The batch import path's skills-overwrite refusal still claimed
+  tree snapshots were "a future release" after the single-skill overwrite
+  Pull shipped in 0.3.12; the reason now states the actual condition (the
+  batch path does not snapshot skill trees) and each surface appends its
+  own runnable remediation — the CLI names `mm context pull skills <name>
+  --overwrite --apply`, MCP names complete `mem_context_pull` calls
+  including the scope-consent parameters, and the web UI points at the
+  Pull picker's own *Replace the existing copy* affordance. `mm search
+  --as-of` help and the `mem_search` docstring now also say the flag
+  anchors time-decay scoring to that instant, not just validity
+  filtering.
 
 ## [0.3.12] — 2026-07-22
 

@@ -11,7 +11,7 @@ retrieval and write-time indexing. Install the safe base plugin first.
 The hooks use the memtomem CLI, pinned to the same reviewed core release:
 
 ```sh
-uv tool install 'memtomem==0.3.12'
+uv tool install 'memtomem==0.3.13'
 ```
 
 The dispatcher is launched through `uv`, so it does not depend on a

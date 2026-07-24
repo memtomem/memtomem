@@ -315,11 +315,11 @@ class TestMcpServerCommand:
 
     def test_uvx_uses_isolated_exact_all_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
         profile = _make_test_profile(kind="pypi", mm_binary_origin="uvx")
-        monkeypatch.setattr("memtomem.cli.init_cmd.importlib.metadata.version", lambda _: "0.3.12")
+        monkeypatch.setattr("memtomem.cli.init_cmd.importlib.metadata.version", lambda _: "0.3.13")
 
         assert _mcp_server_command(profile) == (
             "uvx",
-            ["--isolated", "--from", "memtomem[all]==0.3.12", "memtomem-server"],
+            ["--isolated", "--from", "memtomem[all]==0.3.13", "memtomem-server"],
         )
 
     def test_persistent_command_launches_server_module(self) -> None:

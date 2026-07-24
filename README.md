@@ -137,7 +137,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.3.12" memtomem-server
+claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.3.13" memtomem-server
 ```
 
 See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi CLI.
