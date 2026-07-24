@@ -710,6 +710,14 @@ def _stage_inventory(
     scaffold: set[Path] = set()
 
     def _record_scaffold(leaf: Path, root: Path) -> None:
+        """Record *leaf* and its ancestors below *root* as ours to prune.
+
+        Call this *before* the ``mkdir``: ``parents=True`` can create
+        part of the chain and then raise, and a directory we made but
+        never recorded is one cleanup would leave behind. Recording a
+        path that never gets created costs nothing — ``_prune_if_empty``
+        no-ops on a missing one.
+        """
         p = leaf
         while p != root and root in p.parents:
             scaffold.add(p)
@@ -761,8 +769,8 @@ def _stage_inventory(
                 staging_root = _staging_root_for(anchor)
                 rel = src.relative_to(anchor)
                 dst = staging_root / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
                 _record_scaffold(dst.parent, staging_root)
+                dst.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(src, dst)
             except OSError as exc:
                 rollback_errors = _rollback()
