@@ -1528,8 +1528,9 @@ class TestPruneIsFailureSafe:
         assert _prune_if_empty(tmp_path / "missing") is False
 
     def test_never_prunes_a_symlinked_dir_target(self, tmp_path):
-        """``rmdir`` on a symlink fails (ENOTDIR); the guard must report
-        'not pruned' and leave both the link and its target intact."""
+        """The refusal must come from the link check, not from POSIX luck:
+        ``rmdir`` on a symlink fails with ``ENOTDIR`` here, but Windows
+        ``RemoveDirectoryW`` would happily unlink the reparse point."""
         target = tmp_path / "target"
         target.mkdir()
         link = tmp_path / "link"
@@ -1541,4 +1542,46 @@ class TestPruneIsFailureSafe:
 
         assert _prune_if_empty(link) is False
         assert link.is_symlink()
+        assert target.is_dir()
+
+    def test_link_refusal_does_not_reach_rmdir(self, tmp_path, monkeypatch):
+        """Runs the Windows contract on POSIX: with ``rmdir`` rigged to
+        succeed, only the link check can produce the refusal. Without it
+        this suite would pass on ``ENOTDIR`` alone and keep claiming a
+        safety the Windows shard disproves."""
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        def _fail(_self):
+            raise AssertionError("rmdir reached for a directory link")
+
+        monkeypatch.setattr(Path, "rmdir", _fail)
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert _prune_if_empty(link) is False
+        assert link.is_symlink()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="junctions are NTFS-only")
+    def test_never_prunes_a_junction(self, tmp_path):
+        """Junctions are the case ``is_symlink()`` alone misses: Windows
+        tags them ``IO_REPARSE_TAG_MOUNT_POINT``, so they stay
+        directory-shaped to ``lstat`` and to ``is_symlink()`` while
+        ``rmdir`` still removes the link."""
+        import _winapi
+
+        target = tmp_path / "target"
+        target.mkdir()
+        junction = tmp_path / "junction"
+        _winapi.CreateJunction(str(target), str(junction))
+        from memtomem.cli.uninstall_cmd import _prune_if_empty
+
+        assert junction.is_junction()
+        assert not junction.is_symlink()
+        assert _prune_if_empty(junction) is False
+        assert junction.is_junction()
         assert target.is_dir()

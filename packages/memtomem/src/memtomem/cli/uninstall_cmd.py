@@ -114,8 +114,19 @@ def _prune_if_empty(path: Path) -> bool:
     uninstall) must degrade to "not pruned" rather than raise and skip
     every prune that follows. Guarding only the ``rmdir`` — the shape
     this replaced — left the listing able to abort the sequence.
+
+    Directory links are refused outright: ``is_dir()`` follows them, and
+    while POSIX ``rmdir`` then fails with ``ENOTDIR``, Windows
+    ``RemoveDirectoryW`` removes the reparse point and leaves the target,
+    so an empty ``config.d`` or ``memories`` *link* would be deleted out
+    from under ``--keep-config`` / ``--keep-data``. Both checks are
+    needed: Windows tags junctions differently from symlinks, so
+    ``is_symlink()`` (like ``lstat`` + ``S_ISDIR``) reports ``False`` for
+    a junction, which stays directory-shaped.
     """
     try:
+        if path.is_symlink() or path.is_junction():
+            return False
         if not path.is_dir() or any(path.iterdir()):
             return False
         path.rmdir()
@@ -774,8 +785,8 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # away. The runtime-dir prune below then usually still finds the
     # retained ``instances.registry.lock`` sidecar and no-ops — expected;
     # the runtime dir is volatile and self-cleans. ``_real_registry_dir``
-    # already refused a symlinked ``instances/``, so this never prunes
-    # across a link.
+    # already refuses a symlinked ``instances/``; ``_prune_if_empty`` is
+    # what keeps every prune here off directory links in general.
     reg_dir = _real_registry_dir()
     if reg_dir is not None:
         _prune_if_empty(reg_dir)
