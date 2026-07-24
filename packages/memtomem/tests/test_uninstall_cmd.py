@@ -2076,6 +2076,10 @@ class TestDanglingOwnedSubdirLinks:
         result = CliRunner().invoke(cli, ["uninstall", "-y"])
         assert result.exit_code == 0, result.output
         assert "Nothing to delete" not in result.output
+        # The staged entry must show a row, not "(nothing found)" — the
+        # user is asked to confirm deleting it.
+        assert "nothing found" not in result.output
+        assert "uploads" in result.output
         assert not os.path.lexists(link)
         assert target.is_dir(), "the linked-to directory must be untouched"
         assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
@@ -2089,6 +2093,9 @@ class TestDanglingOwnedSubdirLinks:
         result = CliRunner().invoke(cli, ["uninstall", "-y"])
         assert result.exit_code == 0, result.output
         assert "Nothing to delete" not in result.output
+        # Shown, not "(nothing found)" — the confirmation asks about it.
+        assert "nothing found" not in result.output
+        assert "memories" in result.output
         assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
 
     def test_entry_probe_calls_only_genuine_absence_absent(self, home, monkeypatch):
