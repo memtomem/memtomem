@@ -1380,7 +1380,14 @@ class TestInstanceRegistrySymlinkGuard:
         ``instances/`` is made to answer ``is_junction()`` so the whole
         chain — untrusted → UNKNOWN → refuse, nothing staged — is proven
         on every platform. What stays Windows-only is the narrow fact
-        that a real junction answers True."""
+        that a real junction answers True.
+
+        Both guards are covered, and they fail differently: the probe
+        (``_dir_state``) is what refuses, while ``_real_registry_dir`` is
+        what keeps the *listing* out of the inventory — and inventory
+        collection runs before the refusal block, so without it the
+        target's filenames reach the user's screen even on a refused
+        run."""
         reg = registry_at_runtime_dir
         state = _seed_state(home)
         entry = _seed_sentinel(reg)
@@ -1393,6 +1400,7 @@ class TestInstanceRegistrySymlinkGuard:
         assert "did not complete" in result.output
         assert (state / "memtomem.db").exists()
         assert entry.exists(), "a junctioned registry must never be staged"
+        assert entry.name not in result.output, "inventory must not list across the junction"
 
     @_windows_only
     def test_junctioned_instances_dir_refuses_and_touches_nothing(
