@@ -2013,6 +2013,74 @@ class TestDanglingOwnedSubdirLinks:
         assert not os.path.lexists(link)
         assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
 
+    def test_unresolvable_link_target_is_treated_as_dangling_and_removed(self, home):
+        """``Path.exists()`` propagates ``EACCES`` (target beneath an
+        unsearchable directory) instead of returning False — the
+        classifier must call that dangling, not crash the inventory."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX permission bits required")
+        state = _seed_state(home)
+        locked = home / "locked"
+        inner = locked / "inner"
+        inner.mkdir(parents=True)
+        link = state / "uploads"
+        try:
+            link.symlink_to(inner / "gone")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        os.chmod(locked, 0o000)
+        try:
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        finally:
+            os.chmod(locked, 0o700)
+        assert result.exit_code == 0, result.output
+        assert not os.path.lexists(link)
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_live_link_to_empty_dir_is_not_nothing_to_delete(self, home):
+        """Zero listed files, zero bytes — but the plan stages the link
+        entry, so a byte/file-count gate would falsely short-circuit."""
+        state = home / ".memtomem"
+        state.mkdir()
+        target = home / "empty-target"
+        target.mkdir()
+        link = state / "uploads"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" not in result.output
+        assert not os.path.lexists(link)
+        assert target.is_dir(), "the linked-to directory must be untouched"
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_empty_owned_dir_alone_is_deleted_not_nothing(self, home):
+        """An empty real owned dir is our own skeleton: staged and gone,
+        not "Nothing to delete" with the state dir left behind."""
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "memories").mkdir()
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" not in result.output
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_entry_probe_calls_only_genuine_absence_absent(self, home, monkeypatch):
+        """``lexists`` semantics (every lstat error → absent) would let
+        the staging loop silently skip a planned entry; only ENOENT /
+        ENOTDIR may read as absent."""
+        from memtomem.cli import uninstall_cmd
+
+        assert uninstall_cmd._entry_present(home / "nope") is False
+
+        def _eacces(path):
+            raise PermissionError(errno.EACCES, "denied")
+
+        monkeypatch.setattr(uninstall_cmd.os, "lstat", _eacces)
+        assert uninstall_cmd._entry_present(home / "nope") is True
+
     def test_mid_stage_failure_rolls_dangling_link_back(self, home, monkeypatch):
         """Uploads stage before the database in the plan, so failing the
         db move exercises rollback of an already-staged dangling link."""

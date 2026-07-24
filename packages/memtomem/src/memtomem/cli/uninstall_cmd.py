@@ -101,18 +101,52 @@ def _is_dangling_link(path: Path) -> bool:
     Junction-aware for free: ``_is_dir_link`` checks ``is_junction()``
     (reparse-tag based), and a dangling junction — ``lstat``-reported
     ``S_IFDIR`` while the follow-based ``is_dir()`` is False — lands
-    here like a dangling symlink. An unreadable entry also classifies
-    as dangling (``_is_dir_link`` says True on OSError, ``exists()``
-    says False), so we *attempt* the staged move and a real failure
-    surfaces through rollback + ``_UninstallStagingError`` instead of
-    today's silent leftover.
+    here like a dangling symlink. An unresolvable link also classifies
+    as dangling — ``Path.exists()`` propagates errors outside its
+    ignore-set (e.g. ``EACCES`` when the target sits beneath an
+    unsearchable directory), and "cannot be followed" is exactly the
+    condition this helper names. Either way we *attempt* the staged
+    move and a real failure surfaces through rollback +
+    ``_UninstallStagingError`` instead of today's silent leftover.
     """
-    return _is_dir_link(path) and not path.exists()
+    if not _is_dir_link(path):
+        return False
+    try:
+        return not path.exists()
+    except OSError:
+        return True
+
+
+def _entry_present(path: Path) -> bool:
+    """No-follow existence where only genuine absence counts as absent.
+
+    ``os.path.lexists`` maps *every* ``lstat`` failure to False, which
+    would make the staging loop silently skip an entry it planned to
+    delete — the #1946 silent-leftover shape all over again, one layer
+    down. Only ``ENOENT``/``ENOTDIR`` mean "nothing there"; any other
+    failure answers True so the ``os.replace`` is attempted and a real
+    problem surfaces through rollback + exit 2.
+    """
+    try:
+        os.lstat(path)
+    except OSError as exc:
+        return exc.errno not in (errno.ENOENT, errno.ENOTDIR)
+    return True
 
 
 def _stageable_dir_entry(path: Path) -> bool:
-    """Real dir, live dir link (whole-entry move, #1943), or dangling link."""
-    return path.is_dir() or _is_dangling_link(path)
+    """Real dir, live dir link (whole-entry move, #1943), or dangling link.
+
+    ``is_dir()`` follows, so — like ``exists()`` above — it propagates
+    e.g. ``EACCES`` for an unresolvable link; that case falls through to
+    the dangling classifier rather than aborting plan construction.
+    """
+    try:
+        if path.is_dir():
+            return True
+    except OSError:
+        pass
+    return _is_dangling_link(path)
 
 
 def _real_registry_dir() -> Path | None:
@@ -283,7 +317,14 @@ def _file_size(path: Path) -> int:
 
 
 def _dir_total(path: Path) -> tuple[list[Path], int]:
-    if not path.is_dir():
+    # ``is_dir()`` follows links and propagates errors outside its
+    # ignore-set (e.g. EACCES for an unresolvable link) — an unlistable
+    # candidate contributes nothing rather than aborting the inventory;
+    # the dangling-link classification below still surfaces the entry.
+    try:
+        if not path.is_dir():
+            return [], 0
+    except OSError:
         return [], 0
     files = sorted(p for p in path.rglob("*") if p.is_file())
     return files, sum(_file_size(p) for p in files)
@@ -539,28 +580,21 @@ def _print_group(group: _Group) -> None:
         )
 
 
-def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> tuple[int, int]:
-    """Print inventory grouped + return ``(bytes, paths)`` that will be deleted.
-
-    The path count exists because bytes alone under-report: a dangling
-    owned-subdir link is a deletable 0 B entry (#1946), so "anything to
-    delete?" must be decided on paths, not on the byte total.
-    """
+def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> int:
+    """Print inventory grouped + return total bytes that will be deleted."""
     click.echo("memtomem state inventory:")
     if inv.db_path.parent != _DEFAULT_STATE_DIR:
         click.echo(f"  (custom storage path: {_format_path(inv.db_path.parent)})")
 
     will_delete_total = 0
-    will_delete_count = 0
 
     def emit(group: _Group, will_delete: bool) -> None:
-        nonlocal will_delete_total, will_delete_count
+        nonlocal will_delete_total
         if not group.paths:
             return
         _print_group(group)
         if will_delete:
             will_delete_total += group.bytes_total
-            will_delete_count += len(group.paths)
 
     emit(inv.db_files, not keep_data)
     emit(inv.config_files, not keep_config)
@@ -586,7 +620,7 @@ def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> 
         click.echo("  (nothing found)")
     else:
         click.echo(f"\nTotal to delete: ~{_human_size(will_delete_total)}")
-    return will_delete_total, will_delete_count
+    return will_delete_total
 
 
 def _print_externals(externals: list[_External]) -> None:
@@ -741,11 +775,11 @@ def _stage_inventory(
     # lives on the anchor's filesystem even when it is a link pointing at
     # another volume. Following it here reports the target's device and
     # refuses a move that would have worked. The existence gate must be
-    # no-follow too (``lexists``): a dangling link is a plannable entry
-    # (#1946) that ``exists()`` would misread as absent.
+    # no-follow too: a dangling link is a plannable entry (#1946) that
+    # ``exists()`` would misread as absent.
     for _, paths in plan:
         for src in paths:
-            if not os.path.lexists(src):
+            if not _entry_present(src):
                 continue
             try:
                 anchor = _anchor_for(src)
@@ -820,7 +854,7 @@ def _stage_inventory(
         for src in paths:
             # No-follow, like the pre-check above: a dangling link must
             # reach the ``os.replace`` that removes its entry (#1946).
-            if not os.path.lexists(src):
+            if not _entry_present(src):
                 continue
             try:
                 anchor = _anchor_for(src)
@@ -952,7 +986,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     inv = _collect_inventory(db_path)
     externals = _probe_external_integrations()
 
-    _, will_delete_count = _print_inventory(inv, keep_config=keep_config, keep_data=keep_data)
+    _print_inventory(inv, keep_config=keep_config, keep_data=keep_data)
     _print_externals(externals)
     label, lines = _binary_uninstall_hint(profile)
     _print_binary_hint(label, lines)
@@ -1083,10 +1117,14 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 )
         sys.exit(2)
 
-    # Path-count gate, not bytes: a dangling owned-subdir link (#1946) —
-    # or any zero-byte entry — is still something to delete. other_files
-    # needs no special case; it is emitted with ``will_delete=True``.
-    if will_delete_count == 0:
+    # "Anything to delete?" is decided on the stage plan, not the printed
+    # byte total: the inventory lists *files*, so a dangling owned-subdir
+    # link (#1946), a live link to an empty directory, or an empty owned
+    # directory is deletable state that contributes zero listed bytes and
+    # zero listed files while ``_build_stage_plan`` still stages its
+    # entry. ``_entry_present`` keeps the probe no-follow.
+    gate_plan = _build_stage_plan(inv, keep_config=keep_config, keep_data=keep_data)
+    if not any(_entry_present(p) for _, paths in gate_plan for p in paths):
         click.echo("\nNothing to delete with the current flags.")
         return
 
