@@ -82,13 +82,13 @@ Both write to `~/.claude.json` — no need to edit that file by hand.
 
 These commands reuse the persistent environment that provides `mm`. If you
 intentionally do not install memtomem, replace `memtomem-server` with `uvx
---isolated --from "memtomem[all]==0.3.12" memtomem-server`.
+--isolated --from "memtomem[all]==0.3.13" memtomem-server`.
 
 For the safe plugin experience (bundled MCP server plus six focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
 indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
 Note that both manual commands above differ from the plugin's pinned launch
-command (`uvx --from memtomem==0.3.12 memtomem-server`), so installing the
+command (`uvx --from memtomem==0.3.13 memtomem-server`), so installing the
 plugin on top of a manual entry runs **two** servers against the same store.
 The [Claude Code integration guide](integrations/claude-code.md) shows how to
 check for the duplicate and which registration to keep.
@@ -293,13 +293,16 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The published npm plugin is `opencode-memtomem@0.1.2`. Add it through
-OpenCode's plugin form — `{"plugin": ["opencode-memtomem@0.1.2"]}` in
-`opencode.json`. The plugin supplies an exact-pinned MCP server, six commands,
-three read-only skills, and conservative permissions.
+The published npm plugin is `opencode-memtomem@0.1.2` (bundling core
+`0.3.12`). Version `0.1.3`, which this repository's source describes and which
+bundles core `0.3.13`, is not on npm yet; until it is, configure the MCP
+server directly (below). Once published, add it through OpenCode's plugin
+form — `{"plugin": ["opencode-memtomem@0.1.3"]}` in `opencode.json`. The
+plugin supplies an exact-pinned MCP server, six commands, three read-only
+skills, and conservative permissions.
 
-If you only need the MCP tools — without the plugin's bundled commands and
-skills — configure the released MCP server directly instead:
+To use the MCP tools directly — without the plugin's bundled commands and
+skills — configure the released MCP server:
 
 ```json
 {
@@ -307,7 +310,7 @@ skills — configure the released MCP server directly instead:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.12", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.13", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core"}
@@ -803,7 +806,7 @@ ad-hoc sqlite consumers are not registered and stay invisible to it.
 3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free
 4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
 
-> Running `uvx --isolated --from "memtomem[all]==0.3.12" memtomem-server`
+> Running `uvx --isolated --from "memtomem[all]==0.3.13" memtomem-server`
 > bare in a terminal prints
 > a setup hint (MCP client configuration plus the network-transport
 > examples from §12) and exits — it is **not** a "does it serve?" smoke

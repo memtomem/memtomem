@@ -7,19 +7,9 @@ and three read-only skills. It does not add event hooks or automatic indexing.
 ## Install
 
 The published npm release is `opencode-memtomem@0.1.2` (bundling core
-`0.3.12`). Do not use an `opencode plugin add` command; OpenCode loads npm
-plugins from the singular `plugin` array in `opencode.json`:
-
-```json
-{"plugin": ["opencode-memtomem@0.1.2"]}
-```
-
-Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
-`uvx` must be available on `PATH`; the plugin starts the exact-pinned
-`memtomem[all]==0.3.12` runtime on demand.
-
-If you only need the MCP tools — without the bundled commands and skills —
-configure the local MCP server directly instead:
+`0.3.12`). Version `0.1.3` — the one this repository's source describes,
+bundling core `0.3.13` — is not on npm yet. Until it is, configure the local
+MCP server directly, which pulls the `memtomem[all]==0.3.13` runtime from PyPI:
 
 ```json
 {
@@ -27,7 +17,7 @@ configure the local MCP server directly instead:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.12", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.13", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core"}
@@ -35,6 +25,18 @@ configure the local MCP server directly instead:
   }
 }
 ```
+
+After `0.1.3` is published, add it through OpenCode's singular `plugin`
+configuration key (there is no `opencode plugin add` command):
+
+```json
+{"plugin": ["opencode-memtomem@0.1.3"]}
+```
+
+Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
+`uvx` must be available on `PATH`; the plugin starts the exact-pinned
+`memtomem==0.3.13` runtime on demand. For development from this repository,
+point the same `plugin` array at `packages/opencode-memtomem/dist/server.js`.
 
 The plugin supports macOS, Linux, and Windows through WSL. Native Windows has
 not been verified.

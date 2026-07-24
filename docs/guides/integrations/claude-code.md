@@ -62,7 +62,7 @@ optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
 > whether your manual entry launches the server with the **same command and
-> arguments** as the plugin — `uvx --from memtomem==0.3.12 memtomem-server`
+> arguments** as the plugin — `uvx --from memtomem==0.3.13 memtomem-server`
 > (environment variables are not compared; measured on Claude Code 2.1.218):
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
@@ -70,7 +70,7 @@ optional.
 >   `mcp__memtomem__mem_*` names. Only one server runs.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
->   environment, or `uvx --isolated --from "memtomem[all]==0.3.12"
+>   environment, or `uvx --isolated --from "memtomem[all]==0.3.13"
 >   memtomem-server`) *are* different — **both servers run**: two processes
 >   write the same store, and the tool list doubles under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
@@ -138,7 +138,7 @@ that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
 `mm`. For a no-install setup, use `uvx --isolated --from
-"memtomem[all]==0.3.12" memtomem-server`. If an older user-scope registration
+"memtomem[all]==0.3.13" memtomem-server`. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash
@@ -246,7 +246,7 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.3.12'
+uv tool install 'memtomem==0.3.13'
 ```
 
 The bundled dispatcher reads Claude's hook JSON from stdin; it never expands

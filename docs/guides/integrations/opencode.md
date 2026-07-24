@@ -15,11 +15,16 @@ Native Windows has not yet been verified.
 ## Install
 
 The published npm release is `opencode-memtomem@0.1.2`, bundling core
-`0.3.12`. Add it through OpenCode's singular `plugin` configuration key
-(there is no `opencode plugin add` command):
+`0.3.12`. Version `0.1.3` — the one this repository's source describes,
+bundling core `0.3.13` — is not on npm yet. Until it is, the manual MCP
+configuration below is the recommended path; it pulls the `0.3.13` runtime
+from PyPI directly.
+
+After `0.1.3` is published, add it through OpenCode's singular `plugin`
+configuration key (there is no `opencode plugin add` command):
 
 ```json
-{"plugin": ["opencode-memtomem@0.1.2"]}
+{"plugin": ["opencode-memtomem@0.1.3"]}
 ```
 
 For development from this repository, build the package and point the same
@@ -44,7 +49,7 @@ instead:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.12", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.13", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core"}
@@ -59,7 +64,7 @@ Restart OpenCode and call `memtomem_mem_status` to verify this path.
 
 | Surface | Included behavior |
 |---|---|
-| MCP | Exact-pinned `memtomem==0.3.12`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
+| MCP | Exact-pinned `memtomem==0.3.13`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
 | Commands | `memtomem-search`, `recall`, `status`, `remember`, `index`, `setup` |
 | Skills | Read-only `search`, `recall`, and `status` |
 
