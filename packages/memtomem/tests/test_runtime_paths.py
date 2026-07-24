@@ -19,6 +19,7 @@ import pytest
 
 from memtomem._runtime_paths import (
     _hint_quote,
+    _scrub,
     ensure_runtime_dir,
     legacy_server_pid_path,
     runtime_dir,
@@ -346,10 +347,12 @@ class TestRemovalHintQuoting:
         expected = f"rmdir -- {shlex.quote(str(xdg / 'memtomem'))}"
         assert expected in str(exc.value)
 
-    def test_control_char_in_path_is_shell_quoted(self, tmp_path, monkeypatch):
-        """A path with an embedded control character (ESC) must land inside
-        the ``shlex.quote`` form so the suggested command is execution-safe
-        rather than splicing a raw escape sequence into the command line."""
+    def test_control_char_path_renders_escaped_everywhere(self, tmp_path, monkeypatch):
+        """A path with an embedded control character (ESC) must render
+        escaped in the *entire* message — ANSI-C ``$'...'`` form in the
+        command portion (byte-exact on paste), ``_scrub``-ed in the
+        ``runtime dir`` prose prefix. A single raw byte anywhere would
+        misrender the terminal before the safe command is even reached."""
         xdg = tmp_path / "x\x1bdg"
         xdg.mkdir()
         os.chmod(xdg, 0o700)
@@ -359,8 +362,10 @@ class TestRemovalHintQuoting:
 
         with pytest.raises(PermissionError) as exc:
             ensure_runtime_dir()
-        expected = f"rm -rf -- {shlex.quote(str(xdg / 'memtomem'))}"
-        assert expected in str(exc.value)
+        msg = str(exc.value)
+        assert "rm -rf -- $'" in msg and "\\x1b" in msg
+        # No raw control byte may survive anywhere — prose included.
+        assert not any(not ch.isprintable() for ch in msg)
 
     def test_leading_hyphen_path_tokenizes_as_operand(self, tmp_path, monkeypatch):
         """A relative ``$XDG_RUNTIME_DIR`` beginning with ``-`` resolves to a
@@ -389,11 +394,14 @@ class TestRemovalHintQuoting:
 
 
 class TestHintQuote:
-    """Unit coverage for the quoting helper itself — an unconditional
-    :func:`shlex.quote` wrap. Assertions are on the *contract* (the result
-    is one shell token equal to the path), not the exact quoted string:
-    ``str(Path(...))`` uses ``\\`` on Windows, so a hard-coded POSIX string
-    would spuriously fail there while the helper is in fact correct."""
+    """Unit coverage for the quoting helper itself — :func:`shlex.quote`
+    for printable paths, ANSI-C ``$'...'`` with fsencoded-byte escapes when
+    a non-printable is present. ``Path`` inputs assert on the *contract*
+    (the result is one shell token equal to the path), not the exact quoted
+    string: ``str(Path(...))`` uses ``\\`` on Windows, so a hard-coded
+    POSIX string would spuriously fail there while the helper is in fact
+    correct. Exact-form assertions use ``str`` inputs, which bypass that
+    rewriting."""
 
     def test_whitespace_path_becomes_a_single_operand(self):
         """A path with a space must not stay a bare word (it would split
@@ -409,6 +417,52 @@ class TestHintQuote:
         ``detail`` verbatim (#1948/#1955)."""
         p = Path("/run/user/501/memtomem")
         assert shlex.split(_hint_quote(p)) == [str(p)]
+
+    def test_control_char_uses_ansi_c_byte_escapes(self):
+        # str inputs bypass Path's platform separator rewriting, so the
+        # exact-form assertions below are OS-independent.
+        quoted = _hint_quote("/tmp/x\x1b]0;pwned\x07/memtomem-501")
+        assert quoted == "$'/tmp/x\\x1b]0;pwned\\x07/memtomem-501'"
+        assert "\x1b" not in quoted and "\x07" not in quoted
+
+    def test_multibyte_non_printable_escapes_filesystem_bytes(self):
+        # U+200B (zero-width space) is non-printable and multi-byte in
+        # UTF-8. ``$'\xNN'`` produces raw *bytes* in bash/zsh — escaping
+        # the code point (``​``) would name a different path, and
+        # macOS bash 3.2 has no ``\u`` at all — so the escape must spell
+        # out the fsencoded bytes.
+        assert _hint_quote("/tmp/a​b") == "$'/tmp/a\\xe2\\x80\\x8bb'"
+
+    def test_backslash_and_nul_escape_inside_ansi_c(self):
+        assert _hint_quote("/tmp/a\\b\x00") == "$'/tmp/a\\\\b\\x00'"
+
+    def test_printable_non_ascii_stays_literal_inside_ansi_c(self):
+        # A control char forces the $'...' branch, but printable
+        # non-ASCII (e.g. Hangul) must pass through as-is — only the
+        # non-printables get byte-escaped.
+        assert _hint_quote("/tmp/한글\x1b") == "$'/tmp/한글\\x1b'"
+
+    def test_single_quote_with_control_char_stays_one_token(self):
+        # ' inside the ANSI-C branch must be escaped or the token ends
+        # early; bash tokenization of the result must give the raw path.
+        quoted = _hint_quote("/tmp/o'brien\x1b/memtomem")
+        assert quoted == "$'/tmp/o\\'brien\\x1b/memtomem'"
+
+
+class TestScrub:
+    """``_scrub`` is the prose-side counterpart of ``_hint_quote``: the
+    ``runtime dir {target}`` prefix renders the same environment-derived
+    path, so a raw ESC/OSC there would reach the terminal before the
+    safely quoted command ever does (#1956)."""
+
+    def test_printable_text_passes_through(self):
+        assert _scrub("/tmp/my dir/memtomem-501") == "/tmp/my dir/memtomem-501"
+
+    def test_control_chars_become_byte_escapes(self):
+        assert _scrub("x\x1b]0;pwned\x07y") == "x\\x1b]0;pwned\\x07y"
+
+    def test_multibyte_non_printable_scrubs_filesystem_bytes(self):
+        assert _scrub("a​b") == "a\\xe2\\x80\\x8bb"
 
 
 @pytest.mark.skipif(

@@ -61,7 +61,7 @@ from memtomem._instance_registry import instances_dir as _instances_dir
 from memtomem._instance_registry import (
     probe_all_for_uninstall as _probe_registry_liveness,
 )
-from memtomem._runtime_paths import runtime_dir, server_pid_path
+from memtomem._runtime_paths import _hint_quote, _scrub, runtime_dir, server_pid_path
 from memtomem.cli._db_lock import DbLockState as _DbLockState  # noqa: F401  (test seam)
 from memtomem.cli._db_lock import check_db_lock as _check_db_lock
 from memtomem.cli._liveness import ServerState
@@ -554,10 +554,10 @@ def _binary_uninstall_hint(profile: RuntimeProfile) -> tuple[str, list[str]]:
             str(profile.workspace_venv_path) if profile.workspace_venv_path else "<workspace>/.venv"
         )
         return (
-            f"workspace venv ({venv_str})",
+            f"workspace venv ({_scrub(venv_str)})",
             [
                 "uv pip uninstall memtomem",
-                f"  # or: rm -rf {venv_str}",
+                f"  # or: rm -rf -- {_hint_quote(venv_str)}",
             ],
         )
     if origin == "system":

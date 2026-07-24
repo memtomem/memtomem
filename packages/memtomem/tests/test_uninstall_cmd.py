@@ -498,6 +498,65 @@ class TestBinaryHintPerOrigin:
         assert result.exit_code == 0, result.output
         assert expected_substring in result.output
 
+    def test_venv_hint_shell_quotes_a_whitespace_path(self, home, monkeypatch):
+        """A workspace venv under a path with a space must reach the
+        ``rm -rf`` fallback hint quoted and behind ``--``, so the
+        suggested command targets the real dir instead of splitting on
+        the space (#1956 follow-up; same shape as the runtime-dir
+        hints). Expectation is computed from the same ``Path`` —
+        ``str(Path(...))`` uses ``\\`` on Windows, so a hard-coded POSIX
+        string would spuriously fail there."""
+        import shlex
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli import uninstall_cmd
+
+        venv = Path("My Project/.venv")
+        fake_profile = init_cmd.RuntimeProfile(
+            cwd_install_type="pypi",
+            cwd_install_dir=None,
+            runtime_interpreter=Path("python3"),
+            workspace_venv_path=venv,
+            mm_binary_origin="venv-relative",
+            runtime_matches_workspace=True,
+        )
+        monkeypatch.setattr(uninstall_cmd, "_runtime_profile", lambda: fake_profile)
+
+        result = CliRunner().invoke(cli, ["uninstall"])
+        assert result.exit_code == 0, result.output
+        expected = f"rm -rf -- {shlex.quote(str(venv))}"
+        assert expected in result.output
+        assert expected != f"rm -rf -- {venv}"  # the space forced quoting
+
+    def test_venv_hint_scrubs_control_chars_from_label_and_command(self, home, monkeypatch):
+        """A venv path carrying an ESC byte must not reach the terminal
+        raw — neither via the ``workspace venv (...)`` prose label nor
+        via the ``rm -rf`` hint (#1956 follow-up). The exact escaped form
+        is platform-dependent (``str(Path(...))`` separator rewriting),
+        so pin the wiring — the CLI must route the path through the
+        producer's own quote/scrub helpers — plus the terminal-safety
+        contract that no raw control byte survives anywhere."""
+        from memtomem._runtime_paths import _hint_quote
+        from memtomem.cli import init_cmd
+        from memtomem.cli import uninstall_cmd
+
+        venv = Path("ws\x1bdir/.venv")
+        fake_profile = init_cmd.RuntimeProfile(
+            cwd_install_type="pypi",
+            cwd_install_dir=None,
+            runtime_interpreter=Path("python3"),
+            workspace_venv_path=venv,
+            mm_binary_origin="venv-relative",
+            runtime_matches_workspace=True,
+        )
+        monkeypatch.setattr(uninstall_cmd, "_runtime_profile", lambda: fake_profile)
+
+        result = CliRunner().invoke(cli, ["uninstall"])
+        assert result.exit_code == 0, result.output
+        assert f"rm -rf -- {_hint_quote(str(venv))}" in result.output
+        assert "rm -rf -- $'" in result.output  # ANSI-C branch was taken
+        assert "\x1b" not in result.output
+
 
 # -------------------------------------------------------------------- 9
 

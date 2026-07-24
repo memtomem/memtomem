@@ -59,7 +59,7 @@ import tempfile
 from pathlib import Path
 
 
-def _hint_quote(target: Path) -> str:
+def _hint_quote(target: Path | str) -> str:
     """Quote *target* for embedding in a suggested removal command.
 
     The remediation hints below splice ``target`` into a copy-pasteable
@@ -67,15 +67,27 @@ def _hint_quote(target: Path) -> str:
     (``$XDG_RUNTIME_DIR``/``$TMPDIR``); a path with whitespace or shell
     metacharacters would otherwise yield a command that deletes the wrong
     path when pasted (``rm -rf /tmp/my dir/memtomem-501`` splits into two
-    args). Quote the *command* portion only — the human-readable
-    ``runtime dir {target}`` prefix stays raw prose.
+    args). Prose renderings of the same path (the ``runtime dir {target}``
+    prefix) go through :func:`_scrub` instead — display-safe, not a shell
+    token.
+
+    A printable path is :func:`shlex.quote`-d. A path carrying any
+    non-printable character (terminal control/escape sequences) renders in
+    ANSI-C form (``$'...'``) with each non-printable expanded to ``\\xNN``
+    escapes of its **filesystem bytes** (``os.fsencode``) — ``$'\\xNN'``
+    produces raw bytes in both bash and zsh, so escaping code points would
+    name a different path for anything multi-byte, and bash 3.2 (macOS) has
+    no ``\\uNNNN`` at all. Display-safe *and* byte-for-byte resolving to
+    the real path when pasted.
 
     :func:`shlex.quote` is POSIX-shell quoting. On PowerShell its
     single-quote form is also the literal (no ``$``/backtick expansion), so
-    the hint stays paste-safe there too. ``cmd.exe`` is out of scope: it
-    expands ``%VAR%`` regardless of any quoting and has no ``rm``, so these
-    Unix-shaped hints are illustrative rather than literally executable
-    there — a Windows-native rewrite is a separate change (see #1956).
+    the hint stays paste-safe there too (the ANSI-C form is bash/zsh-only,
+    but only ever appears for paths that are already hostile on any shell).
+    ``cmd.exe`` is out of scope: it expands ``%VAR%`` regardless of any
+    quoting and has no ``rm``, so these Unix-shaped hints are illustrative
+    rather than literally executable there — a Windows-native rewrite is a
+    separate change (see #1956).
 
     Quoting alone is not enough for a leading-hyphen path:
     ``shlex.quote("-rf/memtomem")`` returns it unchanged, and ``rm`` would
@@ -84,7 +96,42 @@ def _hint_quote(target: Path) -> str:
     a filename (a relative ``$XDG_RUNTIME_DIR``/``$TMPDIR`` can begin with
     ``-``; an absolute one never does).
     """
-    return shlex.quote(str(target))
+    s = str(target)
+    if all(ch.isprintable() for ch in s):
+        return shlex.quote(s)
+    out: list[str] = []
+    for ch in s:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "'":
+            out.append("\\'")
+        elif ch.isprintable():
+            out.append(ch)
+        else:
+            out.extend(f"\\x{b:02x}" for b in os.fsencode(ch))
+    return "$'" + "".join(out) + "'"
+
+
+def _scrub(text: str) -> str:
+    """Make environment-derived *text* safe to print as prose.
+
+    Non-printable characters (terminal control/escape sequences smuggled
+    into ``$XDG_RUNTIME_DIR`` or a workspace path) are replaced with
+    ``\\xNN`` escapes of their **filesystem bytes** (``os.fsencode``), so
+    nothing in the rendered message can move the cursor or retitle the
+    terminal — even the prose ahead of the safely quoted command. Printable
+    text — including non-ASCII — passes through untouched. Display-only:
+    for a copy-paste *command*, use :func:`_hint_quote` instead.
+    """
+    if all(ch.isprintable() for ch in text):
+        return text
+    out: list[str] = []
+    for ch in text:
+        if ch.isprintable():
+            out.append(ch)
+        else:
+            out.extend(f"\\x{b:02x}" for b in os.fsencode(ch))
+    return "".join(out)
 
 
 def _is_safe_dir(path: Path) -> bool:
@@ -155,13 +202,14 @@ def ensure_runtime_dir() -> Path:
         st = None
     except OSError as exc:
         raise PermissionError(
-            f"runtime dir {target}: cannot stat ({exc}). Remove it and retry."
+            f"runtime dir {_scrub(str(target))}: cannot stat ({_scrub(str(exc))}). "
+            f"Remove it and retry."
         ) from exc
 
     if st is not None:
         if stat.S_ISLNK(st.st_mode):
             raise PermissionError(
-                f"runtime dir {target} is a symlink; refusing to follow. "
+                f"runtime dir {_scrub(str(target))} is a symlink; refusing to follow. "
                 f"Remove it: rm -f -- {_hint_quote(target)}"
             )
         # Windows junctions redirect exactly like a symlink but keep
@@ -170,25 +218,25 @@ def ensure_runtime_dir() -> Path:
         # uninstall path stages and deletes what it finds there.
         if target.is_junction():
             raise PermissionError(
-                f"runtime dir {target} is a junction; refusing to follow. "
+                f"runtime dir {_scrub(str(target))} is a junction; refusing to follow. "
                 f"Remove it: rmdir -- {_hint_quote(target)}"
             )
         if not stat.S_ISDIR(st.st_mode):
             raise PermissionError(
-                f"runtime dir {target} exists but is not a directory. "
+                f"runtime dir {_scrub(str(target))} exists but is not a directory. "
                 f"Remove it: rm -f -- {_hint_quote(target)}"
             )
         if os.name != "nt":
             if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
                 raise PermissionError(
-                    f"runtime dir {target} is owned by uid {st.st_uid} "
+                    f"runtime dir {_scrub(str(target))} is owned by uid {st.st_uid} "
                     f"(expected {os.geteuid()}). "
                     f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
                 )
             unsafe = stat.S_IMODE(st.st_mode) & 0o077
             if unsafe:
                 raise PermissionError(
-                    f"runtime dir {target} has unsafe permissions "
+                    f"runtime dir {_scrub(str(target))} has unsafe permissions "
                     f"0o{stat.S_IMODE(st.st_mode):o} (expected 0o700, "
                     f"group/world bits: 0o{unsafe:o}). "
                     f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
