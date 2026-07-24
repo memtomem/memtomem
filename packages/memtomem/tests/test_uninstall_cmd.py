@@ -1181,6 +1181,79 @@ class TestTransactionalStaging:
         )
         assert (outside / "keep.md").exists(), "link target must be untouched"
 
+    def test_failed_rollback_cleanup_never_walks_staged_content(self, home, monkeypatch):
+        """Cleanup must prune only the scaffold it created, never walk the
+        survivor.
+
+        The link case below is one symptom; this is the defect. Walking
+        with ``rglob`` reaches *any* empty directory inside the staged
+        tree — no link required — and on Windows it also descends a
+        staged junction, pruning inside its target, because ``rglob``
+        goes through ``Path.walk`` whose
+        ``is_dir(follow_symlinks=False)`` is True for a junction. A
+        per-entry link check cannot help once the walk has crossed."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        (state / "memories" / "keepdir").mkdir()
+
+        real_replace = os.replace
+
+        def _broken_replace(src, dst, **kwargs):
+            if uninstall_cmd._STAGING_PREFIX in str(dst):
+                if Path(src).name == "memtomem.db":
+                    raise OSError(errno.EACCES, "fake stage failure")
+                return real_replace(src, dst, **kwargs)
+            if uninstall_cmd._STAGING_PREFIX in str(src):
+                raise OSError(errno.EACCES, "fake rollback failure")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _broken_replace)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        staged = [
+            p
+            for p in state.glob(f"{uninstall_cmd._STAGING_PREFIX}*/memories/keepdir")
+            if p.is_dir()
+        ]
+        assert staged, (
+            "an empty directory inside the unrecovered content was pruned; "
+            "cleanup walked user data instead of its own scaffold"
+        )
+
+    def test_cross_fs_precheck_does_not_follow_a_linked_source(self, home, monkeypatch):
+        """``os.replace`` moves the *entry*, which lives on the anchor's
+        filesystem even when it is a link to another volume. Statting
+        through the link reports the target's device and refuses a move
+        that would have succeeded."""
+        state = _seed_state(home)
+        outside = home / "elsewhere"
+        outside.mkdir()
+        link = state / "uploads"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        real_stat = Path.stat
+
+        def _stat(self, *, follow_symlinks=True):
+            st = real_stat(self, follow_symlinks=follow_symlinks)
+            if follow_symlinks and self == link:
+                fields = list(st)
+                fields[2] = 0x5EEDBEEF  # st_dev — pretend the target is elsewhere
+                return os.stat_result(tuple(fields))
+            return st
+
+        monkeypatch.setattr(Path, "stat", _stat)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert "different filesystem" not in result.output, result.output
+        assert result.exit_code == 0, result.output
+
     def test_cross_fs_layout_refused_cleanly(self, home, monkeypatch):
         """Simulate EXDEV from os.replace and assert the user sees a
         cross-filesystem refusal — not a generic stage-failed error —
