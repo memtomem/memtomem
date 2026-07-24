@@ -310,12 +310,20 @@ def _mutation_lock(deadline: float):
 
 
 class BarrierTimeout(Exception):
-    """The lifecycle barrier could not be acquired before its deadline.
+    """The lifecycle barrier could not be taken before the deadline.
 
-    Raised on contention *and* on infrastructure failure — both mean the
-    caller cannot prove that no destructive operation is in flight, and
-    both surfaces fail closed. The distinction is not actionable, but the
-    underlying error is chained for the log.
+    Normally contention — another process holds the flock — and the
+    destructive CLIs advise stopping the holder. Infrastructure failures
+    *before* the lock attempt (a refused runtime dir, an unopenable
+    barrier path) do not reach here: they escape :func:`_acquire_barrier`
+    unwrapped as the original :class:`OSError`, and the CLIs route them to
+    a repair-the-path remediation instead (#1945, #1951). Both fail closed;
+    the last flock error is chained for the log.
+
+    Known gap (#1957): the poll-loop classifier still treats a lock-*call*
+    I/O error (portalocker wraps e.g. ``EIO``/``ENOLCK`` in a bare
+    ``LockException``) as contention, so such an error currently surfaces
+    here rather than as ``OSError``.
     """
 
 
@@ -416,9 +424,9 @@ def acquire_server_lifecycle_barrier(timeout_s: float | None = None) -> HeldBarr
     Held for the process lifetime and released only once storage close is
     confirmed, so a server whose registration failed — or whose close
     failed — still blocks uninstall instead of going invisible. Raises
-    :class:`BarrierTimeout` (contention or unusable runtime dir) or the
-    original :class:`OSError`; the caller must not proceed to open the
-    store on failure.
+    :class:`BarrierTimeout` on contention, or the original :class:`OSError`
+    on an unusable runtime dir / barrier path; the caller must not proceed
+    to open the store on failure.
 
     ``timeout_s=None`` resolves :data:`_BARRIER_TIMEOUT_S` at call time —
     a default argument would freeze the value at import and silently
@@ -435,10 +443,12 @@ def acquire_uninstall_lifecycle_barrier(timeout_s: float | None = None) -> HeldB
     uninstall`` across its staging, ``mm reset`` (#1945) across each of
     its two write boundaries. Held through the final liveness re-probe
     *and* the write, so a server cannot open the store in between. Raises
-    :class:`BarrierTimeout` on contention: a held flock is never stale
-    (the kernel releases it when its holder dies), so this refusal is not
-    ``--force``-overridable. (Name kept for API stability; not
-    uninstall-specific.)
+    :class:`BarrierTimeout` on contention — a held flock is never stale
+    (the kernel releases it when its holder dies), so that refusal is not
+    ``--force``-overridable — or the original :class:`OSError` on an
+    unusable runtime dir / barrier path, which the CLIs route to a
+    repair-the-path remediation (#1951). (Name kept for API stability;
+    not uninstall-specific.)
     """
     return _acquire_barrier(portalocker.LOCK_EX, timeout_s)
 

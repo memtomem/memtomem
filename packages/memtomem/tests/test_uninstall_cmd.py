@@ -2517,6 +2517,11 @@ class TestLifecycleBarrierRefusesUninstall:
 
             assert result.exit_code == 2, result.output
             assert "lifecycle barrier" in result.output
+            # Contention wording, not the infrastructure branch: a held
+            # barrier has a holder to stop (#1951). Paired pin so the two
+            # branches' remediations cannot drift into each other's.
+            assert "stop it and re-run" in result.output
+            assert "Repair the reported path" not in result.output
             assert (state / "memtomem.db").exists()
             assert (state / "config.json").exists()
         finally:
@@ -2526,6 +2531,30 @@ class TestLifecycleBarrierRefusesUninstall:
                 holder.kill()
                 holder.join(timeout=30)
         assert uninstall_cmd is not None  # import pin
+
+    def test_infrastructure_oserror_prescribes_repair(self, home, monkeypatch):
+        """A direct ``OSError`` from acquisition is infrastructure (unusable
+        runtime dir, barrier-file permissions), not contention — "stop it
+        and re-run" would send the user hunting for a process that does not
+        exist (#1870, #1951). Mirrors reset's
+        ``test_infrastructure_oserror_prescribes_repair``.
+        """
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+
+        def broken_acquire(timeout_s=None):
+            raise PermissionError("lifecycle.lock: permission denied")
+
+        monkeypatch.setattr(uninstall_cmd, "_acquire_lifecycle_barrier", broken_acquire)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert "Repair the reported path" in result.output
+        assert "stop it and re-run" not in result.output
+        assert "--force" not in result.output
+        assert (state / "memtomem.db").exists()
+        assert (state / "config.json").exists()
 
     def test_force_does_not_override_the_barrier(self, home, registry_at_runtime_dir, monkeypatch):
         """A held flock is never stale — the kernel releases it when its
