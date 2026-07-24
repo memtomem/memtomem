@@ -1091,6 +1091,80 @@ class TestTransactionalStaging:
         )
         assert leftover == [], f"unexpected staging leftovers: {leftover}"
 
+    def test_rollback_cleans_nested_scaffold_across_two_roots(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """The scaffold path, which every other rollback test misses.
+
+        Everything ``_seed_state`` produces sits directly under the state
+        dir, so ``rel`` is one component, ``dst.parent`` *is* the staging
+        root, and ``_record_scaffold`` iterates zero times. A registry
+        sentinel is the case that does not degenerate: it lives at
+        ``<runtime>/instances/<name>``, so staging it creates a second
+        root under a different anchor *and* an ``instances/`` directory
+        inside it. Both roots must come back clean, which also exercises
+        the deepest-first ordering across unrelated roots."""
+        from memtomem.cli import uninstall_cmd
+
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        entry = _seed_sentinel(reg, aged=True)
+        rt = reg.instances_dir().parent
+
+        real_replace = os.replace
+
+        def _fail_on_db(src, dst, **kwargs):
+            if uninstall_cmd._STAGING_PREFIX in str(dst) and Path(src).name == "memtomem.db":
+                raise OSError(errno.EACCES, "fake stage failure")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _fail_on_db)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert entry.exists(), "the sentinel must be rolled back"
+        for anchor in (state, rt):
+            leftover = sorted(
+                str(p.relative_to(anchor))
+                for p in anchor.rglob(f"{uninstall_cmd._STAGING_PREFIX}*")
+            )
+            assert leftover == [], f"staging leftovers under {anchor}: {leftover}"
+
+    def test_partial_mkdir_scaffold_is_still_pruned(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """``mkdir(parents=True)`` can create part of the chain and then
+        raise. Recording after it would lose exactly those directories —
+        the ones cleanup exists to remove — so the record must be taken
+        first."""
+        from memtomem.cli import uninstall_cmd
+
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        _seed_sentinel(reg, aged=True)
+        rt = reg.instances_dir().parent
+
+        real_mkdir = Path.mkdir
+
+        def _partial_mkdir(self, mode=0o777, parents=False, exist_ok=False):
+            if parents and self.name == "instances" and uninstall_cmd._STAGING_PREFIX in str(self):
+                real_mkdir(self, mode=mode, parents=True, exist_ok=True)
+                raise OSError(errno.EACCES, "fake failure after creating the chain")
+            return real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+        monkeypatch.setattr(Path, "mkdir", _partial_mkdir)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        for anchor_dir in (state, rt):
+            leftover = sorted(
+                str(p.relative_to(anchor_dir))
+                for p in anchor_dir.rglob(f"{uninstall_cmd._STAGING_PREFIX}*")
+            )
+            assert leftover == [], f"staging leftovers under {anchor_dir}: {leftover}"
+
     def test_rollback_failure_surfaces_recovery_path(self, home, monkeypatch):
         """When BOTH stage AND rollback fail, the user must see the
         staging dir path so they can recover manually. Without this,
@@ -1128,6 +1202,132 @@ class TestTransactionalStaging:
         assert uninstall_cmd._STAGING_PREFIX in result.output, (
             "user must be told the staging dir path for manual recovery"
         )
+
+    def test_failed_rollback_cleanup_spares_directory_links(self, home, monkeypatch):
+        """Belt and braces for the survivor: no ``rmdir`` may ever target
+        a directory link in the staging tree.
+
+        Cleanup no longer walks staged content at all, so this cannot
+        trigger today — it pins the outcome rather than the mechanism, so
+        that reintroducing a walk fails here too. POSIX survives the old
+        shape by accident (``rmdir`` on a symlink is ENOTDIR), hence the
+        assertion is on the call: on Windows ``RemoveDirectoryW`` removes
+        the reparse point, silently eating part of the tree the error
+        message tells the user to recover by hand."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        outside = home / "outside-target"
+        outside.mkdir()
+        (outside / "keep.md").write_text("# keep", encoding="utf-8")
+        link = state / "memories" / "linked"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        real_replace = os.replace
+
+        def _broken_replace(src, dst, **kwargs):
+            if uninstall_cmd._STAGING_PREFIX in str(dst):
+                if Path(src).name == "memtomem.db":
+                    raise OSError(errno.EACCES, "fake stage failure")
+                return real_replace(src, dst, **kwargs)
+            if uninstall_cmd._STAGING_PREFIX in str(src):
+                raise OSError(errno.EACCES, "fake rollback failure")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _broken_replace)
+
+        real_rmdir = Path.rmdir
+        rmdir_targets: list[str] = []
+
+        def _recording_rmdir(self):
+            rmdir_targets.append(self.name)
+            return real_rmdir(self)
+
+        monkeypatch.setattr(Path, "rmdir", _recording_rmdir)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert "linked" not in rmdir_targets, (
+            f"cleanup tried to rmdir a directory link; targets={rmdir_targets}"
+        )
+        assert (outside / "keep.md").exists(), "link target must be untouched"
+
+    def test_failed_rollback_cleanup_never_walks_staged_content(self, home, monkeypatch):
+        """Cleanup must prune only the scaffold it created, never walk the
+        survivor.
+
+        The link case above is one symptom; this is the defect. Walking
+        with ``rglob`` reaches *any* empty directory inside the staged
+        tree — no link required — and on Windows it also descends a
+        staged junction, pruning inside its target, because ``rglob``
+        goes through ``Path.walk`` whose
+        ``is_dir(follow_symlinks=False)`` is True for a junction. A
+        per-entry link check cannot help once the walk has crossed."""
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        (state / "memories" / "keepdir").mkdir()
+
+        real_replace = os.replace
+
+        def _broken_replace(src, dst, **kwargs):
+            if uninstall_cmd._STAGING_PREFIX in str(dst):
+                if Path(src).name == "memtomem.db":
+                    raise OSError(errno.EACCES, "fake stage failure")
+                return real_replace(src, dst, **kwargs)
+            if uninstall_cmd._STAGING_PREFIX in str(src):
+                raise OSError(errno.EACCES, "fake rollback failure")
+            return real_replace(src, dst, **kwargs)
+
+        monkeypatch.setattr(uninstall_cmd.os, "replace", _broken_replace)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        staged = [
+            p
+            for p in state.glob(f"{uninstall_cmd._STAGING_PREFIX}*/memories/keepdir")
+            if p.is_dir()
+        ]
+        assert staged, (
+            "an empty directory inside the unrecovered content was pruned; "
+            "cleanup walked user data instead of its own scaffold"
+        )
+
+    def test_cross_fs_precheck_does_not_follow_a_linked_source(self, home, monkeypatch):
+        """``os.replace`` moves the *entry*, which lives on the anchor's
+        filesystem even when it is a link to another volume. Statting
+        through the link reports the target's device and refuses a move
+        that would have succeeded."""
+        state = _seed_state(home)
+        outside = home / "elsewhere"
+        outside.mkdir()
+        link = state / "uploads"
+        try:
+            link.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        real_stat = Path.stat
+
+        def _stat(self, *, follow_symlinks=True):
+            st = real_stat(self, follow_symlinks=follow_symlinks)
+            if follow_symlinks and self == link:
+                fields = list(st)
+                fields[2] = 0x5EEDBEEF  # st_dev — pretend the target is elsewhere
+                return os.stat_result(tuple(fields))
+            return st
+
+        monkeypatch.setattr(Path, "stat", _stat)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert "different filesystem" not in result.output, result.output
+        assert result.exit_code == 0, result.output
 
     def test_cross_fs_layout_refused_cleanly(self, home, monkeypatch):
         """Simulate EXDEV from os.replace and assert the user sees a

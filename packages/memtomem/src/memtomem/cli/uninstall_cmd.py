@@ -682,6 +682,11 @@ def _stage_inventory(
     # plan before the doomed move surfaces. The late-detection branch
     # below still catches anything the pre-check misses (stat race,
     # transient FS errors, etc.).
+    #
+    # No-follow on the source: ``os.replace`` moves the *entry*, which
+    # lives on the anchor's filesystem even when it is a link pointing at
+    # another volume. Following it here reports the target's device and
+    # refuses a move that would have worked.
     for _, paths in plan:
         for src in paths:
             if not src.exists():
@@ -691,7 +696,7 @@ def _stage_inventory(
             except ValueError:
                 continue
             try:
-                if src.stat().st_dev != anchor.stat().st_dev:
+                if os.stat(src, follow_symlinks=False).st_dev != anchor.stat().st_dev:
                     raise _UninstallCrossFsError(src=src, anchor=anchor)
             except OSError:
                 # Stat failure: defer to ``os.replace``'s own diagnostics.
@@ -699,6 +704,24 @@ def _stage_inventory(
 
     roots: dict[Path, Path] = {}
     moves: list[_StagedMove] = []
+    # Intermediate directories *we* created inside a staging root to hold a
+    # move. Recorded rather than rediscovered: cleanup must never walk the
+    # staged tree, which is user data (see ``_rollback``).
+    scaffold: set[Path] = set()
+
+    def _record_scaffold(leaf: Path, root: Path) -> None:
+        """Record *leaf* and its ancestors below *root* as ours to prune.
+
+        Call this *before* the ``mkdir``: ``parents=True`` can create
+        part of the chain and then raise, and a directory we made but
+        never recorded is one cleanup would leave behind. Recording a
+        path that never gets created costs nothing — ``_prune_if_empty``
+        no-ops on a missing one.
+        """
+        p = leaf
+        while p != root and root in p.parents:
+            scaffold.add(p)
+            p = p.parent
 
     def _staging_root_for(anchor: Path) -> Path:
         if anchor not in roots:
@@ -717,22 +740,22 @@ def _stage_inventory(
                 os.replace(move.staged, move.original)
             except OSError as exc:
                 errors.append((move.staged, exc))
-        # Best-effort cleanup of empty staging trees. If rollback
+        # Best-effort cleanup of the staging scaffold. If rollback
         # partially failed, the not-rolled-back content survives — and
         # the user is told the staging root path so they can recover.
+        #
+        # Only directories we created are considered, deepest first.
+        # Walking the tree instead (``root.rglob("*")``) would inspect
+        # the survivor, which is user data: ``rglob`` descends through
+        # ``Path.walk``, whose ``is_dir(follow_symlinks=False)`` is True
+        # for an NTFS junction, so on Windows the walk enters a staged
+        # junction and prunes empty directories *inside its target* —
+        # outside the staging tree entirely. A per-entry link check
+        # cannot fix that: by then the traversal has already crossed.
+        for path in sorted(scaffold, key=lambda p: len(p.parts), reverse=True):
+            _prune_if_empty(path)
         for root in list(roots.values()):
-            if not root.exists():
-                continue
-            for sub in sorted(root.rglob("*"), reverse=True):
-                if sub.is_dir():
-                    try:
-                        sub.rmdir()
-                    except OSError:
-                        pass
-            try:
-                root.rmdir()
-            except OSError:
-                pass
+            _prune_if_empty(root)
         return errors
 
     completed_labels: list[str] = []
@@ -746,6 +769,7 @@ def _stage_inventory(
                 staging_root = _staging_root_for(anchor)
                 rel = src.relative_to(anchor)
                 dst = staging_root / rel
+                _record_scaffold(dst.parent, staging_root)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(src, dst)
             except OSError as exc:
