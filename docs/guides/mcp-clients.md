@@ -293,13 +293,16 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The published npm plugin is `opencode-memtomem@0.1.2`. Add it through
-OpenCode's plugin form — `{"plugin": ["opencode-memtomem@0.1.2"]}` in
-`opencode.json`. The plugin supplies an exact-pinned MCP server, six commands,
-three read-only skills, and conservative permissions.
+The published npm plugin is `opencode-memtomem@0.1.2` (bundling core
+`0.3.12`). Version `0.1.3`, which this repository's source describes and which
+bundles core `0.3.13`, is not on npm yet; until it is, configure the MCP
+server directly (below). Once published, add it through OpenCode's plugin
+form — `{"plugin": ["opencode-memtomem@0.1.3"]}` in `opencode.json`. The
+plugin supplies an exact-pinned MCP server, six commands, three read-only
+skills, and conservative permissions.
 
-If you only need the MCP tools — without the plugin's bundled commands and
-skills — configure the released MCP server directly instead:
+To use the MCP tools directly — without the plugin's bundled commands and
+skills — configure the released MCP server:
 
 ```json
 {

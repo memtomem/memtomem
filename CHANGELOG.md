@@ -115,8 +115,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   split their refusals accordingly: contention says stop the process and
   re-run, while a barrier that could not be *used* at all (a refused
   runtime dir, an unopenable barrier path, a lock-call I/O failure) says
-  repair the reported path and retry. Both refusals still exit 2 and
-  neither offers `--force`.
+  repair the reported path and retry. In text mode both refusals still exit
+  2 and neither offers `--force`; `mm reset --json` reports either refusal in
+  the write-command JSON error shape and exits 1.
 - **A persistent unprobeable instance-registry entry now names itself
   instead of advising retry forever** (#1953). The registry probe is
   fail-closed, but every entry-level failure used to collapse into
