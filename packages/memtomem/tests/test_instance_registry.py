@@ -361,13 +361,13 @@ class TestEnumerationInProcess:
 
 class TestUninstallProbeInProcess:
     def test_empty_registry_is_none(self, rt):
-        assert reg.probe_all_for_uninstall() == "NONE"
+        assert reg.probe_all_for_uninstall().state == "NONE"
 
     def test_own_registration_is_live(self, rt, db):
         inst = reg.register_instance(db)
         assert inst is not None
         try:
-            assert reg.probe_all_for_uninstall() == "LIVE"
+            assert reg.probe_all_for_uninstall().state == "LIVE"
         finally:
             inst.cleanup()
 
@@ -378,28 +378,75 @@ class TestUninstallProbeInProcess:
         entry.touch()
         old = time.time() - reg._STALE_GRACE_S - 10
         os.utime(entry, (old, old))
-        assert reg.probe_all_for_uninstall() == "NONE"
+        assert reg.probe_all_for_uninstall().state == "NONE"
         # fail-closed probe performs no GC — uninstall must not mutate
         # the registry it is judging
         assert entry.exists()
 
     def test_mutation_lock_contention_is_unknown(self, rt, monkeypatch):
-        """A timeout never means empty (fail-closed)."""
+        """A timeout never means empty (fail-closed) — and it is the
+        *transient* verdict, so it must not carry an untrusted path."""
         monkeypatch.setattr(reg, "_LOCK_TIMEOUT_S", 0.2)
         reg.instances_dir().mkdir(parents=True, exist_ok=True)
         (reg.instances_dir() / "whatever").touch()
         assert reg._mutation_thread_lock.acquire(timeout=5)
         try:
-            state = reg.probe_all_for_uninstall()
+            verdict = reg.probe_all_for_uninstall()
         finally:
             reg._mutation_thread_lock.release()
-        assert state == "UNKNOWN"
+        assert verdict.state == "UNKNOWN"
+        assert verdict.untrusted_path is None
 
     def test_unreadable_entry_is_unknown(self, rt, monkeypatch):
         reg.instances_dir().mkdir(parents=True, exist_ok=True)
         (reg.instances_dir() / "entry").touch()
         monkeypatch.setattr(reg, "_probe_entry", lambda _p: "unknown")
-        assert reg.probe_all_for_uninstall() == "UNKNOWN"
+        assert reg.probe_all_for_uninstall().state == "UNKNOWN"
+
+    def test_runtime_dir_refusal_is_untrusted_not_unknown(self, rt, monkeypatch):
+        """``ensure_runtime_dir`` refusing its own directory (symlink,
+        junction, wrong owner, unsafe mode — #1940) is persistent, not
+        transient: the probe must answer UNTRUSTED naming the runtime
+        dir, not collapse into UNKNOWN's "retry" advice (#1942)."""
+
+        def _refuse() -> Path:
+            raise PermissionError(f"runtime dir {rt} is a junction; refusing to follow.")
+
+        monkeypatch.setattr(reg, "ensure_runtime_dir", _refuse)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNTRUSTED"
+        assert verdict.untrusted_path == rt
+
+    def test_sidecar_failure_is_unknown_not_untrusted(self, rt, monkeypatch):
+        """A ``PermissionError`` from the sidecar layer proves nothing
+        about the runtime dir — attributing it there would tell the user
+        to remove a directory that may be fine. Only the translated
+        ``ensure_runtime_dir`` refusal maps to UNTRUSTED (#1942)."""
+
+        def _bad_sidecar() -> Path:
+            raise PermissionError("sidecar open denied")
+
+        monkeypatch.setattr(reg, "registry_sidecar_path", _bad_sidecar)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNKNOWN"
+        assert verdict.untrusted_path is None
+
+    def test_entry_unlock_failure_is_unknown_not_untrusted(self, rt, monkeypatch):
+        """``portalocker.unlock`` / ``close`` on a sentinel are the one
+        unguarded spot inside the probe loop — an escaping
+        ``PermissionError`` there must read as UNKNOWN, never as an
+        untrusted runtime dir (#1942)."""
+        d = reg.instances_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"12345-1-{'f' * 16}-aaaaaaaa-bbbbbbbb.lock").touch()
+
+        def _bad_unlock(_fp):
+            raise PermissionError("unlock denied")
+
+        monkeypatch.setattr(reg.portalocker, "unlock", _bad_unlock)
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNKNOWN"
+        assert verdict.untrusted_path is None
 
 
 # ------------------------------------------------------------ cross-process
@@ -427,7 +474,7 @@ class TestCrossProcess:
             assert [i.pid for i in result.instances] == [child_pid]
 
             # all-store probe sees both children regardless of digest
-            assert reg.probe_all_for_uninstall() == "LIVE"
+            assert reg.probe_all_for_uninstall().state == "LIVE"
         finally:
             release.set()
             same.join(timeout=30)
@@ -524,7 +571,7 @@ class TestCrossProcess:
             # registration: fail-open (None, server still starts)
             assert reg.register_instance(db) is None
             # uninstall surface: fail-closed
-            assert reg.probe_all_for_uninstall() == "UNKNOWN"
+            assert reg.probe_all_for_uninstall().state == "UNKNOWN"
         finally:
             release.set()
             holder.join(timeout=30)
@@ -579,7 +626,7 @@ class TestListingUnderMutationLock:
                 return real_dir()
 
             monkeypatch.setattr(reg, "instances_dir", spying_dir)
-            assert reg.probe_all_for_uninstall() == "LIVE"
+            assert reg.probe_all_for_uninstall().state == "LIVE"
             result = reg.enumerate_live_instances(reg.store_digest_for(db))
             assert result.complete
         finally:
@@ -603,7 +650,7 @@ class TestListingUnderMutationLock:
 
         monkeypatch.setattr(reg.portalocker, "lock", flaky_lock)
         assert reg._probe_entry(entry) == "unknown"
-        assert reg.probe_all_for_uninstall() == "UNKNOWN"
+        assert reg.probe_all_for_uninstall().state == "UNKNOWN"
         result = reg.enumerate_live_instances("e" * 16)
         assert not result.complete
         assert result.instances == ()
@@ -619,7 +666,9 @@ class TestSymlinkedRegistryDir:
             reg.instances_dir().symlink_to(victim_dir)
         except OSError:
             pytest.skip("symlinks unavailable")
-        assert reg.probe_all_for_uninstall() == "UNKNOWN"
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNTRUSTED"
+        assert verdict.untrusted_path == reg.instances_dir()
         result = reg.enumerate_live_instances("0" * 16)
         assert not result.complete
         assert result.instances == ()
@@ -628,16 +677,20 @@ class TestSymlinkedRegistryDir:
 
 class TestDanglingSymlinkedRegistryDir:
     def test_dangling_symlink_is_untrusted_not_missing(self, rt, tmp_path):
-        """A dangling ``instances`` symlink must read as uncertainty:
+        """A dangling ``instances`` symlink must read as *untrusted*:
         collapsing it into 'missing' (via a follow-the-link exists())
         would let the fail-closed uninstall probe answer NONE against a
-        registry it cannot actually see."""
+        registry it cannot actually see — and collapsing it into
+        UNKNOWN would prescribe "retry" for a link only removal can
+        clear (#1942)."""
         reg.ensure_runtime_dir()
         try:
             reg.instances_dir().symlink_to(tmp_path / "no-such-target")
         except OSError:
             pytest.skip("symlinks unavailable")
-        assert reg.probe_all_for_uninstall() == "UNKNOWN"
+        verdict = reg.probe_all_for_uninstall()
+        assert verdict.state == "UNTRUSTED"
+        assert verdict.untrusted_path == reg.instances_dir()
         result = reg.enumerate_live_instances("0" * 16)
         assert not result.complete
         assert result.instances == ()
