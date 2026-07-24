@@ -88,6 +88,33 @@ def _is_dir_link(path: Path) -> bool:
         return True
 
 
+def _is_dangling_link(path: Path) -> bool:
+    """True when *path* is a symlink/junction whose target is gone.
+
+    A dangling ``config.d`` / ``memories`` / ``uploads`` link under the
+    state dir is our own leftover: it must be inventoried and its
+    *entry* unlinked with the rest (#1946). Refusing to *follow* a link
+    (#1940) is not the same as refusing to remove the link entry itself
+    — removal happens exclusively via the staged ``os.replace``, which
+    operates on the entry; ``_prune_if_empty`` keeps refusing links.
+
+    Junction-aware for free: ``_is_dir_link`` checks ``is_junction()``
+    (reparse-tag based), and a dangling junction — ``lstat``-reported
+    ``S_IFDIR`` while the follow-based ``is_dir()`` is False — lands
+    here like a dangling symlink. An unreadable entry also classifies
+    as dangling (``_is_dir_link`` says True on OSError, ``exists()``
+    says False), so we *attempt* the staged move and a real failure
+    surfaces through rollback + ``_UninstallStagingError`` instead of
+    today's silent leftover.
+    """
+    return _is_dir_link(path) and not path.exists()
+
+
+def _stageable_dir_entry(path: Path) -> bool:
+    """Real dir, live dir link (whole-entry move, #1943), or dangling link."""
+    return path.is_dir() or _is_dangling_link(path)
+
+
 def _real_registry_dir() -> Path | None:
     """The sentinel directory iff it is an actual directory.
 
@@ -299,16 +326,27 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     config_json = state_dir / "config.json"
     config_files = [config_json] if config_json.exists() else []
 
+    # A dangling owned-subdir link never lists via ``_dir_total`` (the
+    # follow-based ``is_dir()`` is False), yet it is deletable state: show
+    # the link entry itself so the inventory, the byte total, and the
+    # keep-flag gating all see it (#1946). ``_file_size`` follows and gets
+    # OSError, so the row reads 0 B.
     fragment_dir = state_dir / "config.d"
     fragments, _ = _dir_total(fragment_dir)
+    if _is_dangling_link(fragment_dir):
+        fragments = [fragment_dir]
 
     backups = sorted(state_dir.glob("config.json.bak-*")) if state_dir.exists() else []
 
     memory_dir = state_dir / "memories"
     memories, _ = _dir_total(memory_dir)
+    if _is_dangling_link(memory_dir):
+        memories = [memory_dir]
 
     upload_dir = state_dir / "uploads"
     uploads, _ = _dir_total(upload_dir)
+    if _is_dangling_link(upload_dir):
+        uploads = [upload_dir]
 
     other: list[Path] = []
     # ``.config.json.lock`` is the sidecar lock for config.json read-modify-write
@@ -501,21 +539,28 @@ def _print_group(group: _Group) -> None:
         )
 
 
-def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> int:
-    """Print inventory grouped + return total bytes that will be deleted."""
+def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> tuple[int, int]:
+    """Print inventory grouped + return ``(bytes, paths)`` that will be deleted.
+
+    The path count exists because bytes alone under-report: a dangling
+    owned-subdir link is a deletable 0 B entry (#1946), so "anything to
+    delete?" must be decided on paths, not on the byte total.
+    """
     click.echo("memtomem state inventory:")
     if inv.db_path.parent != _DEFAULT_STATE_DIR:
         click.echo(f"  (custom storage path: {_format_path(inv.db_path.parent)})")
 
     will_delete_total = 0
+    will_delete_count = 0
 
     def emit(group: _Group, will_delete: bool) -> None:
-        nonlocal will_delete_total
+        nonlocal will_delete_total, will_delete_count
         if not group.paths:
             return
         _print_group(group)
         if will_delete:
             will_delete_total += group.bytes_total
+            will_delete_count += len(group.paths)
 
     emit(inv.db_files, not keep_data)
     emit(inv.config_files, not keep_config)
@@ -541,7 +586,7 @@ def _print_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) -> 
         click.echo("  (nothing found)")
     else:
         click.echo(f"\nTotal to delete: ~{_human_size(will_delete_total)}")
-    return will_delete_total
+    return will_delete_total, will_delete_count
 
 
 def _print_externals(externals: list[_External]) -> None:
@@ -627,7 +672,9 @@ def _build_stage_plan(
     Owned subdirs (``config.d``, ``memories``, ``uploads``) move as
     whole directories — one ``rename`` instead of N — which is also
     why ``_OWNED_SUBDIRS`` no longer needs a post-deletion empty-prune
-    pass for the no-keep-flag path.
+    pass for the no-keep-flag path. A dangling owned-subdir link is
+    planned the same way (the entry moves, #1946), under the same
+    keep-flag gates, so ``--keep-config`` / ``--keep-data`` retain it.
     """
     state_dir = _DEFAULT_STATE_DIR
     plan: list[tuple[str, list[Path]]] = []
@@ -636,18 +683,18 @@ def _build_stage_plan(
 
     if not keep_config:
         fragment_dir = state_dir / "config.d"
-        if fragment_dir.is_dir():
+        if _stageable_dir_entry(fragment_dir):
             plan.append(("fragments", [fragment_dir]))
         plan.append(("backups", list(inv.backup_files.paths)))
         plan.append(("config.json", list(inv.config_files.paths)))
 
     if not keep_data:
         memory_dir = state_dir / "memories"
-        if memory_dir.is_dir():
+        if _stageable_dir_entry(memory_dir):
             plan.append(("memories", [memory_dir]))
 
     upload_dir = state_dir / "uploads"
-    if upload_dir.is_dir():
+    if _stageable_dir_entry(upload_dir):
         plan.append(("uploads", [upload_dir]))
 
     if not keep_data:
@@ -693,10 +740,12 @@ def _stage_inventory(
     # No-follow on the source: ``os.replace`` moves the *entry*, which
     # lives on the anchor's filesystem even when it is a link pointing at
     # another volume. Following it here reports the target's device and
-    # refuses a move that would have worked.
+    # refuses a move that would have worked. The existence gate must be
+    # no-follow too (``lexists``): a dangling link is a plannable entry
+    # (#1946) that ``exists()`` would misread as absent.
     for _, paths in plan:
         for src in paths:
-            if not src.exists():
+            if not os.path.lexists(src):
                 continue
             try:
                 anchor = _anchor_for(src)
@@ -769,7 +818,9 @@ def _stage_inventory(
     for label, paths in plan:
         any_staged = False
         for src in paths:
-            if not src.exists():
+            # No-follow, like the pre-check above: a dangling link must
+            # reach the ``os.replace`` that removes its entry (#1946).
+            if not os.path.lexists(src):
                 continue
             try:
                 anchor = _anchor_for(src)
@@ -901,7 +952,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     inv = _collect_inventory(db_path)
     externals = _probe_external_integrations()
 
-    will_delete_bytes = _print_inventory(inv, keep_config=keep_config, keep_data=keep_data)
+    _, will_delete_count = _print_inventory(inv, keep_config=keep_config, keep_data=keep_data)
     _print_externals(externals)
     label, lines = _binary_uninstall_hint(profile)
     _print_binary_hint(label, lines)
@@ -1032,7 +1083,10 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 )
         sys.exit(2)
 
-    if will_delete_bytes == 0 and not inv.other_files.paths:
+    # Path-count gate, not bytes: a dangling owned-subdir link (#1946) —
+    # or any zero-byte entry — is still something to delete. other_files
+    # needs no special case; it is emitted with ``will_delete=True``.
+    if will_delete_count == 0:
         click.echo("\nNothing to delete with the current flags.")
         return
 
