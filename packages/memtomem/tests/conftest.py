@@ -262,9 +262,11 @@ def _isolated_instance_registry(
         return rt
 
     active: dict = {}
+    barriers: set = set()
     monkeypatch.setattr(_reg, "runtime_dir", _rt)
     monkeypatch.setattr(_reg, "ensure_runtime_dir", _ensure_rt)
     monkeypatch.setattr(_reg, "_active", active)
+    monkeypatch.setattr(_reg, "_active_barriers", barriers)
     monkeypatch.setattr(_reg, "_procid", None)
     yield
     # Release any registration a test made and forgot to clean — leaked
@@ -272,6 +274,13 @@ def _isolated_instance_registry(
     # lifetime and the shared atexit handler would walk a stale dict.
     for inst in list(active.values()):
         inst.cleanup()
+    # Same for lifecycle barriers (#1936). NOTE this sweep is a *safety
+    # net, not a verification tool*: because it silently releases a leaked
+    # hold at teardown, no test may infer "the code released the barrier"
+    # from a later test passing. Tests that assert a release path must
+    # re-acquire within the same test, before this runs.
+    for barrier in list(barriers):
+        barrier.release()
 
 
 @pytest.fixture(autouse=True)

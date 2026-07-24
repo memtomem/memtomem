@@ -1,4 +1,4 @@
-"""AppContext ↔ instance-registry wiring (#1935).
+"""AppContext ↔ instance-registry wiring (#1935) and lifecycle barrier (#1936).
 
 Covers the server-only opt-in flag, publication at storage init,
 close-before-cleanup ordering (sentinel released only on a *confirmed*
@@ -6,6 +6,14 @@ storage close), rollback release, and cancellation accumulate-and-defer.
 Registry lock semantics themselves are covered cross-process in
 ``test_instance_registry.py``; here the registry runs for real but inside
 the per-test isolated runtime dir (conftest ``_isolated_instance_registry``).
+
+``TestLifecycleBarrierOwnership`` extends the same discipline to the
+#1936 barrier, which shares the ``storage_closed`` release gate. Its
+release assertions never lean on fixture teardown (which sweeps leaked
+barriers and would mask a bug): each one proves the barrier is free by
+having a **spawned process** take it exclusively before the test ends.
+Same-process re-acquisition would be weaker — Windows can grant a second
+handle to the owning process, so a dropped ``release()`` could pass there.
 """
 
 from __future__ import annotations
@@ -57,6 +65,39 @@ def components(db) -> Components:
         index_engine=object(),  # type: ignore[arg-type]
         search_pipeline=object(),  # type: ignore[arg-type]
     )
+
+
+def _child_try_exclusive(rt_str: str, q) -> None:
+    """Attempt the conflicting acquire from a separate process."""
+    import memtomem._instance_registry as _reg
+
+    target = Path(rt_str)
+    _reg.runtime_dir = lambda: target
+    _reg.ensure_runtime_dir = lambda: (target.mkdir(mode=0o700, exist_ok=True), target)[1]
+    try:
+        _reg.acquire_uninstall_lifecycle_barrier(timeout_s=1.0).release()
+    except Exception as exc:  # noqa: BLE001 — the message is the signal
+        q.put(("refused", type(exc).__name__))
+        return
+    q.put(("acquired", ""))
+
+
+def _assert_barrier_free(rt: Path) -> None:
+    """Fail unless a *spawned* process can take the barrier exclusively."""
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    child = ctx.Process(target=_child_try_exclusive, args=(str(rt), q))
+    child.start()
+    try:
+        outcome, detail = q.get(timeout=30)
+    finally:
+        child.join(timeout=30)
+        if child.is_alive():
+            child.kill()
+            child.join(timeout=30)
+    assert outcome == "acquired", f"barrier still held ({detail})"
 
 
 def _sentinels() -> list[Path]:
@@ -385,3 +426,245 @@ class TestCancellation:
         inst = ctx._instance_registration
         assert inst is not None
         inst.cleanup()
+
+
+class TestLifecycleBarrierOwnership:
+    """Who holds the #1936 barrier, and when it is safe to let go.
+
+    Every release assertion re-acquires the barrier *inside the test*: the
+    autouse fixture sweeps leaked holds at teardown, so a passing suite is
+    no evidence that production code released anything.
+    """
+
+    @staticmethod
+    def _reacquire_or_fail() -> None:
+        """Prove the barrier is free right now, from another *process*.
+
+        Same-process re-acquisition would be a weaker check than it looks:
+        Windows can grant a second handle in the owning process (the
+        reason ``test_lifecycle_barrier.py`` is spawn-based throughout),
+        so a dropped ``release()`` could pass there and then be hidden by
+        the autouse sweep at teardown.
+        """
+        _assert_barrier_free(reg.lifecycle_barrier_path().parent)
+
+    @pytest.mark.asyncio
+    async def test_barrier_is_held_before_storage_opens(self, components) -> None:
+        """The ordering that closes the race: by the time
+        ``create_components`` runs, the barrier is already ours."""
+        observed: list[object] = []
+
+        def _create(*_a: object, **_k: object):
+            observed.append(ctx._lifecycle_barrier)
+            return components
+
+        ctx = AppContext(config=components.config, register_server_instance=True)
+        with patch("memtomem.server.component_factory.create_components", side_effect=_create):
+            await ctx.ensure_initialized()
+        try:
+            assert observed, "create_components was never reached"
+            assert observed[0] is not None, "storage opened before the barrier was held"
+        finally:
+            await ctx.close()
+
+    @pytest.mark.asyncio
+    async def test_unflagged_context_never_takes_the_barrier(self, components) -> None:
+        """CLI / ``mm web`` / LangGraph build components through the same
+        factory and must stay out of the barrier protocol entirely."""
+        ctx = AppContext(config=components.config)
+        with patch("memtomem.server.component_factory.create_components", return_value=components):
+            await ctx.ensure_initialized()
+        try:
+            assert ctx._lifecycle_barrier is None
+            self._reacquire_or_fail()
+        finally:
+            await ctx.close()
+
+    @pytest.mark.asyncio
+    async def test_barrier_outlives_registration_and_is_released_on_close(self, components) -> None:
+        ctx = await _init_flagged(components)
+        assert ctx._lifecycle_barrier is not None
+        await ctx.close()
+        assert ctx._lifecycle_barrier is None
+        self._reacquire_or_fail()
+
+    @pytest.mark.asyncio
+    async def test_registration_failure_still_leaves_the_barrier_held(
+        self, components, monkeypatch
+    ) -> None:
+        """The hole lifetime-hold exists to close: registration returns
+        ``None`` (its documented failure mode), so nothing advertises the
+        open store — only the barrier keeps uninstall out."""
+        monkeypatch.setattr(reg, "register_instance", lambda _p: None)
+        ctx = await _init_flagged(components)
+        try:
+            assert _sentinels() == []  # nothing published…
+            assert ctx._lifecycle_barrier is not None  # …but still blocking
+            with pytest.raises(reg.BarrierTimeout):
+                reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.3)
+        finally:
+            await ctx.close()
+
+    @pytest.mark.asyncio
+    async def test_failed_storage_close_retains_the_barrier(self, components) -> None:
+        """Same polarity as the sentinel: a possibly-open store keeps
+        blocking uninstall until the process exits."""
+        components.storage = MagicMock()
+        components.storage.close = AsyncMock(side_effect=RuntimeError("close failed"))
+        ctx = await _init_flagged(components)
+        await ctx.close()
+        barrier = ctx._lifecycle_barrier
+        assert barrier is not None, "unconfirmed close must retain the barrier"
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.3)
+        # process-exit backstop still applies; release manually for hygiene
+        barrier.release()
+        inst = ctx._instance_registration
+        if inst is not None:
+            inst.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_double_close_after_failed_storage_close_keeps_retaining(
+        self, components
+    ) -> None:
+        """A second close sees no components; that absence must not be
+        read as a confirmed storage close."""
+        components.storage = MagicMock()
+        components.storage.close = AsyncMock(side_effect=RuntimeError("close failed"))
+        ctx = await _init_flagged(components)
+        await ctx.close()
+        await ctx.close()
+        barrier = ctx._lifecycle_barrier
+        assert barrier is not None
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.3)
+        barrier.release()
+        inst = ctx._instance_registration
+        if inst is not None:
+            inst.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_rollback_after_post_storage_failure_releases_the_barrier(
+        self, components, monkeypatch
+    ) -> None:
+        """A clean storage close during startup rollback frees it."""
+        from memtomem.indexing import watcher as watcher_mod
+
+        def _broken_watcher(*_a: object, **_k: object) -> object:
+            fake = MagicMock()
+            fake.start = AsyncMock(side_effect=RuntimeError("watcher exploded"))
+            fake.stop = AsyncMock()
+            return fake
+
+        monkeypatch.setattr(watcher_mod, "FileWatcher", _broken_watcher)
+        ctx = AppContext(config=components.config, register_server_instance=True)
+        with patch("memtomem.server.component_factory.create_components", return_value=components):
+            with pytest.raises(RuntimeError, match="watcher exploded"):
+                await ctx.ensure_initialized()
+        assert ctx._lifecycle_barrier is None
+        self._reacquire_or_fail()
+
+    @pytest.mark.asyncio
+    async def test_acquire_failure_propagates_and_storage_never_opens(
+        self, components, monkeypatch
+    ) -> None:
+        """Fail closed: the whole point is that a refused barrier stops
+        initialization *before* the store is opened."""
+        opened: list[int] = []
+
+        def _create(*_a: object, **_k: object):
+            opened.append(1)
+            return components
+
+        def _refuse(*_a: object, **_k: object):
+            raise reg.BarrierTimeout("busy")
+
+        monkeypatch.setattr(reg, "acquire_server_lifecycle_barrier", _refuse)
+        ctx = AppContext(config=components.config, register_server_instance=True)
+        with patch("memtomem.server.component_factory.create_components", side_effect=_create):
+            with pytest.raises(reg.BarrierTimeout):
+                await ctx.ensure_initialized()
+        assert opened == [], "storage must not open when the barrier is refused"
+        assert ctx._components is None
+        assert ctx._lifecycle_barrier is None
+
+    @pytest.mark.asyncio
+    async def test_retry_after_a_refused_acquire_succeeds(self, components, monkeypatch) -> None:
+        """Init is lazy and retried per tool call: once the uninstall has
+        finished, the next attempt must go through."""
+        calls: list[int] = []
+        real_acquire = reg.acquire_server_lifecycle_barrier
+
+        def _flaky(*a: object, **k: object):
+            calls.append(1)
+            if len(calls) == 1:
+                raise reg.BarrierTimeout("busy")
+            return real_acquire(*a, **k)
+
+        monkeypatch.setattr(reg, "acquire_server_lifecycle_barrier", _flaky)
+        ctx = AppContext(config=components.config, register_server_instance=True)
+        with patch("memtomem.server.component_factory.create_components", return_value=components):
+            with pytest.raises(reg.BarrierTimeout):
+                await ctx.ensure_initialized()
+            await ctx.ensure_initialized()
+        try:
+            assert len(calls) == 2
+            assert ctx._lifecycle_barrier is not None
+        finally:
+            await ctx.close()
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_acquire_releases_the_handle(self, components, monkeypatch) -> None:
+        """A cancelled acquire must not leave a barrier behind.
+
+        ``settle_shielded_value`` hands the handle back so it cannot be
+        dropped on the floor, but storage never opened here — the
+        cancellation propagates *before* the block whose rollback would
+        release it. Retaining would block ``mm uninstall`` on behalf of a
+        server that never opened the store, with no release path short of
+        process exit. Verified without touching the handle by hand: the
+        earlier version of this test released it manually and would have
+        passed against exactly that bug.
+        """
+        real_acquire = reg.acquire_server_lifecycle_barrier
+
+        def _slow(*a: object, **k: object):
+            time.sleep(0.3)
+            return real_acquire(*a, **k)
+
+        monkeypatch.setattr(reg, "acquire_server_lifecycle_barrier", _slow)
+        ctx = AppContext(config=components.config, register_server_instance=True)
+        with patch("memtomem.server.component_factory.create_components", return_value=components):
+            task = asyncio.create_task(ctx.ensure_initialized())
+            await asyncio.sleep(0.1)  # let the worker thread start
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert ctx._components is None
+        assert ctx._lifecycle_barrier is None
+        self._reacquire_or_fail()
+
+    @pytest.mark.asyncio
+    async def test_close_after_cancelled_acquire_leaves_nothing_held(
+        self, components, monkeypatch
+    ) -> None:
+        """The lifespan's shutdown path after a cancelled init: ``close()``
+        sees no components and so cannot confirm a storage close — which
+        must not translate into a retained barrier, because there was
+        never an open store to protect."""
+        real_acquire = reg.acquire_server_lifecycle_barrier
+
+        def _slow(*a: object, **k: object):
+            time.sleep(0.3)
+            return real_acquire(*a, **k)
+
+        monkeypatch.setattr(reg, "acquire_server_lifecycle_barrier", _slow)
+        ctx = AppContext(config=components.config, register_server_instance=True)
+        with patch("memtomem.server.component_factory.create_components", return_value=components):
+            task = asyncio.create_task(ctx.ensure_initialized())
+            await asyncio.sleep(0.1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await ctx.close()
+        self._reacquire_or_fail()
