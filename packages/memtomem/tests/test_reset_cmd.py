@@ -907,10 +907,10 @@ class TestResetRevalidatesStoreIdentity:
         assert "different database" in result.output
 
     def test_inode_reuse_replacement_refuses(self, home, reg, monkeypatch):
-        """The #1945 round-4 hardening: a replacement that reuses the
-        freed inode (same st_dev/st_ino) is still caught, because the
-        fingerprint also carries st_size/st_mtime_ns. Simulated by
-        forcing both stats to share device+inode but differ in size."""
+        """The #1945 round-4 hardening at the wiring level: a fingerprint
+        change between Phase A and Phase B refuses even when it shares the
+        inode. Fabricated same-dev/ino tuples differing in size stand in
+        for an inode-reuse swap the comparison must still catch."""
         _patch_liveness(monkeypatch)
         runner = CliRunner()
         db_path = _init_and_index(home, runner)
@@ -922,6 +922,28 @@ class TestResetRevalidatesStoreIdentity:
         assert result.exit_code == 2, result.output
         assert "replaced" in result.output
         assert _count(db_path, "chunks") >= 1, "an inode-reuse swap was wiped"
+
+    def test_fingerprint_carries_size_and_mtime(self, home):
+        """The fingerprint FUNCTION must include more than (dev, ino):
+        an in-place rewrite keeps the inode but changes size/mtime, and
+        that has to move the fingerprint or an inode-reuse swap slips
+        through. Exercises the real helper, so dropping the extra fields
+        (round-4 mutation) is caught here rather than behind a mock."""
+        state = home / ".memtomem"
+        state.mkdir(parents=True)
+        f = state / "fp.db"
+        f.write_bytes(b"a" * 10)
+        first = reset_cmd._store_fingerprint(f)
+        assert first is not None
+        st = os.stat(f)
+        # In-place rewrite: same path, same inode, larger + newer.
+        with open(f, "wb") as fh:
+            fh.write(b"b" * 4096)
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+        second = reset_cmd._store_fingerprint(f)
+        assert second is not None
+        assert os.stat(f).st_ino == st.st_ino, "test premise: inode unchanged"
+        assert first != second, "fingerprint ignores size/mtime — inode reuse slips through"
 
 
 class TestResetAlwaysReleasesTheBarrier:
