@@ -272,6 +272,153 @@ class TestRegistrationState:
             entry.unlink()
 
 
+class TestRegistrationRetry:
+    """#1939: a sidecar-lock timeout is retried; other failures are one-shot.
+
+    In-process is correct here — these pin the *decision* logic around the
+    lock, not lock contention itself (which the file convention validates
+    cross-process). Some tests script ``_mutation_lock`` /
+    ``_MutationLockTimeout`` directly; the contention-classification tests
+    instead monkeypatch ``portalocker.lock`` to raise a specific exception
+    shape and exercise the real poll loop, which catches ``_LOCK_CONTENDED``
+    and then defers to :func:`_is_lock_contention` (shared with the barrier,
+    #1957): genuine contention is polled, every durable lock-call I/O error
+    propagates one-shot.
+    """
+
+    def test_lost_sidecar_race_once_still_registers(self, rt, db, monkeypatch):
+        real_lock = reg._mutation_lock
+        calls = {"n": 0}
+
+        def flaky_lock(deadline):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise reg._MutationLockTimeout
+            return real_lock(deadline)
+
+        monkeypatch.setattr(reg, "_mutation_lock", flaky_lock)
+        inst = reg.register_instance(db)
+        try:
+            assert inst is not None
+            assert inst.path.exists()
+            assert reg._active.get(inst.path) is inst
+            assert calls["n"] == 2  # one loss, one success
+        finally:
+            if inst is not None:
+                inst.cleanup()
+
+    def test_persistent_timeout_bounded_and_returns_none(self, rt, db, monkeypatch):
+        calls = {"n": 0}
+
+        def always_timeout(deadline):
+            calls["n"] += 1
+            raise reg._MutationLockTimeout
+
+        monkeypatch.setattr(reg, "_mutation_lock", always_timeout)
+        inst = reg.register_instance(db)
+        assert inst is None
+        assert calls["n"] == reg._REGISTRATION_ATTEMPTS  # bounded, no infinite loop
+        # The lock never yielded, so no sentinel could have been created.
+        assert not list((rt / "instances").glob("*.lock")) if (rt / "instances").is_dir() else True
+
+    def test_non_file_store_returns_none_without_lock_attempt(self, rt, tmp_path, monkeypatch):
+        calls = {"n": 0}
+
+        def counting_lock(deadline):
+            calls["n"] += 1
+            raise reg._MutationLockTimeout
+
+        monkeypatch.setattr(reg, "_mutation_lock", counting_lock)
+        # ``digest is None`` short-circuits before the loop — the lock is
+        # never taken and no retry happens.
+        assert reg.register_instance(tmp_path / "missing.db") is None
+        assert calls["n"] == 0
+
+    def test_untrusted_instances_dir_not_retried(self, rt, db, monkeypatch):
+        # A permanent in-loop refusal via ``return None`` (the sentinel
+        # directory is untrusted — ``_dir_state != "dir"``) exits on the
+        # first attempt: retrying cannot change a persistent cause.
+        real_lock = reg._mutation_lock
+        calls = {"n": 0}
+
+        def counting_lock(deadline):
+            calls["n"] += 1
+            return real_lock(deadline)
+
+        monkeypatch.setattr(reg, "_mutation_lock", counting_lock)
+        monkeypatch.setattr(reg, "_dir_state", lambda _p: "untrusted")
+        assert reg.register_instance(db) is None
+        assert calls["n"] == 1  # entered the lock once, refused, did not retry
+
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            pytest.param(
+                lambda: reg.portalocker.LockException("simulated EIO wrapper"),
+                id="lockexception-wrapper",
+            ),
+            pytest.param(
+                lambda: OSError(errno.EIO, "simulated raw I/O error"),
+                id="raw-oserror",
+            ),
+        ],
+    )
+    def test_durable_lock_error_is_one_shot(self, rt, db, monkeypatch, exc_factory):
+        # A durable sidecar-flock failure must propagate to the never-raise
+        # handler and return ``None`` after exactly one lock call, never be
+        # polled to a timeout and retried (#1939). The ``LockException``
+        # wrapper is the real production shape: portalocker 3.2 maps a
+        # non-contention ``OSError`` (``EIO``/``ENOLCK``) to a bare
+        # ``LockException`` (not the ``AlreadyLocked`` subclass), which
+        # ``_is_lock_contention`` rejects, so the poll loop re-raises it
+        # despite the retry.
+        calls = {"n": 0}
+
+        def failing_lock(fp, flags):
+            calls["n"] += 1
+            raise exc_factory()
+
+        monkeypatch.setattr(reg.portalocker, "lock", failing_lock)
+        assert reg.register_instance(db) is None
+        assert calls["n"] == 1  # first sidecar-lock call propagated; no retry
+
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            pytest.param(lambda: reg.portalocker.AlreadyLocked("held"), id="already-locked"),
+            pytest.param(
+                lambda: OSError(errno.EAGAIN, "resource temporarily unavailable"),
+                id="raw-eagain",
+            ),
+        ],
+    )
+    def test_contention_is_retried_and_registers(self, rt, db, monkeypatch, exc_factory):
+        # Genuine contention must be polled and retried, not propagated, so
+        # a single lost race still ends up registered. portalocker maps
+        # POSIX ``EACCES``/``EAGAIN`` and Win32 ``ERROR_LOCK_VIOLATION`` to
+        # ``AlreadyLocked``, but ``_is_lock_contention`` also accepts a
+        # *raw* ``EACCES``/``EAGAIN`` ``OSError`` — a version-drift shape a
+        # bare ``isinstance(AlreadyLocked)`` check would have dropped,
+        # regressing #1939 on real contention.
+        real_lock = reg.portalocker.lock
+        state = {"raised": False}
+
+        def flaky_lock(fp, flags):
+            if not state["raised"]:
+                state["raised"] = True
+                raise exc_factory()
+            return real_lock(fp, flags)
+
+        monkeypatch.setattr(reg.portalocker, "lock", flaky_lock)
+        inst = reg.register_instance(db)
+        try:
+            assert inst is not None  # contention polled through, not propagated
+            assert inst.path.exists()
+        finally:
+            if inst is not None:
+                inst.cleanup()
+
+
 class TestEnumerationInProcess:
     def test_missing_dir_is_complete_and_empty(self, rt):
         result = reg.enumerate_live_instances("0" * 16)

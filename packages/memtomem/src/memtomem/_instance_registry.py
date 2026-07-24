@@ -102,6 +102,14 @@ logger = logging.getLogger(__name__)
 # One shared budget for every bounded lock acquisition and for the
 # enumeration pass as a whole (acquisition + traversal).
 _LOCK_TIMEOUT_S = 2.0
+# Total sidecar-lock attempts for register_instance (#1939). Retried only
+# on _MutationLockTimeout — contention with an enumeration pass that holds
+# the sidecar for its whole 2 s budget would otherwise leave this server
+# permanently invisible to the concurrent-writer signal. Every other
+# failure is permanent (non-file store, untrusted dir) or logged-and-
+# dropped and is not retried; worst case is _REGISTRATION_ATTEMPTS ×
+# _LOCK_TIMEOUT_S off-loop (to_thread) on the first initializing call.
+_REGISTRATION_ATTEMPTS = 3
 # An unlocked entry younger than this is left alone: its registrar may be
 # between create and flock-acquire (the publication window). Fresh files
 # always carry a fresh mtime — registration never reuses an existing file.
@@ -117,11 +125,16 @@ _BARRIER_TIMEOUT_S = 2.0
 # POSIX raises ``BlockingIOError``; portalocker's Windows backend wraps
 # Win32 errors as ``LockException``. This is the *catch* set — every shape
 # a non-blocking ``portalocker.lock`` can produce, contention or not.
-# ``_acquire_barrier`` narrows it further with ``_is_lock_contention``
-# (#1957); the other call sites (mutation lock, ``register_instance``,
-# ``_gc_stale_entry``) deliberately keep treating the whole tuple as one
-# bucket — their fail-open/fail-closed contracts absorb a lock-call I/O
-# error exactly as they do contention, and must not be split here.
+# ``_acquire_barrier`` (#1957) and ``_mutation_lock`` (#1939) narrow it
+# further with ``_is_lock_contention``: both poll a held lock but must let
+# a lock-call I/O failure escape, because each has a caller that would
+# otherwise mistreat it — the barrier would flatten it into stop-the-holder
+# advice, and ``register_instance``'s retry would triple a permanent
+# failure's delay. ``register_instance``'s own sentinel flock and
+# ``_gc_stale_entry`` still treat the whole tuple as one bucket: neither
+# retries, and their fail-open/fail-closed contracts absorb a lock-call I/O
+# error exactly as they do contention, so splitting there would only add
+# noise.
 _LOCK_CONTENDED = (portalocker.LockException, BlockingIOError, OSError)
 
 # Windows ``PermissionError.winerror`` codes that mean *transient*
@@ -365,7 +378,22 @@ def _mutation_lock(deadline: float):
             try:
                 portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
                 break
-            except _LOCK_CONTENDED:
+            except _LOCK_CONTENDED as exc:
+                # Split contention from a lock-call I/O failure the same way
+                # ``_acquire_barrier`` does (#1957), because #1939 gave this
+                # site a *retrying* caller: ``register_instance`` re-runs on
+                # ``_MutationLockTimeout``, so folding a durable ``EIO``/
+                # ``ENOLCK`` (a bare ``LockException``) into the timeout
+                # would triple a permanent failure's startup delay. Only
+                # genuine contention (:func:`_is_lock_contention`) is polled
+                # to the deadline; anything else propagates unwrapped to the
+                # never-raise handler and stays one-shot. Unlike the barrier
+                # there is no ``_raise_lock_io_failure`` normalization — the
+                # mutation lock's callers already absorb a raw error through
+                # their own ``except`` (cleanup closes the handle,
+                # enumeration is incomplete, the uninstall probe is UNKNOWN).
+                if not _is_lock_contention(exc):
+                    raise
                 if time.monotonic() >= deadline:
                     raise _MutationLockTimeout from None
                 time.sleep(0.05)
@@ -443,10 +471,14 @@ def _is_lock_contention(exc: BaseException) -> bool:
     """True when a non-blocking ``portalocker.lock`` failure means "held by
     someone else" rather than "the lock call itself failed" (#1957).
 
-    The barrier-side sibling of :func:`_probe_entry`'s live/unknown split,
-    but barrier-only: a ``False`` here escapes as ``OSError``, whereas
-    ``_probe_entry`` maps its own I/O uncertainty to ``"unknown"``. Do not
-    reuse this verdict there without that translation.
+    The lock-acquire sibling of :func:`_probe_entry`'s live/unknown split,
+    shared by :func:`_acquire_barrier` (#1957) and :func:`_mutation_lock`
+    (#1939): both poll on ``True`` and let a ``False`` escape unwrapped —
+    the barrier normalizes it to ``OSError`` via
+    :func:`_raise_lock_io_failure`, the mutation lock re-raises it straight
+    into ``register_instance``'s never-raise handler. It is *not* reusable
+    in ``_probe_entry`` as-is: that surface maps its own I/O uncertainty to
+    ``"unknown"``, so a bare ``False`` there would need that translation.
 
     Across the supported range (portalocker 3.0/3.1/3.2, source-verified)
     genuine contention is *always* the ``AlreadyLocked`` subclass — POSIX
@@ -684,6 +716,16 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
     raises — on any failure: non-file store, lock timeout, permission
     errors. Registration failure must never affect server startup; the
     cost is a degraded advisory signal, not a broken server.
+
+    A sidecar-lock timeout is retried up to :data:`_REGISTRATION_ATTEMPTS`
+    times (#1939): the mutation sidecar is held for a full ``mem_status``
+    enumeration pass, so a single lost race would otherwise leave this
+    server permanently invisible to the concurrent-writer signal. The
+    timeout is raised *before* :func:`_mutation_lock` yields, so no partial
+    on-disk state exists to reconcile between attempts. Every other
+    outcome is one-shot: a non-file store never enters the loop, and a
+    permanent in-loop refusal (untrusted directory, sentinel flock
+    contention) or an unexpected exception exits immediately.
     """
     try:
         digest = store_digest_for(db_path)
@@ -692,43 +734,59 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
         pid = os.getpid()
         with _state_guard:
             procid = _process_id_locked()
-        name = f"{pid}-{os.getppid()}-{digest}-{procid}-{secrets.token_hex(4)}.lock"
-        with _mutation_lock(time.monotonic() + _LOCK_TIMEOUT_S):
-            directory = instances_dir()
-            directory.mkdir(mode=0o700, exist_ok=True)
-            # ``exist_ok=True`` accepts a symlink-to-directory, and the
-            # sentinel open below would then land in the link's target —
-            # refuse instead (same trust rule as the probes; the 0700
-            # runtime dir plus the held mutation lock make the
-            # lstat→open window practically inert).
-            if _dir_state(directory) != "dir":
-                return None
-            path = directory / name
-            # The nonce makes this filename fresh — never reuse/unlink an
-            # existing entry here (a same-pid leftover may belong to a
-            # different pid namespace and be live; probe+grace GC owns it).
-            fp = open(path, "a+b")
+        for attempt in range(_REGISTRATION_ATTEMPTS):
+            # Fresh nonce per attempt — a timed-out attempt created no
+            # file, but regenerating keeps the "registration never reuses
+            # an existing filename" invariant unconditional.
+            name = f"{pid}-{os.getppid()}-{digest}-{procid}-{secrets.token_hex(4)}.lock"
             try:
-                portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-            except _LOCK_CONTENDED:
-                fp.close()
-                return None
-            inst = RegisteredInstance(path=path, pid=pid, _fp=fp)
-            # Publish into the active dict while STILL holding the
-            # mutation lock: the on-disk sentinel must never be visible
-            # to a same-process enumeration before the in-memory record
-            # exists, or the self-probe skip fails and Windows (where a
-            # second same-process handle can acquire the flock) would
-            # misread the fresh registration as stale. ``_state_guard``
-            # nests inside the mutation lock here; no path nests them in
-            # the opposite order, so there is no inversion.
-            with _state_guard:
-                _active[path] = inst
-                global _atexit_installed
-                if not _atexit_installed:
-                    atexit.register(_atexit_cleanup)
-                    _atexit_installed = True
-        return inst
+                with _mutation_lock(time.monotonic() + _LOCK_TIMEOUT_S):
+                    directory = instances_dir()
+                    directory.mkdir(mode=0o700, exist_ok=True)
+                    # ``exist_ok=True`` accepts a symlink-to-directory, and
+                    # the sentinel open below would then land in the link's
+                    # target — refuse instead (same trust rule as the
+                    # probes; the 0700 runtime dir plus the held mutation
+                    # lock make the lstat→open window practically inert).
+                    if _dir_state(directory) != "dir":
+                        return None
+                    path = directory / name
+                    # The nonce makes this filename fresh — never
+                    # reuse/unlink an existing entry here (a same-pid
+                    # leftover may belong to a different pid namespace and
+                    # be live; probe+grace GC owns it).
+                    fp = open(path, "a+b")
+                    try:
+                        portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                    except _LOCK_CONTENDED:
+                        fp.close()
+                        return None
+                    inst = RegisteredInstance(path=path, pid=pid, _fp=fp)
+                    # Publish into the active dict while STILL holding the
+                    # mutation lock: the on-disk sentinel must never be
+                    # visible to a same-process enumeration before the
+                    # in-memory record exists, or the self-probe skip fails
+                    # and Windows (where a second same-process handle can
+                    # acquire the flock) would misread the fresh
+                    # registration as stale. ``_state_guard`` nests inside
+                    # the mutation lock here; no path nests them in the
+                    # opposite order, so there is no inversion.
+                    with _state_guard:
+                        _active[path] = inst
+                        global _atexit_installed
+                        if not _atexit_installed:
+                            atexit.register(_atexit_cleanup)
+                            _atexit_installed = True
+                    return inst
+            except _MutationLockTimeout:
+                # Contention only — retry with a fresh budget. No file was
+                # created (the timeout fires before the lock yields).
+                logger.debug(
+                    "instance registration lost the sidecar race (attempt %d/%d)",
+                    attempt + 1,
+                    _REGISTRATION_ATTEMPTS,
+                )
+        return None
     except Exception:
         logger.debug("instance registration failed", exc_info=True)
         return None
