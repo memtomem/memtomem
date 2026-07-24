@@ -21,11 +21,14 @@ same test**.
 
 from __future__ import annotations
 
+import builtins
+import errno
 import multiprocessing as mp
 import os
 import time
 from pathlib import Path
 
+import portalocker
 import pytest
 
 import memtomem._instance_registry as reg
@@ -284,6 +287,201 @@ class TestAcquireFailsClosed:
             release.set()
             holder.join(timeout=30)
             _stop(holder)
+
+
+# ----------------------------------------------------- poll-loop classifier
+
+
+class _FakePywinError(Exception):
+    """Stand-in for ``pywintypes.error``: derives from ``Exception`` (not
+    ``OSError``), carries ``.winerror`` and *no* ``.errno`` — exactly the
+    real Win32 exception's shape (#1957) — so the classifier can be
+    exercised on non-Windows CI. Defaults to the lock-violation code."""
+
+    def __init__(
+        self, winerror: int = reg._WINERROR_LOCK_VIOLATION, strerror: str = "lock violation"
+    ) -> None:
+        super().__init__(winerror, "LockFileEx", strerror)
+        self.winerror = winerror
+        self.strerror = strerror
+
+
+class TestPollLoopClassifier:
+    """#1957: the poll loop separates "someone holds the flock" from "the
+    lock call itself failed". Per-guard pins — each classifier branch has
+    its own test; a sibling branch passing is not evidence
+    (``feedback_pin_test_mutation_validation``)."""
+
+    @staticmethod
+    def _lockexc(cause: BaseException | None) -> portalocker.LockException:
+        exc = portalocker.LockException("lock call failed")
+        exc.__cause__ = cause
+        return exc
+
+    @staticmethod
+    def _patch_lock(monkeypatch, exc: BaseException) -> None:
+        def _lock(fp, flags):
+            raise exc
+
+        monkeypatch.setattr(reg.portalocker, "lock", _lock)
+
+    # -- non-contention I/O failures escape as OSError (fast, no polling) --
+
+    @pytest.mark.parametrize(
+        "acquire_name",
+        ["acquire_uninstall_lifecycle_barrier", "acquire_server_lifecycle_barrier"],
+    )
+    def test_lockexception_eio_cause_escapes_as_oserror_fast(self, rt, monkeypatch, acquire_name):
+        """A bare ``LockException`` chaining an ``EIO`` ``OSError`` is
+        infrastructure, not contention: it escapes as ``OSError`` at once,
+        preserving errno and naming the barrier path, for both surfaces."""
+        cause = OSError(errno.EIO, "disk I/O error")
+        exc = self._lockexc(cause)
+        self._patch_lock(monkeypatch, exc)
+        acquire = getattr(reg, acquire_name)
+        started = time.monotonic()
+        with pytest.raises(OSError) as excinfo:
+            acquire(timeout_s=5.0)
+        assert time.monotonic() - started < 2.0, "I/O failure must not wait out the deadline"
+        assert excinfo.value.errno == errno.EIO
+        assert "disk I/O error" in str(excinfo.value)
+        assert str(reg.lifecycle_barrier_path()) in str(excinfo.value)
+        assert excinfo.value.__cause__ is exc
+
+    def test_lockexception_eoferror_cause_escapes_as_oserror(self, rt, monkeypatch):
+        """The NFS shape (``LockException`` chaining ``EOFError``, no errno)
+        still escapes as ``OSError`` — via the generic wrap that names the
+        barrier path — rather than being mislabeled contention."""
+        exc = self._lockexc(EOFError("nfs lockd down"))
+        self._patch_lock(monkeypatch, exc)
+        with pytest.raises(OSError) as excinfo:
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+        assert "lifecycle barrier lock failed" in str(excinfo.value)
+        assert str(reg.lifecycle_barrier_path()) in str(excinfo.value)
+        assert excinfo.value.__cause__ is exc
+
+    def test_naked_oserror_escapes_identically(self, rt, monkeypatch):
+        """A raw non-contention ``OSError`` is re-raised as-is (subtype and
+        identity preserved), only backfilling the barrier path as its
+        filename so the CLI has one to report."""
+        boom = OSError(errno.EIO, "boom")
+        self._patch_lock(monkeypatch, boom)
+        with pytest.raises(OSError) as excinfo:
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+        assert excinfo.value is boom
+        assert boom.filename == str(reg.lifecycle_barrier_path())
+
+    def test_lock_io_failure_closes_the_descriptor(self, rt, monkeypatch):
+        """The ownership block still runs on the new escape path: the
+        barrier handle is closed (no leak) and the file is never unlinked
+        (retained infrastructure)."""
+        captured: dict[str, object] = {}
+        real_open = builtins.open
+
+        def spy_open(file, *args, **kwargs):
+            fp = real_open(file, *args, **kwargs)
+            if Path(str(file)).name == "lifecycle.lock":
+                captured["fp"] = fp
+            return fp
+
+        monkeypatch.setattr(builtins, "open", spy_open)
+        self._patch_lock(monkeypatch, self._lockexc(OSError(errno.EIO, "disk I/O error")))
+        with pytest.raises(OSError):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+        assert captured["fp"].closed is True
+        assert reg.lifecycle_barrier_path().exists()
+
+    # ------ genuine contention keeps polling to the BarrierTimeout ------
+
+    def test_lockexception_eagain_cause_is_contention(self, rt, monkeypatch):
+        exc = self._lockexc(OSError(errno.EAGAIN, "resource temporarily unavailable"))
+        self._patch_lock(monkeypatch, exc)
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
+
+    def test_lockexception_eacces_cause_is_contention(self, rt, monkeypatch):
+        exc = self._lockexc(OSError(errno.EACCES, "permission denied"))
+        self._patch_lock(monkeypatch, exc)
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
+
+    def test_already_locked_without_cause_is_contention(self, rt, monkeypatch):
+        """The ``isinstance`` branch stands alone — across portalocker
+        3.0/3.1/3.2 a held lock is always ``AlreadyLocked``, cause or not
+        (guards the #1944 type-drift note)."""
+        self._patch_lock(monkeypatch, portalocker.AlreadyLocked("busy"))
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
+
+    def test_blockingioerror_is_contention(self, rt, monkeypatch):
+        """POSIX's ``BlockingIOError`` (an ``OSError`` subclass, often with
+        no errno set) must not fall through to the OSError-escape branch."""
+        self._patch_lock(monkeypatch, BlockingIOError())
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
+
+    def test_winerror_lock_violation_cause_is_contention(self, rt, monkeypatch):
+        """Windows contention chains a ``pywintypes.error`` carrying
+        ``.winerror`` and no ``.errno``; the winerror probe catches it."""
+        self._patch_lock(monkeypatch, self._lockexc(_FakePywinError()))
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
+
+    def test_naked_permissionerror_eacces_is_contention(self, rt, monkeypatch):
+        """The direct-errno superset: a raw ``EACCES`` ``OSError`` leaking
+        past portalocker is fcntl-documented contention, not a path to
+        repair."""
+        self._patch_lock(monkeypatch, OSError(errno.EACCES, "permission denied"))
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
+
+    # ---- raw pywintypes.error: classifier verdict (platform-independent) ----
+
+    def test_raw_winerror_lock_violation_is_contention(self):
+        """A *raw* ``pywintypes.error`` (not chained) with the lock-violation
+        code reads as contention off the exception itself — the Win32 backend
+        maps 33 to ``AlreadyLocked``, but a leaked raw 33 must not be sent to
+        repair-the-path. Pure-function pin, so it runs on POSIX CI."""
+        assert reg._is_lock_contention(_FakePywinError(reg._WINERROR_LOCK_VIOLATION)) is True
+
+    def test_raw_non_violation_winerror_is_not_contention(self):
+        """A raw non-33 ``pywintypes.error`` (portalocker re-raises these
+        unwrapped) is a lock-call failure, not contention: the classifier
+        rejects it and the normalizer turns it into an ``OSError`` naming the
+        barrier path. Pure-function pin, so it runs on POSIX CI."""
+        boom = _FakePywinError(32, "sharing violation")
+        assert reg._is_lock_contention(boom) is False
+        path = reg.lifecycle_barrier_path()
+        with pytest.raises(OSError) as excinfo:
+            reg._raise_lock_io_failure(boom, path)
+        assert str(path) in str(excinfo.value)
+        assert excinfo.value.__cause__ is boom
+
+    def test_raw_pywintypes_error_escapes_the_poll_loop_as_oserror(self, rt, monkeypatch):
+        """End-to-end through the real poll loop: a raw, non-``OSError``
+        ``pywintypes.error`` must be *caught* (not escape unhandled) and
+        normalized to ``OSError`` so the CLIs' repair branch fires (#1957).
+
+        Simulates the Windows-only catch tuple on POSIX by injecting the fake
+        Win32 type into ``_BARRIER_LOCK_ERRORS`` — on real Windows that tuple
+        already carries ``pywintypes.error``.
+        """
+        monkeypatch.setattr(reg, "_BARRIER_LOCK_ERRORS", (*reg._LOCK_CONTENDED, _FakePywinError))
+        self._patch_lock(monkeypatch, _FakePywinError(32, "sharing violation"))
+        started = time.monotonic()
+        with pytest.raises(OSError) as excinfo:
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+        assert time.monotonic() - started < 2.0, "a lock-call failure must not poll"
+        assert not isinstance(excinfo.value, reg.BarrierTimeout)
+        assert str(reg.lifecycle_barrier_path()) in str(excinfo.value)
+
+    def test_raw_pywintypes_lock_violation_polls_to_barrier_timeout(self, rt, monkeypatch):
+        """The contention twin of the escape test: a raw lock-violation Win32
+        error keeps polling and refuses as ``BarrierTimeout``, not repair."""
+        monkeypatch.setattr(reg, "_BARRIER_LOCK_ERRORS", (*reg._LOCK_CONTENDED, _FakePywinError))
+        self._patch_lock(monkeypatch, _FakePywinError(reg._WINERROR_LOCK_VIOLATION))
+        with pytest.raises(reg.BarrierTimeout):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
 
 
 # ------------------------------------------------------------ held handle

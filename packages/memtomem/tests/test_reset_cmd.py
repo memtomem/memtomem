@@ -921,6 +921,35 @@ class TestResetLifecycleBarrier:
         assert "Stop it and re-run" not in result.output
         assert "--force" not in result.output
 
+    def test_lock_call_io_failure_prescribes_repair(self, home, monkeypatch):
+        """Production path (#1957): a bare ``LockException``/``EIO`` raised
+        by ``portalocker.lock`` itself is normalized to ``OSError`` by the
+        poll-loop classifier and propagated through ``asyncio.to_thread`` +
+        settlement to the repair branch — not mislabeled contention. Keyed
+        on the barrier basename so the mutation sidecar lock, taken first,
+        is untouched.
+        """
+        import errno
+
+        import portalocker
+
+        _patch_liveness(monkeypatch)
+        real_lock = portalocker.lock
+
+        def flaky_lock(fp, flags):
+            if Path(str(getattr(fp, "name", ""))).name == "lifecycle.lock":
+                exc = portalocker.LockException("disk I/O error")
+                exc.__cause__ = OSError(errno.EIO, "disk I/O error")
+                raise exc
+            return real_lock(fp, flags)
+
+        monkeypatch.setattr(portalocker, "lock", flaky_lock)
+        result = CliRunner().invoke(cli, ["reset", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "Repair the reported path" in result.output
+        assert "Stop it and re-run" not in result.output
+        assert "--force" not in result.output
+
 
 class TestResetRevalidatesStoreIdentity:
     """Consent is for the file counted in Phase A (#1945, Codex round 3).

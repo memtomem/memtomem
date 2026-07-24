@@ -2639,6 +2639,40 @@ class TestLifecycleBarrierRefusesUninstall:
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
 
+    def test_lock_call_io_failure_prescribes_repair(
+        self, home, registry_at_runtime_dir, monkeypatch
+    ):
+        """Production path (#1957): the failure is injected at
+        ``portalocker.lock`` itself, not the acquire wrapper, so the
+        poll-loop classifier — not the CLI seam — is what routes a bare
+        ``LockException``/``EIO`` to the repair branch. Keyed on the barrier
+        basename because the mutation sidecar lock legitimately fires first.
+        """
+        import portalocker
+
+        reg = registry_at_runtime_dir
+        state = _seed_state(home)
+        monkeypatch.setattr(reg, "_BARRIER_TIMEOUT_S", 0.3)
+
+        real_lock = portalocker.lock
+
+        def flaky_lock(fp, flags):
+            if Path(str(getattr(fp, "name", ""))).name == "lifecycle.lock":
+                exc = portalocker.LockException("disk I/O error")
+                exc.__cause__ = OSError(errno.EIO, "disk I/O error")
+                raise exc
+            return real_lock(fp, flags)
+
+        monkeypatch.setattr(portalocker, "lock", flaky_lock)
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2, result.output
+        assert "Repair the reported path" in result.output
+        assert "stop it and re-run" not in result.output
+        assert "--force" not in result.output
+        assert (state / "memtomem.db").exists()
+        assert (state / "config.json").exists()
+
     def test_force_does_not_override_the_barrier(self, home, registry_at_runtime_dir, monkeypatch):
         """A held flock is never stale — the kernel releases it when its
         holder dies — so there is nothing here for ``--force`` to
