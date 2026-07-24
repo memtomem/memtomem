@@ -222,13 +222,18 @@ async def _acquire_barrier_settled() -> HeldBarrier:
 async def _acquire_barrier_or_refuse(*, as_json: bool = False) -> HeldBarrier:
     """Acquire the barrier or refuse the way the gates do.
 
-    Deliberately no ``--force`` hint in the refusal: a held flock is
-    never stale — the kernel releases it when its holder dies — so there
-    is nothing here for ``--force`` to legitimately override.
+    Deliberately no ``--force`` hint in either refusal: a held flock is
+    never stale — the kernel releases it when its holder dies — and an
+    unusable barrier path is infrastructure, not a heuristic. The two
+    causes prescribe different remediations (#1870): contention is fixed
+    by stopping the holder, a direct ``OSError`` (unusable runtime dir,
+    barrier-file permissions) only by repairing the reported path —
+    "stop it" would send that user hunting for a process that does not
+    exist.
     """
     try:
         return await _acquire_barrier_settled()
-    except (BarrierTimeout, OSError) as exc:
+    except BarrierTimeout as exc:
         _refuse(
             f"A memtomem process is starting or holding the lifecycle "
             f"barrier ({exc}). Refusing to reset.",
@@ -236,6 +241,34 @@ async def _acquire_barrier_or_refuse(*, as_json: bool = False) -> HeldBarrier:
             as_json=as_json,
         )
         raise  # unreachable — _refuse exits; keeps the return type honest
+    except OSError as exc:
+        _refuse(
+            f"The lifecycle barrier could not be used ({exc}). Refusing to reset.",
+            "Repair the reported path, then retry — this is an infrastructure "
+            "failure, not a running process.",
+            as_json=as_json,
+        )
+        raise  # unreachable — _refuse exits; keeps the return type honest
+
+
+def _release_or_retain(barrier: HeldBarrier, close_confirmed: bool) -> None:
+    """Release the barrier, or retain it on an unconfirmed storage close.
+
+    The server-side polarity (#1936, ``AppContext._release_lifecycle_barrier``):
+    a ``close()`` that raised leaves a possibly-open store, which must
+    keep blocking servers and uninstalls — the kernel frees the flock
+    when this process exits. The propagating close exception explains
+    itself; this only surfaces the retention.
+    """
+    if close_confirmed:
+        barrier.release()
+        return
+    click.secho(
+        f"Warning: storage close unconfirmed — retaining the lifecycle "
+        f"barrier at {barrier.path} until process exit.",
+        fg="yellow",
+        err=True,
+    )
 
 
 def _backup_db(db_path: Path) -> Path:
@@ -320,20 +353,24 @@ async def _run(
     # re-probe past our idle connection, and stage the live DB file out
     # from under us.
     barrier = await _acquire_barrier_or_refuse(as_json=as_json)
+    close_confirmed = True
     try:
         _check_gates(db_path, force=force, as_json=as_json)
         storage = _make_backend()
+        # From construction on, the store may be open: release only after
+        # a *confirmed* close (#1936 polarity — see _release_or_retain).
+        close_confirmed = False
         try:
             await storage.initialize()
             stats = await storage.get_stats()
             total = stats.get("total_chunks", 0)
         finally:
             # ``close`` is partial-init tolerant; every gate refusal above
-            # raises ``SystemExit`` through the outer ``finally``, so no
-            # handle and no hold survive this block on any path.
+            # raises ``SystemExit`` before construction, releasing normally.
             await storage.close()
+            close_confirmed = True
     finally:
-        barrier.release()
+        _release_or_retain(barrier, close_confirmed)
 
     if total == 0:
         if as_json:
@@ -367,6 +404,7 @@ async def _run(
     # surfaces here as a timeout refusal — the mechanism working, not a
     # degraded message.
     barrier = await _acquire_barrier_or_refuse(as_json=as_json)
+    close_confirmed = True  # nothing open until the wipe backend below
     try:
         _check_gates(db_path, force=force, as_json=as_json)
 
@@ -393,13 +431,15 @@ async def _run(
         # A fresh backend for the wipe — Phase A's was closed before the
         # prompt, precisely so nothing of ours outlived that hold.
         storage = _make_backend()
+        close_confirmed = False
         try:
             await storage.initialize()
             deleted = await storage.reset_all()
         finally:
             await storage.close()
+            close_confirmed = True
     finally:
-        barrier.release()
+        _release_or_retain(barrier, close_confirmed)
 
     if as_json:
         click.echo(

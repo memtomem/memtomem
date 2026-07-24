@@ -479,6 +479,22 @@ def _assert_barrier_free(reg) -> None:
     assert outcome == "acquired", f"reset left the barrier held ({detail})"
 
 
+def _assert_barrier_held(reg) -> None:
+    """Prove the barrier is still held, from another *process*."""
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    child = ctx.Process(target=_child_try_exclusive_barrier, args=(str(reg.runtime_dir()), q))
+    child.start()
+    try:
+        outcome, _detail = q.get(timeout=30)
+    finally:
+        child.join(timeout=30)
+        if child.is_alive():
+            child.kill()
+            child.join(timeout=30)
+    assert outcome == "refused", "an unconfirmed close must retain the barrier"
+
+
 @contextlib.contextmanager
 def _shared_barrier_holder(reg):
     """A spawned process standing in for a live server (shared hold)."""
@@ -681,10 +697,12 @@ class TestResetLifecycleBarrier:
 
         ctx = mp.get_context("spawn")
         q, release = ctx.Queue(), ctx.Event()
-        worker = ctx.Process(target=_child_reset_blocking_in_wipe, args=(str(home), rt, q, release))
+        worker = ctx.Process(
+            target=_child_reset_parked_inside, args=(str(home), rt, "reset_all", q, release)
+        )
         worker.start()
         try:
-            assert q.get(timeout=60)[0] == "wiping", "reset never reached reset_all"
+            assert q.get(timeout=60)[0] == "parked", "reset never reached reset_all"
             # Parked inside the wipe, still holding: a server starting
             # now must be refused before it can open the store.
             with pytest.raises(reg.BarrierTimeout):
@@ -697,6 +715,101 @@ class TestResetLifecycleBarrier:
                 worker.join(timeout=30)
         assert q.get(timeout=30) == ("done", 0)
         assert _count(db_path, "chunks") == 0
+
+    def test_phase_a_hold_spans_the_backend_lifetime(self, home, reg, monkeypatch):
+        """Codex round-2 pin: releasing right after the Phase A re-probe
+        would leave every other test green — prove the hold covers the
+        open backend by parking a real reset inside ``get_stats`` and
+        failing a cross-process shared acquire."""
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+        rt = str(reg.ensure_runtime_dir())
+
+        ctx = mp.get_context("spawn")
+        q, release = ctx.Queue(), ctx.Event()
+        worker = ctx.Process(
+            target=_child_reset_parked_inside, args=(str(home), rt, "get_stats", q, release)
+        )
+        worker.start()
+        try:
+            assert q.get(timeout=60)[0] == "parked", "reset never reached get_stats"
+            with pytest.raises(reg.BarrierTimeout):
+                reg.acquire_server_lifecycle_barrier(timeout_s=0.3)
+        finally:
+            release.set()
+            worker.join(timeout=60)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=30)
+        assert q.get(timeout=30) == ("done", 0)
+
+    def test_backend_closed_before_prompt(self, home, reg, monkeypatch):
+        """The design-gate blocker made concrete: an open handle carried
+        across the prompt would let an uninstall stage the DB out from
+        under it — Phase A must confirm its close before ``_confirm``
+        runs."""
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+        events: list[str] = []
+        real_close = SqliteBackend.close
+
+        async def spying_close(self):
+            events.append("close")
+            return await real_close(self)
+
+        monkeypatch.setattr(SqliteBackend, "close", spying_close)
+
+        def confirm_probe(*_a, **_k) -> bool:
+            events.append("confirm")
+            return False
+
+        monkeypatch.setattr(reset_cmd, "_confirm", confirm_probe)
+        result = runner.invoke(cli, ["reset"])
+        assert result.exit_code == 0, result.output
+        assert events == ["close", "confirm"], events
+
+    def test_barrier_free_during_prompt(self, home, reg, monkeypatch):
+        """Nothing may be held while the user sits on the prompt (#1936's
+        rejected shape) — proven by a spawned exclusive acquire from
+        inside ``_confirm``."""
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+        seen: dict[str, bool] = {}
+
+        def confirm_probe(*_a, **_k) -> bool:
+            try:
+                _assert_barrier_free(reg)
+                seen["free"] = True
+            except AssertionError:
+                seen["free"] = False
+            return False
+
+        monkeypatch.setattr(reset_cmd, "_confirm", confirm_probe)
+        result = runner.invoke(cli, ["reset"])
+        assert result.exit_code == 0, result.output
+        assert seen.get("free") is True, "barrier still held while prompting"
+
+    def test_infrastructure_oserror_prescribes_repair(self, home, monkeypatch):
+        """A direct ``OSError`` from acquisition is infrastructure
+        (unusable runtime dir, barrier-file permissions), not contention
+        — "stop it and re-run" would send the user hunting for a process
+        that does not exist (#1870)."""
+        _patch_liveness(monkeypatch)
+
+        def broken_acquire(timeout_s: float | None = None):
+            raise PermissionError("lifecycle.lock: permission denied")
+
+        monkeypatch.setattr(reset_cmd, "_acquire_lifecycle_barrier", broken_acquire)
+        result = CliRunner().invoke(cli, ["reset", "-y"])
+        assert result.exit_code == 2, result.output
+        assert "Repair the reported path" in result.output
+        assert "Stop it and re-run" not in result.output
+        assert "--force" not in result.output
 
 
 class TestResetAlwaysReleasesTheBarrier:
@@ -830,14 +943,56 @@ class TestResetAlwaysReleasesTheBarrier:
         _assert_barrier_free(reg)
 
 
-def _child_reset_blocking_in_wipe(home_str: str, rt_str: str, q, release) -> None:
-    """Run a *real* ``mm reset -y`` that parks inside ``reset_all``.
+class TestResetRetainsBarrierOnUncleanClose:
+    """#1936 polarity (Codex round 2): an unconfirmed close leaves a
+    possibly-open store — the barrier must keep blocking until process
+    exit frees the flock, never be released on faith."""
+
+    def test_phase_a_close_failure_retains(self, home, reg, monkeypatch):
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        _patch_liveness(monkeypatch)
+
+        async def broken_close(self) -> None:
+            raise OSError("close failed")
+
+        monkeypatch.setattr(SqliteBackend, "close", broken_close)
+        result = CliRunner().invoke(cli, ["reset", "-y"])
+        assert result.exit_code != 0
+        _assert_barrier_held(reg)
+
+    def test_phase_b_close_failure_retains(self, home, reg, monkeypatch):
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+        calls: list[int] = []
+        real_close = SqliteBackend.close
+
+        async def second_close_fails(self) -> None:
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("close failed")
+            return await real_close(self)
+
+        monkeypatch.setattr(SqliteBackend, "close", second_close_fails)
+        result = runner.invoke(cli, ["reset", "-y"])
+        assert result.exit_code != 0
+        assert len(calls) == 2, "the failure must land on the Phase B close"
+        _assert_barrier_held(reg)
+
+
+def _child_reset_parked_inside(home_str: str, rt_str: str, method: str, q, release) -> None:
+    """Run a *real* ``mm reset -y`` parked inside ``SqliteBackend.<method>``.
 
     The barrier is only proven useful if reset keeps holding it across
-    the wipe — a child that merely grabbed the lock would pass the same
-    assertions even if production dropped it right after the re-probe.
-    The runtime dir is injected as the parent's already-resolved path,
-    never re-derived from the environment: on Windows ``runtime_dir()``
+    its write boundaries — a child that merely grabbed the lock would
+    pass the same assertions even if production dropped it right after
+    the re-probe. ``method`` picks the parking spot: ``get_stats`` sits
+    inside the Phase A hold, ``reset_all`` inside Phase B's. The runtime
+    dir is injected as the parent's already-resolved path, never
+    re-derived from the environment: on Windows ``runtime_dir()``
     ignores ``$XDG_RUNTIME_DIR`` entirely and the two processes would
     land on different barrier files.
     """
@@ -866,13 +1021,13 @@ def _child_reset_blocking_in_wipe(home_str: str, rt_str: str, q, release) -> Non
     _reg.ensure_runtime_dir = _ensure_rt
     _bootstrap._CONFIG_PATH = Path(home_str) / ".memtomem" / "config.json"
 
-    real_reset_all = SqliteBackend.reset_all
+    real_method = getattr(SqliteBackend, method)
 
-    async def blocking_reset_all(self):
-        q.put(("wiping",))
+    async def parked(self, *args, **kwargs):
+        q.put(("parked",))
         release.wait(60)
-        return await real_reset_all(self)
+        return await real_method(self, *args, **kwargs)
 
-    SqliteBackend.reset_all = blocking_reset_all  # type: ignore[method-assign]
+    setattr(SqliteBackend, method, parked)
     result = CliRunner().invoke(_cli, ["reset", "-y"])
     q.put(("done", result.exit_code))
