@@ -21,8 +21,20 @@ from memtomem.server.tools.search import (
     _resolve_project_context_root as _resolve_project_context_root_from_cwd,
 )
 
+# ``\b`` is Click's raw-paragraph marker: without it Click rewraps the epilog as
+# prose and the examples collapse into one run-on paragraph, which is exactly
+# what makes them useless to copy-paste (#1667).
+SEARCH_EPILOG = """\
+Examples:
 
-@click.command()
+\b
+  mm search "payment timeout"
+  mm search "onboarding flow" --tag-filter onboarding --top-k 5
+  mm search "incident" --scope project_shared --format context
+"""
+
+
+@click.command(epilog=SEARCH_EPILOG)
 @click.argument("query")
 @click.option("--top-k", "-k", default=10, help="Number of results")
 @click.option("--source-filter", "-s", default=None, help="Source file filter")

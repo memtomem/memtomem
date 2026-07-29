@@ -1145,3 +1145,37 @@ class TestSubcommandHelp:
         result = runner.invoke(cli, ["shell", "--help"])
         assert result.exit_code == 0
         assert "Interactive" in result.output
+
+
+class TestHelpEpilog:
+    """#1667: ``mm search`` / ``mm add`` --help should surface usage examples.
+
+    The assertions are line-based on purpose. Substring checks against the whole
+    output pass even when Click rewraps the epilog into a run-on paragraph, so
+    they cannot tell a copy-pasteable example from a flattened one.
+    """
+
+    def test_search_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert 'mm search "payment timeout"' in lines
+        assert 'mm search "onboarding flow" --tag-filter onboarding --top-k 5' in lines
+        assert 'mm search "incident" --scope project_shared --format context' in lines
+
+    def test_add_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["add", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert 'mm add "Quick note to self" --json' in lines
+        assert (
+            'mm add "Canary deploy froze at 14:02Z; rolled back." --tags incident,postmortem'
+            in lines
+        )
+        long_example = (
+            'mm add "Standardize on uv for installs." '
+            "--scope project_shared --confirm-project-shared"
+        )
+        assert long_example in lines
