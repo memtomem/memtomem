@@ -79,8 +79,8 @@ ADD_EPILOG = """\
 Examples:
 
 \b
-  mm add "Canary deploy froze at 14:02Z; rolled back." --tags incident,postmortem
-  mm add "Standardize on uv for installs." --scope project_shared --confirm-project-shared
+  mm add "Canary deploy froze at 14:02Z." --tags incident,postmortem
+  mm add "Standardize on uv" --scope project_shared --confirm-project-shared
   mm add "Quick note to self" --json
 """
 

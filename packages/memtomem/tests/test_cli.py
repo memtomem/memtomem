@@ -1170,12 +1170,25 @@ class TestHelpEpilog:
         lines = [line.strip() for line in result.output.splitlines()]
         assert "Examples:" in lines
         assert 'mm add "Quick note to self" --json' in lines
-        assert (
-            'mm add "Canary deploy froze at 14:02Z; rolled back." --tags incident,postmortem'
-            in lines
+        assert 'mm add "Canary deploy froze at 14:02Z." --tags incident,postmortem' in lines
+        scoped_example = (
+            'mm add "Standardize on uv" --scope project_shared --confirm-project-shared'
         )
-        long_example = (
-            'mm add "Standardize on uv for installs." '
-            "--scope project_shared --confirm-project-shared"
-        )
-        assert long_example in lines
+        assert scoped_example in lines
+
+    def test_epilog_examples_fit_an_80_column_terminal(self, runner: CliRunner) -> None:
+        """Raw paragraphs are exempt from Click's wrapping, so width is on us.
+
+        A `\\b` block is emitted verbatim: an example longer than the terminal is
+        left for the terminal to soft-wrap, which breaks it mid-flag on screen.
+        Nothing else in the help output can regress this, so pin it here.
+        """
+        for command in ("search", "add"):
+            result = runner.invoke(cli, [command, "--help"])
+            assert result.exit_code == 0
+            examples = [
+                line for line in result.output.splitlines() if line.strip().startswith("mm ")
+            ]
+            assert examples, f"no examples rendered for {command}"
+            over_width = [line for line in examples if len(line) > 80]
+            assert not over_width, f"{command} examples exceed 80 columns: {over_width}"
