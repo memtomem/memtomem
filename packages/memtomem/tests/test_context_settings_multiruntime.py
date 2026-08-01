@@ -6,7 +6,7 @@ hooks record) fans out to Codex ``.codex/hooks.json`` (near-identity) and
 Gemini ``.gemini/settings.json`` (event + tool-name remap, drop-with-warning
 for anything that can't convert faithfully).
 
-Mappings were verified against official docs (developers.openai.com/codex/hooks,
+Mappings were verified against official docs (learn.chatgpt.com/docs/hooks,
 gemini-cli docs/hooks/writing-hooks.md).
 """
 

@@ -4454,7 +4454,7 @@ ADR-0011 PR-A through PR-F changes that landed earlier in the cycle.
   silently overwrote each other in `~/.codex/agents/`, and any
   `mm context sync` from a worktree leaked onto the real host home —
   defeating worktree isolation. The OpenAI Codex CLI [supports both
-  scopes](https://developers.openai.com/codex/subagents) ("standalone
+  scopes](https://learn.chatgpt.com/docs/agent-configuration/subagents) ("standalone
   TOML files under `~/.codex/agents/` for personal agents or
   `.codex/agents/` for project-scoped agents"), and project scope is
   the right default for a per-repo canonical source. This makes

@@ -522,7 +522,7 @@ _register(ClaudeSettingsGenerator())
 #
 # Canonical hook event names are Claude's. Mappings below were verified
 # against official docs this session: code.claude.com/docs/en/hooks,
-# developers.openai.com/codex/hooks, and gemini-cli
+# learn.chatgpt.com/docs/hooks, and gemini-cli
 # docs/hooks/writing-hooks.md (event list + tool-name matchers).
 
 # Events Codex understands. Codex shares Claude's event names and accepts

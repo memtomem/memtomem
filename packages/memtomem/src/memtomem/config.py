@@ -1867,7 +1867,7 @@ def _detect_provider_dirs() -> dict[str, list[Path]]:
     - ``claude-plans``: ``~/.claude/plans/`` (local convention, not in
       official docs but commonly used for plan-mode artifacts).
     - ``codex``: ``~/.codex/memories/``
-      (https://developers.openai.com/codex/memories).
+      (https://learn.chatgpt.com/docs/customization/memories).
 
     Gemini CLI is intentionally excluded: its memory surface is the single
     file ``~/.gemini/GEMINI.md`` (doesn't fit the directory abstraction)
