@@ -6,7 +6,9 @@ of the write surfaces rather than of the session lifecycle.
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -281,6 +283,33 @@ async def _provenance_events(app, session_id):
         for e in await app.storage.get_session_events(session_id)
         if (e.get("metadata") or {}).get("provenance") == PROVENANCE_KIND
     ]
+
+
+# Older than any TTL a test would sweep with, and a constant rather than
+# ``now() - timedelta`` so no reading of the clock is left to go wrong.
+ANCIENT_UPDATED_AT = "2020-01-01T00:00:00+00:00"
+
+
+async def _backdate_chunks(app) -> int:
+    """Age every chunk row so a TTL sweep is a fact, not a race with the clock.
+
+    ``expire_chunks`` measures age from ``updated_at``, so a test that wants a
+    sweep to actually delete something has to write the past into the row
+    rather than hope enough wall clock elapsed since the write (#1982).
+
+    Returns the number of rows aged, so a caller can assert the aging landed.
+    """
+    db = app.storage._get_db()
+    cursor = db.execute("UPDATE chunks SET updated_at = ?", [ANCIENT_UPDATED_AT])
+    db.commit()
+    return cursor.rowcount
+
+
+def _summary_count(summary: str, label: str) -> int:
+    """One count out of a ``mem_decay_*`` summary, without pinning its padding."""
+    match = re.search(rf"^- {label}:\s+(\d+)$", summary, re.MULTILINE)
+    assert match is not None, f"no {label!r} line in:\n{summary}"
+    return int(match.group(1))
 
 
 class TestEveryChunkCreatingSurfaceIsAccountedFor:
@@ -1043,10 +1072,15 @@ class TestMaintenanceToolsFlagTheSession:
         await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
         session_id = app.current_session_id
         await mem_add(content="a fact old enough to expire", ctx=ctx)  # type: ignore[arg-type]
+        chunk_id = (await _provenance_events(app, session_id))[0]["chunk_ids"][0]
 
-        # max_age_days below any real age ⇒ everything expires.
-        await mem_decay_expire(max_age_days=0.0000001, dry_run=False, ctx=ctx)  # type: ignore[arg-type]
+        # Age the row rather than pick a cutoff below however much wall clock
+        # happened to pass since the write — that boundary was flaky (#1982).
+        assert await _backdate_chunks(app) >= 1
+        await mem_decay_expire(max_age_days=1.0, dry_run=False, ctx=ctx)  # type: ignore[arg-type]
 
+        # The delete really ran through the service, and the session says so.
+        assert await app.storage.get_chunk(UUID(chunk_id)) is None
         row = await app.storage.get_session(session_id)
         assert row["metadata"]["provenance_incomplete"] is True
 
@@ -1065,9 +1099,18 @@ class TestMaintenanceToolsFlagTheSession:
         await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
         session_id = app.current_session_id
         await mem_add(content="a fact that survives the preview", ctx=ctx)  # type: ignore[arg-type]
+        chunk_id = (await _provenance_events(app, session_id))[0]["chunk_ids"][0]
 
-        await mem_decay_expire(max_age_days=0.0000001, dry_run=True, ctx=ctx)  # type: ignore[arg-type]
+        # Backdated too, so the preview has a genuine candidate to skip —
+        # otherwise this test passes even when the sweep finds nothing.
+        assert await _backdate_chunks(app) >= 1
+        summary = await mem_decay_expire(max_age_days=1.0, dry_run=True, ctx=ctx)  # type: ignore[arg-type]
 
+        # "Would have deleted, didn't": the counts are what separates a
+        # working dry-run from a sweep that simply found nothing.
+        assert _summary_count(summary, "Expired") >= 1
+        assert _summary_count(summary, "Deleted") == 0
+        assert await app.storage.get_chunk(UUID(chunk_id)) is not None
         row = await app.storage.get_session(session_id)
         assert "provenance_incomplete" not in row["metadata"]
 
