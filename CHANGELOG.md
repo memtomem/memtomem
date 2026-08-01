@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.14] — 2026-08-01
+
+Emergency patch: every install of 0.3.13 or earlier made from PyPI after
+`mcp` 2.0.0 shipped fails at import. The dependency declared no upper bound,
+so a fresh resolve picked up an SDK that had removed `mcp.server.fastmcp`.
+Anyone whose install is currently broken should upgrade to this release;
+anyone on a working install is unaffected, and no behavior changes.
+
 ### Added
 
 - Worked examples in `mm search --help` and `mm add --help`.
@@ -17,6 +25,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mcp` is capped below 2.0, so fresh installs resolve a working SDK
+  again** (#1979). `mcp` 2.0.0 removed `mcp.server.fastmcp`, which the server
+  imports at module scope, and the requirement was an unbounded
+  `mcp[cli]>=1.28.1` — so `uv tool install memtomem[all]`, `uvx --from
+  "memtomem[all]==0.3.13" memtomem-server`, and every other
+  install-from-index path died at import. `uv.lock` pinned 1.x, which is why
+  CI and checkout-based development never saw it. The cap is a stopgap;
+  #1978 tracks the migration off the removed surfaces that lifts it.
 - **`SessionEnd` hooks now reach Codex** (#1976). The Codex fan-out filter
   grouped `SessionEnd` with `Notification` as unsupported, so every canonical
   `SessionEnd` hook was withheld from `~/.codex/hooks.json` under a warning
@@ -30,14 +46,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `mm init` reranker step printed the wrong model cache path
   (`~/.cache/fastembed/`); it now names the resolved default,
   `~/.memtomem/cache/fastembed/`.
-- deps: the `mcp[cli]` requirement is capped at `<2`, so a fresh install from
-  the index no longer resolves `mcp` 2.x. 2.0 removed `mcp.server.fastmcp`,
-  which the server imports at module scope — every install of 0.3.13 and
-  earlier made after 2.0 shipped failed at import, including the documented
-  `uvx --from "memtomem[all]==0.3.13"` flow. `uv.lock` pinned 1.x, so CI and
-  checkout-based development never resolved 2.0 and the break was visible only
-  on the install-from-index path. The cap is a stopgap; #1978 tracks the
-  migration that lifts it. (#1979)
 
 ## [0.3.13] — 2026-07-24
 
