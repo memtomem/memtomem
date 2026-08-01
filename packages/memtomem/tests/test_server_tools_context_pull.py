@@ -66,10 +66,10 @@ def _store_exists(proj: Path, kind: str, name: str, scope: str = "project_shared
 
 
 def _pull_arg_model() -> type:
-    """The pydantic arg model FastMCP validates a direct ``mem_context_pull``
+    """The pydantic arg model the SDK validates a direct ``mem_context_pull``
     call against — built from the function so it is available in every tool
     mode (the tool itself is pruned from ``mcp`` outside ``full``)."""
-    from mcp.server.fastmcp.utilities.func_metadata import func_metadata
+    from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 
     return func_metadata(mem_context_pull).arg_model
 

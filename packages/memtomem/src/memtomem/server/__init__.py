@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from memtomem.server.component_factory import (
     Components as Components,
@@ -37,7 +38,7 @@ from memtomem.server.helpers import (
 from memtomem.server.instructions import build_instructions
 from memtomem.server.lifespan import app_lifespan
 
-# Tool mode must be resolved BEFORE the FastMCP instance exists: the
+# Tool mode must be resolved BEFORE the MCPServer instance exists: the
 # instructions text has to describe the tool surface this mode actually
 # exposes (#1608), and ``instructions=`` is only accepted at construction.
 _TOOL_MODE = os.environ.get("MEMTOMEM_TOOL_MODE", "core").lower()
@@ -48,7 +49,7 @@ _TOOL_MODE = os.environ.get("MEMTOMEM_TOOL_MODE", "core").lower()
 #   standard → core + frequently used packs as individual tools + mem_do
 #   full     → all tools registered individually (no mem_do needed)
 #
-# Defined above the FastMCP construction below because the instructions
+# Defined above the MCPServer construction below because the instructions
 # text renders this set's size; the count in the prose can then never
 # drift from the set that is actually exposed.
 _CORE_TOOLS = {
@@ -69,23 +70,21 @@ _CORE_TOOLS = {
 # documentation surface most LLMs see before picking a tool. Source of
 # truth lives in ``memtomem/server/instructions.py``; pinned by
 # ``tests/test_server_instructions.py``.
-mcp = FastMCP(
-    "memtomem",
-    instructions=build_instructions(_TOOL_MODE, core_count=len(_CORE_TOOLS)),
-    lifespan=app_lifespan,
-)
-
-# Pin ``serverInfo.version`` in the MCP ``initialize`` response to the
-# memtomem package version (#383). ``FastMCP.__init__`` has no ``version``
-# parameter; when the underlying ``Server.version`` stays ``None`` the
-# lowlevel server falls back to ``importlib.metadata.version("mcp")`` —
-# which made every memtomem handshake report the MCP SDK version
-# (e.g. ``1.27.0``) instead of ``mm --version`` (e.g. ``0.1.24``).
-# External consumers keying off ``serverInfo.version`` (telemetry,
-# error reports, "which version are we both on") saw misleading data.
+#
+# ``version=`` pins ``serverInfo.version`` in the ``initialize`` response to
+# the memtomem package version (#383). Left unset it is not merely cosmetic:
+# 1.x reported ``importlib.metadata.version("mcp")`` — the SDK's own version —
+# and 2.0 reports an empty string. Either way, external consumers keying off
+# ``serverInfo.version`` (telemetry, error reports, "which version are we both
+# on") get something other than ``mm --version``.
 from memtomem import __version__ as _memtomem_version
 
-mcp._mcp_server.version = _memtomem_version
+mcp = MCPServer(
+    "memtomem",
+    instructions=build_instructions(_TOOL_MODE, core_count=len(_CORE_TOOLS)),
+    version=_memtomem_version,
+    lifespan=app_lifespan,
+)
 
 # ── Register ALL tools (decorators bind to `mcp` on import) ───────────
 from memtomem.server.tools.ask import mem_ask
@@ -216,13 +215,13 @@ _STANDARD_PACKS = frozenset(
 
 
 def _registered_tool_names() -> frozenset[str]:
-    """Enumerate registered tool names via FastMCP's public-ish surface.
+    """Enumerate registered tool names via MCPServer's public-ish surface.
 
-    FastMCP exposes ``remove_tool`` publicly but has no *synchronous*
-    public tool listing (``FastMCP.list_tools`` is async and yields wire
+    ``MCPServer`` exposes ``remove_tool`` publicly but has no *synchronous*
+    public tool listing (``MCPServer.list_tools`` is async and yields wire
     objects), so we call the tool manager's synchronous ``list_tools``.
-    Both that method and ``FastMCP.remove_tool`` (used below) are the
-    coupling points to FastMCP internals — pinned by
+    Both that method and ``MCPServer.remove_tool`` (used below) are the
+    coupling points to SDK internals — pinned by
     ``tests/test_tool_mode_pruning.py``. Guard the shape explicitly and
     raise if it changes: a silent failure here would ship every tool in
     ``core`` mode instead of pruning to 9 (#1609).
@@ -231,7 +230,7 @@ def _registered_tool_names() -> frozenset[str]:
     lister = getattr(manager, "list_tools", None)
     if manager is None or not callable(lister):
         raise RuntimeError(
-            "FastMCP tool-manager API changed: cannot enumerate registered tools "
+            "MCPServer tool-manager API changed: cannot enumerate registered tools "
             "for MEMTOMEM_TOOL_MODE pruning. Pin the mcp dependency or update the "
             "tool-mode pruning in memtomem/server/__init__.py."
         )
@@ -252,12 +251,12 @@ if _TOOL_MODE != "full":
         }
     else:
         _allowed = _CORE_TOOLS
-    # ``FastMCP.remove_tool`` is the public removal API (mcp>=1.27.2);
-    # raise rather than silently no-op if a future release drops it, so
-    # pruning can't fail open to full mode.
+    # ``MCPServer.remove_tool`` is the public removal API; raise rather
+    # than silently no-op if a future release drops it, so pruning can't
+    # fail open to full mode.
     if not callable(getattr(mcp, "remove_tool", None)):
         raise RuntimeError(
-            "FastMCP.remove_tool is unavailable: cannot prune tools for "
+            "MCPServer.remove_tool is unavailable: cannot prune tools for "
             "MEMTOMEM_TOOL_MODE. Pin the mcp dependency or update "
             "memtomem/server/__init__.py."
         )
@@ -562,7 +561,16 @@ def _host_patterns(host: str | None) -> list[str]:
     return [host, f"{host}:*"]
 
 
-def _configure_network_transport(args, transport: str) -> tuple[str, str | None]:
+def _configure_network_transport(args, transport: str) -> tuple[str, dict[str, Any]]:
+    """Build the ``mcp.run()`` keyword arguments for a network transport.
+
+    The 2.0 SDK moved host/port/paths/transport-security off the server
+    instance: ``MCPServer.settings`` no longer carries them, and
+    ``run(transport=..., **kwargs)`` forwards straight to
+    ``run_sse_async`` / ``run_streamable_http_async``. So this returns the
+    kwargs instead of mutating global state, which also means a failed
+    parse leaves nothing half-applied.
+    """
     from urllib.parse import urlparse
 
     from mcp.server.transport_security import TransportSecuritySettings
@@ -572,27 +580,32 @@ def _configure_network_transport(args, transport: str) -> tuple[str, str | None]
     )
     parsed = urlparse(public_url)
 
-    mcp.settings.host = args.host
-    mcp.settings.port = args.port
+    run_kwargs: dict[str, Any] = {"host": args.host, "port": args.port}
     if transport == "sse":
+        # 1.x took a separate ``mount_path`` and prefixed both the SSE route
+        # and the advertised message endpoint with it. 2.0 has no
+        # ``mount_path``: ``sse_app`` registers ``sse_path`` and
+        # ``message_path`` verbatim, so the prefix is folded into both here.
+        # ``_split_sse_url_path`` returns ``None`` for a single-segment path
+        # like ``/sse``, hence the normalization to "".
         mount_path, endpoint_path = _split_sse_url_path(parsed.path)
-        mcp.settings.sse_path = endpoint_path
+        prefix = mount_path or ""
+        run_kwargs["sse_path"] = f"{prefix}{endpoint_path}"
+        run_kwargs["message_path"] = f"{prefix}/messages/"
     else:
-        mount_path = None
-        endpoint_path = parsed.path
-        mcp.settings.streamable_http_path = endpoint_path
+        run_kwargs["streamable_http_path"] = parsed.path
 
     if args.disable_dns_rebinding_protection:
         # Pin the allow-lists to empty even though the SDK's current default
         # is `[]` — relying on that default means a future upstream change
         # could silently widen what we accept when DNS rebinding protection
         # is off. Pass them explicitly so the contract here is local.
-        mcp.settings.transport_security = TransportSecuritySettings(
+        run_kwargs["transport_security"] = TransportSecuritySettings(
             enable_dns_rebinding_protection=False,
             allowed_hosts=[],
             allowed_origins=[],
         )
-        return public_url, mount_path
+        return public_url, run_kwargs
 
     allowed_hosts = [
         "127.0.0.1",
@@ -606,27 +619,27 @@ def _configure_network_transport(args, transport: str) -> tuple[str, str | None]
         *args.allowed_host,
     ]
     allowed_origins = [_origin_from_url(public_url), *args.allowed_origin]
-    mcp.settings.transport_security = TransportSecuritySettings(
+    run_kwargs["transport_security"] = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=list(dict.fromkeys(allowed_hosts)),
         allowed_origins=list(dict.fromkeys(allowed_origins)),
     )
-    return public_url, mount_path
+    return public_url, run_kwargs
 
 
-def _internal_network_url(args, transport: str, mount_path: str | None) -> str:
+def _internal_network_url(args, transport: str, run_kwargs: dict[str, Any]) -> str:
     if transport == "sse":
-        path = f"{mount_path or ''}{mcp.settings.sse_path}"
+        path = run_kwargs["sse_path"]
     else:
-        path = mcp.settings.streamable_http_path
+        path = run_kwargs["streamable_http_path"]
     return f"http://{args.host}:{args.port}{path}"
 
 
 def _print_network_server_info(
-    transport: str, args, public_url: str, mount_path: str | None
+    transport: str, args, public_url: str, run_kwargs: dict[str, Any]
 ) -> None:
     transport_label = "http (streamable-http)" if args.transport == "http" else transport
-    internal_url = _internal_network_url(args, transport, mount_path)
+    internal_url = _internal_network_url(args, transport, run_kwargs)
     lines = [
         "memtomem-server",
         f"Transport: {transport_label}",
@@ -698,15 +711,16 @@ def main(argv: list[str] | None = None) -> None:
         _print_direct_stdio_help()
         raise SystemExit(2)
     if transport != "stdio":
-        # Configure ``mcp.settings`` up front so it's ready by ``mcp.run()``,
-        # but defer the user-facing banner until after the pid-lock decision:
-        # printing "Press Ctrl+C to stop" before discovering the lock is held
-        # contradicts the "another instance is already running" warning that
-        # the lock-contention branch logs a moment later.
-        public_url, mount_path = _configure_network_transport(args, transport)
+        # Resolve the transport kwargs up front so a bad ``--url`` fails
+        # before the pid-lock dance, but defer the user-facing banner until
+        # after the pid-lock decision: printing "Press Ctrl+C to stop" before
+        # discovering the lock is held contradicts the "another instance is
+        # already running" warning that the lock-contention branch logs a
+        # moment later.
+        public_url, run_kwargs = _configure_network_transport(args, transport)
     else:
         public_url = None
-        mount_path = None
+        run_kwargs = {}
 
     # B1: bidirectional mutual exclusion during the transition window.
     # Hold the legacy flock for the process lifetime so an old (pre-#412)
@@ -828,11 +842,14 @@ def main(argv: list[str] | None = None) -> None:
         # Banner runs after the lock decision so the warning log (if any)
         # and the "Press Ctrl+C to stop" line stay consistent with reality.
         assert public_url is not None  # narrowed by the configure branch above
-        _print_network_server_info(transport, args, public_url, mount_path)
+        _print_network_server_info(transport, args, public_url, run_kwargs)
 
+    # ``run`` forwards these kwargs to the matching async runner, and its
+    # overloads key off a literal transport — hence the explicit branches
+    # rather than one call with a ``str`` variable.
     if transport == "stdio":
         mcp.run()
     elif transport == "sse":
-        mcp.run(transport="sse", mount_path=mount_path)
+        mcp.run(transport="sse", **run_kwargs)
     else:
-        mcp.run(transport="streamable-http")
+        mcp.run(transport="streamable-http", **run_kwargs)

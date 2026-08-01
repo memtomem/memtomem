@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **Migrated to the `mcp` 2.0 SDK; the requirement is now `mcp[cli]>=2.0.0,<3`**
+  (#1978). 2.0 removed `mcp.server.fastmcp`, which 0.3.14 worked around by
+  capping below it. The server now builds on `mcp.server.mcpserver.MCPServer`,
+  pins `serverInfo.version` through the SDK's new `version=` argument instead
+  of patching a private attribute, and passes host/port/paths/transport
+  security to `run()` — 2.0 moved those off the settings object. The floor is
+  hard: the SDK offers no dual 1.x/2.x support, so **`mcp` 1.x installs must
+  upgrade together with memtomem**. Wire behavior is unchanged; SSE keeps
+  serving the same paths a mounted `--url` produced before, including the
+  advertised message endpoint.
+- **MCP resource handlers no longer receive a context parameter unless their
+  URI is templated.** The 2.0 SDK rejects `Context` injection on static
+  resources, so `memtomem://sources`, `://namespaces`, `://tags` and
+  `://stats` read the lifespan's `AppContext` directly. `memtomem://chunks/{chunk_id}`
+  is templated and is unaffected. No client-visible change.
+
 ## [0.3.14] — 2026-08-01
 
 Emergency patch: a fresh, unconstrained install of 0.3.13 or earlier from

@@ -7,10 +7,10 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from contextvars import ContextVar, Token
+from typing import TYPE_CHECKING, Any
 
-from mcp.server.fastmcp import Context
-from mcp.server.session import ServerSession
+from mcp.server.mcpserver import Context
 
 from memtomem.config import Mem2MemConfig
 from memtomem.constants import validate_namespace
@@ -797,11 +797,16 @@ class AppContext:
             raise first_cancel
 
 
-CtxType = Context[ServerSession, AppContext] | None
+# The 2.0 SDK reordered ``Context``'s type parameters: 1.x was
+# ``Context[ServerSessionT, LifespanContextT]``, 2.0 is
+# ``Context[LifespanContextT, RequestT]`` — ``RequestT`` being the transport
+# request object (a Starlette ``Request`` over HTTP, absent over stdio), which
+# no handler here touches.
+CtxType = Context[AppContext, Any] | None
 
 
 def _get_app(ctx: CtxType) -> AppContext:
-    # FastMCP always injects the context at call time; the None default on
+    # The SDK always injects the context at call time; the None default on
     # tool signatures exists only so the param isn't positional-required.
     assert ctx is not None, "MCP framework must inject ctx at call time"
     return ctx.request_context.lifespan_context
@@ -821,5 +826,53 @@ async def _get_app_initialized(ctx: CtxType) -> AppContext:
     every handler to this helper to make that flip safe.
     """
     app = _get_app(ctx)
+    await app.ensure_initialized()
+    return app
+
+
+# ── Lifespan-scoped AppContext, for handlers the SDK cannot inject ─────
+# The 2.0 SDK refuses to inject ``Context`` into a *static* resource handler
+# (only templated ones, which carry a request), and it removed the 1.x
+# ambient ``get_context()``. Static resources therefore reach the AppContext
+# through this handle, which ``app_lifespan`` owns.
+#
+# A ContextVar, not a module global: over SSE the SDK runs the whole lowlevel
+# server — lifespan included — once per *connection* (``MCPServer.sse_app``'s
+# ``handle_sse``), so two overlapping clients each enter their own lifespan.
+# A single global slot would let the second connection's context overwrite the
+# first's, and the first disconnect would then blank the handle out from under
+# a live second connection. Each connection runs in its own task, so a
+# ContextVar set inside the lifespan is visible to that connection's request
+# handlers (spawned beneath it) and to no one else's. stdio and
+# streamable-HTTP enter the lifespan once per process and are unaffected
+# either way.
+_ACTIVE_APP: ContextVar[AppContext | None] = ContextVar("memtomem_active_app", default=None)
+
+
+def _set_active_app(app: AppContext) -> Token[AppContext | None]:
+    """Publish the lifespan's ``AppContext``; returns the reset token."""
+    return _ACTIVE_APP.set(app)
+
+
+def _reset_active_app(token: Token[AppContext | None]) -> None:
+    """Retract what ``_set_active_app`` published. Lifespan only."""
+    try:
+        _ACTIVE_APP.reset(token)
+    except ValueError:
+        # The token belongs to another Context — only reachable if a future
+        # refactor moves lifespan exit off the task that entered it. Blanking
+        # the value here is still better than leaving a torn-down context
+        # readable.
+        _ACTIVE_APP.set(None)
+
+
+async def _get_active_app_initialized() -> AppContext:
+    """``_get_app_initialized`` for handlers that get no ``ctx``."""
+    app = _ACTIVE_APP.get()
+    if app is None:
+        raise RuntimeError(
+            "No active AppContext: the MCP server lifespan is not running. "
+            "Handlers that receive a ctx must use _get_app_initialized(ctx)."
+        )
     await app.ensure_initialized()
     return app

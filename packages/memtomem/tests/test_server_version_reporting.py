@@ -1,23 +1,22 @@
 """Regression for #383: MCP ``serverInfo.version`` must be the memtomem
 package version, not the transport SDK's.
 
-``FastMCP.__init__`` exposes no ``version`` parameter, so the underlying
-``Server.version`` stays ``None`` unless explicitly patched. In that
-state the lowlevel server's ``create_initialization_options`` returns
-``server_version=importlib.metadata.version("mcp")`` — the MCP SDK
-version — which leaks to every ``initialize`` response as
-``serverInfo.version``. External consumers reading that field
-(monitoring, client telemetry, error reports) saw a misleading value.
+Left unset, the value the lowlevel server puts on the wire is not the
+package's: 1.x substituted ``importlib.metadata.version("mcp")`` — the SDK's
+own version, which is what #383 was filed about — and 2.0 substitutes an
+empty string. Either leaks to every ``initialize`` response as
+``serverInfo.version``, where external consumers (monitoring, client
+telemetry, error reports) read it as ours.
 
 Both tests below lock in the fix from #383:
 
-* A unit test asserts ``mcp._mcp_server.version`` matches
-  ``memtomem.__version__`` at import time — the patch applies
+* A unit test asserts ``mcp.version`` matches ``memtomem.__version__``
+  at import time — the ``version=`` constructor argument applies
   unconditionally during module construction.
 * An end-to-end test drives the ``initialize`` RPC against a real
   subprocess and parses the JSON-RPC response, so a regression that
-  bypasses the patch (e.g. a future ``FastMCP`` release that resets
-  ``.version`` during ``run``) is still caught.
+  bypasses it (e.g. a future SDK release that resets ``.version``
+  during ``run``) is still caught.
 """
 
 from __future__ import annotations
@@ -36,11 +35,11 @@ from memtomem.server import mcp
 
 
 def test_server_version_matches_package_version() -> None:
-    """Unit: ``mcp._mcp_server.version`` is pinned at import time."""
-    assert mcp._mcp_server.version == memtomem.__version__, (
+    """Unit: ``mcp.version`` is pinned at import time."""
+    assert mcp.version == memtomem.__version__, (
         "serverInfo.version must track memtomem.__version__, not the "
-        "MCP SDK version; see memtomem/server/__init__.py post-construction "
-        "assignment"
+        "MCP SDK version; see the ``version=`` argument in "
+        "memtomem/server/__init__.py"
     )
 
 
@@ -112,8 +111,8 @@ def test_initialize_response_reports_memtomem_version(tmp_path: Path) -> None:
         assert server_info.get("version") == memtomem.__version__, (
             f"serverInfo.version must be the memtomem package version "
             f"({memtomem.__version__}), got {server_info.get('version')!r}. "
-            f"If the assertion reports the MCP SDK version (e.g. '1.27.0'), "
-            f"the post-construction patch in server/__init__.py was lost."
+            f"An empty string (or an MCP SDK version) means the ``version=`` "
+            f"argument in server/__init__.py stopped reaching the wire."
         )
     finally:
         if proc.poll() is None:

@@ -6,13 +6,23 @@ import json
 from uuid import UUID
 
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.context import (
+    CtxType,
+    _get_active_app_initialized,
+    _get_app_initialized,
+)
+
+# The 2.0 SDK injects ``Context`` into templated resource handlers only —
+# a static URI carries no request, and declaring the parameter there is a
+# registration-time error. The four static resources below therefore read
+# the lifespan's AppContext through ``_get_active_app_initialized``;
+# ``chunk_resource`` is templated and keeps the injected ctx.
 
 
 @mcp.resource("memtomem://sources")
-async def sources_resource(ctx: CtxType = None) -> str:
+async def sources_resource() -> str:
     """List all indexed source files with chunk counts."""
-    app = await _get_app_initialized(ctx)
+    app = await _get_active_app_initialized()
     rows = await app.storage.get_source_files_with_counts()
     result = []
     for path, count, updated, ns, avg_tok, min_tok, max_tok in rows:
@@ -29,27 +39,27 @@ async def sources_resource(ctx: CtxType = None) -> str:
 
 
 @mcp.resource("memtomem://namespaces")
-async def namespaces_resource(ctx: CtxType = None) -> str:
+async def namespaces_resource() -> str:
     """List all namespaces and their chunk counts."""
-    app = await _get_app_initialized(ctx)
+    app = await _get_active_app_initialized()
     ns_list = await app.storage.list_namespaces()
     result = [{"namespace": ns, "chunks": count} for ns, count in ns_list]
     return json.dumps(result, indent=2)
 
 
 @mcp.resource("memtomem://tags")
-async def tags_resource(ctx: CtxType = None) -> str:
+async def tags_resource() -> str:
     """List all tags and their usage counts."""
-    app = await _get_app_initialized(ctx)
+    app = await _get_active_app_initialized()
     tag_counts = await app.storage.get_tag_counts()
     result = [{"tag": tag, "chunks": count} for tag, count in tag_counts]
     return json.dumps(result, indent=2)
 
 
 @mcp.resource("memtomem://stats")
-async def stats_resource(ctx: CtxType = None) -> str:
+async def stats_resource() -> str:
     """Current index statistics."""
-    app = await _get_app_initialized(ctx)
+    app = await _get_active_app_initialized()
     stats = await app.storage.get_stats()
     return json.dumps(stats, indent=2)
 

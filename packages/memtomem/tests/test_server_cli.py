@@ -8,23 +8,19 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _restore_mcp_settings():
-    from memtomem import server as server_mod
-
-    settings = server_mod.mcp.settings
-    original = {
-        "host": settings.host,
-        "port": settings.port,
-        "sse_path": settings.sse_path,
-        "streamable_http_path": settings.streamable_http_path,
-        "transport_security": settings.transport_security,
-    }
-
-    yield
-
-    for name, value in original.items():
-        setattr(settings, name, value)
+# Network configuration is passed to ``mcp.run()`` as keyword arguments
+# rather than written onto ``mcp.settings`` — the 2.0 SDK dropped
+# host/port/paths/transport-security from the settings object and takes them
+# per-run. That also means these tests mutate no global state, so there is
+# nothing to snapshot and restore between them.
+def _run_kwargs(
+    calls: list[tuple[tuple[object, ...], dict[str, object]]],
+) -> dict[str, object]:
+    """The single ``mcp.run()`` call's kwargs."""
+    assert len(calls) == 1, f"expected exactly one mcp.run() call, got {calls}"
+    args, kwargs = calls[0]
+    assert args == (), f"mcp.run() takes the transport by keyword, got positional {args}"
+    return kwargs
 
 
 def _isolate_runtime(
@@ -133,15 +129,17 @@ def test_http_transport_alias_runs_streamable_http(
     finally:
         _run_callbacks(callbacks)
 
-    assert server_mod.mcp.settings.host == "127.0.0.1"
-    assert server_mod.mcp.settings.port == 8765
-    assert server_mod.mcp.settings.streamable_http_path == "/custom-mcp"
-    assert "mcp.example.test" in server_mod.mcp.settings.transport_security.allowed_hosts
-    assert "https://mcp.example.test" in server_mod.mcp.settings.transport_security.allowed_origins
-    assert calls == [((), {"transport": "streamable-http"})]
+    kwargs = _run_kwargs(calls)
+    assert kwargs["transport"] == "streamable-http"
+    assert kwargs["host"] == "127.0.0.1"
+    assert kwargs["port"] == 8765
+    assert kwargs["streamable_http_path"] == "/custom-mcp"
+    security = kwargs["transport_security"]
+    assert "mcp.example.test" in security.allowed_hosts
+    assert "https://mcp.example.test" in security.allowed_origins
 
 
-def test_sse_transport_passes_mount_path(
+def test_sse_transport_folds_mount_path_into_both_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,10 +167,16 @@ def test_sse_transport_passes_mount_path(
     finally:
         _run_callbacks(callbacks)
 
-    assert server_mod.mcp.settings.host == "0.0.0.0"
-    assert server_mod.mcp.settings.port == 8766
-    assert server_mod.mcp.settings.sse_path == "/events"
-    assert calls == [((), {"transport": "sse", "mount_path": "/memtomem"})]
+    # 1.x mounted the SSE app under ``mount_path`` and served ``sse_path``
+    # beneath it. 2.0 has no ``mount_path``, so the prefix is folded into
+    # both routes: the same GET path, and the same advertised message
+    # endpoint, as before.
+    kwargs = _run_kwargs(calls)
+    assert kwargs["transport"] == "sse"
+    assert kwargs["host"] == "0.0.0.0"
+    assert kwargs["port"] == 8766
+    assert kwargs["sse_path"] == "/memtomem/events"
+    assert kwargs["message_path"] == "/memtomem/messages/"
 
 
 def test_network_url_trailing_slash_is_normalized(
@@ -203,8 +207,9 @@ def test_network_url_trailing_slash_is_normalized(
     finally:
         _run_callbacks(callbacks)
 
-    assert server_mod.mcp.settings.streamable_http_path == "/mcp"
-    assert calls == [((), {"transport": "streamable-http"})]
+    kwargs = _run_kwargs(calls)
+    assert kwargs["transport"] == "streamable-http"
+    assert kwargs["streamable_http_path"] == "/mcp"
 
 
 def test_disable_dns_rebinding_protection_skips_allowed_hosts(
@@ -232,11 +237,12 @@ def test_disable_dns_rebinding_protection_skips_allowed_hosts(
     finally:
         _run_callbacks(callbacks)
 
-    security = server_mod.mcp.settings.transport_security
+    kwargs = _run_kwargs(calls)
+    assert kwargs["transport"] == "streamable-http"
+    security = kwargs["transport_security"]
     assert security.enable_dns_rebinding_protection is False
     assert security.allowed_hosts == []
     assert security.allowed_origins == []
-    assert calls == [((), {"transport": "streamable-http"})]
 
 
 def test_sse_transport_uses_default_endpoint_when_url_omitted(
@@ -256,12 +262,16 @@ def test_sse_transport_uses_default_endpoint_when_url_omitted(
     finally:
         _run_callbacks(callbacks)
 
-    assert server_mod.mcp.settings.host == "127.0.0.1"
-    assert server_mod.mcp.settings.port == 8768
-    assert server_mod.mcp.settings.sse_path == "/sse"
-    assert "127.0.0.1" in server_mod.mcp.settings.transport_security.allowed_hosts
-    assert "http://127.0.0.1:8768" in server_mod.mcp.settings.transport_security.allowed_origins
-    assert calls == [((), {"transport": "sse", "mount_path": None})]
+    kwargs = _run_kwargs(calls)
+    assert kwargs["transport"] == "sse"
+    assert kwargs["host"] == "127.0.0.1"
+    assert kwargs["port"] == 8768
+    # No mount prefix in the default URL: the SDK defaults, verbatim.
+    assert kwargs["sse_path"] == "/sse"
+    assert kwargs["message_path"] == "/messages/"
+    security = kwargs["transport_security"]
+    assert "127.0.0.1" in security.allowed_hosts
+    assert "http://127.0.0.1:8768" in security.allowed_origins
 
 
 def test_http_transport_uses_default_endpoint_when_url_omitted(
@@ -281,12 +291,14 @@ def test_http_transport_uses_default_endpoint_when_url_omitted(
     finally:
         _run_callbacks(callbacks)
 
-    assert server_mod.mcp.settings.host == "127.0.0.1"
-    assert server_mod.mcp.settings.port == 8769
-    assert server_mod.mcp.settings.streamable_http_path == "/mcp"
-    assert "127.0.0.1" in server_mod.mcp.settings.transport_security.allowed_hosts
-    assert "http://127.0.0.1:8769" in server_mod.mcp.settings.transport_security.allowed_origins
-    assert calls == [((), {"transport": "streamable-http"})]
+    kwargs = _run_kwargs(calls)
+    assert kwargs["transport"] == "streamable-http"
+    assert kwargs["host"] == "127.0.0.1"
+    assert kwargs["port"] == 8769
+    assert kwargs["streamable_http_path"] == "/mcp"
+    security = kwargs["transport_security"]
+    assert "127.0.0.1" in security.allowed_hosts
+    assert "http://127.0.0.1:8769" in security.allowed_origins
 
 
 def test_default_network_url_uses_loopback_for_wildcard_host(
@@ -306,15 +318,16 @@ def test_default_network_url_uses_loopback_for_wildcard_host(
     finally:
         _run_callbacks(callbacks)
 
-    security = server_mod.mcp.settings.transport_security
-    assert server_mod.mcp.settings.host == "0.0.0.0"
-    assert server_mod.mcp.settings.port == 8770
-    assert server_mod.mcp.settings.streamable_http_path == "/mcp"
+    kwargs = _run_kwargs(calls)
+    assert kwargs["transport"] == "streamable-http"
+    assert kwargs["host"] == "0.0.0.0"
+    assert kwargs["port"] == 8770
+    assert kwargs["streamable_http_path"] == "/mcp"
+    security = kwargs["transport_security"]
     assert "0.0.0.0" not in security.allowed_hosts
     assert "0.0.0.0:*" not in security.allowed_hosts
     assert "http://127.0.0.1:8770" in security.allowed_origins
     assert "http://0.0.0.0:8770" not in security.allowed_origins
-    assert calls == [((), {"transport": "streamable-http"})]
 
 
 def test_network_url_requires_endpoint_path() -> None:

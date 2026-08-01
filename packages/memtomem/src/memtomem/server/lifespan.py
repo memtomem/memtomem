@@ -10,10 +10,15 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from memtomem.config import Mem2MemConfig
-from memtomem.server.context import AppContext, _stop_quietly
+from memtomem.server.context import (
+    AppContext,
+    _reset_active_app,
+    _set_active_app,
+    _stop_quietly,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +92,7 @@ def _load_dotenv() -> None:
 
 
 @asynccontextmanager
-async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(_server: MCPServer[AppContext]) -> AsyncIterator[AppContext]:
     """Run the MCP server with lazy component init (Phase 3 of #399).
 
     Startup is deliberately minimal: load env, set up logging, build the
@@ -139,6 +144,12 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
         await _stop_quietly(webhook_mgr, "webhook_manager")
         raise
 
+    # Static resource handlers get no ``ctx`` from the 2.0 SDK; publish this
+    # one for them (see ``context._get_active_app_initialized``). Scoped to
+    # this lifespan's task, so overlapping SSE connections — which each enter
+    # their own lifespan — don't share the handle. Published before the
+    # ``try`` so the token always exists by the time ``finally`` retracts it.
+    active_app_token = _set_active_app(ctx)
     try:
         if config.warmup.enabled:
             from memtomem.server.warmup import spawn_warmup
@@ -146,6 +157,7 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
             ctx._warmup_task = spawn_warmup(ctx)
         yield ctx
     finally:
+        _reset_active_app(active_app_token)
         # Accumulate-and-defer (#1935): a cancellation during the webhook
         # stop must not skip ``ctx.close()`` — the context owns the
         # instance-registry settlement, which has to run. The first caught
