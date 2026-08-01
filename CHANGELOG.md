@@ -20,6 +20,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `mm init` reranker step printed the wrong model cache path
   (`~/.cache/fastembed/`); it now names the resolved default,
   `~/.memtomem/cache/fastembed/`.
+- deps: the `mcp[cli]` requirement is capped at `<2`, so a fresh install from
+  the index no longer resolves `mcp` 2.x. 2.0 removed `mcp.server.fastmcp`,
+  which the server imports at module scope — every install of 0.3.13 and
+  earlier made after 2.0 shipped failed at import, including the documented
+  `uvx --from "memtomem[all]==0.3.13"` flow. `uv.lock` pinned 1.x, so CI and
+  checkout-based development never resolved 2.0 and the break was visible only
+  on the install-from-index path. The cap is a stopgap; #1978 tracks the
+  migration that lifts it. (#1979)
 
 ## [0.3.13] — 2026-07-24
 
