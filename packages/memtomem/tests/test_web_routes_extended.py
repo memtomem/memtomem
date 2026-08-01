@@ -850,6 +850,46 @@ class TestSettingsSync:
         assert "echo good" in commands, data
         assert "echo bad" not in commands, data
 
+    @pytest.mark.parametrize(
+        "bad_matcher", [None, 7, ["Write"], {"tool": "Write"}], ids=["null", "int", "list", "dict"]
+    )
+    async def test_unprunable_owned_target_rule_is_not_reported_out_of_sync(
+        self, app, client: AsyncClient, tmp_path, bad_matcher
+    ):
+        """The panel must not claim work a sync cannot do (#1983 review).
+
+        With every canonical rule malformed and the target holding an
+        ownership-marked rule that is *also* malformed, a sync is a no-op —
+        the merge keeps that rule because memtomem cannot have written it.
+        Counting it as prunable reported ``out_of_sync`` with empty buckets,
+        forever: nothing to click, and re-syncing never cleared it.
+        """
+        bad = self._rule("", "echo bad")
+        bad["matcher"] = bad_matcher
+        owned_bad = self._rule("", "echo owned")
+        owned_bad["matcher"] = bad_matcher
+        owned_bad["hooks"][0]["statusMessage"] = "memtomem · PostToolUse"
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [bad]}}), encoding="utf-8")
+        target = Path.home() / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [owned_bad]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "no_hooks", resp.json()
+
+        # An owned rule the sync *would* prune still reports out_of_sync.
+        owned_ok = self._rule("Write", "echo prunable")
+        owned_ok["hooks"][0]["statusMessage"] = "memtomem · PostToolUse"
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [owned_bad, owned_ok]}}), encoding="utf-8"
+        )
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        assert resp.json()["status"] == "out_of_sync", resp.json()
+
     async def test_dedup_when_target_has_multiple_same_matcher_rules(
         self, app, client: AsyncClient, tmp_path
     ):

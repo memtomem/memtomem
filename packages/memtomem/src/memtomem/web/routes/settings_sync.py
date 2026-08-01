@@ -299,11 +299,17 @@ def _compare_hooks(
         # Canonical emits no hooks. A sync still prunes any memtomem-owned
         # target rule (ADR-0019), so surface that as out_of_sync; only when the
         # target has none of memtomem's rules is there genuinely nothing to do.
+        #
+        # "Would prune" is the test, not "is owned": the merge keeps an owned
+        # rule whose matcher is malformed, since memtomem cannot have written
+        # it (#1983). Counting one here reported an out_of_sync no sync could
+        # ever clear — an empty-bucket panel the user cannot act on.
         owned_in_target = any(
-            _rule_is_memtomem_owned(rule)
+            _rule_is_memtomem_owned(rule) and isinstance(rule.get("matcher", ""), str)
             for rules in target_hooks.values()
             if isinstance(rules, list)
             for rule in rules
+            if isinstance(rule, dict)
         )
         result["status"] = "out_of_sync" if owned_in_target else "no_hooks"
         return result
