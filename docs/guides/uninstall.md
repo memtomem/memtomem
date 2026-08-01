@@ -15,11 +15,14 @@ mm uninstall                  # interactive, removes everything
 mm uninstall -y               # skip the confirmation prompt
 mm uninstall --keep-config    # preserve config.json + config.d/* + backups
 mm uninstall --keep-data      # preserve the SQLite DB + ~/.memtomem/memories/ (uploads/ are still removed)
-mm uninstall --force          # bypass the running-server safety check
+mm uninstall --force          # bypass stale-pid/db-lock heuristics only
 ```
 
-The command refuses to run while the MCP server is still alive (open WAL
-handles risk corruption); stop the server first or pass `--force`.
+The command refuses to run while an MCP server or Web UI still has positive
+liveness evidence (open WAL handles risk corruption). Stop every memtomem
+process first. `--force` can bypass only stale PID and DB-lock heuristics; it
+does **not** override a live instance-registry entry, an open handle on Windows,
+or a held lifecycle barrier.
 
 After `mm uninstall` finishes, follow the binary-removal command it prints
 (varies by install context — `uv tool uninstall memtomem`, `pip
@@ -46,7 +49,7 @@ config file, then restart the editor.
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) |
 | Antigravity CLI (`agy`) | `~/.gemini/antigravity-cli/mcp_config.json` |
 | Antigravity IDE | MCP Servers panel → remove the memtomem entry |
-| Gemini CLI (deprecated 2026-06-18) | `~/.gemini/settings.json` |
+| Gemini CLI (consumer free/Pro/Ultra service ended 2026-06-18; enterprise licenses and paid API keys remain supported) | `~/.gemini/settings.json` |
 | Codex CLI | `~/.codex/config.toml` (remove the `[mcp_servers.memtomem]` section) |
 | Kimi | `~/.kimi/mcp.json` (or `$KIMI_SHARE_DIR/mcp.json` if that variable is set) |
 
@@ -68,20 +71,46 @@ uv remove memtomem            # or: pip uninstall memtomem
 pip uninstall memtomem
 ```
 
-## 3. Delete the data directory
+## 3. Move the data directory aside
 
 All databases, config, session state, and uploaded files live under
 `~/.memtomem/` by default. The state directory location is fixed; only the
 SQLite database file can be relocated, via `storage.sqlite_path` in
 `config.json` or the `MEMTOMEM_STORAGE__SQLITE_PATH` environment variable
 (`mm uninstall` cleans up a custom DB path and its `-wal`/`-shm`/`-journal`
-siblings too):
+siblings too). If the CLI is unavailable, stop every memtomem process and move
+the state aside rather than deleting it.
+
+Find the database path **before** you move anything — `config.json` is inside
+the directory you are about to relocate. It can come from three places, highest
+precedence first:
+
+1. the `MEMTOMEM_STORAGE__SQLITE_PATH` environment variable,
+2. `storage.sqlite_path` in `~/.memtomem/config.json`,
+3. `storage.sqlite_path` in any `~/.memtomem/config.d/*.json` fragment.
+
+If none of them is set, the database is inside `~/.memtomem/` and the directory
+move below already covers it. Otherwise expand any leading `~` yourself and
+pass the absolute path as `db=` — leaving a `-wal` behind next to a future
+database is what turns a stale sidecar into a corrupt open.
+
+Run it as one block so a failed `mkdir` stops the moves instead of letting them
+land somewhere unintended, and so `$backup` is always set:
 
 ```bash
-rm -rf ~/.memtomem
+set -eu
+db=            # absolute path from the lookup above; leave empty if unset
+backup=$(mktemp -d "${HOME}/memtomem-uninstall-backup-XXXXXX")
+mv ~/.memtomem "$backup"/
+if [ -n "$db" ]; then
+  for f in "$db" "$db"-wal "$db"-shm "$db"-journal; do
+    if [ -e "$f" ]; then mv "$f" "$backup"/; fi
+  done
+fi
+echo "state moved to $backup"
 ```
 
-This removes:
+This moves aside:
 
 | Path | Contents |
 |------|----------|
@@ -93,11 +122,12 @@ This removes:
 | `.current_session` | Active session marker |
 | `.server.pid` | Legacy MCP server advisory lock (pre-#412 installs only) |
 
-The running server's pid/flock file lives **outside** `~/.memtomem/`
-under `$XDG_RUNTIME_DIR/memtomem/server.pid` (Linux w/ systemd) or
-`$TMPDIR/memtomem-$UID/server.pid` (macOS, BSD). It is cleaned by
-`mm uninstall` automatically; a manual cleanup is rarely needed but
-equivalent to `rm -rf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/memtomem"*`.
+The running server's pid/flock file lives **outside** `~/.memtomem/` under
+`$XDG_RUNTIME_DIR/memtomem/server.pid` (Linux w/ systemd) or
+`$TMPDIR/memtomem-$UID/server.pid` (macOS, BSD). `mm uninstall` inventories its
+owned sentinel files; retained registry and lifecycle-lock sidecars are
+volatile and self-clean. Do not use a wildcard runtime-directory deletion:
+it can erase active liveness evidence or another user's state.
 
 ## 4. Clean up project-scoped files (optional)
 
@@ -126,17 +156,23 @@ provider or dimension, the server startup will refuse to open a DB whose
 stored embedding metadata doesn't match — `mm init` now detects this and
 offers to reset the vector index in place.
 
-To skip the prompt and start from a fully blank slate, delete the data
-directory before re-running the wizard:
+For a data-only reset that preserves configuration, let the CLI take a database
+backup and enforce all liveness checks:
 
 ```bash
-rm -rf ~/.memtomem
-mm init
+mm reset --backup --yes
 ```
 
-This wipes chunks, embeddings, sessions, uploads, and persisted config.
-MCP registrations in each editor are separate — see step 1 above to clean
-those up first if you want them regenerated.
+For a complete state reset, run `mm uninstall -y`, keep the installed binary
+instead of following its package-removal suggestion, then re-run `mm init`.
+This removes persisted config as well as chunks, embeddings, sessions, uploads,
+and user memories while preserving the CLI's fail-closed safety gates. (Use
+`mm init --fresh` only against a config you are keeping: it resets
+wizard-untouched canonical settings while preserving credentials, endpoints,
+and user-curated lists — after `mm uninstall` there is no config left to
+reset.) MCP
+registrations in each editor are separate — see step 1 above to clean those up
+first if you want them regenerated.
 
 ---
 

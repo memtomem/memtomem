@@ -226,7 +226,7 @@ in-memory cache doesn't re-pin the dropped values on the next save.
 | `MEMTOMEM_EMBEDDING__ONNX_CPU_MEM_ARENA` | `false` | Cache CPU allocations for reuse; disabled by default to release peak RSS after local ONNX indexing (restart required) |
 | `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` | `4` | Max parallel embedding requests |
 | `MEMTOMEM_EMBEDDING__THREADS` | `4` | ONNX intra-op thread cap for the local `fastembed` provider |
-| `MEMTOMEM_EMBEDDING__PROGRESS_THRESHOLD` | `32` | Show an embedding progress indicator once a batch exceeds this many texts |
+| `MEMTOMEM_EMBEDDING__PROGRESS_THRESHOLD` | `32` | Emit per-file `chunk_progress` updates when one file produces more than this many chunks (`0` = always emit) |
 
 See [Embedding Providers](embeddings.md) for the supported model list and the dimension values you must use with each one.
 
@@ -398,7 +398,7 @@ candidate) refuse with a configuration error naming
 | `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments. Register per-project with `mm mem init` (run from the project root; a running server/web UI picks the new tier up after restart). Deliberately outside `mm config set`/`unset` — to deregister, edit `indexing.project_memory_dirs` in `~/.memtomem/config.json` directly |
 | `MEMTOMEM_INDEXING__AUTO_SUMMARIZE` | `false` | Generate a per-source LLM summary chunk at index time (requires LLM enabled) |
 | `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
-| `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Skip the per-source summary when the source body exceeds this many characters |
+| `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Clamp the leading source body to this many characters before generating the per-source summary |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_TOKENS` | `256` | Output token cap for each per-source summary |
 
 ### Exclude patterns

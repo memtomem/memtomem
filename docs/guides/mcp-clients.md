@@ -189,11 +189,12 @@ Restart Claude Desktop after configuration.
 
 ## 5. Gemini CLI
 
-> **Deprecated upstream.** Google is transitioning Gemini CLI to the
-> Antigravity CLI (see [§9](#9-antigravity)). Gemini CLI stopped serving
-> free/Pro/Ultra individual tiers on **2026-06-18** (enterprise Gemini Code
-> Assist Standard/Enterprise keep it). New setups should prefer the
-> **Antigravity CLI (`agy`)** instructions in §9.
+> **Consumer transition upstream.** Google is transitioning individual users
+> from Gemini CLI to Antigravity CLI (see [§9](#9-antigravity)). Gemini CLI
+> stopped serving free/Pro/Ultra individual tiers on **2026-06-18**. Gemini
+> Code Assist Standard/Enterprise licenses and paid Gemini or Gemini Enterprise
+> Agent Platform API keys remain supported. New consumer setups should prefer
+> the **Antigravity CLI (`agy`)** instructions in §9.
 
 Create or edit the `~/.gemini/settings.json` file:
 
@@ -272,13 +273,14 @@ plugin from Option A: with both present, only the manual entry's server runs
 under a different name instead would run both servers — see the
 [Codex integration guide](integrations/codex.md) for details.
 
-> Codex MCP tools default to **serialized** calls. memtomem is safe to
-> run in parallel — opt in by adding `supports_parallel_tool_calls = true`
-> alongside `command`/`args`. Other server-level knobs documented by
-> Codex (e.g. `enabled`, `enabled_tools`, `disabled_tools`,
-> `startup_timeout_sec`, `tool_timeout_sec`) all work; see the official
-> [Codex config reference](https://developers.openai.com/codex/config-reference)
-> for the full schema.
+> memtomem is safe to call in parallel. codex-cli 0.146.0 accepts and
+> boolean-type-checks `supports_parallel_tool_calls = true` alongside
+> `command`/`args`, but the current official Codex config reference does not
+> list that key or specify the default scheduling behavior. Treat it as a
+> version-specific measured compatibility toggle and re-check it after Codex
+> upgrades. Documented server-level knobs include `enabled`, `enabled_tools`,
+> `disabled_tools`, `startup_timeout_sec`, and `tool_timeout_sec`; see the
+> official [Codex config reference](https://developers.openai.com/codex/config-reference).
 
 <a id="verify-connection-2"></a>
 ### Verify Codex CLI

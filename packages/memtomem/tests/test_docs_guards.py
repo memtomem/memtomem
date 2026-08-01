@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import subprocess
 import tomllib
 import types
 import typing
@@ -49,6 +50,10 @@ _PYPI_README = _REPO_ROOT / "packages" / "memtomem" / "README.md"
 _PLUGIN_README = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "README.md"
 _CODEX_PLUGIN_README = _REPO_ROOT / "plugins" / "memtomem" / "README.md"
 _NOTEBOOKS_README = _REPO_ROOT / "examples" / "notebooks" / "README.md"
+_CONFIGURATION_GUIDE = _GUIDES / "configuration.md"
+_LLM_PROVIDERS = _GUIDES / "llm-providers.md"
+_CONTEXT_GATEWAY = _GUIDES / "context-gateway.md"
+_UNINSTALL_GUIDE = _GUIDES / "uninstall.md"
 _PLUGIN_CONTRACT = _REPO_ROOT / "packages" / "memtomem-plugin-assets" / "contract.toml"
 _VIBE_GUIDE = _GUIDES / "vibe-coding-getting-started-ko.md"
 _SRC = _REPO_ROOT / "packages" / "memtomem" / "src" / "memtomem"
@@ -74,9 +79,106 @@ def _public_markdown() -> list[Path]:
     return sorted([*roots, *_GUIDES.rglob("*.md")])
 
 
+# Tracked Markdown that is *not* documentation a reader ever follows:
+# retrieval-eval corpora, vendored third-party docs, and the LLM prompt
+# templates shipped under src/. Their links are fixture data, not promises.
+# Exact paths, not globs: `:!*/prompts/*` would also silence a future
+# reader-facing docs/**/prompts/ directory, and the exclusion is meant to
+# cover exactly the shipped source templates.
+_NON_DOC_MARKDOWN = (
+    ":!packages/memtomem/tests/fixtures",
+    ":!packages/memtomem/src/memtomem/web/static/vendor",
+    ":!packages/memtomem/tests/web/vendor",
+    ":!packages/memtomem/src/memtomem/summarization/prompts",
+)
+
+
+def _tracked_markdown() -> list[Path]:
+    """Tracked Markdown documentation — guides, ADRs, plugin and package docs.
+
+    Broader than :func:`_public_markdown` (which is the *contractual* surface)
+    so a link rotting in an ADR or a plugin SKILL.md is caught too, but the
+    non-documentation Markdown in ``_NON_DOC_MARKDOWN`` is excluded.
+
+    ``core.quotePath=false`` plus NUL separation keeps non-ASCII filenames
+    usable: the default output would octal-escape and quote them, and the
+    resulting path would then fail ``_read``'s existence assert with a
+    misleading "Doc file missing" message.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.quotePath=false",
+                "ls-files",
+                "-z",
+                "--",
+                "*.md",
+                *_NON_DOC_MARKDOWN,
+            ],
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:  # pragma: no cover - git is present in CI
+        pytest.skip("git is unavailable; cannot enumerate tracked Markdown")
+    except subprocess.CalledProcessError:  # pragma: no cover - CI is a checkout
+        # git exists but there is no repository metadata (source archive,
+        # exported tree). Fall back to the contractual surface, which is
+        # enumerated from the filesystem and needs no git.
+        return _public_markdown()
+    return sorted(_REPO_ROOT / path for path in result.stdout.split("\0") if path)
+
+
 def _read(path: Path) -> str:
     assert path.exists(), f"Doc file missing: {path}"
     return path.read_text(encoding="utf-8")
+
+
+def _unwrapped(text: str) -> str:
+    """Collapse all whitespace runs so prose pins survive re-wrapping."""
+    return re.sub(r"\s+", " ", text)
+
+
+def _plain(cell: str) -> str:
+    """Strip Markdown emphasis/code markers so a cell can be compared exactly.
+
+    ``**Never**`` and ``Never`` are the same claim to a reader, but an
+    equality pin has to see one string. Comparing the stripped cell for
+    *equality* is what stops a hedged rewrite (``Never for skills; Yes for
+    agents``) from satisfying a guard that promises an unconditional value.
+
+    Underscores are left alone on purpose: in these tables they carry
+    identifiers such as ``chunk_progress`` far more often than emphasis.
+    """
+    return re.sub(r"[*`]", "", cell).strip()
+
+
+def _table_row(text: str, key: str) -> list[str]:
+    """Return the cells of the one Markdown table row keyed by *key*.
+
+    Pins that need a *value* (a fan-out column, a default) must read the
+    table, not the prose around it: prose can stay correct while the row
+    it describes regresses.
+
+    The key is matched against the first cell stripped of Markdown markup,
+    for equality, and exactly one row must match. Substring-and-first-hit
+    selection would let a ``…_LEGACY`` row shadow the real one — the guard
+    would then assert the right value against the wrong row.
+    """
+    matches = [
+        cells
+        for line in text.splitlines()
+        if line.startswith("|")
+        for cells in [[cell.strip() for cell in line.strip().strip("|").split("|")]]
+        if cells and _plain(cells[0]) == key
+    ]
+    assert matches, f"No table row keyed {key!r}"
+    assert len(matches) == 1, f"{len(matches)} table rows keyed {key!r}; expected exactly one"
+    return matches[0]
 
 
 def _plugin_contract() -> dict:
@@ -130,6 +232,89 @@ def canonical_footnote(reference: str) -> str:
     pytest.fail(
         f"reference.md lost its tool-mode footnote line (no line starts with {_FOOTNOTE_PREFIX!r})"
     )
+
+
+class TestFreshnessCorrections:
+    """Guard high-impact setup and safety claims against known regressions.
+
+    Prose pins here go through ``_unwrapped`` so a paragraph re-wrap can't
+    fail a claim that is still true; the negative pins stay literal because
+    they name the exact wording that regressed.
+    """
+
+    def test_openai_cloud_example_sets_the_cloud_base_url(self) -> None:
+        guide = _read(_LLM_PROVIDERS)
+        assert "### OpenAI (cloud)" in guide, "llm-providers.md lost its OpenAI heading"
+        assert "### Anthropic (cloud)" in guide, "llm-providers.md lost its Anthropic heading"
+        section = guide.split("### OpenAI (cloud)", 1)[1].split("### Anthropic (cloud)", 1)[0]
+        # The provider default is Ollama's localhost URL (config.py LLMConfig),
+        # so the cloud example is wrong without an explicit base URL. No
+        # ``/v1`` suffix: OpenAILLM posts to ``/v1/chat/completions``.
+        assert "MEMTOMEM_LLM__BASE_URL=https://api.openai.com" in section
+
+    def test_uninstall_force_keeps_positive_liveness_fail_closed(self) -> None:
+        guide = _read(_UNINSTALL_GUIDE)
+        # The inline comment on the ``--force`` example is what a skimming
+        # reader acts on, so pin that line — not just the paragraph below it.
+        # ``--force`` bypasses stale-pid/db-lock heuristics only; see the
+        # option help in cli/uninstall_cmd.py and cli/reset_cmd.py.
+        force_example = next(
+            (line for line in guide.splitlines() if line.startswith("mm uninstall --force")),
+            None,
+        )
+        assert force_example is not None, "uninstall.md lost its `mm uninstall --force` example"
+        assert "stale-pid/db-lock heuristics only" in force_example, force_example
+        assert "bypass the running-server safety check" not in guide
+        assert "does **not** override a live instance-registry entry" in _unwrapped(guide)
+        assert 'rm -rf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/memtomem"*' not in guide
+
+    def test_project_local_is_never_described_as_pushed(self) -> None:
+        guide = _read(_CONTEXT_GATEWAY)
+        # The tier table is the value a reader looks up; the prose only
+        # explains it. Pin the row, or the row can flip while the sentence
+        # underneath stays true-looking.
+        # Equality, not containment: a hedged cell ("Never for skills; Yes
+        # for agents") must not satisfy a pin that promises an absolute.
+        for tier, expected in (
+            ("Project (local) (project_local)", "Never"),
+            ("User (user)", "Yes"),
+            ("Project (shared) (project_shared)", "Yes"),
+        ):
+            pushed = _plain(_table_row(guide, tier)[2])
+            assert pushed == expected, f"{tier} fan-out cell is {pushed!r}, expected {expected!r}"
+        assert "every tier Pushes" not in _unwrapped(guide)
+        # Qualified on purpose: three (kind, runtime, tier) combinations are
+        # NO_FANOUT in context/_runtime_targets.py even for the pushed tiers.
+        assert (
+            "tiers Push to the tools wherever that runtime supports the artifact kind"
+            in _unwrapped(guide)
+        )
+
+    def test_embedding_and_summary_row_semantics_stay_corrected(self) -> None:
+        """The two config rows this guide previously described backwards."""
+        guide = _read(_CONFIGURATION_GUIDE)
+        # indexing/engine.py gates on ``len(texts) > threshold`` per file, with
+        # 0 meaning "always emit" — not "show a progress indicator per batch".
+        progress = _plain(_table_row(guide, "MEMTOMEM_EMBEDDING__PROGRESS_THRESHOLD")[-1])
+        assert progress == (
+            "Emit per-file chunk_progress updates when one file produces more than "
+            "this many chunks (0 = always emit)"
+        ), progress
+        # summarizer.py `_build_body` truncates (``joined[:max_chars]``); it
+        # does not skip the summary for oversized sources.
+        summary = _plain(_table_row(guide, "MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS")[-1])
+        assert summary == (
+            "Clamp the leading source body to this many characters before generating "
+            "the per-source summary"
+        ), summary
+
+    def test_notebook_setup_covers_the_fourth_notebook(self) -> None:
+        readme = _read(_NOTEBOOKS_README)
+        # Pin the install command itself: the dependency names also appear in
+        # surrounding prose, so a bare substring check stays green even after
+        # the command a reader copies is deleted.
+        assert "uv pip install langchain langgraph nest-asyncio" in _unwrapped(readme)
+        assert "MEMTOMEM_FASTEMBED_CACHE" in readme
 
 
 class TestIntegrationsMmStatus:
@@ -654,6 +839,7 @@ def _anchors(md_text: str) -> set[str]:
 
 
 _LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_REFERENCE_LINK_TARGET = re.compile(r"^\s*\[(?!\^)[^\]]+\]:\s*(\S+)")
 _GITHUB_BLOB_PREFIX = "https://github.com/memtomem/memtomem/blob/main/"
 _GITHUB_TREE_PREFIX = "https://github.com/memtomem/memtomem/tree/main/"
 
@@ -666,10 +852,10 @@ def _same_repo_absolute_target(raw: str) -> str | None:
 
 
 class TestInternalDocLinksResolve:
-    """Internal markdown links and #anchors across the guides must resolve."""
+    """Internal links and anchors across every tracked Markdown file resolve."""
 
     def test_links_and_anchors_resolve(self) -> None:
-        docs = _public_markdown()
+        docs = _tracked_markdown()
         anchor_cache: dict[Path, set[str]] = {}
         offenders: list[str] = []
         for doc in docs:
@@ -680,7 +866,11 @@ class TestInternalDocLinksResolve:
                 # Drop inline-code spans so a `[title](target)` shown as a
                 # literal example (reference.md:692) is not read as a link.
                 line = re.sub(r"`[^`]*`", "", line)
-                for raw in _LINK.findall(line):
+                targets = list(_LINK.findall(line))
+                reference_target = _REFERENCE_LINK_TARGET.match(line)
+                if reference_target:
+                    targets.append(reference_target.group(1))
+                for raw in targets:
                     target = raw.strip().strip("<>")
                     same_repo = _same_repo_absolute_target(target)
                     if same_repo is not None:

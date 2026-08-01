@@ -1,9 +1,11 @@
 # memtomem — example notebooks
 
 Runnable Jupyter notebooks that walk through memtomem's Python API. Each is
-self-contained, runs against a throwaway temp directory, and never touches your
-real `~/.memtomem/`. They use local **ONNX** embeddings — there is no embedding
-server to start; the model downloads once on first use.
+self-contained and keeps its database, configuration, and sample memories in a
+throwaway temp directory. They use local **ONNX** embeddings — there is no
+embedding server to start; model snapshots download once and are shared through
+`~/.memtomem/cache/fastembed` by default. Set `MEMTOMEM_FASTEMBED_CACHE` to an
+explicit temporary path as well if you need strict home-directory isolation.
 
 | # | Notebook | What it covers | Time |
 |---|----------|----------------|------|
@@ -15,13 +17,18 @@ server to start; the model downloads once on first use.
 ## Setup
 
 ```bash
-# ONNX is enough for all three; add ',korean' for notebook 02's Korean section.
+# Base setup for notebooks 01-03; add ',korean' for notebook 02's Korean section.
 uv pip install "memtomem[onnx]" jupyter ipykernel
+
+# Notebook 04 additionally uses LangChain, LangGraph, and Jupyter's nested loop.
+uv pip install langchain langgraph nest-asyncio
+
 uv run jupyter lab examples/notebooks/
 ```
 
 Each notebook checks that its embedding backend is importable in the first cell
-and stops early with a clear message if a required extra is missing.
+and stops early with a clear message if a required extra is missing. Notebook 04
+also checks its orchestration dependencies there.
 
 More scenario notebooks (search tuning, LangGraph integration, lifecycle,
 embedding-provider comparison, LLM features) live in the private

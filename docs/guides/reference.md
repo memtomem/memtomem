@@ -149,4 +149,4 @@ The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skill
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All current tools with parameters
+- [Package README](../../packages/memtomem/README.md) — Installation, feature overview, and documentation entry points

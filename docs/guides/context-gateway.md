@@ -154,8 +154,11 @@ Web UI). The display label is on the left; the literal token you pass to
 A few load-bearing details:
 
 - **Project (shared)** means *git-tracked* (you commit it so teammates get it on
-  `git pull`). It does not mean "shared between tools" — every tier Pushes to the
-  tools; only the git-sharing differs.
+  `git pull`). It does not mean "shared between tools" — the `user` and
+  `project_shared` tiers Push to the tools wherever that runtime supports the
+  artifact kind; only the git-sharing differs. (A few combinations have no
+  target at all — Codex has no project-shared command location, and Kimi has
+  no command location for either tier — so those are skipped.)
 - **Project (local)** is a gitignored scratch tier. It is never Pushed out to a
   runtime, by design — it is your private draft.
 - Writing a secret into **Project (shared)** is blocked outright (see

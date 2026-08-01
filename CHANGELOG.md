@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- Worked examples in `mm search --help` and `mm add --help`.
+
+### Changed
+
+- Corrected public guidance for OpenAI LLM endpoints, fail-closed uninstall
+  safety, Context Gateway `project_local` fan-out, Gemini CLI support tiers,
+  and executable-notebook dependencies and cache isolation.
+
+### Fixed
+
+- `mm init` reranker step printed the wrong model cache path
+  (`~/.cache/fastembed/`); it now names the resolved default,
+  `~/.memtomem/cache/fastembed/`.
+
 ## [0.3.13] — 2026-07-24
 
 ### Added

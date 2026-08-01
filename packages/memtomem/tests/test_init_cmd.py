@@ -7871,3 +7871,99 @@ class TestStepSettingsFsGuards:
         assert "Wizard cancelled" in result.output
         assert next_step_called == []
         assert result.exit_code == 0
+
+
+class TestFastembedCacheHint:
+    """The wizard's cache line must track the real resolution precedence.
+
+    ``_fastembed_cache_hint`` restates the precedence from
+    ``embedding/fastembed_cache.py`` instead of calling it (that helper has a
+    mkdir side effect), so pin the two against each other: a hint that names
+    a path the resolver would not use is exactly the drift this catches.
+    """
+
+    def test_default_names_the_resolved_default_and_the_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.delenv("MEMTOMEM_FASTEMBED_CACHE", raising=False)
+        monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
+        hint = init_cmd._fastembed_cache_hint()
+        assert "~/.memtomem/cache/fastembed/" in hint
+        assert "MEMTOMEM_FASTEMBED_CACHE" in hint
+        assert "~/.cache/fastembed" not in hint
+
+    @pytest.mark.parametrize("env", ["MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH"])
+    def test_override_is_reported_verbatim(
+        self, env: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.delenv("MEMTOMEM_FASTEMBED_CACHE", raising=False)
+        monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
+        monkeypatch.setenv(env, str(tmp_path / "cache"))
+        hint = init_cmd._fastembed_cache_hint()
+        assert str(tmp_path / "cache") in hint
+        assert f"${env}" in hint
+
+    @pytest.mark.parametrize(
+        "mm_env,fe_env",
+        [
+            (None, None),
+            ("mm", None),
+            (None, "fe"),
+            ("mm", "fe"),
+        ],
+        ids=["neither", "memtomem-only", "fastembed-only", "both"],
+    )
+    def test_hint_path_matches_the_resolver(
+        self,
+        mm_env: str | None,
+        fe_env: str | None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cross-check the whole env matrix, not just one override.
+
+        The hint restates the resolver's precedence rather than calling it,
+        so a coordinated change on the resolver side is only caught if every
+        combination is compared — a single-combination pin lets the other
+        three drift silently.
+        """
+        from memtomem.cli import init_cmd
+        from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+
+        # resolve_fastembed_cache_dir() mkdirs what it returns, so the
+        # unset-both case must not be allowed to reach the real home.
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+        for name, value in (
+            ("MEMTOMEM_FASTEMBED_CACHE", mm_env),
+            ("FASTEMBED_CACHE_PATH", fe_env),
+        ):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, str(tmp_path / value))
+
+        resolved = resolve_fastembed_cache_dir()
+        hint = init_cmd._fastembed_cache_hint()
+        if mm_env is None and fe_env is None:
+            # The default is spelled with a literal ``~`` in the hint, so
+            # compare against the unexpanded form the resolver starts from.
+            assert resolved == Path("~/.memtomem/cache/fastembed").expanduser()
+            assert "~/.memtomem/cache/fastembed/" in hint
+        else:
+            assert str(resolved) in hint
+
+    def test_memtomem_env_wins_over_fastembed_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path / "mm"))
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path / "fe"))
+        hint = init_cmd._fastembed_cache_hint()
+        assert str(tmp_path / "mm") in hint
+        assert str(tmp_path / "fe") not in hint
