@@ -21,7 +21,11 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp[cli]>=1.28.1",
+    # Capped below 2.0: the server builds on ``mcp.server.fastmcp``, which the
+    # 2.0 SDK removed outright. uv.lock pins 1.x so CI never saw the break, but
+    # a fresh PyPI install resolves to 2.0 and fails at import. Lift the cap
+    # only together with the FastMCP migration (#1978).
+    "mcp[cli]>=1.28.1,<2",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "sqlite-vec>=0.1.6",
