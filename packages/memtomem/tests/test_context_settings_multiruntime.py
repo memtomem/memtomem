@@ -78,13 +78,12 @@ class TestCodexGenerator:
         assert rule["hooks"][0]["command"] == "echo hi"
 
     def test_unsupported_events_dropped_with_warning(self, tmp_path, all_home):
-        """Events Codex lacks (Notification, SessionEnd) are dropped + warned."""
+        """The one event Codex lacks (Notification) is dropped + warned."""
         _canonical(
             tmp_path,
             {
                 "PreToolUse": [_rule("Bash", "ok")],
                 "Notification": [_rule("", "n")],
-                "SessionEnd": [_rule("", "e")],
             },
         )
         results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
@@ -94,9 +93,178 @@ class TestCodexGenerator:
         written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
         assert "PreToolUse" in written["hooks"]
         assert "Notification" not in written["hooks"]
-        assert "SessionEnd" not in written["hooks"]
         assert any("Notification" in w for w in r.warnings)
-        assert any("SessionEnd" in w for w in r.warnings)
+
+    def test_session_end_reaches_codex(self, tmp_path, all_home):
+        """Codex documents SessionEnd, so it must fan out rather than drop.
+
+        Regression pin for #1976: ``SessionEnd`` was grouped with
+        ``Notification`` as unsupported, so every canonical SessionEnd hook
+        was silently withheld from Codex while the warning blamed Codex for
+        not understanding an event it documents.
+        """
+        _canonical(
+            tmp_path,
+            {
+                # Timeout inside Codex's 3s SessionEnd cap, so this case pins
+                # the fan-out alone; the clamp has its own test below.
+                "SessionEnd": [_rule("", "bye", timeout=2)],
+                "Notification": [_rule("", "n")],
+            },
+        )
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        r = results["codex_settings"]
+        assert r.status == "ok"
+
+        written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        handler = written["hooks"]["SessionEnd"][0]["hooks"][0]
+        assert handler["command"] == "bye"
+        assert handler["timeout"] == 2  # untouched — already within the cap
+        # The sibling event must keep being dropped — this pin is about
+        # SessionEnd alone, not about loosening the filter.
+        assert "Notification" not in written["hooks"]
+        # Match the drop message's subject, not a bare substring: the
+        # Notification warning enumerates every supported event, so it now
+        # legitimately contains the word "SessionEnd".
+        assert not any(w.startswith("Hook event 'SessionEnd'") for w in r.warnings), r.warnings
+
+    def test_session_end_timeout_clamped_to_codex_cap(self, tmp_path, all_home):
+        """Codex caps SessionEnd at 3s; other runtimes keep the canonical value.
+
+        Claude lets a per-hook ``timeout`` raise its SessionEnd budget to 60s,
+        so a canonical 30s hook is legal there and out of contract on Codex.
+        Clamp rather than drop — a shorter hook still runs.
+        """
+        _canonical(tmp_path, {"SessionEnd": [_rule("", "bye", timeout=30)]})
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        r = results["codex_settings"]
+        assert r.status == "ok"
+
+        written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        handler = written["hooks"]["SessionEnd"][0]["hooks"][0]
+        assert handler["timeout"] == 3
+        assert handler["command"] == "bye"  # the hook itself survives
+        assert any("clamped" in w for w in r.warnings), r.warnings
+
+        # The canonical record and the Claude fan-out keep 30 — the clamp is
+        # a Codex-local translation, not a rewrite of the user's intent.
+        claude = json.loads((all_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        assert claude["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == 30
+
+    @pytest.mark.parametrize(
+        "matcher",
+        ["", "other", "^other$", ".*", "*", "other|clear"],
+        ids=["empty", "literal", "anchored", "wildcard-regex", "star", "alternation"],
+    )
+    def test_session_end_regex_matchers_survive_for_codex(self, matcher, tmp_path, all_home):
+        """Codex's matcher is a regex string, so regexes must pass through.
+
+        An allow-list of literals would drop every one of these even though
+        each fires on Codex — dropping a working hook under a "could never
+        fire" warning is worse than passing it through.
+        """
+        _canonical(tmp_path, {"SessionEnd": [_rule(matcher, "kept", timeout=2)]})
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        r = results["codex_settings"]
+        assert r.status == "ok"
+
+        written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        commands = [h["command"] for rule in written["hooks"]["SessionEnd"] for h in rule["hooks"]]
+        assert commands == ["kept"], written
+        assert not any("could never fire" in w for w in r.warnings), r.warnings
+
+    @pytest.mark.parametrize(
+        "matcher",
+        ["clear", "resume", "logout", "prompt_input_exit", "bypass_permissions_disabled"],
+    )
+    def test_session_end_claude_only_reason_dropped_for_codex(self, matcher, tmp_path, all_home):
+        """The five Claude-only `reason` literals cannot match Codex's `other`.
+
+        Writing such a rule out would look like a registration while never
+        firing; an explicit warning beats a silent no-op.
+        """
+        _canonical(
+            tmp_path,
+            {
+                "SessionEnd": [
+                    _rule(matcher, "dead", timeout=2),
+                    _rule("", "always", timeout=2),
+                ]
+            },
+        )
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        r = results["codex_settings"]
+        assert r.status == "ok"
+
+        written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        commands = [h["command"] for rule in written["hooks"]["SessionEnd"] for h in rule["hooks"]]
+        assert commands == ["always"]
+        assert any("could never fire" in w for w in r.warnings), r.warnings
+
+        # Claude keeps the reason-filtered rule — it is valid there.
+        claude = json.loads((all_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        assert matcher in [rule["matcher"] for rule in claude["hooks"]["SessionEnd"]]
+
+    @pytest.mark.parametrize(
+        "matcher", [None, 7, ["other"], {"reason": "other"}], ids=["null", "int", "list", "dict"]
+    )
+    @pytest.mark.parametrize("preexisting", [False, True], ids=["fresh", "merge"])
+    def test_session_end_non_string_matcher_dropped(self, matcher, preexisting):
+        """A non-string matcher is malformed for Codex's regex-string field.
+
+        Passing it through wrote it verbatim on a fresh target, and with the
+        event already present it reached ``_merge_hooks_record``'s
+        matcher-keyed dict and raised ``TypeError: unhashable type``.
+
+        Scoped to the Codex generator on purpose: routing a non-string
+        matcher through ``generate_all_settings`` crashes earlier, inside
+        ``_ensure_gemini_handler_names``' ``re.sub``, for *any* event. That is
+        a separate pre-existing defect in the Gemini path, not this one.
+        """
+        rule = _rule("", "dropped", timeout=2)
+        rule["matcher"] = matcher
+        existing = (
+            {"hooks": {"SessionEnd": [_rule("", "user-rule", timeout=1)]}} if preexisting else None
+        )
+
+        merged, warnings = CodexSettingsGenerator().merge(
+            existing, {"hooks": {"SessionEnd": [rule]}}
+        )
+
+        commands = [
+            h["command"]
+            for rule in merged.get("hooks", {}).get("SessionEnd", [])
+            for h in rule["hooks"]
+        ]
+        assert "dropped" not in commands, merged
+        assert any("non-string matcher" in w for w in warnings), warnings
+        if preexisting:
+            assert "user-rule" in commands  # the user's own rule is untouched
+
+    def test_session_end_absent_matcher_is_match_all(self, tmp_path, all_home):
+        """Omitting `matcher` is documented as match-all — never malformed."""
+        rule = _rule("", "always", timeout=2)
+        del rule["matcher"]
+        _canonical(tmp_path, {"SessionEnd": [rule]})
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        r = results["codex_settings"]
+        assert r.status == "ok"
+
+        written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        commands = [h["command"] for rule in written["hooks"]["SessionEnd"] for h in rule["hooks"]]
+        assert commands == ["always"]
+        assert not any("matcher" in w for w in r.warnings), r.warnings
+
+    def test_session_end_event_omitted_when_every_rule_is_dropped(self, tmp_path, all_home):
+        """An event left with no usable rule must not be written as empty."""
+        _canonical(tmp_path, {"SessionEnd": [_rule("clear", "on-clear", timeout=2)]})
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        assert results["codex_settings"].status == "ok"
+
+        written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        # A contribution with nothing left writes ``{}`` — no empty ``hooks``
+        # key — which is the same shape a Notification-only record produces.
+        assert "SessionEnd" not in written.get("hooks", {}), written
 
     def test_additive_merge_preserves_user_codex_rules(self, tmp_path, all_home):
         target = all_home / ".codex" / "hooks.json"
