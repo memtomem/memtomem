@@ -1,12 +1,12 @@
 """Regression for #383: MCP ``serverInfo.version`` must be the memtomem
 package version, not the transport SDK's.
 
-Left unset, the underlying ``Server.version`` stays ``None`` and the
-lowlevel server's ``create_initialization_options`` returns
-``server_version=importlib.metadata.version("mcp")`` — the MCP SDK
-version — which leaks to every ``initialize`` response as
-``serverInfo.version``. External consumers reading that field
-(monitoring, client telemetry, error reports) saw a misleading value.
+Left unset, the value the lowlevel server puts on the wire is not the
+package's: 1.x substituted ``importlib.metadata.version("mcp")`` — the SDK's
+own version, which is what #383 was filed about — and 2.0 substitutes an
+empty string. Either leaks to every ``initialize`` response as
+``serverInfo.version``, where external consumers (monitoring, client
+telemetry, error reports) read it as ours.
 
 Both tests below lock in the fix from #383:
 
@@ -111,8 +111,8 @@ def test_initialize_response_reports_memtomem_version(tmp_path: Path) -> None:
         assert server_info.get("version") == memtomem.__version__, (
             f"serverInfo.version must be the memtomem package version "
             f"({memtomem.__version__}), got {server_info.get('version')!r}. "
-            f"If the assertion reports the MCP SDK version (e.g. '1.27.0'), "
-            f"the post-construction patch in server/__init__.py was lost."
+            f"An empty string (or an MCP SDK version) means the ``version=`` "
+            f"argument in server/__init__.py stopped reaching the wire."
         )
     finally:
         if proc.poll() is None:

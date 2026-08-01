@@ -7,6 +7,7 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import Context
@@ -830,24 +831,44 @@ async def _get_app_initialized(ctx: CtxType) -> AppContext:
 
 
 # ── Lifespan-scoped AppContext, for handlers the SDK cannot inject ─────
-# The 2.0 SDK refuses to inject ``Context`` into a *static* resource
-# handler (only templated ones, which carry a request), and it removed the
-# 1.x ambient ``get_context()``. Static resources therefore reach the
-# AppContext through this module-level handle, which ``app_lifespan`` owns:
-# it is set on entry and cleared on exit, so a read outside the lifespan
-# raises instead of resurrecting a torn-down context.
-_ACTIVE_APP: AppContext | None = None
+# The 2.0 SDK refuses to inject ``Context`` into a *static* resource handler
+# (only templated ones, which carry a request), and it removed the 1.x
+# ambient ``get_context()``. Static resources therefore reach the AppContext
+# through this handle, which ``app_lifespan`` owns.
+#
+# A ContextVar, not a module global: over SSE the SDK runs the whole lowlevel
+# server — lifespan included — once per *connection* (``MCPServer.sse_app``'s
+# ``handle_sse``), so two overlapping clients each enter their own lifespan.
+# A single global slot would let the second connection's context overwrite the
+# first's, and the first disconnect would then blank the handle out from under
+# a live second connection. Each connection runs in its own task, so a
+# ContextVar set inside the lifespan is visible to that connection's request
+# handlers (spawned beneath it) and to no one else's. stdio and
+# streamable-HTTP enter the lifespan once per process and are unaffected
+# either way.
+_ACTIVE_APP: ContextVar[AppContext | None] = ContextVar("memtomem_active_app", default=None)
 
 
-def _set_active_app(app: AppContext | None) -> None:
-    """Publish (or retract) the lifespan's ``AppContext``. Lifespan only."""
-    global _ACTIVE_APP
-    _ACTIVE_APP = app
+def _set_active_app(app: AppContext) -> Token[AppContext | None]:
+    """Publish the lifespan's ``AppContext``; returns the reset token."""
+    return _ACTIVE_APP.set(app)
+
+
+def _reset_active_app(token: Token[AppContext | None]) -> None:
+    """Retract what ``_set_active_app`` published. Lifespan only."""
+    try:
+        _ACTIVE_APP.reset(token)
+    except ValueError:
+        # The token belongs to another Context — only reachable if a future
+        # refactor moves lifespan exit off the task that entered it. Blanking
+        # the value here is still better than leaving a torn-down context
+        # readable.
+        _ACTIVE_APP.set(None)
 
 
 async def _get_active_app_initialized() -> AppContext:
     """``_get_app_initialized`` for handlers that get no ``ctx``."""
-    app = _ACTIVE_APP
+    app = _ACTIVE_APP.get()
     if app is None:
         raise RuntimeError(
             "No active AppContext: the MCP server lifespan is not running. "

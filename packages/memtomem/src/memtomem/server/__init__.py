@@ -72,11 +72,11 @@ _CORE_TOOLS = {
 # ``tests/test_server_instructions.py``.
 #
 # ``version=`` pins ``serverInfo.version`` in the ``initialize`` response to
-# the memtomem package version (#383). Left unset, the lowlevel server falls
-# back to ``importlib.metadata.version("mcp")``, so every handshake reported
-# the MCP SDK version instead of ``mm --version`` and external consumers
-# keying off ``serverInfo.version`` (telemetry, error reports, "which version
-# are we both on") saw misleading data.
+# the memtomem package version (#383). Left unset it is not merely cosmetic:
+# 1.x reported ``importlib.metadata.version("mcp")`` — the SDK's own version —
+# and 2.0 reports an empty string. Either way, external consumers keying off
+# ``serverInfo.version`` (telemetry, error reports, "which version are we both
+# on") get something other than ``mm --version``.
 from memtomem import __version__ as _memtomem_version
 
 mcp = MCPServer(

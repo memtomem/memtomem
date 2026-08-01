@@ -16,6 +16,7 @@ are covered in ``test_server_app_context.py``.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock
 
@@ -299,12 +300,55 @@ async def test_lifespan_publishes_and_retracts_active_app(
 
     import memtomem.server.context as context_mod
 
-    assert context_mod._ACTIVE_APP is None
+    assert context_mod._ACTIVE_APP.get() is None
 
     async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
-        assert context_mod._ACTIVE_APP is ctx
+        assert context_mod._ACTIVE_APP.get() is ctx
 
-    assert context_mod._ACTIVE_APP is None
+    assert context_mod._ACTIVE_APP.get() is None
+
+
+@pytest.mark.asyncio
+async def test_overlapping_lifespans_do_not_share_the_active_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over SSE the SDK runs the whole lowlevel server — lifespan included —
+    once per *connection*, so two clients can hold overlapping lifespans in
+    separate tasks. Each must see its own ``AppContext``, and one
+    disconnecting must not blank the handle for the other: with a plain
+    module global the second enter would clobber the first, and the first
+    exit would leave a live connection reading ``None``."""
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
+
+    import memtomem.server.context as context_mod
+
+    started = asyncio.Event()
+    may_exit = asyncio.Event()
+    seen: dict[str, object] = {}
+
+    async def first_connection() -> None:
+        async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+            seen["first"] = ctx
+            started.set()
+            await may_exit.wait()
+            # Still this connection's own context, after the second
+            # connection has come and gone.
+            seen["first_after"] = context_mod._ACTIVE_APP.get()
+
+    task = asyncio.create_task(first_connection())
+    try:
+        await started.wait()
+        async with lifespan_mod.app_lifespan(MagicMock()) as second:
+            assert second is not seen["first"]
+            assert context_mod._ACTIVE_APP.get() is second
+    finally:
+        may_exit.set()
+        await task
+
+    assert seen["first_after"] is seen["first"]
+    # Both connections gone → nothing left published in this task either.
+    assert context_mod._ACTIVE_APP.get() is None
 
 
 @pytest.mark.asyncio
@@ -312,7 +356,7 @@ async def test_get_active_app_initialized_raises_outside_lifespan() -> None:
     """Fail loudly rather than hand a static resource a ``None`` app."""
     import memtomem.server.context as context_mod
 
-    assert context_mod._ACTIVE_APP is None
+    assert context_mod._ACTIVE_APP.get() is None
     with pytest.raises(RuntimeError, match="lifespan is not running"):
         await context_mod._get_active_app_initialized()
 
@@ -330,11 +374,11 @@ async def test_static_resource_reads_the_active_app(
     app.ensure_initialized = AsyncMock()
     app.storage.list_namespaces = AsyncMock(return_value=[("work", 3)])
 
-    context_mod._set_active_app(app)
+    token = context_mod._set_active_app(app)
     try:
         payload = await resources_mod.namespaces_resource()
     finally:
-        context_mod._set_active_app(None)
+        context_mod._reset_active_app(token)
 
     assert '"namespace": "work"' in payload
     app.ensure_initialized.assert_awaited_once()
