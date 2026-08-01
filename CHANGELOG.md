@@ -7,11 +7,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [0.3.14] — 2026-08-01
 
-Emergency patch: every install of 0.3.13 or earlier made from PyPI after
-`mcp` 2.0.0 shipped fails at import. The dependency declared no upper bound,
-so a fresh resolve picked up an SDK that had removed `mcp.server.fastmcp`.
-Anyone whose install is currently broken should upgrade to this release;
-anyone on a working install is unaffected, and no behavior changes.
+Emergency patch: a fresh, unconstrained install of 0.3.13 or earlier from
+PyPI fails at import once `mcp` 2.0.0 is the newest release. The dependency
+declared no upper bound, so resolution picked up an SDK that had removed
+`mcp.server.fastmcp`. Installs that pinned `mcp` themselves are unaffected,
+as is any environment already resolved against 1.x. Upgrade if your install
+is broken; no behavior changes either way.
 
 ### Added
 
