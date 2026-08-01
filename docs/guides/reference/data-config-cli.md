@@ -147,7 +147,7 @@ mm ingest codex-memory --source ~/.codex/memories/
   are ignored. Discovery is flat (non-recursive).
 - **Delta on re-run**: same content-hash dedup as the Claude ingest.
 
-### MCP `mem_ingest` tool
+### MCP ingest action
 
 All three ingest commands are also available as an MCP action:
 

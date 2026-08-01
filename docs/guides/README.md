@@ -17,6 +17,7 @@ guides are organized by outcome rather than by feature name.
    - [Codex](integrations/codex.md)
    - [Cursor](integrations/cursor.md)
    - [Claude Desktop](integrations/claude-desktop.md)
+   - [OpenCode](integrations/opencode.md)
 3. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool
    developers, individual knowledge bases, and teams.
 

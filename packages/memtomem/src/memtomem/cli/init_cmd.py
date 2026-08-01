@@ -644,6 +644,22 @@ def _step_embedding(state: dict) -> None:
     click.echo()
 
 
+def _fastembed_cache_hint() -> str:
+    """Describe where fastembed model snapshots will land.
+
+    Mirrors the precedence in ``embedding/fastembed_cache.py`` rather than
+    calling ``resolve_fastembed_cache_dir()``: that helper creates the
+    directory, and a wizard line that only prints a path must not have that
+    side effect. Naming the active override matters — a flat
+    ``~/.memtomem/cache/fastembed/`` is simply wrong for anyone who set one.
+    """
+    for env in ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH"):
+        raw = os.environ.get(env)
+        if raw:
+            return f"{raw}, from ${env}"
+    return "~/.memtomem/cache/fastembed/ by default, override with $MEMTOMEM_FASTEMBED_CACHE"
+
+
 def _step_reranker(state: dict) -> None:
     step_header(state, "Reranker (optional)")
     click.echo("  Cross-encoder reranking sharpens search relevance after BM25+dense fusion.")
@@ -675,7 +691,7 @@ def _step_reranker(state: dict) -> None:
     state["rerank_enabled"] = True
     state["rerank_model"] = models[choice]
     click.secho(f"  Reranker '{models[choice]}' selected.", fg="green")
-    click.echo("  Model downloads on first search (~/.cache/fastembed/).")
+    click.echo(f"  Model downloads on first search ({_fastembed_cache_hint()}).")
     click.echo()
 
 

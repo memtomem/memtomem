@@ -40,6 +40,7 @@ export MEMTOMEM_LLM__BASE_URL=http://localhost:11434
 export MEMTOMEM_LLM__ENABLED=true
 export MEMTOMEM_LLM__PROVIDER=openai
 export MEMTOMEM_LLM__MODEL=gpt-4.1-mini    # default when empty
+export MEMTOMEM_LLM__BASE_URL=https://api.openai.com
 export MEMTOMEM_LLM__API_KEY=sk-...
 ```
 
@@ -103,8 +104,9 @@ Add the following to your editor's MCP config file — e.g.,
 (Claude Desktop), `~/.gemini/antigravity-cli/mcp_config.json`
 (Antigravity CLI — its entries also carry `"type": "stdio"`; see
 [mcp-clients.md](mcp-clients.md#9-antigravity)), or
-`~/.gemini/settings.json` (Gemini CLI, deprecated 2026-06-18). For Claude
-Code, use `claude mcp add` instead of editing a file. See
+`~/.gemini/settings.json` (Gemini CLI; consumer free/Pro/Ultra service ended
+2026-06-18, while enterprise licenses and paid API keys remain supported). For
+Claude Code, use `claude mcp add` instead of editing a file. See
 [MCP Client Configuration](mcp-clients.md) for the full list.
 
 ```json
