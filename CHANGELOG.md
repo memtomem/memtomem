@@ -61,7 +61,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `matcher` is now validated once on the canonical record, before any
   per-runtime translation: absent means match-all, a string passes through,
   and anything else is dropped with a warning naming the event and the type
-  (ADR-0018 §5). Healthy rules in the same file are unaffected.
+  (ADR-0018 §5). Healthy rules in the same file are unaffected. The Web hooks
+  panel (`GET /api/settings-sync`) keys rules by matcher the same way and
+  returned a 500 on the same input; it now drops the rule from the comparison
+  instead, on either side, so the view matches what a sync would write.
 
 ## [0.3.14] — 2026-08-01
 

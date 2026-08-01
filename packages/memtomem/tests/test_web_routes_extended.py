@@ -806,6 +806,50 @@ class TestSettingsSync:
         assert len(data["hooks"]["pending"]) == 1
         assert data["hooks"]["pending"][0]["event"] == "PostToolUse"
 
+    @pytest.mark.parametrize(
+        "bad_matcher", [None, 7, ["Write"], {"tool": "Write"}], ids=["null", "int", "list", "dict"]
+    )
+    @pytest.mark.parametrize("side", ["canonical", "target"], ids=["canonical", "target"])
+    async def test_non_string_matcher_does_not_break_the_panel(
+        self, app, client: AsyncClient, tmp_path, bad_matcher, side
+    ):
+        """A malformed ``matcher`` must not 500 the hooks panel (#1983).
+
+        This comparison keys rules by ``(event, matcher)``, so a list or dict
+        one raised ``TypeError: unhashable type`` out of the route — the same
+        user typo that used to crash the fan-out. Both files are hand-edited,
+        so both sides get the drop; the healthy rule beside it still shows.
+        """
+        bad = self._rule("", "echo bad")
+        bad["matcher"] = bad_matcher
+        good = self._rule("Write", "echo good")
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        target = Path.home() / ".claude" / "settings.json"
+        canonical_rules = [bad, good] if side == "canonical" else [good]
+        target_rules = [bad, good] if side == "target" else [good]
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": canonical_rules}}), encoding="utf-8"
+        )
+        target.write_text(json.dumps({"hooks": {"PostToolUse": target_rules}}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] != "error", data
+        rows = [
+            row for bucket in ("synced", "pending", "conflicts") for row in data["hooks"][bucket]
+        ] + data["target_hooks"]["configured"]
+        commands = [
+            h.get("command")
+            for row in rows
+            for h in (row.get("rule") or row.get("existing") or {}).get("hooks", [])
+        ]
+        assert "echo good" in commands, data
+        assert "echo bad" not in commands, data
+
     async def test_dedup_when_target_has_multiple_same_matcher_rules(
         self, app, client: AsyncClient, tmp_path
     ):
