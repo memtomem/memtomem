@@ -12,7 +12,13 @@ PyPI fails at import once `mcp` 2.0.0 is the newest release. The dependency
 declared no upper bound, so resolution picked up an SDK that had removed
 `mcp.server.fastmcp`. Installs that pinned `mcp` themselves are unaffected,
 as is any environment already resolved against 1.x. Upgrade if your install
-is broken; no behavior changes either way.
+is broken; the cap itself changes nothing else.
+
+The release also carries the `SessionEnd` fan-out fix (#1976): canonical
+`SessionEnd` hooks now reach Codex instead of being withheld. That one does
+change observable behavior — hooks that never ran on Codex will start
+running, with clamped timeouts and warnings where the two runtimes' contracts
+disagree. Read its entry under Fixed before upgrading if you author hooks.
 
 ### Added
 
