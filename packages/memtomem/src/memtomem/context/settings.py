@@ -37,6 +37,9 @@ Merge semantics
 * **Identity key**: ``(event, matcher)`` — rules with the same event and
   matcher string are considered the same rule.  On collision the user's
   existing rule wins and a guided warning is emitted.
+* **``matcher`` is a string or absent**: validated on the canonical shape by
+  :func:`_drop_nonstring_matchers` before any per-runtime translation, so a
+  malformed one is dropped with a warning instead of crashing a translator.
 * **Formatting**: ``json.dumps(indent=2, sort_keys=False)`` + trailing
   newline.  Byte-for-byte preservation of the user's original formatting is
   explicitly **not** guaranteed — semantic equality is the contract.
@@ -313,6 +316,51 @@ def _stamp_status_markers(contributions: dict) -> dict:
     return {**contributions, "hooks": out_hooks}
 
 
+def _drop_nonstring_matchers(contributions: dict) -> tuple[dict, list[str]]:
+    """Drop canonical hook rules whose ``matcher`` is present but not a string.
+
+    The canonical record is user-authored JSON, and ``"matcher": ["Bash"]`` is
+    a plausible typo — several neighbouring config fields *are* arrays. Every
+    runtime translator downstream assumes a string, each failing differently:
+    Gemini feeds it to ``re.sub`` (``TypeError: expected string or bytes-like
+    object``), the shared additive merge keys rules by it (``TypeError:
+    unhashable type``), and Kimi ``str()``-coerces it into a matcher that can
+    never fire. Validating **once, on the canonical shape** — before any
+    per-runtime translation — turns all three into the drop-with-warning
+    ADR-0018 §5 promises (issue #1983).
+
+    An **absent** ``matcher`` is valid and means match-all; only a matcher that
+    is present and non-string is malformed. Non-dict rules pass through
+    untouched — every translator already skips them.
+    """
+    src_hooks = contributions.get("hooks")
+    if not isinstance(src_hooks, dict):
+        return contributions, []
+    warnings: list[str] = []
+    out: dict = {}
+    for event, rules in src_hooks.items():
+        if not isinstance(rules, list):
+            out[event] = rules
+            continue
+        kept: list = []
+        for rule in rules:
+            if isinstance(rule, dict) and not isinstance(rule.get("matcher", ""), str):
+                warnings.append(
+                    f"Hook rule under '{event}' has a non-string matcher "
+                    f"({type(rule.get('matcher')).__name__}) and was dropped: "
+                    f"'matcher' must be a string. Omit it to match every "
+                    f"{event}, or quote the value."
+                )
+                continue
+            kept.append(rule)
+        out[event] = kept
+    if not warnings:
+        # Nothing dropped → hand back the caller's object, so a clean canonical
+        # keeps travelling by identity (no copy per generator).
+        return contributions, []
+    return {**contributions, "hooks": out}, warnings
+
+
 def _merge_hooks_record(
     existing: dict | None,
     contributions: dict,
@@ -512,7 +560,9 @@ class ClaudeSettingsGenerator:
         contributions: dict,
     ) -> tuple[dict, list[str]]:
         """Ownership-aware merge of record-format ``hooks`` (ADR-0019)."""
-        return _merge_hooks_record(existing, _stamp_status_markers(contributions))
+        clean, matcher_warnings = _drop_nonstring_matchers(contributions)
+        merged, merge_warnings = _merge_hooks_record(existing, _stamp_status_markers(clean))
+        return merged, matcher_warnings + merge_warnings
 
 
 _register(ClaudeSettingsGenerator())
@@ -662,6 +712,12 @@ def _clamp_codex_session_end(rules: list) -> tuple[list, list[str]]:
     Codex can never produce, or when it is not a string at all: Codex's
     matcher field is a regex *string*, and a non-string reaches the merge as
     an unhashable dict key.
+
+    Through :meth:`CodexSettingsGenerator.merge` the non-string case is
+    already gone — :func:`_drop_nonstring_matchers` rejects it on the
+    canonical shape, for every runtime (#1983). The check stays because this
+    helper is also called directly and its very next line, a ``frozenset``
+    membership test, is itself unhashable-unsafe.
     """
     warnings: list[str] = []
     kept: list = []
@@ -1021,9 +1077,10 @@ class CodexSettingsGenerator:
         existing: dict | None,
         contributions: dict,
     ) -> tuple[dict, list[str]]:
-        filtered, drop_warnings = _filter_codex_events(contributions)
+        clean, matcher_warnings = _drop_nonstring_matchers(contributions)
+        filtered, drop_warnings = _filter_codex_events(clean)
         merged, merge_warnings = _merge_hooks_record(existing, _stamp_status_markers(filtered))
-        return merged, drop_warnings + merge_warnings
+        return merged, matcher_warnings + drop_warnings + merge_warnings
 
 
 _register(CodexSettingsGenerator())
@@ -1056,9 +1113,10 @@ class GeminiSettingsGenerator:
         existing: dict | None,
         contributions: dict,
     ) -> tuple[dict, list[str]]:
-        remapped, drop_warnings = _remap_for_gemini(contributions)
+        clean, matcher_warnings = _drop_nonstring_matchers(contributions)
+        remapped, drop_warnings = _remap_for_gemini(clean)
         merged, merge_warnings = _merge_hooks_record(existing, remapped)
-        return merged, drop_warnings + merge_warnings
+        return merged, matcher_warnings + drop_warnings + merge_warnings
 
 
 _register(GeminiSettingsGenerator())
@@ -1091,9 +1149,10 @@ class KimiSettingsGenerator:
         existing_text = ""
         if existing and isinstance(existing.get(_KIMI_TOML_TEXT_KEY), str):
             existing_text = existing[_KIMI_TOML_TEXT_KEY]
-        hooks_body, warnings = _render_kimi_hooks(contributions)
+        clean, matcher_warnings = _drop_nonstring_matchers(contributions)
+        hooks_body, warnings = _render_kimi_hooks(clean)
         merged_text = _replace_kimi_managed_block(existing_text, hooks_body)
-        return {_KIMI_TOML_TEXT_KEY: merged_text}, warnings
+        return {_KIMI_TOML_TEXT_KEY: merged_text}, matcher_warnings + warnings
 
 
 _register(KimiSettingsGenerator())

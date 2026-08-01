@@ -48,6 +48,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `://stats` read the lifespan's `AppContext` directly. `memtomem://chunks/{chunk_id}`
   is templated and is unaffected. No client-visible change.
 
+### Fixed
+
+- **A malformed hook `matcher` no longer takes down settings fan-out**
+  (#1983). The canonical `.memtomem/settings.json` is user-authored, and a
+  `"matcher": ["Bash"]` typo raised an uncaught `TypeError` — out of the
+  Gemini generator's `re.sub` on a fresh target, or out of the matcher-keyed
+  additive merge (`unhashable type`) once the target already had a rule for
+  that event — so one bad rule aborted the sync for *every* runtime, not just
+  the one that could not translate it. Kimi failed a third way, rendering
+  `matcher = "['Bash']"` into `config.toml` where it could never fire.
+  `matcher` is now validated once on the canonical record, before any
+  per-runtime translation: absent means match-all, a string passes through,
+  and anything else is dropped with a warning naming the event and the type
+  (ADR-0018 §5). Healthy rules in the same file are unaffected.
+
 ## [0.3.14] — 2026-08-01
 
 Emergency patch: a fresh, unconstrained install of 0.3.13 or earlier from
