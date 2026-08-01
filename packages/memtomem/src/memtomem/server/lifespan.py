@@ -10,10 +10,10 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from memtomem.config import Mem2MemConfig
-from memtomem.server.context import AppContext, _stop_quietly
+from memtomem.server.context import AppContext, _set_active_app, _stop_quietly
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def _load_dotenv() -> None:
 
 
 @asynccontextmanager
-async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(_server: MCPServer[AppContext]) -> AsyncIterator[AppContext]:
     """Run the MCP server with lazy component init (Phase 3 of #399).
 
     Startup is deliberately minimal: load env, set up logging, build the
@@ -144,8 +144,12 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
             from memtomem.server.warmup import spawn_warmup
 
             ctx._warmup_task = spawn_warmup(ctx)
+        # Static resource handlers get no ``ctx`` from the 2.0 SDK; publish
+        # this one for them (see ``context._get_active_app_initialized``).
+        _set_active_app(ctx)
         yield ctx
     finally:
+        _set_active_app(None)
         # Accumulate-and-defer (#1935): a cancellation during the webhook
         # stop must not skip ``ctx.close()`` — the context owns the
         # instance-registry settlement, which has to run. The first caught

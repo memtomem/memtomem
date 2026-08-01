@@ -280,3 +280,61 @@ def test_load_dotenv_does_not_override_existing_env(
     finally:
         os.environ.clear()
         os.environ.update(snapshot)
+
+
+# ── static-resource AppContext handle ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lifespan_publishes_and_retracts_active_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2.0 SDK refuses to inject ``Context`` into a static resource
+    handler, so those handlers read the lifespan's ``AppContext`` through
+    ``context._ACTIVE_APP``. The lifespan owns that handle: published on
+    entry, retracted on exit — otherwise a static resource read after
+    shutdown would touch a closed context instead of failing."""
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
+
+    import memtomem.server.context as context_mod
+
+    assert context_mod._ACTIVE_APP is None
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        assert context_mod._ACTIVE_APP is ctx
+
+    assert context_mod._ACTIVE_APP is None
+
+
+@pytest.mark.asyncio
+async def test_get_active_app_initialized_raises_outside_lifespan() -> None:
+    """Fail loudly rather than hand a static resource a ``None`` app."""
+    import memtomem.server.context as context_mod
+
+    assert context_mod._ACTIVE_APP is None
+    with pytest.raises(RuntimeError, match="lifespan is not running"):
+        await context_mod._get_active_app_initialized()
+
+
+@pytest.mark.asyncio
+async def test_static_resource_reads_the_active_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End of that path: a static resource handler resolves the published
+    context and returns its data with no ``ctx`` parameter in sight."""
+    import memtomem.server.context as context_mod
+    import memtomem.server.resources as resources_mod
+
+    app = MagicMock()
+    app.ensure_initialized = AsyncMock()
+    app.storage.list_namespaces = AsyncMock(return_value=[("work", 3)])
+
+    context_mod._set_active_app(app)
+    try:
+        payload = await resources_mod.namespaces_resource()
+    finally:
+        context_mod._set_active_app(None)
+
+    assert '"namespace": "work"' in payload
+    app.ensure_initialized.assert_awaited_once()

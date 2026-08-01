@@ -1,9 +1,8 @@
 """Regression for #383: MCP ``serverInfo.version`` must be the memtomem
 package version, not the transport SDK's.
 
-``FastMCP.__init__`` exposes no ``version`` parameter, so the underlying
-``Server.version`` stays ``None`` unless explicitly patched. In that
-state the lowlevel server's ``create_initialization_options`` returns
+Left unset, the underlying ``Server.version`` stays ``None`` and the
+lowlevel server's ``create_initialization_options`` returns
 ``server_version=importlib.metadata.version("mcp")`` — the MCP SDK
 version — which leaks to every ``initialize`` response as
 ``serverInfo.version``. External consumers reading that field
@@ -11,13 +10,13 @@ version — which leaks to every ``initialize`` response as
 
 Both tests below lock in the fix from #383:
 
-* A unit test asserts ``mcp._mcp_server.version`` matches
-  ``memtomem.__version__`` at import time — the patch applies
+* A unit test asserts ``mcp.version`` matches ``memtomem.__version__``
+  at import time — the ``version=`` constructor argument applies
   unconditionally during module construction.
 * An end-to-end test drives the ``initialize`` RPC against a real
   subprocess and parses the JSON-RPC response, so a regression that
-  bypasses the patch (e.g. a future ``FastMCP`` release that resets
-  ``.version`` during ``run``) is still caught.
+  bypasses it (e.g. a future SDK release that resets ``.version``
+  during ``run``) is still caught.
 """
 
 from __future__ import annotations
@@ -36,11 +35,11 @@ from memtomem.server import mcp
 
 
 def test_server_version_matches_package_version() -> None:
-    """Unit: ``mcp._mcp_server.version`` is pinned at import time."""
-    assert mcp._mcp_server.version == memtomem.__version__, (
+    """Unit: ``mcp.version`` is pinned at import time."""
+    assert mcp.version == memtomem.__version__, (
         "serverInfo.version must track memtomem.__version__, not the "
-        "MCP SDK version; see memtomem/server/__init__.py post-construction "
-        "assignment"
+        "MCP SDK version; see the ``version=`` argument in "
+        "memtomem/server/__init__.py"
     )
 
 

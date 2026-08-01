@@ -7,10 +7,9 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from mcp.server.fastmcp import Context
-from mcp.server.session import ServerSession
+from mcp.server.mcpserver import Context
 
 from memtomem.config import Mem2MemConfig
 from memtomem.constants import validate_namespace
@@ -797,11 +796,16 @@ class AppContext:
             raise first_cancel
 
 
-CtxType = Context[ServerSession, AppContext] | None
+# The 2.0 SDK reordered ``Context``'s type parameters: 1.x was
+# ``Context[ServerSessionT, LifespanContextT]``, 2.0 is
+# ``Context[LifespanContextT, RequestT]`` — ``RequestT`` being the transport
+# request object (a Starlette ``Request`` over HTTP, absent over stdio), which
+# no handler here touches.
+CtxType = Context[AppContext, Any] | None
 
 
 def _get_app(ctx: CtxType) -> AppContext:
-    # FastMCP always injects the context at call time; the None default on
+    # The SDK always injects the context at call time; the None default on
     # tool signatures exists only so the param isn't positional-required.
     assert ctx is not None, "MCP framework must inject ctx at call time"
     return ctx.request_context.lifespan_context
@@ -821,5 +825,33 @@ async def _get_app_initialized(ctx: CtxType) -> AppContext:
     every handler to this helper to make that flip safe.
     """
     app = _get_app(ctx)
+    await app.ensure_initialized()
+    return app
+
+
+# ── Lifespan-scoped AppContext, for handlers the SDK cannot inject ─────
+# The 2.0 SDK refuses to inject ``Context`` into a *static* resource
+# handler (only templated ones, which carry a request), and it removed the
+# 1.x ambient ``get_context()``. Static resources therefore reach the
+# AppContext through this module-level handle, which ``app_lifespan`` owns:
+# it is set on entry and cleared on exit, so a read outside the lifespan
+# raises instead of resurrecting a torn-down context.
+_ACTIVE_APP: AppContext | None = None
+
+
+def _set_active_app(app: AppContext | None) -> None:
+    """Publish (or retract) the lifespan's ``AppContext``. Lifespan only."""
+    global _ACTIVE_APP
+    _ACTIVE_APP = app
+
+
+async def _get_active_app_initialized() -> AppContext:
+    """``_get_app_initialized`` for handlers that get no ``ctx``."""
+    app = _ACTIVE_APP
+    if app is None:
+        raise RuntimeError(
+            "No active AppContext: the MCP server lifespan is not running. "
+            "Handlers that receive a ctx must use _get_app_initialized(ctx)."
+        )
     await app.ensure_initialized()
     return app
