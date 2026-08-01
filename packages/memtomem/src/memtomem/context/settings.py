@@ -522,13 +522,26 @@ def _merge_hooks_record(
     # Prune memtomem-owned rules from events the canonical no longer emits at
     # all. The ownership marker makes them safe to remove; user rules under the
     # same event are preserved, and an event left empty is dropped entirely.
+    #
+    # ``_prunable`` is the same test Pass 1 applies, not a bare ownership check:
+    # a marked rule with a malformed matcher is one memtomem cannot have
+    # written (#1983), so deleting it here while Pass 1 keeps it would make the
+    # same rule survive or vanish purely on whether the canonical still names
+    # its event.
+    def _prunable(rule: object) -> bool:
+        return (
+            isinstance(rule, dict)
+            and _rule_is_memtomem_owned(rule)
+            and isinstance(rule.get("matcher", ""), str)
+        )
+
     for event in list(existing_hooks):
         if event in contrib_hooks:
             continue
         rules = existing_hooks[event]
         if not isinstance(rules, list):
             continue
-        kept = [r for r in rules if not (isinstance(r, dict) and _rule_is_memtomem_owned(r))]
+        kept = [r for r in rules if not _prunable(r)]
         if len(kept) == len(rules):
             continue
         if kept:

@@ -933,6 +933,67 @@ class TestNonStringMatcherIsDropped:
         assert owned_bad in rules, rules
         assert any(rule.get("matcher") == "Bash" for rule in rules), rules
 
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    @pytest.mark.parametrize(
+        "canonical_hooks",
+        [{}, {"Stop": [_rule("", "elsewhere", timeout=2)]}],
+        ids=["canonical-empty", "other-event"],
+    )
+    def test_stale_event_sweep_keeps_it_too(self, tmp_path, every_home, matcher, canonical_hooks):
+        """The same rule must not survive or vanish on where the canonical looks.
+
+        Rules under an event the canonical no longer emits are swept by a
+        second, separate pass. Checking only the ownership marker there deleted
+        the very rule the in-place pass keeps — silently, and only when the
+        canonical happened to stop naming that event (#1983 review).
+        """
+        owned_bad = {
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "target-owned",
+                    "statusMessage": "memtomem · PreToolUse",
+                }
+            ],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [owned_bad]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, canonical_hooks)
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert owned_bad in written.get("hooks", {}).get("PreToolUse", []), written
+
+    def test_stale_event_sweep_still_prunes_a_well_formed_owned_rule(self, tmp_path, every_home):
+        """The guard must not turn the sweep off: an owned rule memtomem really
+        did write is still pruned once the canonical stops emitting its event.
+        """
+        owned_ok = {
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "stale",
+                    "statusMessage": "memtomem · PreToolUse",
+                }
+            ],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [owned_ok]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, {})
+
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert "PreToolUse" not in written.get("hooks", {}), written
+
     def test_diff_reports_the_same_drop(self, tmp_path, every_home):
         """``diff_settings`` shares the merge, so the dry run must not crash
         either — it is what the Web UI and ``mm context diff`` call."""
