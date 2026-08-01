@@ -459,7 +459,7 @@ your machine and lets you accept them per category:
 |----------|--------|-------|
 | `claude-memory` | `~/.claude/projects/<project>/memory/` | Claude Code per-project auto-memory ([official docs](https://code.claude.com/docs/en/memory)) |
 | `claude-plans` | `~/.claude/plans/` | Claude Code plan files (local convention) |
-| `codex` | `~/.codex/memories/` | Codex memories ([official docs](https://developers.openai.com/codex/memories)) |
+| `codex` | `~/.codex/memories/` | Codex memories ([official docs](https://learn.chatgpt.com/docs/customization/memories)) |
 
 #### How provider memory namespaces map back to each tool
 
@@ -471,7 +471,7 @@ scope model.
 | Tool | Upstream memory shape | memtomem namespace shape |
 |------|-----------------------|--------------------------|
 | Claude Code | Auto memory is per repository at `~/.claude/projects/<project>/memory/`, with a `MEMORY.md` index plus topic files. Claude also has explicit `CLAUDE.md` / `.claude/rules/` instruction scopes. | `claude:<project>` via the `<project>` folder above `memory/`. `MEMORY.md` is treated as a provider index file, so the topic files carry most searchable detail. |
-| Codex | Generated memories live under `~/.codex/memories/` and include summaries, durable entries, recent inputs, and supporting evidence from prior threads ([official docs](https://developers.openai.com/codex/memories)). | `codex:rollout_summaries` for per-session recap files, `codex:extensions` for ad-hoc/manual note extensions, and `codex:global` for the remaining consolidated top-level memory files. The split follows the on-disk `rollout_summaries/` and `extensions/` subdirectories — an observed layout that Codex's docs don't formally specify, so re-check it if a Codex release reshapes the directory. |
+| Codex | Generated memories live under `~/.codex/memories/` and include summaries, durable entries, recent inputs, and supporting evidence from prior threads ([official docs](https://learn.chatgpt.com/docs/customization/memories)). | `codex:rollout_summaries` for per-session recap files, `codex:extensions` for ad-hoc/manual note extensions, and `codex:global` for the remaining consolidated top-level memory files. The split follows the on-disk `rollout_summaries/` and `extensions/` subdirectories — an observed layout that Codex's docs don't formally specify, so re-check it if a Codex release reshapes the directory. |
 | Antigravity CLI | Successor to Gemini CLI ([transition notice](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). Its global instructional memory is the single file `~/.gemini/GEMINI.md` — the same hardcoded path the legacy Gemini CLI used ([docs](https://antigravity.google/docs/agent-features)). | Not added as a watched `memory_dirs` provider because the canonical memory surface is a file, not a directory. Use `mm ingest gemini-memory --source ~/.gemini/GEMINI.md` for a one-shot import with `gemini-memory:<slug>` namespaces — the command keeps the `gemini-memory` name because Antigravity's global memory file is still `~/.gemini/GEMINI.md`. |
 
 Accepted categories get appended directly to `indexing.memory_dirs` in

@@ -280,7 +280,7 @@ under a different name instead would run both servers — see the
 > version-specific measured compatibility toggle and re-check it after Codex
 > upgrades. Documented server-level knobs include `enabled`, `enabled_tools`,
 > `disabled_tools`, `startup_timeout_sec`, and `tool_timeout_sec`; see the
-> official [Codex config reference](https://developers.openai.com/codex/config-reference).
+> official [Codex config reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 <a id="verify-connection-2"></a>
 ### Verify Codex CLI

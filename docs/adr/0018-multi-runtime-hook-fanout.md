@@ -78,7 +78,7 @@ Accepted ADR; ADR-0007 / ADR-0008 layer onto ADR-0001 the same way).
 Mappings were verified against the official docs (2026-05):
 
 - Claude — <https://code.claude.com/docs/en/hooks>
-- Codex — <https://developers.openai.com/codex/hooks> (event names; matchers
+- Codex — <https://learn.chatgpt.com/docs/hooks> (event names; matchers
   accept `Bash` / `apply_patch` and the `Edit` / `Write` aliases)
 - Gemini hooks — <https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/writing-hooks.md>
   (event list, hook-entry `name`/`type`/`command` shape)
