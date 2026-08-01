@@ -900,6 +900,39 @@ class TestNonStringMatcherIsDropped:
             assert not results[name].warnings, (name, results[name].warnings)
             assert commands[name] == ["always"], (name, commands[name])
 
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    def test_owned_target_rule_with_bad_matcher_is_kept_verbatim(
+        self, tmp_path, every_home, matcher
+    ):
+        """The *target* file is hand-editable too, and the merge's in-place pass
+        keys a dict by the matcher of every ownership-marked rule it finds
+        there — an unhashable one raised ``TypeError`` before it could ever be
+        compared. memtomem cannot have written such a rule, so it is kept
+        verbatim rather than replaced or pruned as stale.
+        """
+        owned_bad = {
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "target-owned",
+                    "statusMessage": "memtomem · PreToolUse",
+                }
+            ],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [owned_bad]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "good", timeout=2)]})
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        assert owned_bad in rules, rules
+        assert any(rule.get("matcher") == "Bash" for rule in rules), rules
+
     def test_diff_reports_the_same_drop(self, tmp_path, every_home):
         """``diff_settings`` shares the merge, so the dry run must not crash
         either — it is what the Web UI and ``mm context diff`` call."""

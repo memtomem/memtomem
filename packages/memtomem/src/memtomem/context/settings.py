@@ -452,6 +452,15 @@ def _merge_hooks_record(
         for r in existing_rules:
             if isinstance(r, dict) and _rule_is_memtomem_owned(r):
                 matcher = r.get("matcher", "")
+                if not isinstance(matcher, str):
+                    # The *target* file is hand-editable too, so an owned rule
+                    # can carry a malformed matcher (#1983) — and this lookup
+                    # would then key a dict by an unhashable value. Keep the
+                    # rule verbatim: memtomem cannot have written it, so
+                    # replacing or pruning it would be destroying something it
+                    # does not actually own.
+                    result_rules.append(r)
+                    continue
                 queue = contrib_by_matcher.get(matcher, [])
                 idx = consumed.get(matcher, 0)
                 if idx < len(queue):
