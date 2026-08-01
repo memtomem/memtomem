@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.14] — 2026-08-01
+
+Emergency patch: a fresh, unconstrained install of 0.3.13 or earlier from
+PyPI fails at import once `mcp` 2.0.0 is the newest release. The dependency
+declared no upper bound, so resolution picked up an SDK that had removed
+`mcp.server.fastmcp`. Installs that pinned `mcp` themselves are unaffected,
+as is any environment already resolved against 1.x. Upgrade if your install
+is broken; the cap itself changes nothing else.
+
+The release also carries the `SessionEnd` fan-out fix (#1976): canonical
+`SessionEnd` hooks now reach Codex instead of being withheld. That one does
+change observable behavior — hooks that never ran on Codex will start
+running, with clamped timeouts and warnings where the two runtimes' contracts
+disagree. Read its entry under Fixed before upgrading if you author hooks.
+
 ### Added
 
 - Worked examples in `mm search --help` and `mm add --help`.
@@ -17,6 +32,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mcp` is capped below 2.0, so fresh installs resolve a working SDK
+  again** (#1979). `mcp` 2.0.0 removed `mcp.server.fastmcp`, which the server
+  imports at module scope, and the requirement was an unbounded
+  `mcp[cli]>=1.28.1` — so `uv tool install memtomem[all]`, `uvx --from
+  "memtomem[all]==0.3.13" memtomem-server`, and every other
+  install-from-index path died at import. `uv.lock` pinned 1.x, which is why
+  CI and checkout-based development never saw it. The cap is a stopgap;
+  #1978 tracks the migration off the removed surfaces that lifts it.
 - **`SessionEnd` hooks now reach Codex** (#1976). The Codex fan-out filter
   grouped `SessionEnd` with `Notification` as unsupported, so every canonical
   `SessionEnd` hook was withheld from `~/.codex/hooks.json` under a warning
@@ -30,14 +53,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `mm init` reranker step printed the wrong model cache path
   (`~/.cache/fastembed/`); it now names the resolved default,
   `~/.memtomem/cache/fastembed/`.
-- deps: the `mcp[cli]` requirement is capped at `<2`, so a fresh install from
-  the index no longer resolves `mcp` 2.x. 2.0 removed `mcp.server.fastmcp`,
-  which the server imports at module scope — every install of 0.3.13 and
-  earlier made after 2.0 shipped failed at import, including the documented
-  `uvx --from "memtomem[all]==0.3.13"` flow. `uv.lock` pinned 1.x, so CI and
-  checkout-based development never resolved 2.0 and the break was visible only
-  on the install-from-index path. The cap is a stopgap; #1978 tracks the
-  migration that lifts it. (#1979)
 
 ## [0.3.13] — 2026-07-24
 
