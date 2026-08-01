@@ -17,6 +17,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`SessionEnd` hooks now reach Codex** (#1976). The Codex fan-out filter
+  grouped `SessionEnd` with `Notification` as unsupported, so every canonical
+  `SessionEnd` hook was withheld from `~/.codex/hooks.json` under a warning
+  that blamed Codex for not understanding an event it documents.
+  `Notification` remains genuinely unsupported and is still dropped.
+  `SessionEnd` is also the first event whose *contract* differs per runtime
+  (ADR-0031), so the Codex copy clamps timeouts to the 3s Codex allows there
+  (Claude permits up to 60s) and drops the five Claude-only `reason` matchers
+  Codex can never produce. Both emit a warning; the canonical record and every
+  other runtime keep the author's values.
 - `mm init` reranker step printed the wrong model cache path
   (`~/.cache/fastembed/`); it now names the resolved default,
   `~/.memtomem/cache/fastembed/`.

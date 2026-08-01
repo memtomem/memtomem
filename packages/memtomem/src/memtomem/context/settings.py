@@ -8,8 +8,8 @@ source we fan out to each installed runtime's hooks file:
 * ``~/.claude/settings.json`` — Claude Code (JSON deep-merge into ``hooks``)
 * ``~/.codex/hooks.json`` — Codex CLI (same event names + record shape as
   Claude; matchers ``Bash``/``Edit``/``Write`` are accepted natively, so
-  the merge is near-identical — events Codex lacks, ``Notification`` /
-  ``SessionEnd``, are dropped with a warning)
+  the merge is near-identical — the one event Codex lacks,
+  ``Notification``, is dropped with a warning)
 * ``~/.gemini/settings.json`` — Gemini CLI (event names AND tool-name
   matchers are remapped — ``PreToolUse``→``BeforeTool``, ``Bash``→
   ``run_shell_command`` etc.; unmappable events/matchers are dropped with a
@@ -527,11 +527,17 @@ _register(ClaudeSettingsGenerator())
 
 # Events Codex understands. Codex shares Claude's event names and accepts
 # Bash/Edit/Write matchers natively, so supported events pass through
-# unchanged; canonical events outside this set (Notification, SessionEnd)
-# are dropped with a warning.
+# unchanged; canonical events outside this set (Notification) are dropped
+# with a warning.
+#
+# ``SessionEnd`` is here because Codex documents it ("When the main thread
+# ends SessionEnd" — learn.chatgpt.com/docs/hooks). It was previously
+# grouped with ``Notification`` as unsupported, which silently withheld
+# every canonical SessionEnd hook from Codex (#1976).
 _CODEX_EVENTS: frozenset[str] = frozenset(
     {
         "SessionStart",
+        "SessionEnd",
         "SubagentStart",
         "PreToolUse",
         "PermissionRequest",
@@ -619,12 +625,103 @@ def _kimi_target_file(project_root: Path, scope: str) -> Path | None:
     raise ValueError(f"Unknown target_scope: {scope!r}")
 
 
+# ``SessionEnd`` is the one event whose *contract* differs between Claude and
+# Codex, so passing it through verbatim (as every other supported event is)
+# would emit configuration Codex rejects or silently never fires:
+#
+# * **timeout.** Codex gives SessionEnd 1s by default and caps it at 3s, while
+#   every other Codex event defaults to 600s. Claude lets a per-hook timeout
+#   raise its 1.5s shared budget up to 60s, so a perfectly legal canonical
+#   ``timeout: 30`` is out of contract on Codex.
+# * **matcher.** Claude filters SessionEnd on ``reason`` — one of ``clear``,
+#   ``resume``, ``logout``, ``prompt_input_exit``,
+#   ``bypass_permissions_disabled``, ``other``. Codex documents ``reason`` as
+#   *always* ``other``, so a rule carrying one of the five Claude-only
+#   literals is dead on arrival there rather than merely narrow.
+_CODEX_SESSION_END_MAX_TIMEOUT = 3
+
+# Codex's ``matcher`` is a **regex string**, not an enum ("The matcher field
+# is a regex string that filters when hooks fire"), so this is a deny-list of
+# the exact Claude ``reason`` literals that cannot match ``other`` — not an
+# allow-list of the matchers we happen to recognise. An allow-list would drop
+# ``^other$``, ``.*``, ``*`` and ``other|clear``, every one of which does fire
+# on Codex, and it would keep doing so for any reason Codex adds later.
+# Emulating a regex engine to decide the general case is not worth it: when in
+# doubt the rule passes through, because a hook that fires more often than
+# intended is recoverable and one silently deleted in translation is not.
+_CODEX_SESSION_END_DEAD_MATCHERS = frozenset(
+    {"clear", "resume", "logout", "prompt_input_exit", "bypass_permissions_disabled"}
+)
+
+
+def _clamp_codex_session_end(rules: list) -> tuple[list, list[str]]:
+    """Bring canonical ``SessionEnd`` rules inside Codex's contract.
+
+    Over-long timeouts are clamped rather than dropped — a shorter hook still
+    runs. A matcher is dropped only when it is a Claude ``reason`` literal
+    Codex can never produce, or when it is not a string at all: Codex's
+    matcher field is a regex *string*, and a non-string reaches the merge as
+    an unhashable dict key.
+    """
+    warnings: list[str] = []
+    kept: list = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            kept.append(rule)
+            continue
+        # An absent matcher is valid and means "every SessionEnd" — only a
+        # matcher that is *present* and non-string is malformed.
+        matcher = rule.get("matcher", "")
+        if not isinstance(matcher, str):
+            warnings.append(
+                f"SessionEnd hook with a non-string matcher ({type(matcher).__name__}) "
+                "was dropped from the Codex hooks file: Codex's matcher is a regex "
+                "string. Omit the matcher to run on every Codex SessionEnd."
+            )
+            continue
+        if matcher in _CODEX_SESSION_END_DEAD_MATCHERS:
+            warnings.append(
+                f"SessionEnd hook with matcher {matcher!r} was dropped from the Codex "
+                "hooks file: that is a Claude-only 'reason', and Codex documents "
+                "SessionEnd's reason as always 'other', so this rule could never fire "
+                "there. Omit the matcher or use 'other' to run on every Codex "
+                "SessionEnd."
+            )
+            continue
+        handlers = rule.get("hooks")
+        if not isinstance(handlers, list):
+            kept.append(rule)
+            continue
+        new_handlers = []
+        for handler in handlers:
+            if not isinstance(handler, dict):
+                new_handlers.append(handler)
+                continue
+            timeout = handler.get("timeout")
+            if (
+                isinstance(timeout, (int, float))
+                and not isinstance(timeout, bool)
+                and timeout > _CODEX_SESSION_END_MAX_TIMEOUT
+            ):
+                handler = {**handler, "timeout": _CODEX_SESSION_END_MAX_TIMEOUT}
+                warnings.append(
+                    f"SessionEnd hook timeout {timeout}s exceeds the "
+                    f"{_CODEX_SESSION_END_MAX_TIMEOUT}s Codex allows for that event "
+                    f"and was clamped in the Codex hooks file. Other runtimes keep "
+                    f"the canonical value."
+                )
+            new_handlers.append(handler)
+        kept.append({**rule, "hooks": new_handlers})
+    return kept, warnings
+
+
 def _filter_codex_events(contributions: dict) -> tuple[dict, list[str]]:
-    """Drop canonical events Codex doesn't support (Notification, SessionEnd).
+    """Drop canonical events Codex doesn't support (Notification).
 
     Codex shares Claude's event names and accepts Bash/Edit/Write matchers,
     so supported events pass through verbatim; only the unsupported ones are
-    dropped, each with a warning.
+    dropped, each with a warning. ``SessionEnd`` is the one exception — see
+    :func:`_clamp_codex_session_end` for the contract it has to satisfy.
     """
     warnings: list[str] = []
     src_hooks = contributions.get("hooks", {})
@@ -639,6 +736,11 @@ def _filter_codex_events(contributions: dict) -> tuple[dict, list[str]]:
                 f"{', '.join(sorted(_CODEX_EVENTS))}."
             )
             continue
+        if event == "SessionEnd" and isinstance(rules, list):
+            rules, session_end_warnings = _clamp_codex_session_end(rules)
+            warnings.extend(session_end_warnings)
+            if not rules:
+                continue
         out[event] = rules
     return {"hooks": out}, warnings
 
@@ -899,7 +1001,7 @@ class CodexSettingsGenerator:
     Codex shares Claude's event names + record shape and accepts
     ``Bash``/``Edit``/``Write`` matchers natively, so the merge is the same
     :func:`_merge_hooks_record` Claude uses — only events Codex lacks
-    (``Notification`` / ``SessionEnd``) are dropped with a warning. Writes a
+    (``Notification``) are dropped with a warning. Writes a
     dedicated ``hooks.json`` rather than touching the user's ``config.toml``.
     """
 
