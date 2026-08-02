@@ -25,6 +25,7 @@ from memtomem.context.settings import (
     _SETTINGS_LOCK_BUDGET_S,
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
+    _drop_nonstring_matchers,
     _rule_content_equal,
     _rule_is_memtomem_owned,
     _safe_load_json,
@@ -202,6 +203,15 @@ def _iter_hook_rules(hooks_record: dict) -> list[dict]:
         for index, rule in enumerate(rules):
             if not isinstance(rule, dict):
                 continue
+            if not isinstance(rule.get("matcher", ""), str):
+                # A present-but-non-string matcher is malformed (#1983). Callers
+                # key these rows by ``(event, matcher)``, so emitting one raises
+                # ``TypeError: unhashable type`` and 500s the whole panel. An
+                # absent matcher is valid (match-all) and stays. The skip is
+                # NOT silent at the wire: ``_compare_hooks`` reports every
+                # skipped target rule in ``target_hooks.malformed`` via
+                # :func:`_malformed_hook_rules`.
+                continue
             rows.append(
                 {
                     "event": event,
@@ -209,6 +219,35 @@ def _iter_hook_rules(hooks_record: dict) -> list[dict]:
                     "rule_index": index,
                     "rule_hash": _rule_hash(rule),
                     "rule": rule,
+                }
+            )
+    return rows
+
+
+def _malformed_hook_rules(hooks_record: dict) -> list[dict]:
+    """Rows for rules :func:`_iter_hook_rules` skips as malformed (#1983).
+
+    Mirrors its iteration exactly so the two lists partition the record's dict
+    rules. ``owned`` marks rules the next sync will prune (the merge treats the
+    ownership marker as authoritative — pre-validation releases really did
+    write such rules); user rules are merely invisible to hook matching and
+    stay untouched.
+    """
+    rows: list[dict] = []
+    for event, rules in hooks_record.items():
+        if not isinstance(event, str) or not isinstance(rules, list):
+            continue
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            if isinstance(rule.get("matcher", ""), str):
+                continue
+            rows.append(
+                {
+                    "event": event,
+                    "matcher_type": type(rule.get("matcher")).__name__,
+                    "rule_index": index,
+                    "owned": _rule_is_memtomem_owned(rule),
                 }
             )
     return rows
@@ -231,7 +270,11 @@ def _compare_hooks(
         "canonical_mtime_ns": _mtime_ns(canonical_path),
         "target_mtime_ns": _mtime_ns(target_path),
         "hooks": {"synced": [], "conflicts": [], "pending": []},
-        "target_hooks": {"configured": [], "target_only": []},
+        "target_hooks": {"configured": [], "target_only": [], "malformed": []},
+        # Canonical-side drop warnings (#1983) — the fan-out's exact wording,
+        # so the panel can show WHY a rule the user just authored is missing
+        # from every bucket instead of a silent "no hooks".
+        "matcher_warnings": [],
     }
 
     target_hooks: dict = {}
@@ -248,6 +291,7 @@ def _compare_hooks(
 
         configured = _iter_hook_rules(target_hooks)
         result["target_hooks"]["configured"] = configured
+        result["target_hooks"]["malformed"] = _malformed_hook_rules(target_hooks)
 
     if not canonical_path.is_file():
         result["target_hooks"]["target_only"] = result["target_hooks"]["configured"]
@@ -265,6 +309,15 @@ def _compare_hooks(
         result["status"] = "error"
         result["error"] = "hooks must be a record (object), not an array"
         return result
+
+    # Drop malformed rules before anything indexes them, exactly as the
+    # fan-out does (#1983) — this view must agree with what a sync would
+    # actually write, and several passes below key canonical rules by matcher
+    # straight off this record. Keep the warnings: discarding them here is how
+    # the panel showed "no hooks" for a canonical whose only rule was dropped.
+    cleaned, matcher_warnings = _drop_nonstring_matchers({"hooks": canonical_hooks})
+    canonical_hooks = cleaned["hooks"]
+    result["matcher_warnings"] = matcher_warnings
 
     # Stamp the ownership marker (ADR-0019) so the canonical rules compared
     # here match what ``generate_all_settings`` actually writes to the Claude
@@ -286,11 +339,16 @@ def _compare_hooks(
         # Canonical emits no hooks. A sync still prunes any memtomem-owned
         # target rule (ADR-0019), so surface that as out_of_sync; only when the
         # target has none of memtomem's rules is there genuinely nothing to do.
+        # A bare ownership check matches the merge: it prunes an owned rule
+        # whose matcher is malformed too — pre-validation releases really did
+        # write such rules (#1983) — so counting one here is an out_of_sync the
+        # next sync clears.
         owned_in_target = any(
             _rule_is_memtomem_owned(rule)
             for rules in target_hooks.values()
             if isinstance(rules, list)
             for rule in rules
+            if isinstance(rule, dict)
         )
         result["status"] = "out_of_sync" if owned_in_target else "no_hooks"
         return result
@@ -434,6 +492,11 @@ def _compare_hooks(
     pending_removals = sum(
         max(0, len(owned) - consumed_owned.get(key, 0)) for key, owned in owned_by_matcher.items()
     )
+    # Owned rules skipped by ``_iter_hook_rules`` as malformed never make it
+    # into ``owned_by_matcher``, but the merge prunes them all the same
+    # (#1983) — without counting them the panel says in_sync while the next
+    # sync rewrites the target.
+    pending_removals += sum(1 for row in result["target_hooks"]["malformed"] if row["owned"])
 
     if result["hooks"]["conflicts"]:
         result["status"] = "conflicts"

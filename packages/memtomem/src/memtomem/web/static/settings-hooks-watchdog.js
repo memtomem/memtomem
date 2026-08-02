@@ -412,6 +412,51 @@ function _renderHooksDuplicateBanner(data) {
   el.hidden = false;
 }
 
+// #1983 validation banner: canonical rules the sync DROPS (server-worded
+// ``matcher_warnings``, the fan-out's exact text) plus target rules the diff
+// skips as malformed (``target_hooks.malformed`` rows). Without this the
+// panel silently hides a rule the user just authored — a canonical whose only
+// rule is malformed rendered as a plain "no hooks" with Sync Now disabled and
+// no path to the warning a POST would have shown.
+function _renderHooksMatcherBanner(data) {
+  const el = qs('hooks-matcher-banner');
+  if (!el) return;
+  const warnings = Array.isArray(data && data.matcher_warnings) ? data.matcher_warnings : [];
+  const malformed = Array.isArray(data && data.target_hooks && data.target_hooks.malformed)
+    ? data.target_hooks.malformed
+    : [];
+  if (!warnings.length && !malformed.length) {
+    el.innerHTML = '';
+    el.hidden = true;
+    return;
+  }
+  const rows = warnings.map(w =>
+    `<div class="hooks-matcher-banner-row">${escapeHtml(w)}</div>`
+  ).concat(malformed.map(row => {
+    const event = escapeHtml(row.event || '');
+    const type = escapeHtml(row.matcher_type || '');
+    const ck = row.owned
+      ? 'settings.hooks.malformed_target_owned'
+      : 'settings.hooks.malformed_target_user';
+    let consequence = t(ck);
+    if (consequence === ck) {
+      consequence = row.owned
+        ? 'the next sync removes this memtomem-managed rule.'
+        : 'Claude Code will never fire it; fix the matcher by hand.';
+    }
+    const key = 'settings.hooks.malformed_target_row';
+    let text = t(key, { event, type, consequence });
+    if (text === key) {
+      // Cold-boot fallback while the locale fetch is in flight (same shape as
+      // the duplicate-tier banner above).
+      text = `Target rule under "${event}" has a non-string matcher (${type}) — ${consequence}`;
+    }
+    return `<div class="hooks-matcher-banner-row">${text}</div>`;
+  })).join('');
+  el.innerHTML = rows;
+  el.hidden = false;
+}
+
 async function loadHooksSync() {
   const seq = ++_hooksSyncSeq;
   const statusEl = qs('hooks-sync-status');
@@ -426,6 +471,7 @@ async function loadHooksSync() {
   // nulling it mid-reload would let a concurrent rule click bypass the
   // stale-write gate.
   _renderHooksDuplicateBanner(null);
+  _renderHooksMatcherBanner(null);
   const requestedScope = _hooksCurrentTargetScope();
   let requestedProjectScope = _hooksCurrentProjectScope();
   if (typeof _ctxFetchProjectsData === 'function') {
@@ -512,6 +558,7 @@ async function loadHooksSync() {
         ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
     _renderHooksDuplicateBanner(data);
+    _renderHooksMatcherBanner(data);
 
     // Sync Now is only meaningful when a canonical source exists and has
     // at least one hook rule. Disable the button for empty sources so a
@@ -1041,5 +1088,12 @@ window.addEventListener('langchange', () => {
   const el = qs('hooks-duplicate-banner');
   if (el && !el.hidden && _hooksLastSyncData) {
     _renderHooksDuplicateBanner(_hooksLastSyncData);
+  }
+  // Same contract for the malformed-matcher banner (#1983): its target rows
+  // are t()-localized (and may hold the EN cold-boot fallback), so a language
+  // switch must repaint them from the cached payload too.
+  const matcherEl = qs('hooks-matcher-banner');
+  if (matcherEl && !matcherEl.hidden && _hooksLastSyncData) {
+    _renderHooksMatcherBanner(_hooksLastSyncData);
   }
 });

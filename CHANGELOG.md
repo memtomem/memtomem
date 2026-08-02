@@ -48,6 +48,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `://stats` read the lifespan's `AppContext` directly. `memtomem://chunks/{chunk_id}`
   is templated and is unaffected. No client-visible change.
 
+### Fixed
+
+- **A malformed hook `matcher` no longer takes down settings fan-out**
+  (#1983). The canonical `.memtomem/settings.json` is user-authored, and a
+  `"matcher": ["Bash"]` typo raised an uncaught `TypeError` — out of the
+  Gemini generator's `re.sub` on a fresh target, or out of the matcher-keyed
+  additive merge (`unhashable type`) once the target already had a rule for
+  that event — so one bad rule aborted the sync for *every* runtime, not just
+  the one that could not translate it. Kimi failed a third way, rendering
+  `matcher = "['Bash']"` into `config.toml` where it could never fire.
+  `matcher` is now validated once on the canonical record, before any
+  per-runtime translation: absent means match-all, a string passes through,
+  and anything else is dropped with a warning naming the event and the type
+  (ADR-0018 §5). Healthy rules in the same file are unaffected. The Web hooks
+  panel (`GET /api/settings-sync`) keys rules by matcher the same way and
+  returned a 500 on the same input; it now drops the rule from the comparison
+  instead, on either side, so the view matches what a sync would write — and
+  the drop is visible, not silent: the payload carries the canonical-side
+  warnings (`matcher_warnings`) and the skipped target rows
+  (`target_hooks.malformed`), rendered as a warning banner in the panel.
+  An ownership-marked *target* rule with a malformed matcher is pruned with a
+  warning on the next sync: releases without this validation stamped and wrote
+  such rules themselves before Gemini aborted the run, and keeping them would
+  strand the broken rule beside its corrected replacement after an upgrade.
+
 ## [0.3.14] — 2026-08-01
 
 Emergency patch: a fresh, unconstrained install of 0.3.13 or earlier from

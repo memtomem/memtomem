@@ -86,13 +86,21 @@ decision is left intact rather than rewritten.
   a second `reason`. That is accepted: the alternative costs working hooks
   today for a hypothetical tomorrow.
 
-## Known adjacent defect (not fixed here)
+## Known adjacent defect (fixed in #1983, after this ADR)
 
-A non-string `matcher` crashes the **Gemini** generator before any Codex code
-runs, in `_ensure_gemini_handler_names`' `re.sub`, for *any* event. That
-predates this change and is out of scope; decision 5 is scoped to the Codex
-generator, and the test pinning it calls that generator directly for exactly
-this reason.
+A non-string `matcher` crashed the **Gemini** generator before any Codex code
+ran, in `_ensure_gemini_handler_names`' `re.sub`, for *any* event — which is
+why decision 5 above is scoped to the Codex generator and its test calls that
+generator directly.
+
+Issue #1983 lifted the validation to the canonical shape:
+`_drop_nonstring_matchers` runs before any per-runtime translation, so all
+four generators drop the rule with a warning instead of crashing (Gemini's
+`re.sub`, the matcher-keyed additive merge's unhashable key, and Kimi's
+`str()`-coercion into a matcher that could never fire). Decision 5 is now the
+canonical rule rather than a Codex-local one; `_clamp_codex_session_end` keeps
+its own non-string check only because it is also called directly and its
+`frozenset` membership test is unhashable-unsafe.
 
 ## Verification
 

@@ -806,6 +806,128 @@ class TestSettingsSync:
         assert len(data["hooks"]["pending"]) == 1
         assert data["hooks"]["pending"][0]["event"] == "PostToolUse"
 
+    @pytest.mark.parametrize(
+        "bad_matcher", [None, 7, ["Write"], {"tool": "Write"}], ids=["null", "int", "list", "dict"]
+    )
+    @pytest.mark.parametrize("side", ["canonical", "target"], ids=["canonical", "target"])
+    async def test_non_string_matcher_does_not_break_the_panel(
+        self, app, client: AsyncClient, tmp_path, bad_matcher, side
+    ):
+        """A malformed ``matcher`` must not 500 the hooks panel (#1983).
+
+        This comparison keys rules by ``(event, matcher)``, so a list or dict
+        one raised ``TypeError: unhashable type`` out of the route — the same
+        user typo that used to crash the fan-out. Both files are hand-edited,
+        so both sides get the drop; the healthy rule beside it still shows.
+        """
+        bad = self._rule("", "echo bad")
+        bad["matcher"] = bad_matcher
+        good = self._rule("Write", "echo good")
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        target = Path.home() / ".claude" / "settings.json"
+        canonical_rules = [bad, good] if side == "canonical" else [good]
+        target_rules = [bad, good] if side == "target" else [good]
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": canonical_rules}}), encoding="utf-8"
+        )
+        target.write_text(json.dumps({"hooks": {"PostToolUse": target_rules}}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] != "error", data
+        rows = [
+            row for bucket in ("synced", "pending", "conflicts") for row in data["hooks"][bucket]
+        ] + data["target_hooks"]["configured"]
+        commands = [
+            h.get("command")
+            for row in rows
+            for h in (row.get("rule") or row.get("existing") or {}).get("hooks", [])
+        ]
+        assert "echo good" in commands, data
+        assert "echo bad" not in commands, data
+        # The drop is visible, not silent (#1986 review): the canonical side
+        # reports the fan-out's warning text, the target side reports a
+        # malformed row naming the event and the offending type.
+        if side == "canonical":
+            assert any("non-string matcher" in w for w in data["matcher_warnings"]), data
+        else:
+            assert data["target_hooks"]["malformed"] == [
+                {
+                    "event": "PostToolUse",
+                    "matcher_type": type(bad_matcher).__name__,
+                    "rule_index": 0,
+                    "owned": False,
+                }
+            ], data
+
+    @pytest.mark.parametrize(
+        "bad_matcher", [None, 7, ["Write"], {"tool": "Write"}], ids=["null", "int", "list", "dict"]
+    )
+    async def test_malformed_owned_target_rule_is_reported_out_of_sync(
+        self, app, client: AsyncClient, tmp_path, bad_matcher
+    ):
+        """The panel mirrors the merge (#1986 review): an ownership-marked
+        target rule with a malformed matcher is one the next sync PRUNES —
+        pre-validation releases really did write such rules — so it must count
+        toward ``out_of_sync``, in both the canonical-empty branch and the
+        main diff path, and be listed as an owned malformed row.
+        """
+        bad = self._rule("", "echo bad")
+        bad["matcher"] = bad_matcher
+        owned_bad = self._rule("", "echo owned")
+        owned_bad["matcher"] = bad_matcher
+        owned_bad["hooks"][0]["statusMessage"] = "memtomem · PostToolUse"
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [bad]}}), encoding="utf-8")
+        target = Path.home() / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [owned_bad]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        # Canonical-empty branch (every canonical rule dropped).
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "out_of_sync", data
+        assert data["target_hooks"]["malformed"][0]["owned"] is True, data
+
+        # Main diff path: a healthy canonical rule beside it, already synced —
+        # the malformed owned rule alone must keep the status out_of_sync.
+        good = self._rule("Write", "echo good")
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [good]}}), encoding="utf-8")
+        stamped_good = self._rule("Write", "echo good")
+        stamped_good["hooks"][0]["statusMessage"] = "memtomem · PostToolUse"
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [owned_bad, stamped_good]}}), encoding="utf-8"
+        )
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        assert resp.json()["status"] == "out_of_sync", resp.json()
+
+    async def test_canonical_only_malformed_surfaces_warnings(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """A canonical whose ONLY rule is malformed must not render as a bare
+        "no hooks" (#1986 review): the GET carries the fan-out's drop warning
+        so the panel can say WHY the rule the user just authored is invisible.
+        """
+        bad = self._rule("", "echo bad")
+        bad["matcher"] = ["Write"]
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": [bad]}}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        resp = await client.get("/api/settings-sync?target_scope=user")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "no_hooks", data
+        assert any("non-string matcher" in w for w in data["matcher_warnings"]), data
+
     async def test_dedup_when_target_has_multiple_same_matcher_rules(
         self, app, client: AsyncClient, tmp_path
     ):

@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=140" />
+  <link rel="stylesheet" href="/style.css?v=141" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -803,6 +803,10 @@
                across tiers (filled from the GET /api/settings-sync payload's
                duplicate_tier_warnings; #1247 id 32). -->
           <div id="hooks-duplicate-banner" class="hooks-duplicate-banner" hidden></div>
+          <!-- #1983 validation signal: canonical rules the sync drops for a
+               non-string matcher (matcher_warnings) and target rules the diff
+               skips as malformed (target_hooks.malformed). -->
+          <div id="hooks-matcher-banner" class="hooks-matcher-banner" hidden></div>
           <div id="hooks-sync-content"></div>
         </div>
 
@@ -1914,7 +1918,7 @@
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=12"></script>
   <script src="/settings-harness.js?v=9"></script>
-  <script src="/settings-hooks-watchdog.js?v=21"></script>
+  <script src="/settings-hooks-watchdog.js?v=22"></script>
   <script src="/timeline.js?v=4"></script>
   <script src="/context-gateway-core.js?v=3"></script>
   <script src="/context-gateway-controls.js?v=2"></script>

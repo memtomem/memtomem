@@ -13,6 +13,7 @@ gemini-cli docs/hooks/writing-hooks.md).
 from __future__ import annotations
 
 import json
+import tomllib
 
 import pytest
 
@@ -20,6 +21,7 @@ from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     CodexSettingsGenerator,
     GeminiSettingsGenerator,
+    _stamp_status_markers,
     diff_settings,
     generate_all_settings,
     host_write_targets,
@@ -729,3 +731,334 @@ class TestGeminiHandlerNormalization:
         assert name.startswith("memtomem-BeforeTool-")
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
         assert set(name) <= allowed, f"unsafe chars leaked into Gemini name: {name!r}"
+
+
+# ── Canonical matcher validation (issue #1983) ───────────────────────
+
+
+@pytest.fixture
+def every_home(tmp_path, monkeypatch):
+    """HOME with all four runtime markers, so one fan-out exercises every
+    registered generator (Claude, Codex, Gemini, Kimi)."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    for marker in (".claude", ".codex", ".gemini", ".kimi"):
+        (fake_home / marker).mkdir()
+    set_home(monkeypatch, fake_home)
+    return fake_home
+
+
+#: ``matcher`` shapes that are present but not a string. ``null`` is included:
+#: an *absent* matcher means match-all, an explicit ``null`` does not.
+_BAD_MATCHERS = [None, 7, ["Bash"], {"tool": "Bash"}]
+_BAD_MATCHER_IDS = ["null", "int", "list", "dict"]
+
+#: ``(canonical event, a valid matcher for it, Gemini event, Kimi event)`` —
+#: one tool-matching event (matcher is remapped per runtime) and one lifecycle
+#: event (matcher passes through), because the two take different code paths.
+_EVENTS = [
+    ("PreToolUse", "Bash", "BeforeTool", "PreToolUse"),
+    ("SessionStart", "", "SessionStart", "SessionStart"),
+]
+_EVENT_IDS = ["tool-event", "lifecycle-event"]
+
+#: ``event → (target matcher, Gemini target matcher)`` for a *user*-authored
+#: rule already sitting under the event. Deliberately distinct from the
+#: contribution's matcher: a same-matcher user rule wins by design (the merge
+#: yields to it), which would mask whether the good rule was delivered.
+_USER_MATCHERS = {
+    "PreToolUse": ("Read", "read_file"),
+    "SessionStart": ("startup", "startup"),
+}
+
+
+def _kimi_rows(home):
+    """The ``[[hooks]]`` rows memtomem rendered into Kimi's config.toml."""
+    text = (home / ".kimi" / "config.toml").read_text(encoding="utf-8")
+    return tomllib.loads(text).get("hooks", []), text
+
+
+def _written_commands(home, event, gemini_event, kimi_event):
+    """Commands memtomem delivered to each runtime for *event*."""
+
+    def _record(path, ev):
+        if not path.is_file():
+            return []
+        hooks = json.loads(path.read_text(encoding="utf-8")).get("hooks", {})
+        return [h.get("command") for rule in hooks.get(ev, []) for h in rule.get("hooks", [])]
+
+    rows, _ = _kimi_rows(home)
+    return {
+        "claude_settings": _record(home / ".claude" / "settings.json", event),
+        "codex_settings": _record(home / ".codex" / "hooks.json", event),
+        "gemini_settings": _record(home / ".gemini" / "settings.json", gemini_event),
+        "kimi_settings": [r.get("command") for r in rows if r.get("event") == kimi_event],
+    }
+
+
+class TestNonStringMatcherIsDropped:
+    """A non-string ``matcher`` is malformed canonical input, not a crash.
+
+    Regression pins for #1983: the canonical record is user-authored JSON, so
+    ``"matcher": ["Bash"]`` is a plausible typo. It used to take down the whole
+    fan-out — ``TypeError`` out of ``_ensure_gemini_handler_names``' ``re.sub``
+    on a fresh target, ``TypeError: unhashable type`` out of the matcher-keyed
+    additive merge when the event already existed — instead of the
+    drop-with-warning ADR-0018 §5 promises. Kimi failed a third way, coercing
+    it with ``str()`` into a matcher that could never fire.
+    """
+
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    @pytest.mark.parametrize("event,good_matcher,gemini_event,kimi_event", _EVENTS, ids=_EVENT_IDS)
+    def test_fresh_target_drops_only_the_malformed_rule(
+        self, tmp_path, every_home, matcher, event, good_matcher, gemini_event, kimi_event
+    ):
+        """Every generator writes the healthy rule and warns about the bad one."""
+        bad = _rule("", "bad", timeout=2)
+        bad["matcher"] = matcher
+        _canonical(tmp_path, {event: [bad, _rule(good_matcher, "good", timeout=2)]})
+
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        commands = _written_commands(every_home, event, gemini_event, kimi_event)
+        for name in ("claude_settings", "codex_settings", "gemini_settings", "kimi_settings"):
+            r = results[name]
+            assert r.status == "ok", (name, r.reason)
+            assert any("non-string matcher" in w for w in r.warnings), (name, r.warnings)
+            assert "good" in commands[name], (name, commands[name])
+            assert "bad" not in commands[name], (name, commands[name])
+
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    @pytest.mark.parametrize("event,good_matcher,gemini_event,kimi_event", _EVENTS, ids=_EVENT_IDS)
+    def test_existing_event_in_target_still_merges(
+        self, tmp_path, every_home, matcher, event, good_matcher, gemini_event, kimi_event
+    ):
+        """With the event already present the merge keys rules by matcher — an
+        unhashable one must never reach it, and the user's rule survives."""
+        user_matcher, gemini_user_matcher = _USER_MATCHERS[event]
+        (every_home / ".claude" / "settings.json").write_text(
+            json.dumps({"hooks": {event: [_rule(user_matcher, "user-claude")]}}) + "\n",
+            encoding="utf-8",
+        )
+        (every_home / ".codex" / "hooks.json").write_text(
+            json.dumps({"hooks": {event: [_rule(user_matcher, "user-codex")]}}) + "\n",
+            encoding="utf-8",
+        )
+        (every_home / ".gemini" / "settings.json").write_text(
+            json.dumps({"hooks": {gemini_event: [_rule(gemini_user_matcher, "user-gemini")]}})
+            + "\n",
+            encoding="utf-8",
+        )
+        (every_home / ".kimi" / "config.toml").write_text('model = "kimi-k2"\n', encoding="utf-8")
+
+        bad = _rule("", "bad", timeout=2)
+        bad["matcher"] = matcher
+        _canonical(tmp_path, {event: [bad, _rule(good_matcher, "good", timeout=2)]})
+
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        commands = _written_commands(every_home, event, gemini_event, kimi_event)
+        for name in ("claude_settings", "codex_settings", "gemini_settings", "kimi_settings"):
+            r = results[name]
+            assert r.status == "ok", (name, r.reason)
+            assert any("non-string matcher" in w for w in r.warnings), (name, r.warnings)
+            assert "bad" not in commands[name], (name, commands[name])
+            assert "good" in commands[name], (name, commands[name])
+        # User rules under the same event are untouched by the drop.
+        assert "user-claude" in commands["claude_settings"]
+        assert "user-codex" in commands["codex_settings"]
+        assert "user-gemini" in commands["gemini_settings"]
+        assert 'model = "kimi-k2"' in _kimi_rows(every_home)[1]
+
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    def test_kimi_never_renders_a_stringified_matcher(self, tmp_path, every_home, matcher):
+        """Kimi's renderer used ``str(matcher)``, so a lifecycle event wrote
+        ``matcher = "['Bash']"`` — silently unfireable rather than crashing."""
+        bad = _rule("", "bad", timeout=2)
+        bad["matcher"] = matcher
+        _canonical(tmp_path, {"SessionStart": [bad]})
+
+        assert (
+            generate_all_settings(tmp_path, scope="user", allow_host_writes=True)[
+                "kimi_settings"
+            ].status
+            == "ok"
+        )
+        rows, text = _kimi_rows(every_home)
+        assert rows == []
+        assert str(matcher) not in text
+
+    def test_absent_matcher_is_still_match_all(self, tmp_path, every_home):
+        """The validator must not confuse "omitted" with "malformed"."""
+        rule = _rule("", "always", timeout=2)
+        del rule["matcher"]
+        _canonical(tmp_path, {"SessionStart": [rule]})
+
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        commands = _written_commands(every_home, "SessionStart", "SessionStart", "SessionStart")
+        for name in ("claude_settings", "codex_settings", "gemini_settings", "kimi_settings"):
+            assert results[name].status == "ok", (name, results[name].reason)
+            assert not results[name].warnings, (name, results[name].warnings)
+            assert commands[name] == ["always"], (name, commands[name])
+
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    def test_owned_target_rule_with_bad_matcher_is_pruned_with_warning(
+        self, tmp_path, every_home, matcher
+    ):
+        """The merge's in-place pass keys a dict by the matcher of every
+        ownership-marked rule it finds in the target — an unhashable one raised
+        ``TypeError`` before it could ever be compared. The marker is
+        authoritative (ADR-0019): pre-validation releases stamped and wrote
+        such rules themselves (#1983), so the rule is pruned with a warning —
+        keeping it would strand it beside its corrected replacement forever.
+        """
+        owned_bad = {
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "target-owned",
+                    "statusMessage": "memtomem · PreToolUse",
+                }
+            ],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [owned_bad]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "good", timeout=2)]})
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+        assert any("memtomem-managed hook rule" in w for w in r.warnings), r.warnings
+
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        assert owned_bad not in rules, rules
+        assert [rule.get("matcher") for rule in rules] == ["Bash"], rules
+
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    def test_user_target_rule_with_bad_matcher_is_kept_verbatim(
+        self, tmp_path, every_home, matcher
+    ):
+        """Only ownership-marked rules are memtomem's to prune. A *user* rule
+        with a malformed matcher is the user's content — kept verbatim and in
+        position, exactly like every other user rule.
+        """
+        user_bad = {
+            "matcher": matcher,
+            "hooks": [{"type": "command", "command": "user-owned"}],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [user_bad]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "good", timeout=2)]})
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        assert user_bad in rules, rules
+        assert any(rule.get("matcher") == "Bash" for rule in rules), rules
+
+    def test_upgrade_from_pre_validation_write_leaves_no_duplicate(self, tmp_path, every_home):
+        """The upgrade path that motivated pruning (#1986 review): a release
+        without the canonical-shape validator stamped ``["Bash"]`` into the
+        Claude target before Gemini aborted the sync. After the user corrects
+        the canonical to ``"Bash"``, one sync must leave exactly the corrected
+        rule — not the broken one with the fixed one appended beside it.
+        """
+        bad = _rule("Bash", "memtomem-hook", timeout=2)
+        bad["matcher"] = ["Bash"]
+        _canonical(tmp_path, {"PreToolUse": [bad]})
+        target = every_home / ".claude" / "settings.json"
+        # What the old fast path wrote: the canonical rule, marker-stamped,
+        # malformed matcher intact.
+        stamped = _stamp_status_markers({"hooks": {"PreToolUse": [bad]}})["hooks"]
+        target.write_text(json.dumps({"hooks": stamped}) + "\n", encoding="utf-8")
+
+        good = _rule("Bash", "memtomem-hook", timeout=2)
+        _canonical(tmp_path, {"PreToolUse": [good]})
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+        assert any("memtomem-managed hook rule" in w for w in r.warnings), r.warnings
+
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        assert [rule.get("matcher") for rule in rules] == ["Bash"], rules
+
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    @pytest.mark.parametrize(
+        "canonical_hooks",
+        [{}, {"Stop": [_rule("", "elsewhere", timeout=2)]}],
+        ids=["canonical-empty", "other-event"],
+    )
+    def test_stale_event_sweep_prunes_it_too(self, tmp_path, every_home, matcher, canonical_hooks):
+        """The same rule must not survive or vanish on where the canonical looks.
+
+        Rules under an event the canonical no longer emits are swept by a
+        second, separate pass. It applies the same rule as the in-place pass —
+        an owned rule with a malformed matcher is pruned, with the same
+        warning — so the outcome cannot depend on whether the canonical still
+        names the event (#1983 review).
+        """
+        owned_bad = {
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "target-owned",
+                    "statusMessage": "memtomem · PreToolUse",
+                }
+            ],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [owned_bad]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, canonical_hooks)
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+        assert any("memtomem-managed hook rule" in w for w in r.warnings), r.warnings
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert "PreToolUse" not in written.get("hooks", {}), written
+
+    def test_stale_event_sweep_still_prunes_a_well_formed_owned_rule(self, tmp_path, every_home):
+        """The guard must not turn the sweep off: an owned rule memtomem really
+        did write is still pruned once the canonical stops emitting its event.
+        """
+        owned_ok = {
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "stale",
+                    "statusMessage": "memtomem · PreToolUse",
+                }
+            ],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [owned_ok]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, {})
+
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        assert "PreToolUse" not in written.get("hooks", {}), written
+
+    def test_diff_reports_the_same_drop(self, tmp_path, every_home):
+        """``diff_settings`` shares the merge, so the dry run must not crash
+        either — it is what the Web UI and ``mm context diff`` call."""
+        bad = _rule("", "bad", timeout=2)
+        bad["matcher"] = ["Bash"]
+        _canonical(tmp_path, {"PreToolUse": [bad, _rule("Bash", "good", timeout=2)]})
+
+        results = diff_settings(tmp_path, scope="user")
+        for name in ("claude_settings", "codex_settings", "gemini_settings", "kimi_settings"):
+            r = results[name]
+            assert r.status != "error", (name, r.reason)
+            assert any("non-string matcher" in w for w in r.warnings), (name, r.warnings)
