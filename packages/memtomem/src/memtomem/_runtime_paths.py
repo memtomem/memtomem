@@ -52,9 +52,11 @@ Security posture for the runtime directory itself:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shlex
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -258,12 +260,58 @@ def ensure_runtime_dir() -> Path:
     return target
 
 
-def server_pid_path() -> Path:
+def store_pid_digest(db_path: Path | str) -> str | None:
+    """Derive the per-store pid-file digest from a SQLite path (#1990).
+
+    This is a **pre-open coordination key**, not authoritative store
+    identity: it hashes the normalized path *text* (expanduser + non-strict
+    ``resolve()`` + ``normcase``, force-lowered on macOS like
+    ``context/projects.py:_normalize_for_scope_id``) so it exists before
+    the DB file does — which is exactly when a fresh server must name its
+    pid file. That is why it deliberately differs from
+    ``_instance_registry.store_digest_for`` (inode identity, undefined
+    pre-creation). Known limits, all fail-safe: hard links to one DB get
+    distinct digests (missed contention warning; destructive gates are
+    still covered by the DB-lock probe and the instance registry), and
+    case folding on a case-sensitive macOS volume can collapse distinct
+    files (a spurious same-store warning, never a skipped refusal).
+
+    Returns ``None`` when no per-store name can be derived — non-file
+    targets (``:memory:``, ``file:`` URIs) or a normalization failure
+    (symlink loop, unreadable ancestor). Callers must degrade to the
+    store-agnostic behavior: the server falls back to the transitional
+    bare ``server.pid``; liveness probes fall back to scanning every
+    ``server-*.pid`` (fail-closed).
+    """
+    raw = str(db_path)
+    if raw == ":memory:" or raw.startswith("file:"):
+        return None
+    try:
+        s = os.path.normcase(str(Path(raw).expanduser().resolve()))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if sys.platform == "darwin":
+        s = s.lower()
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+def server_pid_path(db_path: Path | str | None = None) -> Path:
     """Return the path to ``memtomem-server``'s pid / flock file.
+
+    With *db_path*, the name is scoped to that store —
+    ``server-<digest16>.pid`` via :func:`store_pid_digest` — so servers
+    on different stores no longer contend for one per-user lock (#1990).
+    Without it (or when no digest can be derived), the transitional bare
+    ``server.pid`` is returned: the name servers started by older
+    versions still hold, which liveness probes keep checking fail-closed.
 
     Does not create the parent directory — callers that intend to open the
     path for write should go through :func:`ensure_runtime_dir` first.
     """
+    if db_path is not None:
+        digest = store_pid_digest(db_path)
+        if digest is not None:
+            return runtime_dir() / f"server-{digest}.pid"
     return runtime_dir() / "server.pid"
 
 

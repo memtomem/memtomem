@@ -127,6 +127,24 @@ def test_install_sigterm_handler_is_noop_on_windows(
 # ── integration ──────────────────────────────────────────────────────
 
 
+def _pin_store_pid_name(env: dict[str, str], home: Path) -> str:
+    """Pin the subprocess's store path and return the expected pid filename.
+
+    #1990 made the pid file name store-scoped (``server-<digest>.pid``).
+    The digest is derived from the resolved SQLite path, so the tests must
+    (a) pin ``MEMTOMEM_STORAGE__SQLITE_PATH`` explicitly — the parent's
+    ambient value or the isolated ``HOME`` default would otherwise decide
+    the name — and (b) compute the expectation through the production
+    helper so macOS ``/tmp`` → ``/private/tmp`` resolution matches what
+    the server computes.
+    """
+    from memtomem._runtime_paths import store_pid_digest
+
+    db = home / ".memtomem" / "memtomem.db"
+    env["MEMTOMEM_STORAGE__SQLITE_PATH"] = str(db)
+    return f"server-{store_pid_digest(db)}.pid"
+
+
 def _spawn_server(env: dict[str, str]) -> subprocess.Popen:
     """Start ``memtomem-server`` as a subprocess that keeps its stdin
     open — without that, the MCP stdio loop sees EOF immediately and
@@ -192,12 +210,12 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
-    pid_file = xdg / "memtomem" / "server.pid"
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
+    pid_file = xdg / "memtomem" / _pin_store_pid_name(env, home)
 
     proc = _spawn_server(env)
     try:
@@ -255,7 +273,6 @@ def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
     tmp_tmp.mkdir()
     uid = os.geteuid() if hasattr(os, "geteuid") else 0
     expected_dir = tmp_tmp / f"memtomem-{uid}"
-    expected_pid = expected_dir / "server.pid"
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -264,6 +281,7 @@ def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
     env["TMP"] = str(tmp_tmp)
     env["TEMP"] = str(tmp_tmp)
     env.pop("XDG_RUNTIME_DIR", None)
+    expected_pid = expected_dir / _pin_store_pid_name(env, home)
 
     proc = _spawn_server(env)
     try:
@@ -302,12 +320,12 @@ def test_sigterm_unlinks_legacy_pid_file_end_to_end(tmp_path: Path) -> None:
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)
-    xdg_pid = xdg / "memtomem" / "server.pid"
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
+    xdg_pid = xdg / "memtomem" / _pin_store_pid_name(env, home)
 
     proc = _spawn_server(env)
     try:
@@ -367,12 +385,12 @@ def test_server_warns_but_proceeds_when_legacy_lock_held_exclusively(
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)
-    xdg_pid = xdg / "memtomem" / "server.pid"
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
+    xdg_pid = xdg / "memtomem" / _pin_store_pid_name(env, home)
 
     holder = open(legacy_pid, "a+b")  # held for test scope
     try:
@@ -418,21 +436,21 @@ def test_two_post_412_servers_coexist_with_shared_lock(tmp_path: Path) -> None:
     xdg1 = tmp_path / "xdg1"
     xdg1.mkdir()
     os.chmod(xdg1, 0o700)
-    pid1 = xdg1 / "memtomem" / "server.pid"
 
     xdg2 = tmp_path / "xdg2"
     xdg2.mkdir()
     os.chmod(xdg2, 0o700)
-    pid2 = xdg2 / "memtomem" / "server.pid"
 
     env1 = os.environ.copy()
     env1["HOME"] = str(home)
     env1["USERPROFILE"] = str(home)
     env1["XDG_RUNTIME_DIR"] = str(xdg1)
+    pid1 = xdg1 / "memtomem" / _pin_store_pid_name(env1, home)
     env2 = os.environ.copy()
     env2["HOME"] = str(home)
     env2["USERPROFILE"] = str(home)
     env2["XDG_RUNTIME_DIR"] = str(xdg2)
+    pid2 = xdg2 / "memtomem" / _pin_store_pid_name(env2, home)
 
     proc1 = _spawn_server(env1)
     proc2 = None
@@ -445,6 +463,73 @@ def test_two_post_412_servers_coexist_with_shared_lock(tmp_path: Path) -> None:
         assert proc2.poll() is None, (
             "second instance must coexist with the first (#444); it used to "
             "exit(1) on the legacy LOCK_EX guard"
+        )
+    finally:
+        _cleanup_proc(proc1)
+        if proc2 is not None:
+            _cleanup_proc(proc2)
+
+
+def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
+    """#1990 symptom 1: servers on *different* stores must not share a pid
+    file, so the second one must neither warn about another instance nor
+    contend for the first one's lock.
+
+    Both subprocesses share one ``XDG_RUNTIME_DIR`` (same user) but point
+    ``MEMTOMEM_STORAGE__SQLITE_PATH`` at different databases. Expected:
+    two distinct ``server-*.pid`` files, both servers alive, and the
+    second server's stderr free of the same-store contention warning.
+
+    No shared ``HOME`` ``.memtomem`` dir is created, so the legacy
+    interlock (POSIX-only ``LOCK_SH`` on ``~/.memtomem/.server.pid``)
+    stays out of the picture on every platform.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    if os.name != "nt":
+        os.chmod(xdg, 0o700)
+
+    from memtomem._runtime_paths import store_pid_digest
+
+    db1 = tmp_path / "store-a" / "memtomem.db"
+    db2 = tmp_path / "store-b" / "memtomem.db"
+
+    def _env_for(db: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["XDG_RUNTIME_DIR"] = str(xdg)
+        env["MEMTOMEM_STORAGE__SQLITE_PATH"] = str(db)
+        return env
+
+    pid1 = xdg / "memtomem" / f"server-{store_pid_digest(db1)}.pid"
+    pid2 = xdg / "memtomem" / f"server-{store_pid_digest(db2)}.pid"
+    assert pid1 != pid2, "different stores must derive different pid file names"
+
+    proc1 = _spawn_server(_env_for(db1))
+    proc2 = None
+    try:
+        _wait_for_pid_file(proc1, pid1)
+        proc2 = _spawn_server(_env_for(db2))
+        _wait_for_pid_file(proc2, pid2)
+
+        assert proc1.poll() is None, "first server must stay alive"
+        assert proc2.poll() is None, "second server must stay alive"
+
+        # The contention warning logs synchronously during startup, before
+        # the pid file is written on the winner branch — by the time pid2
+        # exists, a spurious warning would already be in stderr, so a
+        # plain kill (cross-platform, no SIGTERM dependency) loses nothing.
+        proc2.kill()
+        proc2.wait(timeout=10)
+        stderr2 = proc2.stderr.read().decode(errors="replace") if proc2.stderr else ""
+        assert "already writing to this store" not in stderr2, (
+            f"cross-store server start must not log the contention warning; got:\n{stderr2}"
+        )
+        assert "Another instance is already running" not in stderr2, (
+            f"old-form contention warning must not appear either; got:\n{stderr2}"
         )
     finally:
         _cleanup_proc(proc1)
@@ -529,13 +614,16 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
     sub.mkdir()
     if os.name != "nt":
         os.chmod(sub, 0o700)
-    pid_file = sub / "server.pid"
-    pid_file.write_text("12345")
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
+    # Wide terminal so the rich log handler doesn't hard-wrap the
+    # contention warning asserted below (wrap points shift with width).
+    env["COLUMNS"] = "300"
+    pid_file = sub / _pin_store_pid_name(env, home)
+    pid_file.write_text("12345")
 
     import portalocker
 
@@ -568,6 +656,20 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
                 "open(..., 'a+') + post-lock truncate. "
                 f"Got: {content!r}"
             )
+            # Positive pin for the same-store contention warning (#1990):
+            # the cross-store test asserts the warning's *absence*, so
+            # without this assertion the warning could be removed outright
+            # and every test would stay green.
+            proc.kill()
+            proc.wait(timeout=10)
+            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+            # The rich log handler hard-wraps the message and interleaves
+            # its location column, so a single-substring match is brittle;
+            # check whitespace-collapsed fragments instead.
+            collapsed = " ".join(stderr.split())
+            assert "Another memtomem-server is already" in collapsed and (
+                "writing to this store" in collapsed
+            ), f"same-store contention must log the warning; stderr:\n{stderr}"
         finally:
             _cleanup_proc(proc)
     finally:
@@ -643,7 +745,9 @@ def test_server_main_acquires_portalocker_pid_lock(
     monkeypatch.setenv("TMP", str(xdg))
     monkeypatch.setenv("TEMP", str(xdg))
     monkeypatch.setattr(runtime_paths, "ensure_runtime_dir", lambda: runtime)
-    monkeypatch.setattr(runtime_paths, "server_pid_path", lambda: runtime / "server.pid")
+    monkeypatch.setattr(
+        runtime_paths, "server_pid_path", lambda db_path=None: runtime / "server.pid"
+    )
     monkeypatch.setattr(
         atexit,
         "register",
@@ -713,3 +817,74 @@ def test_server_main_acquires_portalocker_pid_lock(
                     fn(*args, **kwargs)
                 except Exception:
                     pass
+
+
+# ── _resolve_store_db_path (#1990) ───────────────────────────────────
+
+
+class TestResolveStoreDbPath:
+    """Pin the config layering the pid-file digest depends on."""
+
+    def test_env_var_decides_the_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.server import _resolve_store_db_path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("MEMTOMEM_STORAGE__SQLITE_PATH", str(tmp_path / "env.db"))
+
+        assert _resolve_store_db_path() == tmp_path / "env.db"
+
+    def test_dotenv_runs_before_the_config_is_built(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dotenv-provided SQLite override must reach the pid digest —
+        the lifespan loads dotenv before building its config, so pid
+        naming has to see the same value or the pid file would name one
+        store while the server opens another. The seam is stubbed (rather
+        than a real ``.env`` file) because ``load_dotenv()`` discovers the
+        file relative to the *calling module*, not the test cwd."""
+        from memtomem.server import lifespan
+        from memtomem.server import _resolve_store_db_path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.delenv("MEMTOMEM_STORAGE__SQLITE_PATH", raising=False)
+
+        def _fake_dotenv() -> None:
+            os.environ["MEMTOMEM_STORAGE__SQLITE_PATH"] = str(tmp_path / "dotenv.db")
+
+        monkeypatch.setattr(lifespan, "_load_dotenv", _fake_dotenv)
+
+        try:
+            assert _resolve_store_db_path() == tmp_path / "dotenv.db"
+        finally:
+            # The stub writes through to os.environ like load_dotenv does;
+            # monkeypatch only tracks its own mutations, so clean up.
+            os.environ.pop("MEMTOMEM_STORAGE__SQLITE_PATH", None)
+
+    def test_returns_none_when_config_loading_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Any config failure degrades to ``None`` → the caller falls back
+        to the transitional bare ``server.pid`` instead of crashing the
+        server before the lock dance."""
+        import memtomem.config as config_mod
+        from memtomem.server import _resolve_store_db_path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+
+        def _boom(cfg, *, migrate: bool = True) -> None:
+            raise OSError("config layer unavailable")
+
+        monkeypatch.setattr(config_mod, "load_config_overrides", _boom)
+
+        assert _resolve_store_db_path() is None

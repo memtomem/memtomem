@@ -123,11 +123,16 @@ This moves aside:
 | `.server.pid` | Legacy MCP server advisory lock (pre-#412 installs only) |
 
 The running server's pid/flock file lives **outside** `~/.memtomem/` under
-`$XDG_RUNTIME_DIR/memtomem/server.pid` (Linux w/ systemd) or
-`$TMPDIR/memtomem-$UID/server.pid` (macOS, BSD). `mm uninstall` inventories its
-owned sentinel files; retained registry and lifecycle-lock sidecars are
-volatile and self-clean. Do not use a wildcard runtime-directory deletion:
-it can erase active liveness evidence or another user's state.
+`$XDG_RUNTIME_DIR/memtomem/server-<digest>.pid` (Linux w/ systemd) or
+`$TMPDIR/memtomem-$UID/server-<digest>.pid` (macOS, BSD), where `<digest>` is
+derived from the resolved SQLite path so servers on different stores don't
+share one lock (#1990). Servers started by older versions still hold the bare
+`server.pid` name; `mm uninstall` inventories only the pid files attributable
+to the store it is deleting (plus that transitional bare name) and leaves
+other stores' `server-*.pid` files alone. Retained registry and
+lifecycle-lock sidecars are volatile and self-clean. Do not use a wildcard
+runtime-directory deletion: it can erase active liveness evidence or another
+user's state.
 
 ## 4. Clean up project-scoped files (optional)
 
