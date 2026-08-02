@@ -383,6 +383,53 @@ class TestStorageExtended:
         results = await storage.dense_search([0.2] * 768, top_k=5)
         assert len(results) >= 1
 
+    async def test_reset_then_reembed_existing_chunk_restores_dense_coverage(self, components):
+        """A pre-existing chunk re-embedded after a reset must get a vector row.
+
+        This is the ``mm embedding-reset --mode apply-current`` →
+        ``mm index --force`` recovery path: the chunk row survives the reset
+        (so ``upsert_chunks`` takes its UPDATE branch) while its vector row
+        does not. The sibling test above only re-inserts a *new* chunk, which
+        takes the INSERT branch and cannot catch this.
+        """
+        storage = components.storage
+        chunk = make_chunk(content="survives the reset", embedding=_varied_embedding(0.1))
+        await storage.upsert_chunks([chunk])
+
+        await storage.reset_embedding_meta(
+            dimension=768, provider="onnx", model="bge-small-en-v1.5"
+        )
+        assert (await storage.get_dense_coverage())["with_dense"] == 0
+
+        # Same chunk id — what a forced re-index re-upserts.
+        reembedded = dataclasses.replace(chunk, embedding=[0.2] * 768)
+        await storage.upsert_chunks([reembedded])
+
+        cov = await storage.get_dense_coverage()
+        assert cov["total"] == 1
+        assert cov["with_dense"] == 1
+        results = await storage.dense_search([0.2] * 768, top_k=5)
+        assert [r.chunk.content for r in results] == ["survives the reset"]
+
+    async def test_reembed_existing_chunk_overwrites_vector_in_place(self, components):
+        """Re-upserting a chunk whose vector row exists must replace, not duplicate.
+
+        Pins the DELETE half of the reset-safe DELETE+INSERT: without it the
+        INSERT would collide, and a stale vector would keep answering queries.
+        """
+        storage = components.storage
+        chunk = make_chunk(content="re-embedded in place", embedding=_varied_embedding(0.1))
+        await storage.upsert_chunks([chunk])
+
+        new_embedding = _distant_embedding()
+        await storage.upsert_chunks([dataclasses.replace(chunk, embedding=new_embedding)])
+
+        cov = await storage.get_dense_coverage()
+        assert cov["total"] == 1
+        assert cov["with_dense"] == 1
+        results = await storage.dense_search(new_embedding, top_k=5)
+        assert [r.chunk.content for r in results] == ["re-embedded in place"]
+
     async def test_clear_embedding_mismatch_zeroes_both_flags(self, components):
         """clear_embedding_mismatch() must reset both private tuples to None."""
         storage = components.storage
