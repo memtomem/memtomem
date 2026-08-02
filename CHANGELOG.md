@@ -13,7 +13,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `default`, where a plain `mm search` returned it — the announced isolation
   did not exist. CLI writes now inherit the active session's bound agent, the
   way `mem_add` already did on the MCP surface, and `mm add` reports the
-  namespace it used (also as a `namespace` key in the `--json` ack). Read the
+  namespace it pinned (also as a `namespace` key in the `--json` ack, `null`
+  when nothing was pinned and the engine's rules chose). Read the
   notes back with `mm search -n agent-runtime:planner`, or pin a single write
   elsewhere with the new `mm add --namespace/-n`. Scope of the change: only
   `mm add` inherits the session — `mm index` and the importers are unchanged —

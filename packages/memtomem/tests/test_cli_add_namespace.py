@@ -229,41 +229,52 @@ class TestStaleSessionState:
 
 
 class TestResolutionHappensUnderTheLock:
-    """``_mem_add_core`` resolves its namespace inside the file lock so the
-    write is attributed to whichever session is live at write time, not at
-    command-parse time. ``_add`` must not drift above the lock: a write
-    that waited out a long lock hold would otherwise be filed under a
-    session that ended while it waited.
+    """``_mem_add_core`` resolves its namespace inside the file lock, so the
+    write is attributed to whichever session is live when it reaches the
+    file — not when the command was parsed. ``_add`` must not drift above
+    the lock: a write that waited out a long lock hold would otherwise be
+    filed under a session that ended while it waited.
+
+    Pinned by re-acquisition rather than by timing. The resolver tries to
+    take the same sidecar it is supposed to be running inside; portalocker
+    contends between fds within one process, so that attempt must time out.
+    Hoisting resolution above the lock makes it succeed instead, and there
+    is no sleep to tune or to flake on.
     """
 
     @pytest.mark.asyncio
-    async def test_session_switched_while_waiting_for_the_lock_wins(
-        self, monkeypatch, tmp_path, home
-    ):
-        import asyncio
-
+    async def test_resolver_runs_while_the_target_lock_is_held(self, monkeypatch, tmp_path, home):
         from memtomem.cli.memory import _add
         from memtomem.context._atomic import _lock_path_for, async_file_lock
-
-        comp = _components(tmp_path, _row("planner"))
-        _patch_components(monkeypatch, comp)
-        _write_current_session(_SESSION_ID)
 
         base = tmp_path / "memories"
         base.mkdir(parents=True, exist_ok=True)
         target = base / "locked.md"
 
-        async with async_file_lock(_lock_path_for(target), timeout=5):
-            task = asyncio.create_task(_add(_CLEAN, None, [], "locked.md"))
-            # Let the write reach the lock and block there, then retarget
-            # the session the way a concurrent `mm session start` would.
-            await asyncio.sleep(0.1)
-            assert not task.done()
-            comp.storage.get_session.return_value = _row("coder")
+        observed: dict[str, object] = {}
+        rows = {_SESSION_ID: _row("planner")}
 
-        await task
+        async def get_session(session_id: str) -> dict | None:
+            observed["asked_for"] = session_id
+            try:
+                async with async_file_lock(_lock_path_for(target), timeout=0.2):
+                    observed["lock_held"] = False
+            except TimeoutError:
+                observed["lock_held"] = True
+            return rows.get(session_id)
 
-        assert _indexed_namespace(comp) == "agent-runtime:coder"
+        comp = _components(tmp_path)
+        comp.storage.get_session = get_session
+        _patch_components(monkeypatch, comp)
+        _write_current_session(_SESSION_ID)
+
+        await _add(_CLEAN, None, [], "locked.md")
+
+        assert observed["lock_held"] is True
+        # …and the row it read is the one the marker names, not a session
+        # captured earlier by some other route.
+        assert observed["asked_for"] == _SESSION_ID
+        assert _indexed_namespace(comp) == "agent-runtime:planner"
 
 
 class TestNamespaceFlag:
