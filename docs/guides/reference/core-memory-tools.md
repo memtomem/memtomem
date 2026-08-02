@@ -97,11 +97,15 @@ the blocked paths when the count is nonzero. Other files in the same run are
 unaffected.
 
 `mm index --force-unsafe` bypasses the gate for a direct CLI index run
-(audit-logged). This flag is **CLI-only** — the `mem_index` MCP tool has no
-`force_unsafe` parameter, so an agent calling `mem_index` cannot bypass the
-gate; a false positive needs a human running `mm index --force-unsafe` from
-a terminal. The bypass is hard-refused for files that resolve to the
-git-tracked `project_shared` scope regardless of caller.
+(audit-logged), and the Web UI offers the same bypass as an explicit
+opt-in: a blocked run shows a toast pointing at the "Index without privacy
+gate" checkbox, and re-running with it enabled indexes the file. Both are
+explicit request controls on human-facing surfaces (note the checkbox
+stays set until you untick it). The one hard guarantee is on the agent
+side: the `mem_index` MCP tool has no `force_unsafe` parameter, so an
+agent calling `mem_index` cannot bypass the gate. The bypass is
+hard-refused for files that resolve to the git-tracked `project_shared`
+scope regardless of caller.
 
 See [ADR-0006](../../adr/0006-web-ui-folder-upload-redaction.md) for the
 full trust-boundary design.
@@ -378,18 +382,23 @@ You can also pass plain text as `content` — it will be placed in the template 
 #### How `mem_add` stores entries
 
 - Without `file`: entries are appended to a date-stamped file (`~/.memtomem/memories/YYYY-MM-DD.md`).
-- **The date is UTC**, as is the `created_at` timestamp on the entry and the
+- **The date is UTC**, as is the `> created:` timestamp on the entry and the
   time column in `mm recall`. East of UTC this means an early-morning note
-  lands in yesterday's file — at 08:56 KST you get `2026-08-01.md`. Pass
-  `file` explicitly if you need a particular local grouping.
+  lands in the previous day's file — before 09:00 KST (UTC+9) the UTC date
+  has not rolled over yet. Pass `file` explicitly if you need a particular
+  local grouping.
 - Each entry gets its own `## ` heading and is indexed as a separate chunk.
 - Tags are applied only to the new entry, not to existing entries in the same file.
 - The file is re-indexed after each add, but unchanged chunks are skipped (incremental indexing).
 - A `force_unsafe` write is a one-time bypass, but the file it leaves behind
-  is permanent. Every later run that re-indexes that memory directory scans
-  the content again and blocks on it again, asking for `--force-unsafe`
-  each time. If the match was a false positive you will keep re-forcing it;
-  if it was a real secret, rotate it and edit the file.
+  is permanent. Later CRUD writes (`mm add`, `mem_add`, `mem_edit`) do not
+  rescan it, but every automated re-index path — the `mem_index` MCP tool,
+  the file watcher, the debounce queue — scans the content again, blocks on
+  it again, and offers no bypass; re-forcing it takes an explicit opt-in on
+  a human-facing surface, either `mm index --force-unsafe` or the Web UI's
+  "Index without privacy gate" checkbox. If the match was a false positive
+  you will keep re-forcing it; if it was a real secret, rotate it and edit
+  the file.
 
 ### `mem_batch_add` — Add multiple notes
 
