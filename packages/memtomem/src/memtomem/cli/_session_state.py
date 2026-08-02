@@ -73,14 +73,25 @@ async def resolve_session_write_namespace(storage: Any) -> str | None:
     (#1875).
 
     Degrades to ``None`` — never raises — for every "no usable session"
-    shape: no state file, a row that no longer exists, a row already
-    ended (``mm session end`` clears the state file, but
-    ``--auto-end-stale`` ends rows without touching it, so the file can
-    outlive its session), or an ``agent_id`` corrupted out of band. This
-    is a read path, so it does not clean up a stale state file either;
-    mutating it belongs to ``mm session start`` / ``mm session end``.
+    shape: no state file, a state file that cannot be read as text (it
+    has been replaced by a directory, or holds invalid UTF-8), a row that
+    no longer exists, a row already ended (``mm session end`` clears the
+    state file, but ``--auto-end-stale`` ends rows without touching it,
+    so the file can outlive its session), or an ``agent_id`` corrupted
+    out of band. Losing the agent scope is the right cost for unusable
+    session state; failing the write is not, and this is the only caller
+    of ``_read_current_session`` on a write path. This is also a read
+    path, so it does not clean up a stale state file: mutating it belongs
+    to ``mm session start`` / ``mm session end``.
     """
-    session_id = _read_current_session()
+    try:
+        session_id = _read_current_session()
+    except (OSError, UnicodeError):
+        logger.warning(
+            "Could not read %s; writing without a session-derived namespace.",
+            _state_file(),
+        )
+        return None
     if not session_id:
         return None
     row = await storage.get_session(session_id)
@@ -90,7 +101,7 @@ async def resolve_session_write_namespace(storage: Any) -> str | None:
         bound_agent_id = normalize_bound_agent_id(row.get("agent_id"))
     except InvalidNameError:
         logger.warning(
-            "Session %s has an unusable agent_id; writing to the default namespace.",
+            "Session %s has an unusable agent_id; writing without a session-derived namespace.",
             session_id,
         )
         return None

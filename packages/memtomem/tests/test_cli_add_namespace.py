@@ -202,6 +202,69 @@ class TestStaleSessionState:
         assert result.exit_code == 0, result.output
         assert _indexed_namespace(comp) is None
 
+    def test_unreadable_state_file_degrades_instead_of_failing(self, monkeypatch, tmp_path, home):
+        # Reading the marker is now on a *write* path, so an unreadable
+        # marker must cost the agent scope, not the note. A directory in
+        # its place raises IsADirectoryError from read_text.
+        comp = _components(tmp_path, _row("planner"))
+        _patch_components(monkeypatch, comp)
+        (home / ".memtomem").mkdir()
+        (home / ".memtomem" / ".current_session").mkdir()
+
+        result = CliRunner().invoke(add_cmd, [_CLEAN])
+
+        assert result.exit_code == 0, result.output
+        assert _indexed_namespace(comp) is None
+
+    def test_non_utf8_state_file_degrades_instead_of_failing(self, monkeypatch, tmp_path, home):
+        comp = _components(tmp_path, _row("planner"))
+        _patch_components(monkeypatch, comp)
+        (home / ".memtomem").mkdir()
+        (home / ".memtomem" / ".current_session").write_bytes(b"\xff\xfe\x00garbage")
+
+        result = CliRunner().invoke(add_cmd, [_CLEAN])
+
+        assert result.exit_code == 0, result.output
+        assert _indexed_namespace(comp) is None
+
+
+class TestResolutionHappensUnderTheLock:
+    """``_mem_add_core`` resolves its namespace inside the file lock so the
+    write is attributed to whichever session is live at write time, not at
+    command-parse time. ``_add`` must not drift above the lock: a write
+    that waited out a long lock hold would otherwise be filed under a
+    session that ended while it waited.
+    """
+
+    @pytest.mark.asyncio
+    async def test_session_switched_while_waiting_for_the_lock_wins(
+        self, monkeypatch, tmp_path, home
+    ):
+        import asyncio
+
+        from memtomem.cli.memory import _add
+        from memtomem.context._atomic import _lock_path_for, async_file_lock
+
+        comp = _components(tmp_path, _row("planner"))
+        _patch_components(monkeypatch, comp)
+        _write_current_session(_SESSION_ID)
+
+        base = tmp_path / "memories"
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / "locked.md"
+
+        async with async_file_lock(_lock_path_for(target), timeout=5):
+            task = asyncio.create_task(_add(_CLEAN, None, [], "locked.md"))
+            # Let the write reach the lock and block there, then retarget
+            # the session the way a concurrent `mm session start` would.
+            await asyncio.sleep(0.1)
+            assert not task.done()
+            comp.storage.get_session.return_value = _row("coder")
+
+        await task
+
+        assert _indexed_namespace(comp) == "agent-runtime:coder"
+
 
 class TestNamespaceFlag:
     def test_flag_overrides_active_session(self, monkeypatch, tmp_path, home):
