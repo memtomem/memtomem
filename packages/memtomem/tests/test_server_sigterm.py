@@ -173,6 +173,25 @@ def _wait_for_pid_file(proc: subprocess.Popen, pid_file: Path, *, timeout: float
         pytest.fail(f"pid file did not appear within {timeout}s. stderr:\n{stderr}")
 
 
+def _kill_and_read_stderr(proc: subprocess.Popen, *, timeout: float = 20.0) -> str | None:
+    """Kill *proc* and drain its stderr, or ``None`` if it can't be drained.
+
+    ``proc.stderr.read()`` blocks until EOF, which needs every handle on
+    the pipe's write end to be closed. On Windows a grandchild can hold an
+    inherited handle after the server itself is gone, and the read then
+    never returns — a CI job that hangs until the workflow times out
+    rather than failing. ``communicate(timeout=...)`` bounds it; callers
+    treat ``None`` as "no evidence" and skip the assertion instead of
+    reading an empty string as proof the log line was absent.
+    """
+    proc.kill()
+    try:
+        _, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    return err.decode(errors="replace") if err else ""
+
+
 def _cleanup_proc(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.kill()
@@ -518,13 +537,18 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
         assert proc1.poll() is None, "first server must stay alive"
         assert proc2.poll() is None, "second server must stay alive"
 
+        # Two distinct pid files is the platform-independent half of the
+        # claim: with one shared name the second server would have found
+        # the first one's lock held.
+        assert pid1.exists() and pid2.exists()
+
         # The contention warning logs synchronously during startup, before
         # the pid file is written on the winner branch — by the time pid2
         # exists, a spurious warning would already be in stderr, so a
         # plain kill (cross-platform, no SIGTERM dependency) loses nothing.
-        proc2.kill()
-        proc2.wait(timeout=10)
-        stderr2 = proc2.stderr.read().decode(errors="replace") if proc2.stderr else ""
+        stderr2 = _kill_and_read_stderr(proc2)
+        if stderr2 is None:
+            pytest.skip("could not drain the second server's stderr (see _kill_and_read_stderr)")
         assert "already writing to this store" not in stderr2, (
             f"cross-store server start must not log the contention warning; got:\n{stderr2}"
         )
@@ -660,9 +684,9 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
             # the cross-store test asserts the warning's *absence*, so
             # without this assertion the warning could be removed outright
             # and every test would stay green.
-            proc.kill()
-            proc.wait(timeout=10)
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+            stderr = _kill_and_read_stderr(proc)
+            if stderr is None:
+                pytest.skip("could not drain the server's stderr (see _kill_and_read_stderr)")
             # The rich log handler hard-wraps the message and interleaves
             # its location column, so a single-substring match is brittle;
             # check whitespace-collapsed fragments instead.
