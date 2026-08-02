@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm index --force` now restores vectors after `mm embedding-reset --mode
+  apply-current`.** Resetting the embedding meta drops and recreates
+  `chunks_vec` while the chunk rows survive, so the forced re-index wrote each
+  vector with an `UPDATE ... WHERE rowid=?` that matched nothing and reported
+  success anyway. The documented recovery from an embedding-model change left
+  the whole pre-existing corpus permanently BM25-only, visible only as a
+  partial `Dense vectors: N/M` line in `mm status`. Chunks indexed after the
+  reset were unaffected. Re-run `mm index --force <path>` to repair an
+  affected store.
+
 ### Changed
 
 - **Migrated to the `mcp` 2.0 SDK; the requirement is now `mcp[cli]>=2.0.0,<3`**
