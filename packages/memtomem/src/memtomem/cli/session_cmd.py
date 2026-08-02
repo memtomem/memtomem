@@ -156,16 +156,16 @@ def start(
     if one exists; with ``--auto-end-stale=<duration>``, first close any active
     sessions older than the duration. Both flags exist for SessionStart hooks;
     see ``docs/guides/reference/data-config-cli.md`` (Sessions) for worked
-    invocations and ``docs/guides/integrations/claude-code.md`` for the hook
-    recipe itself.
+    invocations. The bundled Claude Code hooks plugin deliberately does not
+    create episodic sessions (see ``docs/guides/integrations/claude-code.md``);
+    wire these flags into a hook yourself if you want that.
 
     ``--idempotent`` is safe for serial hook callers but not for concurrent
     ones. Two parallel ``mm session start --idempotent`` invocations can both
     observe a missing/stale state file and both create a session — the state
     file is written atomically per call but the read-then-create is not
-    locked. Claude Code's SessionStart fires once per session, so this is
-    fine for the documented hook recipe; multi-process callers must
-    serialize themselves.
+    locked. Claude Code's SessionStart fires once per session, so a hook
+    calling this is safe; multi-process callers must serialize themselves.
     """
     try:
         validate_agent_id(agent_id)
