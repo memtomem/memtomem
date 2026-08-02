@@ -16,7 +16,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   into its neighbour and the file's chunk ids were re-minted, invalidating an
   id already returned to the caller and any provenance link recorded against
   it. The auto-heading now carries a millisecond stamp plus a short random
-  suffix, so it is unique per entry rather than merely finer-grained. An
+  suffix (the full uuid4, since one batch shares a stamp and a truncated
+  suffix leaves a real birthday collision across 500 entries), so it is unique
+  per entry rather than merely finer-grained. An
   explicit `title` is still used verbatim, and the `> created:` line parsers
   and stored metadata read keeps its second resolution.
 

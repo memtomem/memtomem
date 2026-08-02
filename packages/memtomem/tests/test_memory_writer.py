@@ -101,6 +101,16 @@ class TestDefaultHeadingUniqueness:
         headings = self._headings("".join(blocks))
         assert len(set(headings)) == 50
 
+    def test_heading_suffix_keeps_the_whole_uuid(self):
+        """A truncated suffix is not enough. Every block in one `mem_batch_add`
+        shares a millisecond stamp, so the suffix is the only discriminator for
+        up to 500 entries — at 32 bits that is roughly a 3e-5 birthday collision
+        per batch, and one collision restores the merge this prevents."""
+        heading = format_entry_block("body").splitlines()[1]
+        suffix = heading.split()[-1]
+        assert len(suffix) == 32
+        int(suffix, 16)  # a full uuid4 hex, not a prefix of one
+
     def test_default_heading_still_carries_a_readable_timestamp(self, tmp_path):
         target = tmp_path / "notes.md"
 

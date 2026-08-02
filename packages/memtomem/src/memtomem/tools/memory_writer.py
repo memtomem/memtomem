@@ -31,11 +31,14 @@ def _default_heading(now: str) -> str:
     ``mem_batch_add``, which composes up to 500 blocks in a single loop.
 
     So the heading carries a millisecond stamp for human legibility plus a
-    short random suffix for uniqueness. Only the heading changes; the
-    ``> created:`` line keeps its second resolution, which is what the parsers
-    and the stored metadata read.
+    random suffix for uniqueness. The suffix is the FULL uuid4, not a truncated
+    prefix: a 500-entry batch shares one millisecond stamp, and against 32 bits
+    that is a ~3e-5 chance per batch of two entries colliding — which restores
+    the exact merge and id invalidation this is meant to remove. Only the
+    heading changes; the ``> created:`` line keeps its second resolution, which
+    is what the parsers and the stored metadata read.
     """
-    return f"## Entry {now} {uuid4().hex[:8]}"
+    return f"## Entry {now} {uuid4().hex}"
 
 
 def format_entry_block(
