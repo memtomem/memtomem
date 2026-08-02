@@ -16,6 +16,7 @@ whole chain works against a live ``memtomem-server`` subprocess.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -563,24 +564,22 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
         assert proc1.poll() is None, "first server must stay alive"
         assert proc2.poll() is None, "second server must stay alive"
 
-        # Two distinct pid files is the platform-independent half of the
-        # claim: with one shared name the second server would have found
-        # the first one's lock held.
+        # Two distinct pid files, both written: with one shared name the
+        # second server would have found the first one's lock held and
+        # taken the contention branch, which never writes a pid. That the
+        # warning itself stays silent across stores is pinned in-process
+        # by ``TestContentionWarningScope`` (a subprocess's stderr is not
+        # reliably capturable after teardown on Windows).
         assert pid1.exists() and pid2.exists()
-
-        # The contention warning logs synchronously during startup, before
-        # the pid file is written on the winner branch — by the time pid2
-        # exists, a spurious warning would already be in stderr, so a
-        # plain kill (cross-platform, no SIGTERM dependency) loses nothing.
-        stderr2 = _kill_and_read_stderr(proc2)
-        if stderr2 is None:
-            pytest.skip("could not drain the second server's stderr (see _kill_and_read_stderr)")
-        assert "already writing to this store" not in stderr2, (
-            f"cross-store server start must not log the contention warning; got:\n{stderr2}"
-        )
-        assert "Another instance is already running" not in stderr2, (
-            f"old-form contention warning must not appear either; got:\n{stderr2}"
-        )
+        if os.name != "nt":
+            # Windows ``LockFileEx`` blocks reads from other handles while
+            # the server holds its lock (#819), so the content check is
+            # POSIX-only; the two distinct files above are the
+            # cross-platform half.
+            assert pid2.read_text().strip() == str(proc2.pid), (
+                "the second server must own its own pid file, not fall "
+                "through to the first one's contention branch"
+            )
     finally:
         _cleanup_proc(proc1)
         if proc2 is not None:
@@ -718,20 +717,10 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
                 "open(..., 'a+') + post-lock truncate. "
                 f"Got: {content!r}"
             )
-            # Positive pin for the same-store contention warning (#1990):
-            # the cross-store test asserts the warning's *absence*, so
-            # without this assertion the warning could be removed outright
-            # and every test would stay green.
-            stderr = _kill_and_read_stderr(proc)
-            if stderr is None:
-                pytest.skip("could not drain the server's stderr (see _kill_and_read_stderr)")
-            # The rich log handler hard-wraps the message and interleaves
-            # its location column, so a single-substring match is brittle;
-            # check whitespace-collapsed fragments instead.
-            collapsed = " ".join(stderr.split())
-            assert "Another memtomem-server is already" in collapsed and (
-                "writing to this store" in collapsed
-            ), f"same-store contention must log the warning; stderr:\n{stderr}"
+            # The warning this contention emits is pinned in-process by
+            # ``TestContentionWarningScope`` — a killed child's stderr comes
+            # back empty on Windows, and the rich handler re-wraps the text,
+            # so ``caplog`` is the reliable place to assert a log line.
         finally:
             _cleanup_proc(proc)
     finally:
@@ -950,3 +939,112 @@ class TestResolveStoreDbPath:
         monkeypatch.setattr(config_mod, "load_config_overrides", _boom)
 
         assert _resolve_store_db_path() is None
+
+
+# ── contention warning scope (#1990), in-process ─────────────────────
+
+
+class TestContentionWarningScope:
+    """The startup contention warning must fire for a same-store holder and
+    stay silent for a foreign one.
+
+    Asserted in-process against ``caplog`` rather than a subprocess's
+    stderr: a killed child returns an empty stderr on Windows, and the
+    rich handler re-wraps the text, so substring checks on captured output
+    are unreliable in exactly the direction that matters (an empty capture
+    silently satisfies the "no warning" half).
+    """
+
+    _MSG = "Another memtomem-server is already"
+
+    def _run_main(self, tmp_path, monkeypatch, *, store: Path) -> None:
+        """Run ``main()`` with the pid dance isolated under ``tmp_path``."""
+        import atexit
+        import pathlib
+
+        import memtomem._runtime_paths as runtime_paths
+
+        from memtomem import server as server_mod
+
+        tmp_home = tmp_path / "home"
+        tmp_home.mkdir(exist_ok=True)
+        runtime = tmp_path / "runtime"
+        runtime.mkdir(exist_ok=True)
+        if os.name != "nt":
+            os.chmod(runtime, 0o700)
+
+        captured: list[tuple] = []
+        monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *a, **kw: None)
+        monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
+        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_home))
+        monkeypatch.setattr(runtime_paths, "ensure_runtime_dir", lambda: runtime)
+        monkeypatch.setattr(server_mod, "_resolve_store_db_path", lambda: store)
+        monkeypatch.setattr(
+            atexit, "register", lambda fn, *a, **kw: captured.append((fn, a, kw)) or fn
+        )
+
+        try:
+            server_mod.main([])
+        finally:
+            for fn, args, kwargs in reversed(captured):
+                try:
+                    fn(*args, **kwargs)
+                except Exception:
+                    pass
+
+    @contextlib.contextmanager
+    def _hold(self, pid_file: Path):
+        import portalocker
+
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text("12345", encoding="utf-8")
+        fp = open(pid_file, "rb+")
+        try:
+            portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            yield
+        finally:
+            try:
+                portalocker.unlock(fp)
+            except Exception:
+                pass
+            fp.close()
+
+    def test_same_store_holder_warns(self, tmp_path, monkeypatch, caplog) -> None:
+        from memtomem._runtime_paths import store_pid_digest
+
+        store = tmp_path / "store" / "memtomem.db"
+        held = tmp_path / "runtime" / f"server-{store_pid_digest(store)}.pid"
+
+        with self._hold(held), caplog.at_level("WARNING", logger="memtomem.server"):
+            self._run_main(tmp_path, monkeypatch, store=store)
+
+        assert any(self._MSG in r.getMessage() for r in caplog.records), (
+            f"same-store contention must warn; records={[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_foreign_store_holder_is_silent(self, tmp_path, monkeypatch, caplog) -> None:
+        """The foreign server's lock is held under *both* names it could
+        plausibly own: its own ``server-<digest>.pid`` and the bare
+        ``server.pid`` a store-blind build would have used. Without the
+        second holder, reverting the fix would put this server on the bare
+        name, find nothing held there, and stay silent — the test would
+        pass on exactly the code it exists to reject.
+        """
+        from memtomem._runtime_paths import store_pid_digest
+
+        store = tmp_path / "store" / "memtomem.db"
+        other = tmp_path / "other" / "memtomem.db"
+        held = tmp_path / "runtime" / f"server-{store_pid_digest(other)}.pid"
+        held_bare = tmp_path / "runtime" / "server.pid"
+
+        with (
+            self._hold(held),
+            self._hold(held_bare),
+            caplog.at_level("WARNING", logger="memtomem.server"),
+        ):
+            self._run_main(tmp_path, monkeypatch, store=store)
+
+        assert not any(self._MSG in r.getMessage() for r in caplog.records), (
+            "a live server on a different store must not trigger the "
+            f"contention warning; records={[r.getMessage() for r in caplog.records]}"
+        )
