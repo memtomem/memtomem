@@ -54,7 +54,7 @@ async def test_mcp_rename_routes_through_service_invalidates_cache(mcp_app, comp
     await components.storage.upsert_chunks([chunk])
     ctx = StubCtx(app)
 
-    out = await mem_tag_rename("old", "new", ctx=ctx)
+    out = await mem_tag_rename("old", "new", dry_run=False, ctx=ctx)
     assert "1 chunks" in out
 
     assert counter["calls"] == 1, "MCP rename did not trigger search-cache invalidation"
@@ -87,7 +87,7 @@ async def test_mcp_delete_routes_through_service(mcp_app, components):
     await components.storage.upsert_chunks([chunk])
     ctx = StubCtx(app)
 
-    out = await mem_tag_delete("doomed", ctx=ctx)
+    out = await mem_tag_delete("doomed", dry_run=False, ctx=ctx)
     assert "1 chunks" in out
     assert counter["calls"] == 1
     counts = dict(await components.storage.get_tag_counts())
@@ -117,7 +117,7 @@ async def test_mcp_merge_routes_through_service(mcp_app, components):
     await components.storage.upsert_chunks([c1, c2])
     ctx = StubCtx(app)
 
-    out = await mem_tag_merge(["py", "python3"], "python", ctx=ctx)
+    out = await mem_tag_merge(["py", "python3"], "python", dry_run=False, ctx=ctx)
     assert "2 chunks" in out
     assert counter["calls"] == 1
     counts = dict(await components.storage.get_tag_counts())
@@ -139,6 +139,55 @@ async def test_mcp_merge_dry_run_no_invalidate(mcp_app, components):
     assert counter["calls"] == 0
     counts = dict(await components.storage.get_tag_counts())
     assert counts.get("py") == 1
+
+
+# --- default-is-dry-run pins (#1992) ---------------------------------------
+# One pin per tool: a call that omits dry_run must preview, not write. Each
+# tool gets its own test so a sibling can't pass on another's behalf.
+
+
+@pytest.mark.asyncio
+async def test_mcp_rename_defaults_to_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("old",))])
+    ctx = StubCtx(app)
+
+    out = await mem_tag_rename("old", "new", ctx=ctx)
+    assert "DRY RUN" in out
+    assert "dry_run=false" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("old") == 1
+    assert "new" not in counts
+
+
+@pytest.mark.asyncio
+async def test_mcp_delete_defaults_to_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("doomed",))])
+    ctx = StubCtx(app)
+
+    out = await mem_tag_delete("doomed", ctx=ctx)
+    assert "DRY RUN" in out
+    assert "dry_run=false" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("doomed") == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_merge_defaults_to_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("py",))])
+    ctx = StubCtx(app)
+
+    out = await mem_tag_merge(["py"], "python", ctx=ctx)
+    assert "DRY RUN" in out
+    assert "dry_run=false" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("py") == 1
+    assert "python" not in counts
 
 
 @pytest.mark.asyncio
