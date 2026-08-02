@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm add` now writes where `mm session start` says it will** (#1991).
+  `mm session start --agent-id planner` printed
+  `Namespace: agent-runtime:planner`, but the following `mm add` wrote to
+  `default`, where a plain `mm search` returned it — the announced isolation
+  did not exist. CLI writes now inherit the active session's bound agent, the
+  way `mem_add` already did on the MCP surface, and `mm add` reports the
+  namespace it pinned (also as a `namespace` key in the `--json` ack, `null`
+  when nothing was pinned and the engine's rules chose). Read the
+  notes back with `mm search -n agent-runtime:planner`, or pin a single write
+  elsewhere with the new `mm add --namespace/-n`. Scope of the change: only
+  `mm add` inherits the session — `mm index` and the importers are unchanged —
+  and a session started without `--agent-id` (or with the reserved id
+  `default`) still binds no agent, so its writes route exactly as before.
+
 - **The server pid file is now per-store, not per-user** (#1990). The pid /
   flock file is named `server-<digest>.pid`, with the digest derived from the
   normalized resolved SQLite path, instead of one shared `server.pid` for the

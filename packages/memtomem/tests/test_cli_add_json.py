@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 from click.testing import CliRunner
 
+from helpers import set_home
 from memtomem import privacy
 from memtomem.cli.memory import add as add_cmd
 
@@ -31,6 +32,14 @@ def _reset_privacy_counters():
     privacy.reset_for_tests()
     yield
     privacy.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(monkeypatch, tmp_path):
+    """``mm add`` reads ``~/.memtomem/.current_session`` to resolve its write
+    namespace (#1991). Without this, a developer's own active session would
+    reach into these runs and call ``get_session`` on the storage double."""
+    set_home(monkeypatch, tmp_path / "home")
 
 
 def _components(tmp_path: Path, *, index_error: Exception | None = None) -> SimpleNamespace:

@@ -82,6 +82,7 @@ Examples:
   mm add "Canary deploy froze at 14:02Z." --tags incident,postmortem
   mm add "Standardize on uv" --scope project_shared --confirm-project-shared
   mm add "Quick note to self" --json
+  mm add "Cross-agent handoff" --namespace shared
 """
 
 
@@ -115,6 +116,12 @@ Examples:
     help="Confirm writing to the git-tracked project_shared memory tier.",
 )
 @click.option(
+    "--namespace",
+    "-n",
+    default=None,
+    help="Write namespace; defaults to the active session's agent scope.",
+)
+@click.option(
     "--yes",
     "-y",
     is_flag=True,
@@ -136,6 +143,7 @@ def add(
     force_unsafe: bool,
     scope: TargetScope,
     confirm_project_shared: bool,
+    namespace: str | None,
     yes: bool,
     as_json: bool,
 ) -> None:
@@ -152,6 +160,7 @@ def add(
                 scope,
                 confirm_project_shared,
                 yes,
+                namespace=namespace,
                 as_json=as_json,
             )
         )
@@ -174,12 +183,23 @@ async def _add(
     confirm_project_shared: bool = False,
     yes: bool = False,
     *,
+    namespace: str | None = None,
     as_json: bool = False,
 ) -> None:
     from memtomem import privacy
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.cli._session_state import resolve_session_write_namespace
+    from memtomem.constants import InvalidNameError, validate_namespace
     from memtomem.server.tools.search import _resolve_project_context_root
     from memtomem.tools.memory_writer import append_entry
+
+    if namespace is not None:
+        # Raised as a ClickException so ``--json`` runs get the ``{"ok": false}``
+        # ack from ``add``'s handler instead of a UsageError on stderr.
+        try:
+            validate_namespace(namespace)
+        except InvalidNameError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     guard = privacy.enforce_write_guard(
         content,
@@ -282,11 +302,16 @@ async def _add(
         # this appended entry. ``lock_held=True`` skips the nested engine acquire.
         try:
             async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+                # Resolved inside the lock, like ``_mem_add_core`` — the write is
+                # attributed to whichever session is live at write time, not at
+                # command-parse time (#1991). ``None`` leaves the engine's
+                # namespace rules in charge, which is the pre-#1991 behavior.
+                effective_ns = namespace or await resolve_session_write_namespace(comp.storage)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
                 # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
                 stats = await comp.index_engine.index_file(
-                    target, already_scanned=True, lock_held=True
+                    target, namespace=effective_ns, already_scanned=True, lock_held=True
                 )
 
                 # Apply tags to indexed chunks (chunker doesn't parse tag text
@@ -317,10 +342,24 @@ async def _add(
 
         if as_json:
             click.echo(
-                json.dumps({"ok": True, "target": str(target), "chunks": stats.indexed_chunks})
+                json.dumps(
+                    {
+                        "ok": True,
+                        "target": str(target),
+                        "chunks": stats.indexed_chunks,
+                        # ``None`` when the write was un-pinned and the engine's
+                        # namespace rules decided — the ack reports what this
+                        # command pinned, not what the engine resolved.
+                        "namespace": effective_ns,
+                    }
+                )
             )
         else:
             click.echo(f"Added to {target} ({stats.indexed_chunks} chunks indexed)")
+            if effective_ns is not None:
+                # Surfaced so a session-inherited redirect is never silent: a
+                # plain ``mm search`` hides system namespaces.
+                click.echo(f"  Namespace: {effective_ns}")
 
 
 @click.command()
