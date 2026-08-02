@@ -418,7 +418,8 @@ class TestStorageExtended:
         INSERT would collide, and a stale vector would keep answering queries.
         """
         storage = components.storage
-        chunk = make_chunk(content="re-embedded in place", embedding=_varied_embedding(0.1))
+        old_embedding = _varied_embedding(0.1)
+        chunk = make_chunk(content="re-embedded in place", embedding=old_embedding)
         await storage.upsert_chunks([chunk])
 
         new_embedding = _distant_embedding()
@@ -427,8 +428,12 @@ class TestStorageExtended:
         cov = await storage.get_dense_coverage()
         assert cov["total"] == 1
         assert cov["with_dense"] == 1
-        results = await storage.dense_search(new_embedding, top_k=5)
-        assert [r.chunk.content for r in results] == ["re-embedded in place"]
+        # Read the vector back rather than inferring it from a search hit: with
+        # a single row in the table, any query returns it whether or not the
+        # embedding was actually replaced.
+        stored = (await storage.get_embeddings_for_chunks([str(chunk.id)]))[str(chunk.id)]
+        assert stored == pytest.approx(new_embedding, abs=1e-5)
+        assert stored != pytest.approx(old_embedding, abs=1e-5)
 
     async def test_clear_embedding_mismatch_zeroes_both_flags(self, components):
         """clear_embedding_mismatch() must reset both private tuples to None."""
