@@ -160,12 +160,14 @@ def start(
     create episodic sessions (see ``docs/guides/integrations/claude-code.md``);
     wire these flags into a hook yourself if you want that.
 
-    ``--idempotent`` is safe for serial hook callers but not for concurrent
-    ones. Two parallel ``mm session start --idempotent`` invocations can both
-    observe a missing/stale state file and both create a session — the state
-    file is written atomically per call but the read-then-create is not
-    locked. Claude Code's SessionStart fires once per session, so a hook
-    calling this is safe; multi-process callers must serialize themselves.
+    ``--idempotent`` is safe for serial callers but not for concurrent ones.
+    Two parallel ``mm session start --idempotent`` invocations can both
+    observe a missing/stale state file and both create a session — neither
+    the read-then-create sequence nor the state-file write is locked or
+    atomic. Do not assume SessionStart implies serialization: it also fires
+    on resume, ``/clear``, and context compaction, and matching hooks from
+    different settings tiers or Claude Code processes may run concurrently.
+    Callers that can overlap must serialize themselves.
     """
     try:
         validate_agent_id(agent_id)
