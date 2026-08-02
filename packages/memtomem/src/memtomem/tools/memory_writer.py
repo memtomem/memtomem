@@ -7,9 +7,35 @@ import re
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+
+
+def _default_heading(now: str) -> str:
+    """The auto-heading for an untitled entry — unique per entry.
+
+    Two chunks with the same ``heading_hierarchy`` are mergeable
+    (``indexing.engine._can_merge``), which is what keeps a short entry from
+    being stranded from its own section. Distinct headings are the protection
+    that keeps separate entries separate — the ``## Cache Decision`` vs
+    ``## Database Decision`` case that rule is written against.
+
+    A timestamp alone does not provide it. At second resolution any two
+    untitled entries appended inside the same second shared a heading and were
+    packed into ONE chunk: the earlier entry's text was swallowed and the
+    file's chunk ids were re-minted, so an id already handed to a caller (and
+    any provenance link recorded against it) pointed at nothing. Finer
+    resolution only narrows that window, and does not close it at all for
+    ``mem_batch_add``, which composes up to 500 blocks in a single loop.
+
+    So the heading carries a millisecond stamp for human legibility plus a
+    short random suffix for uniqueness. Only the heading changes; the
+    ``> created:`` line keeps its second resolution, which is what the parsers
+    and the stored metadata read.
+    """
+    return f"## Entry {now} {uuid4().hex[:8]}"
 
 
 def format_entry_block(
@@ -36,6 +62,10 @@ def format_entry_block(
     real characters in the file rather than ``\\uXXXX`` escape text. The
     parser does not JSON-decode the array element-by-element, so escaped
     text would otherwise survive verbatim into the stored tag.
+
+    An untitled entry gets a heading that is unique per entry rather than a
+    bare timestamp — see ``_default_heading`` for why two entries must never
+    share one.
     """
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     tag_line = f"\n> tags: {json.dumps(list(tags), ensure_ascii=False)}" if tags else ""
@@ -44,7 +74,11 @@ def format_entry_block(
     stripped = content.strip()
     if stripped.startswith("## "):
         return f"\n> created: {now}{tag_line}\n\n{stripped}\n"
-    heading = f"## {title}" if title else f"## Entry {now}"
+    heading = (
+        f"## {title}"
+        if title
+        else _default_heading(datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
+    )
     return f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
 
 

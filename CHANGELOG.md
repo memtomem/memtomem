@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Two untitled entries appended in the same second no longer merge into one
+  chunk.** `append_entry` headed an untitled entry with a second-resolution
+  timestamp, and two chunks sharing a `heading_hierarchy` are mergeable — the
+  rule that keeps a short entry attached to its own section. So back-to-back
+  `mem_add` calls (and any `mem_batch_add`, which composes every block in a
+  single loop) were packed together: the earlier entry's text was swallowed
+  into its neighbour and the file's chunk ids were re-minted, invalidating an
+  id already returned to the caller and any provenance link recorded against
+  it. The auto-heading now carries a millisecond stamp plus a short random
+  suffix, so it is unique per entry rather than merely finer-grained. An
+  explicit `title` is still used verbatim, and the `> created:` line parsers
+  and stored metadata read keeps its second resolution.
+
 - **`mm add` now writes where `mm session start` says it will** (#1991).
   `mm session start --agent-id planner` printed
   `Namespace: agent-runtime:planner`, but the following `mm add` wrote to
