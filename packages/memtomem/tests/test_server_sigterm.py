@@ -159,17 +159,24 @@ def _spawn_server(env: dict[str, str]) -> subprocess.Popen:
 
 
 def _wait_for_pid_file(proc: subprocess.Popen, pid_file: Path, *, timeout: float = 10.0) -> None:
-    """Poll until ``pid_file`` materialises or fail with the server's stderr."""
+    """Poll until ``pid_file`` materialises or fail with the server's stderr.
+
+    The failure paths drain stderr through :func:`_kill_and_read_stderr`,
+    never a bare ``read()``: a still-running server (or a grandchild
+    holding an inherited pipe handle on Windows) keeps the write end open,
+    so the read would block forever and the whole CI job would hang until
+    the workflow timeout instead of reporting this failure.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and not pid_file.exists():
         if proc.poll() is not None:
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+            stderr = _kill_and_read_stderr(proc)
             pytest.fail(
                 f"Server died before writing pid file (rc={proc.returncode}). stderr:\n{stderr}"
             )
         time.sleep(0.1)
     if not pid_file.exists():
-        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        stderr = _kill_and_read_stderr(proc)
         pytest.fail(f"pid file did not appear within {timeout}s. stderr:\n{stderr}")
 
 
@@ -494,10 +501,17 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
     file, so the second one must neither warn about another instance nor
     contend for the first one's lock.
 
-    Both subprocesses share one ``XDG_RUNTIME_DIR`` (same user) but point
+    Both subprocesses land in one runtime directory (same user) but point
     ``MEMTOMEM_STORAGE__SQLITE_PATH`` at different databases. Expected:
     two distinct ``server-*.pid`` files, both servers alive, and the
     second server's stderr free of the same-store contention warning.
+
+    The runtime dir is isolated on every platform: ``XDG_RUNTIME_DIR`` for
+    the POSIX branch and ``TMPDIR``/``TMP``/``TEMP`` for the tempdir
+    fallback, because ``runtime_dir()`` ignores ``XDG_RUNTIME_DIR`` on
+    Windows entirely. Pinning only the XDG var would send the Windows
+    servers to the shared real temp dir, the expected pid paths would
+    never appear, and the test would sit in ``_wait_for_pid_file``.
 
     No shared ``HOME`` ``.memtomem`` dir is created, so the legacy
     interlock (POSIX-only ``LOCK_SH`` on ``~/.memtomem/.server.pid``)
@@ -507,10 +521,19 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
     home.mkdir()
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
+    tmp_tmp = tmp_path / "tmp"
+    tmp_tmp.mkdir()
     if os.name != "nt":
         os.chmod(xdg, 0o700)
 
     from memtomem._runtime_paths import store_pid_digest
+
+    # Mirrors ``_runtime_paths.runtime_dir()``: XDG on POSIX, the per-user
+    # tempdir subdir on Windows (where ``uid`` collapses to 0).
+    if os.name == "nt":
+        runtime = tmp_tmp / "memtomem-0"
+    else:
+        runtime = xdg / "memtomem"
 
     db1 = tmp_path / "store-a" / "memtomem.db"
     db2 = tmp_path / "store-b" / "memtomem.db"
@@ -520,11 +543,14 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         env["XDG_RUNTIME_DIR"] = str(xdg)
+        env["TMPDIR"] = str(tmp_tmp)
+        env["TMP"] = str(tmp_tmp)
+        env["TEMP"] = str(tmp_tmp)
         env["MEMTOMEM_STORAGE__SQLITE_PATH"] = str(db)
         return env
 
-    pid1 = xdg / "memtomem" / f"server-{store_pid_digest(db1)}.pid"
-    pid2 = xdg / "memtomem" / f"server-{store_pid_digest(db2)}.pid"
+    pid1 = runtime / f"server-{store_pid_digest(db1)}.pid"
+    pid2 = runtime / f"server-{store_pid_digest(db2)}.pid"
     assert pid1 != pid2, "different stores must derive different pid file names"
 
     proc1 = _spawn_server(_env_for(db1))
@@ -627,14 +653,23 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
     exclusive lock the same way ``main()`` does. ``"rb+"`` open keeps
     the ``MsvcrtLocker`` Windows backend happy (read-only handles
     fail with ``EACCES``).
+
+    Both runtime-dir branches are pinned (``XDG_RUNTIME_DIR`` plus the
+    ``TMPDIR``/``TMP``/``TEMP`` fallback ``runtime_dir()`` uses on
+    Windows). With only the XDG var set, a Windows server would open its
+    pid file in the shared real temp dir, never contend with the holder
+    here, and the whole scenario would silently degrade into an
+    uncontended start that still satisfies the content assertion.
     """
     home = tmp_path / "home"
     home.mkdir()
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
+    tmp_tmp = tmp_path / "tmp"
+    tmp_tmp.mkdir()
     if os.name != "nt":
         os.chmod(xdg, 0o700)
-    sub = xdg / "memtomem"
+    sub = tmp_tmp / "memtomem-0" if os.name == "nt" else xdg / "memtomem"
     sub.mkdir()
     if os.name != "nt":
         os.chmod(sub, 0o700)
@@ -643,6 +678,9 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
+    env["TMPDIR"] = str(tmp_tmp)
+    env["TMP"] = str(tmp_tmp)
+    env["TEMP"] = str(tmp_tmp)
     # Wide terminal so the rich log handler doesn't hard-wrap the
     # contention warning asserted below (wrap points shift with width).
     env["COLUMNS"] = "300"
