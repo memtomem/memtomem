@@ -9,13 +9,21 @@ from __future__ import annotations
 
 import logging
 
+from pydantic import StrictBool
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._validation import strict_bool
 from memtomem.services import tag_management as tag_svc
 
 logger = logging.getLogger(__name__)
+
+
+# Trailing hint on every dry-run response — the caller is a model reading
+# the result, so the apply step must be stated there, not just in the schema.
+_APPLY_HINT = "\nNo changes written. Pass dry_run=false to apply."
 
 
 def _format_samples(result: tag_svc.TagOpResult) -> str:
@@ -59,7 +67,11 @@ async def mem_tag_list(
 async def mem_tag_rename(
     old_tag: str,
     new_tag: str,
-    dry_run: bool = False,
+    # StrictBool at the FastMCP boundary + strict_bool in the body: the lax
+    # coercion path ("0"/"false" → False) and the unvalidated mem_do path
+    # would each let a malformed value fall through to apply. Same pair as
+    # the consent flags in context.py.
+    dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
     """Rename a tag across all chunks that use it.
@@ -68,8 +80,13 @@ async def mem_tag_rename(
         old_tag: The current tag name to replace
         new_tag: The new tag name
         dry_run: If True, return the count + a sample of affected chunks
-            without writing. Defaults to False (apply).
+            without writing. Defaults to True (preview); pass
+            dry_run=False to perform the rename.
     """
+    try:
+        dry_run = strict_bool(dry_run, "dry_run")
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not old_tag.strip() or not new_tag.strip():
         return "Error: both old_tag and new_tag must be non-empty."
     # Same-name reject lives in services.tag_management.rename_tag so Web,
@@ -89,7 +106,7 @@ async def mem_tag_rename(
             f"DRY RUN: rename '{old_tag}' → '{new_tag}' would affect "
             f"{result.affected_chunks} chunks."
         )
-        return head + _format_samples(result)
+        return head + _format_samples(result) + _APPLY_HINT
     return f"Renamed tag '{old_tag}' → '{new_tag}' in {result.affected_chunks} chunks."
 
 
@@ -98,7 +115,7 @@ async def mem_tag_rename(
 @register("tags")
 async def mem_tag_delete(
     tag: str,
-    dry_run: bool = False,
+    dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
     """Remove a tag from all chunks that use it.
@@ -108,8 +125,13 @@ async def mem_tag_delete(
     Args:
         tag: The tag name to remove
         dry_run: If True, return the count + a sample of affected chunks
-            without writing. Defaults to False (apply).
+            without writing. Defaults to True (preview); pass
+            dry_run=False to perform the removal.
     """
+    try:
+        dry_run = strict_bool(dry_run, "dry_run")
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not tag.strip():
         return "Error: tag must be non-empty."
 
@@ -122,7 +144,7 @@ async def mem_tag_delete(
     )
     if result.dry_run:
         head = f"DRY RUN: delete '{tag}' would affect {result.affected_chunks} chunks."
-        return head + _format_samples(result)
+        return head + _format_samples(result) + _APPLY_HINT
     return f"Removed tag '{tag}' from {result.affected_chunks} chunks."
 
 
@@ -132,7 +154,7 @@ async def mem_tag_delete(
 async def mem_tag_merge(
     sources: list[str],
     target: str,
-    dry_run: bool = False,
+    dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
     """Fold multiple source tags into a single target tag across all chunks.
@@ -145,8 +167,13 @@ async def mem_tag_merge(
         sources: List of source tags to fold into ``target``.
         target: The tag every source should be rewritten to.
         dry_run: If True, return the candidate count + a sample without
-            writing. Defaults to False (apply).
+            writing. Defaults to True (preview); pass dry_run=False to
+            perform the merge.
     """
+    try:
+        dry_run = strict_bool(dry_run, "dry_run")
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not target.strip():
         return "Error: target must be non-empty."
     cleaned_sources = [s.strip() for s in sources if s and s.strip()]
@@ -166,5 +193,5 @@ async def mem_tag_merge(
             f"DRY RUN: merge {cleaned_sources} → '{target}' would affect "
             f"{result.affected_chunks} chunks."
         )
-        return head + _format_samples(result)
+        return head + _format_samples(result) + _APPLY_HINT
     return f"Merged {cleaned_sources} → '{target}' across {result.affected_chunks} chunks."

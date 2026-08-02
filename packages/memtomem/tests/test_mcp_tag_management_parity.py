@@ -22,6 +22,7 @@ import pytest
 
 from helpers import StubCtx, make_chunk
 from memtomem.server.context import AppContext
+from memtomem.server.tools.meta import mem_do
 from memtomem.server.tools.tag_management import (
     mem_tag_delete,
     mem_tag_merge,
@@ -54,7 +55,7 @@ async def test_mcp_rename_routes_through_service_invalidates_cache(mcp_app, comp
     await components.storage.upsert_chunks([chunk])
     ctx = StubCtx(app)
 
-    out = await mem_tag_rename("old", "new", ctx=ctx)
+    out = await mem_tag_rename("old", "new", dry_run=False, ctx=ctx)
     assert "1 chunks" in out
 
     assert counter["calls"] == 1, "MCP rename did not trigger search-cache invalidation"
@@ -87,7 +88,7 @@ async def test_mcp_delete_routes_through_service(mcp_app, components):
     await components.storage.upsert_chunks([chunk])
     ctx = StubCtx(app)
 
-    out = await mem_tag_delete("doomed", ctx=ctx)
+    out = await mem_tag_delete("doomed", dry_run=False, ctx=ctx)
     assert "1 chunks" in out
     assert counter["calls"] == 1
     counts = dict(await components.storage.get_tag_counts())
@@ -117,7 +118,7 @@ async def test_mcp_merge_routes_through_service(mcp_app, components):
     await components.storage.upsert_chunks([c1, c2])
     ctx = StubCtx(app)
 
-    out = await mem_tag_merge(["py", "python3"], "python", ctx=ctx)
+    out = await mem_tag_merge(["py", "python3"], "python", dry_run=False, ctx=ctx)
     assert "2 chunks" in out
     assert counter["calls"] == 1
     counts = dict(await components.storage.get_tag_counts())
@@ -139,6 +140,164 @@ async def test_mcp_merge_dry_run_no_invalidate(mcp_app, components):
     assert counter["calls"] == 0
     counts = dict(await components.storage.get_tag_counts())
     assert counts.get("py") == 1
+
+
+# --- default-is-dry-run pins (#1992) ---------------------------------------
+# One pin per tool: a call that omits dry_run must preview, not write. Each
+# tool gets its own test so a sibling can't pass on another's behalf.
+
+
+@pytest.mark.asyncio
+async def test_mcp_rename_defaults_to_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("old",))])
+    ctx = StubCtx(app)
+
+    out = await mem_tag_rename("old", "new", ctx=ctx)
+    assert "DRY RUN" in out
+    assert "dry_run=false" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("old") == 1
+    assert "new" not in counts
+
+
+@pytest.mark.asyncio
+async def test_mcp_delete_defaults_to_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("doomed",))])
+    ctx = StubCtx(app)
+
+    out = await mem_tag_delete("doomed", ctx=ctx)
+    assert "DRY RUN" in out
+    assert "dry_run=false" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("doomed") == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_merge_defaults_to_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("py",))])
+    ctx = StubCtx(app)
+
+    out = await mem_tag_merge(["py"], "python", ctx=ctx)
+    assert "DRY RUN" in out
+    assert "dry_run=false" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("py") == 1
+    assert "python" not in counts
+
+
+# --- strict dry_run pins (#1992 follow-up) ----------------------------------
+# mem_do forwards params unvalidated, so the tool body must refuse anything
+# that is not a literal True/False: a falsy-but-not-False value (0, "", None)
+# would otherwise slip past the preview default straight into a bulk write.
+# These go through the REAL mem_do dispatch (not a direct function call) so
+# the registry wiring for each action is pinned too. One test per tool — a
+# sibling can't pass on another's behalf.
+
+_MALFORMED_DRY_RUN = (0, "false", "", None)
+
+
+@pytest.mark.asyncio
+async def test_mem_do_rename_refuses_malformed_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("old",))])
+    ctx = StubCtx(app)
+
+    for bad in _MALFORMED_DRY_RUN:
+        out = await mem_do(
+            action="tag_rename",
+            params={"old_tag": "old", "new_tag": "new", "dry_run": bad},
+            ctx=ctx,
+        )
+        assert "Error" in out, f"dry_run={bad!r} was not refused"
+        assert "literal boolean" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("old") == 1
+    assert "new" not in counts
+
+
+@pytest.mark.asyncio
+async def test_mem_do_delete_refuses_malformed_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("doomed",))])
+    ctx = StubCtx(app)
+
+    for bad in _MALFORMED_DRY_RUN:
+        out = await mem_do(action="tag_delete", params={"tag": "doomed", "dry_run": bad}, ctx=ctx)
+        assert "Error" in out, f"dry_run={bad!r} was not refused"
+        assert "literal boolean" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("doomed") == 1
+
+
+@pytest.mark.asyncio
+async def test_mem_do_merge_refuses_malformed_dry_run(mcp_app, components):
+    app, counter = mcp_app
+    await components.storage.upsert_chunks([make_chunk(content="a", tags=("py",))])
+    ctx = StubCtx(app)
+
+    for bad in _MALFORMED_DRY_RUN:
+        out = await mem_do(
+            action="tag_merge",
+            params={"sources": ["py"], "target": "python", "dry_run": bad},
+            ctx=ctx,
+        )
+        assert "Error" in out, f"dry_run={bad!r} was not refused"
+        assert "literal boolean" in out
+    assert counter["calls"] == 0
+    counts = dict(await components.storage.get_tag_counts())
+    assert counts.get("py") == 1
+    assert "python" not in counts
+
+
+# The OTHER dispatch door: a direct tool call goes through FastMCP's pydantic
+# arg model, which is LAX by default and would coerce "false" / 0 → False
+# before the body's strict_bool runs — reaching apply without a literal JSON
+# false. StrictBool annotations close that. Built via func_metadata so this
+# runs in every tool mode (see test_server_tools_context_pull.py).
+
+_TAG_TOOLS = {
+    "rename": (mem_tag_rename, {"old_tag": "a", "new_tag": "b"}),
+    "delete": (mem_tag_delete, {"tag": "a"}),
+    "merge": (mem_tag_merge, {"sources": ["a"], "target": "b"}),
+}
+
+
+def _arg_model(func) -> type:
+    from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+
+    return func_metadata(func).arg_model
+
+
+@pytest.mark.parametrize("tool", sorted(_TAG_TOOLS))
+@pytest.mark.parametrize("bad", ["true", "false", 1, 0, "yes"])
+def test_fastmcp_boundary_rejects_non_literal_dry_run(tool: str, bad: object) -> None:
+    from pydantic import ValidationError
+
+    func, required = _TAG_TOOLS[tool]
+    with pytest.raises(ValidationError):
+        _arg_model(func).model_validate({**required, "dry_run": bad})
+
+
+@pytest.mark.parametrize("tool", sorted(_TAG_TOOLS))
+def test_fastmcp_boundary_accepts_real_booleans(tool: str) -> None:
+    func, required = _TAG_TOOLS[tool]
+    model = _arg_model(func)
+    for val in (True, False):
+        m = model.model_validate({**required, "dry_run": val})
+        assert m.dry_run is val
+    # Wire schema stays a plain boolean with the preview default — clients
+    # see no StrictBool leak.
+    schema = model.model_json_schema()["properties"]["dry_run"]
+    assert schema["type"] == "boolean"
+    assert schema["default"] is True
 
 
 @pytest.mark.asyncio

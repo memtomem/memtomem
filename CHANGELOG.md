@@ -19,6 +19,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **MCP `mem_tag_rename` / `mem_tag_delete` / `mem_tag_merge` now default to
+  `dry_run=true`** (#1992). Previously the MCP surface applied these bulk
+  rewrites immediately while the CLI equivalents (`mm tags rename` etc.)
+  defaulted to preview — an agent probing what a tag covers could rewrite the
+  corpus. The three tools now preview by default and require an explicit
+  `dry_run=false` to write, matching the CLI and the existing `policy_run`
+  convention. **Breaking for MCP callers** that relied on the implicit apply:
+  pass `dry_run=false` to keep the old behavior. Dry-run responses now end
+  with an explicit "pass dry_run=false to apply" hint. `dry_run` is also
+  strict now: only a literal JSON boolean is accepted — coercible values
+  (`0`, `"false"`, `""`, `null`) are refused instead of silently reaching
+  the apply path via lax coercion or the unvalidated `mem_do` dispatch.
+
 - **Migrated to the `mcp` 2.0 SDK; the requirement is now `mcp[cli]>=2.0.0,<3`**
   (#1978). 2.0 removed `mcp.server.fastmcp`, which 0.3.14 worked around by
   capping below it. The server now builds on `mcp.server.mcpserver.MCPServer`,
