@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import logging
 
+from pydantic import StrictBool
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._validation import strict_bool
 from memtomem.services import tag_management as tag_svc
 
 logger = logging.getLogger(__name__)
@@ -64,7 +67,11 @@ async def mem_tag_list(
 async def mem_tag_rename(
     old_tag: str,
     new_tag: str,
-    dry_run: bool = True,
+    # StrictBool at the FastMCP boundary + strict_bool in the body: the lax
+    # coercion path ("0"/"false" → False) and the unvalidated mem_do path
+    # would each let a malformed value fall through to apply. Same pair as
+    # the consent flags in context.py.
+    dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
     """Rename a tag across all chunks that use it.
@@ -76,6 +83,10 @@ async def mem_tag_rename(
             without writing. Defaults to True (preview); pass
             dry_run=False to perform the rename.
     """
+    try:
+        dry_run = strict_bool(dry_run, "dry_run")
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not old_tag.strip() or not new_tag.strip():
         return "Error: both old_tag and new_tag must be non-empty."
     # Same-name reject lives in services.tag_management.rename_tag so Web,
@@ -104,7 +115,7 @@ async def mem_tag_rename(
 @register("tags")
 async def mem_tag_delete(
     tag: str,
-    dry_run: bool = True,
+    dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
     """Remove a tag from all chunks that use it.
@@ -117,6 +128,10 @@ async def mem_tag_delete(
             without writing. Defaults to True (preview); pass
             dry_run=False to perform the removal.
     """
+    try:
+        dry_run = strict_bool(dry_run, "dry_run")
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not tag.strip():
         return "Error: tag must be non-empty."
 
@@ -139,7 +154,7 @@ async def mem_tag_delete(
 async def mem_tag_merge(
     sources: list[str],
     target: str,
-    dry_run: bool = True,
+    dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
     """Fold multiple source tags into a single target tag across all chunks.
@@ -155,6 +170,10 @@ async def mem_tag_merge(
             writing. Defaults to True (preview); pass dry_run=False to
             perform the merge.
     """
+    try:
+        dry_run = strict_bool(dry_run, "dry_run")
+    except ValueError as exc:
+        return f"Error: {exc}"
     if not target.strip():
         return "Error: target must be non-empty."
     cleaned_sources = [s.strip() for s in sources if s and s.strip()]

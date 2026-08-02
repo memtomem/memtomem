@@ -27,7 +27,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `dry_run=false` to write, matching the CLI and the existing `policy_run`
   convention. **Breaking for MCP callers** that relied on the implicit apply:
   pass `dry_run=false` to keep the old behavior. Dry-run responses now end
-  with an explicit "pass dry_run=false to apply" hint.
+  with an explicit "pass dry_run=false to apply" hint. `dry_run` is also
+  strict now: only a literal JSON boolean is accepted — coercible values
+  (`0`, `"false"`, `""`, `null`) are refused instead of silently reaching
+  the apply path via lax coercion or the unvalidated `mem_do` dispatch.
 
 - **Migrated to the `mcp` 2.0 SDK; the requirement is now `mcp[cli]>=2.0.0,<3`**
   (#1978). 2.0 removed `mcp.server.fastmcp`, which 0.3.14 worked around by
