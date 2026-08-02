@@ -1573,3 +1573,21 @@ class TestNoPrivateRepoRefsInCliHelp:
             "``docs/guides/`` instead, or move the reference into a "
             f"non-help docstring. Offenders: {sorted(offenders)}"
         )
+
+    def test_no_private_doc_path_in_rendered_help(self) -> None:
+        # The attribute scan above misses text Click synthesizes at render
+        # time — a string ``deprecated=`` on a command lands only in
+        # ``cmd.deprecated`` yet renders as ``(DEPRECATED: ...)`` in --help.
+        # Rendering each command's help covers every such surface at once.
+        offenders = []
+        for path, cmd in self._walk(_CLI):
+            ctx = click.Context(cmd, info_name=path[-1] if path else "mm")
+            if "memtomem-docs" in cmd.get_help(ctx):
+                offenders.append("mm " + " ".join(path) if path else "mm")
+        assert not offenders, (
+            "Rendered ``--help`` output references the private "
+            "``memtomem-docs`` repo, which installed users cannot open. "
+            "Cite a file under ``docs/guides/`` instead — and check text "
+            "Click composes itself, e.g. a ``deprecated=`` message. "
+            f"Offenders: {sorted(offenders)}"
+        )
