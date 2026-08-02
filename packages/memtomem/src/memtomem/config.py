@@ -1098,6 +1098,44 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
 }
 
 
+def _split_scalar_list_string(value: str) -> list[object]:
+    """Split a CLI/API string into the items of a scalar list field.
+
+    Two spellings are accepted: a JSON array (the shape ``config.json`` and the
+    configuration guide show) and a comma list. A JSON array that parses is used
+    verbatim, so ``'["*node_modules*"]'`` stops being stored as a one-element
+    list holding the JSON text (issue #1993).
+
+    A value that opens with ``[`` but fails to parse is rejected only when it
+    also closes with ``]`` and carries a double quote — the shape nothing but a
+    botched JSON array has. Everything else falls back to comma splitting, which
+    keeps gitignore character-class globs (``[abc]*.log``, and the quoted
+    ``["abc]*.log`` that ``pathspec`` also accepts) working as literal patterns.
+    """
+    stripped = value.strip()
+    if stripped.startswith("["):
+        import json as _json
+
+        try:
+            parsed = _json.loads(stripped)
+        except _json.JSONDecodeError as exc:
+            if stripped.endswith("]") and '"' in stripped:
+                raise ValueError(
+                    f"looks like a JSON array but is not valid JSON ({exc}). "
+                    'Use a JSON array (\'["*a*", "*b*"]\') or a comma list '
+                    "('*a*,*b*')"
+                ) from exc
+        else:
+            if isinstance(parsed, list):
+                for idx, item in enumerate(parsed):
+                    if not isinstance(item, (str, int, float, bool)):
+                        raise ValueError(
+                            f"item[{idx}]: expected a string or number, got {type(item).__name__}"
+                        )
+                return list(parsed)
+    return [s.strip() for s in value.split(",")]
+
+
 def coerce_and_validate(value: object, constraint: dict | None) -> object:
     """Coerce *value* to the expected type and validate min/max/allowed constraints."""
     if constraint is None:
@@ -1177,7 +1215,7 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
                 raise ValueError(f"expected length {expected_len}, got {len(coerced)}")
         else:
             if isinstance(value, str):
-                parts = [s.strip() for s in value.split(",")]
+                parts = _split_scalar_list_string(value)
             elif isinstance(value, (list, tuple)):
                 parts = list(value)
             else:

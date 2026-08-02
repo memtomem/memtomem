@@ -266,6 +266,44 @@ class TestConfigCLI:
         assert result.exit_code != 0
         assert "not a mutable field" in result.output
 
+    def test_config_set_rejection_suggests_near_miss(self, runner: CliRunner) -> None:
+        """The `mm status` spelling of top-k points at the config key (#1993)."""
+        result = runner.invoke(cli, ["config", "set", "search.top_k", "5"])
+        assert result.exit_code != 0
+        assert "did you mean 'search.default_top_k'" in result.output
+
+    def test_config_set_rejection_lists_section_fields(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["config", "set", "search.nonexistent_field", "10"])
+        assert "Mutable fields in [search]:" in result.output
+        assert "default_top_k" in result.output
+
+    def test_config_set_rejection_points_at_config_show(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["config", "set", "search.nonexistent_field", "10"])
+        assert "mm config show" in result.output
+
+    def test_config_set_rejection_memory_dirs_names_its_command(self, runner: CliRunner) -> None:
+        """memory_dirs has a dedicated endpoint; say so instead of listing keys."""
+        result = runner.invoke(cli, ["config", "set", "indexing.memory_dirs", "/tmp/x"])
+        assert result.exit_code != 0
+        assert "mm memory-dirs" in result.output
+
+    def test_config_set_exclude_patterns_json_array_persists(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ):
+        """End-to-end: a JSON array reaches config.json as a real list (#1993)."""
+        import json
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        result = runner.invoke(
+            cli, ["config", "set", "indexing.exclude_patterns", '["*node_modules*"]']
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads(config_file.read_text())
+        assert data["indexing"]["exclude_patterns"] == ["*node_modules*"]
+
     def test_config_set_namespace_rules_json(self, tmp_path, monkeypatch, runner: CliRunner):
         """End-to-end: `mm config set namespace.rules '[...]'` persists + reloads."""
         import json
@@ -376,6 +414,36 @@ class TestCoerceAndValidate:
     def test_rrf_weights_has_constraint(self) -> None:
         """search.rrf_weights must be registered in FIELD_CONSTRAINTS."""
         assert "search.rrf_weights" in FIELD_CONSTRAINTS
+
+    def test_list_str_from_json_array(self) -> None:
+        """A JSON array is parsed, not stored as one literal item (#1993)."""
+        constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
+        assert coerce_and_validate('["*node_modules*"]', constraint) == ["*node_modules*"]
+
+    def test_list_float_from_json_array(self) -> None:
+        constraint = {"type": list, "item_type": float, "length": 2}
+        assert coerce_and_validate("[1.5, 0.8]", constraint) == [1.5, 0.8]
+
+    def test_list_str_glob_character_class_kept_literal(self) -> None:
+        """A leading '[' that isn't JSON stays a pattern (gitignore char class)."""
+        constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
+        assert coerce_and_validate("[abc]*.log", constraint) == ["[abc]*.log"]
+
+    def test_list_str_quoted_glob_character_class_kept_literal(self) -> None:
+        """`["abc]*.log` is a pathspec char class, not botched JSON."""
+        constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
+        assert coerce_and_validate('["abc]*.log', constraint) == ['["abc]*.log']
+
+    def test_list_str_malformed_json_rejected_with_both_syntaxes(self) -> None:
+        constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
+        with pytest.raises(ValueError, match="not valid JSON") as exc:
+            coerce_and_validate('["*a*",]', constraint)
+        assert "comma list" in str(exc.value)
+
+    def test_list_str_json_object_item_rejected(self) -> None:
+        constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
+        with pytest.raises(ValueError, match=r"item\[0\]"):
+            coerce_and_validate('[{"a": 1}]', constraint)
 
     # ── list[BaseModel] coercion (namespace.rules) ─────────────────
 
@@ -979,6 +1047,13 @@ class TestConfigUnset:
         assert result.exit_code == 1
         assert "Skipped mmr.enabld" in result.output
         assert "did you mean 'mmr.enabled'" in result.output
+
+    def test_unset_suggestion_is_hash_order_independent(self, isolated, runner: CliRunner) -> None:
+        """Two equal-length substring matches must resolve the same way every run."""
+        from memtomem.cli.config_cmd import _canonical_unset_keys, _suggest_key
+
+        canonical = _canonical_unset_keys()
+        assert _suggest_key("indexing.chunk_tokens", canonical) == "indexing.max_chunk_tokens"
 
     def test_unset_unknown_key_without_suggestion(self, isolated, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["config", "unset", "completely_unrelated_xyz"])
