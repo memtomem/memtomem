@@ -453,13 +453,22 @@ def _merge_hooks_record(
             if isinstance(r, dict) and _rule_is_memtomem_owned(r):
                 matcher = r.get("matcher", "")
                 if not isinstance(matcher, str):
-                    # The *target* file is hand-editable too, so an owned rule
-                    # can carry a malformed matcher (#1983) — and this lookup
-                    # would then key a dict by an unhashable value. Keep the
-                    # rule verbatim: memtomem cannot have written it, so
-                    # replacing or pruning it would be destroying something it
-                    # does not actually own.
-                    result_rules.append(r)
+                    # This lookup would key a dict by an unhashable value. The
+                    # ownership marker is authoritative (ADR-0019): releases
+                    # before the canonical-shape validator stamped and wrote a
+                    # malformed matcher to Claude/Codex targets before Gemini
+                    # aborted the sync (#1983), so such a rule IS plausibly
+                    # memtomem's own broken output — keeping it verbatim would
+                    # strand it beside its corrected replacement forever. Prune
+                    # it with a warning; a hand-edit that kept the marker loses
+                    # the edit by the marker's documented contract.
+                    warnings.append(
+                        f"Removed a memtomem-managed hook rule under '{event}' "
+                        f"with a non-string matcher "
+                        f"({type(matcher).__name__}): 'matcher' must be a "
+                        f"string. A previous memtomem version may have "
+                        f"written it before matcher validation existed."
+                    )
                     continue
                 queue = contrib_by_matcher.get(matcher, [])
                 idx = consumed.get(matcher, 0)
@@ -523,25 +532,29 @@ def _merge_hooks_record(
     # all. The ownership marker makes them safe to remove; user rules under the
     # same event are preserved, and an event left empty is dropped entirely.
     #
-    # ``_prunable`` is the same test Pass 1 applies, not a bare ownership check:
-    # a marked rule with a malformed matcher is one memtomem cannot have
-    # written (#1983), so deleting it here while Pass 1 keeps it would make the
-    # same rule survive or vanish purely on whether the canonical still names
-    # its event.
-    def _prunable(rule: object) -> bool:
-        return (
-            isinstance(rule, dict)
-            and _rule_is_memtomem_owned(rule)
-            and isinstance(rule.get("matcher", ""), str)
-        )
-
+    # A bare ownership check on purpose — the same rule Pass 1 applies: an
+    # owned rule with a malformed matcher is pruned here too (with the same
+    # warning), so it cannot survive or vanish purely on whether the canonical
+    # still names its event (#1983 review).
     for event in list(existing_hooks):
         if event in contrib_hooks:
             continue
         rules = existing_hooks[event]
         if not isinstance(rules, list):
             continue
-        kept = [r for r in rules if not _prunable(r)]
+        kept: list = []
+        for r in rules:
+            if not (isinstance(r, dict) and _rule_is_memtomem_owned(r)):
+                kept.append(r)
+                continue
+            if not isinstance(r.get("matcher", ""), str):
+                warnings.append(
+                    f"Removed a memtomem-managed hook rule under '{event}' "
+                    f"with a non-string matcher "
+                    f"({type(r.get('matcher')).__name__}): 'matcher' must be "
+                    f"a string. A previous memtomem version may have written "
+                    f"it before matcher validation existed."
+                )
         if len(kept) == len(rules):
             continue
         if kept:

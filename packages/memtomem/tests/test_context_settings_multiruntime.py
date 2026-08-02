@@ -21,6 +21,7 @@ from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     CodexSettingsGenerator,
     GeminiSettingsGenerator,
+    _stamp_status_markers,
     diff_settings,
     generate_all_settings,
     host_write_targets,
@@ -901,14 +902,15 @@ class TestNonStringMatcherIsDropped:
             assert commands[name] == ["always"], (name, commands[name])
 
     @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
-    def test_owned_target_rule_with_bad_matcher_is_kept_verbatim(
+    def test_owned_target_rule_with_bad_matcher_is_pruned_with_warning(
         self, tmp_path, every_home, matcher
     ):
-        """The *target* file is hand-editable too, and the merge's in-place pass
-        keys a dict by the matcher of every ownership-marked rule it finds
-        there — an unhashable one raised ``TypeError`` before it could ever be
-        compared. memtomem cannot have written such a rule, so it is kept
-        verbatim rather than replaced or pruned as stale.
+        """The merge's in-place pass keys a dict by the matcher of every
+        ownership-marked rule it finds in the target — an unhashable one raised
+        ``TypeError`` before it could ever be compared. The marker is
+        authoritative (ADR-0019): pre-validation releases stamped and wrote
+        such rules themselves (#1983), so the rule is pruned with a warning —
+        keeping it would strand it beside its corrected replacement forever.
         """
         owned_bad = {
             "matcher": matcher,
@@ -928,10 +930,62 @@ class TestNonStringMatcherIsDropped:
 
         r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
         assert r.status == "ok", r.reason
+        assert any("memtomem-managed hook rule" in w for w in r.warnings), r.warnings
 
         rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
-        assert owned_bad in rules, rules
+        assert owned_bad not in rules, rules
+        assert [rule.get("matcher") for rule in rules] == ["Bash"], rules
+
+    @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
+    def test_user_target_rule_with_bad_matcher_is_kept_verbatim(
+        self, tmp_path, every_home, matcher
+    ):
+        """Only ownership-marked rules are memtomem's to prune. A *user* rule
+        with a malformed matcher is the user's content — kept verbatim and in
+        position, exactly like every other user rule.
+        """
+        user_bad = {
+            "matcher": matcher,
+            "hooks": [{"type": "command", "command": "user-owned"}],
+        }
+        target = every_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [user_bad]}}) + "\n", encoding="utf-8"
+        )
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "good", timeout=2)]})
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        assert user_bad in rules, rules
         assert any(rule.get("matcher") == "Bash" for rule in rules), rules
+
+    def test_upgrade_from_pre_validation_write_leaves_no_duplicate(self, tmp_path, every_home):
+        """The upgrade path that motivated pruning (#1986 review): a release
+        without the canonical-shape validator stamped ``["Bash"]`` into the
+        Claude target before Gemini aborted the sync. After the user corrects
+        the canonical to ``"Bash"``, one sync must leave exactly the corrected
+        rule — not the broken one with the fixed one appended beside it.
+        """
+        bad = _rule("Bash", "memtomem-hook", timeout=2)
+        bad["matcher"] = ["Bash"]
+        _canonical(tmp_path, {"PreToolUse": [bad]})
+        target = every_home / ".claude" / "settings.json"
+        # What the old fast path wrote: the canonical rule, marker-stamped,
+        # malformed matcher intact.
+        stamped = _stamp_status_markers({"hooks": {"PreToolUse": [bad]}})["hooks"]
+        target.write_text(json.dumps({"hooks": stamped}) + "\n", encoding="utf-8")
+
+        good = _rule("Bash", "memtomem-hook", timeout=2)
+        _canonical(tmp_path, {"PreToolUse": [good]})
+
+        r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
+        assert r.status == "ok", r.reason
+        assert any("memtomem-managed hook rule" in w for w in r.warnings), r.warnings
+
+        rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        assert [rule.get("matcher") for rule in rules] == ["Bash"], rules
 
     @pytest.mark.parametrize("matcher", _BAD_MATCHERS, ids=_BAD_MATCHER_IDS)
     @pytest.mark.parametrize(
@@ -939,13 +993,14 @@ class TestNonStringMatcherIsDropped:
         [{}, {"Stop": [_rule("", "elsewhere", timeout=2)]}],
         ids=["canonical-empty", "other-event"],
     )
-    def test_stale_event_sweep_keeps_it_too(self, tmp_path, every_home, matcher, canonical_hooks):
+    def test_stale_event_sweep_prunes_it_too(self, tmp_path, every_home, matcher, canonical_hooks):
         """The same rule must not survive or vanish on where the canonical looks.
 
         Rules under an event the canonical no longer emits are swept by a
-        second, separate pass. Checking only the ownership marker there deleted
-        the very rule the in-place pass keeps — silently, and only when the
-        canonical happened to stop naming that event (#1983 review).
+        second, separate pass. It applies the same rule as the in-place pass —
+        an owned rule with a malformed matcher is pruned, with the same
+        warning — so the outcome cannot depend on whether the canonical still
+        names the event (#1983 review).
         """
         owned_bad = {
             "matcher": matcher,
@@ -965,9 +1020,10 @@ class TestNonStringMatcherIsDropped:
 
         r = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)["claude_settings"]
         assert r.status == "ok", r.reason
+        assert any("memtomem-managed hook rule" in w for w in r.warnings), r.warnings
 
         written = json.loads(target.read_text(encoding="utf-8"))
-        assert owned_bad in written.get("hooks", {}).get("PreToolUse", []), written
+        assert "PreToolUse" not in written.get("hooks", {}), written
 
     def test_stale_event_sweep_still_prunes_a_well_formed_owned_rule(self, tmp_path, every_home):
         """The guard must not turn the sweep off: an owned rule memtomem really
