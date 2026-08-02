@@ -1574,16 +1574,39 @@ class TestNoPrivateRepoRefsInCliHelp:
             f"non-help docstring. Offenders: {sorted(offenders)}"
         )
 
+    @staticmethod
+    def _rendered_offenders(root: click.Command, root_name: str = "mm") -> list[str]:
+        # Contexts must be built with ``make_context`` (a bare ``Context``
+        # skips ``context_settings``, hiding e.g. ``show_default`` text) and
+        # rendered wide (Click wraps at hyphens, so at terminal width the
+        # literal ``memtomem-docs`` can split across lines and dodge a
+        # substring check).
+        offenders = []
+
+        def visit(cmd: click.Command, path: tuple[str, ...], parent) -> None:
+            ctx = cmd.make_context(
+                path[-1] if path else root_name,
+                [],
+                parent=parent,
+                resilient_parsing=True,
+                terminal_width=10_000,
+                max_content_width=10_000,
+            )
+            if "memtomem-docs" in cmd.get_help(ctx):
+                offenders.append(f"{root_name} " + " ".join(path) if path else root_name)
+            if isinstance(cmd, click.Group):
+                for name, sub in cmd.commands.items():
+                    visit(sub, path + (name,), ctx)
+
+        visit(root, (), None)
+        return offenders
+
     def test_no_private_doc_path_in_rendered_help(self) -> None:
         # The attribute scan above misses text Click synthesizes at render
         # time — a string ``deprecated=`` on a command lands only in
         # ``cmd.deprecated`` yet renders as ``(DEPRECATED: ...)`` in --help.
         # Rendering each command's help covers every such surface at once.
-        offenders = []
-        for path, cmd in self._walk(_CLI):
-            ctx = click.Context(cmd, info_name=path[-1] if path else "mm")
-            if "memtomem-docs" in cmd.get_help(ctx):
-                offenders.append("mm " + " ".join(path) if path else "mm")
+        offenders = self._rendered_offenders(_CLI)
         assert not offenders, (
             "Rendered ``--help`` output references the private "
             "``memtomem-docs`` repo, which installed users cannot open. "
@@ -1591,3 +1614,24 @@ class TestNoPrivateRepoRefsInCliHelp:
             "Click composes itself, e.g. a ``deprecated=`` message. "
             f"Offenders: {sorted(offenders)}"
         )
+
+    def test_rendered_scan_catches_click_synthesized_text(self) -> None:
+        # Regression for two false negatives in the first cut of the scan:
+        # a command-level ``deprecated=`` string (lives only in
+        # ``cmd.deprecated``), and a default surfaced via
+        # ``context_settings={"show_default": True}`` (invisible to a bare
+        # ``click.Context``). Both must be flagged.
+        @click.group()
+        def root() -> None:
+            pass
+
+        @root.command(deprecated="see memtomem-docs/x.md", help="words " * 30)
+        def dep() -> None:
+            pass
+
+        @root.command(context_settings={"show_default": True})
+        @click.option("--src", default="memtomem-docs/private", help="Source")
+        def sd(src: str) -> None:
+            pass
+
+        assert {"mm dep", "mm sd"} <= set(self._rendered_offenders(root))
