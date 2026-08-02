@@ -126,6 +126,11 @@ That read resolves its scope in order: an explicit agent_id parameter, then the
 session's bound agent, then the current namespace, and only if none of those is
 set does it search unpinned. An unbound session therefore does not by itself
 mean an unpinned search — it removes the second step, nothing more.
+
+CLI sessions are separate from these, and only "mm add" inherits them: "mm
+session start --agent-id planner" parks its session id in
+~/.memtomem/.current_session, and a later "mm add" re-reads it and writes to
+"agent-runtime:planner" unless given its own --namespace.
 """,
     "multi_agent": """\
 Typical flow: mem_do(action="session_start", params={"agent_id": "planner"})

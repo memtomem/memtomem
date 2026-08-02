@@ -8,11 +8,19 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import click
 
 from memtomem.cli._errors import raise_cli_error
+
+# Re-exported for this module's own use: the state-file helpers moved to
+# ``cli/_session_state.py`` so ``mm add`` can resolve the active session's
+# write scope without importing the command module (#1991).
+from memtomem.cli._session_state import (
+    _clear_current_session,
+    _read_current_session,
+    _write_current_session,
+)
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     InvalidNameError,
@@ -58,11 +66,18 @@ def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:
 
     Mirrors the priority chain documented on ``mem_session_start``, with
     the ``app.current_namespace`` step omitted: each ``mm`` invocation is
-    a fresh process and has no cross-call session state to consult — and
-    for the same reason the CLI binds no runtime agent, so the #1875
-    write-routing question does not arise here. The sentinel is resolved
-    through :func:`normalize_bound_agent_id` so the ``"default"`` rule
-    lives in one place instead of being re-declared as a literal.
+    a fresh process and has no in-memory session state to consult. The
+    sentinel is resolved through :func:`normalize_bound_agent_id` so the
+    ``"default"`` rule lives in one place instead of being re-declared as
+    a literal — the same producer that keeps an unbound session from
+    capturing writes (#1875).
+
+    This value is what the session *row* stores and what ``start`` echoes.
+    It is not the write-routing input: ``mm add`` re-derives its scope
+    from the row's ``agent_id`` per invocation, via
+    :func:`memtomem.cli._session_state.resolve_session_write_namespace`,
+    so an explicit ``--namespace`` on a session that bound no agent
+    labels the session without redirecting writes — matching MCP (#1991).
     """
     if namespace:
         return namespace
@@ -70,38 +85,6 @@ def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:
     if bound_agent_id:
         return f"{AGENT_NAMESPACE_PREFIX}{bound_agent_id}"
     return "default"
-
-
-# Session state file — stores active session UUID.
-def _state_dir() -> Path:
-    """Return the memtomem state directory, resolving HOME at call time."""
-    return Path.home() / ".memtomem"
-
-
-def _state_file() -> Path:
-    """Return the path to the current-session state file (lazy — resolves HOME at call time)."""
-    return _state_dir() / ".current_session"
-
-
-def _read_current_session() -> str | None:
-    """Read the active session ID from the state file, or None."""
-    try:
-        text = _state_file().read_text(encoding="utf-8").strip()
-        return text if text else None
-    except FileNotFoundError:
-        return None
-
-
-def _write_current_session(session_id: str) -> None:
-    _state_dir().mkdir(parents=True, exist_ok=True)
-    _state_file().write_text(session_id + "\n", encoding="utf-8")
-
-
-def _clear_current_session() -> None:
-    try:
-        _state_file().unlink()
-    except FileNotFoundError:
-        pass
 
 
 # ---------------------------------------------------------------------------

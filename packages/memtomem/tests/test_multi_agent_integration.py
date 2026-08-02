@@ -1129,3 +1129,75 @@ class TestCaseGPerProjectSharedBucket:
             ctx=ctx,
         )
         assert "invalid namespace" in out
+
+
+# ── Case H — CLI parity: mm add inherits the CLI session's agent ──────
+
+
+class TestCaseHCliSessionWriteRouting:
+    """The CLI mirror of Case E (#1991).
+
+    ``mm session start --agent-id planner`` announced
+    ``Namespace: agent-runtime:planner`` while the following ``mm add``
+    wrote to ``default``, where a plain ``mm search`` returned it — the
+    announced isolation did not exist. This drives the issue's exact
+    four-command sequence through the real CLI code paths (``_start`` →
+    ``_add`` → the search pipeline) against real storage.
+
+    Unlike the MCP path there is no in-process binding to inherit: each
+    ``mm`` invocation re-reads ``~/.memtomem/.current_session``, so HOME
+    isolation is part of the contract under test.
+    """
+
+    @pytest.fixture
+    def cli_env(self, bm25_only_components, monkeypatch, tmp_path):
+        from contextlib import asynccontextmanager
+
+        from helpers import set_home
+
+        comp, _mem_dir = bm25_only_components
+        set_home(monkeypatch, tmp_path / "cli-home")
+
+        @asynccontextmanager
+        async def fake_components():
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda comp: None
+        )
+        return comp
+
+    @pytest.mark.asyncio
+    async def test_cli_add_lands_in_the_announced_namespace(self, cli_env):
+        from memtomem.cli.memory import _add
+        from memtomem.cli.session_cmd import _start
+
+        comp = cli_env
+        session_id, _resumed, _ended = await _start("planner", None, None)
+        row = await comp.storage.get_session(session_id)
+        assert row["namespace"] == "agent-runtime:planner"  # what `start` echoes
+
+        await _add("planner private note: roadmap draft v2", None, [], None)
+
+        # A plain `mm search` hides system namespaces — the note is not here.
+        hidden, _stats = await comp.search_pipeline.search("roadmap draft", top_k=10)
+        assert hidden == []
+
+        # …and the announced namespace is where it actually went.
+        found, _stats = await comp.search_pipeline.search(
+            "roadmap draft", top_k=10, namespace="agent-runtime:planner"
+        )
+        assert any("roadmap draft" in r.chunk.content for r in found)
+
+    @pytest.mark.asyncio
+    async def test_cli_add_without_session_stays_searchable(self, cli_env):
+        # The no-session path must not change: writes stay in the default
+        # namespace and a plain `mm search` finds them.
+        from memtomem.cli.memory import _add
+
+        comp = cli_env
+        await _add("unbound note: quarterly planning offsite", None, [], None)
+
+        found, _stats = await comp.search_pipeline.search("quarterly planning", top_k=10)
+        assert any("quarterly planning" in r.chunk.content for r in found)

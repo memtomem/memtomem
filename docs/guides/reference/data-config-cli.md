@@ -273,6 +273,7 @@ mm index --debounce-window 5 PATH      # record PATH; drain entries silent ≥5s
 mm index --flush                       # synchronously drain queue (correctness primitive)
 mm index --status                      # snapshot queue depth + oldest entry
 mm add "note" --tags "tag1"            # add a memory (--json prints a machine-readable write ack)
+mm add "note" --namespace shared       # pin the write namespace; default is the active session's agent scope
 mm recall --since 2026-03-01           # recall by date (Validity column shown when chunks have valid_from/valid_to)
 
 # Configuration
@@ -462,6 +463,11 @@ mm session events <id>                                        # show events for 
 mm session wrap -- CMD                                        # wrap a command with session lifecycle
 mm activity log                                               # log agent activity event
 # Scripting: list/events/log support --json (see CONTRIBUTING.md → CLI output convention)
+# Write routing: `mm session start --agent-id X` sends subsequent `mm add` writes to
+# `agent-runtime:X` (override per call with `mm add --namespace`, or read them back with
+# `mm search -n agent-runtime:X`). A session started without `--agent-id` binds no agent
+# and leaves writes where they were. Other CLI writers (`mm index`, importers) do not
+# inherit the session scope.
 
 # Health
 mm watchdog status                     # show latest health check results
