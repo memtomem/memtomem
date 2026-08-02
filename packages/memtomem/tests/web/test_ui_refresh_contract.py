@@ -83,7 +83,9 @@ def test_header_utility_icons_are_dependency_free_inline_svg() -> None:
 def test_changed_static_assets_bump_cache_versions() -> None:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert "/style.css?v=140" in html
+    # v=141 / watchdog v=22 add the #1983 malformed-matcher banner (PR #1986).
+    assert "/style.css?v=141" in html
+    assert "/settings-hooks-watchdog.js?v=22" in html
     assert "/app.js?v=157" in html
     assert "/settings-harness.js?v=9" in html
     assert "/settings-config.js?v=19" in html

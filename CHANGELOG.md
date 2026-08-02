@@ -64,7 +64,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (ADR-0018 §5). Healthy rules in the same file are unaffected. The Web hooks
   panel (`GET /api/settings-sync`) keys rules by matcher the same way and
   returned a 500 on the same input; it now drops the rule from the comparison
-  instead, on either side, so the view matches what a sync would write.
+  instead, on either side, so the view matches what a sync would write — and
+  the drop is visible, not silent: the payload carries the canonical-side
+  warnings (`matcher_warnings`) and the skipped target rows
+  (`target_hooks.malformed`), rendered as a warning banner in the panel.
+  An ownership-marked *target* rule with a malformed matcher is pruned with a
+  warning on the next sync: releases without this validation stamped and wrote
+  such rules themselves before Gemini aborted the run, and keeping them would
+  strand the broken rule beside its corrected replacement after an upgrade.
 
 ## [0.3.14] — 2026-08-01
 
