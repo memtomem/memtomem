@@ -100,11 +100,12 @@ unaffected.
 (audit-logged), and the Web UI offers the same bypass as an explicit
 opt-in: a blocked run shows a toast pointing at the "Index without privacy
 gate" checkbox, and re-running with it enabled indexes the file. Both are
-deliberate, per-run opt-ins on human-facing surfaces. The one hard
-guarantee is on the agent side: the `mem_index` MCP tool has no
-`force_unsafe` parameter, so an agent calling `mem_index` cannot bypass
-the gate. The bypass is hard-refused for files that resolve to the
-git-tracked `project_shared` scope regardless of caller.
+explicit request controls on human-facing surfaces (note the checkbox
+stays set until you untick it). The one hard guarantee is on the agent
+side: the `mem_index` MCP tool has no `force_unsafe` parameter, so an
+agent calling `mem_index` cannot bypass the gate. The bypass is
+hard-refused for files that resolve to the git-tracked `project_shared`
+scope regardless of caller.
 
 See [ADR-0006](../../adr/0006-web-ui-folder-upload-redaction.md) for the
 full trust-boundary design.
