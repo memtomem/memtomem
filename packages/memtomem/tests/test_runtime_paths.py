@@ -10,8 +10,10 @@ the security contract (symlink / owner / mode).
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from memtomem._runtime_paths import (
     legacy_server_pid_path,
     runtime_dir,
     server_pid_path,
+    store_pid_digest,
 )
 from .helpers import set_home
 
@@ -482,10 +485,64 @@ class TestServerPidPath:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
 
         server_pid_path()
+        server_pid_path(tmp_path / "store" / "memtomem.db")
 
         assert not (xdg / "memtomem").exists(), (
             "server_pid_path() is a path resolver; use ensure_runtime_dir() "
             "explicitly when opening the file"
+        )
+
+    def test_store_scoped_name_matches_digest_pattern(self, tmp_path, monkeypatch):
+        xdg = _make_safe_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+
+        p = server_pid_path(tmp_path / "a" / "memtomem.db")
+
+        assert p.parent == xdg / "memtomem"
+        assert re.fullmatch(r"server-[0-9a-f]{16}\.pid", p.name), p.name
+
+    def test_different_stores_get_different_names(self, tmp_path, monkeypatch):
+        xdg = _make_safe_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+
+        a = server_pid_path(tmp_path / "a" / "memtomem.db")
+        b = server_pid_path(tmp_path / "b" / "memtomem.db")
+
+        assert a != b
+
+    def test_spelling_variants_of_one_store_get_one_name(self, tmp_path, monkeypatch):
+        """expanduser / trailing-slash / relative-segment spellings of the
+        same path must all land on one digest — the server resolves through
+        ``expanduser().resolve()`` while ``mm uninstall`` passes an
+        ``expanduser()``-only path, and the helper must erase that caller
+        discrepancy (#1990)."""
+        xdg = _make_safe_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        db = tmp_path / ".memtomem" / "memtomem.db"
+
+        assert server_pid_path(db) == server_pid_path("~/.memtomem/memtomem.db")
+        assert server_pid_path(db) == server_pid_path(
+            tmp_path / ".memtomem" / "sub" / ".." / "memtomem.db"
+        )
+
+    def test_memory_store_falls_back_to_bare_name(self, tmp_path, monkeypatch):
+        """Non-file SQLite targets have no per-store identity to hash —
+        ``:memory:`` resolved as a path text would just be CWD-relative
+        noise. They degrade to the transitional bare name (store-agnostic,
+        fail-closed for the liveness probes)."""
+        xdg = _make_safe_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+
+        assert server_pid_path(":memory:") == xdg / "memtomem" / "server.pid"
+        assert store_pid_digest(":memory:") is None
+        assert store_pid_digest("file:mem?mode=memory") is None
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="APFS default is case-insensitive")
+    def test_darwin_case_variants_collapse(self, tmp_path):
+        assert store_pid_digest(tmp_path / "Store" / "DB.db") == store_pid_digest(
+            tmp_path / "store" / "db.db"
         )
 
 

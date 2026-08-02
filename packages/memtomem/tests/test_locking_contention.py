@@ -25,9 +25,12 @@ cross-process ordering is verified separately via timestamps.
 
 from __future__ import annotations
 
+import contextlib
 import multiprocessing as mp
 import time
 from pathlib import Path
+
+import pytest
 
 # spawn: cross-platform consistency (Windows + macOS default since Py 3.8;
 # Linux otherwise forks, which is fine but spawn keeps test semantics
@@ -249,3 +252,128 @@ class TestLivenessProbeContention:
         state = probe_pid_file(pid_file)
         assert state.alive is False
         assert state.pid == 4242
+
+
+# ------------------------------------------- check_server_liveness (#1990)
+
+
+class TestCheckServerLivenessStoreScope:
+    """The liveness aggregate is store-scoped: with a ``db_path`` it must
+    see this store's ``server-<digest>.pid`` and the transitional/legacy
+    names, and must NOT report a *foreign* store's live server (#1990).
+
+    In-process ``portalocker`` holders are sufficient here: ``flock`` /
+    ``LockFileEx`` contention is per open handle, and the uninstall suite
+    already relies on the same pattern (``_hold_pid_lock``).
+    """
+
+    @pytest.fixture()
+    def rt(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Isolated runtime dir + HOME so probes never touch real state."""
+        import os
+        import tempfile
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        xdg = tmp_path / "xdg"
+        xdg.mkdir()
+        if os.name != "nt":
+            os.chmod(xdg, 0o700)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        tmp_tmp = tmp_path / "tmp"
+        tmp_tmp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_tmp))
+
+        from memtomem._runtime_paths import ensure_runtime_dir
+
+        return ensure_runtime_dir()
+
+    @contextlib.contextmanager
+    def _hold(self, pid_file: Path):
+        import portalocker
+
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        if not pid_file.exists():
+            pid_file.write_text("4242", encoding="utf-8")
+        fp = open(pid_file, "rb+")
+        try:
+            portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            yield
+        finally:
+            try:
+                portalocker.unlock(fp)
+            except Exception:
+                pass
+            fp.close()
+
+    def test_scoped_probe_sees_own_store_holder(self, rt: Path, tmp_path: Path):
+        from memtomem._runtime_paths import server_pid_path
+        from memtomem.cli._liveness import check_server_liveness
+
+        db = tmp_path / "store" / "memtomem.db"
+        with self._hold(rt / server_pid_path(db).name):
+            state = check_server_liveness(db)
+
+        assert state.alive is True
+        assert state.pid_file is not None and state.pid_file.name == server_pid_path(db).name
+
+    def test_scoped_probe_ignores_foreign_store_holder(self, rt: Path, tmp_path: Path):
+        from memtomem._runtime_paths import server_pid_path
+        from memtomem.cli._liveness import check_server_liveness
+
+        mine = tmp_path / "store" / "memtomem.db"
+        other = tmp_path / "other" / "memtomem.db"
+        with self._hold(rt / server_pid_path(other).name):
+            state = check_server_liveness(mine)
+
+        assert state.alive is False, (
+            "a live server on a different store must not gate work on this one"
+        )
+
+    def test_scoped_probe_still_sees_transitional_bare_holder(self, rt: Path, tmp_path: Path):
+        from memtomem.cli._liveness import check_server_liveness
+
+        db = tmp_path / "store" / "memtomem.db"
+        with self._hold(rt / "server.pid"):
+            state = check_server_liveness(db)
+
+        assert state.alive is True, (
+            "a pre-#1990 server's bare server.pid cannot be attributed to a "
+            "store and must keep refusing fail-closed"
+        )
+
+    def test_store_agnostic_probe_globs_scoped_files(self, rt: Path, tmp_path: Path):
+        from memtomem._runtime_paths import server_pid_path
+        from memtomem.cli._liveness import check_server_liveness
+
+        db = tmp_path / "store" / "memtomem.db"
+        with self._hold(rt / server_pid_path(db).name):
+            state = check_server_liveness()
+
+        assert state.alive is True, (
+            "the no-db_path arm (mm upgrade) must find per-store pid files via glob"
+        )
+
+    def test_store_agnostic_probe_fails_closed_on_glob_error(
+        self, rt: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        class _Unsearchable:
+            def glob(self, pattern: str):
+                raise OSError("unsearchable runtime dir")
+
+            def __str__(self) -> str:
+                return "<runtime dir>"
+
+        monkeypatch.setattr(liveness, "runtime_dir", lambda: _Unsearchable())
+
+        state = liveness.check_server_liveness()
+
+        assert state.alive is True
+        assert state.probe_error is not None, (
+            "an unenumerable runtime dir is an assumption, not observed "
+            "evidence — probe_error must say so (#1949)"
+        )

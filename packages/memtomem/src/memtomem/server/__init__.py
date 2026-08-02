@@ -695,13 +695,44 @@ def _print_network_server_info(
     print("\n".join(lines))
 
 
+def _resolve_store_db_path() -> Path | None:
+    """Best-effort store resolution for pid-file naming (#1990).
+
+    Mirrors the effective config the lazy context will later open: dotenv
+    first (the lifespan loads it before building ``Mem2MemConfig``, so the
+    pid digest must see the same ``MEMTOMEM_STORAGE__SQLITE_PATH``), then
+    the same env → config.d → overrides layering as the component factory —
+    but with ``migrate=False``: pid naming is a read-only concern and must
+    not rewrite ``config.json``. If a pending migration would change
+    ``storage.sqlite_path``, the digest is stale for exactly one server run
+    (equivalent to today's store-blind name), after which the persisted
+    config converges. The same bound applies when ``config.json`` /
+    ``config.d`` are edited after startup: the lazy context re-reads them
+    at first tool call, so the pid name can lag the opened store for this
+    run only — destructive CLI paths stay protected by the DB-lock probe
+    and the instance registry regardless. Any failure returns ``None``
+    and the caller falls back to the transitional bare ``server.pid``.
+    """
+    try:
+        from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+        from memtomem.server.lifespan import _load_dotenv
+
+        _load_dotenv()
+        cfg = Mem2MemConfig()
+        load_config_d(cfg, quiet=True)
+        load_config_overrides(cfg, migrate=False)
+        return Path(cfg.storage.sqlite_path)
+    except Exception:
+        return None
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the MCP server."""
     import atexit
 
     import portalocker
 
-    from memtomem._runtime_paths import ensure_runtime_dir, legacy_server_pid_path
+    from memtomem._runtime_paths import ensure_runtime_dir, legacy_server_pid_path, server_pid_path
 
     args = _parse_server_args(argv)
     transport = _normalize_transport(args.transport)
@@ -755,7 +786,15 @@ def main(argv: list[str] | None = None) -> None:
     # when the platform provides one, otherwise a per-user temp subdir.
     # This keeps ``~/.memtomem/`` untouched during MCP handshake — it is
     # created only when persistent storage is first written (#412).
-    pid_file = ensure_runtime_dir() / "server.pid"
+    # The name is scoped to the resolved store (#1990) so servers on
+    # different databases don't contend for one per-user lock; when the
+    # store can't be resolved the bare transitional name keeps today's
+    # fail-closed behavior. The file is anchored to the exact directory
+    # ``ensure_runtime_dir`` validated and created — re-resolving via
+    # ``server_pid_path`` could land on a different (unvalidated) runtime
+    # dir if the environment shifted between the two calls.
+    db_path = _resolve_store_db_path()
+    pid_file = ensure_runtime_dir() / server_pid_path(db_path).name
 
     # Advisory lock — prevents multiple MCP servers from writing concurrently.
     # The lock is held for the lifetime of the process and auto-released on exit.
@@ -794,7 +833,8 @@ def main(argv: list[str] | None = None) -> None:
         import logging
 
         logging.getLogger(__name__).warning(
-            "Another instance is already running (pid file: %s). Concurrent writes may be slow.",
+            "Another memtomem-server is already writing to this store (pid file: %s). "
+            "Concurrent writes may be slow.",
             pid_file,
         )
     else:

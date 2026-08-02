@@ -662,10 +662,11 @@ class TestServerAliveRefuses:
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
 
-    def test_refuses_when_server_alive_at_runtime_path(self, home):
-        """Post-#412 servers hold the flock at
-        ``$XDG_RUNTIME_DIR/memtomem/server.pid``. The probe must see it
-        even though the pid file lives outside ``~/.memtomem/``.
+    def test_refuses_when_server_alive_at_transitional_runtime_path(self, home):
+        """A server started by a pre-#1990 version holds the flock at the
+        bare ``$XDG_RUNTIME_DIR/memtomem/server.pid``. That name cannot be
+        attributed to a store, so the probe keeps checking it fail-closed
+        during the transition window and uninstall must still refuse.
 
         Same Windows caveat as ``test_refuses_when_server_alive_at_legacy_path``:
         the recorded pid is unreachable behind ``LockFileEx``, so the
@@ -689,6 +690,23 @@ class TestServerAliveRefuses:
             )
         else:
             assert str(os.getpid()) in result.output
+        assert (home / ".memtomem" / "memtomem.db").exists()
+
+    def test_refuses_when_server_alive_at_store_scoped_path(self, home):
+        """A current server holds the flock at this store's
+        ``server-<digest>.pid`` (#1990). The store-scoped probe must find
+        it and refuse."""
+        from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
+
+        _seed_state(home)
+        pid_file = ensure_runtime_dir() / server_pid_path(home / ".memtomem" / "memtomem.db").name
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+        with _hold_pid_lock(pid_file):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 2
+        assert "Server still running" in result.output
         assert (home / ".memtomem" / "memtomem.db").exists()
 
     @pytest.mark.skipif(
@@ -825,17 +843,23 @@ class TestRuntimePidCleanedWithOther:
     starts fresh. The runtime subdir is rmdir'd if we empty it."""
 
     def test_runtime_pid_deleted_and_subdir_pruned(self, home):
-        from memtomem._runtime_paths import ensure_runtime_dir, runtime_dir
+        """Both pid names attributable to this store — the store-scoped
+        ``server-<digest>.pid`` and the transitional bare ``server.pid``
+        (#1990) — are staged, and the emptied subdir is pruned."""
+        from memtomem._runtime_paths import ensure_runtime_dir, runtime_dir, server_pid_path
 
         _seed_state(home)
         rt = ensure_runtime_dir()
         pid_file = rt / "server.pid"
         pid_file.write_text("0", encoding="utf-8")
+        scoped_pid = rt / server_pid_path(home / ".memtomem" / "memtomem.db").name
+        scoped_pid.write_text("0", encoding="utf-8")
 
         result = CliRunner().invoke(cli, ["uninstall", "-y"])
 
         assert result.exit_code == 0, result.output
-        assert not pid_file.exists(), "runtime pid file must be deleted"
+        assert not pid_file.exists(), "transitional runtime pid file must be deleted"
+        assert not scoped_pid.exists(), "store-scoped runtime pid file must be deleted"
         # subdir should be gone too — we own it
         assert not runtime_dir().exists(), "empty runtime subdir must be pruned"
 
@@ -863,6 +887,59 @@ class TestRuntimePidCleanedWithOther:
         assert not (rt / "server.pid").exists()
         assert sibling.exists(), "unrelated file in runtime subdir must survive"
         assert runtime_dir().exists(), "runtime subdir must not be pruned when other files remain"
+
+
+class TestForeignStorePidFiles:
+    """#1990: another store's ``server-<digest>.pid`` in the shared runtime
+    dir is not ours — it must neither block the uninstall (symptom 2) nor
+    appear in the deletion inventory (symptom 3)."""
+
+    def _foreign_pid_file(self, home) -> Path:
+        from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
+
+        rt = ensure_runtime_dir()
+        foreign = rt / server_pid_path(home / "somewhere-else" / "other.db").name
+        assert foreign.name != server_pid_path(home / ".memtomem" / "memtomem.db").name
+        foreign.write_text("27462", encoding="utf-8")
+        return foreign
+
+    def test_live_foreign_server_does_not_block_uninstall(self, home):
+        """The #1990 repro: a *live* server on an unrelated store holds
+        its own pid flock. Uninstalling this store must proceed — the old
+        per-user pid file turned this into a false refusal whose
+        remediation taught users to reach for ``--force``."""
+        from memtomem._runtime_paths import runtime_dir
+
+        state = _seed_state(home)
+        foreign = self._foreign_pid_file(home)
+
+        with _hold_pid_lock(foreign):
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert "Server still running" not in result.output
+        assert not state.exists(), "state must be deleted despite the unrelated live server"
+        assert foreign.exists(), "the foreign store's live pid file must survive"
+        assert runtime_dir().exists(), "runtime subdir must not be pruned around a foreign file"
+
+    def test_foreign_pid_file_not_inventoried(self, home):
+        """Even a *stale* foreign pid file is another store's property:
+        it must not show up in the deletion plan and must survive the
+        wipe."""
+        from memtomem._runtime_paths import runtime_dir
+
+        state = _seed_state(home)
+        foreign = self._foreign_pid_file(home)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert foreign.name not in result.output, (
+            "foreign server-*.pid must not be listed in the inventory"
+        )
+        assert not state.exists()
+        assert foreign.exists(), "stale foreign pid file must be left alone"
+        assert runtime_dir().exists()
 
 
 # -------------------------------------------------------------------- 13
@@ -1980,7 +2057,7 @@ class TestDestructiveBoundaryReprobe:
         state = _seed_state(home)
         calls: list[int] = []
 
-        def flapping_liveness():
+        def flapping_liveness(db_path=None):
             calls.append(1)
             if len(calls) == 1:
                 return ServerState(alive=False, pid=None, pid_file=None)
@@ -2008,7 +2085,7 @@ class TestDestructiveBoundaryReprobe:
         monkeypatch.setattr(
             uninstall_cmd,
             "_check_server_liveness",
-            lambda: ServerState(alive=True, pid=4242, pid_file=state / ".server.pid"),
+            lambda db_path=None: ServerState(alive=True, pid=4242, pid_file=state / ".server.pid"),
         )
 
         result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
@@ -2606,7 +2683,7 @@ def _child_uninstall_blocking_in_staging(home_str: str, rt_str: str, q, release)
     _reg.runtime_dir = _rt
     _reg.ensure_runtime_dir = _ensure_rt
     _uninstall.runtime_dir = _rt
-    _uninstall.server_pid_path = lambda: rt / "server.pid"
+    _uninstall.server_pid_path = lambda db_path=None: rt / "server.pid"
 
     home = Path(home_str)
     _bootstrap._CONFIG_PATH = home / ".memtomem" / "config.json"
@@ -3233,7 +3310,7 @@ class TestLivenessDbLockProbeHardening:
             pid_file=state / ".server.pid",
             probe_error="PermissionError: [Errno 13] Permission denied",
         )
-        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", lambda: fake)
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", lambda db_path=None: fake)
 
         result = CliRunner().invoke(cli, ["uninstall", "-y"])
         assert result.exit_code == 2, result.output
@@ -3269,7 +3346,7 @@ class TestUnverifiableLivenessBoundaryAndModes:
             probe_error="PermissionError: [Errno 13] Permission denied",
         )
 
-        def _seq():
+        def _seq(db_path=None):
             calls["n"] += 1
             return clean if calls["n"] == 1 else broken
 
@@ -3375,7 +3452,7 @@ class TestUnverifiableLivenessBoundaryAndModes:
             probe_error="PermissionError: denied",
         )
 
-        def _srv_seq():
+        def _srv_seq(db_path=None):
             srv_calls["n"] += 1
             return clean if srv_calls["n"] == 1 else broken
 

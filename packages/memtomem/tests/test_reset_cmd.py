@@ -85,7 +85,15 @@ _DEAD = ServerState(alive=False, pid=None, pid_file=None)
 
 
 def _patch_liveness(monkeypatch, server: ServerState = _DEAD, web: ServerState = _DEAD) -> None:
-    monkeypatch.setattr(reset_cmd, "check_server_liveness", lambda: server)
+    def _server_probe(db_path=None) -> ServerState:
+        # #1990: reset must probe store-scoped — a stub that tolerated an
+        # omitted db_path would keep passing if reset reverted to the
+        # store-agnostic probe (and went back to refusing on unrelated
+        # stores' servers).
+        assert db_path is not None, "reset must pass its resolved db_path to the liveness probe"
+        return server
+
+    monkeypatch.setattr(reset_cmd, "check_server_liveness", _server_probe)
     monkeypatch.setattr(reset_cmd, "check_web_liveness", lambda: web)
 
 

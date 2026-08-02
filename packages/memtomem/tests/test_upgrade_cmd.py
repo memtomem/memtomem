@@ -73,7 +73,7 @@ _DEAD = ServerState(alive=False, pid=None, pid_file=None)
 
 def _patch_liveness(monkeypatch, state: ServerState, web: ServerState = _DEAD) -> None:
     """Patch both probes; web defaults to dead so tests never touch the real runtime dir."""
-    monkeypatch.setattr(upgrade_cmd, "check_server_liveness", lambda: state)
+    monkeypatch.setattr(upgrade_cmd, "check_server_liveness", lambda db_path=None: state)
     monkeypatch.setattr(upgrade_cmd, "check_web_liveness", lambda: web)
 
 

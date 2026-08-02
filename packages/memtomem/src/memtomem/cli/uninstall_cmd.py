@@ -430,13 +430,20 @@ def _collect_inventory(db_path: Path) -> _Inventory:
         candidate = state_dir / name
         if _entry_present(candidate):
             other.append(candidate)
-    # New-location pid file lives outside state_dir (#412: on
+    # New-location pid files live outside state_dir (#412: on
     # ``$XDG_RUNTIME_DIR/memtomem/`` or a per-user temp subdir). Include
-    # it in the transient "other" group so it's cleaned with the legacy
-    # ``.server.pid`` and the user sees a single row per file.
-    runtime_pid = server_pid_path()
-    if _entry_present(runtime_pid):
-        other.append(runtime_pid)
+    # only the ones attributable to *this* store — the store-scoped
+    # ``server-<digest>.pid`` and the transitional bare ``server.pid``
+    # (#1990) — in the transient "other" group so they're cleaned with
+    # the legacy ``.server.pid``. Foreign ``server-*.pid`` files belong
+    # to other stores' servers (possibly live) and are deliberately left
+    # alone; ``_prune_if_empty`` keeps the runtime dir while they remain.
+    # A crashed foreign server can leave its stale file behind — bounded
+    # to one per store, and kernel-cleaned where the runtime dir is the
+    # XDG tmpfs.
+    for runtime_pid in dict.fromkeys((server_pid_path(db_path), server_pid_path())):
+        if _entry_present(runtime_pid):
+            other.append(runtime_pid)
     # #1935: instance-registry sentinels are transient runtime files like
     # the pid files above; the refusal gate guarantees none of them is
     # live by the time staging runs. The two lock files outside that
@@ -1123,7 +1130,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     db_path, config_error = _load_config_safely()
     state_dir = _DEFAULT_STATE_DIR
 
-    server = _check_server_liveness()
+    server = _check_server_liveness(db_path)
     db_lock = _check_db_lock(db_path)
     registry_state = _probe_registry_liveness()
 
@@ -1386,7 +1393,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
     # through it, and an in-process ``CliRunner`` invocation would otherwise
     # leak the exclusive hold into the surrounding process.
     try:
-        server = _check_server_liveness()
+        server = _check_server_liveness(db_path)
         db_lock = _check_db_lock(db_path)
         registry_state = _probe_registry_liveness()
         heuristics_block = (server.alive or db_lock.locked) and (not force or is_windows)

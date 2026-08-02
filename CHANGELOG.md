@@ -7,6 +7,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The server pid file is now per-store, not per-user** (#1990). The pid /
+  flock file is named `server-<digest>.pid`, with the digest derived from the
+  normalized resolved SQLite path, instead of one shared `server.pid` for the
+  whole user. This removes three false signals observed when several servers
+  run against different stores on one machine: the spurious "Another instance
+  is already running" warning at startup (now only fires for a genuinely
+  same-store server, and says so), `mm uninstall` / `mm reset` refusing —
+  and recommending `--force` — because an *unrelated* store's server was
+  alive, and the uninstall inventory counting another instance's live pid
+  file as state to delete. Scope of the claim: this fixes the *pid-file*
+  layer; the instance-registry gate (#1935) intentionally still refuses
+  uninstall while any registered server is live for this user, and a server
+  started by an **older** version still holds the bare `server.pid` name,
+  which remains probed fail-closed (a transitional cross-store refusal that
+  disappears once that server restarts on this version). If the store path
+  cannot be resolved at startup (broken config, `:memory:`), the server
+  falls back to the bare transitional name. `mm upgrade`'s store-agnostic
+  probe now scans all `server-*.pid` files and fails closed if the runtime
+  directory cannot be enumerated.
+
 - **`mm index --force` now restores vectors after `mm embedding-reset --mode
   apply-current`.** Resetting the embedding meta drops and recreates
   `chunks_vec` while the chunk rows survive, so the forced re-index wrote each

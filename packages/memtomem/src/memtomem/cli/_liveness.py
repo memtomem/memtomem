@@ -19,7 +19,13 @@ from pathlib import Path
 
 import portalocker
 
-from memtomem._runtime_paths import legacy_server_pid_path, server_pid_path, web_pid_path
+from memtomem._runtime_paths import (
+    legacy_server_pid_path,
+    runtime_dir,
+    server_pid_path,
+    store_pid_digest,
+    web_pid_path,
+)
 
 
 @dataclass(frozen=True)
@@ -159,12 +165,62 @@ def probe_pid_file(pid_file: Path) -> ServerState:
         fp.close()
 
 
-def check_server_liveness() -> ServerState:
-    """Probe the server pid file at both new (#412) and legacy locations.
+def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
+    """Enumerate per-store ``server-*.pid`` files.
 
-    First live holder wins; if neither is held the state is dead.
+    Returns ``(files, detail)`` — ``files`` is ``None`` when enumeration
+    failed, with ``detail`` describing where/why. ``Path.glob`` on py3.12
+    can raise for an unsearchable runtime dir; callers must treat ``None``
+    as "could not enumerate" and fail closed (#1949) rather than conclude
+    no per-store server exists. The detail is captured here so the caller
+    never re-resolves the runtime dir — if resolution itself was the
+    failure, a second call would raise out of the fail-closed path.
     """
-    for pid_file in (server_pid_path(), legacy_server_pid_path()):
+    try:
+        rt = runtime_dir()
+    except OSError as exc:
+        return None, f"runtime dir unresolved: {exc}"
+    try:
+        return sorted(rt.glob("server-*.pid")), str(rt)
+    except OSError as exc:
+        return None, f"{rt}: {exc}"
+
+
+def check_server_liveness(db_path: Path | None = None) -> ServerState:
+    """Probe the server pid files at per-store, transitional and legacy locations.
+
+    With *db_path*, only pid files that can gate work on **that store** are
+    probed (#1990): the store-scoped ``server-<digest>.pid`` first (so the
+    reported pid is this store's server), then the transitional bare
+    ``server.pid`` (a server started by an older version can't be
+    attributed to a store — refuse fail-closed), then the legacy
+    ``~/.memtomem/.server.pid``. A live server on a *different* store no
+    longer reports alive here.
+
+    Without *db_path* — or when no digest can be derived for it
+    (``:memory:``, normalization failure) — every ``server-*.pid`` is
+    scanned before the transitional and legacy names, so store-agnostic
+    callers (``mm upgrade``) see per-store servers too. An enumeration
+    failure fails closed with ``probe_error`` set (#1949).
+
+    First live holder wins; if nothing is held the state is dead.
+    """
+    candidates: list[Path] = []
+    digest = store_pid_digest(db_path) if db_path is not None else None
+    if digest is not None:
+        candidates.append(server_pid_path(db_path))
+    else:
+        globbed, detail = _glob_server_pid_files()
+        if globbed is None:
+            return ServerState(
+                alive=True,
+                pid=None,
+                pid_file=None,
+                probe_error=f"could not enumerate server-*.pid ({detail})",
+            )
+        candidates.extend(globbed)
+    candidates.extend((server_pid_path(), legacy_server_pid_path()))
+    for pid_file in candidates:
         state = probe_pid_file(pid_file)
         if state.alive:
             return state

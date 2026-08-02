@@ -186,7 +186,7 @@ def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -
         _refuse_registry(registry, as_json=as_json)
     if force:
         return
-    server = check_server_liveness()
+    server = check_server_liveness(db_path)
     if server.alive:
         who = f"pid {server.pid}" if server.pid is not None else "pid unknown, flock held"
         _refuse(
