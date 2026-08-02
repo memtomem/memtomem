@@ -1536,3 +1536,40 @@ class TestLintPathsMatchCI:
     def test_parser_reports_unparseable_call_with_fragment(self) -> None:
         with pytest.raises(AssertionError, match=r"No closing quotation.*unterminated"):
             _ruff_calls('uv run ruff check "unterminated')
+
+
+class TestNoPrivateRepoRefsInCliHelp:
+    """``mm ... --help`` must not point users at a private repository.
+
+    ``memtomem-docs`` is a private repo. Internal module docstrings may cite
+    it — those are read by contributors with access — but anything Click
+    renders into ``--help`` reaches every installed user, and a reference
+    they cannot open is a dead end at exactly the moment they went looking
+    for more detail. Found in ``mm session start --help`` during an
+    end-to-end scenario pass; the fix points at the public guides instead.
+
+    Deliberately scoped to help text, not the whole source tree: this guard
+    protects the user-visible surface without forbidding the internal
+    citations that keep design rationale traceable.
+    """
+
+    @staticmethod
+    def _walk(cmd: click.Command, path: tuple[str, ...] = ()):
+        yield path, cmd
+        if isinstance(cmd, click.Group):
+            for name, sub in cmd.commands.items():
+                yield from TestNoPrivateRepoRefsInCliHelp._walk(sub, path + (name,))
+
+    def test_no_private_doc_path_in_any_command_help(self) -> None:
+        offenders = []
+        for path, cmd in self._walk(_CLI):
+            texts = [cmd.help, cmd.short_help, getattr(cmd, "epilog", None)]
+            texts += [getattr(param, "help", None) for param in cmd.params]
+            if any("memtomem-docs" in (text or "") for text in texts):
+                offenders.append("mm " + " ".join(path) if path else "mm")
+        assert not offenders, (
+            "CLI help text references the private ``memtomem-docs`` repo, "
+            "which installed users cannot open. Cite a file under "
+            "``docs/guides/`` instead, or move the reference into a "
+            f"non-help docstring. Offenders: {sorted(offenders)}"
+        )

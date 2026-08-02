@@ -966,9 +966,23 @@ class SqliteBackend(
                 )
                 vec_updates = [(c, rowid) for c, rowid in to_update if c.embedding]
                 if vec_updates and self._has_vec_table:
+                    # DELETE + INSERT, not UPDATE: after
+                    # ``reset_embedding_meta`` drops and recreates
+                    # ``chunks_vec``, the chunk rows survive but their vector
+                    # rows do not. A bare ``UPDATE ... WHERE rowid=?`` then
+                    # matches nothing and reports success, so the documented
+                    # recovery (``mm embedding-reset --mode apply-current``
+                    # followed by ``mm index --force``) left every
+                    # pre-existing chunk permanently BM25-only. The DELETE
+                    # keeps this idempotent when the vector row does exist.
+                    update_rowids = [rowid for _, rowid in vec_updates]
+                    db.execute(
+                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(update_rowids))})",
+                        update_rowids,
+                    )
                     db.executemany(
-                        "UPDATE chunks_vec SET embedding=? WHERE rowid=?",
-                        [(serialize_f32(c.embedding), rowid) for c, rowid in vec_updates],  # type: ignore[arg-type]
+                        "INSERT INTO chunks_vec(rowid, embedding) VALUES (?,?)",
+                        [(rowid, serialize_f32(c.embedding)) for c, rowid in vec_updates],  # type: ignore[arg-type]
                     )
 
             if to_insert:

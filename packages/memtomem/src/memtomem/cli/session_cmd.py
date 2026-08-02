@@ -154,9 +154,10 @@ def start(
 
     With ``--idempotent``, return the active session for the same ``--agent-id``
     if one exists; with ``--auto-end-stale=<duration>``, first close any active
-    sessions older than the duration. See
-    ``memtomem-docs/memtomem/planning/hooks-session-cli-rfc.md`` for the
-    SessionStart hook design these flags back.
+    sessions older than the duration. Both flags exist for SessionStart hooks;
+    see ``docs/guides/reference/data-config-cli.md`` (Sessions) for worked
+    invocations and ``docs/guides/integrations/claude-code.md`` for the hook
+    recipe itself.
 
     ``--idempotent`` is safe for serial hook callers but not for concurrent
     ones. Two parallel ``mm session start --idempotent`` invocations can both
