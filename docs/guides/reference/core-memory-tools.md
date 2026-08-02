@@ -100,8 +100,9 @@ unaffected.
 (audit-logged), and the Web UI offers the same bypass as an explicit
 opt-in: a blocked run shows a toast pointing at the "Index without privacy
 gate" checkbox, and re-running with it enabled indexes the file. Both are
-explicit request controls on human-facing surfaces (note the checkbox
-stays set until you untick it). The one hard guarantee is on the agent
+explicit request controls on human-facing surfaces, and the checkbox is
+one-shot: it clears itself when the run starts, so each bypass requires a
+fresh opt-in. The one hard guarantee is on the agent
 side: the `mem_index` MCP tool has no `force_unsafe` parameter, so an
 agent calling `mem_index` cannot bypass the gate. The bypass is
 hard-refused for files that resolve to the git-tracked `project_shared`

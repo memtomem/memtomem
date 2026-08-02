@@ -92,7 +92,13 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
     window.fetch = async function fetchSpy(input, init) {
       const url = typeof input === 'string' ? input : input?.url;
       if (url === '/api/index/stream') {
-        capturedIndex.push({ method: init?.method, body: init?.body ? JSON.parse(init.body) : null });
+        capturedIndex.push({
+          method: init?.method,
+          body: init?.body ? JSON.parse(init.body) : null,
+          // #1998: the one-shot reset must happen BEFORE network dispatch,
+          // not in a completion/catch handler.
+          unsafeCheckedAtDispatch: window.document.getElementById('index-force-unsafe').checked,
+        });
         return streamResponse(postResult);
       }
       return origFetch(input, init);
@@ -179,6 +185,37 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
     expect(msgs).toContain(window.t('toast.index_blocked', { count: 2 }));
   });
 
+  it('force_unsafe checkbox is one-shot: cleared before the request is dispatched (#1998)', async () => {
+    const box = document.getElementById('index-force-unsafe');
+    box.checked = true;
+    await clickIndex();
+    expect(capturedIndex[0].body.force_unsafe).toBe(true);
+    expect(capturedIndex[0].unsafeCheckedAtDispatch).toBe(false);
+    expect(box.checked).toBe(false);
+  });
+
+  it('force_unsafe checkbox clears even when the indexing preflight refuses the run (#1998)', async () => {
+    window._indexingTryStartOrRefresh = async () => false;
+    const box = document.getElementById('index-force-unsafe');
+    box.checked = true;
+    await clickIndex();
+    expect(capturedIndex).toHaveLength(0);
+    expect(box.checked).toBe(false);
+  });
+
+  it('force_unsafe checkbox clears even when the stream request fails (#1998)', async () => {
+    const spy = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      if (url === '/api/index/stream') throw new Error('network down');
+      return spy(input, init);
+    };
+    const box = document.getElementById('index-force-unsafe');
+    box.checked = true;
+    await clickIndex();
+    expect(box.checked).toBe(false);
+  });
+
   it('clean SSE run keeps the Blocked row hidden and fires no blocked toast', async () => {
     document.getElementById('index-force-unsafe').checked = false;
     window.__setPostResult(indexResult());
@@ -243,6 +280,14 @@ describe('Sources "+ Add path" — force_unsafe body + blocked surfacing', () =>
     await submitAdd();
     expect(captured).toHaveLength(1);
     expect(captured[0].body.force_unsafe).toBe(true);
+  });
+
+  it('force_unsafe checkbox is one-shot: cleared once submit starts (#1998 twin)', async () => {
+    const box = document.getElementById('memory-add-force-unsafe');
+    box.checked = true;
+    await submitAdd();
+    expect(captured[0].body.force_unsafe).toBe(true);
+    expect(box.checked).toBe(false);
   });
 
   it('indexed.blocked_files>0 fires the blocked toast', async () => {

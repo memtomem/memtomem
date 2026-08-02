@@ -6830,12 +6830,18 @@ async function _runIndexForceUnsafe({ path, recursive, force, namespace, registe
 async function runIndexStream() {
   const path     = qs('index-path').value.trim();
   if (!path) { setMsg(qs('index-msg'), 'Please enter a path to index.', true); return; }
+  // One-shot bypass: capture+clear before any await so the arm is bound to
+  // this click — a refused preflight must not leave it set for a later run,
+  // and toggling during the preflight must not affect an already-clicked run
+  // (mirrors the memory-add path; the handler has no finally to reset in).
+  const unsafeEl = qs('index-force-unsafe');
+  const forceUnsafe = unsafeEl?.checked === true;
+  if (unsafeEl) unsafeEl.checked = false;
   if (!(await _indexingTryStartOrRefresh())) return;
   const recursive = qs('index-recursive').checked;
   const force     = qs('index-force').checked;
   const namespace = qs('index-namespace').value.trim();
   const registerAsSource = qs('index-register-source')?.checked === true;
-  const forceUnsafe = qs('index-force-unsafe')?.checked === true;
   const progressEl = qs('index-progress');
   const barEl      = qs('index-progress-bar');
   const labelEl    = qs('index-progress-label');
