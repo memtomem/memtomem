@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import datetime
+
 from memtomem.tools.memory_writer import (
     _validate_line_range,
     append_entry,
+    format_entry_block,
     remove_lines,
     replace_lines,
 )
@@ -64,6 +67,70 @@ class TestAppendEntry:
 
         text = target.read_text(encoding="utf-8")
         assert "tags:" not in text
+
+
+class TestDefaultHeadingUniqueness:
+    """Two untitled entries must never share a heading.
+
+    ``indexing.engine._can_merge`` treats an identical ``heading_hierarchy`` as
+    permission to pack two short chunks into one, so entries appended under the
+    same auto-heading were folded together: the earlier entry's text was
+    swallowed and the file's chunk ids were re-minted, invalidating any id
+    already handed to a caller. The heading was a second-resolution timestamp,
+    which two back-to-back appends share routinely.
+    """
+
+    def _headings(self, text: str) -> list[str]:
+        return [line for line in text.splitlines() if line.startswith("## ")]
+
+    def test_back_to_back_entries_get_distinct_headings(self, tmp_path):
+        target = tmp_path / "notes.md"
+
+        for i in range(5):
+            append_entry(target, f"entry {i}")
+
+        headings = self._headings(target.read_text(encoding="utf-8"))
+        assert len(headings) == 5
+        assert len(set(headings)) == 5
+
+    def test_one_batch_of_blocks_gets_distinct_headings(self, tmp_path):
+        # mem_batch_add composes every block in a single loop, so these are
+        # written well inside one millisecond — finer resolution alone would
+        # not separate them.
+        blocks = [format_entry_block(f"entry {i}") for i in range(50)]
+        headings = self._headings("".join(blocks))
+        assert len(set(headings)) == 50
+
+    def test_heading_suffix_keeps_the_whole_uuid(self):
+        """A truncated suffix is not enough. Every block in one `mem_batch_add`
+        shares a millisecond stamp, so the suffix is the only discriminator for
+        up to 500 entries — at 32 bits that is roughly a 3e-5 birthday collision
+        per batch, and one collision restores the merge this prevents."""
+        heading = format_entry_block("body").splitlines()[1]
+        suffix = heading.split()[-1]
+        assert len(suffix) == 32
+        int(suffix, 16)  # a full uuid4 hex, not a prefix of one
+
+    def test_default_heading_still_carries_a_readable_timestamp(self, tmp_path):
+        target = tmp_path / "notes.md"
+
+        append_entry(target, "content")
+
+        text = target.read_text(encoding="utf-8")
+        heading = self._headings(text)[0]
+        assert heading.startswith("## Entry ")
+        stamp = heading.split()[2]
+        assert datetime.fromisoformat(stamp).tzinfo is not None
+        # the metadata line parsers read keeps its own second resolution
+        created = [ln for ln in text.splitlines() if ln.startswith("> created:")][0]
+        assert "." not in created.split("created:")[1]
+
+    def test_an_explicit_title_is_still_used_verbatim(self, tmp_path):
+        target = tmp_path / "notes.md"
+
+        append_entry(target, "content", title="Cache Decision")
+
+        assert self._headings(target.read_text(encoding="utf-8")) == ["## Cache Decision"]
 
 
 class TestValidateLineRange:
