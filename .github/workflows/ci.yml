@@ -223,9 +223,16 @@ jobs:
         working-directory: packages/memtomem/tests-js
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Node 20 is below the floor the jsdom 30 line requires
+      # (`^22.22.2 || ^24.15.0 || >=26.0.0`, and its undici dependency needs
+      # >=22.19.0) — `npm ci` only warns EBADENGINE there and the whole suite
+      # then dies at import time. The range, rather than a bare "24", is
+      # load-bearing: with check-latest off setup-node takes the newest
+      # matching version already in the runner tool cache, which can be a 24.x
+      # below jsdom's 24.15.0 floor.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
-          node-version: "20"
+          node-version: "^24.15.0"
           cache: npm
           cache-dependency-path: packages/memtomem/tests-js/package-lock.json
       - run: npm ci
