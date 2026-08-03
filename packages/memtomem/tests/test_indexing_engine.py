@@ -1669,7 +1669,78 @@ class TestBulkResolvesNamespaceOnce:
 
         assert spy.await_count == 2
 
-    async def test_late_store_failure_cannot_reach_the_write_path(
+    async def test_stream_stamps_each_files_own_namespace(self, components, memory_dir):
+        """The per-file values are positionally mapped — with rules splitting
+        the walk into two namespaces, each file's chunks carry its own, not
+        its neighbour's."""
+        engine = components.index_engine
+        (memory_dir / "alpha").mkdir()
+        (memory_dir / "beta").mkdir()
+        a = memory_dir / "alpha" / "a.md"
+        b = memory_dir / "beta" / "b.md"
+        a.write_text("# A\n\nalpha", encoding="utf-8")
+        b.write_text("# B\n\nbeta", encoding="utf-8")
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/alpha/**", namespace="ns-alpha"
+                ),
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/beta/**", namespace="ns-beta"
+                ),
+            ],
+        )
+
+        async for _ in engine.index_path_stream(memory_dir, recursive=True):
+            pass
+
+        assert await components.storage.namespaces_for_source(a) == ["ns-alpha"]
+        assert await components.storage.namespaces_for_source(b) == ["ns-beta"]
+
+    async def test_stream_complete_event_echoes_the_applied_namespaces(
+        self, components, memory_dir
+    ):
+        """The ``complete`` event's ``resolved_namespaces`` reports the same
+        distinct-sorted set the write actually applied."""
+        engine = components.index_engine
+        (memory_dir / "alpha").mkdir()
+        (memory_dir / "alpha" / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        (memory_dir / "untagged.md").write_text("# U\n\nplain", encoding="utf-8")
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/alpha/**", namespace="ns-alpha"
+                ),
+            ],
+        )
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+
+        complete = next(ev for ev in events if ev["type"] == "complete")
+        assert complete["resolved_namespaces"] == ["ns-alpha", None]
+
+    async def test_a_store_that_stops_answering_after_the_prepass_is_not_an_error(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The direct regression pin for the removed second lookup: a store
+        that answers the pre-write resolution and then dies must not surface
+        anything — under the old double-resolution shape the second, mid-run
+        lookup failed and was flattened into ``stats.errors``."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[[], RuntimeError("store down")]),
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.errors == ()
+
+    async def test_a_prepass_failure_stops_the_run_before_any_write(
         self, components, memory_dir, monkeypatch
     ):
         """A store that answers once and then stops fails the run *before*

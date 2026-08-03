@@ -1841,10 +1841,12 @@ class TestIndexNamespaceLookupFailure:
         self, app, client: AsyncClient
     ):
         """SSE carries no status code, so the message is the only place this
-        surface can classify the failure. It also cannot borrow the single-shot
-        wording: the stream indexes as it walks, so earlier files really were
-        indexed by the time a later lookup fails."""
+        surface can classify the failure. Since #2018 the stream resolves
+        every namespace before its first write, so an escaping lookup failure
+        means the run changed nothing — the stream states the same
+        post-condition, with the same string, as the single-shot routes."""
         from memtomem.errors import NamespaceResolutionError
+        from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 
         async def _boom(*args, **kwargs):
             raise NamespaceResolutionError("could not read the stored namespace for /tmp/secret.md")
@@ -1857,8 +1859,7 @@ class TestIndexNamespaceLookupFailure:
         assert resp.status_code == 200, resp.text
         event = json.loads(resp.text.split("data: ", 1)[1].strip())
         assert event["retryable"] is True
-        assert "Retry" in event["message"]
-        assert "nothing was changed" not in event["message"]
+        assert event["message"] == NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
         # The engine embeds the absolute path in ``str(exc)``.
         assert "/tmp/secret.md" not in event["message"]
 
