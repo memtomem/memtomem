@@ -150,3 +150,16 @@ class RetryableError(Exception):
 
 class PermanentError(Exception):
     """Error that will not resolve with retries (e.g., invalid API key, malformed input)."""
+
+
+class NamespaceResolutionError(IndexingError, RetryableError):
+    """The namespace a file's chunks are stored under could not be read.
+
+    Raised instead of falling back to rule resolution (issue #2005): a
+    transient store failure must not become a silent namespace move.
+
+    ``RetryableError`` is part of the type, not just the docstring — the MCP
+    handler branches on it to label the message, and the watcher re-queues
+    the file instead of dropping the event. A comment saying "treat this as
+    retryable" would leave both of those to be remembered.
+    """

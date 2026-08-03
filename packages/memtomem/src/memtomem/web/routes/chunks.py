@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.errors import NamespaceResolutionError
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.tools.memory_writer import remove_lines, replace_chunk_body
@@ -183,6 +184,7 @@ async def delete_chunk(
     ),
     storage=Depends(get_storage),
     index_engine=Depends(get_index_engine),
+    config=Depends(get_config),
 ) -> DeleteResponse:
     chunk = await storage.get_chunk(chunk_id)
     if chunk is None:
@@ -240,10 +242,50 @@ async def delete_chunk(
         # failure we fall back to an index-only delete rather than restoring the
         # line. ``lock_held=True`` skips the nested sidecar acquire (#1587).
         if source.exists() and meta.start_line and meta.end_line:
+            # Issue #2005: ``force=True`` re-applies namespace resolution to
+            # every chunk, including the ones this delete leaves alone — so
+            # deleting one chunk from an ``aaa`` file would move its survivors
+            # to whatever the rules say today. Pass the namespace the file
+            # already has, so force keeps meaning "re-embed everything"
+            # without also meaning "re-namespace everything".
+            #
+            # Outside the try below on purpose. That handler's fallback is an
+            # index-only delete, which is the right answer when the *file*
+            # edit fails but a wrong one here: the row would go while the
+            # source kept the entry, so the chunk returns on the next
+            # re-index and the caller was told the delete succeeded. A
+            # namespace lookup that cannot answer is retryable, and nothing
+            # has been mutated yet.
+            try:
+                # ``or default_namespace``: the resolver returns ``None`` for
+                # the untagged carve-out, and passing that back through would
+                # read as "no caller namespace" and re-enter rule resolution —
+                # the very thing being avoided. The explicit default stores
+                # the same value the carve-out does.
+                preserved_ns = (
+                    await index_engine.effective_namespace_for(source)
+                ) or config.namespace.default_namespace
+            except NamespaceResolutionError as exc:
+                # Only this one: it is the resolver's declared "the store did
+                # not answer" signal and is genuinely retryable. Catching
+                # everything here would dress a config or programming error up
+                # as a transient failure and invite the caller to keep retrying.
+                logger.warning("Namespace lookup failed for %s: %s", source, exc)
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Could not determine the source file's namespace; nothing was "
+                        "deleted. Retry once the chunk store is reachable."
+                    ),
+                ) from exc
             try:
                 await asyncio.to_thread(remove_lines, source, meta.start_line, meta.end_line)
                 await index_engine.index_file(
-                    source, force=True, already_scanned=True, lock_held=True
+                    source,
+                    force=True,
+                    namespace=preserved_ns,
+                    already_scanned=True,
+                    lock_held=True,
                 )
             except Exception as exc:
                 logger.warning("Source file edit failed for %s: %s", chunk_id, exc)

@@ -5,6 +5,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **A namespaced write goes to that namespace's own day file** (#2005,
+  ADR-0032). The default target was `{date}.md` for everyone, and a namespace
+  is applied per `index_file` call across the *whole* file — so when a later
+  append merged with an earlier entry, the merged chunk was stored under the
+  later write's namespace and the earlier entry's namespace was overwritten
+  with no sign of it in either call's output. A non-default namespace now
+  writes to `{date}--{slug}-{digest}.md` instead; merging cannot cross files.
+  The digest is over the exact namespace, so namespaces that differ only in
+  case (one file on macOS/Windows) or only in characters a filename cannot
+  hold (`a:b` vs `a-b`) still get separate files. The default namespace keeps
+  `{date}.md`. `mm agent share` moves too — it indexes with
+  `namespace=<target>` and so carried the same hazard.
+
+  Appending into a `file` that already holds a *different* namespace is now
+  refused rather than performed silently; pass `--allow-namespace-mix`
+  (`allow_namespace_mix=true` on MCP/web) to accept the restamping. A file
+  with no indexed chunks is not refused — unindexed text has no stored
+  namespace to lose.
+
+  A re-index that carries no caller namespace — the watcher, `mem_edit` /
+  `mem_delete` — now keeps a file's namespace when its chunks are unanimously
+  stored under one, instead of restamping the changed ones through the
+  rules/default fallback. `mm index --force` still applies freshly resolved
+  namespaces, which is what makes it the way to apply changed namespace
+  rules. Deleting a chunk in the web UI used to inherit that re-resolution by
+  accident — it re-indexes with `force=True` for the re-embed, so removing
+  one chunk from an `aaa` file moved every survivor to whatever the rules say
+  today; it now passes the file's existing namespace explicitly.
+
+  `/api/index` and the namespace preview report the namespace the write will
+  actually use, rather than the rule-derived one, so a file that keeps its
+  stored namespace is no longer described as moving.
+
+  Day files written before this change may hold several namespaces; they are
+  not migrated, and the guard refuses further mixing into them.
+
 ### Fixed
 
 - **Two untitled entries appended in the same second no longer merge into one

@@ -309,26 +309,58 @@ class MemtomemStore:
                 "surface": "langgraph_add",
             }
 
+        effective_namespace = self._resolve_add_namespace(namespace)
+        default_ns = comp.config.namespace.default_namespace
+
         if file:
             target = Path(file).expanduser().resolve()
         else:
             from memtomem.errors import ConfigError
-            from memtomem.memory_scope import require_user_base
+            from memtomem.memory_scope import day_file_name, require_user_base
 
             try:
                 base = require_user_base(comp.config.indexing.memory_dirs)
             except ConfigError as exc:
                 return {"error": str(exc)}
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            target = base / f"{date_str}.md"
+            # Issue #2005: one day file per namespace. The adapter resolves
+            # its namespace before choosing the file (no session can change
+            # it mid-write here), so no in-lock re-target is needed.
+            target = base / day_file_name(effective_namespace, default_ns, date_str=date_str)
 
-        effective_namespace = self._resolve_add_namespace(namespace)
-
-        append_entry(target, content, title=title, tags=tags)
-        # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
-        stats = await comp.index_engine.index_file(
-            target, namespace=effective_namespace, already_scanned=True
+        from memtomem.context._atomic import (
+            _CRUD_SIDECAR_LOCK_BUDGET_S,
+            _lock_path_for,
+            async_file_lock,
         )
+        from memtomem.memory_scope import namespace_mix_refusal
+
+        # Issue #2005: refuse rather than let re-chunking restamp the existing
+        # entries' namespace. Guard, append and re-index share one lock span —
+        # a guard that inspects a file another writer may change before the
+        # append is decoration. This adapter previously took no lock at all;
+        # adding it here is what makes the guard mean something.
+        try:
+            async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+                mix_err = await namespace_mix_refusal(
+                    index_engine=comp.index_engine,
+                    storage=comp.storage,
+                    default_namespace=default_ns,
+                    target=target,
+                    effective_ns=effective_namespace,
+                    override_hint="a different target file",
+                )
+                if mix_err is not None:
+                    return {"error": "namespace_mix_refused", "detail": mix_err}
+
+                append_entry(target, content, title=title, tags=tags)
+                # Guarded above (``enforce_write_guard``); skip the engine gate
+                # (ADR-0006 PR-A).
+                stats = await comp.index_engine.index_file(
+                    target, namespace=effective_namespace, already_scanned=True, lock_held=True
+                )
+        except TimeoutError:
+            return {"error": "locked", "detail": f"{target} is locked by another process; retry."}
 
         return {
             "file": str(target),

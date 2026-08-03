@@ -360,17 +360,54 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
 
         from memtomem.cli._errors import raise_cli_error
         from memtomem.errors import ConfigError
-        from memtomem.memory_scope import require_user_base
+        from memtomem.memory_scope import day_file_name, namespace_mix_refusal, require_user_base
 
         try:
             base = require_user_base(comp.config.indexing.memory_dirs)
         except ConfigError as exc:
             raise_cli_error(exc)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = base / f"{date_str}.md"
-        append_entry(path, chunk.content, title=title, tags=tags)
-        # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
-        stats = await comp.index_engine.index_file(path, namespace=target, already_scanned=True)
+        # Issue #2005: this write indexes with ``namespace=target``, so it has
+        # the same restamping hazard as ``mm add`` — the shared entry landing
+        # in the plain day file would move that day's other entries into
+        # ``target`` as soon as chunk merging joined them.
+        default_ns = comp.config.namespace.default_namespace
+        path = base / day_file_name(target, default_ns, date_str=date_str)
+
+        from memtomem.context._atomic import (
+            _CRUD_SIDECAR_LOCK_BUDGET_S,
+            _lock_path_for,
+            async_file_lock,
+        )
+
+        # The guard is only worth anything if the file it inspected is the
+        # file that gets appended to, so it shares one lock span with the
+        # append and the re-index — the same L2 sidecar ``mm add`` holds
+        # (#1587). Checking outside the lock would let another writer change
+        # the file's namespace in between and turn the guard into decoration.
+        # ``lock_held=True`` skips the nested engine acquire.
+        try:
+            async with async_file_lock(_lock_path_for(path), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+                mix_err = await namespace_mix_refusal(
+                    index_engine=comp.index_engine,
+                    storage=comp.storage,
+                    default_namespace=default_ns,
+                    target=path,
+                    effective_ns=target,
+                    override_hint="--allow-namespace-mix on `mm add` for a hand-picked file",
+                )
+                if mix_err is not None:
+                    raise click.ClickException(mix_err)
+                append_entry(path, chunk.content, title=title, tags=tags)
+                # Guarded above (``enforce_write_guard``); skip the engine gate
+                # (ADR-0006 PR-A).
+                stats = await comp.index_engine.index_file(
+                    path, namespace=target, already_scanned=True, lock_held=True
+                )
+        except TimeoutError as exc:
+            raise click.ClickException(
+                f"{path} is locked by another process (another server or migrate in flight); retry."
+            ) from exc
 
     click.echo(f"Shared to namespace '{target}'.")
     click.echo(f"- File: {path}")

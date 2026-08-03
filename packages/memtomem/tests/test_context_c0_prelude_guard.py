@@ -627,6 +627,20 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "",
         "Memory FILE lock (L2) — the memory domain, not context artifacts.",
     ),
+    ("cli/agent_cmd.py", "_run_share", 0, "async_file_lock"): (
+        NON_C0,
+        "",
+        "Memory FILE lock (L2) — the day file `mm agent share` appends to. "
+        "Added with the #2005 namespace guard, which has to inspect the same "
+        "file the append lands in.",
+    ),
+    ("integrations/langgraph.py", "MemtomemStore.add", 0, "async_file_lock"): (
+        NON_C0,
+        "",
+        "Memory FILE lock (L2) — the adapter's append target, same span as "
+        "``mm add``. Added with the #2005 namespace guard (this path held no "
+        "lock at all before).",
+    ),
     ("cli/memory_doctor_cmd.py", "_apply_fix", 0, "_file_lock"): (
         NON_C0,
         "",

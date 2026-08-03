@@ -56,10 +56,19 @@ def _components(tmp_path: Path, *, index_error: Exception | None = None) -> Simp
             indexing=SimpleNamespace(
                 memory_dirs=[str(tmp_path / "memories")],
                 project_memory_dirs=[],
-            )
+            ),
+            # #2005: the day-file name and the mixed-namespace guard both
+            # compare against the configured default namespace.
+            namespace=SimpleNamespace(default_namespace="default"),
         ),
-        index_engine=SimpleNamespace(index_file=index_file),
-        storage=SimpleNamespace(list_chunks_by_source=AsyncMock(return_value=[])),
+        index_engine=SimpleNamespace(
+            index_file=index_file,
+            effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
+        ),
+        storage=SimpleNamespace(
+            list_chunks_by_source=AsyncMock(return_value=[]),
+            namespaces_for_source=AsyncMock(return_value=[]),
+        ),
     )
 
 

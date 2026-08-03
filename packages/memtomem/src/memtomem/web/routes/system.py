@@ -1570,7 +1570,7 @@ async def preview_namespace(
     truncated = len(files) > _PREVIEW_FILE_CAP
     walked = files[:_PREVIEW_FILE_CAP]
     return PreviewNamespaceResponse(
-        resolved_namespaces=index_engine.resolve_namespaces_for(walked),
+        resolved_namespaces=await index_engine.resolve_namespaces_for(walked),
         truncated=truncated,
         scanned_files=len(walked),
     )
@@ -1888,8 +1888,17 @@ async def add_memory(
                 detail="File path must be relative and must not contain '..'",
             )
     else:
+        # Issue #2005: one day file per namespace — a shared day file loses one
+        # namespace as soon as chunk merging joins two entries. The web surface
+        # has no session-derived namespace, so unlike the CLI/MCP paths the
+        # name is final here and needs no in-lock re-target.
+        from memtomem.memory_scope import day_file_name
+
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        target = (base / f"{date_str}.md").resolve()
+        target = (
+            base
+            / day_file_name(req.namespace, config.namespace.default_namespace, date_str=date_str)
+        ).resolve()
 
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
@@ -1905,6 +1914,23 @@ async def add_memory(
     # ``lock_held=True`` skips the nested engine acquire.
     try:
         async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            # Issue #2005: refuse before appending when the target already
+            # holds another namespace — re-chunking would restamp its chunks
+            # with this write's namespace. Inside the lock so the check and
+            # the write see the same file state.
+            if not req.allow_namespace_mix:
+                from memtomem.memory_scope import namespace_mix_refusal
+
+                mix_err = await namespace_mix_refusal(
+                    index_engine=index_engine,
+                    storage=storage,
+                    default_namespace=config.namespace.default_namespace,
+                    target=target,
+                    effective_ns=req.namespace,
+                    override_hint="allow_namespace_mix=true",
+                )
+                if mix_err is not None:
+                    raise HTTPException(status_code=409, detail=mix_err)
             target.parent.mkdir(parents=True, exist_ok=True)
             # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from memtomem.config import TargetScope
+from memtomem.memory_scope import NS_RETARGET_ATTEMPTS
+from memtomem.memory_scope import NS_RETARGET_EXHAUSTED_ERROR as _NS_RETARGET_EXHAUSTED
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -85,6 +87,71 @@ async def _release_idempotency_claim(app: AppContext, tool: str, key: str) -> No
         await app.storage.idempotency_release(tool, key)
     except Exception:
         logger.warning("idempotency claim release failed for %s", tool, exc_info=True)
+
+
+NS_RETARGET_EXHAUSTED_ERROR = f"Error: {_NS_RETARGET_EXHAUSTED}"
+
+
+def _day_file_retarget(
+    app: AppContext,
+    *,
+    target: Path,
+    day_base: Path | None,
+    date_str: str,
+    effective_ns: str | None,
+) -> Path | None:
+    """Day file this write belongs in, if it is not ``target`` (issue #2005).
+
+    Returns ``None`` when ``target`` is already right — including for every
+    explicit ``file=`` target, which the caller chose and this never
+    overrides (``day_base`` is ``None`` there).
+
+    The day file's name depends on the namespace, but the namespace is only
+    authoritative once resolved *inside* the lock (#1991), and the lock is
+    keyed to the file. So the caller picks a file from a pre-lock guess,
+    and this reports the disagreement so it can re-acquire on the right
+    one instead of appending to a file named for someone else's namespace.
+    """
+    if day_base is None:
+        return None
+    from memtomem.memory_scope import day_file_name
+
+    desired = day_base / day_file_name(
+        effective_ns, app.config.namespace.default_namespace, date_str=date_str
+    )
+    return desired if desired != target else None
+
+
+async def _namespace_mix_refusal(
+    app: AppContext,
+    target: Path,
+    effective_ns: str | None,
+    *,
+    allow_namespace_mix: bool,
+    override_hint: str = "allow_namespace_mix=true",
+) -> str | None:
+    """Refusal message when appending would mix namespaces in ``target`` (#2005).
+
+    ``index_file`` re-chunks the whole file and stamps one namespace on
+    every chunk it rewrites, so an append that merges with an existing
+    entry silently moves that entry into this write's namespace. Compare
+    against what the engine will actually stamp — ``effective_ns`` may be
+    ``None``, which the engine resolves through its namespace rules — so
+    the guard does not fire on writes that agree with the file.
+    """
+    if allow_namespace_mix:
+        return None
+    from memtomem.memory_scope import namespace_mix_refusal
+
+    err = await namespace_mix_refusal(
+        index_engine=app.index_engine,
+        storage=app.storage,
+        default_namespace=app.config.namespace.default_namespace,
+        target=target,
+        effective_ns=effective_ns,
+        override_hint=override_hint,
+    )
+    return f"Error: {err}" if err else None
 
 
 @asynccontextmanager
@@ -315,6 +382,7 @@ async def _mem_add_core(
     confirm_project_shared: bool = False,
     project_root_override: Path | None = None,
     idempotency_key: str | None = None,
+    allow_namespace_mix: bool = False,
     *,
     event_type: str,
 ) -> tuple[str, "IndexingStats | None"]:
@@ -340,6 +408,12 @@ async def _mem_add_core(
     with the same key returns the original result and performs no second
     write. On such a replay ``stats`` is ``None`` (the write already
     happened), so id-consuming internal callers must not pass a key.
+
+    ``allow_namespace_mix`` opts out of the issue #2005 guard that refuses
+    to append into a file already holding a different namespace. The guard
+    exists because re-chunking restamps merged chunks with this write's
+    namespace, silently moving the earlier entry; the override is for
+    callers that accept that outcome.
 
     ``event_type`` names the *public* surface this write arrived on, for
     the session-provenance event (issue #1876). It is required and has no
@@ -402,6 +476,12 @@ async def _mem_add_core(
     # and Gate A (force_unsafe=True still allowed). Mirrors the
     # ``mem_edit`` / ``mem_delete`` inferred-scope contract.
     target: Path | None = None
+    # Set only for the default day-file target: it is the base directory the
+    # per-namespace day file is (re)built under when the in-lock namespace
+    # disagrees with the pre-lock guess (issue #2005). An explicit ``file=``
+    # leaves it ``None`` — that target is the caller's choice, not ours.
+    day_base: Path | None = None
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if file:
         # ADR-0011 PR-D round 8: thread caller's explicit scope into the
         # path validator so a relative ``file=`` under project-tier
@@ -510,6 +590,7 @@ async def _mem_add_core(
         from memtomem.errors import ConfigError
         from memtomem.memory_scope import (
             MemoryScopeError,
+            day_file_name,
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
@@ -546,8 +627,18 @@ async def _mem_add_core(
                     f"Error: {project_tier_registration_error(base, effective_scope)}",
                     None,
                 )
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        target = base / f"{date_str}.md"
+        # Issue #2005: a day file is shared by every write of the day, and
+        # ``index_file`` stamps one namespace across the whole file — so two
+        # namespaces in one day file lose one of them as soon as chunk
+        # merging joins their entries. Give each namespace its own day file.
+        # The namespace here is only a *guess* (the authoritative one is
+        # resolved inside the lock, #1991); the lock block re-targets if the
+        # guess turns out wrong.
+        day_base = base
+        _, candidate_ns = await capture_session_and_namespace(app, namespace)
+        target = base / day_file_name(
+            candidate_ns, app.config.namespace.default_namespace, date_str=date_str
+        )
 
     assert target is not None
 
@@ -567,102 +658,139 @@ async def _mem_add_core(
     # observe idle, snapshot the event list, and miss a write that was
     # still persisting its own provenance a moment later.
     async with app.write_in_flight():
-        try:
-            async with (
-                app.get_memory_file_lock(target),
-                async_file_lock(
-                    _lock_path_for(target.expanduser().resolve()),
-                    timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
-                ),
-            ):
-                # Idempotency claim under the lock (issue #1573). The claim is a
-                # global (tool, key) row, not a file lock, so it also blocks a
-                # concurrent same-key call that targets a *different* file: exactly
-                # one caller wins the write, the rest replay or get "in progress".
-                if idempotency_key is not None:
-                    state, stored = await app.storage.idempotency_claim("mem_add", idempotency_key)
-                    if state == "completed":
-                        assert stored is not None  # completed rows always carry a result
-                        return (stored + _REPLAY_MARKER, None)
-                    if state == "pending":
-                        return (_idempotency_in_progress_error(idempotency_key), None)
-                # Resolve the session-derived namespace *inside* the lock: waiting on
-                # the lock is a suspension point, and the active session can change
-                # during it — the entry must land under the namespace active at write
-                # time, not one captured before the wait.
-                #
-                # The session id is captured in the *same* lock acquisition as the
-                # namespace, not separately: a transition landing between the two
-                # reads would file this write's chunks under the new session's
-                # namespace and its provenance under the old session's id.
-                provenance_session_id, effective_ns = await capture_session_and_namespace(
-                    app, namespace
-                )
-                # Release the claim only for a failure *before* the append is
-                # durable (mkdir / append itself) — nothing landed, so the key must
-                # stay re-runnable. Once the append lands we NEVER release: a keyed
-                # retry must not re-append. If index_file (below) raises, the claim
-                # is left pending (retry gets "in progress", not a duplicate) and
-                # the watcher / ``mm index --force`` recovers the un-indexed entry.
-                try:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
-                except Exception:
-                    if idempotency_key is not None:
-                        await _release_idempotency_claim(app, "mem_add", idempotency_key)
-                    raise
-                # Re-index the whole file via the standard pipeline so the watcher
-                # (which also calls index_file) produces identical hashes → no dups.
-                # The append is already durable, so a failure here leaves
-                # content on disk that this session created but has no
-                # provenance event for — the watcher or ``mm index`` will
-                # index it later, outside the session. Say so before the
-                # error propagates, or the session reports a complete
-                # record of a write it half-performed.
-                try:
-                    stats = await app.index_engine.index_file(
-                        target, namespace=effective_ns, already_scanned=True, lock_held=True
+        # The loop re-acquires on a different day file when the in-lock
+        # namespace disagrees with the pre-lock guess the file name was built
+        # from (issue #2005). Nothing durable happens before the append and the
+        # idempotency claim is taken *after* the re-target check, so an aborted
+        # attempt leaves no trace — not on disk, and not in the ledger.
+        for _attempt in range(NS_RETARGET_ATTEMPTS):
+            try:
+                async with (
+                    app.get_memory_file_lock(target),
+                    async_file_lock(
+                        _lock_path_for(target.expanduser().resolve()),
+                        timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
+                    ),
+                ):
+                    # Resolve the session-derived namespace *inside* the lock: waiting on
+                    # the lock is a suspension point, and the active session can change
+                    # during it — the entry must land under the namespace active at write
+                    # time, not one captured before the wait.
+                    #
+                    # The session id is captured in the *same* lock acquisition as the
+                    # namespace, not separately: a transition landing between the two
+                    # reads would file this write's chunks under the new session's
+                    # namespace and its provenance under the old session's id.
+                    provenance_session_id, effective_ns = await capture_session_and_namespace(
+                        app, namespace
                     )
-                except Exception:
-                    await mark_provenance_incomplete(app, provenance_session_id)
-                    raise
-                await _flag_imprecise_write(app, provenance_session_id, stats)
-                display_ns = effective_ns or app.config.namespace.default_namespace
-                result = (
-                    f"Memory added to {target}\n"
-                    f"- Namespace: {display_ns}\n"
-                    f"- Chunks indexed: {stats.indexed_chunks}\n"
-                    f"- File: {target}"
-                )
-                # Fill in the won claim with the base result, under the lock. Only
-                # the deterministic base message is stored — the advisory tails
-                # below are non-deterministic and original-only. A complete failure
-                # leaves the row pending (never released — the append is durable),
-                # so a retry replays/blocks instead of duplicating.
-                if idempotency_key is not None:
-                    try:
-                        await app.storage.idempotency_complete("mem_add", idempotency_key, result)
-                    except Exception:
-                        logger.warning(
-                            "idempotency ledger complete failed; mem_add key left pending "
-                            "(retry blocks until TTL)",
-                            exc_info=True,
+                    retarget = _day_file_retarget(
+                        app,
+                        target=target,
+                        day_base=day_base,
+                        date_str=date_str,
+                        effective_ns=effective_ns,
+                    )
+                    if retarget is not None:
+                        target = retarget
+                        continue
+                    # Issue #2005: refuse before appending when the file already holds
+                    # other namespaces — re-chunking would restamp their chunks with
+                    # this write's namespace. Ahead of the claim, not after it: a
+                    # refusal is an ordinary outcome, and releasing a won claim is
+                    # best-effort (see ``_release_idempotency_claim``), so claiming
+                    # first would let a swallowed release strand the key as pending
+                    # for the ledger's full TTL.
+                    mix_err = await _namespace_mix_refusal(
+                        app, target, effective_ns, allow_namespace_mix=allow_namespace_mix
+                    )
+                    if mix_err is not None:
+                        return (mix_err, None)
+                    # Idempotency claim under the lock (issue #1573). The claim is a
+                    # global (tool, key) row, not a file lock, so it also blocks a
+                    # concurrent same-key call that targets a *different* file: exactly
+                    # one caller wins the write, the rest replay or get "in progress".
+                    if idempotency_key is not None:
+                        state, stored = await app.storage.idempotency_claim(
+                            "mem_add", idempotency_key
                         )
-        except TimeoutError:
-            return (
-                f"Error: {target} is locked by another process (migration in flight?); retry.",
-                None,
+                        if state == "completed":
+                            assert stored is not None  # completed rows always carry a result
+                            return (stored + _REPLAY_MARKER, None)
+                        if state == "pending":
+                            return (_idempotency_in_progress_error(idempotency_key), None)
+                    # Release the claim only for a failure *before* the append is
+                    # durable (mkdir / append itself) — nothing landed, so the key must
+                    # stay re-runnable. Once the append lands we NEVER release: a keyed
+                    # retry must not re-append. If index_file (below) raises, the claim
+                    # is left pending (retry gets "in progress", not a duplicate) and
+                    # the watcher / ``mm index --force`` recovers the un-indexed entry.
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        await asyncio.to_thread(
+                            append_entry, target, content, title=title, tags=tags
+                        )
+                    except Exception:
+                        if idempotency_key is not None:
+                            await _release_idempotency_claim(app, "mem_add", idempotency_key)
+                        raise
+                    # Re-index the whole file via the standard pipeline so the watcher
+                    # (which also calls index_file) produces identical hashes → no dups.
+                    # The append is already durable, so a failure here leaves
+                    # content on disk that this session created but has no
+                    # provenance event for — the watcher or ``mm index`` will
+                    # index it later, outside the session. Say so before the
+                    # error propagates, or the session reports a complete
+                    # record of a write it half-performed.
+                    try:
+                        stats = await app.index_engine.index_file(
+                            target, namespace=effective_ns, already_scanned=True, lock_held=True
+                        )
+                    except Exception:
+                        await mark_provenance_incomplete(app, provenance_session_id)
+                        raise
+                    await _flag_imprecise_write(app, provenance_session_id, stats)
+                    display_ns = effective_ns or app.config.namespace.default_namespace
+                    result = (
+                        f"Memory added to {target}\n"
+                        f"- Namespace: {display_ns}\n"
+                        f"- Chunks indexed: {stats.indexed_chunks}\n"
+                        f"- File: {target}"
+                    )
+                    # Fill in the won claim with the base result, under the lock. Only
+                    # the deterministic base message is stored — the advisory tails
+                    # below are non-deterministic and original-only. A complete failure
+                    # leaves the row pending (never released — the append is durable),
+                    # so a retry replays/blocks instead of duplicating.
+                    if idempotency_key is not None:
+                        try:
+                            await app.storage.idempotency_complete(
+                                "mem_add", idempotency_key, result
+                            )
+                        except Exception:
+                            logger.warning(
+                                "idempotency ledger complete failed; mem_add key left pending "
+                                "(retry blocks until TTL)",
+                                exc_info=True,
+                            )
+            except TimeoutError:
+                return (
+                    f"Error: {target} is locked by another process (migration in flight?); retry.",
+                    None,
+                )
+            app.search_pipeline.invalidate_cache()
+            # After the lock, deliberately: ``add_session_event`` commits, and a
+            # commit inside the CRUD lock span would flush while another process
+            # may still be waiting on the same sidecar.
+            await record_write_provenance(
+                app,
+                session_id=provenance_session_id,
+                event_type=event_type,
+                stats=stats,
             )
-        app.search_pipeline.invalidate_cache()
-        # After the lock, deliberately: ``add_session_event`` commits, and a
-        # commit inside the CRUD lock span would flush while another process
-        # may still be waiting on the same sidecar.
-        await record_write_provenance(
-            app,
-            session_id=provenance_session_id,
-            event_type=event_type,
-            stats=stats,
-        )
+            break
+        else:
+            return (NS_RETARGET_EXHAUSTED_ERROR, None)
 
     # Semantic duplicate check: warn if very similar content already exists
     try:
@@ -720,6 +848,7 @@ async def mem_add(
     scope: TargetScope = "user",
     confirm_project_shared: bool = False,
     idempotency_key: str | None = None,
+    allow_namespace_mix: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Add a new memory entry to a markdown file and immediately index it.
@@ -760,6 +889,8 @@ async def mem_add(
                          Only successful writes are recorded, so a failed
                          call may be retried with the same key. Without a
                          key, semantics are at-least-once.
+        allow_namespace_mix: Append even if ``file`` holds another
+                             namespace (refused by default).
 
     Returns a confirmation message, plus a duplicate warning when a highly
     similar memory (≥90% match) already exists.
@@ -775,6 +906,7 @@ async def mem_add(
         scope=scope,
         confirm_project_shared=confirm_project_shared,
         idempotency_key=idempotency_key,
+        allow_namespace_mix=allow_namespace_mix,
         ctx=ctx,
         event_type="add",
     )
@@ -1085,6 +1217,7 @@ async def mem_batch_add(
     scope: TargetScope = "user",
     confirm_project_shared: bool = False,
     idempotency_key: str | None = None,
+    allow_namespace_mix: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Add multiple memory entries in one call (KV batch).
@@ -1092,6 +1225,10 @@ async def mem_batch_add(
     Each entry dict should have "key" (title) and "value" (content), and
     optionally "tags" (list[str]).  All entries are appended to the same file
     and indexed once.
+
+    Like ``mem_add``, the default target is per namespace per day, and
+    appending into a ``file`` that already holds a different namespace is
+    refused unless ``allow_namespace_mix=True`` (issue #2005).
 
     Each entry's content passes through the same trust-boundary redaction
     guard as ``mem_add`` — routed through ``enforce_write_guard`` per
@@ -1130,6 +1267,11 @@ async def mem_batch_add(
                          failed call may be retried with the same key. Without
                          a key, semantics stay at-least-once (a transport retry
                          may duplicate the entries).
+        allow_namespace_mix: When True, append even though ``file`` already
+                             holds a different namespace. Re-indexing may then
+                             restamp the existing entries' chunks with this
+                             batch's namespace (issue #2005); without it such
+                             a call is refused.
     """
     if len(entries) > 500:
         return f"Error: batch too large (max 500 entries, got {len(entries)})."
@@ -1169,6 +1311,9 @@ async def mem_batch_add(
     # and Gate A (force_unsafe=True still allowed). Mirrors the
     # ``_mem_add_core`` inferred-scope contract.
     target: Path | None = None
+    # Day-file base for the issue #2005 re-target, like ``_mem_add_core``.
+    day_base: Path | None = None
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if file:
         # ADR-0011 PR-D round 8: relative ``file=`` under project-tier
         # scope must resolve to the project's tier base, not the user
@@ -1290,6 +1435,7 @@ async def mem_batch_add(
         from memtomem.errors import ConfigError
         from memtomem.memory_scope import (
             MemoryScopeError,
+            day_file_name,
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
@@ -1316,17 +1462,27 @@ async def mem_batch_add(
             # surface / watcher cannot see it.
             if not is_project_tier_registered(base, pmdirs):
                 return f"Error: {project_tier_registration_error(base, effective_scope)}"
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        target = base / f"{date_str}.md"
+        # Per-namespace day file (issue #2005) — same contract and same
+        # pre-lock-guess/in-lock-retarget split as ``_mem_add_core``.
+        day_base = base
+        _, candidate_ns = await capture_session_and_namespace(app, namespace)
+        target = base / day_file_name(
+            candidate_ns, app.config.namespace.default_namespace, date_str=date_str
+        )
 
     assert target is not None
 
-    def _append_entries() -> int:
+    def _append_entries(path: Path) -> int:
         """Append all non-empty entries in ONE write; returns the skipped
         count. Composing every block up front and doing a single append
         makes the batch all-or-nothing (issue #1573) — a mid-batch failure
         can no longer leave entries ``0..k-1`` stranded on disk. Runs in one
         worker thread so formatting up to 500 blocks doesn't block the loop.
+
+        The target is a parameter rather than a closure variable: the #2005
+        re-target loop below can rebind ``target``, and a closure would make
+        the file this writes to depend on when the thread happened to read
+        it.
         """
         skipped = 0
         blocks: list[str] = []
@@ -1338,7 +1494,7 @@ async def mem_batch_add(
                 skipped += 1
                 continue
             blocks.append(format_entry_block(value, title=key or None, tags=entry_tags))
-        append_blocks(target, blocks)
+        append_blocks(path, blocks)
         return skipped
 
     # Serialize the batch append + re-index under the per-file lock (issue
@@ -1354,89 +1510,116 @@ async def mem_batch_add(
     # Same gauge span as ``_mem_add_core``: capture through provenance
     # event, so session teardown cannot snapshot around this write.
     async with app.write_in_flight():
-        try:
-            async with (
-                app.get_memory_file_lock(target),
-                async_file_lock(
-                    _lock_path_for(target.expanduser().resolve()),
-                    timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
-                ),
-            ):
-                # Idempotency claim under the lock (issue #1573), same protocol as
-                # ``_mem_add_core``: the global (tool, key) claim blocks a concurrent
-                # same-key batch even when it targets a different file.
-                if idempotency_key is not None:
-                    state, stored = await app.storage.idempotency_claim(
-                        "mem_batch_add", idempotency_key
+        # Bounded re-target loop, same contract as ``_mem_add_core``
+        # (issue #2005): the day file's name depends on the namespace, which
+        # is only authoritative once resolved inside the lock.
+        for _attempt in range(NS_RETARGET_ATTEMPTS):
+            try:
+                async with (
+                    app.get_memory_file_lock(target),
+                    async_file_lock(
+                        _lock_path_for(target.expanduser().resolve()),
+                        timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
+                    ),
+                ):
+                    # Inside the lock for the same write-time-namespace reason as
+                    # ``_mem_add_core`` — the session can change during the lock wait
+                    # — and in one acquisition with the session id for the same
+                    # reason: split, a transition between them would file the chunks
+                    # and their provenance under different sessions.
+                    provenance_session_id, effective_ns = await capture_session_and_namespace(
+                        app, namespace
                     )
-                    if state == "completed":
-                        assert stored is not None  # completed rows always carry a result
-                        return stored + _REPLAY_MARKER
-                    if state == "pending":
-                        return _idempotency_in_progress_error(idempotency_key)
-                # Inside the lock for the same write-time-namespace reason as
-                # ``_mem_add_core`` — the session can change during the lock wait
-                # — and in one acquisition with the session id for the same
-                # reason: split, a transition between them would file the chunks
-                # and their provenance under different sessions.
-                provenance_session_id, effective_ns = await capture_session_and_namespace(
-                    app, namespace
-                )
-                # Release only for a failure before the append is durable (same rule
-                # as ``_mem_add_core``); once the single append lands the claim is
-                # never released, so a keyed retry can't duplicate the batch.
-                try:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    skipped = await asyncio.to_thread(_append_entries)
-                except Exception:
+                    retarget = _day_file_retarget(
+                        app,
+                        target=target,
+                        day_base=day_base,
+                        date_str=date_str,
+                        effective_ns=effective_ns,
+                    )
+                    if retarget is not None:
+                        target = retarget
+                        continue
+                    # Issue #2005 mixed-namespace refusal, same rule and same
+                    # before-the-claim placement as ``_mem_add_core``.
+                    mix_err = await _namespace_mix_refusal(
+                        app, target, effective_ns, allow_namespace_mix=allow_namespace_mix
+                    )
+                    if mix_err is not None:
+                        return mix_err
+                    # Idempotency claim under the lock (issue #1573), same protocol as
+                    # ``_mem_add_core``: the global (tool, key) claim blocks a concurrent
+                    # same-key batch even when it targets a different file. Taken after
+                    # the re-target check and the guard so neither leaves a ledger row.
                     if idempotency_key is not None:
-                        await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
-                    raise
-                # The append is already durable, so a failure here leaves
-                # content on disk that this session created but has no
-                # provenance event for — the watcher or ``mm index`` will
-                # index it later, outside the session. Say so before the
-                # error propagates, or the session reports a complete
-                # record of a write it half-performed.
-                try:
-                    stats = await app.index_engine.index_file(
-                        target, namespace=effective_ns, already_scanned=True, lock_held=True
-                    )
-                except Exception:
-                    await mark_provenance_incomplete(app, provenance_session_id)
-                    raise
-                await _flag_imprecise_write(app, provenance_session_id, stats)
-                display_ns = effective_ns or app.config.namespace.default_namespace
-                result = (
-                    f"Batch add complete ({len(entries)} entries) → {target}\n"
-                    f"- Namespace: {display_ns}\n"
-                    f"- Chunks indexed: {stats.indexed_chunks}"
-                )
-                if skipped:
-                    result += f"\n- Skipped: {skipped} entries (empty content)"
-                # Fill in the won claim under the lock. A complete failure leaves the
-                # row pending (never released — the append is durable), so a retry
-                # replays/blocks instead of duplicating.
-                if idempotency_key is not None:
+                        state, stored = await app.storage.idempotency_claim(
+                            "mem_batch_add", idempotency_key
+                        )
+                        if state == "completed":
+                            assert stored is not None  # completed rows always carry a result
+                            return stored + _REPLAY_MARKER
+                        if state == "pending":
+                            return _idempotency_in_progress_error(idempotency_key)
+                    # Release only for a failure before the append is durable (same rule
+                    # as ``_mem_add_core``); once the single append lands the claim is
+                    # never released, so a keyed retry can't duplicate the batch.
                     try:
-                        await app.storage.idempotency_complete(
-                            "mem_batch_add", idempotency_key, result
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        skipped = await asyncio.to_thread(_append_entries, target)
+                    except Exception:
+                        if idempotency_key is not None:
+                            await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
+                        raise
+                    # The append is already durable, so a failure here leaves
+                    # content on disk that this session created but has no
+                    # provenance event for — the watcher or ``mm index`` will
+                    # index it later, outside the session. Say so before the
+                    # error propagates, or the session reports a complete
+                    # record of a write it half-performed.
+                    try:
+                        stats = await app.index_engine.index_file(
+                            target, namespace=effective_ns, already_scanned=True, lock_held=True
                         )
                     except Exception:
-                        logger.warning(
-                            "idempotency ledger complete failed; mem_batch_add key left "
-                            "pending (retry blocks until TTL)",
-                            exc_info=True,
-                        )
-        except TimeoutError:
-            return f"Error: {target} is locked by another process (migration in flight?); retry."
-        app.search_pipeline.invalidate_cache()
-        await record_write_provenance(
-            app,
-            session_id=provenance_session_id,
-            event_type="batch_add",
-            stats=stats,
-        )
+                        await mark_provenance_incomplete(app, provenance_session_id)
+                        raise
+                    await _flag_imprecise_write(app, provenance_session_id, stats)
+                    display_ns = effective_ns or app.config.namespace.default_namespace
+                    result = (
+                        f"Batch add complete ({len(entries)} entries) → {target}\n"
+                        f"- Namespace: {display_ns}\n"
+                        f"- Chunks indexed: {stats.indexed_chunks}"
+                    )
+                    if skipped:
+                        result += f"\n- Skipped: {skipped} entries (empty content)"
+                    # Fill in the won claim under the lock. A complete failure leaves the
+                    # row pending (never released — the append is durable), so a retry
+                    # replays/blocks instead of duplicating.
+                    if idempotency_key is not None:
+                        try:
+                            await app.storage.idempotency_complete(
+                                "mem_batch_add", idempotency_key, result
+                            )
+                        except Exception:
+                            logger.warning(
+                                "idempotency ledger complete failed; mem_batch_add key left "
+                                "pending (retry blocks until TTL)",
+                                exc_info=True,
+                            )
+            except TimeoutError:
+                return (
+                    f"Error: {target} is locked by another process (migration in flight?); retry."
+                )
+            app.search_pipeline.invalidate_cache()
+            await record_write_provenance(
+                app,
+                session_id=provenance_session_id,
+                event_type="batch_add",
+                stats=stats,
+            )
+            break
+        else:
+            return NS_RETARGET_EXHAUSTED_ERROR
 
     return result
 
