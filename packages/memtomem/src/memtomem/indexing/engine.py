@@ -669,9 +669,10 @@ class IndexEngine:
         """Each file's effective namespace, positionally aligned with ``files``.
 
         The bulk paths' pre-write prepass (issue #2018): a store that cannot
-        answer fails the whole run here, before any durable write, and each
-        entry doubles as the per-file fallback should the authoritative
-        in-lock resolution fail mid-run.
+        answer fails the whole run here, before any durable write, as the
+        typed retryable error. The write path re-resolves inside each file's
+        critical section — that answer stays authoritative; these entries
+        only feed the ``resolved_namespaces`` echo.
         """
         return [await self.effective_namespace_for(f, explicit_ns, force=force) for f in files]
 

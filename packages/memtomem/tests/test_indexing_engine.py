@@ -1826,9 +1826,9 @@ class TestBulkNamespacePrepass:
         assert await components.storage.list_chunks_by_source(b) == []
 
     async def test_bulk_stamps_default_for_the_untagged_carveout(self, components, memory_dir):
-        """The per-file ``None`` (untagged carve-out) is normalised before
-        being passed as the explicit namespace — the stored spelling is the
-        chunk model's own default, exactly as when nothing was stamped."""
+        """The untagged carve-out resolves to ``None`` in the write path,
+        which skips the stamp — the stored spelling is the chunk model's
+        own default."""
         engine = components.index_engine
         fp = memory_dir / "untagged.md"
         fp.write_text("# U\n\nplain note", encoding="utf-8")
@@ -1840,8 +1840,8 @@ class TestBulkNamespacePrepass:
     async def test_bulk_echo_still_reports_the_untagged_carveout_as_none(
         self, components, memory_dir
     ):
-        """Normalisation applies only to the value handed to the write path;
-        the ``resolved_namespaces`` echo keeps ``None`` for untagged."""
+        """The ``resolved_namespaces`` echo keeps ``None`` for untagged —
+        the carve-out sentinel, distinct from the stored spelling."""
         engine = components.index_engine
         (memory_dir / "untagged.md").write_text("# U\n\nplain note", encoding="utf-8")
 
@@ -1852,7 +1852,7 @@ class TestBulkNamespacePrepass:
     async def test_bulk_preservation_still_wins_without_force(self, components, memory_dir):
         """A bulk re-index carrying no caller intent must not move a file
         out of its stored namespace, even when the rules now say otherwise —
-        the pre-resolved value carries the preserved namespace."""
+        the in-lock resolution preserves the stored value."""
         engine = components.index_engine
         fp = memory_dir / "kept.md"
         fp.write_text("# K\n\nfirst entry", encoding="utf-8")
@@ -1871,7 +1871,7 @@ class TestBulkNamespacePrepass:
 
     async def test_bulk_force_applies_rules_not_preservation(self, components, memory_dir):
         """``force=True`` skips preservation on purpose (the documented way
-        to apply changed rules) — the pre-resolved value must carry the rule
+        to apply changed rules) — the in-lock resolution applies the rule
         namespace, not the stored one."""
         engine = components.index_engine
         fp = memory_dir / "moved.md"
