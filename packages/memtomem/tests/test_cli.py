@@ -1065,19 +1065,21 @@ class TestConfigUnset:
         assert "Skipped mmr.enabld" in result.output
         assert "did you mean 'mmr.enabled'" in result.output
 
-    def test_unset_ambiguous_fragment_suggestion_is_deterministic(
+    def test_unset_ambiguous_fragment_makes_no_suggestion(
         self, isolated, runner: CliRunner
     ) -> None:
-        """min_/max_/target_chunk_tokens all contain 'chunk_tokens'.
-
-        The fragment rule declines to pick among them, so the answer comes from
-        edit distance over a sorted candidate list — the same one every run,
-        rather than whichever the set happened to yield first.
-        """
+        """min_/max_/target_chunk_tokens all contain 'chunk_tokens' — don't pick one."""
         from memtomem.cli.config_cmd import _canonical_unset_keys, _suggest_key
 
         canonical = _canonical_unset_keys()
-        assert _suggest_key("indexing.chunk_tokens", canonical) == "indexing.min_chunk_tokens"
+        assert _suggest_key("indexing.chunk_tokens", canonical) is None
+
+    def test_unset_unique_fragment_still_suggests(self, isolated, runner: CliRunner) -> None:
+        """Declining ambiguous matches must not silence the unambiguous ones."""
+        from memtomem.cli.config_cmd import _canonical_unset_keys, _suggest_key
+
+        canonical = _canonical_unset_keys()
+        assert _suggest_key("search.top_k", canonical) == "search.default_top_k"
 
     def test_unset_unknown_key_without_suggestion(self, isolated, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["config", "unset", "completely_unrelated_xyz"])

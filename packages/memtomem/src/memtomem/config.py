@@ -1113,8 +1113,9 @@ def _split_scalar_list_string(value: str) -> list[object]:
     ``["abc]*.log`` that ``pathspec`` also accepts) working as literal patterns.
 
     Accepting both spellings makes a handful of inputs ambiguous: ``'["a"]'`` is
-    a one-element JSON array *and* a pathspec character class matching ``a]`` or
-    ``"]``. JSON wins, deliberately — that reading is what a user copying from
+    a one-element JSON array *and* a pathspec character class matching the
+    single character ``a`` or ``"``. JSON wins, deliberately — that reading is
+    what a user copying from
     ``config.json`` means, and a character class holding a double quote is
     vanishingly rare next to the silent-empty-pattern failure this fixes. Write
     such a pattern as a JSON array (``'["[\\"a\\"]"]'``) to get it verbatim.

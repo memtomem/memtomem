@@ -148,11 +148,12 @@ def _suggest_key(key: str, canonical: set[str]) -> str | None:
             c for c in canonical if c.startswith(f"{section}.") and field in c.split(".", 1)[1]
         ]
         # Only a unique fragment match is a suggestion. 'indexing.chunk_tokens'
-        # sits inside min_/max_/target_chunk_tokens equally, and naming one of
-        # them would be a confident guess at which the user meant; the caller
-        # lists the section's fields either way.
-        if len(contained) == 1:
-            return contained[0]
+        # sits inside min_/max_/target_chunk_tokens equally, so naming one would
+        # be a confident guess at which the user meant — and falling through to
+        # edit distance just launders the same guess. Say nothing instead; the
+        # `config set` caller lists the section's fields either way.
+        if contained:
+            return contained[0] if len(contained) == 1 else None
 
     # ``canonical`` is a set, so sort before ranking — difflib keeps the first
     # of equally-close candidates, which would otherwise be a hash-order winner.

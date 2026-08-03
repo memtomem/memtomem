@@ -445,8 +445,9 @@ can never match. Anything else stays a literal pattern, so gitignore
 character classes such as `[abc]*.log` and `["abc]*.log` keep working.
 
 A value that reads as both — `'["a"]'` is a JSON array *and* a character
-class matching `a]` or `"]` — is taken as JSON. To store such a pattern
-verbatim, wrap it in a JSON array of its own: `'["[\"a\"]"]'`.
+class matching the single character `a` or `"` — is taken as JSON. To store
+such a pattern verbatim, wrap it in a JSON array of its own:
+`'["[\"a\"]"]'`.
 
 > **Caveats:**
 > - **Not retroactive.** Adding a pattern only stops *future* indexing. Files
