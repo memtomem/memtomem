@@ -55,7 +55,6 @@ from memtomem.web.routes import (
     wiki,
     wiki_mutations,
 )
-from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 from memtomem.web.routes._sync_phase import register_sync_phase_error_handler
 
 if TYPE_CHECKING:
@@ -289,27 +288,14 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": "Not found"})
 
-    # A namespace lookup the chunk store could not answer (#2005) is a
-    # transient outage, not an internal defect: the engine raises rather than
-    # falling back to rule resolution, and it raises *before* any write. 503
-    # here rather than the generic 500 below, so the caller retries instead of
-    # filing a bug. Registered app-wide rather than per route because every
-    # indexing entry point can hit it — a route that forgets its own ``except``
-    # lands on this instead of on a 500. Routes that can still say something
-    # more specific (the chunk-delete path's "nothing was deleted", the
-    # per-root partial results of ``/api/reindex``) catch it themselves first;
-    # this only catches what they let through. ``str(exc)`` is deliberately
-    # not surfaced: the engine embeds the absolute file path in it.
-    from memtomem.errors import NamespaceResolutionError
-
-    @app.exception_handler(NamespaceResolutionError)
-    async def namespace_resolution_error_handler(
-        request: Request, exc: NamespaceResolutionError
-    ) -> JSONResponse:
-        logger.warning("Namespace lookup unavailable: %s", exc, exc_info=True)
-        return JSONResponse(
-            status_code=503, content={"detail": NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL}
-        )
+    # No app-wide handler for ``NamespaceResolutionError`` (#2005), on
+    # purpose. One was tried and removed: "retry, nothing was changed" is only
+    # true where the lookup runs before the write, and a blanket handler
+    # cannot know that. ``POST /api/add`` appends and *then* indexes, and it
+    # carries no idempotency key — telling that caller to retry duplicates the
+    # entry. Every surface therefore states its own post-condition at the call
+    # site, where the answer is knowable, and the ones that cannot promise
+    # "nothing was changed" say something else.
 
     @app.exception_handler(Exception)
     async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:

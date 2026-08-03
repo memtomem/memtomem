@@ -1830,33 +1830,37 @@ class TestIndexNamespaceLookupFailure:
         assert body["results"][0]["indexed_chunks"] == 2
         assert "Retry" in body["results"][1]["errors"][0]
         assert body["errors"] == body["results"][1]["errors"]
+        # This route may not claim "nothing was changed" — the first root's
+        # chunks above are the counterexample, in the same response body.
+        from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 
-    async def test_an_unguarded_route_lands_on_the_app_level_handler(
+        assert body["results"][1]["errors"][0] != NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
+        assert "nothing was changed" not in body["results"][1]["errors"][0]
+
+    async def test_the_stream_route_says_transient_in_the_only_field_it_has(
         self, app, client: AsyncClient
     ):
-        """The backstop. Every indexing entry point can raise this, so a route
-        that forgets its own ``except`` must still answer 503 rather than the
-        generic 500 — that is the whole reason the handler is registered
-        app-wide. Pinned on a route registered here rather than a production
-        one, because every production route currently guards itself and the
-        handler would otherwise have no test at all."""
+        """SSE carries no status code, so the message is the only place this
+        surface can classify the failure. It also cannot borrow the single-shot
+        wording: the stream indexes as it walks, so earlier files really were
+        indexed by the time a later lookup fails."""
         from memtomem.errors import NamespaceResolutionError
 
-        @app.get("/api/_test/namespace-boom")
-        async def _boom() -> None:
+        async def _boom(*args, **kwargs):
             raise NamespaceResolutionError("could not read the stored namespace for /tmp/secret.md")
+            yield  # pragma: no cover — generator marker
 
-        # Ahead of the catch-all ``/api/{path}`` 404, which is registered
-        # last at app build time and would otherwise match first.
-        app.router.routes.insert(0, app.router.routes.pop())
+        app.state.index_engine.index_path_stream = _boom
 
-        resp = await client.get("/api/_test/namespace-boom")
+        resp = await client.post("/api/index/stream", json={"path": "/tmp/memories"})
 
-        assert resp.status_code == 503, resp.text
-        detail = resp.json()["detail"]
-        assert "Retry" in detail
-        # ``str(exc)`` embeds the absolute path; the response must not.
-        assert "/tmp/secret.md" not in detail
+        assert resp.status_code == 200, resp.text
+        event = json.loads(resp.text.split("data: ", 1)[1].strip())
+        assert event["retryable"] is True
+        assert "Retry" in event["message"]
+        assert "nothing was changed" not in event["message"]
+        # The engine embeds the absolute path in ``str(exc)``.
+        assert "/tmp/secret.md" not in event["message"]
 
 
 class TestEditChunkNamespaceLookupFailure:
@@ -2662,6 +2666,55 @@ class TestAddMemory:
         detail = resp.json()["detail"]
         assert "'aaa'" in detail and "allow_namespace_mix=true" in detail
         app.state.index_engine.index_file.assert_not_awaited()
+
+    async def test_add_memory_refuses_before_appending_when_the_lookup_fails(
+        self, client: AsyncClient, app, tmp_path
+    ):
+        """#2005 follow-up. The re-index resolves the namespace itself when
+        the caller named none, and that resolution can fail *after* the append
+        is durable. This route has no idempotency key, so a caller told to
+        retry a half-completed write appends the entry twice — the refusal has
+        to land before anything is written, not after."""
+        from memtomem.errors import NamespaceResolutionError
+
+        base = tmp_path / "memories"
+        base.mkdir(exist_ok=True)
+        app.state.config.indexing.memory_dirs = [base]
+        app.state.storage.namespaces_for_source = AsyncMock(return_value=[])
+        app.state.index_engine.effective_namespace_for = AsyncMock(
+            side_effect=NamespaceResolutionError("store down")
+        )
+
+        resp = await client.post("/api/add", json={"content": "test", "file": "note.md"})
+
+        assert resp.status_code == 503, resp.text
+        assert "Retry" in resp.json()["detail"]
+        # The whole point: the retry this response invites must not duplicate
+        # an entry that already landed.
+        assert not (base / "note.md").exists()
+        app.state.index_engine.index_file.assert_not_awaited()
+
+    async def test_add_memory_with_an_explicit_namespace_skips_the_preflight(
+        self, client: AsyncClient, app, tmp_path
+    ):
+        """The discriminating half: an explicit namespace short-circuits the
+        resolver, so there is nothing to pre-flight and a store that cannot
+        answer must not block the write."""
+        from memtomem.errors import NamespaceResolutionError
+
+        base = tmp_path / "memories"
+        base.mkdir(exist_ok=True)
+        app.state.config.indexing.memory_dirs = [base]
+        app.state.storage.namespaces_for_source = AsyncMock(return_value=[])
+        app.state.index_engine.effective_namespace_for = AsyncMock(
+            side_effect=NamespaceResolutionError("store down")
+        )
+
+        resp = await client.post(
+            "/api/add", json={"content": "test", "file": "note.md", "namespace": "bbb"}
+        )
+
+        assert resp.status_code == 200, resp.text
 
     async def test_add_memory_honours_the_namespace_mix_override(
         self, client: AsyncClient, app, tmp_path

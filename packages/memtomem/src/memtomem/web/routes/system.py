@@ -1086,6 +1086,17 @@ async def memory_dirs_status(
     return {"dirs": stats}
 
 
+#: Per-root twin of ``NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL`` for ``/api/reindex``.
+#: Deliberately does NOT promise "nothing was changed": this route walks every
+#: registered root, so by the time one root's lookup fails the earlier roots
+#: have really been indexed, and their entries are in the same response.
+_REINDEX_ROOT_NAMESPACE_ERROR = (
+    "Could not determine the stored namespace for one or more files in this "
+    "root; it was not indexed. Other roots in this response may have "
+    "completed. Retry once the chunk store is reachable."
+)
+
+
 @router.post("/reindex", dependencies=[Depends(require_configured)])
 async def reindex_all(
     force: bool = False,
@@ -1106,12 +1117,14 @@ async def reindex_all(
             # every registered root, and the roots indexed before this one
             # were really indexed. A 503 for the whole call would discard
             # their results and claim "nothing was changed", which is the one
-            # thing the shared detail string must never say untruthfully. The
-            # entry uses ``errors`` (a list) rather than the ``error`` key the
-            # not-a-directory branch above uses, so it reaches ``all_errors``
-            # and flips ``ok`` to false.
+            # thing a detail string must never say untruthfully — which is
+            # also why this does not reuse ``NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL``:
+            # that string promises nothing was changed, and on this route the
+            # earlier roots may well have been. The entry uses ``errors`` (a
+            # list) rather than the ``error`` key the not-a-directory branch
+            # above uses, so it reaches ``all_errors`` and flips ``ok`` to false.
             logger.warning("Namespace lookup failed while reindexing %s: %s", resolved, exc)
-            results.append({"path": str(resolved), "errors": [NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL]})
+            results.append({"path": str(resolved), "errors": [_REINDEX_ROOT_NAMESPACE_ERROR]})
             continue
         entry: dict = {
             "path": str(resolved),
@@ -1501,6 +1514,25 @@ async def index_stream(
                 path_scope="explicit",
             ):
                 yield f"data: {json.dumps(event)}\n\n"
+        except NamespaceResolutionError as exc:
+            # Before the generic branch (#2005 follow-up): SSE has no status
+            # code, so the *message* is the only place this surface can say
+            # "transient — retry" rather than handing the client a redacted
+            # engine string it cannot classify. Its own wording, because the
+            # stream indexes as it walks: by the time a lookup fails, earlier
+            # files in the run may already be indexed, so the "nothing was
+            # changed" promise the single-shot routes make would be a lie here.
+            logger.warning("Namespace lookup failed during index stream: %s", exc)
+            error_event = {
+                "type": "error",
+                "retryable": True,
+                "message": (
+                    "Could not determine the stored namespace for one or more "
+                    "files; the run stopped. Files already reported as indexed "
+                    "were indexed. Retry once the chunk store is reachable."
+                ),
+            }
+            yield f"data: {json.dumps(error_event)}\n\n"
         except Exception as exc:
             # Engine-level failures escape to this handler (per-file errors
             # are caught inside the engine and reported as basenames in the
@@ -1964,6 +1996,24 @@ async def add_memory(
                 )
                 if mix_err is not None:
                     raise HTTPException(status_code=409, detail=mix_err)
+            # Ask the lookup *before* appending (#2005 follow-up). The
+            # re-index below resolves the namespace itself when the caller
+            # named none, and that resolution can fail — after the append is
+            # already durable. This route has no idempotency key, so a caller
+            # told to retry a half-completed write appends the entry twice.
+            # Pre-flighting moves the failure to a point where refusing is
+            # honest: nothing has been written, and a retry costs nothing.
+            # Only for the resolving case — an explicit ``namespace`` short-
+            # circuits the lookup, so there is nothing to pre-flight. The
+            # mixed-namespace guard above already asks this question when the
+            # file has content; this covers the new-file case it skips.
+            if req.namespace is None:
+                try:
+                    await index_engine.effective_namespace_for(target)
+                except NamespaceResolutionError as exc:
+                    raise HTTPException(
+                        status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
+                    ) from exc
             target.parent.mkdir(parents=True, exist_ok=True)
             # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
