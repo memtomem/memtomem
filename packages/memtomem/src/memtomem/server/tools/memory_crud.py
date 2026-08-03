@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from memtomem.config import TargetScope
+from memtomem.errors import RetryableError
 from memtomem.memory_scope import NS_RETARGET_ATTEMPTS
 from memtomem.memory_scope import NS_RETARGET_EXHAUSTED_ERROR as _NS_RETARGET_EXHAUSTED
 from memtomem.server import mcp
@@ -290,6 +291,13 @@ async def _mutate_file_and_reindex(
             logger.warning("Rollback re-index also failed", exc_info=True)
         app.search_pipeline.invalidate_cache()
         logger.error("mem_%s rollback after indexing failure: %s", op, exc, exc_info=True)
+        if isinstance(exc, RetryableError):
+            # Rolled back cleanly, and the cause was transient — re-raise so
+            # ``tool_handler`` labels it ``Error (retryable):``. Flattening it
+            # into the generic string here would tell the caller a transient
+            # store failure was a permanent one, and a retry is exactly the
+            # right response to it.
+            raise
         return None, f"Error: {op} failed and rolled back: {exc}"
 
 

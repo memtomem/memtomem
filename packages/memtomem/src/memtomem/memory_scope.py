@@ -244,7 +244,21 @@ async def namespace_mix_refusal(
     """
     try:
         has_content = target.is_file() and target.stat().st_size > 0
-    except OSError:
+    except OSError as exc:
+        # Only "it isn't there" means there is nothing to protect. Any other
+        # stat failure — a permission error, a dead mount — says the file may
+        # well hold another namespace's entries and we cannot see them, so it
+        # takes the same fail-closed path as an unanswerable store query.
+        # Folding these together as "no content" would let the append proceed
+        # and restamp exactly the content the guard exists to protect.
+        if not isinstance(exc, FileNotFoundError):
+            logger.warning("namespace mix guard could not stat %s", target, exc_info=True)
+            return (
+                f"could not read {target} to check which namespace it holds "
+                f"({exc.__class__.__name__}). Appending could silently move its "
+                f"existing entries into another namespace (issue #2005). Retry, "
+                f"or pass {override_hint} to append anyway."
+            )
         has_content = False
     if not has_content:
         # Checked before anything else: a brand-new day file is the common

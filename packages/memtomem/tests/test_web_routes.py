@@ -1733,6 +1733,44 @@ class TestGetChunk:
 # ---------------------------------------------------------------------------
 
 
+class TestIndexNamespaceLookupFailure:
+    """Issue #2005 follow-up: the engine refuses to re-resolve a namespace it
+    could not read the stored value for. Nothing is written, so the index
+    routes answer 503 like the chunk-delete path — not the generic 500 a
+    genuine bug produces."""
+
+    async def test_index_route_maps_the_failure_to_503(self, app, client: AsyncClient):
+        from memtomem.errors import NamespaceResolutionError
+
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=NamespaceResolutionError("store down")
+        )
+
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+
+        assert resp.status_code == 503, resp.text
+        detail = resp.json()["detail"]
+        assert "Retry" in detail
+        # Caller-supplied and not the response's business to reflect back.
+        assert "/tmp/memories" not in detail
+
+    async def test_preview_route_maps_the_failure_to_503(self, app, client: AsyncClient):
+        from memtomem.errors import NamespaceResolutionError
+
+        app.state.index_engine.discover_indexable_files = MagicMock(
+            return_value=[Path("/tmp/memories/a.md")]
+        )
+        app.state.index_engine.resolve_namespaces_for = AsyncMock(
+            side_effect=NamespaceResolutionError("store down")
+        )
+
+        resp = await client.post(
+            "/api/index/preview-namespace", json={"path": "/tmp/memories", "recursive": True}
+        )
+
+        assert resp.status_code == 503, resp.text
+
+
 class TestDeleteChunk:
     async def test_delete_chunk(self, client: AsyncClient):
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")

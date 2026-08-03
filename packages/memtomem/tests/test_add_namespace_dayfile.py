@@ -937,3 +937,104 @@ class TestNamespacesForSource:
     async def test_unindexed_source_has_no_namespaces(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         assert await comp.storage.namespaces_for_source(mem_dir / "never.md") == []
+
+
+class TestGuardFailsClosedOnFilesystemErrors:
+    """Issue #2005 follow-up: only "it isn't there" means there is nothing to
+    protect. Any other stat failure hides whatever the file holds."""
+
+    @pytest.mark.asyncio
+    async def test_a_stat_permission_error_refuses(self, tmp_path, monkeypatch):
+        target = tmp_path / "unreadable.md"
+        target.write_text("some text")
+        monkeypatch.setattr(
+            Path, "stat", lambda self, **k: (_ for _ in ()).throw(PermissionError("denied"))
+        )
+
+        err = await namespace_mix_refusal(
+            index_engine=_engine("bbb"),
+            storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
+            default_namespace="default",
+            target=target,
+            effective_ns="bbb",
+            override_hint="--allow-namespace-mix",
+        )
+
+        assert err is not None
+        assert "PermissionError" in err
+        assert "--allow-namespace-mix" in err
+
+    @pytest.mark.asyncio
+    async def test_a_missing_file_is_still_allowed(self, tmp_path):
+        """The discriminating half: a brand-new day file must not be refused,
+        or every first write of the day fails."""
+        err = await namespace_mix_refusal(
+            index_engine=_engine("bbb"),
+            storage=SimpleNamespace(namespaces_for_source=AsyncMock()),
+            default_namespace="default",
+            target=tmp_path / "absent.md",
+            effective_ns="bbb",
+            override_hint="-x",
+        )
+        assert err is None
+
+
+class TestRetryableLabelSurvivesRollback:
+    @pytest.mark.asyncio
+    async def test_mem_edit_reports_a_namespace_failure_as_retryable(
+        self, bm25_only_components, monkeypatch
+    ):
+        """``_mutate_file_and_reindex`` rolls back and returns a plain
+        ``Error:`` string. For a transient store failure that tells the caller
+        a retryable condition is permanent, so it re-raises instead and lets
+        ``tool_handler`` label it."""
+        from memtomem.errors import NamespaceResolutionError
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.memory_crud import mem_add, mem_edit
+
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        await mem_add(content=_ALPHA, title="Shared", ctx=ctx)  # type: ignore[arg-type]
+        chunk = (await comp.storage.list_chunks_by_source(mem_dir / f"{_today()}.md"))[0]
+
+        calls = {"n": 0}
+        real = comp.index_engine.index_file
+
+        async def _fail_first(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise NamespaceResolutionError("store down")
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(comp.index_engine, "index_file", _fail_first)
+
+        out = await mem_edit(chunk_id=str(chunk.id), new_content="replacement text", ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error (retryable):"), out
+
+    @pytest.mark.asyncio
+    async def test_a_permanent_failure_stays_a_plain_error(self, bm25_only_components, monkeypatch):
+        """The discriminating half — otherwise every rollback would advertise
+        itself as worth retrying."""
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.memory_crud import mem_add, mem_edit
+
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        await mem_add(content=_ALPHA, title="Shared", ctx=ctx)  # type: ignore[arg-type]
+        chunk = (await comp.storage.list_chunks_by_source(mem_dir / f"{_today()}.md"))[0]
+
+        calls = {"n": 0}
+        real = comp.index_engine.index_file
+
+        async def _fail_first(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(comp.index_engine, "index_file", _fail_first)
+
+        out = await mem_edit(chunk_id=str(chunk.id), new_content="replacement text", ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error:") and "retryable" not in out, out

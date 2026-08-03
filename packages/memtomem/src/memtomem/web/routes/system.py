@@ -35,6 +35,7 @@ from memtomem.config import (
     save_config_overrides,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
+from memtomem.errors import NamespaceResolutionError
 from memtomem.search.reranker.factory import create_reranker
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
@@ -1519,14 +1520,25 @@ async def trigger_index(
     index_engine=Depends(get_index_engine),
 ) -> IndexResponse:
     resolved = Path(req.path).expanduser().resolve()
-    stats = await index_engine.index_path(
-        resolved,
-        recursive=req.recursive,
-        force=req.force,
-        force_unsafe=req.force_unsafe,
-        namespace=req.namespace,
-        path_scope="explicit",
-    )
+    try:
+        stats = await index_engine.index_path(
+            resolved,
+            recursive=req.recursive,
+            force=req.force,
+            force_unsafe=req.force_unsafe,
+            namespace=req.namespace,
+            path_scope="explicit",
+        )
+    except NamespaceResolutionError as exc:
+        # The engine refuses to re-resolve a namespace whose stored value it
+        # could not read (#2005) — transient, and nothing was written, so it
+        # is a 503 like the chunk-delete path rather than the generic 500 a
+        # bug would produce. The path is not echoed back: it is caller-
+        # supplied and the response is not the place to reflect it.
+        raise HTTPException(
+            status_code=503,
+            detail=_NAMESPACE_LOOKUP_UNAVAILABLE,
+        ) from exc
     return IndexResponse(
         total_files=stats.total_files,
         total_chunks=stats.total_chunks,
@@ -1545,6 +1557,14 @@ async def trigger_index(
 # Cap on files walked by the preview endpoint. Large memory_dirs (10k+
 # files) would otherwise stall the synchronous focus event for seconds;
 # the truncated flag lets the UI surface "scanned N+, more not shown".
+#: 503 body for a namespace lookup the chunk store could not answer (#2005).
+#: One string so ``/api/index`` and the preview route cannot drift into
+#: describing the same condition two ways.
+_NAMESPACE_LOOKUP_UNAVAILABLE = (
+    "Could not determine the stored namespace for one or more files; nothing "
+    "was indexed. Retry once the chunk store is reachable."
+)
+
 _PREVIEW_FILE_CAP = 200
 
 
@@ -1569,8 +1589,15 @@ async def preview_namespace(
     files = index_engine.discover_indexable_files(resolved, body.recursive, path_scope="explicit")
     truncated = len(files) > _PREVIEW_FILE_CAP
     walked = files[:_PREVIEW_FILE_CAP]
+    try:
+        resolved_namespaces = await index_engine.resolve_namespaces_for(walked)
+    except NamespaceResolutionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=_NAMESPACE_LOOKUP_UNAVAILABLE,
+        ) from exc
     return PreviewNamespaceResponse(
-        resolved_namespaces=await index_engine.resolve_namespaces_for(walked),
+        resolved_namespaces=resolved_namespaces,
         truncated=truncated,
         scanned_files=len(walked),
     )
