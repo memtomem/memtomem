@@ -1754,6 +1754,30 @@ class TestIndexNamespaceLookupFailure:
         # Caller-supplied and not the response's business to reflect back.
         assert "/tmp/memories" not in detail
 
+    async def test_index_route_passes_the_retryable_marker_through(self, app, client: AsyncClient):
+        """A mid-run lookup failure reaches the client as data, not just an
+        opaque error string: ``retryable_errors`` rides the 200 body so the
+        caller can tell "retry this" from "this file is broken" (#2018)."""
+        from memtomem.models import IndexingStats
+
+        app.state.index_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=1,
+                total_chunks=0,
+                indexed_chunks=0,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                errors=("a.md: store down",),
+                retryable_errors=("a.md: store down",),
+            )
+        )
+
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["retryable_errors"] == ["a.md: store down"]
+
     async def test_preview_route_maps_the_failure_to_503(self, app, client: AsyncClient):
         from memtomem.errors import NamespaceResolutionError
 
@@ -1841,10 +1865,12 @@ class TestIndexNamespaceLookupFailure:
         self, app, client: AsyncClient
     ):
         """SSE carries no status code, so the message is the only place this
-        surface can classify the failure. It also cannot borrow the single-shot
-        wording: the stream indexes as it walks, so earlier files really were
-        indexed by the time a later lookup fails."""
+        surface can classify the failure. Since #2018 the stream resolves
+        every namespace before its first write, so an escaping lookup failure
+        means the run changed nothing — the stream states the same
+        post-condition, with the same string, as the single-shot routes."""
         from memtomem.errors import NamespaceResolutionError
+        from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 
         async def _boom(*args, **kwargs):
             raise NamespaceResolutionError("could not read the stored namespace for /tmp/secret.md")
@@ -1857,8 +1883,7 @@ class TestIndexNamespaceLookupFailure:
         assert resp.status_code == 200, resp.text
         event = json.loads(resp.text.split("data: ", 1)[1].strip())
         assert event["retryable"] is True
-        assert "Retry" in event["message"]
-        assert "nothing was changed" not in event["message"]
+        assert event["message"] == NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
         # The engine embeds the absolute path in ``str(exc)``.
         assert "/tmp/secret.md" not in event["message"]
 

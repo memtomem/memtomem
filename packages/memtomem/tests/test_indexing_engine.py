@@ -1626,6 +1626,268 @@ class TestPreviewHelpers:
 
 
 # ===========================================================================
+# 2c. Bulk namespace prepass + typed retryable per-file failures (issue #2018)
+# ===========================================================================
+
+
+class TestBulkNamespacePrepass:
+    """The bulk paths resolve per-file namespaces in a prepass, before any
+    write: a store that cannot answer fails the whole run as the typed,
+    retryable error instead of a flattened string in ``stats.errors``. The
+    per-file write still resolves inside its own critical section — a
+    concurrent writer may have moved a file since the prepass — and a
+    lookup failure there fails that file closed, with its retryable type
+    kept in ``stats.retryable_errors`` (issue #2018)."""
+
+    async def test_stream_honors_a_namespace_moved_after_the_prepass(self, components, memory_dir):
+        """The in-lock resolution stays authoritative: a file whose stored
+        namespace changes between the prepass and its turn in the stream is
+        stamped with the *current* namespace, not the prepass snapshot —
+        stamping the snapshot would silently undo the concurrent write
+        (the #2005 failure shape)."""
+        engine = components.index_engine
+        a = memory_dir / "a.md"
+        b = memory_dir / "b.md"
+        a.write_text("# A\n\nalpha", encoding="utf-8")
+        b.write_text("# B\n\nfirst", encoding="utf-8")
+
+        moved = False
+        async for ev in engine.index_path_stream(memory_dir, recursive=True):
+            # First per-file completion: the prepass has run, ``b.md`` has
+            # not been processed yet. Move it — and change it again after
+            # the move, so the stream's own pass has an upsert to stamp.
+            if not moved and ev.get("type") == "progress":
+                b.write_text("# B\n\nfirst\n\nmoved entry", encoding="utf-8")
+                await engine.index_file(b, namespace="aaa", already_scanned=True)
+                b.write_text("# B\n\nfirst\n\nmoved entry\n\nnewer entry", encoding="utf-8")
+                moved = True
+
+        assert moved, "the stream yielded no per-file progress event"
+        assert await components.storage.namespaces_for_source(b) == ["aaa"]
+
+    async def test_a_mid_run_lookup_failure_writes_nothing_for_that_file(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Fail-closed: when the authoritative in-lock lookup fails, the file
+        is skipped — writing any guessed namespace (prepass snapshot or rule
+        fallback) would be the silent move #2005 exists to prevent."""
+        engine = components.index_engine
+        fp = memory_dir / "kept.md"
+        fp.write_text("# K\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        fp.write_text("# K\n\nfirst entry\n\nsecond entry", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[["personal"], RuntimeError("store down")]),
+        )
+
+        await engine.index_path(memory_dir, recursive=True)
+
+        monkeypatch.undo()
+        chunks = await components.storage.list_chunks_by_source(fp)
+        assert not any("second entry" in c.content for c in chunks)
+        assert await components.storage.namespaces_for_source(fp) == ["personal"]
+
+    async def test_stream_stamps_each_files_own_namespace(self, components, memory_dir):
+        """The per-file values are positionally mapped — with rules splitting
+        the walk into two namespaces, each file's chunks carry its own, not
+        its neighbour's."""
+        engine = components.index_engine
+        (memory_dir / "alpha").mkdir()
+        (memory_dir / "beta").mkdir()
+        a = memory_dir / "alpha" / "a.md"
+        b = memory_dir / "beta" / "b.md"
+        a.write_text("# A\n\nalpha", encoding="utf-8")
+        b.write_text("# B\n\nbeta", encoding="utf-8")
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/alpha/**", namespace="ns-alpha"
+                ),
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/beta/**", namespace="ns-beta"
+                ),
+            ],
+        )
+
+        async for _ in engine.index_path_stream(memory_dir, recursive=True):
+            pass
+
+        assert await components.storage.namespaces_for_source(a) == ["ns-alpha"]
+        assert await components.storage.namespaces_for_source(b) == ["ns-beta"]
+
+    async def test_stream_complete_event_echoes_the_applied_namespaces(
+        self, components, memory_dir
+    ):
+        """The ``complete`` event's ``resolved_namespaces`` reports the same
+        distinct-sorted set the write actually applied."""
+        engine = components.index_engine
+        (memory_dir / "alpha").mkdir()
+        (memory_dir / "alpha" / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        (memory_dir / "untagged.md").write_text("# U\n\nplain", encoding="utf-8")
+        _install_rules(
+            engine,
+            [
+                NamespacePolicyRule(
+                    path_glob=f"{memory_dir.as_posix()}/alpha/**", namespace="ns-alpha"
+                ),
+            ],
+        )
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+
+        complete = next(ev for ev in events if ev["type"] == "complete")
+        assert complete["resolved_namespaces"] == ["ns-alpha", None]
+
+    async def test_a_mid_run_lookup_failure_is_flagged_retryable(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The direct regression pin for the flattening bug: a store that
+        answers the prepass and then dies mid-run still fails that file, but
+        the failure keeps its retryable type in ``stats.retryable_errors`` —
+        the old shape type-erased it into an ordinary error string."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[[], RuntimeError("store down")]),
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.retryable_errors != ()
+        assert stats.retryable_errors == stats.errors
+
+    async def test_stream_complete_event_flags_mid_run_lookup_failures_retryable(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Same marker on the stream variant's ``complete`` event — SSE has
+        no other channel for the type."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[[], RuntimeError("store down")]),
+        )
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+
+        complete = next(ev for ev in events if ev["type"] == "complete")
+        assert complete["retryable_errors"] != []
+        assert complete["retryable_errors"] == complete["errors"]
+
+    async def test_a_permanent_per_file_failure_is_not_flagged_retryable(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The marker is a subset, not an alias, of ``errors``: an ordinary
+        per-file failure stays out of ``retryable_errors``, or the field
+        would tell callers to retry broken files."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "upsert_chunks",
+            AsyncMock(side_effect=RuntimeError("disk full")),
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.errors != ()
+        assert stats.retryable_errors == ()
+
+    async def test_a_prepass_failure_stops_the_run_before_any_write(
+        self, components, memory_dir, monkeypatch
+    ):
+        """A store that answers once and then stops fails the run *before*
+        any write, as the typed retryable error — not as a flattened string
+        inside a successful-looking stats object."""
+        from memtomem.errors import NamespaceResolutionError, RetryableError
+
+        engine = components.index_engine
+        a = memory_dir / "a.md"
+        b = memory_dir / "b.md"
+        a.write_text("# A\n\nalpha", encoding="utf-8")
+        b.write_text("# B\n\nbeta", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[[], RuntimeError("store down")]),
+        )
+
+        with pytest.raises(NamespaceResolutionError) as excinfo:
+            await engine.index_path(memory_dir, recursive=True)
+
+        assert isinstance(excinfo.value, RetryableError)
+        assert await components.storage.list_chunks_by_source(a) == []
+        assert await components.storage.list_chunks_by_source(b) == []
+
+    async def test_bulk_stamps_default_for_the_untagged_carveout(self, components, memory_dir):
+        """The untagged carve-out resolves to ``None`` in the write path,
+        which skips the stamp — the stored spelling is the chunk model's
+        own default."""
+        engine = components.index_engine
+        fp = memory_dir / "untagged.md"
+        fp.write_text("# U\n\nplain note", encoding="utf-8")
+
+        await engine.index_path(memory_dir, recursive=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["default"]
+
+    async def test_bulk_echo_still_reports_the_untagged_carveout_as_none(
+        self, components, memory_dir
+    ):
+        """The ``resolved_namespaces`` echo keeps ``None`` for untagged —
+        the carve-out sentinel, distinct from the stored spelling."""
+        engine = components.index_engine
+        (memory_dir / "untagged.md").write_text("# U\n\nplain note", encoding="utf-8")
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.resolved_namespaces == (None,)
+
+    async def test_bulk_preservation_still_wins_without_force(self, components, memory_dir):
+        """A bulk re-index carrying no caller intent must not move a file
+        out of its stored namespace, even when the rules now say otherwise —
+        the in-lock resolution preserves the stored value."""
+        engine = components.index_engine
+        fp = memory_dir / "kept.md"
+        fp.write_text("# K\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+        # Content change so the re-index actually re-upserts the chunks —
+        # an unchanged file skips the UPSERT and would pass vacuously.
+        fp.write_text("# K\n\nfirst entry\n\nsecond entry", encoding="utf-8")
+
+        await engine.index_path(memory_dir, recursive=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["personal"]
+
+    async def test_bulk_force_applies_rules_not_preservation(self, components, memory_dir):
+        """``force=True`` skips preservation on purpose (the documented way
+        to apply changed rules) — the in-lock resolution applies the rule
+        namespace, not the stored one."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+
+        await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["ruled"]
+
+
+# ===========================================================================
 # 3. _apply_namespace
 # ===========================================================================
 

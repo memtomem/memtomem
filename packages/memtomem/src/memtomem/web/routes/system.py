@@ -1518,19 +1518,17 @@ async def index_stream(
             # Before the generic branch (#2005 follow-up): SSE has no status
             # code, so the *message* is the only place this surface can say
             # "transient — retry" rather than handing the client a redacted
-            # engine string it cannot classify. Its own wording, because the
-            # stream indexes as it walks: by the time a lookup fails, earlier
-            # files in the run may already be indexed, so the "nothing was
-            # changed" promise the single-shot routes make would be a lie here.
+            # engine string it cannot classify. Since #2018 the stream
+            # resolves every file's namespace before its first write (the
+            # per-file loop folds later exceptions into that file's errors),
+            # so an escaping lookup failure means this run changed nothing —
+            # the same post-condition, and the same string, as the
+            # single-shot routes.
             logger.warning("Namespace lookup failed during index stream: %s", exc)
             error_event = {
                 "type": "error",
                 "retryable": True,
-                "message": (
-                    "Could not determine the stored namespace for one or more "
-                    "files; the run stopped. Files already reported as indexed "
-                    "were indexed. Retry once the chunk store is reachable."
-                ),
+                "message": NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
             }
             yield f"data: {json.dumps(error_event)}\n\n"
         except Exception as exc:
@@ -1594,6 +1592,7 @@ async def trigger_index(
         deleted_chunks=stats.deleted_chunks,
         duration_ms=stats.duration_ms,
         errors=list(stats.errors) if stats.errors else [],
+        retryable_errors=list(stats.retryable_errors),
         resolved_namespaces=list(stats.resolved_namespaces),
         blocked_files=stats.blocked_files,
         blocked_paths=list(stats.blocked_paths),

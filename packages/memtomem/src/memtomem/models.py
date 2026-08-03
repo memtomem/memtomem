@@ -251,3 +251,10 @@ class IndexingStats:
     # hard-refused even with ``force_unsafe`` (ADR-0011 §5), so surfaces must
     # not tell the user to retry with ``--force-unsafe`` for them.
     blocked_project_shared_files: int = 0
+    # Subset of ``errors`` (same strings) whose cause was typed
+    # ``RetryableError`` — e.g. a mid-run namespace lookup the store could
+    # not answer (issue #2018). ``gather(return_exceptions=True)`` erases
+    # exception types when a bulk run flattens per-file failures; this field
+    # keeps "retry this" tellable apart from "this file is broken". Appended
+    # last so positional construction stays stable.
+    retryable_errors: tuple[str, ...] = ()
