@@ -1626,7 +1626,7 @@ class TestPreviewHelpers:
 
 
 # ===========================================================================
-# 2c. Bulk indexing resolves each file's namespace exactly once (issue #2018)
+# 2c. Bulk namespace prepass + typed retryable per-file failures (issue #2018)
 # ===========================================================================
 
 
@@ -1635,9 +1635,9 @@ class TestBulkNamespacePrepass:
     write: a store that cannot answer fails the whole run as the typed,
     retryable error instead of a flattened string in ``stats.errors``. The
     per-file write still resolves inside its own critical section — a
-    concurrent writer may have moved a file since the prepass — and uses
-    the prepass answer only as the fallback when that mid-run lookup fails
-    (issue #2018)."""
+    concurrent writer may have moved a file since the prepass — and a
+    lookup failure there fails that file closed, with its retryable type
+    kept in ``stats.retryable_errors`` (issue #2018)."""
 
     async def test_stream_honors_a_namespace_moved_after_the_prepass(self, components, memory_dir):
         """The in-lock resolution stays authoritative: a file whose stored
@@ -1665,12 +1665,12 @@ class TestBulkNamespacePrepass:
         assert moved, "the stream yielded no per-file progress event"
         assert await components.storage.namespaces_for_source(b) == ["aaa"]
 
-    async def test_mid_run_lookup_failure_falls_back_to_the_prepass_answer(
+    async def test_a_mid_run_lookup_failure_writes_nothing_for_that_file(
         self, components, memory_dir, monkeypatch
     ):
-        """When the authoritative in-lock lookup fails, the file is stamped
-        with the prepass answer — the value the run's echo already promised
-        — rather than failing or re-entering resolution."""
+        """Fail-closed: when the authoritative in-lock lookup fails, the file
+        is skipped — writing any guessed namespace (prepass snapshot or rule
+        fallback) would be the silent move #2005 exists to prevent."""
         engine = components.index_engine
         fp = memory_dir / "kept.md"
         fp.write_text("# K\n\nfirst entry", encoding="utf-8")
@@ -1685,11 +1685,8 @@ class TestBulkNamespacePrepass:
         await engine.index_path(memory_dir, recursive=True)
 
         monkeypatch.undo()
-        # Both halves of the claim: the new content was written (a removed
-        # fallback would leave the file un-indexed and pass vacuously on
-        # namespace alone), and it carries the prepass namespace.
         chunks = await components.storage.list_chunks_by_source(fp)
-        assert any("second entry" in c.content for c in chunks)
+        assert not any("second entry" in c.content for c in chunks)
         assert await components.storage.namespaces_for_source(fp) == ["personal"]
 
     async def test_stream_stamps_each_files_own_namespace(self, components, memory_dir):
@@ -1744,13 +1741,13 @@ class TestBulkNamespacePrepass:
         complete = next(ev for ev in events if ev["type"] == "complete")
         assert complete["resolved_namespaces"] == ["ns-alpha", None]
 
-    async def test_a_store_that_stops_answering_after_the_prepass_is_not_an_error(
+    async def test_a_mid_run_lookup_failure_is_flagged_retryable(
         self, components, memory_dir, monkeypatch
     ):
         """The direct regression pin for the flattening bug: a store that
-        answers the prepass and then dies must not surface anything — the
-        mid-run lookup falls back to the prepass answer, where the old shape
-        flattened the typed failure into ``stats.errors``."""
+        answers the prepass and then dies mid-run still fails that file, but
+        the failure keeps its retryable type in ``stats.retryable_errors`` —
+        the old shape type-erased it into an ordinary error string."""
         engine = components.index_engine
         (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
         monkeypatch.setattr(
@@ -1761,7 +1758,46 @@ class TestBulkNamespacePrepass:
 
         stats = await engine.index_path(memory_dir, recursive=True)
 
-        assert stats.errors == ()
+        assert stats.retryable_errors != ()
+        assert stats.retryable_errors == stats.errors
+
+    async def test_stream_complete_event_flags_mid_run_lookup_failures_retryable(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Same marker on the stream variant's ``complete`` event — SSE has
+        no other channel for the type."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[[], RuntimeError("store down")]),
+        )
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+
+        complete = next(ev for ev in events if ev["type"] == "complete")
+        assert complete["retryable_errors"] != []
+        assert complete["retryable_errors"] == complete["errors"]
+
+    async def test_a_permanent_per_file_failure_is_not_flagged_retryable(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The marker is a subset, not an alias, of ``errors``: an ordinary
+        per-file failure stays out of ``retryable_errors``, or the field
+        would tell callers to retry broken files."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "upsert_chunks",
+            AsyncMock(side_effect=RuntimeError("disk full")),
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.errors != ()
+        assert stats.retryable_errors == ()
 
     async def test_a_prepass_failure_stops_the_run_before_any_write(
         self, components, memory_dir, monkeypatch

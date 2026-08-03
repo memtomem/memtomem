@@ -133,6 +133,10 @@ class IndexResponse(BaseModel):
     deleted_chunks: int
     duration_ms: float
     errors: list[str] = []
+    # Subset of ``errors`` whose cause was typed retryable (issue #2018) —
+    # transient store outages the client may retry, vs. broken files it
+    # should not.
+    retryable_errors: list[str] = []
     resolved_namespaces: list[str | None] = []
     # ADR-0006 PR-A: files skipped by the secret-redaction gate during bulk
     # indexing (count + paths). Zero/empty on the common path.

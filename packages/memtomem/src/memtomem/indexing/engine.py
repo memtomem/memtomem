@@ -33,7 +33,7 @@ from memtomem.config import (
     provider_for_category,
 )
 from memtomem import privacy
-from memtomem.errors import EmbeddingError, NamespaceResolutionError
+from memtomem.errors import EmbeddingError, NamespaceResolutionError, RetryableError
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.models import Chunk, IndexingStats
 
@@ -390,17 +390,6 @@ def _distinct_sorted(values: Iterable[str | None]) -> list[str | None]:
     return sorted(set(values), key=lambda x: (x is None, x or ""))
 
 
-def _default_ns(ns_config: NamespaceConfig) -> str:
-    """The namespace the untagged (``None``) carve-out stands for.
-
-    ``None`` can only be produced when ``default_namespace`` is ``"default"``
-    or empty (``effective_namespace_for`` / ``_resolve_namespace``); either
-    way the chunk model's own default stores the literal ``"default"``, so
-    stamping this value is byte-identical to not stamping at all.
-    """
-    return ns_config.default_namespace or "default"
-
-
 class PrivacyRejection(Exception):
     """Raised by :meth:`IndexEngine._index_file` when a file's content trips the
     secret-redaction guard during **un-adjudicated** indexing (ADR-0006 PR-A).
@@ -575,35 +564,30 @@ class IndexEngine:
         # Per-file namespaces, resolved BEFORE the writes — the same ordering
         # the stream variant uses. Namespace preservation reads the store
         # (issue #2005), so a store that cannot answer must fail the run
-        # here, before any durable write, as the typed retryable error. The
-        # per-file write then re-resolves inside its critical section — a
-        # concurrent writer may have moved a file since this prepass — and
-        # only falls back to this prepass answer when the mid-run lookup
-        # itself fails, so the failure never degrades into a flattened,
-        # type-erased string in ``stats.errors`` (issue #2018).
-        per_file_ns = await self._resolve_namespaces_per_file(files, namespace, force=force)
-        resolved_ns = _distinct_sorted(per_file_ns)
+        # here, before any durable write, as the typed retryable error
+        # (issue #2018). The per-file write still resolves inside its own
+        # critical section — a concurrent writer may have moved a file since
+        # this prepass — and a lookup failure there fails that file closed,
+        # keeping its type in ``retryable_errors`` below.
+        resolved_ns = _distinct_sorted(
+            await self._resolve_namespaces_per_file(files, namespace, force=force)
+        )
 
-        async def _bounded(fp: Path, ns: str | None) -> IndexFileResult:
+        async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
                 return await self._index_file(
                     fp,
                     force,
                     namespace=namespace,
-                    # ``None`` is the untagged carve-out; the fallback must
-                    # be the concrete namespace it stands for, or a mid-run
-                    # failure would re-enter the resolution that just failed.
-                    ns_fallback=ns if ns is not None else _default_ns(self._ns_config),
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
                     embed_semaphore=embed_sem,
                 )
 
-        raw_results = await asyncio.gather(
-            *[_bounded(f, ns) for f, ns in zip(files, per_file_ns)], return_exceptions=True
-        )
+        raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
         file_results: list[IndexFileResult] = []
         all_errors: list[str] = []
+        retryable_errors: list[str] = []
         blocked_paths: list[str] = []
         blocked_project_shared = 0
         for i, r in enumerate(raw_results):
@@ -626,7 +610,13 @@ class IndexEngine:
                 )
             elif isinstance(r, Exception):
                 logger.error("Indexing failed for %s: %s", files[i], r)
-                all_errors.append(f"{files[i].name}: {r}")
+                msg = f"{files[i].name}: {r}"
+                all_errors.append(msg)
+                # ``gather(return_exceptions=True)`` erases types; re-read
+                # this one so a transient store outage stays tellable apart
+                # from a permanently broken file (issue #2018).
+                if isinstance(r, RetryableError):
+                    retryable_errors.append(msg)
 
         # Aggregate new_chunk_ids across all files — preserves per-file order
         # so callers that sort/filter by source get a consistent ordering.
@@ -645,6 +635,7 @@ class IndexEngine:
             deleted_chunks=sum(r["deleted"] for r in file_results),
             duration_ms=duration,
             errors=tuple(dict.fromkeys(all_errors)),
+            retryable_errors=tuple(dict.fromkeys(retryable_errors)),
             new_chunk_ids=tuple(all_new_chunk_ids),
             resolved_namespaces=tuple(resolved_ns),
             blocked_files=len(blocked_paths),
@@ -714,7 +705,6 @@ class IndexEngine:
         force: bool,
         *,
         namespace: str | None = None,
-        ns_fallback: str | None = None,
         on_chunk_progress: Callable[[int, int], None] | None = None,
         force_unsafe: bool = False,
         already_scanned: bool = False,
@@ -763,7 +753,6 @@ class IndexEngine:
                     resolved_path,
                     force,
                     namespace=namespace,
-                    ns_fallback=ns_fallback,
                     on_chunk_progress=on_chunk_progress,
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
@@ -780,7 +769,6 @@ class IndexEngine:
                     resolved_path,
                     force,
                     namespace=namespace,
-                    ns_fallback=ns_fallback,
                     on_chunk_progress=on_chunk_progress,
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
@@ -1130,7 +1118,6 @@ class IndexEngine:
         force: bool,
         namespace: str | None = None,
         *,
-        ns_fallback: str | None = None,
         on_chunk_progress: Callable[[int, int], None] | None = None,
         force_unsafe: bool = False,
         already_scanned: bool = False,
@@ -1292,21 +1279,10 @@ class IndexEngine:
         # runs inside the per-file critical section on purpose: a bulk run's
         # pre-write prepass (issue #2018) answers for the run's *start*, and
         # a concurrent writer may have moved the file since — deciding the
-        # stamp from a pre-lock answer would silently undo that write.
-        # ``ns_fallback`` carries the prepass answer so a lookup the store
-        # cannot answer mid-run degrades to the value already promised in
-        # the run's echo instead of a flattened, type-erased error string.
-        try:
-            resolved_ns = await self.effective_namespace_for(file_path, namespace, force=force)
-        except NamespaceResolutionError:
-            if ns_fallback is None:
-                raise
-            logger.warning(
-                "namespace lookup failed mid-run for %s; using the pre-run answer %r",
-                file_path,
-                ns_fallback,
-            )
-            resolved_ns = ns_fallback
+        # stamp from a pre-lock answer would silently undo that write. A
+        # failure here fails this file closed; the bulk flatten branches
+        # keep the retryable type in ``stats.retryable_errors``.
+        resolved_ns = await self.effective_namespace_for(file_path, namespace, force=force)
         if resolved_ns is not None:
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
 
@@ -1556,6 +1532,7 @@ class IndexEngine:
                     "deleted_chunks": 0,
                     "duration_ms": 0.0,
                     "errors": [f"path is outside configured memory directories: {path}"],
+                    "retryable_errors": [],
                     "resolved_namespaces": [],
                     "blocked_files": 0,
                     "blocked_paths": [],
@@ -1577,6 +1554,7 @@ class IndexEngine:
                     "deleted_chunks": 0,
                     "duration_ms": 0.0,
                     "errors": [f"index path does not exist: {path}"],
+                    "retryable_errors": [],
                     "resolved_namespaces": [],
                     "blocked_files": 0,
                     "blocked_paths": [],
@@ -1598,13 +1576,13 @@ class IndexEngine:
             # same ``fp.resolve()`` form the write below uses, so the
             # preservation lookup and the write answer for the same path.
             # A store that cannot answer fails the run here, before any
-            # write; the per-file runner re-resolves inside its lock and
-            # uses its entry only as the mid-run fallback (issue #2018).
+            # write (issue #2018); the per-file runner still resolves inside
+            # its own lock, and a failure there fails that file closed with
+            # its type kept in ``retryable_errors``.
             resolved_files = [fp.resolve() for fp in files]
-            per_file_ns = await self._resolve_namespaces_per_file(
-                resolved_files, namespace, force=force
+            resolved_ns_for_event = _distinct_sorted(
+                await self._resolve_namespaces_per_file(resolved_files, namespace, force=force)
             )
-            resolved_ns_for_event = _distinct_sorted(per_file_ns)
             agg = {
                 "total_chunks": 0,
                 "indexed": 0,
@@ -1614,6 +1592,7 @@ class IndexEngine:
                 "blocked_project_shared": 0,
             }
             all_errors: list[str] = []
+            retryable_errors: list[str] = []
             blocked_paths: list[str] = []
 
             for i, fp in enumerate(files, start=1):
@@ -1631,7 +1610,6 @@ class IndexEngine:
                 async def runner(
                     fp: Path = fp,
                     idx: int = i,
-                    ns: str | None = per_file_ns[i - 1],
                 ) -> IndexFileResult:
                     def cb(done: int, total: int) -> None:
                         queue.put_nowait(
@@ -1656,10 +1634,6 @@ class IndexEngine:
                             fp.resolve(),
                             force,
                             namespace=namespace,
-                            # Prepass answer from above — the mid-run
-                            # fallback only; the in-lock resolution stays
-                            # authoritative (issue #2018).
-                            ns_fallback=ns if ns is not None else _default_ns(self._ns_config),
                             on_chunk_progress=cb,
                             force_unsafe=force_unsafe,
                             path_scope=path_scope,
@@ -1703,7 +1677,8 @@ class IndexEngine:
                         # Same shape as non-stream's
                         # ``asyncio.gather(return_exceptions=True)`` branch
                         # in ``_index_path_inner`` so consumers see the same
-                        # error shape regardless of stream vs non-stream.
+                        # error shape regardless of stream vs non-stream —
+                        # including the retryable marker (issue #2018).
                         result = {
                             "total": 0,
                             "indexed": 0,
@@ -1711,6 +1686,8 @@ class IndexEngine:
                             "deleted": 0,
                             "errors": [f"{fp.name}: {exc}"],
                         }
+                        if isinstance(exc, RetryableError):
+                            retryable_errors.append(f"{fp.name}: {exc}")
                 except BaseException:
                     # Generator was closed (HTTPException, client disconnect,
                     # consumer ``aclose()``). Cancel the in-flight embedding
@@ -1748,6 +1725,7 @@ class IndexEngine:
                 "deleted_chunks": agg["deleted"],
                 "duration_ms": round(duration, 1),
                 "errors": list(dict.fromkeys(all_errors)),
+                "retryable_errors": list(dict.fromkeys(retryable_errors)),
                 "resolved_namespaces": resolved_ns_for_event,
                 "blocked_files": agg["blocked"],
                 "blocked_paths": blocked_paths,

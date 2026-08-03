@@ -1592,6 +1592,7 @@ async def trigger_index(
         deleted_chunks=stats.deleted_chunks,
         duration_ms=stats.duration_ms,
         errors=list(stats.errors) if stats.errors else [],
+        retryable_errors=list(stats.retryable_errors),
         resolved_namespaces=list(stats.resolved_namespaces),
         blocked_files=stats.blocked_files,
         blocked_paths=list(stats.blocked_paths),
