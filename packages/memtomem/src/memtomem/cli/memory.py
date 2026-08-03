@@ -14,6 +14,8 @@ from memtomem.cli._errors import raise_cli_error
 from memtomem.cli._prompts import confirm as _confirm
 from memtomem.config import TargetScope
 from memtomem.memory_scope import (
+    NS_RETARGET_ATTEMPTS,
+    NS_RETARGET_EXHAUSTED_ERROR,
     MemoryScopeError,
     resolve_memory_scope_dir as _resolve_memory_scope_dir_core,
 )
@@ -122,6 +124,15 @@ Examples:
     help="Write namespace; defaults to the active session's agent scope.",
 )
 @click.option(
+    "--allow-namespace-mix",
+    is_flag=True,
+    default=False,
+    help=(
+        "Append even though --file already holds a different namespace "
+        "(re-indexing may restamp the existing entries)."
+    ),
+)
+@click.option(
     "--yes",
     "-y",
     is_flag=True,
@@ -144,6 +155,7 @@ def add(
     scope: TargetScope,
     confirm_project_shared: bool,
     namespace: str | None,
+    allow_namespace_mix: bool,
     yes: bool,
     as_json: bool,
 ) -> None:
@@ -162,6 +174,7 @@ def add(
                 yes,
                 namespace=namespace,
                 as_json=as_json,
+                allow_namespace_mix=allow_namespace_mix,
             )
         )
     except click.ClickException as e:
@@ -185,6 +198,7 @@ async def _add(
     *,
     namespace: str | None = None,
     as_json: bool = False,
+    allow_namespace_mix: bool = False,
 ) -> None:
     from memtomem import privacy
     from memtomem.cli._bootstrap import cli_components
@@ -255,6 +269,14 @@ async def _add(
             pmdirs = comp.config.indexing.project_memory_dirs
             if not is_project_tier_registered(base, pmdirs):
                 raise click.ClickException(project_tier_registration_error(base, scope))
+        from memtomem.memory_scope import day_file_name, namespace_mix_refusal
+
+        # Only set for the default day-file target: the base the day file is
+        # rebuilt under when the in-lock namespace disagrees with the pre-lock
+        # guess its name was built from (issue #2005).
+        day_base: Path | None = None
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        default_ns = comp.config.namespace.default_namespace
         if file_name:
             if file_name.startswith("/") or file_name.startswith("\\") or ".." in file_name:
                 raise click.ClickException("File path must be relative and must not contain '..'")
@@ -264,8 +286,13 @@ async def _add(
             except ValueError:
                 raise click.ClickException("File path escapes memory directory")
         else:
-            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            target = (base / f"{date_str}.md").resolve()
+            # Issue #2005: one day file per namespace. A single day file
+            # shared by two namespaces loses one of them as soon as chunk
+            # merging joins their entries, because ``index_file`` stamps one
+            # namespace across everything it re-chunks.
+            day_base = base
+            candidate_ns = namespace or await resolve_session_write_namespace(comp.storage)
+            target = (base / day_file_name(candidate_ns, default_ns, date_str=date_str)).resolve()
 
         # ADR-0011 PR-D review round 7: Gate B for project_shared must
         # require an explicit ``--confirm-project-shared`` regardless of
@@ -300,45 +327,79 @@ async def _add(
         # + reindex + tag-merge so a concurrent MCP mem_edit/mem_delete rollback
         # (this CLI runs in a separate process from the MCP server) cannot erase
         # this appended entry. ``lock_held=True`` skips the nested engine acquire.
-        try:
-            async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
-                # Resolved inside the lock, like ``_mem_add_core`` — the write is
-                # attributed to whichever session is live at write time, not at
-                # command-parse time (#1991). ``None`` leaves the engine's
-                # namespace rules in charge, which is the pre-#1991 behavior.
-                effective_ns = namespace or await resolve_session_write_namespace(comp.storage)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
-                # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
-                stats = await comp.index_engine.index_file(
-                    target, namespace=effective_ns, already_scanned=True, lock_held=True
-                )
+        # Bounded re-target loop (issue #2005): the day file's name depends
+        # on the namespace, and the namespace is only authoritative once
+        # resolved inside the lock. Nothing durable happens before the
+        # append, so an aborted attempt leaves no trace.
+        for _attempt in range(NS_RETARGET_ATTEMPTS):
+            try:
+                async with async_file_lock(
+                    _lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
+                ):
+                    # Resolved inside the lock, like ``_mem_add_core`` — the write is
+                    # attributed to whichever session is live at write time, not at
+                    # command-parse time (#1991). ``None`` leaves the engine's
+                    # namespace rules in charge, which is the pre-#1991 behavior.
+                    effective_ns = namespace or await resolve_session_write_namespace(comp.storage)
+                    if day_base is not None:
+                        desired = (
+                            day_base / day_file_name(effective_ns, default_ns, date_str=date_str)
+                        ).resolve()
+                        if desired != target:
+                            # The session changed namespaces while we waited;
+                            # re-acquire on the day file that namespace owns
+                            # rather than appending to one named for another.
+                            target = desired
+                            continue
+                    mix_err = (
+                        None
+                        if allow_namespace_mix
+                        else await namespace_mix_refusal(
+                            index_engine=comp.index_engine,
+                            storage=comp.storage,
+                            default_namespace=default_ns,
+                            target=target,
+                            effective_ns=effective_ns,
+                            override_hint="--allow-namespace-mix",
+                        )
+                    )
+                    if mix_err is not None:
+                        raise click.ClickException(mix_err)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
+                    # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+                    stats = await comp.index_engine.index_file(
+                        target, namespace=effective_ns, already_scanned=True, lock_held=True
+                    )
 
-                # Apply tags to indexed chunks (chunker doesn't parse tag text
-                # from content). Inside the lock — keyed to this file's chunks.
-                if tags and stats.indexed_chunks > 0:
-                    chunks = await comp.storage.list_chunks_by_source(target)
-                    updated = []
-                    for c in chunks:
-                        merged = set(c.metadata.tags) | set(tags)
-                        if merged != set(c.metadata.tags):
-                            c.metadata = c.metadata.__class__(
-                                **{
+                    # Apply tags to indexed chunks (chunker doesn't parse tag text
+                    # from content). Inside the lock — keyed to this file's chunks.
+                    if tags and stats.indexed_chunks > 0:
+                        chunks = await comp.storage.list_chunks_by_source(target)
+                        updated = []
+                        for c in chunks:
+                            merged = set(c.metadata.tags) | set(tags)
+                            if merged != set(c.metadata.tags):
+                                c.metadata = c.metadata.__class__(
                                     **{
-                                        f: getattr(c.metadata, f)
-                                        for f in c.metadata.__dataclass_fields__
-                                    },
-                                    "tags": tuple(sorted(merged)),
-                                }
-                            )
-                            updated.append(c)
-                    if updated:
-                        await comp.storage.upsert_chunks(updated)
-        except TimeoutError as exc:
-            raise click.ClickException(
-                f"{target} is locked by another process (another server or "
-                "migrate in flight); retry."
-            ) from exc
+                                        **{
+                                            f: getattr(c.metadata, f)
+                                            for f in c.metadata.__dataclass_fields__
+                                        },
+                                        "tags": tuple(sorted(merged)),
+                                    }
+                                )
+                                updated.append(c)
+                        if updated:
+                            await comp.storage.upsert_chunks(updated)
+            except TimeoutError as exc:
+                raise click.ClickException(
+                    f"{target} is locked by another process (another server or "
+                    "migrate in flight); retry."
+                ) from exc
+            break
+        else:
+            raise click.ClickException(NS_RETARGET_EXHAUSTED_ERROR)
 
         if as_json:
             click.echo(

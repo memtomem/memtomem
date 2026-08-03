@@ -356,3 +356,52 @@ async def test_reindex_logs_removed_not_reindexed(components, memory_dir, caplog
     messages = [r.getMessage() for r in caplog.records]
     assert any("Removed deleted file from index" in m for m in messages)
     assert not any("Auto-reindexed" in m for m in messages)
+
+
+async def test_namespace_lookup_failure_is_requeued_not_dropped(components, memory_dir, caplog):
+    """Issue #2005: the engine refuses to re-resolve a namespace whose stored
+    value it could not read, rather than silently moving the file's chunks.
+
+    That refusal is transient, so ``_reindex`` must return the path — the
+    caller's retry signal. Swallowing it would leave the edit unindexed until
+    something else happened to touch the file.
+    """
+    from memtomem.errors import NamespaceResolutionError
+
+    md_path = memory_dir / "requeue.md"
+    await _index_content(components, md_path)
+
+    watcher = FileWatcher(
+        index_engine=components.index_engine,
+        config=components.config.indexing,
+        debounce_ms=100,
+    )
+    with mock.patch.object(
+        components.index_engine,
+        "index_file",
+        side_effect=NamespaceResolutionError("store down"),
+    ):
+        with caplog.at_level(logging.WARNING, logger="memtomem.indexing.watcher"):
+            result = await watcher._reindex(md_path)
+
+    assert result == md_path, "a retryable namespace failure must stay pending"
+    assert any("will retry" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_non_retryable_failure_is_still_dropped(components, memory_dir, caplog):
+    """The requeue branch has to discriminate, or a permanently broken file
+    is retried every debounce window forever."""
+    md_path = memory_dir / "broken.md"
+    await _index_content(components, md_path)
+
+    watcher = FileWatcher(
+        index_engine=components.index_engine,
+        config=components.config.indexing,
+        debounce_ms=100,
+    )
+    with mock.patch.object(components.index_engine, "index_file", side_effect=RuntimeError("boom")):
+        with caplog.at_level(logging.ERROR, logger="memtomem.indexing.watcher"):
+            result = await watcher._reindex(md_path)
+
+    assert result is None
+    assert any("Auto-reindex failed" in r.getMessage() for r in caplog.records)

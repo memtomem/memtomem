@@ -1555,7 +1555,7 @@ class TestPreviewHelpers:
         (memory_dir / "b.md").write_text("# B", encoding="utf-8")
 
         files = engine.discover_indexable_files(memory_dir)
-        assert engine.resolve_namespaces_for(files) == [None]
+        assert await engine.resolve_namespaces_for(files) == [None]
 
     async def test_resolve_namespaces_for_rule_variance(self, components, memory_dir):
         """The motivating case for the list shape: a folder where rules
@@ -1581,7 +1581,7 @@ class TestPreviewHelpers:
         )
 
         files = engine.discover_indexable_files(memory_dir)
-        result = engine.resolve_namespaces_for(files)
+        result = await engine.resolve_namespaces_for(files)
         assert result == ["ns-alpha", "ns-beta"]
 
     async def test_resolve_namespaces_for_sorts_with_none_last(self, components, memory_dir):
@@ -1604,7 +1604,7 @@ class TestPreviewHelpers:
         files = engine.discover_indexable_files(memory_dir)
         # zeta-ruled is alphabetically *after* a hypothetical None — confirm
         # None doesn't naively win the sort.
-        result = engine.resolve_namespaces_for(files)
+        result = await engine.resolve_namespaces_for(files)
         assert result == ["zeta-ruled", None]
 
     async def test_walk_matches_index_walk(self, components, memory_dir):

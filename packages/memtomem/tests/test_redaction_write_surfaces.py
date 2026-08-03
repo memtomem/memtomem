@@ -33,7 +33,7 @@ from memtomem import privacy
 from memtomem.server.context import AppContext
 from memtomem.server.tools.memory_crud import mem_edit
 
-from helpers import StubCtx
+from helpers import StubCtx, set_home
 
 _SECRET_SAMPLE = "Notes on token: sk-" + "a" * 30
 _CLEAN_SAMPLE = "Met with the team about Q2 deploy plans."
@@ -183,6 +183,15 @@ class TestCliMmAddRedactionGuard:
     up the real engine. The ``--force-unsafe`` flag is the only path
     through which a CLI user can land secret content.
     """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_home(self, monkeypatch, tmp_path):
+        """``mm add`` reads ``~/.memtomem/.current_session`` to resolve the
+        namespace its write inherits (#1991), and since #2005 it does so
+        before choosing the target file. Without this, the developer's own
+        active session reaches into these runs and calls ``get_session`` on
+        a component double that has no such method."""
+        set_home(monkeypatch, tmp_path / "redaction_home")
 
     def test_blocks_secret_and_does_not_index(self):
         from memtomem.cli.memory import add as add_cmd

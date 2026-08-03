@@ -11,6 +11,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from memtomem.config import IndexingConfig
+from memtomem.errors import NamespaceResolutionError
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver, ObservedWatch
@@ -386,6 +387,15 @@ class FileWatcher:
                 "Auto-reindex deferred for %s: file locked by another writer; will retry",
                 file_path.name,
             )
+            return file_path
+        except NamespaceResolutionError as exc:
+            # Issue #2005: the engine refuses to re-resolve a namespace it
+            # could not read the stored one for, rather than silently moving
+            # the file's chunks. That refusal is transient by nature, so it
+            # gets the retry path rather than the drop path — swallowing it
+            # would leave the edit unindexed until something else touched the
+            # file.
+            logger.warning("Auto-reindex deferred for %s: %s; will retry", file_path.name, exc)
             return file_path
         except Exception as exc:
             logger.error("Auto-reindex failed for %s: %s", file_path, exc)

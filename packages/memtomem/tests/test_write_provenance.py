@@ -951,7 +951,18 @@ class TestImpreciseWritesFlagTheSession:
 
         await mem_session_start(agent_id="beta", ctx=ctx)  # type: ignore[arg-type]
         beta_id = app.current_session_id
-        await mem_add(content="BETAMARKER", title="Shared", file="shared.md", ctx=ctx)  # type: ignore[arg-type]
+        # ``allow_namespace_mix`` because the two sessions are bound to
+        # different agents, so this append crosses namespaces — refused by
+        # default since #2005. The override is what keeps the merge (and
+        # therefore this test's subject, the imprecise-write flag) reachable;
+        # the flag matters for same-namespace merges just as much.
+        await mem_add(  # type: ignore[arg-type]
+            content="BETAMARKER",
+            title="Shared",
+            file="shared.md",
+            allow_namespace_mix=True,
+            ctx=ctx,
+        )
 
         # The leak this guards against is real, so assert it is present —
         # if the chunker stops merging, this test should be revisited

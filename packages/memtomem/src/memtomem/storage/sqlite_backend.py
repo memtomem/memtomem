@@ -2016,6 +2016,19 @@ class SqliteBackend(
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
+    async def namespaces_for_source(self, source_file: Path) -> list[str]:
+        # Issue #2005: the add surfaces refuse a write whose namespace differs
+        # from what the target file already holds. Only the distinct namespace
+        # set is needed, so this does not go through ``list_chunks_by_source``
+        # (which caps at 50 rows and materialises full chunks — a cap would
+        # silently narrow the guard on a large file).
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT DISTINCT namespace FROM chunks WHERE source_file=?",
+            (norm_path(source_file),),
+        ).fetchall()
+        return sorted(str(row[0]) for row in rows)
+
     async def count_chunks_by_source(self, source_file: Path) -> int:
         db = self._get_read_db()
         row = db.execute(

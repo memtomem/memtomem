@@ -15,6 +15,10 @@ class AddMemoryRequest(BaseModel):
     tags: list[str] = []
     file: str | None = None
     namespace: str | None = None
+    # Issue #2005: appending into a file that already holds a different
+    # namespace lets re-chunking restamp the existing entries with this
+    # write's namespace. Refused by default; this opts into that outcome.
+    allow_namespace_mix: bool = False
     # Bypass the trust-boundary redaction guard for this write. Default
     # False so the server rejects accidental secret pastes; the SPA
     # surfaces the matched-pattern count and asks the user to confirm

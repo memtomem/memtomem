@@ -33,7 +33,7 @@ from memtomem.config import (
     provider_for_category,
 )
 from memtomem import privacy
-from memtomem.errors import EmbeddingError
+from memtomem.errors import EmbeddingError, NamespaceResolutionError
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.models import Chunk, IndexingStats
 
@@ -556,6 +556,14 @@ class IndexEngine:
         # embed call itself queues on ``embed_sem``.
         embed_sem = asyncio.Semaphore(_resolve_embed_limit(self._embedder))
 
+        # Namespace echo, resolved BEFORE the writes — the same ordering the
+        # stream variant uses. Namespace preservation reads the store
+        # (issue #2005), so resolving afterwards would both re-read state a
+        # concurrent writer may have changed since, and put a lookup that is
+        # allowed to raise *after* durable writes, aborting the call with the
+        # work already done and its provenance skipped.
+        resolved_ns = await self.resolve_namespaces_for(files, namespace, force=force)
+
         async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
                 return await self._index_file(
@@ -602,12 +610,6 @@ class IndexEngine:
             if ids:
                 all_new_chunk_ids.extend(ids)
 
-        # Distinct namespaces resolved across the file set. Computed
-        # independently of ``_index_file`` so a per-file failure (parse
-        # error, embedding crash) doesn't drop the namespace echo. Pure
-        # pathspec match, no I/O.
-        resolved_ns = self.resolve_namespaces_for(files, namespace)
-
         duration = (time.monotonic() - start) * 1000
         return IndexingStats(
             total_files=len(files),
@@ -624,17 +626,25 @@ class IndexEngine:
             blocked_project_shared_files=blocked_project_shared,
         )
 
-    def resolve_namespaces_for(
-        self, files: list[Path], explicit_ns: str | None = None
+    async def resolve_namespaces_for(
+        self, files: list[Path], explicit_ns: str | None = None, *, force: bool = False
     ) -> list[str | None]:
         """Resolve namespaces for ``files`` in stable (sort) order, distinct.
 
-        Public companion to ``_resolve_namespace`` for callers (preview
-        route, future surfaces) that need the namespace echo without
-        running the indexer. ``None`` represents the
+        Public companion to ``effective_namespace_for`` for callers (preview
+        route, future surfaces) that need the namespace echo without running
+        the indexer. ``None`` represents the
         ``default_namespace == "default"`` carve-out (untagged).
+
+        Async because namespace preservation reads the store: a preview that
+        answered from the rules alone would promise a namespace the write
+        would not use for any file that already has chunks (issue #2005).
+        Pass the same ``force`` the write will use, or the preview answers
+        for a different operation than the one being previewed.
         """
-        ns_set: set[str | None] = {self._resolve_namespace(f, explicit_ns) for f in files}
+        ns_set: set[str | None] = {
+            await self.effective_namespace_for(f, explicit_ns, force=force) for f in files
+        }
         return sorted(ns_set, key=lambda x: (x is None, x or ""))
 
     def discover_indexable_files(
@@ -868,6 +878,56 @@ class IndexEngine:
         except Exception:
             logger.warning("is_duplicate failed; treating as non-duplicate", exc_info=True)
             return False
+
+    async def effective_namespace_for(
+        self, file_path: Path, explicit_ns: str | None = None, *, force: bool = False
+    ) -> str | None:
+        """The namespace ``index_file`` will stamp on ``file_path``'s chunks.
+
+        The single answer to that question (issue #2005). Three callers need
+        it and they must not disagree: ``_index_file`` itself, the add
+        surfaces' mixed-namespace guard — which would otherwise refuse
+        writes the indexer would have handled safely — and the
+        ``resolved_namespaces`` echo, which would otherwise report a
+        namespace the write did not use.
+
+        ``None`` is the untagged carve-out (see ``_resolve_namespace``), not
+        "unknown".
+
+        Raises:
+            NamespaceResolutionError: the preservation lookup could not
+                answer. Failing is deliberate: falling back to rule
+                resolution on a transient read error would perform exactly
+                the silent namespace move this rule exists to prevent.
+                Retryable — the watcher re-queues rather than dropping.
+        """
+        if explicit_ns is not None:
+            return explicit_ns
+        if not force:
+            # A re-index carrying no caller intent must not move a file out
+            # of the namespace it is already stored under. Only a
+            # *unanimous* stored namespace is preserved: a file holding
+            # several is the ambiguity #2005 is about, and there is no
+            # per-line provenance to split it by.
+            try:
+                stored = await self._storage.namespaces_for_source(file_path)
+            except Exception as exc:
+                raise NamespaceResolutionError(
+                    f"could not read the stored namespace for {file_path}: {exc}"
+                ) from exc
+            if len(stored) == 1:
+                # Normalise the untagged carve-out back to ``None``. With the
+                # configured default at "default", ``_resolve_namespace``
+                # answers ``None`` and the chunk model's own default stores
+                # the literal "default" — the same state by two names.
+                # Returning the stored spelling would make this resolver
+                # answer ``None`` before a file is written and "default"
+                # after, so the preview and the ``/api/index`` echo would
+                # disagree about a file that never moved.
+                if stored[0] == "default" and self._ns_config.default_namespace == "default":
+                    return None
+                return stored[0]
+        return self._resolve_namespace(file_path, None)
 
     def _resolve_namespace(self, file_path: Path, explicit_ns: str | None) -> str | None:
         """Determine the namespace for a file.
@@ -1183,8 +1243,12 @@ class IndexEngine:
         if self._config.chunk_overlap_tokens > 0:
             new_chunks = _add_overlap(new_chunks, self._config.chunk_overlap_tokens)
 
-        # Resolve namespace: explicit > auto_ns > default
-        resolved_ns = self._resolve_namespace(file_path, namespace)
+        # Resolve namespace: explicit > preserved > rules > auto_ns > default.
+        # ``force`` skips preservation on purpose — it is the documented way
+        # to apply changed namespace rules to an already-indexed file, so
+        # internal mutation callers that must not re-resolve pass the
+        # preserved namespace explicitly instead (issue #2005).
+        resolved_ns = await self.effective_namespace_for(file_path, namespace, force=force)
         if resolved_ns is not None:
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
 
@@ -1473,7 +1537,7 @@ class IndexEngine:
             # Pre-compute the namespace echo so the complete event surfaces
             # what was actually applied — single render across both stream
             # and non-stream paths (see ``_index_path_inner``).
-            resolved_ns_for_event = self.resolve_namespaces_for(files, namespace)
+            resolved_ns_for_event = await self.resolve_namespaces_for(files, namespace, force=force)
             agg = {
                 "total_chunks": 0,
                 "indexed": 0,

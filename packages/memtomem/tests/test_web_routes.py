@@ -253,7 +253,7 @@ def app():
     # 1-file walk producing a single named NS — individual tests override
     # to exercise rule-variance / truncation / untagged paths.
     index_engine.discover_indexable_files = MagicMock(return_value=[Path("/tmp/memories/note.md")])
-    index_engine.resolve_namespaces_for = MagicMock(return_value=["notes"])
+    index_engine.resolve_namespaces_for = AsyncMock(return_value=["notes"])
 
     # -- dedup scanner mock --
     dedup_scanner = AsyncMock()
@@ -1740,6 +1740,62 @@ class TestDeleteChunk:
         data = resp.json()
         assert data["deleted"] == 1
 
+    @staticmethod
+    def _real_source_chunk(app, tmp_path: Path):
+        """A chunk whose source file exists with real line numbers, so the
+        route takes its remove-lines + re-index branch instead of the
+        index-only fallback."""
+        import dataclasses
+
+        source = tmp_path / "multi.md"
+        source.write_text("## a\n\nfirst\n\n## b\n\nsecond\n", encoding="utf-8")
+        base = _make_test_chunk(source=str(source))
+        chunk = dataclasses.replace(
+            base,
+            metadata=dataclasses.replace(
+                base.metadata, source_file=source, start_line=1, end_line=3
+            ),
+        )
+        app.state.storage.get_chunk.return_value = chunk
+        return source
+
+    async def test_delete_passes_the_files_namespace_to_the_forced_reindex(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """Issue #2005: the re-index uses ``force=True`` for the re-embed,
+        and force re-resolves namespaces — so without an explicit namespace
+        the survivors of a delete move to whatever the rules say today."""
+        self._real_source_chunk(app, tmp_path)
+        app.state.index_engine.effective_namespace_for = AsyncMock(return_value="aaa")
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 200, resp.text
+        kwargs = app.state.index_engine.index_file.await_args.kwargs
+        assert kwargs["force"] is True
+        assert kwargs["namespace"] == "aaa"
+
+    async def test_delete_refuses_when_the_namespace_lookup_fails(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """The route's fallback is an index-only delete, which is right for a
+        failed *file* edit and wrong here: the row would go while the source
+        kept the entry, so the chunk returns on the next re-index and the
+        caller was told the delete succeeded."""
+        from memtomem.errors import NamespaceResolutionError
+
+        source = self._real_source_chunk(app, tmp_path)
+        before = source.read_text(encoding="utf-8")
+        app.state.index_engine.effective_namespace_for = AsyncMock(
+            side_effect=NamespaceResolutionError("store down")
+        )
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 503, resp.text
+        app.state.storage.delete_chunks.assert_not_awaited()
+        assert source.read_text(encoding="utf-8") == before
+
     async def test_delete_chunk_not_found(self, app, client: AsyncClient):
         app.state.storage.get_chunk.return_value = None
         fake_id = uuid.uuid4()
@@ -2363,6 +2419,90 @@ class TestAddMemory:
         )
         assert resp.status_code == 422
 
+    @staticmethod
+    def _seed_mixed_target(app, tmp_path) -> Path:
+        """A real file with content: the guard skips a missing or empty
+        target on purpose (nothing to protect), so a mock-only setup would
+        never reach the namespace comparison.
+
+        ``config.indexing.memory_dirs`` is the attribute the route resolves
+        the base from — assigning ``config.memory_dirs`` instead silently
+        leaves the route pointing at the fixture default ``/tmp/memories``,
+        where a stray file from an earlier run makes this pass for the wrong
+        reason on a developer's machine and fail on a clean runner.
+        """
+        base = tmp_path / "memories"
+        base.mkdir(exist_ok=True)
+        target = base / "shared.md"
+        target.write_text("previously written text\n")
+        app.state.config.indexing.memory_dirs = [base]
+        app.state.storage.namespaces_for_source = AsyncMock(return_value=["aaa"])
+        app.state.index_engine.effective_namespace_for = AsyncMock(return_value="bbb")
+        return target
+
+    async def test_add_memory_refuses_a_mixed_namespace_file(
+        self, client: AsyncClient, app, tmp_path
+    ):
+        """Issue #2005: appending into a file that already holds another
+        namespace would let re-chunking restamp its entries."""
+        target = self._seed_mixed_target(app, tmp_path)
+
+        resp = await client.post(
+            "/api/add",
+            json={"content": "test", "file": "shared.md", "namespace": "bbb"},
+        )
+
+        # The guard only engages on a target with content. Assert the setup
+        # reached the route's own base, or a path mismatch would read as
+        # "guard did not fire" instead of "test pointed somewhere else".
+        assert target.exists() and target.stat().st_size > 0
+        assert Path(app.state.config.indexing.memory_dirs[0]) == target.parent
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "'aaa'" in detail and "allow_namespace_mix=true" in detail
+        app.state.index_engine.index_file.assert_not_awaited()
+
+    async def test_add_memory_honours_the_namespace_mix_override(
+        self, client: AsyncClient, app, tmp_path
+    ):
+        self._seed_mixed_target(app, tmp_path)
+
+        resp = await client.post(
+            "/api/add",
+            json={
+                "content": "test",
+                "file": "shared.md",
+                "namespace": "bbb",
+                "allow_namespace_mix": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        app.state.index_engine.index_file.assert_awaited()
+
+    async def test_add_memory_default_target_is_per_namespace(
+        self, client: AsyncClient, app, tmp_path
+    ):
+        """A namespaced write must not land in the shared day file."""
+        from memtomem.memory_scope import day_file_name
+
+        base = tmp_path / "memories"
+        base.mkdir(exist_ok=True)
+        # Into tmp_path rather than the fixture's shared ``/tmp/memories``:
+        # this test writes a real file, and a shared path accumulates them
+        # across runs.
+        app.state.config.indexing.memory_dirs = [base]
+        app.state.storage.namespaces_for_source = AsyncMock(return_value=[])
+
+        resp = await client.post("/api/add", json={"content": "test", "namespace": "aaa"})
+
+        assert resp.status_code == 200
+        written = Path(resp.json()["file"]).name
+        assert written == day_file_name(
+            "aaa", app.state.config.namespace.default_namespace, date_str=written[:10]
+        )
+        assert not written.endswith(f"{written[:10]}.md")
+
     async def test_add_memory_rejects_path_traversal(self, client: AsyncClient):
         resp = await client.post(
             "/api/add",
@@ -2744,7 +2884,7 @@ class TestIndex:
                 Path("/tmp/memories/b.md"),
             ]
         )
-        app.state.index_engine.resolve_namespaces_for = MagicMock(return_value=["personal"])
+        app.state.index_engine.resolve_namespaces_for = AsyncMock(return_value=["personal"])
         resp = await client.post("/api/index/preview-namespace", json={"path": "/tmp/memories"})
         assert resp.status_code == 200
         data = resp.json()
@@ -2761,7 +2901,7 @@ class TestIndex:
                 Path("/tmp/memories/beta/b.md"),
             ]
         )
-        app.state.index_engine.resolve_namespaces_for = MagicMock(
+        app.state.index_engine.resolve_namespaces_for = AsyncMock(
             return_value=["ns-alpha", "ns-beta"]
         )
         resp = await client.post("/api/index/preview-namespace", json={"path": "/tmp/memories"})
@@ -2775,7 +2915,7 @@ class TestIndex:
         app.state.index_engine.discover_indexable_files = MagicMock(
             return_value=[Path(f"/tmp/memories/f{i}.md") for i in range(250)]
         )
-        app.state.index_engine.resolve_namespaces_for = MagicMock(return_value=["notes"])
+        app.state.index_engine.resolve_namespaces_for = AsyncMock(return_value=["notes"])
         resp = await client.post("/api/index/preview-namespace", json={"path": "/tmp/memories"})
         assert resp.status_code == 200
         data = resp.json()

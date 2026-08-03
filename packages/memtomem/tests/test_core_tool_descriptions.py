@@ -40,7 +40,15 @@ def _wire_descriptions() -> dict[str, str]:
 #: thirteen parameters. Adding text here costs every request in every session,
 #: so an increase should be argued for, and detail that explains the server's
 #: reasoning belongs in a module comment or a guide instead.
-_TOTAL_BUDGET = 9_000
+#:
+#: Raised 9,000 → 9,200 for ``mem_add.allow_namespace_mix`` (#2005). The
+#: argument, per the rule above: the floor is one line per parameter and
+#: ``test_every_tool_parameter_is_documented`` enforces exactly that, so a new
+#: core-tool parameter cannot cost zero — yet the budget had ~1% left, which
+#: made it a cap on *parameters* rather than on prose. The increase buys one
+#: parameter line, not room for rationale; the reasoning for this one lives in
+#: ``docs/adr/0032-per-namespace-day-files.md``.
+_TOTAL_BUDGET = 9_200
 
 
 def test_core_descriptions_fit_the_budget() -> None:

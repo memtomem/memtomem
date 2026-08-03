@@ -130,6 +130,14 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # ``services.tag_management`` and SQLite ``chunks.tags`` JSON; no
         # namespace gate applies.
         ("tag_management.py", "mem_tag_merge", "target"),
+        # ``target`` here is the *file path* being written to, not a
+        # namespace — the parameter-name heuristic catches it, but these two
+        # #2005 helpers take a ``Path`` the caller already validated
+        # (``_validate_path`` for an explicit ``file=``, or a name this
+        # module built itself). Their namespace input is ``effective_ns``,
+        # which arrives from the write surfaces classified above.
+        ("memory_crud.py", "_day_file_retarget", "target"),
+        ("memory_crud.py", "_namespace_mix_refusal", "target"),
     }
 )
 

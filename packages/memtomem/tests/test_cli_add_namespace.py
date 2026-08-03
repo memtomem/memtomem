@@ -59,14 +59,19 @@ def _components(tmp_path: Path, session_row: dict | None = None) -> SimpleNamesp
             indexing=SimpleNamespace(
                 memory_dirs=[str(tmp_path / "memories")],
                 project_memory_dirs=[],
-            )
+            ),
+            # #2005: the day-file name and the mixed-namespace guard both
+            # compare against the configured default namespace.
+            namespace=SimpleNamespace(default_namespace="default"),
         ),
         index_engine=SimpleNamespace(
-            index_file=AsyncMock(return_value=SimpleNamespace(indexed_chunks=1))
+            index_file=AsyncMock(return_value=SimpleNamespace(indexed_chunks=1)),
+            effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
         ),
         storage=SimpleNamespace(
             list_chunks_by_source=AsyncMock(return_value=[]),
             get_session=AsyncMock(return_value=session_row),
+            namespaces_for_source=AsyncMock(return_value=[]),
         ),
     )
 
@@ -114,7 +119,12 @@ class TestSessionInheritance:
         assert _indexed_namespace(comp) == "agent-runtime:planner"
         # The redirect is visible: a plain ``mm search`` hides this namespace.
         assert "Namespace: agent-runtime:planner" in result.output
-        comp.storage.get_session.assert_awaited_once_with(_SESSION_ID)
+        # Twice, both against the parked session id: once before the lock to
+        # pick the namespace's day file (#2005) and once inside it for the
+        # authoritative value (#1991). The in-lock read is the one that
+        # decides — ``TestResolutionHappensUnderTheLock`` pins that.
+        assert comp.storage.get_session.await_count == 2
+        assert {c.args for c in comp.storage.get_session.await_args_list} == {(_SESSION_ID,)}
 
     def test_default_agent_session_stays_unpinned(self, monkeypatch, tmp_path, home):
         # The ``"default"`` sentinel binds no agent (#1875), so a session
