@@ -1652,7 +1652,9 @@ class TestBulkNamespacePrepass:
         b.write_text("# B\n\nfirst", encoding="utf-8")
 
         moved = False
+        events = []
         async for ev in engine.index_path_stream(memory_dir, recursive=True):
+            events.append(ev)
             # First per-file completion: the prepass has run, ``b.md`` has
             # not been processed yet. Move it — and change it again after
             # the move, so the stream's own pass has an upsert to stamp.
@@ -1663,6 +1665,14 @@ class TestBulkNamespacePrepass:
                 moved = True
 
         assert moved, "the stream yielded no per-file progress event"
+        # The namespace alone would also hold if the stream had skipped or
+        # failed ``b.md`` — the move above set it. Pin that the stream's own
+        # pass wrote the post-move content, and did so without error, so the
+        # namespace assertion is about a write the stream actually made.
+        complete = next(ev for ev in events if ev["type"] == "complete")
+        assert complete["errors"] == []
+        chunks = await components.storage.list_chunks_by_source(b)
+        assert any("newer entry" in c.content for c in chunks)
         assert await components.storage.namespaces_for_source(b) == ["aaa"]
 
     async def test_a_mid_run_lookup_failure_writes_nothing_for_that_file(
