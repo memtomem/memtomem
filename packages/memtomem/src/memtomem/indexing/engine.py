@@ -385,6 +385,22 @@ async def _resolved_zero() -> int:
     return 0
 
 
+def _distinct_sorted(values: Iterable[str | None]) -> list[str | None]:
+    """Distinct namespaces in stable sort order, ``None`` (untagged) last."""
+    return sorted(set(values), key=lambda x: (x is None, x or ""))
+
+
+def _default_ns(ns_config: NamespaceConfig) -> str:
+    """The namespace the untagged (``None``) carve-out stands for.
+
+    ``None`` can only be produced when ``default_namespace`` is ``"default"``
+    or empty (``effective_namespace_for`` / ``_resolve_namespace``); either
+    way the chunk model's own default stores the literal ``"default"``, so
+    stamping this value is byte-identical to not stamping at all.
+    """
+    return ns_config.default_namespace or "default"
+
+
 class PrivacyRejection(Exception):
     """Raised by :meth:`IndexEngine._index_file` when a file's content trips the
     secret-redaction guard during **un-adjudicated** indexing (ADR-0006 PR-A).
@@ -556,26 +572,36 @@ class IndexEngine:
         # embed call itself queues on ``embed_sem``.
         embed_sem = asyncio.Semaphore(_resolve_embed_limit(self._embedder))
 
-        # Namespace echo, resolved BEFORE the writes — the same ordering the
-        # stream variant uses. Namespace preservation reads the store
+        # Per-file namespaces, resolved BEFORE the writes — the same ordering
+        # the stream variant uses. Namespace preservation reads the store
         # (issue #2005), so resolving afterwards would both re-read state a
         # concurrent writer may have changed since, and put a lookup that is
         # allowed to raise *after* durable writes, aborting the call with the
-        # work already done and its provenance skipped.
-        resolved_ns = await self.resolve_namespaces_for(files, namespace, force=force)
+        # work already done and its provenance skipped. The write path
+        # consumes these values too (issue #2018): each file's namespace is
+        # passed to ``_index_file`` explicitly, so the resolver never runs a
+        # second, post-write lookup that could fail with nowhere honest to
+        # surface it.
+        per_file_ns = await self._resolve_namespaces_per_file(files, namespace, force=force)
+        resolved_ns = _distinct_sorted(per_file_ns)
 
-        async def _bounded(fp: Path) -> IndexFileResult:
+        async def _bounded(fp: Path, ns: str | None) -> IndexFileResult:
             async with sem:
                 return await self._index_file(
                     fp,
                     force,
-                    namespace=namespace,
+                    # ``None`` is the untagged carve-out, but forwarding it
+                    # would read as "no caller namespace" and re-enter rule
+                    # resolution — normalise to the default it stands for.
+                    namespace=ns if ns is not None else _default_ns(self._ns_config),
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
                     embed_semaphore=embed_sem,
                 )
 
-        raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
+        raw_results = await asyncio.gather(
+            *[_bounded(f, ns) for f, ns in zip(files, per_file_ns)], return_exceptions=True
+        )
         file_results: list[IndexFileResult] = []
         all_errors: list[str] = []
         blocked_paths: list[str] = []
@@ -642,10 +668,21 @@ class IndexEngine:
         Pass the same ``force`` the write will use, or the preview answers
         for a different operation than the one being previewed.
         """
-        ns_set: set[str | None] = {
-            await self.effective_namespace_for(f, explicit_ns, force=force) for f in files
-        }
-        return sorted(ns_set, key=lambda x: (x is None, x or ""))
+        return _distinct_sorted(
+            await self._resolve_namespaces_per_file(files, explicit_ns, force=force)
+        )
+
+    async def _resolve_namespaces_per_file(
+        self, files: list[Path], explicit_ns: str | None = None, *, force: bool = False
+    ) -> list[str | None]:
+        """Each file's effective namespace, positionally aligned with ``files``.
+
+        The single lookup per file per bulk run (issue #2018): the bulk paths
+        resolve here, before any write, then pass each value to
+        ``_index_file`` explicitly so the resolver short-circuits instead of
+        asking the store a second time mid-run.
+        """
+        return [await self.effective_namespace_for(f, explicit_ns, force=force) for f in files]
 
     def discover_indexable_files(
         self,
@@ -1247,7 +1284,9 @@ class IndexEngine:
         # ``force`` skips preservation on purpose — it is the documented way
         # to apply changed namespace rules to an already-indexed file, so
         # internal mutation callers that must not re-resolve pass the
-        # preserved namespace explicitly instead (issue #2005).
+        # preserved namespace explicitly instead (issue #2005). The bulk
+        # paths do the same with their pre-write per-file resolution
+        # (issue #2018), so this lookup only runs for single-file callers.
         resolved_ns = await self.effective_namespace_for(file_path, namespace, force=force)
         if resolved_ns is not None:
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
@@ -1534,10 +1573,19 @@ class IndexEngine:
             # (length=0 bar is still a valid render and avoids a special case
             # downstream).
             yield {"type": "discovery", "files_total": total_files}
-            # Pre-compute the namespace echo so the complete event surfaces
+            # Pre-compute per-file namespaces so the complete event surfaces
             # what was actually applied — single render across both stream
-            # and non-stream paths (see ``_index_path_inner``).
-            resolved_ns_for_event = await self.resolve_namespaces_for(files, namespace, force=force)
+            # and non-stream paths (see ``_index_path_inner``). Resolved on
+            # the same ``fp.resolve()`` form the write below uses, so the
+            # preservation lookup and the write answer for the same path.
+            # The write path consumes these values too (issue #2018) — the
+            # per-file runner passes its entry explicitly, so ``_index_file``
+            # never runs a second, post-write lookup.
+            resolved_files = [fp.resolve() for fp in files]
+            per_file_ns = await self._resolve_namespaces_per_file(
+                resolved_files, namespace, force=force
+            )
+            resolved_ns_for_event = _distinct_sorted(per_file_ns)
             agg = {
                 "total_chunks": 0,
                 "indexed": 0,
@@ -1564,6 +1612,7 @@ class IndexEngine:
                 async def runner(
                     fp: Path = fp,
                     idx: int = i,
+                    ns: str | None = per_file_ns[i - 1],
                 ) -> IndexFileResult:
                     def cb(done: int, total: int) -> None:
                         queue.put_nowait(
@@ -1587,7 +1636,10 @@ class IndexEngine:
                         result, _ = await self._index_file_locked(
                             fp.resolve(),
                             force,
-                            namespace=namespace,
+                            # Pre-resolved above; ``None`` (untagged) is
+                            # normalised so ``_index_file`` doesn't re-enter
+                            # rule resolution (issue #2018).
+                            namespace=ns if ns is not None else _default_ns(self._ns_config),
                             on_chunk_progress=cb,
                             force_unsafe=force_unsafe,
                             path_scope=path_scope,

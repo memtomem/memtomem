@@ -1626,6 +1626,138 @@ class TestPreviewHelpers:
 
 
 # ===========================================================================
+# 2c. Bulk indexing resolves each file's namespace exactly once (issue #2018)
+# ===========================================================================
+
+
+class TestBulkResolvesNamespaceOnce:
+    """The bulk paths resolve per-file namespaces once, before any write,
+    and pass each value to ``_index_file`` explicitly. A second, post-write
+    lookup would decide the stamp after the run had started writing, and a
+    late ``NamespaceResolutionError`` from it would be flattened into
+    ``stats.errors`` — a 200 with an error string instead of the typed,
+    retryable failure (issue #2018)."""
+
+    async def test_index_path_reads_stored_namespace_once_per_file(
+        self, components, memory_dir, monkeypatch
+    ):
+        """One preservation lookup per file per run — the pre-write
+        resolution is the only one; ``_index_file`` short-circuits."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        (memory_dir / "b.md").write_text("# B\n\nbeta", encoding="utf-8")
+        spy = AsyncMock(wraps=components.storage.namespaces_for_source)
+        monkeypatch.setattr(components.storage, "namespaces_for_source", spy)
+
+        await engine.index_path(memory_dir, recursive=True)
+
+        assert spy.await_count == 2
+
+    async def test_index_path_stream_reads_stored_namespace_once_per_file(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Same contract on the stream variant, which threads the value
+        through ``_index_file_locked``."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        (memory_dir / "b.md").write_text("# B\n\nbeta", encoding="utf-8")
+        spy = AsyncMock(wraps=components.storage.namespaces_for_source)
+        monkeypatch.setattr(components.storage, "namespaces_for_source", spy)
+
+        async for _ in engine.index_path_stream(memory_dir, recursive=True):
+            pass
+
+        assert spy.await_count == 2
+
+    async def test_late_store_failure_cannot_reach_the_write_path(
+        self, components, memory_dir, monkeypatch
+    ):
+        """A store that answers once and then stops fails the run *before*
+        any write, as the typed retryable error — not as a flattened string
+        inside a successful-looking stats object."""
+        from memtomem.errors import NamespaceResolutionError, RetryableError
+
+        engine = components.index_engine
+        a = memory_dir / "a.md"
+        b = memory_dir / "b.md"
+        a.write_text("# A\n\nalpha", encoding="utf-8")
+        b.write_text("# B\n\nbeta", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[[], RuntimeError("store down")]),
+        )
+
+        with pytest.raises(NamespaceResolutionError) as excinfo:
+            await engine.index_path(memory_dir, recursive=True)
+
+        assert isinstance(excinfo.value, RetryableError)
+        assert await components.storage.list_chunks_by_source(a) == []
+        assert await components.storage.list_chunks_by_source(b) == []
+
+    async def test_bulk_stamps_default_for_the_untagged_carveout(self, components, memory_dir):
+        """The per-file ``None`` (untagged carve-out) is normalised before
+        being passed as the explicit namespace — the stored spelling is the
+        chunk model's own default, exactly as when nothing was stamped."""
+        engine = components.index_engine
+        fp = memory_dir / "untagged.md"
+        fp.write_text("# U\n\nplain note", encoding="utf-8")
+
+        await engine.index_path(memory_dir, recursive=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["default"]
+
+    async def test_bulk_echo_still_reports_the_untagged_carveout_as_none(
+        self, components, memory_dir
+    ):
+        """Normalisation applies only to the value handed to the write path;
+        the ``resolved_namespaces`` echo keeps ``None`` for untagged."""
+        engine = components.index_engine
+        (memory_dir / "untagged.md").write_text("# U\n\nplain note", encoding="utf-8")
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.resolved_namespaces == (None,)
+
+    async def test_bulk_preservation_still_wins_without_force(self, components, memory_dir):
+        """A bulk re-index carrying no caller intent must not move a file
+        out of its stored namespace, even when the rules now say otherwise —
+        the pre-resolved value carries the preserved namespace."""
+        engine = components.index_engine
+        fp = memory_dir / "kept.md"
+        fp.write_text("# K\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+        # Content change so the re-index actually re-upserts the chunks —
+        # an unchanged file skips the UPSERT and would pass vacuously.
+        fp.write_text("# K\n\nfirst entry\n\nsecond entry", encoding="utf-8")
+
+        await engine.index_path(memory_dir, recursive=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["personal"]
+
+    async def test_bulk_force_applies_rules_not_preservation(self, components, memory_dir):
+        """``force=True`` skips preservation on purpose (the documented way
+        to apply changed rules) — the pre-resolved value must carry the rule
+        namespace, not the stored one."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+
+        await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["ruled"]
+
+
+# ===========================================================================
 # 3. _apply_namespace
 # ===========================================================================
 
