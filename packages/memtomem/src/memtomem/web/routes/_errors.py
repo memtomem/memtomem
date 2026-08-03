@@ -84,15 +84,20 @@ PRIVACY_BLOCK_IMPORT_DETAIL = (
 
 #: Fixed 503 body for a namespace lookup the chunk store could not answer
 #: (#2005 follow-up). Lives in this leaf rather than in one route module so
-#: every surface that can hit the condition — ``POST /api/index``, the
-#: namespace preview, ``POST /api/reindex``, the chunk-edit path, and the
-#: app-level backstop handler — describes it the same way instead of drifting
-#: into three wordings for one condition. Path-free on purpose: the target is
+#: the surfaces that share it — ``POST /api/index``, the namespace preview,
+#: the chunk-edit path, and ``POST /api/add`` — describe one condition one
+#: way instead of drifting into four. Path-free on purpose: the target is
 #: caller-supplied and the response is not the place to reflect it back.
-#: "Nothing was changed" holds on every one of those routes — the engine
-#: resolves namespaces *before* any write (``_index_path_inner``), the preview
-#: is read-only, and the chunk edit rolls the file back before the exception
-#: escapes.
+#:
+#: The "nothing was changed" clause is a claim about the *caller's* state, so
+#: only a surface that can keep it may use this string: the engine resolves
+#: namespaces before any write (``_index_path_inner``), the preview is
+#: read-only, the chunk edit rolls the file back, and ``/api/add`` resolves
+#: before appending. The surfaces that cannot keep it do not borrow it —
+#: ``/api/reindex`` (earlier roots really were indexed) and the SSE index
+#: stream (it indexes as it walks) each say so in their own words. There is
+#: deliberately no app-wide handler that would hand this promise to a route
+#: that cannot keep it.
 NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL = (
     "Could not determine the stored namespace for one or more files; nothing "
     "was changed. Retry once the chunk store is reachable."

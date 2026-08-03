@@ -2694,6 +2694,47 @@ class TestAddMemory:
         assert not (base / "note.md").exists()
         app.state.index_engine.index_file.assert_not_awaited()
 
+    async def test_add_memory_leaves_no_second_lookup_after_the_append(
+        self, client: AsyncClient, app, tmp_path
+    ):
+        """Pre-flighting alone does not close the window — it moves it. If the
+        answer is discarded and ``index_file`` resolves again, that second
+        lookup sits *after* the durable append, where 503 would be a lie and
+        500 still invites the retry that duplicates the entry. Passing the
+        resolved namespace through means there is no second lookup to fail."""
+        base = tmp_path / "memories"
+        base.mkdir(exist_ok=True)
+        app.state.config.indexing.memory_dirs = [base]
+        app.state.storage.namespaces_for_source = AsyncMock(return_value=[])
+        app.state.index_engine.effective_namespace_for = AsyncMock(return_value="notes")
+
+        resp = await client.post("/api/add", json={"content": "test", "file": "note.md"})
+
+        assert resp.status_code == 200, resp.text
+        # One lookup for the whole request, and its answer reaches the write.
+        app.state.index_engine.effective_namespace_for.assert_awaited_once()
+        assert app.state.index_engine.index_file.await_args.kwargs["namespace"] == "notes"
+
+    async def test_add_memory_normalises_the_untagged_carve_out(
+        self, client: AsyncClient, app, tmp_path
+    ):
+        """``None`` from the resolver means "untagged", not "no answer" —
+        forwarding it would re-enter rule resolution in ``index_file`` and put
+        the second lookup back. The configured default stores the same state.
+        """
+        base = tmp_path / "memories"
+        base.mkdir(exist_ok=True)
+        app.state.config.indexing.memory_dirs = [base]
+        app.state.storage.namespaces_for_source = AsyncMock(return_value=[])
+        app.state.index_engine.effective_namespace_for = AsyncMock(return_value=None)
+
+        resp = await client.post("/api/add", json={"content": "test", "file": "note.md"})
+
+        assert resp.status_code == 200, resp.text
+        passed = app.state.index_engine.index_file.await_args.kwargs["namespace"]
+        assert passed == app.state.config.namespace.default_namespace
+        assert passed is not None
+
     async def test_add_memory_with_an_explicit_namespace_skips_the_preflight(
         self, client: AsyncClient, app, tmp_path
     ):

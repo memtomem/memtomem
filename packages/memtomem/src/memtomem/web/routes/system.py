@@ -1578,9 +1578,10 @@ async def trigger_index(
         # The engine refuses to re-resolve a namespace whose stored value it
         # could not read (#2005) — transient, and nothing was written, so it
         # is a 503 like the chunk-delete path rather than the generic 500 a
-        # bug would produce. The app-level handler answers the same way; this
-        # stays explicit so the route's own contract is readable at the call
-        # site rather than inferred from a handler two modules away.
+        # bug would produce. Stated here rather than by a shared handler: the
+        # "nothing was changed" promise in the detail is a claim about this
+        # route's own ordering (``_index_path_inner`` resolves every namespace
+        # before it writes anything), and only the call site knows that.
         raise HTTPException(
             status_code=503,
             detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
@@ -2007,9 +2008,24 @@ async def add_memory(
             # circuits the lookup, so there is nothing to pre-flight. The
             # mixed-namespace guard above already asks this question when the
             # file has content; this covers the new-file case it skips.
-            if req.namespace is None:
+            #
+            # The answer is *kept* and passed to ``index_file`` below, which
+            # is what actually closes the window: asking and then letting the
+            # re-index ask again leaves a second lookup on the far side of the
+            # append, and that one has nowhere honest to fail. An explicit
+            # ``namespace`` short-circuits the resolver, so it needs neither.
+            write_ns = req.namespace
+            if write_ns is None:
                 try:
-                    await index_engine.effective_namespace_for(target)
+                    # ``or default_namespace``: the resolver returns ``None``
+                    # for the untagged carve-out, and passing that back through
+                    # would read as "no caller namespace" and re-enter rule
+                    # resolution — the very thing being avoided. The explicit
+                    # default stores the same value the carve-out does. Mirrors
+                    # the web chunk-delete path's ``preserved_ns``.
+                    write_ns = (
+                        await index_engine.effective_namespace_for(target)
+                    ) or config.namespace.default_namespace
                 except NamespaceResolutionError as exc:
                     raise HTTPException(
                         status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
@@ -2018,7 +2034,7 @@ async def add_memory(
             # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
             stats = await index_engine.index_file(
-                target, namespace=req.namespace, already_scanned=True, lock_held=True
+                target, namespace=write_ns, already_scanned=True, lock_held=True
             )
 
             # Apply tags to indexed chunks (the chunker doesn't parse tag text
