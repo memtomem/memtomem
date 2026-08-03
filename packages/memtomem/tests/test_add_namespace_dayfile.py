@@ -16,6 +16,7 @@ this issue was filed against; the rest pin the individual guards.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -937,3 +938,185 @@ class TestNamespacesForSource:
     async def test_unindexed_source_has_no_namespaces(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         assert await comp.storage.namespaces_for_source(mem_dir / "never.md") == []
+
+
+class TestGuardFailsClosedOnFilesystemErrors:
+    """Issue #2005 follow-up: only "it isn't there" means there is nothing to
+    protect. Any other stat failure hides whatever the file holds."""
+
+    @pytest.mark.asyncio
+    async def test_a_stat_permission_error_refuses(self, tmp_path, monkeypatch):
+        target = tmp_path / "unreadable.md"
+        target.write_text("some text")
+        monkeypatch.setattr(
+            Path, "stat", lambda self, **k: (_ for _ in ()).throw(PermissionError("denied"))
+        )
+
+        err = await namespace_mix_refusal(
+            index_engine=_engine("bbb"),
+            storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
+            default_namespace="default",
+            target=target,
+            effective_ns="bbb",
+            override_hint="--allow-namespace-mix",
+        )
+
+        assert err is not None
+        assert "PermissionError" in err
+        assert "--allow-namespace-mix" in err
+
+    @pytest.mark.asyncio
+    async def test_a_symlink_loop_refuses(self, tmp_path, monkeypatch):
+        """ELOOP is not absence. ``Path.is_file`` swallows it and answers
+        False, so a guard that routed through ``is_file`` would read "no
+        content" and append into a file whose contents it cannot see."""
+        target = tmp_path / "looping.md"
+        monkeypatch.setattr(
+            Path,
+            "stat",
+            lambda self, **k: (_ for _ in ()).throw(OSError(errno.ELOOP, "too many levels")),
+        )
+
+        err = await namespace_mix_refusal(
+            index_engine=_engine("bbb"),
+            storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
+            default_namespace="default",
+            target=target,
+            effective_ns="bbb",
+            override_hint="--allow-namespace-mix",
+        )
+
+        assert err is not None
+        assert "--allow-namespace-mix" in err
+
+    @pytest.mark.asyncio
+    async def test_a_missing_file_is_still_allowed(self, tmp_path):
+        """The discriminating half: a brand-new day file must not be refused,
+        or every first write of the day fails."""
+        err = await namespace_mix_refusal(
+            index_engine=_engine("bbb"),
+            storage=SimpleNamespace(namespaces_for_source=AsyncMock()),
+            default_namespace="default",
+            target=tmp_path / "absent.md",
+            effective_ns="bbb",
+            override_hint="-x",
+        )
+        assert err is None
+
+    @pytest.mark.asyncio
+    async def test_a_missing_parent_component_is_still_allowed(self, tmp_path):
+        """The other half of "it isn't there": ENOTDIR (a parent component is
+        a regular file) also means the target cannot exist."""
+        not_a_dir = tmp_path / "file.md"
+        not_a_dir.write_text("x")
+
+        err = await namespace_mix_refusal(
+            index_engine=_engine("bbb"),
+            storage=SimpleNamespace(namespaces_for_source=AsyncMock()),
+            default_namespace="default",
+            target=not_a_dir / "child.md",
+            effective_ns="bbb",
+            override_hint="-x",
+        )
+        assert err is None
+
+
+class TestRetryableLabelSurvivesRollback:
+    @pytest.mark.asyncio
+    async def test_mem_edit_reports_a_namespace_failure_as_retryable(
+        self, bm25_only_components, monkeypatch
+    ):
+        """``_mutate_file_and_reindex`` rolls back and returns a plain
+        ``Error:`` string. For a transient store failure that tells the caller
+        a retryable condition is permanent, so it re-raises instead and lets
+        ``tool_handler`` label it."""
+        from memtomem.errors import NamespaceResolutionError
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.memory_crud import mem_add, mem_edit
+
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        await mem_add(content=_ALPHA, title="Shared", ctx=ctx)  # type: ignore[arg-type]
+        chunk = (await comp.storage.list_chunks_by_source(mem_dir / f"{_today()}.md"))[0]
+
+        calls = {"n": 0}
+        real = comp.index_engine.index_file
+
+        async def _fail_first(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise NamespaceResolutionError("store down")
+            return await real(*args, **kwargs)
+
+        day_file = mem_dir / f"{_today()}.md"
+        before = day_file.read_text()
+        monkeypatch.setattr(comp.index_engine, "index_file", _fail_first)
+
+        out = await mem_edit(chunk_id=str(chunk.id), new_content="replacement text", ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error (retryable):"), out
+        # The label is only half the contract: re-raising must happen *after*
+        # the rollback, or a retry would append onto a half-mutated file.
+        # Without this pin, a regression that raised before ``write_text``
+        # still passes the assertion above.
+        assert day_file.read_text() == before
+
+    @pytest.mark.asyncio
+    async def test_mem_delete_reports_a_namespace_failure_as_retryable(
+        self, bm25_only_components, monkeypatch
+    ):
+        """The twin surface: ``mem_delete``'s chunk branch shares the same
+        helper, so the label has to survive there too."""
+        from memtomem.errors import NamespaceResolutionError
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.memory_crud import mem_add, mem_delete
+
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        await mem_add(content=_ALPHA, title="Shared", ctx=ctx)  # type: ignore[arg-type]
+        day_file = mem_dir / f"{_today()}.md"
+        chunk = (await comp.storage.list_chunks_by_source(day_file))[0]
+
+        calls = {"n": 0}
+        real = comp.index_engine.index_file
+
+        async def _fail_first(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise NamespaceResolutionError("store down")
+            return await real(*args, **kwargs)
+
+        before = day_file.read_text()
+        monkeypatch.setattr(comp.index_engine, "index_file", _fail_first)
+
+        out = await mem_delete(chunk_id=str(chunk.id), ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error (retryable):"), out
+        assert day_file.read_text() == before
+
+    @pytest.mark.asyncio
+    async def test_a_permanent_failure_stays_a_plain_error(self, bm25_only_components, monkeypatch):
+        """The discriminating half — otherwise every rollback would advertise
+        itself as worth retrying."""
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.memory_crud import mem_add, mem_edit
+
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        await mem_add(content=_ALPHA, title="Shared", ctx=ctx)  # type: ignore[arg-type]
+        chunk = (await comp.storage.list_chunks_by_source(mem_dir / f"{_today()}.md"))[0]
+
+        calls = {"n": 0}
+        real = comp.index_engine.index_file
+
+        async def _fail_first(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(comp.index_engine, "index_file", _fail_first)
+
+        out = await mem_edit(chunk_id=str(chunk.id), new_content="replacement text", ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error:") and "retryable" not in out, out

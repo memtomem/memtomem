@@ -19,6 +19,7 @@ from memtomem.web.deps import (
     get_storage,
     require_indexed_source,
 )
+from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 from memtomem.web.schemas.core import (
     ChunkOut,
     DeleteResponse,
@@ -164,6 +165,18 @@ async def edit_chunk(
                     meta.source_file, meta.start_line, meta.end_line, body.new_content
                 ),
             )
+        except NamespaceResolutionError as exc:
+            # Before the generic handler below, and the web twin of the MCP
+            # ``_mutate_file_and_reindex`` re-raise (#2005 follow-up): the
+            # re-index could not read the file's stored namespace, which is
+            # transient. ``mutate_source_and_reindex`` restored the pre-image
+            # before re-raising, so nothing was changed and a retry is the
+            # right response — a 500 would tell the caller to file a bug
+            # instead. Mirrors the 503 the delete route below already answers.
+            logger.warning("Namespace lookup failed during chunk edit %s: %s", chunk_id, exc)
+            raise HTTPException(
+                status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
+            ) from exc
         except Exception as exc:
             logger.error("Chunk edit failed for %s: %s", chunk_id, exc, exc_info=True)
             raise HTTPException(status_code=500, detail="Edit failed. Check server logs.") from exc

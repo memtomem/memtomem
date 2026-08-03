@@ -35,6 +35,7 @@ from memtomem.config import (
     save_config_overrides,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
+from memtomem.errors import NamespaceResolutionError
 from memtomem.search.reranker.factory import create_reranker
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
@@ -48,7 +49,7 @@ from memtomem.web.deps import (
     get_storage,
     require_configured,
 )
-from memtomem.web.routes._errors import _redact_message
+from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL, _redact_message
 from memtomem.web.routes._locks import _config_lock
 from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
@@ -1085,6 +1086,17 @@ async def memory_dirs_status(
     return {"dirs": stats}
 
 
+#: Per-root twin of ``NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL`` for ``/api/reindex``.
+#: Deliberately does NOT promise "nothing was changed": this route walks every
+#: registered root, so by the time one root's lookup fails the earlier roots
+#: have really been indexed, and their entries are in the same response.
+_REINDEX_ROOT_NAMESPACE_ERROR = (
+    "Could not determine the stored namespace for one or more files in this "
+    "root; it was not indexed. Other roots in this response may have "
+    "completed. Retry once the chunk store is reachable."
+)
+
+
 @router.post("/reindex", dependencies=[Depends(require_configured)])
 async def reindex_all(
     force: bool = False,
@@ -1092,13 +1104,28 @@ async def reindex_all(
     index_engine=Depends(get_index_engine),
 ):
     """Re-index every registered index root (user-tier + project-tier per ADR-0011)."""
-    results = []
+    results: list[dict] = []
     for d in config.indexing.all_index_roots():
         resolved = d.expanduser().resolve()
         if not resolved.is_dir():
             results.append({"path": str(resolved), "error": "not a directory"})
             continue
-        stats = await index_engine.index_path(resolved, recursive=True, force=force)
+        try:
+            stats = await index_engine.index_path(resolved, recursive=True, force=force)
+        except NamespaceResolutionError as exc:
+            # Per root, not per request (#2005 follow-up): this route walks
+            # every registered root, and the roots indexed before this one
+            # were really indexed. A 503 for the whole call would discard
+            # their results and claim "nothing was changed", which is the one
+            # thing a detail string must never say untruthfully — which is
+            # also why this does not reuse ``NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL``:
+            # that string promises nothing was changed, and on this route the
+            # earlier roots may well have been. The entry uses ``errors`` (a
+            # list) rather than the ``error`` key the not-a-directory branch
+            # above uses, so it reaches ``all_errors`` and flips ``ok`` to false.
+            logger.warning("Namespace lookup failed while reindexing %s: %s", resolved, exc)
+            results.append({"path": str(resolved), "errors": [_REINDEX_ROOT_NAMESPACE_ERROR]})
+            continue
         entry: dict = {
             "path": str(resolved),
             "total_files": stats.total_files,
@@ -1487,6 +1514,25 @@ async def index_stream(
                 path_scope="explicit",
             ):
                 yield f"data: {json.dumps(event)}\n\n"
+        except NamespaceResolutionError as exc:
+            # Before the generic branch (#2005 follow-up): SSE has no status
+            # code, so the *message* is the only place this surface can say
+            # "transient — retry" rather than handing the client a redacted
+            # engine string it cannot classify. Its own wording, because the
+            # stream indexes as it walks: by the time a lookup fails, earlier
+            # files in the run may already be indexed, so the "nothing was
+            # changed" promise the single-shot routes make would be a lie here.
+            logger.warning("Namespace lookup failed during index stream: %s", exc)
+            error_event = {
+                "type": "error",
+                "retryable": True,
+                "message": (
+                    "Could not determine the stored namespace for one or more "
+                    "files; the run stopped. Files already reported as indexed "
+                    "were indexed. Retry once the chunk store is reachable."
+                ),
+            }
+            yield f"data: {json.dumps(error_event)}\n\n"
         except Exception as exc:
             # Engine-level failures escape to this handler (per-file errors
             # are caught inside the engine and reported as basenames in the
@@ -1519,14 +1565,27 @@ async def trigger_index(
     index_engine=Depends(get_index_engine),
 ) -> IndexResponse:
     resolved = Path(req.path).expanduser().resolve()
-    stats = await index_engine.index_path(
-        resolved,
-        recursive=req.recursive,
-        force=req.force,
-        force_unsafe=req.force_unsafe,
-        namespace=req.namespace,
-        path_scope="explicit",
-    )
+    try:
+        stats = await index_engine.index_path(
+            resolved,
+            recursive=req.recursive,
+            force=req.force,
+            force_unsafe=req.force_unsafe,
+            namespace=req.namespace,
+            path_scope="explicit",
+        )
+    except NamespaceResolutionError as exc:
+        # The engine refuses to re-resolve a namespace whose stored value it
+        # could not read (#2005) — transient, and nothing was written, so it
+        # is a 503 like the chunk-delete path rather than the generic 500 a
+        # bug would produce. Stated here rather than by a shared handler: the
+        # "nothing was changed" promise in the detail is a claim about this
+        # route's own ordering (``_index_path_inner`` resolves every namespace
+        # before it writes anything), and only the call site knows that.
+        raise HTTPException(
+            status_code=503,
+            detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
+        ) from exc
     return IndexResponse(
         total_files=stats.total_files,
         total_chunks=stats.total_chunks,
@@ -1569,8 +1628,15 @@ async def preview_namespace(
     files = index_engine.discover_indexable_files(resolved, body.recursive, path_scope="explicit")
     truncated = len(files) > _PREVIEW_FILE_CAP
     walked = files[:_PREVIEW_FILE_CAP]
+    try:
+        resolved_namespaces = await index_engine.resolve_namespaces_for(walked)
+    except NamespaceResolutionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
+        ) from exc
     return PreviewNamespaceResponse(
-        resolved_namespaces=await index_engine.resolve_namespaces_for(walked),
+        resolved_namespaces=resolved_namespaces,
         truncated=truncated,
         scanned_files=len(walked),
     )
@@ -1931,11 +1997,44 @@ async def add_memory(
                 )
                 if mix_err is not None:
                     raise HTTPException(status_code=409, detail=mix_err)
+            # Ask the lookup *before* appending (#2005 follow-up). The
+            # re-index below resolves the namespace itself when the caller
+            # named none, and that resolution can fail — after the append is
+            # already durable. This route has no idempotency key, so a caller
+            # told to retry a half-completed write appends the entry twice.
+            # Pre-flighting moves the failure to a point where refusing is
+            # honest: nothing has been written, and a retry costs nothing.
+            # Only for the resolving case — an explicit ``namespace`` short-
+            # circuits the lookup, so there is nothing to pre-flight. The
+            # mixed-namespace guard above already asks this question when the
+            # file has content; this covers the new-file case it skips.
+            #
+            # The answer is *kept* and passed to ``index_file`` below, which
+            # is what actually closes the window: asking and then letting the
+            # re-index ask again leaves a second lookup on the far side of the
+            # append, and that one has nowhere honest to fail. An explicit
+            # ``namespace`` short-circuits the resolver, so it needs neither.
+            write_ns = req.namespace
+            if write_ns is None:
+                try:
+                    # ``or default_namespace``: the resolver returns ``None``
+                    # for the untagged carve-out, and passing that back through
+                    # would read as "no caller namespace" and re-enter rule
+                    # resolution — the very thing being avoided. The explicit
+                    # default stores the same value the carve-out does. Mirrors
+                    # the web chunk-delete path's ``preserved_ns``.
+                    write_ns = (
+                        await index_engine.effective_namespace_for(target)
+                    ) or config.namespace.default_namespace
+                except NamespaceResolutionError as exc:
+                    raise HTTPException(
+                        status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
+                    ) from exc
             target.parent.mkdir(parents=True, exist_ok=True)
             # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
             stats = await index_engine.index_file(
-                target, namespace=req.namespace, already_scanned=True, lock_held=True
+                target, namespace=write_ns, already_scanned=True, lock_held=True
             )
 
             # Apply tags to indexed chunks (the chunker doesn't parse tag text

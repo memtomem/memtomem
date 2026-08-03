@@ -288,6 +288,15 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": "Not found"})
 
+    # No app-wide handler for ``NamespaceResolutionError`` (#2005), on
+    # purpose. One was tried and removed: "retry, nothing was changed" is only
+    # true where the lookup runs before the write, and a blanket handler
+    # cannot know that. ``POST /api/add`` appends and *then* indexes, and it
+    # carries no idempotency key — telling that caller to retry duplicates the
+    # entry. Every surface therefore states its own post-condition at the call
+    # site, where the answer is knowable, and the ones that cannot promise
+    # "nothing was changed" say something else.
+
     @app.exception_handler(Exception)
     async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.error("Unhandled exception: %s", exc, exc_info=True)

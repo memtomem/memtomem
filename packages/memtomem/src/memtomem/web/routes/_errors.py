@@ -21,6 +21,12 @@ The wire shape (FastAPI nests the ``detail`` under ``{"detail": {...}}``)::
 ``reason_code`` and ``project_scope_id``. The one deliberate exception to the
 object envelope is the privacy 422 block, which keeps a *string* detail
 (issue-pinned) and therefore never routes through ``_error``.
+
+Being the leaf, this module also holds the fixed, path-free *string* details
+that more than one route surface must phrase identically (the privacy blocks
+above, ``NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL`` below). Anything shared by two
+routes belongs here rather than in whichever route module happened to need it
+first, where the second copy is what drifts.
 """
 
 from __future__ import annotations
@@ -73,6 +79,28 @@ PRIVACY_BLOCK_IMPORT_DETAIL = (
     "Privacy scan blocked this pull: a secret was detected in the source bytes. "
     "git history is forever — project_shared has no force bypass (ADR-0011 §5). "
     "Remove the secret from the source first."
+)
+
+
+#: Fixed 503 body for a namespace lookup the chunk store could not answer
+#: (#2005 follow-up). Lives in this leaf rather than in one route module so
+#: the surfaces that share it — ``POST /api/index``, the namespace preview,
+#: the chunk-edit path, and ``POST /api/add`` — describe one condition one
+#: way instead of drifting into four. Path-free on purpose: the target is
+#: caller-supplied and the response is not the place to reflect it back.
+#:
+#: The "nothing was changed" clause is a claim about the *caller's* state, so
+#: only a surface that can keep it may use this string: the engine resolves
+#: namespaces before any write (``_index_path_inner``), the preview is
+#: read-only, the chunk edit rolls the file back, and ``/api/add`` resolves
+#: before appending. The surfaces that cannot keep it do not borrow it —
+#: ``/api/reindex`` (earlier roots really were indexed) and the SSE index
+#: stream (it indexes as it walks) each say so in their own words. There is
+#: deliberately no app-wide handler that would hand this promise to a route
+#: that cannot keep it.
+NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL = (
+    "Could not determine the stored namespace for one or more files; nothing "
+    "was changed. Retry once the chunk store is reachable."
 )
 
 

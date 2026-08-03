@@ -45,6 +45,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A namespace lookup that cannot answer now stays retryable end to end**
+  (#2005 follow-up). `NamespaceResolutionError` is raised when the stored
+  namespace of a file cannot be read, so a transient store failure does not
+  become a silent namespace move — but every caller flattened it back into a
+  permanent failure. `mem_edit` / `mem_delete` rolled back and returned a
+  plain `Error:` string instead of `Error (retryable):`; `/api/index`, the
+  namespace preview, `/api/reindex` and the Web chunk edit fell through to a
+  generic 500 rather than the 503 the chunk-delete route already returned.
+  Each surface now states its own post-condition: the routes that resolve
+  before writing answer 503 with one shared, path-free "nothing was changed"
+  body; `/api/reindex` reports per registered root, so the roots it already
+  finished keep their results; the SSE index stream — which has no status
+  code — marks the event `retryable` and says which files did land; and
+  `POST /api/add`, which appends before indexing and has no idempotency key,
+  now asks the lookup *before* the append so a caller told to retry cannot
+  duplicate the entry. The mixed-namespace write guard also treated *any* `stat` failure
+  on the target as "no content, nothing to protect", so a permission error, a
+  dead mount, or a symlink loop let an append through that could restamp the
+  file's existing entries; only a target that genuinely cannot exist
+  (`ENOENT` / `ENOTDIR`) takes that path now.
+
 - **Two untitled entries appended in the same second no longer merge into one
   chunk.** `append_entry` headed an untitled entry with a second-resolution
   timestamp, and two chunks sharing a `heading_hierarchy` are mergeable — the
