@@ -48,15 +48,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **A namespace lookup that cannot answer now stays retryable end to end**
   (#2005 follow-up). `NamespaceResolutionError` is raised when the stored
   namespace of a file cannot be read, so a transient store failure does not
-  become a silent namespace move — but three callers flattened it back into a
+  become a silent namespace move — but every caller flattened it back into a
   permanent failure. `mem_edit` / `mem_delete` rolled back and returned a
-  plain `Error:` string instead of `Error (retryable):`; `/api/index` and the
-  namespace preview fell through to a generic 500 rather than the 503 the
-  chunk-delete route already returned. The mixed-namespace write guard also
-  treated *any* `stat` failure on the target as "no content, nothing to
-  protect", so a permission error or a dead mount let an append through that
-  could restamp the file's existing entries; only a genuinely missing file
-  takes that path now.
+  plain `Error:` string instead of `Error (retryable):`; `/api/index`, the
+  namespace preview, `/api/reindex` and the Web chunk edit fell through to a
+  generic 500 rather than the 503 the chunk-delete route already returned.
+  All four routes now answer 503 with one shared, path-free body, with a
+  matching app-level handler behind them so a future route that forgets its
+  own case still says "retry" rather than "internal error"; `/api/reindex`
+  handles it per registered root, so the roots it already finished keep their
+  results. The mixed-namespace write guard also treated *any* `stat` failure
+  on the target as "no content, nothing to protect", so a permission error, a
+  dead mount, or a symlink loop let an append through that could restamp the
+  file's existing entries; only a target that genuinely cannot exist
+  (`ENOENT` / `ENOTDIR`) takes that path now.
 
 - **Two untitled entries appended in the same second no longer merge into one
   chunk.** `append_entry` headed an untitled entry with a second-resolution

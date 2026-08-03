@@ -49,7 +49,7 @@ from memtomem.web.deps import (
     get_storage,
     require_configured,
 )
-from memtomem.web.routes._errors import _redact_message
+from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL, _redact_message
 from memtomem.web.routes._locks import _config_lock
 from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
@@ -1093,13 +1093,26 @@ async def reindex_all(
     index_engine=Depends(get_index_engine),
 ):
     """Re-index every registered index root (user-tier + project-tier per ADR-0011)."""
-    results = []
+    results: list[dict] = []
     for d in config.indexing.all_index_roots():
         resolved = d.expanduser().resolve()
         if not resolved.is_dir():
             results.append({"path": str(resolved), "error": "not a directory"})
             continue
-        stats = await index_engine.index_path(resolved, recursive=True, force=force)
+        try:
+            stats = await index_engine.index_path(resolved, recursive=True, force=force)
+        except NamespaceResolutionError as exc:
+            # Per root, not per request (#2005 follow-up): this route walks
+            # every registered root, and the roots indexed before this one
+            # were really indexed. A 503 for the whole call would discard
+            # their results and claim "nothing was changed", which is the one
+            # thing the shared detail string must never say untruthfully. The
+            # entry uses ``errors`` (a list) rather than the ``error`` key the
+            # not-a-directory branch above uses, so it reaches ``all_errors``
+            # and flips ``ok`` to false.
+            logger.warning("Namespace lookup failed while reindexing %s: %s", resolved, exc)
+            results.append({"path": str(resolved), "errors": [NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL]})
+            continue
         entry: dict = {
             "path": str(resolved),
             "total_files": stats.total_files,
@@ -1533,11 +1546,12 @@ async def trigger_index(
         # The engine refuses to re-resolve a namespace whose stored value it
         # could not read (#2005) — transient, and nothing was written, so it
         # is a 503 like the chunk-delete path rather than the generic 500 a
-        # bug would produce. The path is not echoed back: it is caller-
-        # supplied and the response is not the place to reflect it.
+        # bug would produce. The app-level handler answers the same way; this
+        # stays explicit so the route's own contract is readable at the call
+        # site rather than inferred from a handler two modules away.
         raise HTTPException(
             status_code=503,
-            detail=_NAMESPACE_LOOKUP_UNAVAILABLE,
+            detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
         ) from exc
     return IndexResponse(
         total_files=stats.total_files,
@@ -1557,14 +1571,6 @@ async def trigger_index(
 # Cap on files walked by the preview endpoint. Large memory_dirs (10k+
 # files) would otherwise stall the synchronous focus event for seconds;
 # the truncated flag lets the UI surface "scanned N+, more not shown".
-#: 503 body for a namespace lookup the chunk store could not answer (#2005).
-#: One string so ``/api/index`` and the preview route cannot drift into
-#: describing the same condition two ways.
-_NAMESPACE_LOOKUP_UNAVAILABLE = (
-    "Could not determine the stored namespace for one or more files; nothing "
-    "was indexed. Retry once the chunk store is reachable."
-)
-
 _PREVIEW_FILE_CAP = 200
 
 
@@ -1594,7 +1600,7 @@ async def preview_namespace(
     except NamespaceResolutionError as exc:
         raise HTTPException(
             status_code=503,
-            detail=_NAMESPACE_LOOKUP_UNAVAILABLE,
+            detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
         ) from exc
     return PreviewNamespaceResponse(
         resolved_namespaces=resolved_namespaces,

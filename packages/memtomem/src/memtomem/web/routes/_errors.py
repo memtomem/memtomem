@@ -21,6 +21,12 @@ The wire shape (FastAPI nests the ``detail`` under ``{"detail": {...}}``)::
 ``reason_code`` and ``project_scope_id``. The one deliberate exception to the
 object envelope is the privacy 422 block, which keeps a *string* detail
 (issue-pinned) and therefore never routes through ``_error``.
+
+Being the leaf, this module also holds the fixed, path-free *string* details
+that more than one route surface must phrase identically (the privacy blocks
+above, ``NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL`` below). Anything shared by two
+routes belongs here rather than in whichever route module happened to need it
+first, where the second copy is what drifts.
 """
 
 from __future__ import annotations
@@ -73,6 +79,23 @@ PRIVACY_BLOCK_IMPORT_DETAIL = (
     "Privacy scan blocked this pull: a secret was detected in the source bytes. "
     "git history is forever — project_shared has no force bypass (ADR-0011 §5). "
     "Remove the secret from the source first."
+)
+
+
+#: Fixed 503 body for a namespace lookup the chunk store could not answer
+#: (#2005 follow-up). Lives in this leaf rather than in one route module so
+#: every surface that can hit the condition — ``POST /api/index``, the
+#: namespace preview, ``POST /api/reindex``, the chunk-edit path, and the
+#: app-level backstop handler — describes it the same way instead of drifting
+#: into three wordings for one condition. Path-free on purpose: the target is
+#: caller-supplied and the response is not the place to reflect it back.
+#: "Nothing was changed" holds on every one of those routes — the engine
+#: resolves namespaces *before* any write (``_index_path_inner``), the preview
+#: is read-only, and the chunk edit rolls the file back before the exception
+#: escapes.
+NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL = (
+    "Could not determine the stored namespace for one or more files; nothing "
+    "was changed. Retry once the chunk store is reachable."
 )
 
 

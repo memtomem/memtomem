@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import stat as stat_mod
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -237,29 +238,41 @@ async def namespace_mix_refusal(
       exactly this state and its keyed retry must report the pending
       claim rather than a namespace error.
 
-    A namespace query that *fails* refuses. There the guard cannot tell a
-    safe write from an unsafe one, and the failure mode it protects
-    against is silent data movement — for which "proceed and hope" is the
-    wrong default. The override releases the write either way.
+    A namespace query that *fails* refuses, and so does a ``stat`` that
+    fails for any reason other than "the file is not there". In both cases
+    the guard cannot tell a safe write from an unsafe one, and the failure
+    mode it protects against is silent data movement — for which "proceed
+    and hope" is the wrong default. The override releases the write either
+    way.
     """
+    # ``stat`` directly rather than ``is_file() and stat()``: only "it isn't
+    # there" means there is nothing to protect, and ``Path.is_file`` decides
+    # which errors count as "isn't there" with its own list —
+    # ``pathlib._ignore_error`` swallows ENOENT, ENOTDIR, EBADF *and ELOOP*
+    # alike, returning False for all four. A symlink loop is not absence: the
+    # file may well hold another namespace's entries and we cannot see them,
+    # yet routing through ``is_file`` would report "no content" and let the
+    # append restamp exactly what this guard exists to protect. Branching on
+    # the exception type here keeps that call ours rather than pathlib's.
     try:
-        has_content = target.is_file() and target.stat().st_size > 0
-    except OSError as exc:
-        # Only "it isn't there" means there is nothing to protect. Any other
-        # stat failure — a permission error, a dead mount — says the file may
-        # well hold another namespace's entries and we cannot see them, so it
-        # takes the same fail-closed path as an unanswerable store query.
-        # Folding these together as "no content" would let the append proceed
-        # and restamp exactly the content the guard exists to protect.
-        if not isinstance(exc, FileNotFoundError):
-            logger.warning("namespace mix guard could not stat %s", target, exc_info=True)
-            return (
-                f"could not read {target} to check which namespace it holds "
-                f"({exc.__class__.__name__}). Appending could silently move its "
-                f"existing entries into another namespace (issue #2005). Retry, "
-                f"or pass {override_hint} to append anyway."
-            )
+        st = target.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        # ENOENT / ENOTDIR: the target cannot exist, so there is nothing to
+        # protect and a brand-new day file must not be refused.
         has_content = False
+    except OSError as exc:
+        # Everything else — a permission error, a dead mount, a symlink loop —
+        # hides a file that may exist, so it takes the same fail-closed path
+        # as an unanswerable store query.
+        logger.warning("namespace mix guard could not stat %s", target, exc_info=True)
+        return (
+            f"could not read {target} to check which namespace it holds "
+            f"({exc.__class__.__name__}). Appending could silently move its "
+            f"existing entries into another namespace (issue #2005). Retry, "
+            f"or pass {override_hint} to append anyway."
+        )
+    else:
+        has_content = stat_mod.S_ISREG(st.st_mode) and st.st_size > 0
     if not has_content:
         # Checked before anything else: a brand-new day file is the common
         # case, and it needs neither a namespace resolution nor a query.
