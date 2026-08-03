@@ -70,7 +70,8 @@ def config_set(key: str, value: str) -> None:
     section_name, field_name = parts
     allowed = MUTABLE_FIELDS.get(section_name, set())
     if field_name not in allowed:
-        click.echo(click.style(f"{key}: not a mutable field", fg="red"))
+        for line in _rejection_lines(key, section_name, field_name, allowed):
+            click.echo(line)
         raise SystemExit(1)
 
     constraint = FIELD_CONSTRAINTS.get(key)
@@ -138,8 +139,63 @@ def _canonical_unset_keys() -> set[str]:
 def _suggest_key(key: str, canonical: set[str]) -> str | None:
     import difflib
 
-    match = difflib.get_close_matches(key, list(canonical), n=1, cutoff=0.7)
+    # A field name that is an exact fragment of a canonical one beats edit
+    # distance: 'search.top_k' lives inside 'search.default_top_k', while
+    # difflib ranks the shorter 'search.rrf_k' higher (#1993).
+    section, _, field = key.partition(".")
+    if len(field) >= 3:
+        contained = [
+            c for c in canonical if c.startswith(f"{section}.") and field in c.split(".", 1)[1]
+        ]
+        # Only a unique fragment match is a suggestion. 'indexing.chunk_tokens'
+        # sits inside min_/max_/target_chunk_tokens equally, so naming one would
+        # be a confident guess at which the user meant — and falling through to
+        # edit distance just launders the same guess. Say nothing instead; the
+        # `config set` caller lists the section's fields either way.
+        if contained:
+            return contained[0] if len(contained) == 1 else None
+
+    # ``canonical`` is a set, so sort before ranking — difflib keeps the first
+    # of equally-close candidates, which would otherwise be a hash-order winner.
+    match = difflib.get_close_matches(key, sorted(canonical), n=1, cutoff=0.7)
     return match[0] if match else None
+
+
+def _rejection_lines(key: str, section_name: str, field_name: str, allowed: set[str]) -> list[str]:
+    """Build the ``config set`` rejection message for a non-mutable KEY.
+
+    A bare "not a mutable field" is a dead end: the same value is spelled
+    ``--top-k`` on ``mm init``, ``Top-K`` in ``mm status``, and
+    ``search.default_top_k`` here (issue #1993). Name the near miss, the
+    section's settable fields, and where to read current values.
+    """
+    lines = []
+    if field_name in _EXTRA_MUTATION_FIELDS.get(section_name, set()):
+        lines.append(
+            click.style(
+                f"{key}: not a mutable field — re-run 'mm init', set "
+                f"MEMTOMEM_INDEXING__MEMORY_DIRS, or add the path from the Web UI "
+                f"(Sources). 'mm config unset {key}' clears it.",
+                fg="red",
+            )
+        )
+        return lines
+
+    settable = {f"{sec}.{f}" for sec, fs in MUTABLE_FIELDS.items() for f in fs}
+    suggestion = _suggest_key(key, settable)
+    if suggestion is not None:
+        lines.append(
+            click.style(f"{key}: not a mutable field (did you mean '{suggestion}'?)", fg="red")
+        )
+    else:
+        lines.append(click.style(f"{key}: not a mutable field", fg="red"))
+
+    if allowed:
+        lines.append(f"Mutable fields in [{section_name}]: {', '.join(sorted(allowed))}")
+    else:
+        lines.append(f"Mutable sections: {', '.join(sorted(MUTABLE_FIELDS))}")
+    lines.append("Run 'mm config show' to see current values.")
+    return lines
 
 
 @config.command("unset")
@@ -245,8 +301,8 @@ def config_unset(keys: tuple[str, ...]) -> None:
         click.echo(
             click.style(
                 "Warning: indexing.memory_dirs is normally managed via "
-                "dedicated endpoints. Run 'mm memory-dirs list' to verify; "
-                "run 'mm index' if the directory list changed materially.",
+                "dedicated endpoints. Run 'mm status' and check 'User sources' "
+                "to verify; run 'mm index' if the list changed materially.",
                 fg="yellow",
             )
         )
