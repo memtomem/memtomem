@@ -1639,9 +1639,7 @@ class TestBulkNamespacePrepass:
     the prepass answer only as the fallback when that mid-run lookup fails
     (issue #2018)."""
 
-    async def test_stream_honors_a_namespace_moved_after_the_prepass(
-        self, components, memory_dir
-    ):
+    async def test_stream_honors_a_namespace_moved_after_the_prepass(self, components, memory_dir):
         """The in-lock resolution stays authoritative: a file whose stored
         namespace changes between the prepass and its turn in the stream is
         stamped with the *current* namespace, not the prepass snapshot —
@@ -1661,9 +1659,7 @@ class TestBulkNamespacePrepass:
             if not moved and ev.get("type") == "progress":
                 b.write_text("# B\n\nfirst\n\nmoved entry", encoding="utf-8")
                 await engine.index_file(b, namespace="aaa", already_scanned=True)
-                b.write_text(
-                    "# B\n\nfirst\n\nmoved entry\n\nnewer entry", encoding="utf-8"
-                )
+                b.write_text("# B\n\nfirst\n\nmoved entry\n\nnewer entry", encoding="utf-8")
                 moved = True
 
         assert moved, "the stream yielded no per-file progress event"
@@ -1689,6 +1685,11 @@ class TestBulkNamespacePrepass:
         await engine.index_path(memory_dir, recursive=True)
 
         monkeypatch.undo()
+        # Both halves of the claim: the new content was written (a removed
+        # fallback would leave the file un-indexed and pass vacuously on
+        # namespace alone), and it carries the prepass namespace.
+        chunks = await components.storage.list_chunks_by_source(fp)
+        assert any("second entry" in c.content for c in chunks)
         assert await components.storage.namespaces_for_source(fp) == ["personal"]
 
     async def test_stream_stamps_each_files_own_namespace(self, components, memory_dir):
