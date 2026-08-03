@@ -144,17 +144,19 @@ def _suggest_key(key: str, canonical: set[str]) -> str | None:
     # difflib ranks the shorter 'search.rrf_k' higher (#1993).
     section, _, field = key.partition(".")
     if len(field) >= 3:
-        # Sort by name as well as length: `canonical` is a set, so equal-length
-        # matches would otherwise pick a hash-order winner
-        # (`indexing.chunk_tokens` → min_ vs max_chunk_tokens).
-        contained = sorted(
-            (c for c in canonical if c.startswith(f"{section}.") and field in c.split(".", 1)[1]),
-            key=lambda c: (len(c), c),
-        )
-        if contained:
+        contained = [
+            c for c in canonical if c.startswith(f"{section}.") and field in c.split(".", 1)[1]
+        ]
+        # Only a unique fragment match is a suggestion. 'indexing.chunk_tokens'
+        # sits inside min_/max_/target_chunk_tokens equally, and naming one of
+        # them would be a confident guess at which the user meant; the caller
+        # lists the section's fields either way.
+        if len(contained) == 1:
             return contained[0]
 
-    match = difflib.get_close_matches(key, list(canonical), n=1, cutoff=0.7)
+    # ``canonical`` is a set, so sort before ranking — difflib keeps the first
+    # of equally-close candidates, which would otherwise be a hash-order winner.
+    match = difflib.get_close_matches(key, sorted(canonical), n=1, cutoff=0.7)
     return match[0] if match else None
 
 
@@ -170,8 +172,9 @@ def _rejection_lines(key: str, section_name: str, field_name: str, allowed: set[
     if field_name in _EXTRA_MUTATION_FIELDS.get(section_name, set()):
         lines.append(
             click.style(
-                f"{key}: not a mutable field — it is managed via "
-                f"'mm memory-dirs add/remove', not 'mm config set'.",
+                f"{key}: not a mutable field — re-run 'mm init', set "
+                f"MEMTOMEM_INDEXING__MEMORY_DIRS, or add the path from the Web UI "
+                f"(Sources). 'mm config unset {key}' clears it.",
                 fg="red",
             )
         )
@@ -297,8 +300,8 @@ def config_unset(keys: tuple[str, ...]) -> None:
         click.echo(
             click.style(
                 "Warning: indexing.memory_dirs is normally managed via "
-                "dedicated endpoints. Run 'mm memory-dirs list' to verify; "
-                "run 'mm index' if the directory list changed materially.",
+                "dedicated endpoints. Run 'mm status' and check 'User sources' "
+                "to verify; run 'mm index' if the list changed materially.",
                 fg="yellow",
             )
         )

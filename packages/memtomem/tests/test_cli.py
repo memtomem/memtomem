@@ -281,11 +281,21 @@ class TestConfigCLI:
         result = runner.invoke(cli, ["config", "set", "search.nonexistent_field", "10"])
         assert "mm config show" in result.output
 
-    def test_config_set_rejection_memory_dirs_names_its_command(self, runner: CliRunner) -> None:
-        """memory_dirs has a dedicated endpoint; say so instead of listing keys."""
+    def test_config_set_rejection_memory_dirs_names_its_surfaces(self, runner: CliRunner) -> None:
+        """memory_dirs is managed elsewhere; say where instead of listing keys."""
         result = runner.invoke(cli, ["config", "set", "indexing.memory_dirs", "/tmp/x"])
         assert result.exit_code != 0
-        assert "mm memory-dirs" in result.output
+        assert "mm init" in result.output
+        assert "mm config unset indexing.memory_dirs" in result.output
+
+    def test_config_set_rejection_only_names_real_commands(self, runner: CliRunner) -> None:
+        """Guidance that names a command the CLI doesn't have is a dead end."""
+        import re
+
+        result = runner.invoke(cli, ["config", "set", "indexing.memory_dirs", "/tmp/x"])
+        named = set(re.findall(r"'mm ([a-z][a-z-]*)", result.output))
+        assert named, result.output
+        assert named <= set(cli.commands), sorted(named - set(cli.commands))
 
     def test_config_set_exclude_patterns_json_array_persists(
         self, tmp_path, monkeypatch, runner: CliRunner
@@ -433,6 +443,13 @@ class TestCoerceAndValidate:
         """`["abc]*.log` is a pathspec char class, not botched JSON."""
         constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
         assert coerce_and_validate('["abc]*.log', constraint) == ['["abc]*.log']
+
+    def test_list_str_json_wins_the_ambiguous_spelling(self) -> None:
+        """`["a"]` reads as both a JSON array and a char class; JSON wins."""
+        constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
+        assert coerce_and_validate('["a"]', constraint) == ["a"]
+        # ...and the escape hatch for meaning it literally.
+        assert coerce_and_validate('["[\\"a\\"]"]', constraint) == ['["a"]']
 
     def test_list_str_malformed_json_rejected_with_both_syntaxes(self) -> None:
         constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]
@@ -1039,7 +1056,7 @@ class TestConfigUnset:
 
         result = runner.invoke(cli, ["config", "unset", "indexing.memory_dirs"])
         assert result.exit_code == 0, result.output
-        assert "mm memory-dirs list" in result.output
+        assert "mm status" in result.output
         assert "mm index" in result.output
 
     def test_unset_typo_suggests_similar_canonical_key(self, isolated, runner: CliRunner) -> None:
@@ -1048,12 +1065,19 @@ class TestConfigUnset:
         assert "Skipped mmr.enabld" in result.output
         assert "did you mean 'mmr.enabled'" in result.output
 
-    def test_unset_suggestion_is_hash_order_independent(self, isolated, runner: CliRunner) -> None:
-        """Two equal-length substring matches must resolve the same way every run."""
+    def test_unset_ambiguous_fragment_suggestion_is_deterministic(
+        self, isolated, runner: CliRunner
+    ) -> None:
+        """min_/max_/target_chunk_tokens all contain 'chunk_tokens'.
+
+        The fragment rule declines to pick among them, so the answer comes from
+        edit distance over a sorted candidate list — the same one every run,
+        rather than whichever the set happened to yield first.
+        """
         from memtomem.cli.config_cmd import _canonical_unset_keys, _suggest_key
 
         canonical = _canonical_unset_keys()
-        assert _suggest_key("indexing.chunk_tokens", canonical) == "indexing.max_chunk_tokens"
+        assert _suggest_key("indexing.chunk_tokens", canonical) == "indexing.min_chunk_tokens"
 
     def test_unset_unknown_key_without_suggestion(self, isolated, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["config", "unset", "completely_unrelated_xyz"])
