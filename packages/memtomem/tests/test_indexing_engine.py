@@ -1630,44 +1630,66 @@ class TestPreviewHelpers:
 # ===========================================================================
 
 
-class TestBulkResolvesNamespaceOnce:
-    """The bulk paths resolve per-file namespaces once, before any write,
-    and pass each value to ``_index_file`` explicitly. A second, post-write
-    lookup would decide the stamp after the run had started writing, and a
-    late ``NamespaceResolutionError`` from it would be flattened into
-    ``stats.errors`` — a 200 with an error string instead of the typed,
-    retryable failure (issue #2018)."""
+class TestBulkNamespacePrepass:
+    """The bulk paths resolve per-file namespaces in a prepass, before any
+    write: a store that cannot answer fails the whole run as the typed,
+    retryable error instead of a flattened string in ``stats.errors``. The
+    per-file write still resolves inside its own critical section — a
+    concurrent writer may have moved a file since the prepass — and uses
+    the prepass answer only as the fallback when that mid-run lookup fails
+    (issue #2018)."""
 
-    async def test_index_path_reads_stored_namespace_once_per_file(
+    async def test_stream_honors_a_namespace_moved_after_the_prepass(
+        self, components, memory_dir
+    ):
+        """The in-lock resolution stays authoritative: a file whose stored
+        namespace changes between the prepass and its turn in the stream is
+        stamped with the *current* namespace, not the prepass snapshot —
+        stamping the snapshot would silently undo the concurrent write
+        (the #2005 failure shape)."""
+        engine = components.index_engine
+        a = memory_dir / "a.md"
+        b = memory_dir / "b.md"
+        a.write_text("# A\n\nalpha", encoding="utf-8")
+        b.write_text("# B\n\nfirst", encoding="utf-8")
+
+        moved = False
+        async for ev in engine.index_path_stream(memory_dir, recursive=True):
+            # First per-file completion: the prepass has run, ``b.md`` has
+            # not been processed yet. Move it — and change it again after
+            # the move, so the stream's own pass has an upsert to stamp.
+            if not moved and ev.get("type") == "progress":
+                b.write_text("# B\n\nfirst\n\nmoved entry", encoding="utf-8")
+                await engine.index_file(b, namespace="aaa", already_scanned=True)
+                b.write_text(
+                    "# B\n\nfirst\n\nmoved entry\n\nnewer entry", encoding="utf-8"
+                )
+                moved = True
+
+        assert moved, "the stream yielded no per-file progress event"
+        assert await components.storage.namespaces_for_source(b) == ["aaa"]
+
+    async def test_mid_run_lookup_failure_falls_back_to_the_prepass_answer(
         self, components, memory_dir, monkeypatch
     ):
-        """One preservation lookup per file per run — the pre-write
-        resolution is the only one; ``_index_file`` short-circuits."""
+        """When the authoritative in-lock lookup fails, the file is stamped
+        with the prepass answer — the value the run's echo already promised
+        — rather than failing or re-entering resolution."""
         engine = components.index_engine
-        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
-        (memory_dir / "b.md").write_text("# B\n\nbeta", encoding="utf-8")
-        spy = AsyncMock(wraps=components.storage.namespaces_for_source)
-        monkeypatch.setattr(components.storage, "namespaces_for_source", spy)
+        fp = memory_dir / "kept.md"
+        fp.write_text("# K\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        fp.write_text("# K\n\nfirst entry\n\nsecond entry", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[["personal"], RuntimeError("store down")]),
+        )
 
         await engine.index_path(memory_dir, recursive=True)
 
-        assert spy.await_count == 2
-
-    async def test_index_path_stream_reads_stored_namespace_once_per_file(
-        self, components, memory_dir, monkeypatch
-    ):
-        """Same contract on the stream variant, which threads the value
-        through ``_index_file_locked``."""
-        engine = components.index_engine
-        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
-        (memory_dir / "b.md").write_text("# B\n\nbeta", encoding="utf-8")
-        spy = AsyncMock(wraps=components.storage.namespaces_for_source)
-        monkeypatch.setattr(components.storage, "namespaces_for_source", spy)
-
-        async for _ in engine.index_path_stream(memory_dir, recursive=True):
-            pass
-
-        assert spy.await_count == 2
+        monkeypatch.undo()
+        assert await components.storage.namespaces_for_source(fp) == ["personal"]
 
     async def test_stream_stamps_each_files_own_namespace(self, components, memory_dir):
         """The per-file values are positionally mapped — with rules splitting
@@ -1724,10 +1746,10 @@ class TestBulkResolvesNamespaceOnce:
     async def test_a_store_that_stops_answering_after_the_prepass_is_not_an_error(
         self, components, memory_dir, monkeypatch
     ):
-        """The direct regression pin for the removed second lookup: a store
-        that answers the pre-write resolution and then dies must not surface
-        anything — under the old double-resolution shape the second, mid-run
-        lookup failed and was flattened into ``stats.errors``."""
+        """The direct regression pin for the flattening bug: a store that
+        answers the prepass and then dies must not surface anything — the
+        mid-run lookup falls back to the prepass answer, where the old shape
+        flattened the typed failure into ``stats.errors``."""
         engine = components.index_engine
         (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
         monkeypatch.setattr(

@@ -91,11 +91,12 @@ PRIVACY_BLOCK_IMPORT_DETAIL = (
 #:
 #: The "nothing was changed" clause is a claim about the *caller's* state, so
 #: only a surface that can keep it may use this string: the engine resolves
-#: namespaces before any write (``_index_path_inner``), the preview is
-#: read-only, the chunk edit rolls the file back, and ``/api/add`` resolves
-#: before appending. The surfaces that cannot keep it do not borrow it —
-#: ``/api/reindex`` (earlier roots really were indexed) and the SSE index
-#: stream (it indexes as it walks) each say so in their own words. There is
+#: namespaces before any write (``_index_path_inner``; since #2018 the SSE
+#: index stream shares that prepass, so an escaping lookup failure there
+#: also means a zero-write run), the preview is read-only, the chunk edit
+#: rolls the file back, and ``/api/add`` resolves before appending. A
+#: surface that cannot keep it does not borrow it — ``/api/reindex``
+#: (earlier roots really were indexed) says so in its own words. There is
 #: deliberately no app-wide handler that would hand this promise to a route
 #: that cannot keep it.
 NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL = (

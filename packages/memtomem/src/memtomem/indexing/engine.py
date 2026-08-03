@@ -574,14 +574,13 @@ class IndexEngine:
 
         # Per-file namespaces, resolved BEFORE the writes — the same ordering
         # the stream variant uses. Namespace preservation reads the store
-        # (issue #2005), so resolving afterwards would both re-read state a
-        # concurrent writer may have changed since, and put a lookup that is
-        # allowed to raise *after* durable writes, aborting the call with the
-        # work already done and its provenance skipped. The write path
-        # consumes these values too (issue #2018): each file's namespace is
-        # passed to ``_index_file`` explicitly, so the resolver never runs a
-        # second, post-write lookup that could fail with nowhere honest to
-        # surface it.
+        # (issue #2005), so a store that cannot answer must fail the run
+        # here, before any durable write, as the typed retryable error. The
+        # per-file write then re-resolves inside its critical section — a
+        # concurrent writer may have moved a file since this prepass — and
+        # only falls back to this prepass answer when the mid-run lookup
+        # itself fails, so the failure never degrades into a flattened,
+        # type-erased string in ``stats.errors`` (issue #2018).
         per_file_ns = await self._resolve_namespaces_per_file(files, namespace, force=force)
         resolved_ns = _distinct_sorted(per_file_ns)
 
@@ -590,10 +589,11 @@ class IndexEngine:
                 return await self._index_file(
                     fp,
                     force,
-                    # ``None`` is the untagged carve-out, but forwarding it
-                    # would read as "no caller namespace" and re-enter rule
-                    # resolution — normalise to the default it stands for.
-                    namespace=ns if ns is not None else _default_ns(self._ns_config),
+                    namespace=namespace,
+                    # ``None`` is the untagged carve-out; the fallback must
+                    # be the concrete namespace it stands for, or a mid-run
+                    # failure would re-enter the resolution that just failed.
+                    ns_fallback=ns if ns is not None else _default_ns(self._ns_config),
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
                     embed_semaphore=embed_sem,
@@ -677,10 +677,10 @@ class IndexEngine:
     ) -> list[str | None]:
         """Each file's effective namespace, positionally aligned with ``files``.
 
-        The single lookup per file per bulk run (issue #2018): the bulk paths
-        resolve here, before any write, then pass each value to
-        ``_index_file`` explicitly so the resolver short-circuits instead of
-        asking the store a second time mid-run.
+        The bulk paths' pre-write prepass (issue #2018): a store that cannot
+        answer fails the whole run here, before any durable write, and each
+        entry doubles as the per-file fallback should the authoritative
+        in-lock resolution fail mid-run.
         """
         return [await self.effective_namespace_for(f, explicit_ns, force=force) for f in files]
 
@@ -714,6 +714,7 @@ class IndexEngine:
         force: bool,
         *,
         namespace: str | None = None,
+        ns_fallback: str | None = None,
         on_chunk_progress: Callable[[int, int], None] | None = None,
         force_unsafe: bool = False,
         already_scanned: bool = False,
@@ -762,6 +763,7 @@ class IndexEngine:
                     resolved_path,
                     force,
                     namespace=namespace,
+                    ns_fallback=ns_fallback,
                     on_chunk_progress=on_chunk_progress,
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
@@ -778,6 +780,7 @@ class IndexEngine:
                     resolved_path,
                     force,
                     namespace=namespace,
+                    ns_fallback=ns_fallback,
                     on_chunk_progress=on_chunk_progress,
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
@@ -1127,6 +1130,7 @@ class IndexEngine:
         force: bool,
         namespace: str | None = None,
         *,
+        ns_fallback: str | None = None,
         on_chunk_progress: Callable[[int, int], None] | None = None,
         force_unsafe: bool = False,
         already_scanned: bool = False,
@@ -1284,10 +1288,25 @@ class IndexEngine:
         # ``force`` skips preservation on purpose — it is the documented way
         # to apply changed namespace rules to an already-indexed file, so
         # internal mutation callers that must not re-resolve pass the
-        # preserved namespace explicitly instead (issue #2005). The bulk
-        # paths do the same with their pre-write per-file resolution
-        # (issue #2018), so this lookup only runs for single-file callers.
-        resolved_ns = await self.effective_namespace_for(file_path, namespace, force=force)
+        # preserved namespace explicitly instead (issue #2005). This lookup
+        # runs inside the per-file critical section on purpose: a bulk run's
+        # pre-write prepass (issue #2018) answers for the run's *start*, and
+        # a concurrent writer may have moved the file since — deciding the
+        # stamp from a pre-lock answer would silently undo that write.
+        # ``ns_fallback`` carries the prepass answer so a lookup the store
+        # cannot answer mid-run degrades to the value already promised in
+        # the run's echo instead of a flattened, type-erased error string.
+        try:
+            resolved_ns = await self.effective_namespace_for(file_path, namespace, force=force)
+        except NamespaceResolutionError:
+            if ns_fallback is None:
+                raise
+            logger.warning(
+                "namespace lookup failed mid-run for %s; using the pre-run answer %r",
+                file_path,
+                ns_fallback,
+            )
+            resolved_ns = ns_fallback
         if resolved_ns is not None:
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
 
@@ -1574,13 +1593,13 @@ class IndexEngine:
             # downstream).
             yield {"type": "discovery", "files_total": total_files}
             # Pre-compute per-file namespaces so the complete event surfaces
-            # what was actually applied — single render across both stream
-            # and non-stream paths (see ``_index_path_inner``). Resolved on
-            # the same ``fp.resolve()`` form the write below uses, so the
+            # what was applied — single render across both stream and
+            # non-stream paths (see ``_index_path_inner``). Resolved on the
+            # same ``fp.resolve()`` form the write below uses, so the
             # preservation lookup and the write answer for the same path.
-            # The write path consumes these values too (issue #2018) — the
-            # per-file runner passes its entry explicitly, so ``_index_file``
-            # never runs a second, post-write lookup.
+            # A store that cannot answer fails the run here, before any
+            # write; the per-file runner re-resolves inside its lock and
+            # uses its entry only as the mid-run fallback (issue #2018).
             resolved_files = [fp.resolve() for fp in files]
             per_file_ns = await self._resolve_namespaces_per_file(
                 resolved_files, namespace, force=force
@@ -1636,10 +1655,11 @@ class IndexEngine:
                         result, _ = await self._index_file_locked(
                             fp.resolve(),
                             force,
-                            # Pre-resolved above; ``None`` (untagged) is
-                            # normalised so ``_index_file`` doesn't re-enter
-                            # rule resolution (issue #2018).
-                            namespace=ns if ns is not None else _default_ns(self._ns_config),
+                            namespace=namespace,
+                            # Prepass answer from above — the mid-run
+                            # fallback only; the in-lock resolution stays
+                            # authoritative (issue #2018).
+                            ns_fallback=ns if ns is not None else _default_ns(self._ns_config),
                             on_chunk_progress=cb,
                             force_unsafe=force_unsafe,
                             path_scope=path_scope,
