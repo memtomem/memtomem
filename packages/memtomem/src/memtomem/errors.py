@@ -168,6 +168,8 @@ class NamespaceResolutionError(IndexingError, RetryableError):
 
     ``RetryableError`` is part of the type, not just the docstring — the MCP
     handler branches on it to label the message, and the watcher re-queues
-    the file instead of dropping the event. A comment saying "treat this as
-    retryable" would leave both of those to be remembered.
+    the file instead of dropping the event (the per-file event path returns
+    the path for the next debounce window; the startup backfill re-walks the
+    affected root with bounded backoff, issue #2021). A comment saying
+    "treat this as retryable" would leave all of those to be remembered.
     """

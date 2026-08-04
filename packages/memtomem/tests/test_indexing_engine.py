@@ -3322,6 +3322,270 @@ class TestFileWatcher:
         msgs = [r.message for r in caplog.records]
         assert any("skipped or failed" in m and "binary file detected" in m for m in msgs), msgs
 
+    # -- issue #2021: retryable failures get a bounded per-root re-walk ------
+    #
+    # ``NamespaceResolutionError`` promises the watcher re-queues instead of
+    # dropping; the per-file event path kept that, the startup backfill did
+    # not — a prepass failure dropped the whole root for the process lifetime
+    # and a mid-run failure was folded into the generic skipped-or-failed
+    # line. These tests drive ``_backfill_existing`` with a mock engine so
+    # both failure shapes and the retry budget are pinned without a store.
+
+    @staticmethod
+    def _backfill_stats(indexed: int = 0, retryable: tuple[str, ...] = ()):
+        from memtomem.models import IndexingStats
+
+        return IndexingStats(
+            total_files=1,
+            total_chunks=indexed,
+            indexed_chunks=indexed,
+            skipped_chunks=0,
+            deleted_chunks=0,
+            duration_ms=0.0,
+            errors=tuple(retryable),
+            retryable_errors=tuple(retryable),
+        )
+
+    def _backfill_watcher(self, tmp_path, side_effect):
+        from memtomem.config import IndexingConfig
+        from memtomem.indexing.watcher import FileWatcher
+
+        engine = MagicMock()
+        engine.index_path = AsyncMock(side_effect=side_effect)
+        return FileWatcher(engine, IndexingConfig(memory_dirs=[tmp_path])), engine
+
+    @staticmethod
+    def _no_real_sleep(monkeypatch) -> list[float]:
+        delays: list[float] = []
+
+        async def fake_sleep(s: float) -> None:
+            delays.append(s)
+
+        monkeypatch.setattr("memtomem.indexing.watcher.asyncio.sleep", fake_sleep)
+        return delays
+
+    async def test_startup_backfill_retries_prepass_namespace_failure(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """An escaping prepass ``NamespaceResolutionError`` (all-or-nothing,
+        nothing written) used to drop the whole root for the process
+        lifetime via the generic per-dir handler. It now re-walks the root
+        with backoff, and a transient store blip costs a delay, not the
+        root."""
+        import logging
+
+        from memtomem.errors import NamespaceResolutionError
+
+        delays = self._no_real_sleep(monkeypatch)
+        watcher, engine = self._backfill_watcher(
+            tmp_path,
+            [NamespaceResolutionError("store unavailable"), self._backfill_stats(indexed=3)],
+        )
+
+        with caplog.at_level(logging.INFO, logger="memtomem.indexing.watcher"):
+            await watcher._backfill_existing([tmp_path])
+
+        assert engine.index_path.await_count == 2
+        assert delays == [5.0]
+        msgs = [r.message for r in caplog.records if r.name == "memtomem.indexing.watcher"]
+        assert any("retryable failure" in m and "attempt 1/3" in m for m in msgs), msgs
+        assert any("Startup backfill complete: 3 new chunks indexed" in m for m in msgs), msgs
+
+    async def test_startup_backfill_retries_mid_run_retryable_errors(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A mid-run per-file retryable failure (``stats.retryable_errors``,
+        #2020) used to be logged at the same level as a permanently broken
+        file and forgotten. The root is re-walked — safe because hash-diff
+        skips already-upserted chunks — and indexed counts accumulate
+        without double-counting."""
+        import logging
+
+        delays = self._no_real_sleep(monkeypatch)
+        watcher, engine = self._backfill_watcher(
+            tmp_path,
+            [
+                self._backfill_stats(indexed=2, retryable=("a.md: namespace lookup failed",)),
+                self._backfill_stats(indexed=1),
+            ],
+        )
+
+        with caplog.at_level(logging.INFO, logger="memtomem.indexing.watcher"):
+            await watcher._backfill_existing([tmp_path])
+
+        assert engine.index_path.await_count == 2
+        assert delays == [5.0]
+        msgs = [r.message for r in caplog.records if r.name == "memtomem.indexing.watcher"]
+        assert any("failed retryably; retrying" in m for m in msgs), msgs
+        # The retryable entry gets its retry-status line only — not a second
+        # copy inside the generic skipped-or-failed aggregate.
+        assert not any("skipped or failed" in m for m in msgs), msgs
+        assert any("Startup backfill complete: 3 new chunks indexed" in m for m in msgs), msgs
+
+    async def test_startup_backfill_retry_budget_bounded_and_siblings_unaffected(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A root still failing after the last attempt gets the same
+        log-and-continue permanent failures always got — bounded budget,
+        exponential backoff, and the sibling root still walks."""
+        import logging
+
+        d1 = tmp_path / "one"
+        d2 = tmp_path / "two"
+        d1.mkdir()
+        d2.mkdir()
+        delays = self._no_real_sleep(monkeypatch)
+        failing = self._backfill_stats(retryable=("a.md: namespace lookup failed",))
+        watcher, engine = self._backfill_watcher(
+            tmp_path, [failing, failing, failing, self._backfill_stats(indexed=1)]
+        )
+
+        with caplog.at_level(logging.INFO, logger="memtomem.indexing.watcher"):
+            await watcher._backfill_existing([d1, d2])
+
+        assert engine.index_path.await_count == 4
+        assert delays == [5.0, 10.0]
+        msgs = [r.message for r in caplog.records if r.name == "memtomem.indexing.watcher"]
+        assert any("still failing retryably after 3 attempt(s)" in m for m in msgs), msgs
+        assert any("Startup backfill complete: 1 new chunks indexed" in m for m in msgs), msgs
+
+    async def test_startup_backfill_mixed_failures_report_permanent_once(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A root holding both a retryable file and a permanently broken one
+        re-walks for the retryable file — but the broken file's warning (and
+        a redaction-blocked path) must be named once, not once per attempt.
+        The retry exists for the retryable file; repeating the rest turns a
+        single bad file into three identical warnings per restart."""
+        import logging
+
+        from memtomem.models import IndexingStats
+
+        self._no_real_sleep(monkeypatch)
+        retryable = "a.md: namespace lookup failed"
+        permanent = "b.md: binary file detected, skipping"
+        stats = IndexingStats(
+            total_files=3,
+            total_chunks=0,
+            indexed_chunks=0,
+            skipped_chunks=0,
+            deleted_chunks=0,
+            duration_ms=0.0,
+            errors=(retryable, permanent, "leak.md: redaction_blocked (hits=1)"),
+            retryable_errors=(retryable,),
+            blocked_files=1,
+            blocked_paths=("leak.md",),
+        )
+        watcher, engine = self._backfill_watcher(tmp_path, [stats, stats, stats])
+
+        with caplog.at_level(logging.INFO, logger="memtomem.indexing.watcher"):
+            await watcher._backfill_existing([tmp_path])
+
+        assert engine.index_path.await_count == 3
+        msgs = [r.message for r in caplog.records if r.name == "memtomem.indexing.watcher"]
+        assert sum("skipped or failed" in m and permanent in m for m in msgs) == 1, msgs
+        assert sum("blocked by redaction guard" in m for m in msgs) == 1, msgs
+        # The retryable file still gets a status line on every attempt — that
+        # one is the point of the retry, so it is not deduped.
+        assert sum("failed retryably" in m for m in msgs) == 2, msgs
+        assert sum("still failing retryably" in m for m in msgs) == 1, msgs
+
+    async def test_startup_backfill_recovers_transient_namespace_failure(
+        self, components, memory_dir, monkeypatch
+    ):
+        """End-to-end against the real engine: a store that cannot answer the
+        namespace preservation lookup on the first walk (issue #2005) and can
+        on the second leaves the file *indexed*, not stranded until an
+        unrelated filesystem event touches it."""
+        from memtomem.errors import NamespaceResolutionError
+        from memtomem.indexing.watcher import FileWatcher
+
+        md = memory_dir / "transient.md"
+        md.write_text("# transient\n\nindexed only if the retry happens\n", encoding="utf-8")
+        components.config.indexing.startup_backfill = True
+        self._no_real_sleep(monkeypatch)
+
+        engine = components.index_engine
+        real_index_path = engine.index_path
+        calls: list[int] = []
+
+        async def flaky_index_path(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise NamespaceResolutionError("namespace lookup failed for transient.md")
+            return await real_index_path(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "index_path", flaky_index_path)
+
+        watcher = FileWatcher(
+            index_engine=engine,
+            config=components.config.indexing,
+            debounce_ms=100,
+        )
+        try:
+            await watcher.start()
+            assert watcher._backfill_task is not None
+            await watcher._backfill_task
+        finally:
+            await watcher.stop()
+
+        assert len(calls) == 2
+        hashes = await components.storage.get_chunk_hashes(md)
+        assert len(hashes) > 0, "the retried walk should have indexed the file"
+
+    async def test_startup_backfill_cancel_during_backoff_stops_cleanly(
+        self, tmp_path, monkeypatch
+    ):
+        """``stop()`` cancels the backfill task; a cancel landing inside the
+        backoff sleep must abort the root and its siblings rather than being
+        swallowed into another attempt (the retry loop re-raises
+        ``CancelledError`` around ``index_path``, and ``asyncio.sleep`` is
+        itself a cancellation point)."""
+        from memtomem.errors import NamespaceResolutionError
+
+        d1 = tmp_path / "one"
+        d2 = tmp_path / "two"
+        d1.mkdir()
+        d2.mkdir()
+        sleeping = asyncio.Event()
+
+        async def blocking_sleep(_s: float) -> None:
+            sleeping.set()
+            await asyncio.Event().wait()  # never completes; only cancellation exits
+
+        monkeypatch.setattr("memtomem.indexing.watcher.asyncio.sleep", blocking_sleep)
+        watcher, engine = self._backfill_watcher(
+            tmp_path, NamespaceResolutionError("store unavailable")
+        )
+        task = asyncio.create_task(watcher._backfill_existing([d1, d2]))
+
+        await asyncio.wait_for(sleeping.wait(), timeout=2.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # One attempt on the first root, then the cancel — the second root is
+        # never walked and no further attempt is made.
+        assert engine.index_path.await_count == 1
+
+    async def test_startup_backfill_permanent_failure_not_retried(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A non-retryable failure keeps the single-shot log-and-continue —
+        retrying a permanently broken root would just triple the noise."""
+        import logging
+
+        delays = self._no_real_sleep(monkeypatch)
+        watcher, engine = self._backfill_watcher(tmp_path, [ValueError("schema mismatch")])
+
+        with caplog.at_level(logging.ERROR, logger="memtomem.indexing.watcher"):
+            await watcher._backfill_existing([tmp_path])
+
+        assert engine.index_path.await_count == 1
+        assert delays == []
+        msgs = [r.message for r in caplog.records if r.name == "memtomem.indexing.watcher"]
+        assert any("Startup backfill failed for" in m for m in msgs), msgs
+
 
 # ===========================================================================
 # 11. memory_dir_stats — per-dir index status for the web widget
