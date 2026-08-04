@@ -1863,6 +1863,71 @@ class TestIndexNamespaceLookupFailure:
         assert body["results"][1]["errors"][0] != NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
         assert "nothing was changed" not in body["results"][1]["errors"][0]
 
+    async def test_reindex_aggregates_retryable_as_a_strict_subset(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """Top-level ``retryable_errors`` aggregates per-root subsets rather
+        than aliasing ``errors``. The sibling test above cannot catch that:
+        there every error is retryable, so an accidental
+        ``retryable_errors = all_errors`` would still pass. Here a permanent
+        failure and a retryable one land in the same response, so the two
+        aggregates must differ — and the healthy root must still contribute an
+        empty list rather than omitting the key."""
+        healthy, permanent_root, retryable_root = (
+            tmp_path / "ok",
+            tmp_path / "broken",
+            tmp_path / "transient",
+        )
+        for d in (healthy, permanent_root, retryable_root):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [healthy, permanent_root, retryable_root]
+        permanent = "broken.md: malformed frontmatter"
+        retryable = "transient.md: chunk store unavailable"
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=[
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=2,
+                    indexed_chunks=2,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=10.0,
+                ),
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                    errors=(permanent,),
+                ),
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                    errors=(retryable,),
+                    retryable_errors=(retryable,),
+                ),
+            ]
+        )
+
+        resp = await client.post("/api/reindex")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is False
+        assert body["errors"] == [permanent, retryable]
+        assert body["retryable_errors"] == [retryable]
+        # A healthy root still carries both keys, so a client can tell "no
+        # retryable failures here" from "this server predates the field".
+        assert body["results"][0]["errors"] == []
+        assert body["results"][0]["retryable_errors"] == []
+        assert body["results"][1]["retryable_errors"] == []
+
     async def test_the_stream_route_says_transient_in_the_only_field_it_has(
         self, app, client: AsyncClient
     ):

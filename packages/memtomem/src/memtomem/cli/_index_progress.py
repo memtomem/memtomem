@@ -307,7 +307,7 @@ def print_index_errors(
     errors: Sequence[str],
     *,
     retryable_errors: Sequence[str] = (),
-    retry_hint: str = "retry once the chunk store is reachable.",
+    retry_hint: str,
 ) -> None:
     """Print non-redaction per-file errors from a bulk index run.
 
@@ -315,6 +315,11 @@ def print_index_errors(
     already surfaced those files with a clearer message and hint. Retryable
     errors are a same-string subset of ``errors``; label them in place rather
     than printing the subset again.
+
+    ``retry_hint`` is required rather than defaulted: the actionable resume
+    command differs per surface (`mm index` vs. the init resume line vs. the
+    shell's out-of-shell form), and a generic default would silently hand the
+    wrong command to whichever caller forgot to pass one.
     """
     retryable_set = set(retryable_errors)
     rendered_retryable = False

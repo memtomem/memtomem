@@ -18,7 +18,16 @@ from memtomem.server.tools._provenance import (
 def _partition_index_errors(
     errors: Sequence[str], retryable_errors: Sequence[str]
 ) -> tuple[list[str], list[str]]:
-    """Split errors by the retryable same-string subset, preserving order."""
+    """Split errors by the retryable same-string subset, preserving order.
+
+    Depends on the producer invariant that every ``retryable_errors`` entry is
+    byte-identical to one already in ``errors`` (``IndexEngine`` appends the
+    same ``f"{path.name}: {exc}"`` string to both lists, deduping each with
+    ``dict.fromkeys``). Partitioning ``errors`` — rather than concatenating the
+    two lists — is what keeps a retryable failure reported exactly once; the
+    cost is that a producer which ever emits a retryable string absent from
+    ``errors`` would drop it silently here.
+    """
     retryable_set = set(retryable_errors)
     return (
         [error for error in errors if error not in retryable_set],

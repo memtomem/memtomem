@@ -1142,6 +1142,13 @@ async def reindex_all(
             "duration_ms": stats.duration_ms,
             "blocked_files": stats.blocked_files,
             "blocked_project_shared_files": stats.blocked_project_shared_files,
+            # Both keys are unconditional (``errors`` was previously omitted
+            # when empty): a client reading ``retryable_errors`` must be able
+            # to tell "this root had no retryable failures" from "this server
+            # predates the field", and that only works if a healthy root still
+            # carries the empty list. ``blocked_paths`` below stays conditional
+            # — it is a detail of the ``blocked_files`` counter, not a
+            # standalone classification the client branches on.
             "errors": list(stats.errors),
             "retryable_errors": list(stats.retryable_errors),
         }
