@@ -237,6 +237,12 @@ async def delete_chunk(
             the source mutation (#2016).
             """
 
+            failure_detail = (
+                "The source entry was removed, but index cleanup did not complete. "
+                "Reindex the source before attempting another delete."
+                if source_removed
+                else "Index-only deletion failed; no source file was changed. Check server logs."
+            )
             try:
                 remaining = await storage.get_chunk(chunk_id)
                 if remaining is not None:
@@ -244,22 +250,10 @@ async def delete_chunk(
                     remaining = await storage.get_chunk(chunk_id)
             except Exception as exc:
                 logger.error("Index cleanup failed for deleted chunk %s", chunk_id, exc_info=True)
-                detail = (
-                    "The source entry was removed, but index cleanup did not complete. "
-                    "Reindex the source before attempting another delete."
-                    if source_removed
-                    else "Index-only deletion failed; no source file was changed. Check server logs."
-                )
-                raise HTTPException(status_code=500, detail=detail) from exc
+                raise HTTPException(status_code=500, detail=failure_detail) from exc
             if remaining is not None:
                 logger.error("Chunk %s remained after index cleanup", chunk_id)
-                detail = (
-                    "The source entry was removed, but index cleanup did not complete. "
-                    "Reindex the source before attempting another delete."
-                    if source_removed
-                    else "Index-only deletion failed; no source file was changed. Check server logs."
-                )
-                raise HTTPException(status_code=500, detail=detail)
+                raise HTTPException(status_code=500, detail=failure_detail)
 
         # ADR-0011 PR-D review round 7: Gate B on the web delete path —
         # mirrors the MCP ``mem_delete`` round-3 fix (8407d73). Re-checked on the

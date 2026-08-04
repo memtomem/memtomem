@@ -1966,9 +1966,7 @@ class TestEditChunkNamespaceLookupFailure:
 class TestDeleteChunk:
     async def test_delete_chunk(self, app, client: AsyncClient, tmp_path: Path):
         chunk = _make_test_chunk(source=str(tmp_path / "missing.md"))
-        app.state.storage.get_chunk = AsyncMock(
-            side_effect=[chunk, chunk, chunk, chunk, None]
-        )
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
 
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
@@ -2053,9 +2051,7 @@ class TestDeleteChunk:
         source, chunk = self._real_source_chunk(app, tmp_path)
         chunk = dataclasses.replace(
             chunk,
-            metadata=dataclasses.replace(
-                chunk.metadata, start_line=start_line, end_line=end_line
-            ),
+            metadata=dataclasses.replace(chunk.metadata, start_line=start_line, end_line=end_line),
         )
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk])
         before = source.read_text(encoding="utf-8")
@@ -2113,9 +2109,7 @@ class TestDeleteChunk:
         reindex_outcome: str,
     ):
         source, chunk = self._real_source_chunk(app, tmp_path)
-        app.state.storage.get_chunk = AsyncMock(
-            side_effect=[chunk, chunk, chunk, chunk, None]
-        )
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
         if reindex_outcome == "raises":
             app.state.index_engine.index_file = AsyncMock(side_effect=RuntimeError("boom"))
         else:
@@ -2133,9 +2127,7 @@ class TestDeleteChunk:
         self, app, client: AsyncClient, tmp_path: Path
     ):
         source, chunk = self._real_source_chunk(app, tmp_path)
-        app.state.storage.get_chunk = AsyncMock(
-            side_effect=[chunk, chunk, chunk, chunk]
-        )
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk])
         app.state.index_engine.index_file = AsyncMock(side_effect=RuntimeError("reindex failed"))
         app.state.storage.delete_chunks = AsyncMock(side_effect=RuntimeError("delete failed"))
 

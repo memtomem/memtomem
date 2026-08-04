@@ -16,7 +16,8 @@ from memtomem.constants import (
     validate_agent_id,
     validate_namespace,
 )
-from memtomem.errors import NamespaceConflictError
+from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
+from memtomem.services import namespace_management
 
 _LEGACY_PREFIX = "agent/"
 # Local alias paired with ``_LEGACY_PREFIX`` so the migration mapping reads
@@ -97,6 +98,7 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
 
         total = 0
         dropped = 0
+        completed = 0
         skipped: list[str] = []
         for old, new in mapping:
             # merge only for the targets the user was shown and agreed to.
@@ -105,13 +107,25 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
             # pair is skipped and named, and re-running picks it up with a
             # fresh prompt.
             try:
-                result = await comp.storage.rename_namespace(old, new, merge=new in existing)
+                result = await namespace_management.rename_namespace(
+                    comp.storage,
+                    old,
+                    new,
+                    merge=new in existing,
+                )
+            except NamespaceMutationBusyError as exc:
+                raise click.ClickException(
+                    f"Migration stopped after {completed} namespace(s). "
+                    f"The current pair {old} -> {new} was not changed. {exc} "
+                    "Earlier reported renames remain applied; re-run to continue."
+                ) from exc
             except NamespaceConflictError:
                 skipped.append(old)
                 click.echo(f"Skipped: {old}  ->  {new}  (target appeared after the listing)")
                 continue
             total += result.chunks_moved
             dropped += result.duplicates_dropped
+            completed += 1
             suffix = "  (merged)" if result.merged else ""
             if result.duplicates_dropped:
                 # Chunks the destination already held are deleted, not moved —

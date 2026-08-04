@@ -15,8 +15,11 @@ covers what the *tool* says and accepts. Two things matter here:
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
+from memtomem.errors import NamespaceMutationBusyError
 from memtomem.server.context import AppContext
 from memtomem.server.tools.namespace import mem_ns_rename
 
@@ -67,6 +70,21 @@ class TestRenameMessage:
 
 
 class TestRenameConflict:
+    async def test_unstable_snapshot_is_labeled_retryable_and_claims_no_change(
+        self, ctx, storage, monkeypatch
+    ):
+        await storage.upsert_chunks([make_chunk(content="one", namespace="src-ns")])
+        raw_writer = AsyncMock(
+            side_effect=NamespaceMutationBusyError("snapshot changed; nothing was changed. Retry.")
+        )
+        monkeypatch.setattr(storage, "rename_namespace", raw_writer)
+
+        out = await mem_ns_rename(old="src-ns", new="dst-ns", ctx=ctx)
+
+        assert out.startswith("Error (retryable):")
+        assert "nothing was changed" in out
+        assert raw_writer.await_count == 3
+
     async def test_existing_target_is_refused(self, ctx, storage):
         await storage.upsert_chunks(
             [

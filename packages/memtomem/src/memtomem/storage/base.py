@@ -72,6 +72,24 @@ class NamespaceAssignResult:
 
 
 @dataclass(frozen=True, slots=True)
+class NamespaceChunkCandidate:
+    """A chunk row frozen for a coordinated namespace mutation.
+
+    ``chunk_id`` alone is not enough for compare-and-swap: a concurrent
+    migration can keep the id while changing either its source lock key or its
+    namespace. ``source_file_text`` preserves the exact persisted SQLite TEXT;
+    converting it through :class:`Path` can normalize legacy spellings such as
+    ``foo//bar`` and make an otherwise unchanged row fail CAS forever. Raw
+    storage writers verify all three persisted fields in one transaction.
+    """
+
+    chunk_id: UUID
+    source_file: Path
+    source_file_text: str
+    namespace: str
+
+
+@dataclass(frozen=True, slots=True)
 class SearchMetadataFilter:
     """Exact metadata constraints applied before retrieval limits."""
 
@@ -219,8 +237,20 @@ class StorageBackend(Protocol):
     async def count_chunks_by_namespace(self, namespace: str) -> int: ...
     async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int: ...
     async def delete_by_namespace(self, namespace: str) -> int: ...
+    async def list_namespace_chunk_candidates(
+        self,
+        *,
+        source_filter: str | None = None,
+        namespace: str | None = None,
+        exclude_namespace: str | None = None,
+    ) -> list[NamespaceChunkCandidate]: ...
     async def rename_namespace(
-        self, old: str, new: str, *, merge: bool = False
+        self,
+        old: str,
+        new: str,
+        *,
+        merge: bool = False,
+        candidates: Sequence[NamespaceChunkCandidate] | None = None,
     ) -> NamespaceRenameResult: ...
 
     # Tags
@@ -362,4 +392,5 @@ class StorageBackend(Protocol):
         old_namespace: str | None = None,
         *,
         merge: bool = False,
+        candidates: Sequence[NamespaceChunkCandidate] | None = None,
     ) -> NamespaceAssignResult: ...

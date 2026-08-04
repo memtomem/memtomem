@@ -148,6 +148,14 @@ class RetryableError(Exception):
     """Error that can be resolved by retrying (e.g., network timeout, rate limit)."""
 
 
+class NamespaceMutationBusyError(StorageError, RetryableError):
+    """A namespace writer could not freeze one stable source-row snapshot.
+
+    The coordinator or raw storage CAS raises this only before the operation
+    commits. Callers may retry the same operation without duplicating it.
+    """
+
+
 class PermanentError(Exception):
     """Error that will not resolve with retries (e.g., invalid API key, malformed input)."""
 

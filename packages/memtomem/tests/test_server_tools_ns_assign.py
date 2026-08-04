@@ -445,14 +445,17 @@ class TestAssignNamespaceTool:
     def test_help_catalog_exposes_merge(self):
         assert "merge" in ACTIONS["ns_assign"].params
 
-    async def test_forwards_merge_as_keyword(self, ctx):
-        ctx.request_context.lifespan_context.storage.assign_namespace = AsyncMock(
+    async def test_forwards_merge_with_the_coordinator_snapshot(self, ctx):
+        storage = ctx.request_context.lifespan_context.storage
+        storage.list_namespace_chunk_candidates = AsyncMock(return_value=[])
+        storage.assign_namespace = AsyncMock(
             return_value=type("Result", (), {"chunks_moved": 0, "duplicates_dropped": 0})()
         )
         await mem_ns_assign(namespace="target-ns", old_namespace="source-ns", merge=True, ctx=ctx)
-        ctx.request_context.lifespan_context.storage.assign_namespace.assert_awaited_once_with(
+        storage.assign_namespace.assert_awaited_once_with(
             "target-ns",
             source_filter=None,
             old_namespace="source-ns",
             merge=True,
+            candidates=[],
         )

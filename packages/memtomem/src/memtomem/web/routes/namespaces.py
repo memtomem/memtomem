@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from memtomem.errors import NamespaceConflictError
+from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
+from memtomem.services import namespace_management
 from memtomem.web.deps import get_storage
 from memtomem.web.schemas import (
     DeleteResponse,
@@ -118,7 +119,20 @@ async def rename_namespace(
     description. See ``NamespaceOps.rename_namespace``.
     """
     try:
-        result = await storage.rename_namespace(namespace, body.new_name, merge=body.merge)
+        result = await namespace_management.rename_namespace(
+            storage,
+            namespace,
+            body.new_name,
+            merge=body.merge,
+        )
+    except NamespaceMutationBusyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Namespace sources changed or remained locked; nothing was changed. "
+                "Retry the rename."
+            ),
+        ) from exc
     except NamespaceConflictError as exc:
         # Caller-resolvable collision (existing target, or old == new), not an
         # internal fault — without this it would land on the generic 500
