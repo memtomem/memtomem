@@ -17,6 +17,7 @@ from memtomem.server.tools._provenance import (
     flag_untracked_write,
 )
 from memtomem.server.tools._validation import strict_bool
+from memtomem.services import namespace_management
 
 
 @mcp.tool()
@@ -162,7 +163,12 @@ async def mem_ns_rename(
     merge = strict_bool(merge, "merge")
     app = await _get_app_initialized(ctx)
     try:
-        result = await app.storage.rename_namespace(old, new, merge=merge)
+        result = await namespace_management.rename_namespace(
+            app.storage,
+            old,
+            new,
+            merge=merge,
+        )
     except NamespaceConflictError as exc:
         # Storage states the condition; this surface adds the remedy that
         # exists *here* — an MCP caller can retry with merge=True, which a
@@ -261,7 +267,8 @@ async def mem_ns_assign(
     # cannot attribute that dangling id to the wrong session.
     provenance_session_id = await capture_session_for_untracked_write(app)
     try:
-        result = await app.storage.assign_namespace(
+        result = await namespace_management.assign_namespace(
+            app.storage,
             namespace,
             source_filter=source_filter,
             old_namespace=old_namespace,

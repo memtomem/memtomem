@@ -6,10 +6,16 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
+from uuid import UUID
 
-from memtomem.errors import NamespaceConflictError, StorageError
-from memtomem.storage.base import NamespaceAssignResult, NamespaceRenameResult
+from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError, StorageError
+from memtomem.storage.base import (
+    NamespaceAssignResult,
+    NamespaceChunkCandidate,
+    NamespaceRenameResult,
+)
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders, quote_ident
 
 logger = logging.getLogger(__name__)
@@ -27,6 +33,7 @@ _SET_META_SAVEPOINT = "ns_set_meta"
 # into set-based edge deletes. A linear mapping avoids materializing every
 # pair in a large equivalence group (O(k^2)) while the write lock is held.
 _DUPLICATE_MAP_TABLE = "_ns_duplicate_map"
+_CANDIDATE_TABLE = "_ns_candidates"
 
 # Row cap per ``… IN (?, ?, …)`` delete during a merge. SQLite's
 # host-parameter limit is 999 on builds older than 3.32, and a namespace-wide
@@ -148,6 +155,44 @@ class NamespaceOps:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    async def list_namespace_chunk_candidates(
+        self,
+        *,
+        source_filter: str | None = None,
+        namespace: str | None = None,
+        exclude_namespace: str | None = None,
+    ) -> list[NamespaceChunkCandidate]:
+        """Return the exact row identity needed by the namespace coordinator."""
+        if not source_filter and not namespace:
+            raise ValueError("At least one namespace candidate filter is required")
+        conditions: list[str] = []
+        params: list[object] = []
+        if source_filter:
+            conditions.append("source_file LIKE ? ESCAPE '\\'")
+            params.append(f"%{escape_like(source_filter)}%")
+        if namespace:
+            conditions.append("namespace = ?")
+            params.append(namespace)
+        if exclude_namespace is not None:
+            conditions.append("namespace <> ?")
+            params.append(exclude_namespace)
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT id, source_file, namespace FROM chunks WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY source_file, id",
+            params,
+        ).fetchall()
+        return [
+            NamespaceChunkCandidate(
+                chunk_id=UUID(row[0]),
+                source_file=Path(row[1]),
+                source_file_text=row[1],
+                namespace=row[2],
+            )
+            for row in rows
+        ]
+
     async def delete_by_namespace(self, namespace: str) -> int:
         db = self._get_db()
         owns_txn = self._begin_namespace_write(
@@ -245,8 +290,77 @@ class NamespaceOps:
             except sqlite3.Error as exc:
                 logger.warning("%s undo: rollback failed (%s)", operation, exc)
 
+    @staticmethod
+    def _candidate_membership_sql(chunk_table: str = "chunks") -> str:
+        candidate_table = quote_ident(_CANDIDATE_TABLE)
+        return (
+            f"EXISTS (SELECT 1 FROM temp.{candidate_table} AS frozen "  # nosec B608
+            f"WHERE frozen.chunk_id={chunk_table}.id "
+            f"AND frozen.source_file={chunk_table}.source_file "
+            f"AND frozen.namespace={chunk_table}.namespace)"
+        )
+
+    @classmethod
+    def _stage_candidates(
+        cls,
+        db: sqlite3.Connection,
+        candidates: Sequence[NamespaceChunkCandidate],
+        *,
+        expected_count_sql: str,
+        expected_count_params: Sequence[object],
+    ) -> None:
+        """Stage and validate one complete candidate snapshot under the SQL lock."""
+        candidate_table = quote_ident(_CANDIDATE_TABLE)
+        db.execute(f"DROP TABLE IF EXISTS temp.{candidate_table}")
+        db.execute(
+            f"CREATE TEMP TABLE {candidate_table} ("
+            "chunk_id TEXT PRIMARY KEY, "
+            "source_file TEXT NOT NULL, "
+            "namespace TEXT NOT NULL"
+            ") WITHOUT ROWID"
+        )
+        db.executemany(
+            f"INSERT INTO {candidate_table} (chunk_id, source_file, namespace) VALUES (?, ?, ?)",
+            (
+                (str(candidate.chunk_id), candidate.source_file_text, candidate.namespace)
+                for candidate in candidates
+            ),
+        )
+        staged_count = int(db.execute(f"SELECT COUNT(*) FROM temp.{candidate_table}").fetchone()[0])
+        matched_count = int(
+            db.execute(
+                f"SELECT COUNT(*) FROM temp.{candidate_table} AS frozen "
+                "JOIN chunks ON chunks.id=frozen.chunk_id "
+                "AND chunks.source_file=frozen.source_file "
+                "AND chunks.namespace=frozen.namespace"
+            ).fetchone()[0]
+        )
+        expected_count = int(db.execute(expected_count_sql, expected_count_params).fetchone()[0])
+        if not (staged_count == matched_count == expected_count == len(candidates)):
+            raise NamespaceMutationBusyError(
+                "Namespace candidates changed before the storage transaction; "
+                "nothing was changed. Retry."
+            )
+
+    @staticmethod
+    def _clear_candidates(db: sqlite3.Connection) -> None:
+        candidate_table = quote_ident(_CANDIDATE_TABLE)
+        db.execute(f"DROP TABLE IF EXISTS temp.{candidate_table}")
+
+    @classmethod
+    def _discard_candidates(cls, db: sqlite3.Connection) -> None:
+        try:
+            cls._clear_candidates(db)
+        except sqlite3.Error as exc:
+            logger.debug("namespace candidate cleanup failed: %s", exc)
+
     async def rename_namespace(
-        self, old: str, new: str, *, merge: bool = False
+        self,
+        old: str,
+        new: str,
+        *,
+        merge: bool = False,
+        candidates: Sequence[NamespaceChunkCandidate] | None = None,
     ) -> NamespaceRenameResult:
         """Rename namespace *old* to *new*, atomically.
 
@@ -294,6 +408,13 @@ class NamespaceOps:
 
         try:
             db.execute(f"SAVEPOINT {_RENAME_SAVEPOINT}")
+            if candidates is not None:
+                self._stage_candidates(
+                    db,
+                    candidates,
+                    expected_count_sql="SELECT COUNT(*) FROM chunks WHERE namespace=?",
+                    expected_count_params=(old,),
+                )
             if not self._namespace_exists(db, old):
                 # Renaming a namespace that holds nothing is a no-op, not an
                 # error — and not a conflict either, so this check precedes
@@ -319,10 +440,26 @@ class NamespaceOps:
                     )
 
                 now = now_iso()
-                duplicates_dropped = self._drop_duplicate_chunks(db, old, new) if merged else 0
-                chunks_moved = db.execute(
-                    "UPDATE chunks SET namespace=? WHERE namespace=?", (new, old)
-                ).rowcount
+                duplicates_dropped = (
+                    self._drop_duplicate_chunks(
+                        db,
+                        old,
+                        new,
+                        candidate_scoped=candidates is not None,
+                    )
+                    if merged
+                    else 0
+                )
+                if candidates is None:
+                    chunks_moved = db.execute(
+                        "UPDATE chunks SET namespace=? WHERE namespace=?", (new, old)
+                    ).rowcount
+                else:
+                    chunks_moved = db.execute(
+                        "UPDATE chunks SET namespace=? WHERE namespace=? AND "
+                        + self._candidate_membership_sql(),
+                        (new, old),
+                    ).rowcount
                 # Sessions follow the rename (see docstring) — their
                 # namespace is a live filter, not a historical record.
                 db.execute("UPDATE sessions SET namespace=? WHERE namespace=?", (new, old))
@@ -353,20 +490,24 @@ class NamespaceOps:
                     duplicates_dropped=duplicates_dropped,
                 )
 
+            if candidates is not None:
+                self._clear_candidates(db)
             db.execute(f"RELEASE {_RENAME_SAVEPOINT}")
             if owns_txn:
                 db.commit()
             return result
-        except NamespaceConflictError:
-            # Typed passthrough — the conflict is caller-resolvable and each
-            # surface translates it (web → 409); wrapping it in a generic
-            # StorageError would erase that.
+        except (NamespaceConflictError, NamespaceMutationBusyError):
+            # Typed passthrough: surfaces translate conflicts (web → 409), and
+            # the coordinator retargets a stale candidate snapshot. Wrapping
+            # either in a generic StorageError would erase that distinction.
             self._undo_namespace_write(
                 db,
                 savepoint=_RENAME_SAVEPOINT,
                 owns_txn=owns_txn,
                 operation="rename_namespace",
             )
+            if candidates is not None:
+                self._discard_candidates(db)
             raise
         except Exception as exc:
             self._undo_namespace_write(
@@ -375,9 +516,18 @@ class NamespaceOps:
                 owns_txn=owns_txn,
                 operation="rename_namespace",
             )
+            if candidates is not None:
+                self._discard_candidates(db)
             raise StorageError(f"rename_namespace failed, transaction rolled back: {exc}") from exc
 
-    def _drop_duplicate_chunks(self, db: sqlite3.Connection, old: str, new: str) -> int:
+    def _drop_duplicate_chunks(
+        self,
+        db: sqlite3.Connection,
+        old: str,
+        new: str,
+        *,
+        candidate_scoped: bool = False,
+    ) -> int:
         """Delete source chunks the target already holds. Returns how many.
 
         ``chunks`` carries a UNIQUE index on
@@ -397,8 +547,11 @@ class NamespaceOps:
         cascaded away. The count is reported back so the caller can say
         that rows were dropped rather than moved.
         """
+        candidate_condition = (
+            "AND " + self._candidate_membership_sql("c") if candidate_scoped else ""
+        )
         rows = db.execute(
-            """
+            f"""
             SELECT c.id, c.rowid, MIN(t.id) AS survivor
             FROM chunks c
             JOIN chunks t
@@ -412,6 +565,7 @@ class NamespaceOps:
              -- that never collided.
              AND t.start_line IS c.start_line
             WHERE c.namespace = ?
+              {candidate_condition}
             GROUP BY c.id, c.rowid
             """,
             (new, old),
@@ -829,6 +983,7 @@ class NamespaceOps:
         old_namespace: str | None = None,
         *,
         merge: bool = False,
+        candidates: Sequence[NamespaceChunkCandidate] | None = None,
     ) -> NamespaceAssignResult:
         """Move filtered chunks to *namespace* without changing namespace identity.
 
@@ -856,11 +1011,26 @@ class NamespaceOps:
         )
         try:
             db.execute(f"SAVEPOINT {_ASSIGN_SAVEPOINT}")
+            candidate_where = " AND ".join((*conditions, "namespace <> ?"))
+            if candidates is not None:
+                self._stage_candidates(
+                    db,
+                    candidates,
+                    # All fragments in candidate_where are fixed below; user
+                    # values remain bound parameters.
+                    expected_count_sql=f"SELECT COUNT(*) FROM chunks WHERE {candidate_where}",  # nosec B608
+                    expected_count_params=(*filter_params, namespace),
+                )
+                duplicate_conditions = [self._candidate_membership_sql()]
+                duplicate_params: list[object] = []
+            else:
+                duplicate_conditions = conditions
+                duplicate_params = filter_params
             duplicate_plans = self._find_assign_duplicate_plans(
                 db,
                 namespace,
-                conditions,
-                filter_params,
+                duplicate_conditions,
+                duplicate_params,
             )
             overlap_count = sum(len(plan.losers) for plan in duplicate_plans)
             if overlap_count and not merge:
@@ -873,26 +1043,35 @@ class NamespaceOps:
             duplicates_dropped = (
                 self._drop_duplicate_plans(db, duplicate_plans) if overlap_count else 0
             )
-            candidate_where = " AND ".join((*conditions, "namespace <> ?"))
-            chunks_moved = db.execute(
-                f"UPDATE chunks SET namespace=? WHERE {candidate_where}",
-                (namespace, *filter_params, namespace),
-            ).rowcount
+            if candidates is None:
+                chunks_moved = db.execute(
+                    f"UPDATE chunks SET namespace=? WHERE {candidate_where}",
+                    (namespace, *filter_params, namespace),
+                ).rowcount
+            else:
+                chunks_moved = db.execute(
+                    "UPDATE chunks SET namespace=? WHERE " + self._candidate_membership_sql(),
+                    (namespace,),
+                ).rowcount
             result = NamespaceAssignResult(
                 chunks_moved=chunks_moved,
                 duplicates_dropped=duplicates_dropped,
             )
+            if candidates is not None:
+                self._clear_candidates(db)
             db.execute(f"RELEASE {_ASSIGN_SAVEPOINT}")
             if owns_txn:
                 db.commit()
             return result
-        except NamespaceConflictError:
+        except (NamespaceConflictError, NamespaceMutationBusyError):
             self._undo_namespace_write(
                 db,
                 savepoint=_ASSIGN_SAVEPOINT,
                 owns_txn=owns_txn,
                 operation="assign_namespace",
             )
+            if candidates is not None:
+                self._discard_candidates(db)
             raise
         except Exception as exc:
             self._undo_namespace_write(
@@ -901,4 +1080,6 @@ class NamespaceOps:
                 owns_txn=owns_txn,
                 operation="assign_namespace",
             )
+            if candidates is not None:
+                self._discard_candidates(db)
             raise StorageError(f"assign_namespace failed, transaction rolled back: {exc}") from exc

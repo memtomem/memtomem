@@ -45,6 +45,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Web chunk deletion no longer reports success while leaving the target
+  indexed** (#2016). Source access and stale line-provenance failures now stop
+  before any index-only fallback, while failures after the source entry was
+  removed trigger an explicit row cleanup and a final absence check. A cleanup
+  failure returns a distinct partial-failure response instead of inviting a
+  retry with a now-stale line range.
+
+- **Namespace rename and assignment now serialize with source-backed writers**
+  (#2016). MCP, Web, and `mm agent migrate` discover candidate rows, acquire
+  their source-file L2 sidecars in sorted order under one 30-second deadline,
+  then re-snapshot before writing. SQLite verifies the complete
+  `(id, source_file, namespace)` snapshot in the same transaction as the
+  mutation; source-set churn is retargeted up to three times and otherwise
+  returns a retryable no-change result. Multi-pair CLI migration stops nonzero
+  and preserves an honest receipt for pairs it completed earlier.
+
 - **A namespace lookup that cannot answer now stays retryable end to end**
   (#2005 follow-up). `NamespaceResolutionError` is raised when the stored
   namespace of a file cannot be read, so a transient store failure does not

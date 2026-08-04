@@ -27,6 +27,7 @@ from memtomem.errors import (
 from memtomem.storage.base import (
     ChunkAuditRow,
     NamespaceAssignResult,
+    NamespaceChunkCandidate,
     NamespaceRenameResult,
     SearchMetadataFilter,
 )
@@ -2486,11 +2487,35 @@ class SqliteBackend(
         assert self._ns is not None
         return await self._ns.delete_by_namespace(namespace)
 
+    async def list_namespace_chunk_candidates(
+        self,
+        *,
+        source_filter: str | None = None,
+        namespace: str | None = None,
+        exclude_namespace: str | None = None,
+    ) -> list[NamespaceChunkCandidate]:
+        assert self._ns is not None
+        return await self._ns.list_namespace_chunk_candidates(
+            source_filter=source_filter,
+            namespace=namespace,
+            exclude_namespace=exclude_namespace,
+        )
+
     async def rename_namespace(
-        self, old: str, new: str, *, merge: bool = False
+        self,
+        old: str,
+        new: str,
+        *,
+        merge: bool = False,
+        candidates: Sequence[NamespaceChunkCandidate] | None = None,
     ) -> NamespaceRenameResult:
         assert self._ns is not None
-        return await self._ns.rename_namespace(old, new, merge=merge)
+        return await self._ns.rename_namespace(
+            old,
+            new,
+            merge=merge,
+            candidates=candidates,
+        )
 
     async def get_namespace_meta(self, namespace: str) -> dict | None:
         assert self._ns is not None
@@ -2516,6 +2541,7 @@ class SqliteBackend(
         old_namespace: str | None = None,
         *,
         merge: bool = False,
+        candidates: Sequence[NamespaceChunkCandidate] | None = None,
     ) -> NamespaceAssignResult:
         assert self._ns is not None
         return await self._ns.assign_namespace(
@@ -2523,6 +2549,7 @@ class SqliteBackend(
             source_filter,
             old_namespace,
             merge=merge,
+            candidates=candidates,
         )
 
     # ---- row deserialization -------------------------------------------------

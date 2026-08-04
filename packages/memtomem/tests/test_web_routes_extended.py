@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from memtomem.errors import NamespaceConflictError
+from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.storage.base import NamespaceRenameResult
 from memtomem.web.app import create_app
@@ -1907,6 +1907,20 @@ class TestNamespaceCRUD:
         data = resp.json()
         assert data["namespace"] == "general"
         assert data["chunk_count"] == 30
+
+    async def test_rename_busy_is_retryable_503_and_claims_no_change(self, client: AsyncClient):
+        with patch(
+            "memtomem.web.routes.namespaces.namespace_management.rename_namespace",
+            new=AsyncMock(side_effect=NamespaceMutationBusyError("snapshot changed")),
+        ):
+            resp = await client.post(
+                "/api/namespaces/default/rename",
+                json={"new_name": "general"},
+            )
+
+        assert resp.status_code == 503, resp.text
+        assert "nothing was changed" in resp.json()["detail"]
+        assert "/" not in resp.json()["detail"]
 
     async def test_rename_merge_reports_resulting_total(self, app, client: AsyncClient):
         """On a merge the moved count and the namespace's size differ.

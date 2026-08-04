@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 from click.testing import CliRunner
 
 from memtomem.cli import cli
-from memtomem.errors import NamespaceConflictError
+from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.storage.base import NamespaceRenameResult
 
 
@@ -35,6 +35,7 @@ def _mock_components(legacy_namespaces, existing_new_namespaces=(), chunk_counts
     )
     storage = SimpleNamespace(
         list_namespace_meta=AsyncMock(return_value=rows),
+        list_namespace_chunk_candidates=AsyncMock(return_value=[]),
         rename_namespace=AsyncMock(
             return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=True, merged=False)
         ),
@@ -78,10 +79,10 @@ class TestAgentMigrate:
         # No collisions in the listing, so nothing to consolidate into and
         # no consent was asked for — these take the plain rename.
         comp.storage.rename_namespace.assert_any_await(
-            "agent/alpha", "agent-runtime:alpha", merge=False
+            "agent/alpha", "agent-runtime:alpha", merge=False, candidates=[]
         )
         comp.storage.rename_namespace.assert_any_await(
-            "agent/beta", "agent-runtime:beta", merge=False
+            "agent/beta", "agent-runtime:beta", merge=False, candidates=[]
         )
         assert "Migration complete" in result.output
 
@@ -96,7 +97,7 @@ class TestAgentMigrate:
         result = CliRunner().invoke(cli, ["agent", "migrate"])
         assert result.exit_code == 0
         comp.storage.rename_namespace.assert_awaited_once_with(
-            "agent/ghost", "agent-runtime:ghost", merge=False
+            "agent/ghost", "agent-runtime:ghost", merge=False, candidates=[]
         )
 
     def test_dropped_duplicates_are_reported(self, monkeypatch):
@@ -132,7 +133,7 @@ class TestAgentMigrate:
         result = CliRunner().invoke(cli, ["agent", "migrate"], input="y\n")
         assert result.exit_code == 0
         comp.storage.rename_namespace.assert_awaited_once_with(
-            "agent/alpha", "agent-runtime:alpha", merge=True
+            "agent/alpha", "agent-runtime:alpha", merge=True, candidates=[]
         )
 
     def test_the_prompt_says_what_it_is_agreeing_to(self, monkeypatch):
@@ -147,8 +148,33 @@ class TestAgentMigrate:
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         CliRunner().invoke(cli, ["agent", "migrate"])
         comp.storage.rename_namespace.assert_awaited_once_with(
-            "agent/alpha", "agent-runtime:alpha", merge=False
+            "agent/alpha", "agent-runtime:alpha", merge=False, candidates=[]
         )
+
+    def test_busy_pair_stops_nonzero_and_reports_earlier_partial_progress(self, monkeypatch):
+        comp = _mock_components(["agent/alpha", "agent/beta"])
+        success = NamespaceRenameResult(
+            chunks_moved=2,
+            metadata_renamed=True,
+            merged=False,
+        )
+        comp.storage.rename_namespace = AsyncMock(
+            side_effect=[
+                success,
+                NamespaceMutationBusyError("snapshot changed"),
+                NamespaceMutationBusyError("snapshot changed"),
+                NamespaceMutationBusyError("snapshot changed"),
+            ]
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = CliRunner().invoke(cli, ["agent", "migrate"])
+
+        assert result.exit_code != 0
+        assert "Renamed: agent/alpha" in result.output
+        assert "stopped after 1 namespace(s)" in result.output
+        assert "current pair agent/beta -> agent-runtime:beta was not changed" in result.output
+        assert "Earlier reported renames remain applied" in result.output
 
     def test_a_late_conflict_is_skipped_and_named(self, monkeypatch):
         comp = _mock_components(["agent/alpha"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import stat
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -227,6 +228,33 @@ async def delete_chunk(
         meta = fresh.metadata
         source = meta.source_file
 
+        async def ensure_index_row_absent(*, source_removed: bool) -> None:
+            """Finish an index-only delete and verify the route's post-condition.
+
+            Once the source line has been removed, a failed cleanup is a partial
+            success and must not invite the caller to repeat DELETE with the now
+            stale line range.  Keep that response distinct from failures before
+            the source mutation (#2016).
+            """
+
+            failure_detail = (
+                "The source entry was removed, but index cleanup did not complete. "
+                "Reindex the source before attempting another delete."
+                if source_removed
+                else "Index-only deletion failed; no source file was changed. Check server logs."
+            )
+            try:
+                remaining = await storage.get_chunk(chunk_id)
+                if remaining is not None:
+                    await storage.delete_chunks([chunk_id])
+                    remaining = await storage.get_chunk(chunk_id)
+            except Exception as exc:
+                logger.error("Index cleanup failed for deleted chunk %s", chunk_id, exc_info=True)
+                raise HTTPException(status_code=500, detail=failure_detail) from exc
+            if remaining is not None:
+                logger.error("Chunk %s remained after index cleanup", chunk_id)
+                raise HTTPException(status_code=500, detail=failure_detail)
+
         # ADR-0011 PR-D review round 7: Gate B on the web delete path —
         # mirrors the MCP ``mem_delete`` round-3 fix (8407d73). Re-checked on the
         # fresh chunk so a concurrent re-scope cannot slip a project_shared
@@ -250,11 +278,49 @@ async def delete_chunk(
                 },
             )
 
-        # Remove lines from original source file, then re-index. No file
+        # Only a source that is genuinely absent permits an index-only delete.
+        # ``Path.exists`` collapses permission errors, ELOOP, and other failures
+        # into absence on supported Python versions; that would recreate the
+        # false-success shape fixed here (#2016).  Mirror the fail-closed stat
+        # policy used by the namespace-mix guard (#2017).
+        try:
+            source_stat = source.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            source_exists = False
+        except OSError as exc:
+            logger.warning("Could not inspect source for chunk %s", chunk_id, exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not access the source file; no index entry was deleted. "
+                    "Retry once the file is accessible."
+                ),
+            ) from exc
+        else:
+            source_exists = True
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The chunk source is not a regular file; no index entry was deleted. "
+                        "Repair or reindex the source before retrying."
+                    ),
+                )
+
+        # Remove lines from the original source file, then re-index. No file
         # rollback here (unlike edit): the intent is deletion, so on a reindex
         # failure we fall back to an index-only delete rather than restoring the
         # line. ``lock_held=True`` skips the nested sidecar acquire (#1587).
-        if source.exists() and meta.start_line and meta.end_line:
+        if source_exists:
+            if meta.start_line < 1 or meta.end_line < meta.start_line:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Chunk has no usable source-line provenance; no index entry was "
+                        "deleted. Reindex the source and retry."
+                    ),
+                )
+
             # Issue #2005: ``force=True`` re-applies namespace resolution to
             # every chunk, including the ones this delete leaves alone — so
             # deleting one chunk from an ``aaa`` file would move its survivors
@@ -293,7 +359,33 @@ async def delete_chunk(
                 ) from exc
             try:
                 await asyncio.to_thread(remove_lines, source, meta.start_line, meta.end_line)
-                await index_engine.index_file(
+            except ValueError as exc:
+                logger.warning("Stale line provenance for chunk %s: %s", chunk_id, exc)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Chunk source-line provenance is stale; no index entry was deleted. "
+                        "Reindex the source and retry."
+                    ),
+                ) from exc
+            except OSError as exc:
+                logger.warning("Source file deletion failed for chunk %s", chunk_id, exc_info=True)
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Could not update the source file; no index entry was deleted. "
+                        "Retry once the file is accessible."
+                    ),
+                ) from exc
+            except Exception as exc:
+                logger.error("Source deletion failed for chunk %s", chunk_id, exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Source deletion failed; no index entry was deleted. Check server logs.",
+                ) from exc
+
+            try:
+                stats = await index_engine.index_file(
                     source,
                     force=True,
                     namespace=preserved_ns,
@@ -301,10 +393,22 @@ async def delete_chunk(
                     lock_held=True,
                 )
             except Exception as exc:
-                logger.warning("Source file edit failed for %s: %s", chunk_id, exc)
-                await storage.delete_chunks([chunk_id])
+                logger.warning("Re-index failed after deleting chunk %s: %s", chunk_id, exc)
+            else:
+                if stats.errors:
+                    logger.warning(
+                        "Re-index reported errors after deleting chunk %s: %s",
+                        chunk_id,
+                        "; ".join(stats.errors),
+                    )
+
+            # A single-file index can report an error in IndexingStats instead
+            # of raising (for example, an embedding failure), or can finish with
+            # zero work after a read error.  Verify the target row rather than
+            # treating the await itself as proof of deletion.
+            await ensure_index_row_absent(source_removed=True)
         else:
-            await storage.delete_chunks([chunk_id])
+            await ensure_index_row_absent(source_removed=False)
 
     return DeleteResponse(deleted=1)
 
