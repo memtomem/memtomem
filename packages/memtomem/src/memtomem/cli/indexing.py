@@ -203,7 +203,11 @@ async def _index(
             "files anyway (audit-logged)."
         ),
     )
-    print_index_errors(agg["errors"])
+    print_index_errors(
+        agg["errors"],
+        retryable_errors=agg["retryable_errors"],
+        retry_hint="re-run the same `mm index` command once the chunk store is reachable.",
+    )
     if agg["errors"] or agg["blocked"]:
         raise click.exceptions.Exit(1)
 

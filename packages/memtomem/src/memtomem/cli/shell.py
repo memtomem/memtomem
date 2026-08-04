@@ -321,4 +321,8 @@ async def _cmd_index(comp, args: list[str]) -> None:
             "index the non-project_shared files anyway (audit-logged)."
         ),
     )
-    print_index_errors(stats.errors)
+    print_index_errors(
+        stats.errors,
+        retryable_errors=stats.retryable_errors,
+        retry_hint=f"run `mm index {path}` outside the shell once the chunk store is reachable.",
+    )

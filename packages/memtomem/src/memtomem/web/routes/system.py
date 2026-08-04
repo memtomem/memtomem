@@ -859,6 +859,7 @@ async def add_memory_dir(
                 "deleted_chunks": stats.deleted_chunks,
                 "duration_ms": stats.duration_ms,
                 "errors": list(stats.errors) if stats.errors else [],
+                "retryable_errors": list(stats.retryable_errors),
                 "blocked_files": stats.blocked_files,
                 "blocked_paths": list(stats.blocked_paths),
                 "blocked_project_shared_files": stats.blocked_project_shared_files,
@@ -1124,7 +1125,13 @@ async def reindex_all(
             # list) rather than the ``error`` key the not-a-directory branch
             # above uses, so it reaches ``all_errors`` and flips ``ok`` to false.
             logger.warning("Namespace lookup failed while reindexing %s: %s", resolved, exc)
-            results.append({"path": str(resolved), "errors": [_REINDEX_ROOT_NAMESPACE_ERROR]})
+            results.append(
+                {
+                    "path": str(resolved),
+                    "errors": [_REINDEX_ROOT_NAMESPACE_ERROR],
+                    "retryable_errors": [_REINDEX_ROOT_NAMESPACE_ERROR],
+                }
+            )
             continue
         entry: dict = {
             "path": str(resolved),
@@ -1135,13 +1142,16 @@ async def reindex_all(
             "duration_ms": stats.duration_ms,
             "blocked_files": stats.blocked_files,
             "blocked_project_shared_files": stats.blocked_project_shared_files,
+            "errors": list(stats.errors),
+            "retryable_errors": list(stats.retryable_errors),
         }
         if stats.blocked_files:
             entry["blocked_paths"] = list(stats.blocked_paths)
-        if stats.errors:
-            entry["errors"] = list(stats.errors)
         results.append(entry)
     all_errors = [e for r in results for e in r.get("errors", [])]
+    all_retryable_errors = [
+        error for result in results for error in result.get("retryable_errors", [])
+    ]
     total_blocked = 0
     total_blocked_ps = 0
     for r in results:
@@ -1153,6 +1163,7 @@ async def reindex_all(
         "ok": len(all_errors) == 0,
         "results": results,
         "errors": all_errors,
+        "retryable_errors": all_retryable_errors,
         "blocked_files": total_blocked,
         "blocked_project_shared_files": total_blocked_ps,
     }

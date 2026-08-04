@@ -220,3 +220,34 @@ class TestShellIndexBlockedSurfacing:
 
         out = capsys.readouterr().out
         assert "ERROR: blob.md: binary file detected, skipping" in out
+
+    async def test_retryable_errors_are_labeled_once_with_shell_guidance(
+        self, bm25_only_components, capsys, monkeypatch
+    ):
+        from memtomem.cli.shell import _cmd_index
+        from memtomem.models import IndexingStats
+
+        comp, mem_dir = bm25_only_components
+        retryable = "note.md: chunk store unavailable"
+
+        async def _index_path(*_args, **_kwargs):
+            return IndexingStats(
+                total_files=1,
+                total_chunks=0,
+                indexed_chunks=0,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                errors=(retryable,),
+                retryable_errors=(retryable,),
+            )
+
+        monkeypatch.setattr(comp.index_engine, "index_path", _index_path)
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert f"ERROR (retryable): {retryable}" in out
+        assert out.count(retryable) == 1
+        assert f"mm index {mem_dir}" in out
+        assert "once the chunk store is reachable" in out

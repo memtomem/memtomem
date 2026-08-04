@@ -1881,7 +1881,11 @@ def _seed_with_progress(paths: list[Path]) -> bool:
         blocked_project_shared=agg["blocked_project_shared"],
         bypass_hint=bypass_hint,
     )
-    print_index_errors(agg["errors"])
+    print_index_errors(
+        agg["errors"],
+        retryable_errors=agg["retryable_errors"],
+        retry_hint=f"resume with {resume_hint} once the chunk store is reachable.",
+    )
 
     # Defensive: if the stream processed files but landed zero chunks
     # (neither new nor skipped-as-unchanged), something went wrong

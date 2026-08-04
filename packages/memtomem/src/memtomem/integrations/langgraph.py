@@ -582,7 +582,11 @@ class MemtomemStore:
     async def index(
         self, path: str = ".", recursive: bool = True, namespace: str | None = None
     ) -> dict:
-        """Index files for search."""
+        """Index files and return indexing statistics for search.
+
+        ``retryable_errors`` is the same-string subset of ``errors`` whose
+        cause may be resolved by retrying the operation.
+        """
         comp = await self._ensure_init()
         stats = await comp.index_engine.index_path(
             Path(path).expanduser().resolve(),
@@ -596,6 +600,7 @@ class MemtomemStore:
             "blocked_files": stats.blocked_files,
             "blocked_paths": list(stats.blocked_paths),
             "errors": list(stats.errors),
+            "retryable_errors": list(stats.retryable_errors),
         }
 
     # ── Context Manager ───────────────────────────────────────────────────

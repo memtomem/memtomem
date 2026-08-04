@@ -25,8 +25,9 @@ their distinct UX):
 Helper guarantees: bar is always closed on exit (including raise), stream
 runs serially over the supplied ``paths``, returned aggregate dict has
 stable keys ``total_files``, ``indexed``, ``skipped``, ``deleted``,
-``total_chunks``, ``duration_ms``, ``errors``, ``bar_rendered``,
-``blocked``, ``blocked_paths``, ``blocked_project_shared`` (ADR-0006 PR-A).
+``total_chunks``, ``duration_ms``, ``errors``, ``retryable_errors``,
+``bar_rendered``, ``blocked``, ``blocked_paths``, ``blocked_project_shared``
+(ADR-0006 PR-A).
 
 :func:`print_blocked_summary` / :func:`print_index_errors` are the shared
 post-run reporters for those counters — every CLI bulk-index surface
@@ -104,7 +105,8 @@ async def run_with_progress(
         Aggregate of all ``complete`` events with keys ``total_files``,
         ``indexed``, ``skipped``, ``deleted``, ``total_chunks``,
         ``duration_ms``, ``errors`` (a list of human-readable strings),
-        and ``bar_rendered`` (bool — whether any event triggered bar
+        ``retryable_errors`` (the retryable same-string subset), and
+        ``bar_rendered`` (bool — whether any event triggered bar
         creation; callers use this to gate trailing-newline output that
         would otherwise leave a stray blank line on empty discovers).
         Caller renders its own summary line from this.
@@ -128,6 +130,7 @@ async def run_with_progress(
         "total_chunks": 0,
         "duration_ms": 0.0,
         "errors": [],
+        "retryable_errors": [],
         "bar_rendered": False,
         # ADR-0006 PR-A: files skipped by the redaction gate (count + paths),
         # aggregated from each stream's ``complete`` event. ``blocked_project_shared``
@@ -257,6 +260,9 @@ async def run_with_progress(
                         errs = evt.get("errors") or []
                         if errs:
                             agg["errors"].extend(errs)
+                        retryable_errs = evt.get("retryable_errors") or []
+                        if retryable_errs:
+                            agg["retryable_errors"].extend(retryable_errs)
     finally:
         _close_bar()
 
@@ -297,16 +303,31 @@ def print_blocked_summary(
         )
 
 
-def print_index_errors(errors: Sequence[str]) -> None:
+def print_index_errors(
+    errors: Sequence[str],
+    *,
+    retryable_errors: Sequence[str] = (),
+    retry_hint: str = "retry once the chunk store is reachable.",
+) -> None:
     """Print non-redaction per-file errors from a bulk index run.
 
     ``redaction_blocked`` entries are skipped — :func:`print_blocked_summary`
-    already surfaced those files with a clearer message and hint.
+    already surfaced those files with a clearer message and hint. Retryable
+    errors are a same-string subset of ``errors``; label them in place rather
+    than printing the subset again.
     """
+    retryable_set = set(retryable_errors)
+    rendered_retryable = False
     for err in errors:
         if "redaction_blocked" in err:
             continue
-        click.echo(click.style(f"  ERROR: {err}", fg="red"))
+        if err in retryable_set:
+            click.echo(click.style(f"  ERROR (retryable): {err}", fg="yellow"))
+            rendered_retryable = True
+        else:
+            click.echo(click.style(f"  ERROR: {err}", fg="red"))
+    if rendered_retryable:
+        click.secho(f"  → {retry_hint}", fg="yellow")
 
 
 # Re-exported asyncio.run wrapper kept thin: callers want the surface-specific
