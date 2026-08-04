@@ -251,3 +251,90 @@ class TestShellIndexBlockedSurfacing:
         assert out.count(retryable) == 1
         assert f"mm index {mem_dir}" in out
         assert "once the chunk store is reachable" in out
+
+    async def test_real_error_on_a_file_named_redaction_blocked_is_not_swallowed(
+        self, bm25_only_components, capsys, monkeypatch
+    ):
+        """A file literally named ``redaction_blocked.md`` renders its failure
+        as ``redaction_blocked.md: <cause>``. The old substring test matched
+        that and dropped the line entirely — no error, and no retry hint even
+        when the cause was retryable. The reporter matches the engine's whole
+        message shape instead, so only genuine privacy blocks are skipped."""
+        from memtomem.cli.shell import _cmd_index
+        from memtomem.models import IndexingStats
+
+        comp, mem_dir = bm25_only_components
+        trap = "redaction_blocked.md: chunk store unavailable"
+        genuine = "secret.md: redaction_blocked (hits=2, scope=user, decision=refuse)"
+
+        async def _index_path(*_args, **_kwargs):
+            return IndexingStats(
+                total_files=2,
+                total_chunks=0,
+                indexed_chunks=0,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                errors=(trap, genuine),
+                retryable_errors=(trap,),
+                blocked_files=1,
+                blocked_paths=("secret.md",),
+            )
+
+        monkeypatch.setattr(comp.index_engine, "index_path", _index_path)
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert f"ERROR (retryable): {trap}" in out
+        assert "once the chunk store is reachable" in out
+        # The genuine block is still routed to print_blocked_summary only, so
+        # it must not appear as a raw ERROR line.
+        assert f"ERROR: {genuine}" not in out
+
+    async def test_engine_block_message_still_matches_the_reporter_pattern(
+        self, bm25_only_components
+    ):
+        """Drift canary for the pattern above: it is anchored to wording the
+        engine owns, so a reworded block message would silently start leaking
+        privacy blocks into the raw ERROR list. Assert against a real engine
+        run rather than a hand-spelled string."""
+        from memtomem.cli._index_progress import _REDACTION_BLOCKED_RE
+
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "secret.md").write_text(_SECRET)
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        blocked = [e for e in stats.errors if "redaction_blocked" in e]
+        assert blocked, f"expected a redaction block, got {stats.errors!r}"
+        for entry in blocked:
+            assert _REDACTION_BLOCKED_RE.search(entry), (
+                f"engine reworded its block message; _REDACTION_BLOCKED_RE no "
+                f"longer matches {entry!r} — privacy blocks would now print as "
+                f"raw ERROR lines"
+            )
+
+    async def test_shell_labels_a_retryable_failure_raised_before_any_stats(
+        self, bm25_only_components, capsys, monkeypatch
+    ):
+        """The engine's pre-write namespace prepass raises instead of
+        returning ``IndexingStats``, so ``print_index_errors`` is never
+        reached. Without the typed catch the shell printed a bare traceback-y
+        error for the one failure class the retryable split exists to name."""
+        from memtomem.cli.shell import _cmd_index
+        from memtomem.errors import NamespaceResolutionError
+
+        comp, mem_dir = bm25_only_components
+
+        async def _index_path(*_args, **_kwargs):
+            raise NamespaceResolutionError("chunk store unreachable")
+
+        monkeypatch.setattr(comp.index_engine, "index_path", _index_path)
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert "ERROR (retryable): chunk store unreachable" in out
+        assert f"mm index {mem_dir}" in out
+        assert "once the chunk store is reachable" in out

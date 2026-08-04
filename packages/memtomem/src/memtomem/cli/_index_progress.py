@@ -38,12 +38,26 @@ user can actually run)."""
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
 import click
+
+#: Matches the redaction-block message ``IndexEngine`` synthesizes for a file
+#: the privacy gate refused — ``f"{path.name}: redaction_blocked (hits=N,
+#: scope=S, decision=D)"`` (``indexing/engine.py``, both the gather and the
+#: stream branch). Anchored to that whole trailing shape rather than testing
+#: for the ``redaction_blocked`` substring: a real failure on a file *named*
+#: ``redaction_blocked.md`` renders as ``redaction_blocked.md: <cause>``, and
+#: a substring test silently swallowed it — no error line, and no retry hint
+#: even when the cause was retryable. ``test_index_privacy_block_surfaces``
+#: pins this against drift in the engine's wording.
+_REDACTION_BLOCKED_RE = re.compile(
+    r": redaction_blocked \(hits=\d+, scope=[^,]+, decision=[^)]*\)$"
+)
 
 
 def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
@@ -324,7 +338,7 @@ def print_index_errors(
     retryable_set = set(retryable_errors)
     rendered_retryable = False
     for err in errors:
-        if "redaction_blocked" in err:
+        if _REDACTION_BLOCKED_RE.search(err):
             continue
         if err in retryable_set:
             click.echo(click.style(f"  ERROR (retryable): {err}", fg="yellow"))

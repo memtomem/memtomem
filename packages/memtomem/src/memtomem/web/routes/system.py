@@ -35,7 +35,7 @@ from memtomem.config import (
     save_config_overrides,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
-from memtomem.errors import NamespaceResolutionError
+from memtomem.errors import NamespaceResolutionError, RetryableError
 from memtomem.search.reranker.factory import create_reranker
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
@@ -872,9 +872,28 @@ async def add_memory_dir(
                 index_status = "partial"
             else:
                 index_status = "failed"
+        except RetryableError:
+            # Ahead of the generic branch: the engine's pre-write namespace
+            # prepass (issue #2005) raises rather than returning per-file
+            # errors, so the ``retryable_errors`` key populated on the success
+            # path above would otherwise be absent for the one failure class it
+            # exists to describe — the client would see a flat "failed" and
+            # have no way to know a retry is the right move. The message is
+            # fixed rather than derived from the exception: ``str(exc)`` can
+            # carry the scanned path, and this response is not path-safe.
+            logger.exception("Initial indexing failed (retryable) for newly registered memory dir")
+            message = (
+                "Initial indexing failed: chunk store unreachable. Retry once it is reachable."
+            )
+            indexed = {
+                "error": message,
+                "errors": [message],
+                "retryable_errors": [message],
+            }
+            index_status = "failed"
         except Exception:  # pragma: no cover — surface partial result
             logger.exception("Initial indexing failed for newly registered memory directory")
-            indexed = {"error": "Initial indexing failed"}
+            indexed = {"error": "Initial indexing failed", "errors": [], "retryable_errors": []}
             index_status = "failed"
 
     return {
@@ -1109,7 +1128,21 @@ async def reindex_all(
     for d in config.indexing.all_index_roots():
         resolved = d.expanduser().resolve()
         if not resolved.is_dir():
-            results.append({"path": str(resolved), "error": "not a directory"})
+            # ``error`` (singular) is kept for existing clients, but it alone
+            # never reached ``all_errors`` below — so a registered root that
+            # had been deleted or renamed produced ``ok: true`` with an empty
+            # top-level ``errors``, and every first-party client rendered
+            # "reindex complete". Emit the list form too so aggregation sees
+            # it. Not retryable: a missing root is a config problem that
+            # retrying cannot fix, so it stays out of ``retryable_errors``.
+            results.append(
+                {
+                    "path": str(resolved),
+                    "error": "not a directory",
+                    "errors": [f"{resolved}: not a directory"],
+                    "retryable_errors": [],
+                }
+            )
             continue
         try:
             stats = await index_engine.index_path(resolved, recursive=True, force=force)
