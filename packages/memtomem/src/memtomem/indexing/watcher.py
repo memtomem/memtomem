@@ -11,12 +11,13 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from memtomem.config import IndexingConfig
-from memtomem.errors import NamespaceResolutionError
+from memtomem.errors import NamespaceResolutionError, RetryableError
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver, ObservedWatch
 
     from memtomem.indexing.engine import IndexEngine
+    from memtomem.models import IndexingStats
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,19 @@ _STOP_SENTINEL = Path("/dev/null/__stop__")
 # new events — including the shutdown sentinel — are dropped and a warning
 # is logged. Raise this if you watch a very large tree with a slow indexer.
 _WATCHER_QUEUE_MAXSIZE = 1000
+
+# Startup-backfill retry budget for retryable failures (issue #2021). A root
+# whose walk fails with a ``RetryableError`` (namespace preservation could not
+# read the store, issue #2005/#2018) — or whose run reports files in
+# ``stats.retryable_errors`` — is re-walked up to this many attempts total,
+# with exponential backoff between them. Re-running a root is cheap: the
+# content-hash dedup skips unchanged chunks, so a retry costs a walk, not a
+# re-embed. Bounded because backfill runs while the process warms up — a store
+# that is still down after the last attempt gets the same log-and-continue the
+# per-dir handler always applied, and the file waits for the next filesystem
+# event or restart.
+_BACKFILL_MAX_ATTEMPTS = 3
+_BACKFILL_RETRY_BASE_S = 5.0
 
 
 class _MarkdownEventHandler(FileSystemEventHandler):
@@ -241,7 +255,14 @@ class FileWatcher:
         by the changed-file count rather than the total tree size on
         every restart.
 
-        Per-dir errors are logged and don't abort siblings.
+        Per-dir errors are logged and don't abort siblings. Retryable
+        failures — the typed ``RetryableError`` the namespace-preservation
+        prepass raises before any write (issue #2018), and per-file entries
+        in ``stats.retryable_errors`` — get a bounded per-root re-walk with
+        backoff instead of the log-and-continue that permanent failures get
+        (issue #2021). ``NamespaceResolutionError``'s contract is that the
+        watcher re-queues rather than drops; before this the per-file event
+        path kept that promise and this entry point did not.
 
         Logs a single ``Startup backfill: walking N memory_dir(s)...``
         line at the start so opt-in users can tell whether the (potentially
@@ -253,42 +274,132 @@ class FileWatcher:
         logger.info("Startup backfill: walking %d memory_dir(s)...", len(dirs))
         total_indexed = 0
         for d in dirs:
+            total_indexed += await self._backfill_one_dir(d)
+        logger.info("Startup backfill complete: %d new chunks indexed", total_indexed)
+
+    async def _backfill_one_dir(self, d: Path) -> int:
+        """Walk one root, retrying retryable failures; return chunks indexed.
+
+        Indexed counts accumulate across attempts without double-counting:
+        a re-walk skips already-upserted chunks via the content-hash dedup,
+        so each attempt's ``indexed_chunks`` covers only what that attempt
+        actually wrote.
+
+        ``reported`` carries the permanent failures and blocked paths already
+        named for this root, so a retryable file sharing the root with a
+        permanently broken one doesn't reprint the broken one's warning once
+        per attempt — the retry is for the retryable file, not for it.
+        """
+        indexed = 0
+        reported: set[str] = set()
+        for attempt in range(1, _BACKFILL_MAX_ATTEMPTS + 1):
             try:
                 stats = await self._engine.index_path(d, recursive=True)
-                total_indexed += stats.indexed_chunks
-                if stats.blocked_files:
-                    # ADR-0006 PR-A: secret-bearing files skipped during
-                    # backfill — name them so the log is actionable.
-                    logger.warning(
-                        "Startup backfill %s: %d file(s) blocked by redaction guard: %s",
-                        d,
-                        stats.blocked_files,
-                        ", ".join(stats.blocked_paths),
-                    )
-                other_errors = [e for e in stats.errors if "redaction_blocked" not in e]
-                if other_errors:
-                    # Non-redaction per-file failures/skips (too-large, binary,
-                    # backend errors) — previously dropped. One aggregated line
-                    # per dir bounds the per-restart log noise.
-                    logger.warning(
-                        "Startup backfill %s: %d file(s) skipped or failed: %s",
-                        d,
-                        len(other_errors),
-                        "; ".join(other_errors),
-                    )
-                if stats.indexed_chunks or stats.deleted_chunks:
-                    logger.info(
-                        "Startup backfill %s: indexed=%d skipped=%d deleted=%d",
-                        d,
-                        stats.indexed_chunks,
-                        stats.skipped_chunks,
-                        stats.deleted_chunks,
-                    )
             except asyncio.CancelledError:
                 raise
+            except RetryableError as exc:
+                # The pre-write namespace prepass failed the whole run before
+                # any durable write (issue #2018) — nothing was indexed, so a
+                # re-walk retries every file, not a partial remainder.
+                if attempt < _BACKFILL_MAX_ATTEMPTS:
+                    delay = _BACKFILL_RETRY_BASE_S * 2 ** (attempt - 1)
+                    logger.warning(
+                        "Startup backfill %s: retryable failure (%s); "
+                        "retrying in %.0fs (attempt %d/%d)",
+                        d,
+                        exc,
+                        delay,
+                        attempt,
+                        _BACKFILL_MAX_ATTEMPTS,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(
+                    "Startup backfill failed for %s after %d attempt(s): %s",
+                    d,
+                    attempt,
+                    exc,
+                )
+                return indexed
             except Exception as exc:
                 logger.error("Startup backfill failed for %s: %s", d, exc)
-        logger.info("Startup backfill complete: %d new chunks indexed", total_indexed)
+                return indexed
+
+            indexed += stats.indexed_chunks
+            self._log_backfill_stats(d, stats, reported)
+            if not stats.retryable_errors:
+                return indexed
+            if attempt < _BACKFILL_MAX_ATTEMPTS:
+                delay = _BACKFILL_RETRY_BASE_S * 2 ** (attempt - 1)
+                logger.warning(
+                    "Startup backfill %s: %d file(s) failed retryably; "
+                    "retrying in %.0fs (attempt %d/%d): %s",
+                    d,
+                    len(stats.retryable_errors),
+                    delay,
+                    attempt,
+                    _BACKFILL_MAX_ATTEMPTS,
+                    "; ".join(stats.retryable_errors),
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    "Startup backfill %s: %d file(s) still failing retryably "
+                    "after %d attempt(s): %s",
+                    d,
+                    len(stats.retryable_errors),
+                    attempt,
+                    "; ".join(stats.retryable_errors),
+                )
+        return indexed
+
+    def _log_backfill_stats(self, d: Path, stats: IndexingStats, reported: set[str]) -> None:
+        """Per-attempt summary lines for one root's walk.
+
+        ``reported`` accumulates the blocked paths and permanent errors this
+        root has already named, so a re-walk driven by a *retryable* file
+        doesn't reprint them (issue #2021). Mutated in place — the caller
+        keeps one set per root.
+        """
+        blocked_paths = [p for p in stats.blocked_paths if p not in reported]
+        if blocked_paths:
+            # ADR-0006 PR-A: secret-bearing files skipped during
+            # backfill — name them so the log is actionable.
+            reported.update(blocked_paths)
+            logger.warning(
+                "Startup backfill %s: %d file(s) blocked by redaction guard: %s",
+                d,
+                len(blocked_paths),
+                ", ".join(blocked_paths),
+            )
+        # Retryable entries get their own retry-status line in
+        # ``_backfill_one_dir``; repeating them here would log the same
+        # failure twice per attempt at two different severities.
+        retryable = set(stats.retryable_errors)
+        other_errors = [
+            e
+            for e in stats.errors
+            if "redaction_blocked" not in e and e not in retryable and e not in reported
+        ]
+        if other_errors:
+            reported.update(other_errors)
+            # Non-redaction per-file failures/skips (too-large, binary,
+            # backend errors) — previously dropped. One aggregated line
+            # per dir bounds the per-restart log noise.
+            logger.warning(
+                "Startup backfill %s: %d file(s) skipped or failed: %s",
+                d,
+                len(other_errors),
+                "; ".join(other_errors),
+            )
+        if stats.indexed_chunks or stats.deleted_chunks:
+            logger.info(
+                "Startup backfill %s: indexed=%d skipped=%d deleted=%d",
+                d,
+                stats.indexed_chunks,
+                stats.skipped_chunks,
+                stats.deleted_chunks,
+            )
 
     async def _process_events(self) -> None:
         """Consume changed file paths with batch debouncing.
