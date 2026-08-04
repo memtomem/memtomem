@@ -1964,11 +1964,18 @@ class TestEditChunkNamespaceLookupFailure:
 
 
 class TestDeleteChunk:
-    async def test_delete_chunk(self, client: AsyncClient):
+    async def test_delete_chunk(self, app, client: AsyncClient, tmp_path: Path):
+        chunk = _make_test_chunk(source=str(tmp_path / "missing.md"))
+        app.state.storage.get_chunk = AsyncMock(
+            side_effect=[chunk, chunk, chunk, chunk, None]
+        )
+
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
         assert resp.status_code == 200
         data = resp.json()
         assert data["deleted"] == 1
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
 
     @staticmethod
     def _real_source_chunk(app, tmp_path: Path):
@@ -1986,8 +1993,10 @@ class TestDeleteChunk:
                 base.metadata, source_file=source, start_line=1, end_line=3
             ),
         )
-        app.state.storage.get_chunk.return_value = chunk
-        return source
+        # Route lookup, unlocked + fresh lookups in ``locked_source_chunk``,
+        # then the post-condition probe after the forced re-index.
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, None])
+        return source, chunk
 
     async def test_delete_passes_the_files_namespace_to_the_forced_reindex(
         self, app, client: AsyncClient, tmp_path: Path
@@ -2014,7 +2023,7 @@ class TestDeleteChunk:
         caller was told the delete succeeded."""
         from memtomem.errors import NamespaceResolutionError
 
-        source = self._real_source_chunk(app, tmp_path)
+        source, _chunk = self._real_source_chunk(app, tmp_path)
         before = source.read_text(encoding="utf-8")
         app.state.index_engine.effective_namespace_for = AsyncMock(
             side_effect=NamespaceResolutionError("store down")
@@ -2025,6 +2034,116 @@ class TestDeleteChunk:
         assert resp.status_code == 503, resp.text
         app.state.storage.delete_chunks.assert_not_awaited()
         assert source.read_text(encoding="utf-8") == before
+
+    @pytest.mark.parametrize(
+        ("start_line", "end_line"),
+        [(0, 0), (1, 999)],
+        ids=["missing-provenance", "stale-provenance"],
+    )
+    async def test_delete_refuses_unusable_source_provenance_without_index_fallback(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        start_line: int,
+        end_line: int,
+    ):
+        import dataclasses
+
+        source, chunk = self._real_source_chunk(app, tmp_path)
+        chunk = dataclasses.replace(
+            chunk,
+            metadata=dataclasses.replace(
+                chunk.metadata, start_line=start_line, end_line=end_line
+            ),
+        )
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk])
+        before = source.read_text(encoding="utf-8")
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 409, resp.text
+        app.state.storage.delete_chunks.assert_not_awaited()
+        assert source.read_text(encoding="utf-8") == before
+
+    async def test_delete_refuses_source_stat_error_without_index_fallback(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        source, chunk = self._real_source_chunk(app, tmp_path)
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk])
+        before = source.read_text(encoding="utf-8")
+        real_stat = Path.stat
+
+        def denied(path: Path, *args, **kwargs):
+            if path == source:
+                raise PermissionError("denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", denied)
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 503, resp.text
+        app.state.storage.delete_chunks.assert_not_awaited()
+        assert source.read_text(encoding="utf-8") == before
+
+    async def test_delete_refuses_source_write_error_without_index_fallback(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        source, _chunk = self._real_source_chunk(app, tmp_path)
+        before = source.read_text(encoding="utf-8")
+
+        def denied(*_args, **_kwargs):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr("memtomem.web.routes.chunks.remove_lines", denied)
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 503, resp.text
+        app.state.storage.delete_chunks.assert_not_awaited()
+        assert source.read_text(encoding="utf-8") == before
+
+    @pytest.mark.parametrize("reindex_outcome", ["raises", "reports-errors"])
+    async def test_delete_verifies_and_cleans_the_row_after_reindex_failure(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        reindex_outcome: str,
+    ):
+        source, chunk = self._real_source_chunk(app, tmp_path)
+        app.state.storage.get_chunk = AsyncMock(
+            side_effect=[chunk, chunk, chunk, chunk, None]
+        )
+        if reindex_outcome == "raises":
+            app.state.index_engine.index_file = AsyncMock(side_effect=RuntimeError("boom"))
+        else:
+            app.state.index_engine.index_file = AsyncMock(
+                return_value=IndexingStats(0, 0, 0, 0, 0, 0.0, errors=("boom",))
+            )
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 200, resp.text
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        assert "first" not in source.read_text(encoding="utf-8")
+
+    async def test_delete_reports_partial_failure_when_index_cleanup_does_not_finish(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        source, chunk = self._real_source_chunk(app, tmp_path)
+        app.state.storage.get_chunk = AsyncMock(
+            side_effect=[chunk, chunk, chunk, chunk]
+        )
+        app.state.index_engine.index_file = AsyncMock(side_effect=RuntimeError("reindex failed"))
+        app.state.storage.delete_chunks = AsyncMock(side_effect=RuntimeError("delete failed"))
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 500, resp.text
+        assert "source entry was removed" in resp.json()["detail"]
+        assert "first" not in source.read_text(encoding="utf-8")
 
     async def test_delete_chunk_not_found(self, app, client: AsyncClient):
         app.state.storage.get_chunk.return_value = None
@@ -2102,7 +2221,7 @@ class TestDeleteChunk:
             created_at=chunk.created_at,
             updated_at=chunk.updated_at,
         )
-        app.state.storage.get_chunk.return_value = chunk
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, None])
 
         resp = await client.delete(
             f"/api/chunks/{CHUNK_ID}",
