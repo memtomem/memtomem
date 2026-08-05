@@ -46,12 +46,13 @@ def test_no_store_locales_are_explicitly_excluded() -> None:
     assert set(manifest.excluded) == {"/locales/en.json", "/locales/ko.json"}
     assert all((scm.STATIC_DIR / path.removeprefix("/")).is_file() for path in manifest.excluded)
     i18n = (scm.STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
-    assert re.search(
-        r"fetch\s*\(\s*`/locales/\$\{lang\}\.json`\s*,\s*"
-        r"\{[^}]*\bcache\s*:\s*['\"]no-store['\"][^}]*\}\s*\)",
+    locale_fetch = re.search(
+        r"fetch\s*\(\s*(?P<url>[^,)]*/locales/[^,)]*\.json[^,)]*)\s*,\s*"
+        r"\{(?P<options>[^}]*)\}\s*\)",
         i18n,
-        re.DOTALL,
     )
+    assert locale_fetch is not None
+    assert re.search(r"\bcache\s*:\s*['\"]no-store['\"]", locale_fetch.group("options"))
 
 
 def test_changed_bytes_with_the_same_public_version_fail(tmp_path: Path) -> None:
@@ -179,6 +180,8 @@ def test_preload_conflict_reports_only_the_actual_problem(
 
     assert len(references) == 2
     assert errors == ["/a.js: conflicting public versions 1 and 2 (fixture.html)"]
+    with pytest.raises(scm.StaticCacheManifestError, match="conflicting public versions"):
+        scm.updated_manifest(manifest, references, static_dir=static)
 
 
 def test_updater_refuses_orphan_manifest_entries(tmp_path: Path) -> None:

@@ -5,6 +5,8 @@ module binds each value to the SHA-256 of the exact bytes it names, so an asset
 edit cannot silently reuse a warm-cache URL.  The checked-in manifest keeps a
 small append-only history per path; validation needs no Git base and therefore
 runs the same way in a source archive, local checkout, and CI.
+Manifest keys remain root-relative URLs under the ``static/`` mount even though
+the manifest itself lives beside that directory and is not publicly served.
 """
 
 from __future__ import annotations
@@ -107,6 +109,19 @@ def _validate_digest(digest: object) -> str:
     return digest
 
 
+def _exclusion_schema_errors(asset_paths: set[str], excluded_paths: set[str]) -> list[str]:
+    errors: list[str] = []
+    overlap = sorted(asset_paths & excluded_paths)
+    if overlap:
+        errors.append(f"paths cannot appear in both assets and excluded: {overlap}")
+    cacheable = sorted(
+        path for path in excluded_paths if PurePosixPath(path).suffix.lower() in {".js", ".css"}
+    )
+    if cacheable:
+        errors.append(f"excluded paths must not be cacheable JS/CSS assets: {cacheable}")
+    return errors
+
+
 def load_manifest(path: Path = MANIFEST_PATH) -> StaticCacheManifest:
     """Load and strictly validate the cache-version manifest."""
 
@@ -152,17 +167,13 @@ def load_manifest(path: Path = MANIFEST_PATH) -> StaticCacheManifest:
     excluded: dict[str, str] = {}
     for raw_path, reason in raw_excluded.items():
         excluded_path = _validate_url_path(raw_path)
-        if excluded_path in assets:
-            raise StaticCacheManifestError(
-                f"{excluded_path}: path cannot appear in both assets and excluded"
-            )
-        if PurePosixPath(excluded_path).suffix.lower() in {".js", ".css"}:
-            raise StaticCacheManifestError(
-                f"{excluded_path}: excluded paths must not be cacheable JS/CSS assets"
-            )
         if not isinstance(reason, str) or not reason.strip():
             raise StaticCacheManifestError(f"{excluded_path}: exclusion reason must be non-empty")
         excluded[excluded_path] = reason
+
+    exclusion_errors = _exclusion_schema_errors(set(assets), set(excluded))
+    if exclusion_errors:
+        raise StaticCacheManifestError("; ".join(exclusion_errors))
 
     return StaticCacheManifest(assets=assets, excluded=excluded)
 
@@ -272,17 +283,8 @@ def _reference_versions(
 
 
 def _exclusion_errors(manifest: StaticCacheManifest, *, static_dir: Path = STATIC_DIR) -> list[str]:
-    errors: list[str] = []
-    recorded = set(manifest.assets)
     excluded = set(manifest.excluded)
-    overlap = sorted(recorded & excluded)
-    if overlap:
-        errors.append(f"paths cannot appear in both assets and excluded: {overlap}")
-    cacheable = sorted(
-        path for path in excluded if PurePosixPath(path).suffix.lower() in {".js", ".css"}
-    )
-    if cacheable:
-        errors.append(f"excluded paths must not be cacheable JS/CSS assets: {cacheable}")
+    errors = _exclusion_schema_errors(set(manifest.assets), excluded)
     missing = sorted(
         path for path in excluded if not (static_dir / path.removeprefix("/")).is_file()
     )
@@ -379,7 +381,7 @@ def updated_manifest(
         raise StaticCacheManifestError("; ".join(errors))
 
     assets = {path: dict(versions) for path, versions in manifest.assets.items()}
-    for asset_path in sorted(referenced):
+    for asset_path in sorted(ref_versions):
         version = ref_versions[asset_path]
         digest = file_sha256(static_dir / asset_path.removeprefix("/"))
         history = assets.get(asset_path)
