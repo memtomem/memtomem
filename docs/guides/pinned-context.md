@@ -24,8 +24,10 @@ mm pinned set team-policy --scope project_shared \
   --confirm-project-shared --content "Run the release checklist before tagging."
 ```
 
-Agent-specific blocks use `--agent NAME`. For the same block id, agent-specific
-beats general and `project_local` beats `project_shared`, which beats `user`.
+Agent-specific blocks use `--agent-id NAME` (or the `-a` short form). The legacy
+`--agent NAME` spelling remains accepted for script compatibility. For the same
+block id, agent-specific beats general and `project_local` beats
+`project_shared`, which beats `user`.
 One block is limited to 2,000 characters. The 6,000-character value is the
 pinned portion of one compose operation, not a global storage limit; the
 default complete composed bundle is limited to 12,000 characters. A block is

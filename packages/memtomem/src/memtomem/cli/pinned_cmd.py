@@ -13,6 +13,14 @@ import click
 from memtomem.config import TargetScope
 
 _SCOPES = list(get_args(TargetScope))
+_AGENT_ID_OPTION = click.option(
+    "--agent-id",
+    "--agent",
+    "-a",
+    "agent_id",
+    default=None,
+    help="Agent identifier",
+)
 
 
 @click.group("pinned")
@@ -33,7 +41,7 @@ async def _store_context():
 
 
 @pinned.command("list")
-@click.option("--agent", "agent_id", default=None)
+@_AGENT_ID_OPTION
 @click.option("--json", "as_json", is_flag=True)
 def list_blocks(agent_id: str | None, as_json: bool) -> None:
     """List effective blocks after agent and scope shadowing."""
@@ -56,7 +64,7 @@ async def _list_blocks(agent_id: str | None, as_json: bool) -> None:
 @pinned.command("get")
 @click.argument("block_id")
 @click.option("--scope", type=click.Choice(_SCOPES), default="user")
-@click.option("--agent", "agent_id", default=None)
+@_AGENT_ID_OPTION
 def get_block(block_id: str, scope: TargetScope, agent_id: str | None) -> None:
     """Print one block from an exact scope and agent location."""
     asyncio.run(_get_block(block_id, scope, agent_id))
@@ -77,7 +85,7 @@ async def _get_block(block_id: str, scope: TargetScope, agent_id: str | None) ->
 @click.option("--description", default="")
 @click.option("--priority", type=int, default=0)
 @click.option("--scope", type=click.Choice(_SCOPES), default="user")
-@click.option("--agent", "agent_id", default=None)
+@_AGENT_ID_OPTION
 @click.option("--confirm-project-shared", is_flag=True)
 @click.option("--force-unsafe", is_flag=True)
 def set_block(
@@ -149,7 +157,7 @@ async def _set_block(
 @pinned.command("delete")
 @click.argument("block_id")
 @click.option("--scope", type=click.Choice(_SCOPES), default="user")
-@click.option("--agent", "agent_id", default=None)
+@_AGENT_ID_OPTION
 @click.option("--confirm-project-shared", is_flag=True)
 def delete_block(
     block_id: str,
@@ -187,7 +195,7 @@ async def _delete_block(
 
 @pinned.command("compose")
 @click.argument("query", required=False)
-@click.option("--agent", "agent_id", default=None)
+@_AGENT_ID_OPTION
 @click.option("--max-chars", type=click.IntRange(min=1), default=12_000)
 @click.option("--top-k", type=click.IntRange(min=1), default=10)
 @click.option(
