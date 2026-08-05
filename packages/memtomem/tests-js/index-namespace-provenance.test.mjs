@@ -63,6 +63,12 @@ describe('Index result namespace provenance', () => {
     );
   });
 
+  it('renders a bare namespace value for an explicitly labeled group', () => {
+    expect(window.renderResolvedNamespaces(['bare-ns'], { mode: 'bare' })).toBe(
+      window.t('index.ns_render.single_applied', { ns: 'bare-ns' }),
+    );
+  });
+
   it('renders a privacy-blocked-only namespace as preview', () => {
     const text = render(indexResult({
       resolved_namespaces: ['blocked-ns'],

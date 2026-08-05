@@ -86,10 +86,11 @@ def test_changed_static_assets_bump_cache_versions() -> None:
     # v=141 / watchdog v=22 add the #1983 malformed-matcher banner (PR #1986).
     assert "/style.css?v=141" in html
     assert "/settings-hooks-watchdog.js?v=22" in html
-    # Issue #2026 changes the shared indexing-error classifier plus its Settings
-    # and Sources consumers; all three scripts must invalidate cached copies
-    # together or the cross-file helper calls can fail at runtime.
+    # Issue #2035 adds the applied/preview namespace-provenance renderer.
     assert "/app.js?v=159" in html
+    # Issue #2026 changes the shared indexing-error classifier plus its Settings
+    # and Sources consumers; all three consumers must invalidate cached copies
+    # together or their cross-file helper calls can fail at runtime.
     assert "/settings-harness.js?v=9" in html
     assert "/settings-config.js?v=20" in html
     assert "/sources-memory-dirs.js?v=16" in html

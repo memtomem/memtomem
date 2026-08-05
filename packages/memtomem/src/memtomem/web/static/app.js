@@ -975,8 +975,9 @@ function debounce(fn, ms) {
 // Render a list of namespaces (preview placeholder OR result-row echo)
 // using the ``index.ns_render.*`` i18n family. ``mode`` selects the
 // suffix variant: ``'preview'`` for the placeholder hint,
-// ``'applied'`` for a proven post-index result. Preview is the conservative
-// default; every production call site still passes its mode explicitly.
+// ``'applied'`` for a proven post-index result, or ``'bare'`` when an outer
+// label already communicates provenance. Preview is the conservative default;
+// every production call site still passes its mode explicitly.
 // ``namespaces`` is a
 // distinct list of ``str | null`` (null = untagged ``default`` carve-out).
 // ``truncated`` and ``scanned`` come from the preview endpoint; passing
@@ -984,16 +985,17 @@ function debounce(fn, ms) {
 function renderResolvedNamespaces(namespaces, { truncated = false, scanned = 0, mode = 'preview' } = {}) {
   const list = Array.isArray(namespaces) ? namespaces : [];
   const isUntagged = list.length === 0 || (list.length === 1 && list[0] === null);
+  const copyMode = mode === 'bare' ? 'applied' : mode;
   let body;
   if (isUntagged) {
-    body = t(`index.ns_render.untagged_${mode}`);
+    body = t(`index.ns_render.untagged_${copyMode}`);
   } else if (list.length === 1) {
-    body = t(`index.ns_render.single_${mode}`, { ns: list[0] });
+    body = t(`index.ns_render.single_${copyMode}`, { ns: list[0] });
   } else {
     // Mixed list may contain a trailing null sentinel; render it as
     // ``(untagged)`` inline so the joined display matches the rest.
     const display = list.map(n => n === null ? t('index.ns_render.untagged_applied') : n);
-    body = t(`index.ns_render.multi_${mode}`, { list: display.join(', '), n: list.length });
+    body = t(`index.ns_render.multi_${copyMode}`, { list: display.join(', '), n: list.length });
   }
   if (truncated && scanned > 0) {
     body += t('index.ns_render.truncated_suffix', { scanned });
@@ -1031,7 +1033,7 @@ function renderIndexResolvedNamespaces(result) {
     applied: renderResolvedNamespaces(applied, { mode: 'applied' }),
     // The mixed template labels this group explicitly, so render its values
     // without a second preview suffix.
-    preview: renderResolvedNamespaces(previewOnly, { mode: 'applied' }),
+    preview: renderResolvedNamespaces(previewOnly, { mode: 'bare' }),
   });
 }
 
