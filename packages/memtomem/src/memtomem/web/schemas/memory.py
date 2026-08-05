@@ -138,6 +138,9 @@ class IndexResponse(BaseModel):
     # should not.
     retryable_errors: list[str] = []
     resolved_namespaces: list[str | None] = []
+    # Authoritative subset of ``resolved_namespaces``. Values outside this
+    # subset are preview-only bulk fallbacks.
+    applied_namespaces: list[str | None] = []
     # ADR-0006 PR-A: files skipped by the secret-redaction gate during bulk
     # indexing (count + paths). Zero/empty on the common path.
     blocked_files: int = 0

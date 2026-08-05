@@ -343,6 +343,7 @@
   "index.ns_render.untagged_applied": "(untagged)",
   "index.ns_render.single_applied": "{ns}",
   "index.ns_render.multi_applied": "{list} ({n} namespaces)",
+  "index.ns_render.mixed": "Applied: {applied}; Preview only: {preview}",
   "index.ns_render.truncated_suffix": ", scanned {scanned}+",
   "index.upload_hint": "Drop files here or",
   "index.upload_browse": "browse",

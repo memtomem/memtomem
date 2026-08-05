@@ -1645,6 +1645,7 @@ async def trigger_index(
         errors=list(stats.errors) if stats.errors else [],
         retryable_errors=list(stats.retryable_errors),
         resolved_namespaces=list(stats.resolved_namespaces),
+        applied_namespaces=list(stats.applied_namespaces),
         blocked_files=stats.blocked_files,
         blocked_paths=list(stats.blocked_paths),
         blocked_project_shared_files=stats.blocked_project_shared_files,

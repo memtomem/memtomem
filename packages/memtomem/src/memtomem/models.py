@@ -259,6 +259,15 @@ class IndexingStats:
     # ``RetryableError`` — e.g. a mid-run namespace lookup the store could
     # not answer (issue #2018). ``gather(return_exceptions=True)`` erases
     # exception types when a bulk run flattens per-file failures; this field
-    # keeps "retry this" tellable apart from "this file is broken". Appended
-    # last so positional construction stays stable.
+    # keeps "retry this" tellable apart from "this file is broken". Kept
+    # defaulted so positional construction stays stable.
     retryable_errors: tuple[str, ...] = ()
+    # Distinct, stable-sorted subset of ``resolved_namespaces`` that is known
+    # to have been applied by a successful namespace-bearing upsert in this
+    # run. Values present only in ``resolved_namespaces`` are preview-only
+    # fallbacks from unchanged, skipped, blocked, or failed bulk files. This is
+    # value-level provenance: when one file applies a namespace and another
+    # only previews the same value, the namespace appears here once. ``None``
+    # remains the valid untagged carve-out. Appended last for positional
+    # construction compatibility.
+    applied_namespaces: tuple[str | None, ...] = ()

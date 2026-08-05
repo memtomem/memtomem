@@ -3366,12 +3366,9 @@ class TestIndex:
         resp = await client.post("/api/index", json={"path": "/etc"})
         assert resp.status_code == 200
 
-    async def test_trigger_index_returns_resolved_namespaces(self, app, client: AsyncClient):
-        """``IndexResponse.resolved_namespaces`` must echo what the engine
-        actually applied across the file set — including the rule-variance
-        case where a folder splits into multiple namespaces. The list
-        shape is deliberate; collapsing to a single value would silently
-        misrepresent multi-NS folders."""
+    async def test_trigger_index_returns_namespace_provenance(self, app, client: AsyncClient):
+        """The response preserves the hybrid namespace union and identifies
+        its authoritative applied subset without collapsing multi-NS runs."""
         app.state.index_engine.index_path = AsyncMock(
             return_value=IndexingStats(
                 total_files=2,
@@ -3381,12 +3378,14 @@ class TestIndex:
                 deleted_chunks=0,
                 duration_ms=80.0,
                 resolved_namespaces=("ns-alpha", "ns-beta"),
+                applied_namespaces=("ns-alpha",),
             )
         )
         resp = await client.post("/api/index", json={"path": "/tmp/memories"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["resolved_namespaces"] == ["ns-alpha", "ns-beta"]
+        assert data["applied_namespaces"] == ["ns-alpha"]
 
     async def test_preview_namespace_leaf_file(self, app, client: AsyncClient):
         """Single-file path → single-element list (here: ``notes``)."""

@@ -514,6 +514,7 @@ class TestExcludePatterns:
         )
         assert events[-1]["type"] == "complete"
         assert events[-1]["total_files"] == 0
+        assert events[-1]["applied_namespaces"] == []
 
 
 # ===========================================================================
@@ -1675,6 +1676,7 @@ class TestBulkNamespacePrepass:
         complete = next(ev for ev in events if ev["type"] == "complete")
         assert complete["errors"] == []
         assert complete["resolved_namespaces"] == ["aaa", None]
+        assert complete["applied_namespaces"] == ["aaa", None]
         chunks = await components.storage.list_chunks_by_source(b)
         assert any("newer entry" in c.content for c in chunks)
         assert await components.storage.namespaces_for_source(b) == ["aaa"]
@@ -1709,6 +1711,7 @@ class TestBulkNamespacePrepass:
 
         monkeypatch.undo()
         assert stats.resolved_namespaces == ("new",)
+        assert stats.applied_namespaces == ("new",)
         assert await components.storage.namespaces_for_source(fp) == ["new"]
 
     async def test_index_file_result_marks_only_namespace_bearing_upserts(
@@ -1742,8 +1745,33 @@ class TestBulkNamespacePrepass:
 
         assert first.indexed_chunks > 0
         assert first.resolved_namespaces == (None,)
+        assert first.applied_namespaces == (None,)
         assert second.indexed_chunks == 0
         assert second.resolved_namespaces == ()
+        assert second.applied_namespaces == ()
+
+    async def test_bulk_unchanged_and_delete_only_namespaces_are_preview_only(
+        self, components, memory_dir
+    ):
+        """Bulk keeps the historical namespace echo for no-write outcomes,
+        but neither an unchanged pass nor a delete-only pass is authoritative."""
+        engine = components.index_engine
+        fp = memory_dir / "no-write.md"
+        fp.write_text("# N\n\ncontent", encoding="utf-8")
+
+        first = await engine.index_path(memory_dir, recursive=True)
+        unchanged = await engine.index_path(memory_dir, recursive=True)
+        fp.write_text("", encoding="utf-8")
+        delete_only = await engine.index_path(memory_dir, recursive=True)
+
+        assert first.applied_namespaces == (None,)
+        assert unchanged.indexed_chunks == 0
+        assert unchanged.resolved_namespaces == (None,)
+        assert unchanged.applied_namespaces == ()
+        assert delete_only.indexed_chunks == 0
+        assert delete_only.deleted_chunks > 0
+        assert delete_only.resolved_namespaces == (None,)
+        assert delete_only.applied_namespaces == ()
 
     async def test_bulk_echo_keeps_positional_fallbacks_around_exceptions(
         self, components, memory_dir, monkeypatch
@@ -1784,6 +1812,43 @@ class TestBulkNamespacePrepass:
         stats = await engine.index_path(memory_dir, recursive=True)
 
         assert stats.resolved_namespaces == ("actual-c", "fallback-a", "fallback-b")
+        assert stats.applied_namespaces == ("actual-c",)
+        assert set(stats.applied_namespaces) <= set(stats.resolved_namespaces)
+
+    async def test_bulk_applied_subset_collapses_same_namespace_overlap(
+        self, components, memory_dir, monkeypatch
+    ):
+        """A namespace applied by one file is not preview-only merely because
+        another failed file contributed the same preview value."""
+        engine = components.index_engine
+        for name in ("a.md", "b.md"):
+            (memory_dir / name).write_text(f"# {name}\n\ncontent", encoding="utf-8")
+
+        monkeypatch.setattr(
+            engine,
+            "_resolve_namespaces_per_file",
+            AsyncMock(return_value=["shared", "shared"]),
+        )
+
+        async def fake_index_file(fp, *_args, **_kwargs):
+            if fp.name == "a.md":
+                raise RuntimeError("raised failure")
+            return {
+                "total": 1,
+                "indexed": 1,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [],
+                "resolved_namespace": "shared",
+            }
+
+        monkeypatch.setattr(engine, "_index_file", fake_index_file)
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.resolved_namespaces == ("shared",)
+        assert stats.applied_namespaces == ("shared",)
+        assert set(stats.applied_namespaces) <= set(stats.resolved_namespaces)
 
     async def test_a_mid_run_lookup_failure_writes_nothing_for_that_file(
         self, components, memory_dir, monkeypatch
@@ -1860,6 +1925,7 @@ class TestBulkNamespacePrepass:
 
         complete = next(ev for ev in events if ev["type"] == "complete")
         assert complete["resolved_namespaces"] == ["ns-alpha", None]
+        assert complete["applied_namespaces"] == ["ns-alpha", None]
 
     async def test_a_mid_run_lookup_failure_is_flagged_retryable(
         self, components, memory_dir, monkeypatch
@@ -1881,6 +1947,7 @@ class TestBulkNamespacePrepass:
         assert stats.retryable_errors != ()
         assert stats.retryable_errors == stats.errors
         assert stats.resolved_namespaces == (None,)
+        assert stats.applied_namespaces == ()
 
     async def test_stream_complete_event_flags_mid_run_lookup_failures_retryable(
         self, components, memory_dir, monkeypatch
@@ -1901,6 +1968,7 @@ class TestBulkNamespacePrepass:
         assert complete["retryable_errors"] != []
         assert complete["retryable_errors"] == complete["errors"]
         assert complete["resolved_namespaces"] == [None]
+        assert complete["applied_namespaces"] == []
 
     async def test_a_permanent_per_file_failure_is_not_flagged_retryable(
         self, components, memory_dir, monkeypatch
