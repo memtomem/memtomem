@@ -535,7 +535,7 @@ class TestCheckServerLivenessStoreScope:
         one branch fails here rather than as a silent fail-open."""
         import tempfile
 
-        from memtomem._runtime_paths import candidate_runtime_dirs, runtime_dir
+        from memtomem._runtime_paths import _is_safe_dir, candidate_runtime_dirs, runtime_dir
 
         uid = os.geteuid() if hasattr(os, "geteuid") else 0
         dirs = candidate_runtime_dirs()
@@ -543,11 +543,41 @@ class TestCheckServerLivenessStoreScope:
         assert dirs[0] == runtime_dir(), "caller's own branch must be probed first"
         assert Path(tempfile.gettempdir()) / f"memtomem-{uid}" in dirs
         if os.name != "nt":
-            assert Path(f"/run/user/{uid}") / "memtomem" in dirs, (
-                "the systemd location must be probed for a server whose "
-                "XDG_RUNTIME_DIR this process cannot read"
-            )
+            # Gated on the same safety check ``runtime_dir`` applies to
+            # ``$XDG_RUNTIME_DIR``: a base that fails it is one no server
+            # could have resolved to, and probing an unsearchable one would
+            # fail closed and refuse every destructive command (#2003 review).
+            systemd = Path(f"/run/user/{uid}")
+            if _is_safe_dir(systemd):
+                assert systemd / "memtomem" in dirs, (
+                    "the systemd location must be probed for a server whose "
+                    "XDG_RUNTIME_DIR this process cannot read"
+                )
+            else:
+                assert systemd / "memtomem" not in dirs, (
+                    "an unusable systemd base must not be probed — it fails "
+                    "closed and blocks uninstall with no user remedy"
+                )
         assert len(dirs) == len(set(dirs)), "candidates must be de-duplicated"
+
+    def test_unresolvable_pid_candidates_fail_closed(self, monkeypatch: pytest.MonkeyPatch):
+        """A probe that cannot enumerate *where* a server might be has no
+        evidence that none exists, so it must refuse rather than narrow the
+        candidate set to the caller's own path (#2003 review)."""
+        import memtomem.cli._liveness as liveness
+
+        def _boom():
+            raise OSError("no temp dir")
+
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", _boom)
+
+        scoped = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
+        agnostic = liveness.check_server_liveness()
+        states = liveness.enumerate_server_liveness()
+
+        assert scoped.alive is True and scoped.probe_error is not None
+        assert agnostic.alive is True and agnostic.probe_error is not None
+        assert any(s.probe_error is not None for s in states)
 
     def test_store_agnostic_probe_fails_closed_on_glob_error(
         self, rt: Path, monkeypatch: pytest.MonkeyPatch

@@ -36,10 +36,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the CLI, or the reverse) was reported dead while holding the WAL. Probes now
   walk every runtime directory a server could have chosen: the caller's own,
   the `{gettempdir()}/memtomem-{uid}` fallback, and `/run/user/{uid}/memtomem`
-  on POSIX. This is store-attributable evidence, so unlike the legacy alias it
-  gates the right store. A server under a *non-standard* `XDG_RUNTIME_DIR` the
-  CLI cannot read remains outside every pid-file probe's reach — the instance
-  registry (#1935) is the gate that covers it.
+  on POSIX (that last one only when its base passes the same safety gate
+  `$XDG_RUNTIME_DIR` must pass — an unusable base is one no server could have
+  resolved to, and probing it would fail closed and refuse every destructive
+  command). This is store-attributable evidence, so unlike the legacy alias it
+  gates the right store.
+
+  Known limit, tracked separately: a server under a *non-standard*
+  `XDG_RUNTIME_DIR` that the CLI's environment does not name remains outside
+  this reach, and the instance registry does **not** cover it either — it
+  anchors on the same caller-local `runtime_dir()`. Closing that needs one
+  environment-independent per-user anchor shared by the pid files, the
+  registry, and the lifecycle barrier.
 
 - **A namespaced write goes to that namespace's own day file** (#2005,
   ADR-0032). The default target was `{date}.md` for everyone, and a namespace

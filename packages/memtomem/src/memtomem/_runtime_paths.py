@@ -204,10 +204,17 @@ def candidate_runtime_dirs() -> list[Path]:
     3. ``/run/user/{uid}/memtomem`` on POSIX, for the reverse case — we
        have no ``$XDG_RUNTIME_DIR`` to read but the server did. This is
        the systemd location the variable holds on every distro that sets
-       it, so it is a deterministic address rather than a guess. Probing
-       is read-only and its failure direction is fail-closed, so an
-       unrelated or non-existent path here can only cost a refusal, never
-       a wrongful delete.
+       it, so it is a deterministic address rather than a guess.
+
+       Included only when its base passes :func:`_is_safe_dir`, the same
+       gate :func:`runtime_dir` applies to ``$XDG_RUNTIME_DIR``. A base
+       that fails it is one no server could have resolved *to*, so probing
+       it proves nothing — and probing it anyway is actively harmful: an
+       existing-but-unsearchable ``/run/user/{uid}`` makes ``Path.exists``
+       raise ``EACCES``, which fails closed and would refuse every scoped
+       destructive command with no remediation the user can act on
+       (#2003 review). A base that is simply absent is skipped the same
+       way, costing nothing.
 
     Writers must keep using :func:`ensure_runtime_dir`: there is exactly
     one correct directory to *write* to, and it is the one this
@@ -216,7 +223,9 @@ def candidate_runtime_dirs() -> list[Path]:
     uid = os.geteuid() if hasattr(os, "geteuid") else 0
     dirs = [runtime_dir(), Path(tempfile.gettempdir()) / f"memtomem-{uid}"]
     if os.name != "nt":
-        dirs.append(Path(f"/run/user/{uid}") / "memtomem")
+        systemd_base = Path(f"/run/user/{uid}")
+        if _is_safe_dir(systemd_base):
+            dirs.append(systemd_base / "memtomem")
     seen: list[Path] = []
     for d in dirs:
         if d not in seen:

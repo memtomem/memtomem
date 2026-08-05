@@ -37,7 +37,6 @@ import portalocker
 from memtomem._runtime_paths import (
     candidate_runtime_dirs,
     legacy_server_pid_path,
-    runtime_dir,
     server_pid_path,
     store_pid_digest,
     web_pid_path,
@@ -246,34 +245,49 @@ def _probe_legacy_gate() -> ServerState:
     return state
 
 
-def _runtime_pid_candidates(name: str) -> list[Path]:
+def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
     """Return ``name`` under every runtime dir a live server could have picked.
 
     A server started in a different context may have taken the other
     :func:`runtime_dir` branch — ``$XDG_RUNTIME_DIR`` set for the server
     (systemd user session) and unset for the CLI, or the reverse — so
     probing only the caller's own branch reports "dead" for a server that
-    is alive (#2003 review). Resolution failures degrade to the caller's
-    own path rather than raising: an unresolvable sibling is not evidence.
+    is alive (#2003 review).
+
+    Returns ``(paths, detail)`` with ``paths`` ``None`` when the candidate
+    set could not be resolved. Callers must fail closed on ``None`` rather
+    than fall back to the caller's own path: a probe that could not even
+    enumerate where a server might be has no evidence that none exists,
+    and silently narrowing the set would let a destructive command through
+    on an incomplete pass — the same contract :func:`_glob_server_pid_files`
+    keeps (#1949).
     """
     try:
-        return [rt / name for rt in candidate_runtime_dirs()]
-    except OSError:
-        return [runtime_dir() / name]
+        return [rt / name for rt in candidate_runtime_dirs()], ""
+    except OSError as exc:
+        return None, f"runtime dir candidates unresolved: {exc}"
 
 
 def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
     """Enumerate per-store ``server-*.pid`` files across both runtime dirs.
 
     Returns ``(files, detail)`` — ``files`` is ``None`` when enumeration
-    failed, with ``detail`` describing where/why. ``Path.glob`` on py3.12
-    can raise for an unsearchable runtime dir; callers must treat ``None``
-    as "could not enumerate" and fail closed (#1949) rather than conclude
-    no per-store server exists. A failure in *either* candidate directory
-    fails the whole enumeration — a directory we cannot search is not a
+    failed, with ``detail`` describing where/why. Callers must treat
+    ``None`` as "could not enumerate" and fail closed (#1949) rather than
+    conclude no per-store server exists, and a failure in *any* candidate
+    directory fails the whole pass: a directory we cannot search is not a
     directory we can call empty. The detail is captured here so the caller
     never re-resolves the runtime dir — if resolution itself was the
     failure, a second call would raise out of the fail-closed path.
+
+    Caveat, pre-dating #2003 and tracked separately: ``Path.glob``
+    *suppresses* the ``scandir`` errors it walks over, so an unreadable
+    candidate directory yields ``[]`` instead of raising and this
+    fail-closed branch does not fire for it. Discovery of unknown digests
+    is therefore fail-open; the named probes below (``server-<digest>.pid``
+    and the bare ``server.pid``) still fail closed because ``open()``
+    raises for real. Fixing that needs a ``scandir``-based walk that
+    surfaces the error.
     """
     try:
         dirs = candidate_runtime_dirs()
@@ -315,7 +329,18 @@ def enumerate_server_liveness() -> list[ServerState]:
         )
         candidates: list[Path] = []
     else:
-        candidates = [*globbed, *_runtime_pid_candidates("server.pid")]
+        bare, bare_detail = _runtime_pid_candidates("server.pid")
+        if bare is None:
+            states.append(
+                ServerState(
+                    alive=True,
+                    pid=None,
+                    pid_file=None,
+                    probe_error=f"could not resolve server.pid candidates ({bare_detail})",
+                )
+            )
+            bare = []
+        candidates = [*globbed, *bare]
 
     for pid_file in candidates:
         state = probe_pid_file(pid_file)
@@ -356,8 +381,16 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
     """
     digest = store_pid_digest(db_path) if db_path is not None else None
     if digest is not None:
-        scoped = _runtime_pid_candidates(server_pid_path(db_path).name)
-        for pid_file in (*scoped, *_runtime_pid_candidates("server.pid")):
+        scoped, scoped_detail = _runtime_pid_candidates(server_pid_path(db_path).name)
+        bare, bare_detail = _runtime_pid_candidates("server.pid")
+        if scoped is None or bare is None:
+            return ServerState(
+                alive=True,
+                pid=None,
+                pid_file=None,
+                probe_error=f"could not resolve pid candidates ({scoped_detail or bare_detail})",
+            )
+        for pid_file in (*scoped, *bare):
             state = probe_pid_file(pid_file)
             if state.alive:
                 return state
@@ -374,7 +407,15 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
             pid_file=None,
             probe_error=f"could not enumerate server-*.pid ({detail})",
         )
-    for pid_file in (*globbed, *_runtime_pid_candidates("server.pid")):
+    bare, bare_detail = _runtime_pid_candidates("server.pid")
+    if bare is None:
+        return ServerState(
+            alive=True,
+            pid=None,
+            pid_file=None,
+            probe_error=f"could not resolve server.pid candidates ({bare_detail})",
+        )
+    for pid_file in (*globbed, *bare):
         state = probe_pid_file(pid_file)
         if state.alive:
             return state
