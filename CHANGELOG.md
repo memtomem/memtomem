@@ -15,6 +15,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mm agent share --target` is unchanged because it selects a complete
   namespace rather than a bare agent id.
 
+- **The legacy `~/.memtomem/.server.pid` interlock is retired** (#2003).
+  The transition-era B1 lock existed to mutually exclude pre-0.1.25 servers —
+  Linux-only builds live for a ~2-day window (2026-04-22..24) — but it kept
+  the pid liveness gate user-global: every POSIX server whose `~/.memtomem/`
+  existed created the file and held a lifetime shared flock on it, so with two
+  servers on *different* stores under the same HOME, `mm uninstall` /
+  `mm reset` of one store refused because of the other store's server. New
+  servers no longer create or lock the legacy file, and the liveness gate now
+  refuses only on an *exclusive* holder (a genuine pre-0.1.25 server) or an
+  unclassifiable probe — a modern server's shared compatibility alias no
+  longer blocks work on an unrelated store. Every modern (0.1.26+) server is
+  independently gated by its own `server[-<digest>].pid`. A stale legacy file
+  is still inventoried and deleted by `mm uninstall`.
+
+  Removing the shared-alias gate exposed a pre-existing blind spot it had been
+  masking, fixed in the same change: liveness probes resolved only *one*
+  runtime directory — the one the calling environment produces — so a server
+  that ran in the other context (`$XDG_RUNTIME_DIR` set for it and unset for
+  the CLI, or the reverse) was reported dead while holding the WAL. Probes now
+  walk every runtime directory a server could have chosen: the caller's own,
+  the `{gettempdir()}/memtomem-{uid}` fallback, and `/run/user/{uid}/memtomem`
+  on POSIX (that last one only when its base passes the same safety gate
+  `$XDG_RUNTIME_DIR` must pass — an unusable base is one no server could have
+  resolved to, and probing it would fail closed and refuse every destructive
+  command). This is store-attributable evidence, so unlike the legacy alias it
+  gates the right store.
+
+  Known limit, tracked separately: a server under a *non-standard*
+  `XDG_RUNTIME_DIR` that the CLI's environment does not name remains outside
+  this reach, and the instance registry does **not** cover it either — it
+  anchors on the same caller-local `runtime_dir()`. Closing that needs one
+  environment-independent per-user anchor shared by the pid files, the
+  registry, and the lifecycle barrier.
+
 - **A namespaced write goes to that namespace's own day file** (#2005,
   ADR-0032). The default target was `{date}.md` for everyone, and a namespace
   is applied per `index_file` call across the *whole* file — so when a later

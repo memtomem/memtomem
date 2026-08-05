@@ -95,6 +95,12 @@ def home(tmp_path, monkeypatch):
     fake_tempdir = tmp_path / "tempdir"
     fake_tempdir.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(fake_tempdir))
+    # Pin the env vars too, not just ``tempfile.tempdir``: liveness probes
+    # walk the tempdir branch as well as the XDG one (#2003), and spawned
+    # child processes re-resolve it from the environment — an unpinned
+    # ``TMPDIR`` lets a developer's real running server gate these tests.
+    for _var in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(_var, str(fake_tempdir))
     set_home(monkeypatch, h)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
     monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", h / ".memtomem" / "config.json")
@@ -627,9 +633,12 @@ class TestRuntimeProfileImportPin:
 
 class TestServerAliveRefuses:
     def test_refuses_when_server_alive_at_legacy_path(self, home):
-        """Pre-#412 servers still write ``~/.memtomem/.server.pid``. The
-        mixed-version upgrade path (old server running, new uninstall)
-        must still refuse — the flock probe checks both locations.
+        """An *exclusive* holder of ``~/.memtomem/.server.pid`` is a
+        genuine pre-0.1.25 server and must still refuse — #2003 retired
+        the gate only for *shared* holders (modern compatibility aliases;
+        see ``test_proceeds_when_legacy_lock_held_shared``).
+        ``_hold_pid_lock`` takes ``LOCK_EX``, i.e. exactly the pre-0.1.25
+        posture.
 
         Cross-platform via portalocker (#817/#819). On Windows
         ``LockFileEx`` blocks ``read`` from other handles too, so
@@ -661,6 +670,38 @@ class TestServerAliveRefuses:
         # nothing deleted
         assert (state / "memtomem.db").exists()
         assert (state / "config.json").exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="legacy shared flock is POSIX-only")
+    def test_proceeds_when_legacy_lock_held_shared(self, home):
+        """#2003 headline: a *shared* legacy holder must not block uninstall.
+
+        A modern (0.1.26+, pre-#2003) server on *another* store under the
+        same HOME holds the compatibility ``LOCK_SH`` on
+        ``~/.memtomem/.server.pid``. That server is gated by its own
+        ``server[-<digest>].pid`` — which this store's probe rightly does
+        not see — so uninstall of this store must proceed.
+        """
+        import portalocker
+
+        state = _seed_state(home)
+        pid_file = state / ".server.pid"
+        pid_file.write_text("4242", encoding="utf-8")
+
+        holder = open(pid_file, "rb+")
+        try:
+            portalocker.lock(holder, portalocker.LOCK_SH | portalocker.LOCK_NB)
+            result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        finally:
+            try:
+                portalocker.unlock(holder)
+            except Exception:
+                pass
+            holder.close()
+
+        assert result.exit_code == 0, (
+            f"shared legacy alias must not gate uninstall (#2003); got: {result.output!r}"
+        )
+        assert not (state / "memtomem.db").exists()
 
     def test_refuses_when_server_alive_at_transitional_runtime_path(self, home):
         """A server started by a pre-#1990 version holds the flock at the
