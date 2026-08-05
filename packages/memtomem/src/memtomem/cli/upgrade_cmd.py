@@ -8,10 +8,10 @@ issue #443. The same applies to a backgrounded ``mm web`` — it holds
 ``web.pid`` and keeps serving the previous version against the shared DB
 (#1569). ``mm upgrade`` wraps the reinstall with process-level hygiene:
 
-    probe live server + web UI → SIGTERM (escalate to SIGKILL after
-    grace) → unlink stale pid files → ``BEGIN IMMEDIATE`` DB probe for
-    writers the pid files can't see (#1606, warn-only) → ``uv tool
-    install --refresh --reinstall``.
+    enumerate live servers + probe web UI → SIGTERM (escalate to SIGKILL
+    after grace) → unlink stale pid files → re-enumerate servers →
+    ``BEGIN IMMEDIATE`` DB probe for writers the pid files can't see
+    (#1606, warn-only) → ``uv tool install --refresh --reinstall``.
 
 There is no ``--skip-pkill``: the kill-then-reinstall ordering is the
 whole reason this command exists. On Windows the kill stage is skipped
@@ -24,21 +24,22 @@ from __future__ import annotations
 
 import json as _json
 import os
+import re
 import signal
 import subprocess
 import sys
-import re
 import time
 import tomllib
 from pathlib import Path
 
 import click
 
+from memtomem._runtime_paths import legacy_server_pid_path
 from memtomem.cli._db_lock import check_db_lock
 from memtomem.cli._liveness import (
     ServerState,
-    check_server_liveness,
     check_web_liveness,
+    enumerate_server_liveness,
     probe_pid_file,
 )
 from memtomem.cli._prompts import confirm as _confirm
@@ -68,6 +69,74 @@ def _format_path(p: Path) -> str:
     home = str(Path.home())
     s = str(p)
     return s.replace(home, "~", 1) if s.startswith(home) else s
+
+
+def _server_probe_error(states: list[ServerState]) -> ServerState | None:
+    """Return the first unverifiable state, if any."""
+    return next((state for state in states if state.probe_error is not None), None)
+
+
+def _server_probe_failure_message(state: ServerState) -> str:
+    """Describe a fail-closed inventory error without claiming a held lock."""
+    if state.pid_file is None:
+        action = "enumerating server pid files"
+    else:
+        action = f"probing {_format_path(state.pid_file)}"
+    return (
+        f"Cannot verify the complete memtomem-server inventory: {action} failed "
+        f"({state.probe_error}). Refusing to reinstall. Repair or remove the "
+        "reported path, then retry."
+    )
+
+
+def _upgrade_server_stops(states: list[ServerState]) -> list[ServerState]:
+    """Select directly stoppable server states without signaling a legacy alias.
+
+    Modern POSIX servers can hold both an authoritative runtime pid file and
+    the shared legacy compatibility lock. The latter does not write its pid,
+    so its payload may be empty or stale. When both forms are live, stop only
+    the runtime states and let the final full enumeration verify that the
+    alias disappeared. A legacy-only holder keeps the existing direct-stop
+    behavior for old installations.
+    """
+    legacy_pid = legacy_server_pid_path()
+    runtime_states = [state for state in states if state.pid_file != legacy_pid]
+    return runtime_states if runtime_states else states
+
+
+def _remaining_servers_message(states: list[ServerState]) -> str:
+    """Describe live holders found at the reinstall boundary."""
+    holders: list[str] = []
+    for state in states:
+        pid = state.pid if state.pid is not None else "?"
+        lock = _format_path(state.pid_file) if state.pid_file is not None else "?"
+        holders.append(f"pid {pid}, lock {lock}")
+    detail = "; ".join(holders)
+    return (
+        "A memtomem-server is still running or restarted while upgrade was "
+        f"stopping processes ({detail}). Refusing to reinstall. Close MCP "
+        "clients that auto-restart memtomem-server, then retry."
+    )
+
+
+def _refuse_upgrade(
+    message: str,
+    *,
+    json_out: bool,
+    killed: list[int] | None = None,
+    removed: list[Path] | None = None,
+) -> None:
+    """Emit a structured or human refusal and terminate with status 1."""
+    if json_out:
+        payload: dict[str, object] = {"ok": False, "error": message}
+        if killed is not None:
+            payload["killed"] = killed
+        if removed is not None:
+            payload["removed"] = [str(path) for path in removed]
+        click.echo(_json.dumps(payload))
+    else:
+        click.secho(message, fg="red")
+    sys.exit(1)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -282,7 +351,7 @@ def upgrade(
     json_out: bool,
     dry_run: bool,
 ) -> None:
-    """Stop a running memtomem-server and Web UI, then reinstall via ``uv tool``.
+    """Stop running memtomem servers and the Web UI, then reinstall via ``uv tool``.
 
     The canonical ``uv tool install --reinstall memtomem`` only swaps the
     on-disk bytes; any server already imported by an MCP client — and any
@@ -290,12 +359,20 @@ def upgrade(
     ``mm upgrade`` adds the missing process-level hygiene step around it.
     """
     is_windows = sys.platform == "win32"
-    state = check_server_liveness()
+    server_states = enumerate_server_liveness()
+    initial_probe_error = _server_probe_error(server_states)
+    if initial_probe_error is not None:
+        _refuse_upgrade(
+            _server_probe_failure_message(initial_probe_error),
+            json_out=json_out,
+        )
+
     web_state = check_web_liveness()
     extras, extras_auto = _resolve_extras(extras_flag)
     install_cmd = _build_install_cmd(version, extras)
     pkg_target = install_cmd[-1]
-    live_states = [s for s in (state, web_state) if s.alive]
+    server_stops = _upgrade_server_stops(server_states)
+    live_states = [*server_stops, *([web_state] if web_state.alive else [])]
     # Windows skips the kill stage entirely, so a truthful plan/dry-run
     # must not claim we would kill or remove anything there.
     planned_stops = [] if is_windows else live_states
@@ -311,9 +388,10 @@ def upgrade(
                 fg="yellow",
             )
         elif live_states:
-            for live, label in ((state, "server"), (web_state, "web UI")):
-                if not live.alive:
-                    continue
+            labeled_states = [(server, "server") for server in server_stops]
+            if web_state.alive:
+                labeled_states.append((web_state, "web UI"))
+            for live, label in labeled_states:
                 pid_repr = live.pid if live.pid is not None else "?"
                 pid_file_repr = _format_path(live.pid_file) if live.pid_file else "?"
                 click.echo(f"  Stop running {label} (pid {pid_repr}, lock {pid_file_repr})")
@@ -393,9 +471,38 @@ def upgrade(
                         pass
         except click.ClickException as exc:
             if json_out:
-                click.echo(_json.dumps({"ok": False, "error": str(exc)}))
-                sys.exit(1)
+                _refuse_upgrade(
+                    str(exc),
+                    json_out=True,
+                    killed=killed,
+                    removed=removed,
+                )
             raise
+
+    # ----- clean server boundary (#2002) -----
+    # Re-enumerate unconditionally on POSIX, even when the initial snapshot
+    # was empty: an MCP client can start or auto-restart a server while the
+    # upgrade is waiting for confirmation or stopping another process. One
+    # complete clean pass is required before touching the installed bytes.
+    # Windows deliberately has no automatic stop stage, so retain its manual
+    # warning-and-proceed contract after validating the initial enumeration.
+    if not is_windows:
+        remaining_servers = enumerate_server_liveness()
+        boundary_probe_error = _server_probe_error(remaining_servers)
+        if boundary_probe_error is not None:
+            _refuse_upgrade(
+                _server_probe_failure_message(boundary_probe_error),
+                json_out=json_out,
+                killed=killed,
+                removed=removed,
+            )
+        if remaining_servers:
+            _refuse_upgrade(
+                _remaining_servers_message(remaining_servers),
+                json_out=json_out,
+                killed=killed,
+                removed=removed,
+            )
 
     # ----- post-stop DB probe (#1606) -----
     # The pid-file probes only see processes that wrote server.pid /

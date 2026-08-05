@@ -356,6 +356,32 @@ class TestCheckServerLivenessStoreScope:
             "the no-db_path arm (mm upgrade) must find per-store pid files via glob"
         )
 
+    def test_store_agnostic_enumerator_returns_every_live_holder(self, rt: Path, tmp_path: Path):
+        from memtomem._runtime_paths import server_pid_path
+        from memtomem.cli._liveness import (
+            check_server_liveness,
+            enumerate_server_liveness,
+        )
+
+        store_a = tmp_path / "a" / "memtomem.db"
+        store_b = tmp_path / "b" / "memtomem.db"
+        pid_a = rt / server_pid_path(store_a).name
+        pid_b = rt / server_pid_path(store_b).name
+        stale = rt / "server-ffffffffffffffff.pid"
+        pid_a.write_text("111", encoding="utf-8")
+        pid_b.write_text("222", encoding="utf-8")
+        stale.write_text("333", encoding="utf-8")
+
+        with self._hold(pid_b), self._hold(pid_a):
+            states = enumerate_server_liveness()
+            aggregate = check_server_liveness()
+
+        expected = sorted((pid_a, pid_b))
+        assert [state.pid_file for state in states] == expected
+        assert {state.pid for state in states if state.pid is not None} <= {111, 222}
+        assert aggregate.pid_file == expected[0]
+        assert stale not in [state.pid_file for state in states]
+
     def test_store_agnostic_probe_fails_closed_on_glob_error(
         self, rt: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -370,8 +396,12 @@ class TestCheckServerLivenessStoreScope:
 
         monkeypatch.setattr(liveness, "runtime_dir", lambda: _Unsearchable())
 
+        states = liveness.enumerate_server_liveness()
         state = liveness.check_server_liveness()
 
+        assert len(states) == 1
+        assert states[0].alive is True
+        assert states[0].probe_error is not None
         assert state.alive is True
         assert state.probe_error is not None, (
             "an unenumerable runtime dir is an assumption, not observed "

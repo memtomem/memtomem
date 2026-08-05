@@ -186,6 +186,40 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
         return None, f"{rt}: {exc}"
 
 
+def enumerate_server_liveness() -> list[ServerState]:
+    """Return every live or unverifiable server pid-lock state.
+
+    Candidates are deterministic: sorted per-store ``server-*.pid`` files,
+    then the transitional bare ``server.pid`` and the legacy
+    ``~/.memtomem/.server.pid`` path. The returned states describe lock files,
+    not necessarily unique processes: modern POSIX servers can also share the
+    legacy compatibility lock. An empty list means a complete pass found no
+    live holder.
+
+    An enumeration failure is represented by a fail-closed ``ServerState``
+    with ``probe_error`` set, preserving the liveness probe contract from
+    #1949. Callers must refuse rather than treat that state as stoppable.
+    """
+    globbed, detail = _glob_server_pid_files()
+    if globbed is None:
+        return [
+            ServerState(
+                alive=True,
+                pid=None,
+                pid_file=None,
+                probe_error=f"could not enumerate server-*.pid ({detail})",
+            )
+        ]
+
+    candidates = [*globbed, server_pid_path(), legacy_server_pid_path()]
+    states: list[ServerState] = []
+    for pid_file in candidates:
+        state = probe_pid_file(pid_file)
+        if state.alive:
+            states.append(state)
+    return states
+
+
 def check_server_liveness(db_path: Path | None = None) -> ServerState:
     """Probe the server pid files at per-store, transitional and legacy locations.
 
@@ -205,25 +239,18 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
 
     First live holder wins; if nothing is held the state is dead.
     """
-    candidates: list[Path] = []
     digest = store_pid_digest(db_path) if db_path is not None else None
     if digest is not None:
-        candidates.append(server_pid_path(db_path))
-    else:
-        globbed, detail = _glob_server_pid_files()
-        if globbed is None:
-            return ServerState(
-                alive=True,
-                pid=None,
-                pid_file=None,
-                probe_error=f"could not enumerate server-*.pid ({detail})",
-            )
-        candidates.extend(globbed)
-    candidates.extend((server_pid_path(), legacy_server_pid_path()))
-    for pid_file in candidates:
-        state = probe_pid_file(pid_file)
-        if state.alive:
-            return state
+        candidates = (server_pid_path(db_path), server_pid_path(), legacy_server_pid_path())
+        for pid_file in candidates:
+            state = probe_pid_file(pid_file)
+            if state.alive:
+                return state
+        return ServerState(alive=False, pid=None, pid_file=None)
+
+    states = enumerate_server_liveness()
+    if states:
+        return states[0]
     return ServerState(alive=False, pid=None, pid_file=None)
 
 
