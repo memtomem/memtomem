@@ -91,7 +91,13 @@ class MalformedHookMatcher:
 
 
 class MalformedHookMatcherError(ValueError):
-    """An explicit settings operation encountered malformed hook matchers."""
+    """An explicit settings operation encountered malformed hook matchers.
+
+    The message names the offending **file path** for every finding, not
+    just the logical leg: copy and migrate raise this to tell the user to
+    go hand-edit something, and ``destination tier 'project_local'`` alone
+    leaves them guessing which file that is.
+    """
 
     def __init__(self, findings: list[MalformedHookMatcher]) -> None:
         self.findings = tuple(findings)
@@ -101,7 +107,7 @@ class MalformedHookMatcherError(ValueError):
                 f"{finding.source} '{finding.tier}'" if finding.tier is not None else finding.source
             )
             details.append(
-                f"{source}, event '{finding.event}', rule index "
+                f"{source} ({finding.path}), event '{finding.event}', rule index "
                 f"{finding.rule_index}: non-string matcher ({finding.matcher_type})"
             )
         super().__init__(

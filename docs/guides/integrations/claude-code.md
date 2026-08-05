@@ -315,6 +315,13 @@ JSON output includes a `malformed_matchers` array with the source, tier, path,
 event, rule index, and matcher type. A matcher may be omitted for match-all;
 `null`, numbers, arrays, and objects are malformed.
 
+Malformed rules ride the same non-blocking warning surface as duplicates:
+`mm context sync|diff --include=settings`, the equivalent `mem_context_*` MCP
+tools, and the Web UI hooks panel (`target_hooks.malformed`) all report them.
+Claude Code ignores such a rule for hook matching, so it is invisible to
+duplicate detection and would otherwise go unnoticed until a copy or migrate
+refused to run.
+
 <details>
 <summary>Fixing duplicates — migrate and copy hooks across tiers and projects</summary>
 

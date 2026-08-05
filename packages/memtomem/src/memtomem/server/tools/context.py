@@ -182,7 +182,7 @@ def _validate_on_drop(on_drop: str) -> str:
 
 
 def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
-    """Cross-tier duplicate-hook warning lines for the settings axis.
+    """Cross-tier duplicate + malformed-matcher warning lines for settings.
 
     Mirrors the CLI's ``_print_duplicate_tier_warnings`` (ADR-0010 §4), which
     fires inside the real generate / diff / sync workflow rather than behind a
@@ -196,16 +196,26 @@ def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
     user-tier duplicate — so redact the PATH before formatting (#1550, the
     dup-tier leg the #1539 sweep missed). Redacting the formatted line instead
     would hit the 200-char ``redact_message`` cap and truncate the migrate
-    hint; the path-only substitution keeps the CLI-parity wording whole.
+    hint; the path-only substitution keeps the CLI-parity wording whole. The
+    malformed-matcher leg (#1987) embeds a path the same way and gets the same
+    per-finding substitution.
     """
     from dataclasses import replace
 
-    from memtomem.context.settings_doctor import detect_duplicate_tiers, format_warning
+    from memtomem.context.settings_doctor import (
+        detect_duplicate_tiers,
+        find_malformed_matchers,
+        format_malformed_warning,
+        format_warning,
+    )
 
     lines: list[str] = []
     for dup in detect_duplicate_tiers(root, active_scope=active_scope):
         redacted = replace(dup, path=Path(_redact_reason(str(dup.path), root)))
         lines.append(f"  warning: {format_warning(redacted, active_scope=active_scope)}")
+    for finding in find_malformed_matchers(root):
+        redacted_finding = replace(finding, path=Path(_redact_reason(str(finding.path), root)))
+        lines.append(f"  warning: {format_malformed_warning(redacted_finding)}")
     return lines
 
 

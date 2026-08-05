@@ -215,6 +215,27 @@ def find_malformed_matchers(project_root: Path) -> list[MalformedHookMatcher]:
     return findings
 
 
+def format_malformed_warning(finding: MalformedHookMatcher) -> str:
+    """Human-readable warning string for one malformed matcher row.
+
+    The sibling of :func:`format_warning` for the malformed axis, shared by
+    the CLI sync surface and the MCP settings branches so both agree with
+    the standalone doctor's wording. Assumes the ``source`` vocabulary
+    :func:`find_malformed_matchers` produces (``canonical`` / ``tier``);
+    copy and migrate build their own descriptive sources and render through
+    :class:`~memtomem.context.settings.MalformedHookMatcherError` instead.
+    """
+    location = "canonical settings" if finding.tier is None else f"{finding.tier} tier"
+    return (
+        f"hook rule with a non-string matcher ({finding.matcher_type}) in the "
+        f"{location} ({finding.path}), event '{finding.event}' rule "
+        f"#{finding.rule_index}; `matcher` must be a string — omit it for "
+        f"match-all, or quote the value. It is ignored by hook matching until "
+        f"fixed, and `mm context settings-copy` / `settings-migrate` refuse to "
+        f"run while it exists."
+    )
+
+
 def detect_duplicate_tiers(
     project_root: Path,
     *,

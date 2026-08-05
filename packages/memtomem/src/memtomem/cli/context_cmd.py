@@ -128,6 +128,7 @@ from memtomem.context.settings import (
 from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
     find_malformed_matchers,
+    format_malformed_warning,
     format_warning,
 )
 from memtomem.context.settings_copy import (
@@ -792,16 +793,24 @@ def _confirm_settings_host_writes(root: Path, *, scope: str, yes: bool) -> bool:
 
 
 def _print_duplicate_tier_warnings(root: Path, *, scope: str) -> None:
-    """Emit non-blocking warnings for memtomem hooks duplicated across tiers.
+    """Emit non-blocking warnings for cross-tier duplicates + malformed matchers.
 
     Per ADR-0010 §4 this is the primary detection surface: it fires in
     the user's actual sync workflow rather than behind a separate
     command. Output goes to stderr with yellow color and never blocks
-    the sync — duplicates are informational.
+    the sync — both axes are informational.
+
+    The malformed axis rides here rather than staying doctor-only because
+    ``_iter_signatures`` skips non-string matchers (#1987): a corrupted
+    managed tier rule no longer surfaces as a (spurious) duplicate, so
+    without this leg the sync workflow would report nothing at all about a
+    rule Claude Code silently ignores.
     """
     duplicates = detect_duplicate_tiers(root, active_scope=scope)
     for dup in duplicates:
         click.secho(f"  warning: {format_warning(dup, active_scope=scope)}", err=True, fg="yellow")
+    for finding in find_malformed_matchers(root):
+        click.secho(f"  warning: {format_malformed_warning(finding)}", err=True, fg="yellow")
 
 
 def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool) -> None:

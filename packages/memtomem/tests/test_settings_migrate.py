@@ -335,6 +335,13 @@ def test_malformed_matcher_in_any_related_file_rejects_whole_plan(
     assert "event 'SessionStart'" in message
     assert "rule index 0" in message
     assert type(malformed).__name__ in message
+    # The user has to hand-edit a file, so name it — not just the leg.
+    offender = {
+        "canonical": project_root / CANONICAL_SETTINGS_FILE,
+        "source": source_path,
+        "target": target_path,
+    }[location]
+    assert str(offender) in message
     assert {path: path.read_bytes() for path in paths} == before
 
 

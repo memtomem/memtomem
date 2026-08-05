@@ -217,6 +217,8 @@ class TestMalformedMatcherPlanning:
         assert "event 'PostToolUse'" in message
         assert "rule index 1" in message
         assert type(malformed).__name__ in message
+        # The user has to hand-edit a file, so name it — not just the leg.
+        assert str(src_project / CANONICAL_SETTINGS_FILE) in message
         assert not (dst_project / CANONICAL_SETTINGS_FILE).exists()
 
     @pytest.mark.parametrize("leg", ["canonical", "tier"])
@@ -239,6 +241,7 @@ class TestMalformedMatcherPlanning:
         assert "event 'SessionStart'" in message
         assert "rule index 0" in message
         assert type(malformed).__name__ in message
+        assert str(path) in message
         assert path.read_bytes() == before
 
 

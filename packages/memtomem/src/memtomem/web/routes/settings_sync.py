@@ -26,6 +26,7 @@ from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
     _drop_nonstring_matchers,
+    _normalize_matcher,
     _rule_content_equal,
     _rule_is_memtomem_owned,
     _safe_load_json,
@@ -203,7 +204,7 @@ def _iter_hook_rules(hooks_record: dict) -> list[dict]:
         for index, rule in enumerate(rules):
             if not isinstance(rule, dict):
                 continue
-            if not isinstance(rule.get("matcher", ""), str):
+            if _normalize_matcher(rule.get("matcher", "")) is None:
                 # A present-but-non-string matcher is malformed (#1983). Callers
                 # key these rows by ``(event, matcher)``, so emitting one raises
                 # ``TypeError: unhashable type`` and 500s the whole panel. An
@@ -232,6 +233,10 @@ def _malformed_hook_rules(hooks_record: dict) -> list[dict]:
     ownership marker as authoritative — pre-validation releases really did
     write such rules); user rules are merely invisible to hook matching and
     stay untouched.
+
+    Both halves of the partition test validity through the shared
+    :func:`~memtomem.context.settings._normalize_matcher` (#1987), so the
+    "mirrors its iteration exactly" contract cannot drift on one side only.
     """
     rows: list[dict] = []
     for event, rules in hooks_record.items():
@@ -240,7 +245,7 @@ def _malformed_hook_rules(hooks_record: dict) -> list[dict]:
         for index, rule in enumerate(rules):
             if not isinstance(rule, dict):
                 continue
-            if isinstance(rule.get("matcher", ""), str):
+            if _normalize_matcher(rule.get("matcher", "")) is not None:
                 continue
             rows.append(
                 {

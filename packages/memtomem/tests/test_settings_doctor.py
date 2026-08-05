@@ -389,6 +389,28 @@ class TestSettingsDoctorCli:
         result = CliRunner().invoke(settings_doctor_cmd, ["--scope=project_local"])
         assert result.exit_code == 1, result.output
 
+    def test_malformed_human_output_names_location_and_fix(
+        self, project_root, fake_home, monkeypatch
+    ):
+        """Non-JSON path: the malformed section is rendered, not only counted."""
+        _write_canonical(
+            project_root,
+            {"SessionStart": [_rule(["Bash"], "mm index")]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, [])
+        assert result.exit_code == 1, result.output
+        assert "1 hook rule(s) with malformed matchers" in result.output
+        assert str(project_root / CANONICAL_SETTINGS_FILE) in result.output
+        assert "[SessionStart rule #0] non-string matcher (list)" in result.output
+        assert "Omit it for match-all" in result.output
+        # The clean line must not also print when only the malformed axis fired.
+        assert "No memtomem-managed hooks duplicated" not in result.output
+
     def test_json_clean_schema(self, project_root, fake_home, monkeypatch):
         _write_canonical(project_root, _bundled_hook())
         monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
@@ -532,6 +554,33 @@ class TestSyncWarning:
         result = CliRunner().invoke(diff_cmd, ["--include=settings"])
         assert result.exit_code == 0, result.output
         assert "memtomem-managed hook" in result.output
+
+    def test_sync_emits_warning_for_malformed_matcher(self, project_root, fake_home, monkeypatch):
+        """The malformed axis rides the same non-blocking sync surface (#1987).
+
+        ``_iter_signatures`` skips non-string matchers, so a corrupted rule is
+        invisible to duplicate detection; without this leg the sync workflow
+        would say nothing about a rule Claude Code silently ignores.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(
+            fake_home / ".claude" / "settings.json",
+            {"SessionStart": [_rule(["Bash"], "broken")]},
+        )
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import sync_cmd
+
+        result = CliRunner().invoke(
+            sync_cmd,
+            ["--include=settings", "--scope=project_local", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        # Non-blocking: the sync still wrote the active tier.
+        assert (project_root / ".claude" / "settings.local.json").is_file()
+        assert "non-string matcher (list)" in result.output
+        assert "user tier" in result.output
+        assert "settings-migrate` refuse to run" in result.output
 
 
 # ── Web route response ─────────────────────────────────────────────
