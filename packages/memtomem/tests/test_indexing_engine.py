@@ -1687,10 +1687,22 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nnew content", encoding="utf-8")
+
+        namespace_lookups = 0
+
+        async def namespace_after_move(_source):
+            nonlocal namespace_lookups
+            namespace_lookups += 1
+            if namespace_lookups == 1:
+                return ["old"]
+            if namespace_lookups == 2:
+                return ["new"]
+            raise AssertionError(f"unexpected namespace lookup #{namespace_lookups}")
+
         monkeypatch.setattr(
             components.storage,
             "namespaces_for_source",
-            AsyncMock(side_effect=[["old"], ["new"]]),
+            namespace_after_move,
         )
 
         stats = await engine.index_path(memory_dir, recursive=True)
@@ -1715,6 +1727,23 @@ class TestBulkNamespacePrepass:
         assert first["resolved_namespace"] is None
         assert second["indexed"] == 0
         assert "resolved_namespace" not in second
+
+    async def test_public_index_file_echoes_only_namespace_bearing_upserts(
+        self, components, memory_dir
+    ):
+        """The single-file wrapper forwards applied ``None`` by key presence,
+        while an unchanged second pass has no applied namespace to echo."""
+        engine = components.index_engine
+        fp = memory_dir / "untagged-public.md"
+        fp.write_text("# U\n\nplain note", encoding="utf-8")
+
+        first = await engine.index_file(fp)
+        second = await engine.index_file(fp)
+
+        assert first.indexed_chunks > 0
+        assert first.resolved_namespaces == (None,)
+        assert second.indexed_chunks == 0
+        assert second.resolved_namespaces == ()
 
     async def test_bulk_echo_keeps_positional_fallbacks_around_exceptions(
         self, components, memory_dir, monkeypatch

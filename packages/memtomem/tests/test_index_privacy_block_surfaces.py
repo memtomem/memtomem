@@ -94,6 +94,19 @@ class TestBulkIndexRedactionGate:
         assert complete["blocked_files"] == 1
         assert any("leak.md" in p for p in complete["blocked_paths"])
 
+    async def test_stream_blocked_only_run_keeps_the_prepass_namespace(self, bm25_only_components):
+        """A stream privacy block retains its positional preview and must not
+        manufacture an authoritative per-file namespace result."""
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "leak.md").write_text(_LEAK)
+
+        events = [ev async for ev in comp.index_engine.index_path_stream(mem_dir, recursive=True)]
+        complete = next(ev for ev in events if ev["type"] == "complete")
+
+        assert complete["blocked_files"] == 1
+        assert complete["indexed_chunks"] == 0
+        assert complete["resolved_namespaces"] == [None]
+
     async def test_single_file_index_raises(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         leak = mem_dir / "leak.md"

@@ -608,6 +608,8 @@ class IndexEngine:
                 all_errors.extend(r.get("errors", []))
                 retryable_errors.extend(r.get("retryable_errors", []))
                 if "resolved_namespace" in r:
+                    # ``None`` is a real applied value, so key presence — not
+                    # truthiness — decides whether to replace the prepass.
                     echo_namespaces[i] = r["resolved_namespace"]
             elif isinstance(r, PrivacyRejection):
                 # ADR-0006 PR-A: un-adjudicated bulk index hit a secret-bearing
@@ -891,6 +893,9 @@ class IndexEngine:
             errors=tuple(result.get("errors", ())),
             retryable_errors=tuple(result.get("retryable_errors", ())),
             new_chunk_ids=tuple(result.get("new_chunk_ids", ())),
+            resolved_namespaces=(
+                (result["resolved_namespace"],) if "resolved_namespace" in result else ()
+            ),
         )
 
     async def is_duplicate(
