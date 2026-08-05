@@ -52,6 +52,7 @@ def _hint_for(e: Exception) -> str | None:
         ConfigError,
         EmbeddingDimensionMismatchError,
         EmbeddingError,
+        RetryableError,
         SchemaDowngradeError,
         StorageError,
     )
@@ -87,6 +88,16 @@ def _hint_for(e: Exception) -> str | None:
             "check the active configuration with `mm config show`, then edit "
             "~/.memtomem/config.json or re-run `mm init`."
         )
+    if isinstance(e, RetryableError):
+        # Deliberately ahead of ``StorageError``: a retryable failure that is
+        # *also* a storage failure (``NamespaceMutationBusyError``) is more
+        # usefully described by what the operator should do — retry — than by
+        # which subsystem raised. This is also the only path that keeps the
+        # retryable classification for failures raised *before* any
+        # ``IndexingStats`` exists: the engine's pre-write namespace prepass
+        # (issue #2005) raises ``NamespaceResolutionError`` rather than
+        # returning per-file errors, so ``print_index_errors`` never sees it.
+        return "transient failure — retry the same command once the chunk store is reachable."
     if isinstance(e, StorageError):
         return "storage backend error — run `mm status` to check the DB path and health."
     return None

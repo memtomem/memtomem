@@ -1829,6 +1829,8 @@ def _seed_with_progress(paths: list[Path]) -> bool:
     step-1 annotation."""
     import asyncio
 
+    from memtomem.errors import RetryableError
+
     if not paths:
         return False
 
@@ -1848,6 +1850,16 @@ def _seed_with_progress(paths: list[Path]) -> bool:
     except KeyboardInterrupt:
         click.echo()
         click.secho(f"  Cancelled. Resume with: {resume_hint}", fg="yellow")
+        return False
+    except RetryableError as e:
+        # Split out ahead of the generic branch below: the engine's pre-write
+        # namespace prepass (issue #2005) raises instead of returning per-file
+        # errors, so this never reaches ``print_index_errors``. "Skipped" plus
+        # a bare resume command reads as "this file is bad"; a transient store
+        # outage during first-run setup is worth naming as retryable, since
+        # re-running the seed is exactly the right move.
+        click.secho(f"  Skipped initial seed (retryable): {e}", fg="yellow")
+        click.echo(f"  Resume with {resume_hint} once the chunk store is reachable.")
         return False
     except Exception as e:
         click.secho(f"  Skipped initial seed: {e}", fg="yellow")
@@ -1881,7 +1893,11 @@ def _seed_with_progress(paths: list[Path]) -> bool:
         blocked_project_shared=agg["blocked_project_shared"],
         bypass_hint=bypass_hint,
     )
-    print_index_errors(agg["errors"])
+    print_index_errors(
+        agg["errors"],
+        retryable_errors=agg["retryable_errors"],
+        retry_hint=f"resume with {resume_hint} once the chunk store is reachable.",
+    )
 
     # Defensive: if the stream processed files but landed zero chunks
     # (neither new nor skipped-as-unchanged), something went wrong

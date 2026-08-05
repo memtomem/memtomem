@@ -34,8 +34,9 @@ def _make_complete_event(
     deleted: int = 0,
     duration_ms: float = 12.0,
     errors: list[str] | None = None,
+    retryable_errors: list[str] | None = None,
 ) -> dict:
-    return {
+    event = {
         "type": "complete",
         "total_files": total_files,
         "total_chunks": indexed + skipped,
@@ -45,6 +46,9 @@ def _make_complete_event(
         "duration_ms": duration_ms,
         "errors": errors or [],
     }
+    if retryable_errors is not None:
+        event["retryable_errors"] = retryable_errors
+    return event
 
 
 def _install_fake_engine(
@@ -138,6 +142,34 @@ class TestIndexStreamConversion:
         assert exc_info.value.exit_code == 1
         out = capsys.readouterr().out
         assert "ERROR: broken.md: embedder OOM" in out
+
+    def test_stream_retryable_errors_are_labeled_once_with_retry_guidance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "memories"
+        target.mkdir()
+        permanent = "broken.md: embedder OOM"
+        retryable = "transient.md: chunk store unavailable"
+        events = [
+            _make_complete_event(
+                total_files=2,
+                indexed=1,
+                errors=[permanent, retryable],
+                retryable_errors=[retryable],
+            )
+        ]
+        _install_fake_engine(monkeypatch, events=events)
+
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+
+        assert exc_info.value.exit_code == 1
+        out = capsys.readouterr().out
+        assert "Indexed 2 file(s): 1 new, 0 unchanged, 0 deleted (12ms)" in out
+        assert f"ERROR: {permanent}" in out
+        assert f"ERROR (retryable): {retryable}" in out
+        assert out.count(retryable) == 1
+        assert "re-run the same `mm index` command once the chunk store is reachable" in out
 
 
 class TestIndexKeyboardInterrupt:

@@ -483,6 +483,7 @@ class TestMemtomemStoreIndex:
             "blocked_files": 0,
             "blocked_paths": [],
             "errors": [],
+            "retryable_errors": [],
         }
 
     @pytest.mark.asyncio
@@ -517,6 +518,34 @@ class TestMemtomemStoreIndex:
         assert result["blocked_files"] == 1
         assert result["blocked_paths"] == [str(tmp_path / "leak.md")]
         assert any("redaction_blocked" in e for e in result["errors"])
+
+    @pytest.mark.asyncio
+    async def test_index_surfaces_retryable_error_subset(self, tmp_path):
+        from memtomem.integrations.langgraph import MemtomemStore
+        from memtomem.models import IndexingStats
+
+        permanent = "broken.md: malformed frontmatter"
+        retryable = "transient.md: chunk store unavailable"
+        store = MemtomemStore()
+        mock_engine = MagicMock()
+        mock_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=2,
+                total_chunks=0,
+                indexed_chunks=0,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                errors=(permanent, retryable),
+                retryable_errors=(retryable,),
+            )
+        )
+        store._components = MagicMock(index_engine=mock_engine)
+
+        result = await store.index(path=str(tmp_path))
+
+        assert result["errors"] == [permanent, retryable]
+        assert result["retryable_errors"] == [retryable]
 
     @pytest.mark.asyncio
     async def test_index_engine_has_index_path(self):

@@ -1854,12 +1854,104 @@ class TestIndexNamespaceLookupFailure:
         assert body["results"][0]["indexed_chunks"] == 2
         assert "Retry" in body["results"][1]["errors"][0]
         assert body["errors"] == body["results"][1]["errors"]
+        assert body["results"][1]["retryable_errors"] == body["results"][1]["errors"]
+        assert body["retryable_errors"] == body["errors"]
         # This route may not claim "nothing was changed" — the first root's
         # chunks above are the counterexample, in the same response body.
         from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 
         assert body["results"][1]["errors"][0] != NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
         assert "nothing was changed" not in body["results"][1]["errors"][0]
+
+    async def test_reindex_aggregates_retryable_as_a_strict_subset(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """Top-level ``retryable_errors`` aggregates per-root subsets rather
+        than aliasing ``errors``. The sibling test above cannot catch that:
+        there every error is retryable, so an accidental
+        ``retryable_errors = all_errors`` would still pass. Here a permanent
+        failure and a retryable one land in the same response, so the two
+        aggregates must differ — and the healthy root must still contribute an
+        empty list rather than omitting the key."""
+        healthy, permanent_root, retryable_root = (
+            tmp_path / "ok",
+            tmp_path / "broken",
+            tmp_path / "transient",
+        )
+        for d in (healthy, permanent_root, retryable_root):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [healthy, permanent_root, retryable_root]
+        permanent = "broken.md: malformed frontmatter"
+        retryable = "transient.md: chunk store unavailable"
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=[
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=2,
+                    indexed_chunks=2,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=10.0,
+                ),
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                    errors=(permanent,),
+                ),
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                    errors=(retryable,),
+                    retryable_errors=(retryable,),
+                ),
+            ]
+        )
+
+        resp = await client.post("/api/reindex")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is False
+        assert body["errors"] == [permanent, retryable]
+        assert body["retryable_errors"] == [retryable]
+        # A healthy root still carries both keys, so a client can tell "no
+        # retryable failures here" from "this server predates the field".
+        assert body["results"][0]["errors"] == []
+        assert body["results"][0]["retryable_errors"] == []
+        assert body["results"][1]["retryable_errors"] == []
+
+    async def test_reindex_missing_root_is_not_reported_as_success(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """A registered root that was deleted or renamed used to emit only the
+        singular ``error`` key, which the aggregates skip — so the response
+        said ``ok: true`` with an empty top-level ``errors`` and every
+        first-party client rendered "reindex complete" over a root that was
+        never indexed. It is not retryable: retrying cannot conjure the
+        directory back, so it must not land in ``retryable_errors``."""
+        missing = tmp_path / "gone"
+        app.state.config.indexing.memory_dirs = [missing]
+        app.state.index_engine.index_path = AsyncMock()
+
+        resp = await client.post("/api/reindex")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is False
+        assert body["retryable_errors"] == []
+        assert len(body["errors"]) == 1
+        assert "not a directory" in body["errors"][0]
+        # The singular key stays for existing clients.
+        assert body["results"][0]["error"] == "not a directory"
+        app.state.index_engine.index_path.assert_not_awaited()
 
     async def test_the_stream_route_says_transient_in_the_only_field_it_has(
         self, app, client: AsyncClient
@@ -3430,8 +3522,11 @@ class TestReindexAll:
         data = resp.json()
         assert data["ok"] is True
         assert data["errors"] == []
+        assert data["retryable_errors"] == []
         assert len(data["results"]) == 1
         assert data["results"][0]["path"] == str(target)
+        assert data["results"][0]["errors"] == []
+        assert data["results"][0]["retryable_errors"] == []
 
     async def test_reindex_all_with_str_dirs_returns_200(self, app, client: AsyncClient, tmp_path):
         """Regression: ``memory_dirs`` loaded from ``~/.memtomem/config.json``
@@ -3453,8 +3548,55 @@ class TestReindexAll:
         data = resp.json()
         assert data["ok"] is True
         assert data["errors"] == []
+        assert data["retryable_errors"] == []
         assert len(data["results"]) == 1
         assert data["results"][0]["path"] == str(target)
+
+    async def test_reindex_all_preserves_retryable_subset_and_root_order(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        app.state.config.indexing.memory_dirs = [first, second]
+        app.state.config.indexing.project_memory_dirs = []
+        shared = "shared.md: chunk store unavailable"
+        first_permanent = "broken.md: malformed frontmatter"
+        second_retryable = "other.md: chunk store unavailable"
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=[
+                IndexingStats(
+                    total_files=2,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                    errors=(shared, first_permanent),
+                    retryable_errors=(shared,),
+                ),
+                IndexingStats(
+                    total_files=2,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=2.0,
+                    errors=(shared, second_retryable),
+                    retryable_errors=(shared, second_retryable),
+                ),
+            ]
+        )
+
+        response = await client.post("/api/reindex")
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["ok"] is False
+        assert body["results"][0]["retryable_errors"] == [shared]
+        assert body["results"][1]["retryable_errors"] == [shared, second_retryable]
+        assert body["errors"] == [shared, first_permanent, shared, second_retryable]
+        assert body["retryable_errors"] == [shared, shared, second_retryable]
 
 
 # ---------------------------------------------------------------------------
@@ -3739,11 +3881,98 @@ class TestUnicodePaths:
         assert body["indexed"] is not None
         assert body["indexed"]["indexed_chunks"] == 2
         assert body["indexed"]["total_files"] == 1
+        assert body["indexed"]["retryable_errors"] == []
         assert body["index_status"] == "success"
         # ``index_path`` was called with the resolved path of the dir we
         # just added — watcher invariant naturally satisfied.
         called_args, _ = app.state.index_engine.index_path.call_args
         assert Path(str(called_args[0])).resolve() == memory_dir.resolve()
+
+    async def test_add_memory_dir_auto_index_surfaces_retryable_error_subset(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        permanent = "broken.md: malformed frontmatter"
+        retryable = "transient.md: chunk store unavailable"
+        app.state.index_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=2,
+                total_chunks=1,
+                indexed_chunks=1,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                errors=(permanent, retryable),
+                retryable_errors=(retryable,),
+            )
+        )
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            response = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": True},
+            )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["index_status"] == "partial"
+        assert body["indexed"]["errors"] == [permanent, retryable]
+        assert body["indexed"]["retryable_errors"] == [retryable]
+
+    async def test_add_memory_dir_retryable_raise_keeps_its_classification(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """The pre-write namespace prepass raises instead of returning stats,
+        and the generic handler flattened it to ``{"error": "Initial indexing
+        failed"}`` — dropping the retryability for the one failure class the
+        split exists to describe. The message must stay path-free: this
+        response is not path-safe (see the sibling ``/private/secret`` pin)."""
+        from memtomem.errors import NamespaceResolutionError
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=NamespaceResolutionError(f"lookup failed for {memory_dir}")
+        )
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            response = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": True},
+            )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["index_status"] == "failed"
+        assert body["indexed"]["retryable_errors"] == body["indexed"]["errors"]
+        assert len(body["indexed"]["retryable_errors"]) == 1
+        assert "Retry once it is reachable" in body["indexed"]["error"]
+        assert str(memory_dir) not in json.dumps(body["indexed"])
+
+    async def test_add_memory_dir_permanent_raise_carries_empty_retryable(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Counterpart to the above: a non-retryable failure must still carry
+        both keys, so a client can tell "not retryable" from "old server"."""
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            response = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": True},
+            )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["index_status"] == "failed"
+        assert body["indexed"]["errors"] == []
+        assert body["indexed"]["retryable_errors"] == []
 
     async def test_add_memory_dir_default_omitted_indexes(self, app, client: AsyncClient, tmp_path):
         """**The ``auto_index`` default is ``True``** (flipped in

@@ -26,6 +26,8 @@ from memtomem.errors import (
     ConfigError,
     EmbeddingDimensionMismatchError,
     EmbeddingError,
+    NamespaceMutationBusyError,
+    NamespaceResolutionError,
     SchemaDowngradeError,
     StorageError,
 )
@@ -48,6 +50,11 @@ class TestHintMapping:
             (EmbeddingError("model not found"), "docs/guides/embeddings.md"),
             (ConfigError("bad json"), "mm config show"),
             (StorageError("disk I/O error"), "run `mm status`"),
+            # The engine's pre-write namespace prepass (issue #2005) raises
+            # instead of returning per-file errors, so this is the only place
+            # a retryable indexing failure keeps its classification on the
+            # direct-CLI path — print_index_errors never sees it.
+            (NamespaceResolutionError("store unreachable"), "retry the same command"),
         ],
     )
     def test_known_classes_get_hints(self, exc: Exception, fragment: str) -> None:
@@ -55,6 +62,17 @@ class TestHintMapping:
         assert str(exc) in message, "original message must be preserved"
         assert "Hint:" in message
         assert fragment in message
+
+    def test_retryable_wins_over_storage_for_the_dual_inheritance_case(self) -> None:
+        """``NamespaceMutationBusyError`` is both ``StorageError`` and
+        ``RetryableError``. What the operator should do (retry) is more
+        actionable than which subsystem raised, so the retryable branch must
+        sit ahead of the storage one — this pins the ordering rather than
+        leaving it to import/branch accident."""
+        message = _message_of(NamespaceMutationBusyError("snapshot changed"))
+
+        assert "retry the same command" in message
+        assert "storage backend error" not in message
 
     def test_unknown_exception_falls_back_to_plain_message(self) -> None:
         message = _message_of(RuntimeError("boom"))

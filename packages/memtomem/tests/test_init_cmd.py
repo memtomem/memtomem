@@ -5601,6 +5601,91 @@ class TestInitialSeedThreshold:
         # summary, not double-printed as a raw ERROR line.
         assert "ERROR:" not in out
 
+    def test_seed_with_progress_surfaces_retryable_errors_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        permanent = "broken.md: malformed frontmatter"
+        retryable = "transient.md: chunk store unavailable"
+
+        class _FakeEngine:
+            async def index_path_stream(self, *_args, **_kwargs):
+                yield {"type": "discovery", "files_total": 2}
+                yield {
+                    "type": "complete",
+                    "total_files": 2,
+                    "total_chunks": 1,
+                    "indexed_chunks": 1,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                    "errors": [permanent, retryable],
+                    "retryable_errors": [retryable],
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        assert init_cmd._seed_with_progress([memory_dir]) is True
+        out = capsys.readouterr().out
+        assert f"ERROR: {permanent}" in out
+        assert f"ERROR (retryable): {retryable}" in out
+        assert out.count(retryable) == 1
+        assert f"resume with mm index {memory_dir}" in out
+        assert "once the chunk store is reachable" in out
+
+    def test_seed_with_progress_labels_a_retryable_raise_before_any_stats(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The engine's pre-write namespace prepass raises rather than
+        yielding a ``complete`` event, so the reporter above never runs. The
+        generic branch called this "Skipped initial seed" with a bare "Run
+        manually later" — indistinguishable from a permanently broken file,
+        during first-run setup where re-running the seed is exactly right."""
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+        from memtomem.errors import NamespaceResolutionError
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+
+        class _FakeEngine:
+            async def index_path_stream(self, *_args, **_kwargs):
+                raise NamespaceResolutionError("chunk store unreachable")
+                yield  # pragma: no cover — makes this an async generator
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        assert init_cmd._seed_with_progress([memory_dir]) is False
+        out = capsys.readouterr().out
+        assert "Skipped initial seed (retryable): chunk store unreachable" in out
+        assert f"Resume with mm index {memory_dir} once the chunk store is reachable." in out
+
     def test_seed_with_progress_fully_blocked_skips_upsert_misdiagnosis(
         self,
         tmp_path: Path,

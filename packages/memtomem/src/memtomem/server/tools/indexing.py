@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from memtomem.server import mcp
@@ -12,6 +13,26 @@ from memtomem.server.tools._provenance import (
     capture_session_and_namespace,
     record_write_provenance,
 )
+
+
+def _partition_index_errors(
+    errors: Sequence[str], retryable_errors: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """Split errors by the retryable same-string subset, preserving order.
+
+    Depends on the producer invariant that every ``retryable_errors`` entry is
+    byte-identical to one already in ``errors`` (``IndexEngine`` appends the
+    same ``f"{path.name}: {exc}"`` string to both lists, deduping each with
+    ``dict.fromkeys``). Partitioning ``errors`` — rather than concatenating the
+    two lists — is what keeps a retryable failure reported exactly once; the
+    cost is that a producer which ever emits a retryable string absent from
+    ``errors`` would drop it silently here.
+    """
+    retryable_set = set(retryable_errors)
+    return (
+        [error for error in errors if error not in retryable_set],
+        [error for error in errors if error in retryable_set],
+    )
 
 
 @mcp.tool()
@@ -69,8 +90,16 @@ async def mem_index(
             stats=stats,
         )
 
+    errors, retryable_errors = _partition_index_errors(stats.errors, stats.retryable_errors)
+
     if stats.errors and stats.total_files == 0:
-        return "Error: " + "; ".join(stats.errors)
+        lines: list[str] = []
+        if errors:
+            lines.append("Error: " + "; ".join(errors))
+        if retryable_errors:
+            lines.append("Error (retryable): " + "; ".join(retryable_errors))
+            lines.append("Retry: Call mem_index again once the chunk store is reachable.")
+        return "\n".join(lines)
 
     if stats.total_files == 0:
         return (
@@ -91,8 +120,13 @@ async def mem_index(
     )
     if not app.index_engine._is_within_memory_dirs(target):
         result += "\n- Root registration: unchanged (one-shot index)"
-    if stats.errors:
-        result += "\n- Errors:\n" + "\n".join(f"    {e}" for e in stats.errors)
+    if errors:
+        result += "\n- Errors:\n" + "\n".join(f"    {error}" for error in errors)
+    if retryable_errors:
+        result += "\n- Errors (retryable):\n" + "\n".join(
+            f"    {error}" for error in retryable_errors
+        )
+        result += "\n- Retry: Call mem_index again once the chunk store is reachable."
     if stats.blocked_files:
         # ADR-0006 PR-A: name the skipped files so an operator can review them.
         result += "\n- Blocked files:\n" + "\n".join(f"    {p}" for p in stats.blocked_paths)

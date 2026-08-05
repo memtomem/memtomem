@@ -301,7 +301,22 @@ async def _cmd_index(comp, args: list[str]) -> None:
         return
 
     click.echo(f"Indexing {path}...")
-    stats = await comp.index_engine.index_path(path, recursive=True)
+    from memtomem.errors import RetryableError
+
+    try:
+        stats = await comp.index_engine.index_path(path, recursive=True)
+    except RetryableError as exc:
+        # The engine's pre-write namespace prepass (issue #2005) raises rather
+        # than returning per-file errors, so this never reaches the
+        # ``print_index_errors`` reporter below. Label it here with the same
+        # wording, otherwise the one failure class the retryable split exists
+        # to name is the one class the shell reports as a flat error.
+        click.secho(f"  ERROR (retryable): {exc}", fg="yellow")
+        click.secho(
+            f"  → run `mm index {path}` outside the shell once the chunk store is reachable.",
+            fg="yellow",
+        )
+        return
     click.secho(
         f"Done: {stats.total_files} files, {stats.indexed_chunks} chunks ({stats.duration_ms}ms)",
         fg="green",
@@ -321,4 +336,8 @@ async def _cmd_index(comp, args: list[str]) -> None:
             "index the non-project_shared files anyway (audit-logged)."
         ),
     )
-    print_index_errors(stats.errors)
+    print_index_errors(
+        stats.errors,
+        retryable_errors=stats.retryable_errors,
+        retry_hint=f"run `mm index {path}` outside the shell once the chunk store is reachable.",
+    )

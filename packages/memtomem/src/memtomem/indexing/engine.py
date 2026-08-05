@@ -1505,9 +1505,11 @@ class IndexEngine:
           ``file, files_done, files_total, indexed, skipped``.
         - ``"complete"``: final summary — ``total_files, total_chunks,
           indexed_chunks, skipped_chunks, deleted_chunks, duration_ms,
-          errors``. ``errors`` is a list of human-readable strings in the
-          same loose shape as ``IndexingStats.errors`` so non-stream UI
-          handlers reuse verbatim. Empty list when the run had no errors.
+          errors, retryable_errors``. ``errors`` is a list of human-readable
+          strings in the same loose shape as ``IndexingStats.errors`` so
+          non-stream UI handlers reuse verbatim. ``retryable_errors`` is its
+          same-string retryable subset. Both are empty when the run had no
+          errors.
 
         Locking: each file is indexed under the same L2 sidecar →
         L3 ``_index_lock`` pair as ``index_file`` (via
