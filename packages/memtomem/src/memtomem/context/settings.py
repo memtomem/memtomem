@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Protocol
 
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
+from memtomem.context.error_redact import redact_secret_value
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,12 @@ def _drop_nonstring_matchers(contributions: dict) -> tuple[dict, list[str]]:
     An **absent** ``matcher`` is valid and means match-all; only a matcher that
     is present and non-string is malformed. Non-dict rules pass through
     untouched — every translator already skips them.
+
+    The warning names the offending event, which is a user-authored dict key
+    and can therefore be secret-shaped; these warnings reach the MCP wire via
+    the settings generate / diff / sync branches, so the event is scrubbed the
+    same way :func:`~memtomem.context.settings_doctor.format_malformed_warning`
+    scrubs its own (#2030).
     """
     src_hooks = contributions.get("hooks")
     if not isinstance(src_hooks, dict):
@@ -429,11 +436,12 @@ def _drop_nonstring_matchers(contributions: dict) -> tuple[dict, list[str]]:
         kept: list = []
         for rule in rules:
             if isinstance(rule, dict) and _normalize_matcher(rule.get("matcher", "")) is None:
+                shown_event = redact_secret_value(event)
                 warnings.append(
-                    f"Hook rule under '{event}' has a non-string matcher "
+                    f"Hook rule under '{shown_event}' has a non-string matcher "
                     f"({type(rule.get('matcher')).__name__}) and was dropped: "
                     f"'matcher' must be a string. Omit it to match every "
-                    f"{event}, or quote the value."
+                    f"{shown_event}, or quote the value."
                 )
                 continue
             kept.append(rule)

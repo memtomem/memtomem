@@ -219,6 +219,50 @@ async def test_secret_shaped_event_is_redacted_in_warning(tmp_path, monkeypatch,
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_secret_shaped_canonical_event_is_redacted_in_drop_warning(
+    tmp_path, monkeypatch, tool
+):
+    """Same scrub on the other malformed-warning producer (#2030 review).
+
+    ``_drop_nonstring_matchers`` warns about a malformed rule in the *canonical*
+    record, and its warnings reach the same MCP settings output — so redacting
+    only the tier-tier warning would still ship a secret-shaped canonical event
+    verbatim.
+    """
+    secret_event = "api_key=AKIA1234567890ABCDEF"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    set_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(
+        project / CANONICAL_SETTINGS_FILE,
+        {
+            secret_event: [
+                {
+                    "matcher": ["Bash"],
+                    "hooks": [{"type": "command", "command": "mm index", "timeout": 5000}],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+
+    assert "non-string matcher" in out, "fixture did not surface a drop warning"
+    assert "AKIA1234567890ABCDEF" not in out
+    assert "Hook rule under '<redacted: secret-shape>'" in out
+
+
+@pytest.mark.anyio
 async def test_no_dup_warning_when_only_active_tier(tmp_path, monkeypatch):
     """Negative pin: a hook only in the active (canonical) tier is not a
     duplicate, so no warning is emitted."""
