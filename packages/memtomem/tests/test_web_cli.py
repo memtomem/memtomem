@@ -573,6 +573,7 @@ def test_web_stop_refuses_symlinked_pid_without_signaling(
     assert "Cannot verify whether the Web UI is running" in result.output
     assert "No signal was sent" in result.output
     assert "service manager" in result.output
+    assert str(runtime_dir / "web.pid") in result.output
     assert signals == [], "an unverified pid path must never reach os.kill"
 
 

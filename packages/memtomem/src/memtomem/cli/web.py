@@ -552,11 +552,15 @@ def _web_stop() -> None:
 
     state = check_web_liveness()
     if state.probe_error is not None:
+        from memtomem._runtime_paths import scrub_text
+
+        tracked_path = state.pid_file if state.pid_file is not None else _web_pid_file()
         raise click.ClickException(
             f"Cannot verify whether the Web UI is running: {state.probe_error}\n"
             "No signal was sent. Stop the Web UI through its service manager "
             "or your operating system's process tools, then repair or remove "
-            "the unsafe runtime/pid entry named above and retry."
+            f"the unsafe runtime/pid entry at {scrub_text(str(tracked_path))} "
+            "and retry."
         )
     metadata = _read_web_metadata()
     pid = state.pid if state.pid is not None else metadata.pid
