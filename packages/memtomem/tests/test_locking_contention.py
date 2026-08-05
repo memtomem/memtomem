@@ -500,6 +500,14 @@ class TestCheckServerLivenessStoreScope:
         assert scoped.alive is True and scoped.probe_error is not None
         assert agnostic.alive is True and agnostic.probe_error is not None
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason=(
+            "no sibling branch exists on Windows: runtime_dir() skips "
+            "$XDG_RUNTIME_DIR entirely there, so the tempdir fallback is the "
+            "only branch and is already the caller's own"
+        ),
+    )
     def test_sees_server_in_the_sibling_runtime_dir(self, rt: Path, tmp_path: Path):
         """#2003 review: a server whose runtime dir differs from the CLI's.
 
