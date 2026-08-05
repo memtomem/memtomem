@@ -286,7 +286,7 @@ mm reset --yes                         # skip confirmation prompt (safety gates 
 mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.bak before wiping
 mm reset --force                       # bypass only the stale pid/web/DB-lock heuristics (not registry or barrier evidence)
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
-mm upgrade                             # uv-tool installs: stop services and reinstall with --refresh
+mm upgrade                             # uv-tool installs: on POSIX stop every MCP server and Web UI, reinstall, then recycle respawns
 mm upgrade --version 0.3.14 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
 
 # Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)

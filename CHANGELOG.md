@@ -57,15 +57,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   MCP tools), since such a rule is skipped by duplicate detection and would
   otherwise stay silent.
 
-- **`mm upgrade` now stops every live per-store server before reinstalling**
-  (#2002). Since server pid files became store-scoped, several legitimate
-  `server-<digest>.pid` holders can coexist, but the upgrade probe returned
-  only the first live state and left the others running the old binary.
-  Upgrade now enumerates every scoped, transitional, and legacy server lock,
-  stops all authoritative runtime holders, and requires a complete clean
-  re-enumeration before invoking `uv`. An unenumerable runtime directory,
-  another unverifiable pid lock, or an auto-restarted server now refuses the
-  reinstall instead of proceeding into split-brain.
+- **`mm upgrade` now stops every live per-store server and safely recycles
+  auto-restarted processes after reinstalling** (#2002). Since server pid
+  files became store-scoped, several legitimate `server-<digest>.pid` holders
+  can coexist, but the upgrade probe returned only the first live state and
+  left the others running the old binary. On POSIX, upgrade now inventories
+  and stops every attributable server and Web UI, reinstalls, then retires one
+  complete post-install snapshot; only different pids that appear afterwards
+  are accepted as the new generation. It also distinguishes a modern shared
+  legacy-lock alias from a separate exclusive old server, reports every probe
+  failure in one pass, and prints the full dry-run plan before a diagnostic
+  refusal. Windows retains its no-kill contract, so incomplete inventory is a
+  warning and users must restart every server and `mm web` manually.
 
 - **Web chunk deletion no longer reports success while leaving the target
   indexed** (#2016). Source access and stale line-provenance failures now stop

@@ -14,8 +14,10 @@ the probe is real on every supported OS.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 import portalocker
 
@@ -42,6 +44,11 @@ class ServerState:
     # this first: that claim is evidence-based, and a failed probe has no
     # evidence. ``None`` means the ``alive`` verdict is real.
     probe_error: str | None = None
+    # The legacy path is special on POSIX: modern servers take a shared
+    # compatibility lock while pre-0.1.25 servers take it exclusively.
+    # Upgrade uses this distinction to avoid signaling a stale pid from a
+    # shared alias while still stopping a genuinely separate old server.
+    legacy_lock_mode: Literal["shared", "exclusive"] | None = None
 
 
 def _parse_pid_payload(text: str) -> tuple[int | None, int | None, str | None]:
@@ -165,6 +172,41 @@ def probe_pid_file(pid_file: Path) -> ServerState:
         fp.close()
 
 
+def probe_legacy_pid_file(pid_file: Path | None = None) -> ServerState:
+    """Probe and classify the POSIX legacy compatibility lock.
+
+    A normal exclusive probe establishes whether the path is live. When it
+    is, a second non-blocking shared probe distinguishes modern shared alias
+    holders from a pre-0.1.25 exclusive holder. The shared handle is released
+    immediately. Windows never creates this compatibility lock and callers
+    should keep using :func:`probe_pid_file` there.
+    """
+    target = legacy_server_pid_path() if pid_file is None else pid_file
+    state = probe_pid_file(target)
+    if not state.alive or state.probe_error is not None:
+        return state
+
+    try:
+        fp = open(target, "rb+")
+    except OSError as exc:
+        return replace(state, probe_error=f"legacy lock classification failed: {exc}")
+
+    try:
+        try:
+            portalocker.lock(fp, portalocker.LOCK_SH | portalocker.LOCK_NB)
+        except (portalocker.AlreadyLocked, BlockingIOError):
+            return replace(state, legacy_lock_mode="exclusive")
+        except (portalocker.LockException, OSError) as exc:
+            return replace(state, probe_error=f"legacy lock classification failed: {exc}")
+        portalocker.unlock(fp)
+        # If the holder exited between the exclusive and shared probes this
+        # can conservatively look like a shared alias. It is never signaled,
+        # and the next complete inventory pass resolves the race.
+        return replace(state, legacy_lock_mode="shared")
+    finally:
+        fp.close()
+
+
 def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
     """Enumerate per-store ``server-*.pid`` files.
 
@@ -200,23 +242,31 @@ def enumerate_server_liveness() -> list[ServerState]:
     with ``probe_error`` set, preserving the liveness probe contract from
     #1949. Callers must refuse rather than treat that state as stoppable.
     """
+    states: list[ServerState] = []
     globbed, detail = _glob_server_pid_files()
     if globbed is None:
-        return [
+        states.append(
             ServerState(
                 alive=True,
                 pid=None,
                 pid_file=None,
                 probe_error=f"could not enumerate server-*.pid ({detail})",
             )
-        ]
+        )
+        candidates: list[Path] = []
+    else:
+        candidates = [*globbed, server_pid_path()]
 
-    candidates = [*globbed, server_pid_path(), legacy_server_pid_path()]
-    states: list[ServerState] = []
     for pid_file in candidates:
         state = probe_pid_file(pid_file)
         if state.alive:
             states.append(state)
+
+    legacy_state = (
+        probe_pid_file(legacy_server_pid_path()) if os.name == "nt" else probe_legacy_pid_file()
+    )
+    if legacy_state.alive:
+        states.append(legacy_state)
     return states
 
 
@@ -232,10 +282,10 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
     longer reports alive here.
 
     Without *db_path* — or when no digest can be derived for it
-    (``:memory:``, normalization failure) — every ``server-*.pid`` is
-    scanned before the transitional and legacy names, so store-agnostic
-    callers (``mm upgrade``) see per-store servers too. An enumeration
-    failure fails closed with ``probe_error`` set (#1949).
+    (``:memory:``, normalization failure) — sorted ``server-*.pid``
+    candidates are considered before the transitional and legacy names, so
+    store-agnostic compatibility callers see per-store servers too. An
+    enumeration failure fails closed with ``probe_error`` set (#1949).
 
     First live holder wins; if nothing is held the state is dead.
     """
@@ -248,9 +298,18 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
                 return state
         return ServerState(alive=False, pid=None, pid_file=None)
 
-    states = enumerate_server_liveness()
-    if states:
-        return states[0]
+    globbed, detail = _glob_server_pid_files()
+    if globbed is None:
+        return ServerState(
+            alive=True,
+            pid=None,
+            pid_file=None,
+            probe_error=f"could not enumerate server-*.pid ({detail})",
+        )
+    for pid_file in (*globbed, server_pid_path(), legacy_server_pid_path()):
+        state = probe_pid_file(pid_file)
+        if state.alive:
+            return state
     return ServerState(alive=False, pid=None, pid_file=None)
 
 

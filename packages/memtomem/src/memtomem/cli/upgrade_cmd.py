@@ -9,9 +9,10 @@ issue #443. The same applies to a backgrounded ``mm web`` — it holds
 (#1569). ``mm upgrade`` wraps the reinstall with process-level hygiene:
 
     enumerate live servers + probe web UI → SIGTERM (escalate to SIGKILL
-    after grace) → unlink stale pid files → re-enumerate servers →
-    ``BEGIN IMMEDIATE`` DB probe for writers the pid files can't see
-    (#1606, warn-only) → ``uv tool install --refresh --reinstall``.
+    after grace) → reinstall → snapshot and retire every process that may
+    still have the old generation imported → accept only later replacement
+    pids. A final ``BEGIN IMMEDIATE`` DB probe warns about writers the pid
+    files cannot explain (#1606).
 
 There is no ``--skip-pkill``: the kill-then-reinstall ordering is the
 whole reason this command exists. On Windows the kill stage is skipped
@@ -31,6 +32,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
+from typing import NoReturn
 
 import click
 
@@ -71,52 +73,92 @@ def _format_path(p: Path) -> str:
     return s.replace(home, "~", 1) if s.startswith(home) else s
 
 
-def _server_probe_error(states: list[ServerState]) -> ServerState | None:
-    """Return the first unverifiable state, if any."""
-    return next((state for state in states if state.probe_error is not None), None)
-
-
-def _server_probe_failure_message(state: ServerState) -> str:
-    """Describe a fail-closed inventory error without claiming a held lock."""
+def _probe_problem(state: ServerState, label: str) -> str:
+    """Describe one unverifiable state without claiming a held lock."""
     if state.pid_file is None:
-        action = "enumerating server pid files"
+        action = "enumerating pid files"
     else:
         action = f"probing {_format_path(state.pid_file)}"
-    return (
-        f"Cannot verify the complete memtomem-server inventory: {action} failed "
-        f"({state.probe_error}). Refusing to reinstall. Repair or remove the "
-        "reported path, then retry."
-    )
+    return f"{label}: {action} failed ({state.probe_error})"
 
 
 def _upgrade_server_stops(states: list[ServerState]) -> list[ServerState]:
-    """Select directly stoppable server states without signaling a legacy alias.
+    """Return authoritative server states that are safe to signal.
 
-    Modern POSIX servers can hold both an authoritative runtime pid file and
-    the shared legacy compatibility lock. The latter does not write its pid,
-    so its payload may be empty or stale. When both forms are live, stop only
-    the runtime states and let the final full enumeration verify that the
-    alias disappeared. A legacy-only holder keeps the existing direct-stop
-    behavior for old installations.
+    A classified shared legacy lock is only a modern compatibility alias.
+    An exclusive legacy lock is a separate old server and is stoppable. Tests
+    and compatibility callers can still supply an unclassified legacy state;
+    retain the pre-#2002 rule there and suppress it only when a runtime state
+    is also present.
     """
     legacy_pid = legacy_server_pid_path()
     runtime_states = [state for state in states if state.pid_file != legacy_pid]
-    return runtime_states if runtime_states else states
-
-
-def _remaining_servers_message(states: list[ServerState]) -> str:
-    """Describe live holders found at the reinstall boundary."""
-    holders: list[str] = []
+    stops = list(runtime_states)
     for state in states:
-        pid = state.pid if state.pid is not None else "?"
-        lock = _format_path(state.pid_file) if state.pid_file is not None else "?"
-        holders.append(f"pid {pid}, lock {lock}")
-    detail = "; ".join(holders)
-    return (
-        "A memtomem-server is still running or restarted while upgrade was "
-        f"stopping processes ({detail}). Refusing to reinstall. Close MCP "
-        "clients that auto-restart memtomem-server, then retry."
-    )
+        if state.pid_file != legacy_pid:
+            continue
+        if state.legacy_lock_mode == "shared":
+            continue
+        if state.legacy_lock_mode == "exclusive" or not runtime_states:
+            stops.append(state)
+    return stops
+
+
+def _inventory_problems(server_states: list[ServerState], web_state: ServerState) -> list[str]:
+    """Return every error or live state that cannot be safely retired."""
+    problems = [
+        _probe_problem(state, "memtomem-server")
+        for state in server_states
+        if state.probe_error is not None
+    ]
+    if web_state.probe_error is not None:
+        problems.append(_probe_problem(web_state, "web UI"))
+
+    direct_servers = _upgrade_server_stops(server_states)
+    for state in direct_servers:
+        if state.probe_error is None and state.pid is None:
+            path = _format_path(state.pid_file) if state.pid_file is not None else "?"
+            if state.legacy_lock_mode == "exclusive":
+                problems.append(
+                    "legacy memtomem-server: the exclusive compatibility lock at "
+                    f"{path} has no signalable PID"
+                )
+            else:
+                problems.append(f"memtomem-server: live lock {path} has no signalable PID")
+
+    shared_aliases = [state for state in server_states if state.legacy_lock_mode == "shared"]
+    runtime_servers = [
+        state
+        for state in direct_servers
+        if state.pid_file != legacy_server_pid_path() and state.probe_error is None
+    ]
+    if shared_aliases and not runtime_servers:
+        path = _format_path(shared_aliases[0].pid_file or legacy_server_pid_path())
+        problems.append(
+            "legacy memtomem-server: the shared compatibility lock at "
+            f"{path} has no authoritative runtime PID to signal"
+        )
+
+    if web_state.alive and web_state.probe_error is None and web_state.pid is None:
+        path = _format_path(web_state.pid_file) if web_state.pid_file is not None else "?"
+        problems.append(f"web UI: live lock {path} has no signalable PID")
+    return problems
+
+
+def _inventory_failure_message(problems: list[str], *, package_changed: bool = False) -> str:
+    """Format all inventory failures with phase-accurate remediation."""
+    detail = "\n".join(f"- {problem}" for problem in problems)
+    if package_changed:
+        suffix = (
+            "The package was reinstalled, but process generation cleanup is incomplete. "
+            "Stop every memtomem server and `mm web` manually, then restart them."
+        )
+    else:
+        suffix = (
+            "Refusing to reinstall. Restore access to every reported path and stop the "
+            "reported process manually, then retry."
+        )
+    return f"Cannot verify the complete memtomem process inventory:\n{detail}\n{suffix}"
 
 
 def _refuse_upgrade(
@@ -125,7 +167,8 @@ def _refuse_upgrade(
     json_out: bool,
     killed: list[int] | None = None,
     removed: list[Path] | None = None,
-) -> None:
+    extra: dict[str, object] | None = None,
+) -> NoReturn:
     """Emit a structured or human refusal and terminate with status 1."""
     if json_out:
         payload: dict[str, object] = {"ok": False, "error": message}
@@ -133,6 +176,8 @@ def _refuse_upgrade(
             payload["killed"] = killed
         if removed is not None:
             payload["removed"] = [str(path) for path in removed]
+        if extra is not None:
+            payload.update(extra)
         click.echo(_json.dumps(payload))
     else:
         click.secho(message, fg="red")
@@ -154,7 +199,12 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _stop_server(state: ServerState, grace: float) -> tuple[list[int], list[Path]]:
+def _stop_server(
+    state: ServerState,
+    grace: float,
+    *,
+    warnings_to_stderr: bool = False,
+) -> tuple[list[int], list[Path]]:
     """SIGTERM the live pid-file holder, escalate to SIGKILL after ``grace`` seconds.
 
     Works on any :class:`ServerState` — the MCP server and ``mm web``
@@ -202,12 +252,18 @@ def _stop_server(state: ServerState, grace: float) -> tuple[list[int], list[Path
     # settle window.
     if state.pid_file is not None:
         recheck = probe_pid_file(state.pid_file)
+        if recheck.probe_error is not None:
+            raise click.ClickException(
+                f"cannot verify {_format_path(state.pid_file)} after stopping pid "
+                f"{state.pid}: {recheck.probe_error}"
+            )
         if recheck.alive:
             click.secho(
                 f"  Skipping pid-file unlink — {state.pid_file} is now held by a "
                 "freshly started writer (likely an auto-restart from your MCP "
-                "client). Leaving it alone.",
+                "client). Leaving its live lock intact.",
                 fg="yellow",
+                err=warnings_to_stderr,
             )
         else:
             try:
@@ -218,6 +274,59 @@ def _stop_server(state: ServerState, grace: float) -> tuple[list[int], list[Path
                     f"failed to remove stale pid file {state.pid_file}: {exc}"
                 ) from exc
 
+    return killed, removed
+
+
+def _cleanup_web_sidecar(web_state: ServerState, removed: list[Path]) -> None:
+    """Remove stale ``web.json`` without touching a replacement writer's file."""
+    if web_state.pid_file is None or web_state.pid_file not in removed:
+        return
+
+    from memtomem.cli.web import _WEB_INFO_NAME
+
+    info_file = web_state.pid_file.with_name(_WEB_INFO_NAME)
+    if not info_file.exists():
+        return
+    recheck = probe_pid_file(web_state.pid_file)
+    if recheck.alive:
+        return
+    try:
+        info_file.unlink()
+        removed.append(info_file)
+    except OSError:
+        pass
+
+
+def _stop_process_snapshot(
+    server_states: list[ServerState],
+    web_state: ServerState,
+    *,
+    grace: float,
+    warnings_to_stderr: bool = False,
+) -> tuple[list[int], list[Path]]:
+    """Stop every verified, directly attributable process in one snapshot."""
+    killed: list[int] = []
+    removed: list[Path] = []
+    for state in _upgrade_server_stops(server_states):
+        if state.probe_error is not None or state.pid is None:
+            continue
+        stopped, cleaned = _stop_server(
+            state,
+            grace=grace,
+            warnings_to_stderr=warnings_to_stderr,
+        )
+        killed.extend(stopped)
+        removed.extend(cleaned)
+
+    if web_state.alive and web_state.probe_error is None and web_state.pid is not None:
+        stopped, cleaned = _stop_server(
+            web_state,
+            grace=grace,
+            warnings_to_stderr=warnings_to_stderr,
+        )
+        killed.extend(stopped)
+        removed.extend(cleaned)
+        _cleanup_web_sidecar(web_state, removed)
     return killed, removed
 
 
@@ -360,19 +469,30 @@ def upgrade(
     """
     is_windows = sys.platform == "win32"
     server_states = enumerate_server_liveness()
-    initial_probe_error = _server_probe_error(server_states)
-    if initial_probe_error is not None:
-        _refuse_upgrade(
-            _server_probe_failure_message(initial_probe_error),
-            json_out=json_out,
-        )
-
     web_state = check_web_liveness()
     extras, extras_auto = _resolve_extras(extras_flag)
     install_cmd = _build_install_cmd(version, extras)
     pkg_target = install_cmd[-1]
     server_stops = _upgrade_server_stops(server_states)
     live_states = [*server_stops, *([web_state] if web_state.alive else [])]
+    initial_problems = _inventory_problems(server_states, web_state)
+    probe_problems = [
+        _probe_problem(state, "memtomem-server")
+        for state in server_states
+        if state.probe_error is not None
+    ]
+    if web_state.probe_error is not None:
+        probe_problems.append(_probe_problem(web_state, "web UI"))
+    warnings = (
+        [
+            "Process inventory is incomplete on Windows: "
+            f"{problem}. Windows does not terminate memtomem processes automatically; "
+            "continuing with reinstall. Stop every memtomem server and `mm web` manually."
+            for problem in probe_problems
+        ]
+        if is_windows
+        else []
+    )
     # Windows skips the kill stage entirely, so a truthful plan/dry-run
     # must not claim we would kill or remove anything there.
     planned_stops = [] if is_windows else live_states
@@ -383,7 +503,7 @@ def upgrade(
         if is_windows:
             click.secho(
                 "  Detected Windows; skipping process termination. "
-                "Stop the server (and any `mm web`) manually before "
+                "Stop every memtomem server (and any `mm web`) manually before "
                 "rerunning if you see a split-brain after upgrade.",
                 fg="yellow",
             )
@@ -405,25 +525,43 @@ def upgrade(
         elif extras_auto:
             click.echo("  Extras: none detected (bare install)")
         click.echo(f"  Reinstall: {' '.join(install_cmd)}")
+        if not is_windows:
+            click.echo("  Recycle any server or Web UI process present after reinstall")
+        if initial_problems:
+            click.echo("  Inventory diagnostics:")
+            for problem in initial_problems:
+                click.echo(f"    - {problem}")
+        for warning in warnings:
+            click.secho(f"  Warning: {warning}", fg="yellow")
 
     if dry_run:
         if json_out:
-            click.echo(
-                _json.dumps(
-                    {
-                        "ok": True,
-                        "dry_run": True,
-                        "would_kill": [s.pid for s in planned_stops if s.pid is not None],
-                        "would_remove": [
-                            str(s.pid_file) for s in planned_stops if s.pid_file is not None
-                        ],
-                        "would_install": install_cmd,
-                        "extras": extras,
-                        "version": version,
-                    }
-                )
-            )
+            payload: dict[str, object] = {
+                "ok": is_windows or not initial_problems,
+                "dry_run": True,
+                "inventory_complete": not initial_problems,
+                "would_kill": [s.pid for s in planned_stops if s.pid is not None],
+                "would_remove": [str(s.pid_file) for s in planned_stops if s.pid_file is not None],
+                "would_install": install_cmd,
+                "extras": extras,
+                "version": version,
+            }
+            if warnings:
+                payload["warnings"] = warnings
+            if initial_problems and not is_windows:
+                payload["error"] = _inventory_failure_message(initial_problems)
+            click.echo(_json.dumps(payload))
+        if initial_problems and not is_windows:
+            if not json_out:
+                click.secho(_inventory_failure_message(initial_problems), fg="red")
+            sys.exit(1)
         return
+
+    if initial_problems and not is_windows:
+        _refuse_upgrade(
+            _inventory_failure_message(initial_problems),
+            json_out=json_out,
+        )
 
     # ----- confirm -----
     if not yes:
@@ -449,26 +587,14 @@ def upgrade(
     removed: list[Path] = []
     if planned_stops:
         try:
-            for live in planned_stops:
-                stopped, cleaned = _stop_server(live, grace=grace)
-                killed.extend(stopped)
-                removed.extend(cleaned)
-            if web_state.pid_file is not None and web_state.pid_file in removed:
-                # ``mm web`` unlinks its ``web.json`` metadata sidecar on a
-                # graceful SIGTERM but not on the SIGKILL path; sweep it so
-                # the next start doesn't inherit stale pid/port metadata.
-                # Re-probe right before the unlink (mirroring the pid-file
-                # guard in _stop_server): a web UI respawned after the pid
-                # file was cleaned must keep its fresh sidecar.
-                from memtomem.cli.web import _WEB_INFO_NAME
-
-                info_file = web_state.pid_file.with_name(_WEB_INFO_NAME)
-                if info_file.exists() and not probe_pid_file(web_state.pid_file).alive:
-                    try:
-                        info_file.unlink()
-                        removed.append(info_file)
-                    except OSError:
-                        pass
+            stopped, cleaned = _stop_process_snapshot(
+                server_states,
+                web_state,
+                grace=grace,
+                warnings_to_stderr=json_out,
+            )
+            killed.extend(stopped)
+            removed.extend(cleaned)
         except click.ClickException as exc:
             if json_out:
                 _refuse_upgrade(
@@ -479,42 +605,22 @@ def upgrade(
                 )
             raise
 
-    # ----- clean server boundary (#2002) -----
-    # Re-enumerate unconditionally on POSIX, even when the initial snapshot
-    # was empty: an MCP client can start or auto-restart a server while the
-    # upgrade is waiting for confirmation or stopping another process. One
-    # complete clean pass is required before touching the installed bytes.
-    # Windows deliberately has no automatic stop stage, so retain its manual
-    # warning-and-proceed contract after validating the initial enumeration.
+    # ----- complete pre-install boundary (#2002) -----
+    # A clean snapshot cannot be required here: MCP clients commonly respawn
+    # immediately and would make upgrade impossible. Require a complete,
+    # signalable inventory, then retire that generation after uv succeeds.
+    # Windows deliberately keeps its no-kill, no-boundary compatibility path.
     if not is_windows:
-        remaining_servers = enumerate_server_liveness()
-        boundary_probe_error = _server_probe_error(remaining_servers)
-        if boundary_probe_error is not None:
+        boundary_servers = enumerate_server_liveness()
+        boundary_web = check_web_liveness()
+        boundary_problems = _inventory_problems(boundary_servers, boundary_web)
+        if boundary_problems:
             _refuse_upgrade(
-                _server_probe_failure_message(boundary_probe_error),
+                _inventory_failure_message(boundary_problems),
                 json_out=json_out,
                 killed=killed,
                 removed=removed,
             )
-        if remaining_servers:
-            _refuse_upgrade(
-                _remaining_servers_message(remaining_servers),
-                json_out=json_out,
-                killed=killed,
-                removed=removed,
-            )
-
-    # ----- post-stop DB probe (#1606) -----
-    # The pid-file probes only see processes that wrote server.pid /
-    # web.pid. A writer that never did (a user sqlite3 session, a process
-    # launched from another checkout) survives the stop stage and keeps
-    # running the old code after the byte swap. With the known processes
-    # down, a remaining write lock is by definition an unknown writer.
-    # Warn-and-proceed: the reinstall itself is safe, and the probe can't
-    # name a pid for us to stop (contrast mm reset, where the destructive
-    # wipe justifies refusing outright).
-    db_path = _resolve_db_path()
-    db_lock_warning = db_path is not None and check_db_lock(db_path).locked
 
     # ----- reinstall -----
     try:
@@ -522,14 +628,32 @@ def upgrade(
     except FileNotFoundError:
         msg = "`uv` not found on PATH. Install uv (https://docs.astral.sh/uv/) and retry."
         if json_out:
-            click.echo(_json.dumps({"ok": False, "error": msg, "killed": killed}))
+            click.echo(
+                _json.dumps(
+                    {
+                        "ok": False,
+                        "error": msg,
+                        "killed": killed,
+                        "removed": [str(path) for path in removed],
+                    }
+                )
+            )
             sys.exit(1)
         click.secho(msg, fg="red")
         sys.exit(1)
     except subprocess.TimeoutExpired:
         msg = "uv tool install timed out after 600s."
         if json_out:
-            click.echo(_json.dumps({"ok": False, "error": msg, "killed": killed}))
+            click.echo(
+                _json.dumps(
+                    {
+                        "ok": False,
+                        "error": msg,
+                        "killed": killed,
+                        "removed": [str(path) for path in removed],
+                    }
+                )
+            )
             sys.exit(1)
         click.secho(msg, fg="red")
         sys.exit(1)
@@ -552,21 +676,101 @@ def upgrade(
         click.echo(result.stderr.rstrip())
         sys.exit(1)
 
+    final_servers = server_states
+    final_web = web_state
+    if not is_windows:
+        # ----- post-install generation retirement -----
+        # Every process in this snapshot may have imported the old package.
+        # Stop it once. A different pid appearing afterwards was started after
+        # the successful byte swap and is accepted as the new generation.
+        retirement_servers = enumerate_server_liveness()
+        retirement_web = check_web_liveness()
+        cleanup_problems = _inventory_problems(retirement_servers, retirement_web)
+        retirement_states = [
+            *_upgrade_server_stops(retirement_servers),
+            *([retirement_web] if retirement_web.alive else []),
+        ]
+        retirement_pids = {
+            state.pid
+            for state in retirement_states
+            if state.pid is not None and state.probe_error is None
+        }
+
+        try:
+            stopped, cleaned = _stop_process_snapshot(
+                retirement_servers,
+                retirement_web,
+                grace=grace,
+                warnings_to_stderr=json_out,
+            )
+            killed.extend(stopped)
+            removed.extend(cleaned)
+        except click.ClickException as exc:
+            cleanup_problems.append(str(exc))
+
+        final_servers = enumerate_server_liveness()
+        final_web = check_web_liveness()
+        cleanup_problems.extend(_inventory_problems(final_servers, final_web))
+
+        for state in _upgrade_server_stops(final_servers):
+            if state.probe_error is not None or state.pid is None:
+                continue
+            path = _format_path(state.pid_file) if state.pid_file is not None else "?"
+            if state.legacy_lock_mode == "exclusive":
+                cleanup_problems.append(
+                    "legacy memtomem-server: an exclusive compatibility holder remains "
+                    f"at {path} (pid {state.pid}); its generation cannot be verified"
+                )
+            elif state.pid in retirement_pids:
+                cleanup_problems.append(
+                    f"memtomem-server: retirement pid {state.pid} still holds {path}"
+                )
+        if (
+            final_web.alive
+            and final_web.probe_error is None
+            and final_web.pid is not None
+            and final_web.pid in retirement_pids
+        ):
+            path = _format_path(final_web.pid_file) if final_web.pid_file is not None else "?"
+            cleanup_problems.append(f"web UI: retirement pid {final_web.pid} still holds {path}")
+
+        cleanup_problems = list(dict.fromkeys(cleanup_problems))
+        if cleanup_problems:
+            _refuse_upgrade(
+                _inventory_failure_message(cleanup_problems, package_changed=True),
+                json_out=json_out,
+                killed=killed,
+                removed=removed,
+                extra={
+                    "reinstalled": pkg_target,
+                    "cleanup_complete": False,
+                },
+            )
+
+    # ----- unexplained DB writer warning (#1606) -----
+    # Do not blame a verified replacement process for retaining old code.
+    # When no accepted pid-file holder explains a lock, preserve the existing
+    # warn-and-proceed heuristic for invisible writers.
+    known_final_process = bool(_upgrade_server_stops(final_servers)) or final_web.alive
+    db_path = _resolve_db_path()
+    db_lock_warning = (
+        db_path is not None and not known_final_process and check_db_lock(db_path).locked
+    )
+
     # ----- success -----
     if json_out:
-        click.echo(
-            _json.dumps(
-                {
-                    "ok": True,
-                    "killed": killed,
-                    "removed": [str(p) for p in removed],
-                    "reinstalled": pkg_target,
-                    "extras": extras,
-                    "version": version,
-                    "db_lock_warning": db_lock_warning,
-                }
-            )
-        )
+        payload = {
+            "ok": True,
+            "killed": killed,
+            "removed": [str(p) for p in removed],
+            "reinstalled": pkg_target,
+            "extras": extras,
+            "version": version,
+            "db_lock_warning": db_lock_warning,
+        }
+        if warnings:
+            payload["warnings"] = warnings
+        click.echo(_json.dumps(payload))
         return
 
     if killed:
@@ -574,8 +778,8 @@ def upgrade(
         noun = "pids" if len(killed) > 1 else "pid"
         click.secho(f"\nStopped {noun} {pids_repr}.", fg="green")
     if removed:
-        for path in removed:
-            click.echo(f"Removed {_format_path(path)}.")
+        for removed_path in removed:
+            click.echo(f"Removed {_format_path(removed_path)}.")
     click.secho(f"Reinstalled {pkg_target}.", fg="green")
     if db_lock_warning and db_path is not None:
         db_repr = _format_path(db_path)

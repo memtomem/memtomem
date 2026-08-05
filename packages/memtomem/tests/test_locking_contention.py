@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import multiprocessing as mp
+import os
 import time
 from pathlib import Path
 
@@ -308,6 +309,24 @@ class TestCheckServerLivenessStoreScope:
                 pass
             fp.close()
 
+    @contextlib.contextmanager
+    def _hold_shared(self, pid_file: Path):
+        import portalocker
+
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        if not pid_file.exists():
+            pid_file.write_text("4242", encoding="utf-8")
+        fp = open(pid_file, "rb+")
+        try:
+            portalocker.lock(fp, portalocker.LOCK_SH | portalocker.LOCK_NB)
+            yield
+        finally:
+            try:
+                portalocker.unlock(fp)
+            except Exception:
+                pass
+            fp.close()
+
     def test_scoped_probe_sees_own_store_holder(self, rt: Path, tmp_path: Path):
         from memtomem._runtime_paths import server_pid_path
         from memtomem.cli._liveness import check_server_liveness
@@ -356,6 +375,27 @@ class TestCheckServerLivenessStoreScope:
             "the no-db_path arm (mm upgrade) must find per-store pid files via glob"
         )
 
+    def test_store_agnostic_compat_probe_still_short_circuits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        first = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+        second = tmp_path / "server-bbbbbbbbbbbbbbbb.pid"
+        seen: list[Path] = []
+        monkeypatch.setattr(liveness, "_glob_server_pid_files", lambda: ([first, second], "rt"))
+
+        def probe(path: Path):
+            seen.append(path)
+            return liveness.ServerState(alive=True, pid=111, pid_file=path)
+
+        monkeypatch.setattr(liveness, "probe_pid_file", probe)
+
+        state = liveness.check_server_liveness()
+
+        assert state.pid_file == first
+        assert seen == [first]
+
     def test_store_agnostic_enumerator_returns_every_live_holder(self, rt: Path, tmp_path: Path):
         from memtomem._runtime_paths import server_pid_path
         from memtomem.cli._liveness import (
@@ -378,9 +418,27 @@ class TestCheckServerLivenessStoreScope:
 
         expected = sorted((pid_a, pid_b))
         assert [state.pid_file for state in states] == expected
-        assert {state.pid for state in states if state.pid is not None} <= {111, 222}
+        if os.name != "nt":
+            assert {state.pid for state in states} == {111, 222}
+        else:
+            assert all(state.pid in {111, 222, None} for state in states)
         assert aggregate.pid_file == expected[0]
         assert stale not in [state.pid_file for state in states]
+
+    @pytest.mark.skipif(os.name == "nt", reason="legacy shared flock is POSIX-only")
+    def test_legacy_probe_distinguishes_shared_alias_from_exclusive_holder(self, tmp_path: Path):
+        from memtomem.cli._liveness import probe_legacy_pid_file
+
+        legacy = tmp_path / ".server.pid"
+        with self._hold_shared(legacy):
+            shared = probe_legacy_pid_file(legacy)
+        with self._hold(legacy):
+            exclusive = probe_legacy_pid_file(legacy)
+
+        assert shared.alive is True
+        assert shared.legacy_lock_mode == "shared"
+        assert exclusive.alive is True
+        assert exclusive.legacy_lock_mode == "exclusive"
 
     def test_store_agnostic_probe_fails_closed_on_glob_error(
         self, rt: Path, monkeypatch: pytest.MonkeyPatch

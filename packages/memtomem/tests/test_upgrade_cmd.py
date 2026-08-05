@@ -77,19 +77,28 @@ def _patch_liveness(
     web: ServerState = _DEAD,
     *,
     post: list[ServerState] | None = None,
+    snapshots: list[list[ServerState]] | None = None,
+    web_snapshots: list[ServerState] | None = None,
 ) -> list[list[ServerState]]:
-    """Patch initial/boundary server snapshots and the independent web probe."""
+    """Patch the initial, pre-install, retirement, and final snapshots."""
     initial = state if isinstance(state, list) else ([state] if state.alive else [])
-    snapshots = [initial, [] if post is None else post]
+    server_snapshots = snapshots or [initial, [] if post is None else post, [], []]
+    web_sequence = web_snapshots or [web, _DEAD, _DEAD, _DEAD]
     seen: list[list[ServerState]] = []
+    seen_web: list[ServerState] = []
 
     def enumerate_servers() -> list[ServerState]:
-        snapshot = snapshots[min(len(seen), len(snapshots) - 1)]
+        snapshot = server_snapshots[min(len(seen), len(server_snapshots) - 1)]
         seen.append(snapshot)
         return snapshot
 
+    def probe_web() -> ServerState:
+        snapshot = web_sequence[min(len(seen_web), len(web_sequence) - 1)]
+        seen_web.append(snapshot)
+        return snapshot
+
     monkeypatch.setattr(upgrade_cmd, "enumerate_server_liveness", enumerate_servers)
-    monkeypatch.setattr(upgrade_cmd, "check_web_liveness", lambda: web)
+    monkeypatch.setattr(upgrade_cmd, "check_web_liveness", probe_web)
     return seen
 
 
@@ -110,12 +119,58 @@ def test_no_running_server_just_reinstalls(monkeypatch, fake_uv, force_tty):
     assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem"]]
 
 
-@pytest.mark.parametrize("platform", ["darwin", "win32"])
-def test_initial_server_enumeration_error_refuses_even_dry_run_json(
-    monkeypatch, fake_uv, force_tty, platform
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX fail-closed diagnostics")
+def test_initial_inventory_errors_render_full_dry_run_then_refuse(
+    monkeypatch, tmp_path, fake_uv, force_tty
 ):
     calls, _configure = fake_uv
-    monkeypatch.setattr(upgrade_cmd.sys, "platform", platform)
+    error_a = ServerState(
+        alive=True,
+        pid=None,
+        pid_file=None,
+        probe_error="could not enumerate server-*.pid (<runtime>: denied)",
+    )
+    bad_path = tmp_path / "server.pid"
+    error_b = ServerState(
+        alive=True,
+        pid=None,
+        pid_file=bad_path,
+        probe_error="PermissionError: denied",
+    )
+    web_path = tmp_path / "web.pid"
+    web = ServerState(alive=True, pid=4242, pid_file=web_path, port=8080)
+    seen = _patch_liveness(monkeypatch, [error_a, error_b], web=web)
+
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run", "--json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["inventory_complete"] is False
+    assert "Cannot verify the complete memtomem process inventory" in payload["error"]
+    assert "could not enumerate" in payload["error"]
+    assert str(bad_path) in payload["error"]
+    assert "Refusing to reinstall" in payload["error"]
+    assert "flock is held" not in payload["error"]
+    assert payload["would_kill"] == [4242]
+    assert payload["would_install"][-1] == "memtomem"
+    assert calls == []
+    assert seen == [[error_a, error_b]]
+
+    _patch_liveness(monkeypatch, [error_a, error_b], web=web)
+    human = CliRunner().invoke(cli, ["upgrade", "--dry-run"])
+    assert human.exit_code == 1, human.output
+    assert "memtomem upgrade plan:" in human.output
+    assert "Stop running web UI" in human.output
+    assert "Inventory diagnostics:" in human.output
+    assert "could not enumerate" in human.output
+    assert str(bad_path) in human.output
+    assert "Reinstall:" in human.output
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_windows_inventory_error_warns_and_proceeds(monkeypatch, fake_uv, force_tty, dry_run):
+    calls, _configure = fake_uv
+    monkeypatch.setattr(upgrade_cmd.sys, "platform", "win32")
     error = ServerState(
         alive=True,
         pid=None,
@@ -123,21 +178,42 @@ def test_initial_server_enumeration_error_refuses_even_dry_run_json(
         probe_error="could not enumerate server-*.pid (<runtime>: denied)",
     )
     seen = _patch_liveness(monkeypatch, error)
+    args = ["upgrade", "--json"]
+    args.append("--dry-run" if dry_run else "-y")
 
-    def unexpected_web_probe():
-        raise AssertionError("web probe must not run after an incomplete server inventory")
-
-    monkeypatch.setattr(upgrade_cmd, "check_web_liveness", unexpected_web_probe)
-
-    result = CliRunner().invoke(cli, ["upgrade", "--dry-run", "--json"])
-    assert result.exit_code == 1, result.output
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["ok"] is False
-    assert "Cannot verify the complete memtomem-server inventory" in payload["error"]
-    assert "Refusing to reinstall" in payload["error"]
-    assert "flock is held" not in payload["error"]
-    assert calls == []
+    assert payload["ok"] is True
+    assert payload["warnings"]
+    assert "incomplete on Windows" in payload["warnings"][0]
+    assert "could not enumerate" in payload["warnings"][0]
+    if dry_run:
+        assert payload["would_kill"] == []
+        assert payload["would_remove"] == []
+        assert calls == []
+    else:
+        assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem"]]
     assert seen == [[error]]
+
+
+def test_windows_inventory_error_is_visible_in_human_plan(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    monkeypatch.setattr(upgrade_cmd.sys, "platform", "win32")
+    error = ServerState(
+        alive=True,
+        pid=None,
+        pid_file=None,
+        probe_error="could not enumerate server-*.pid (<runtime>: denied)",
+    )
+    _patch_liveness(monkeypatch, error)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "Inventory diagnostics:" in result.output
+    assert "Warning: Process inventory is incomplete on Windows" in result.output
+    assert "Stop every memtomem server" in result.output
+    assert len(calls) == 1
 
 
 @pytest.mark.skipif(
@@ -255,7 +331,12 @@ def test_legacy_alias_is_not_planned_for_direct_stop(monkeypatch, tmp_path, fake
     monkeypatch.setattr(upgrade_cmd, "legacy_server_pid_path", lambda: legacy_pid)
     states = [
         ServerState(alive=True, pid=111, pid_file=runtime_pid),
-        ServerState(alive=True, pid=999, pid_file=legacy_pid),
+        ServerState(
+            alive=True,
+            pid=999,
+            pid_file=legacy_pid,
+            legacy_lock_mode="shared",
+        ),
     ]
     _patch_liveness(monkeypatch, states)
 
@@ -265,6 +346,42 @@ def test_legacy_alias_is_not_planned_for_direct_stop(monkeypatch, tmp_path, fake
     assert payload["would_kill"] == [111]
     assert payload["would_remove"] == [str(runtime_pid)]
     assert calls == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: legacy exclusive holders use flock and signals",
+)
+def test_distinct_legacy_holder_is_stopped_with_runtime_server(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    calls, _configure = fake_uv
+    runtime_pid = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    legacy_pid = tmp_path / ".server.pid"
+    runtime_pid.write_text("111")
+    legacy_pid.write_text("999")
+    monkeypatch.setattr(upgrade_cmd, "legacy_server_pid_path", lambda: legacy_pid)
+    states = [
+        ServerState(alive=True, pid=111, pid_file=runtime_pid),
+        ServerState(
+            alive=True,
+            pid=999,
+            pid_file=legacy_pid,
+            legacy_lock_mode="exclusive",
+        ),
+    ]
+    _patch_liveness(monkeypatch, states)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert (111, upgrade_cmd.signal.SIGTERM) in sent
+    assert (999, upgrade_cmd.signal.SIGTERM) in sent
+    assert not runtime_pid.exists()
+    assert not legacy_pid.exists()
+    assert calls
 
 
 @pytest.mark.skipif(
@@ -302,9 +419,16 @@ def test_running_server_escalates_to_sigkill(monkeypatch, tmp_path, fake_uv, for
     _patch_liveness(monkeypatch, ServerState(alive=True, pid=12345, pid_file=pid_file))
 
     sent: list[tuple[int, int]] = []
-    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    # Stays alive forever → grace expires → SIGKILL.
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: True)
+    # Stays alive through the grace period, then exits after SIGKILL.
+    killed = {"done": False}
+
+    def fake_kill(pid: int, sig: int) -> None:
+        sent.append((pid, sig))
+        if sig == upgrade_cmd.signal.SIGKILL:
+            killed["done"] = True
+
+    monkeypatch.setattr(upgrade_cmd.os, "kill", fake_kill)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: not killed["done"])
     monkeypatch.setattr(upgrade_cmd.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
         upgrade_cmd.time,
@@ -447,33 +571,43 @@ def test_extras_combined_with_version_pin(monkeypatch, fake_uv, force_tty):
     reason="POSIX-only: exercises the SIGKILL respawn-detection path; Windows skips kill entirely (covered by test_windows_skips_kill)",
 )
 def test_pid_file_unlink_skipped_if_respawned(monkeypatch, tmp_path, fake_uv, force_tty):
-    """SIGKILL path: a fresh server respawns at the same pid file path
-    inside the settle window. We must NOT delete its lockfile or reinstall."""
+    """An auto-respawned old generation is recycled once after reinstall."""
     calls, _configure = fake_uv
     pid_file = tmp_path / "server.pid"
     pid_file.write_text("12345")
     respawned = ServerState(alive=True, pid=99999, pid_file=pid_file)
+    replacement = ServerState(alive=True, pid=100000, pid_file=pid_file)
     _patch_liveness(
         monkeypatch,
         ServerState(alive=True, pid=12345, pid_file=pid_file),
-        post=[respawned],
+        snapshots=[
+            [ServerState(alive=True, pid=12345, pid_file=pid_file)],
+            [respawned],
+            [respawned],
+            [replacement],
+        ],
     )
-    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
 
-    # Re-probe at unlink time sees a live writer (the respawn).
+    probes = iter([respawned, replacement])
     monkeypatch.setattr(
         upgrade_cmd,
         "probe_pid_file",
-        lambda p: ServerState(alive=True, pid=99999, pid_file=p),
+        lambda _p: next(probes),
     )
 
-    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1"])
-    assert result.exit_code == 1, result.output
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["killed"] == [12345, 99999]
+    assert (12345, upgrade_cmd.signal.SIGTERM) in sent
+    assert (99999, upgrade_cmd.signal.SIGTERM) in sent
+    assert all(pid != 100000 for pid, _sig in sent)
     assert pid_file.exists()
-    assert "freshly started writer" in result.output
-    assert "still running or restarted" in result.output
-    assert calls == []
+    assert "freshly started writer" in result.stderr
+    assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem"]]
 
 
 @pytest.mark.skipif(
@@ -511,7 +645,7 @@ def test_boundary_enumeration_error_refuses_after_completed_stops(
     assert payload["ok"] is False
     assert payload["killed"] == [12345]
     assert payload["removed"] == [str(pid_file)]
-    assert "Cannot verify the complete memtomem-server inventory" in payload["error"]
+    assert "Cannot verify the complete memtomem process inventory" in payload["error"]
     assert calls == []
 
 
@@ -519,19 +653,85 @@ def test_boundary_enumeration_error_refuses_after_completed_stops(
     sys.platform == "win32",
     reason="POSIX-only: Windows skips the post-stop clean-server boundary",
 )
-def test_server_starting_after_empty_snapshot_refuses_reinstall(
-    monkeypatch, tmp_path, fake_uv, force_tty
-):
+def test_server_starting_during_reinstall_is_recycled(monkeypatch, tmp_path, fake_uv, force_tty):
     calls, _configure = fake_uv
     new_pid_file = tmp_path / "server-bbbbbbbbbbbbbbbb.pid"
     new_server = ServerState(alive=True, pid=777, pid_file=new_pid_file)
-    seen = _patch_liveness(monkeypatch, _DEAD, post=[new_server])
+    replacement = ServerState(alive=True, pid=888, pid_file=new_pid_file)
+    seen = _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        snapshots=[[], [], [new_server], [replacement]],
+    )
+    events: list[tuple[str, int | None]] = []
+    fake_run = upgrade_cmd.subprocess.run
+
+    def tracked_run(cmd, capture_output=True, text=True, timeout=None):
+        events.append(("install", None))
+        return fake_run(cmd, capture_output=capture_output, text=text, timeout=timeout)
+
+    monkeypatch.setattr(upgrade_cmd.subprocess, "run", tracked_run)
+    monkeypatch.setattr(
+        upgrade_cmd.os,
+        "kill",
+        lambda pid, sig: (
+            events.append(("term", pid)) if sig == upgrade_cmd.signal.SIGTERM else None
+        ),
+    )
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _p: replacement)
 
     result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert events == [("install", None), ("term", 777)]
+    assert len(calls) == 1
+    assert seen == [[], [], [new_server], [replacement]]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX generation verification")
+def test_retirement_pid_still_present_reports_partial_failure(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    calls, _configure = fake_uv
+    pid_file = tmp_path / "server.pid"
+    retirement = ServerState(alive=True, pid=777, pid_file=pid_file)
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        snapshots=[[], [], [retirement], [retirement]],
+    )
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _p: retirement)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
     assert result.exit_code == 1, result.output
-    assert "still running or restarted" in result.output
-    assert calls == []
-    assert seen == [[], [new_server]]
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["reinstalled"] == "memtomem"
+    assert payload["cleanup_complete"] is False
+    assert "retirement pid 777 still holds" in payload["error"]
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX generation verification")
+def test_post_install_inventory_error_reports_partial_failure(monkeypatch, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    error = ServerState(
+        alive=True,
+        pid=None,
+        pid_file=None,
+        probe_error="could not enumerate server-*.pid (<runtime>: denied)",
+    )
+    _patch_liveness(monkeypatch, _DEAD, snapshots=[[], [], [error], [error]])
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["reinstalled"] == "memtomem"
+    assert payload["cleanup_complete"] is False
+    assert "could not enumerate" in payload["error"]
+    assert len(calls) == 1
 
 
 @pytest.mark.skipif(
@@ -652,6 +852,40 @@ def test_web_sidecar_kept_if_respawned_after_pid_cleanup(monkeypatch, tmp_path, 
     assert result.exit_code == 0, result.output
     assert not web_pid_file.exists()
     assert web_info_file.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX Web UI generation recycle")
+def test_web_auto_respawn_is_recycled_after_install(monkeypatch, tmp_path, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    web_info_file = tmp_path / "web.json"
+    web_info_file.write_text('{"pid": 6000, "port": 8080}')
+    initial = ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080)
+    respawned = ServerState(alive=True, pid=5000, pid_file=web_pid_file, port=8080)
+    replacement = ServerState(alive=True, pid=6000, pid_file=web_pid_file, port=8080)
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=initial,
+        web_snapshots=[initial, respawned, respawned, replacement],
+    )
+    probes = iter([respawned, replacement])
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _p: next(probes))
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["killed"] == [4242, 5000]
+    assert (4242, upgrade_cmd.signal.SIGTERM) in sent
+    assert (5000, upgrade_cmd.signal.SIGTERM) in sent
+    assert all(pid != 6000 for pid, _sig in sent)
+    assert web_pid_file.exists()
+    assert web_info_file.exists()
+    assert len(calls) == 1
 
 
 def test_windows_dry_run_json_reports_no_kills(monkeypatch, tmp_path, fake_uv, force_tty):
