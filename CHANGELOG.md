@@ -57,6 +57,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   MCP tools), since such a rule is skipped by duplicate detection and would
   otherwise stay silent.
 
+- **`mm upgrade` now stops every live per-store server and safely recycles
+  auto-restarted processes after reinstalling** (#2002). Since server pid
+  files became store-scoped, several legitimate `server-<digest>.pid` holders
+  can coexist, but the upgrade probe returned only the first live state and
+  left the others running the old binary. On POSIX, upgrade now inventories
+  and stops every attributable server and Web UI, reinstalls, then reconciles
+  one post-install snapshot. New pid metadata carries a process start stamp,
+  so processes launched after the package swap remain up while older or
+  unstamped holders are retired; lock-before-pid startup windows get three short
+  bounded retries before they become errors. The default flow has three full
+  inventory phases; retries add probes only while a startup gap is actually
+  observed, and a DB-lock warning gets one late confirmation inventory so a
+  just-started new server is not mislabeled as old code. Upgrade also
+  distinguishes a modern shared legacy-lock alias from a separate exclusive
+  old server, reports every probe failure in one pass, and prints the full
+  dry-run plan before a diagnostic refusal. Windows retains its no-kill
+  contract: incomplete inventory is a warning, DB-lock warnings remain visible
+  even for a known live server, and users must restart every server and
+  `mm web` manually. JSON adds `inventory_complete`, `warnings`, and the
+  post-install partial-failure marker `cleanup_complete` without removing
+  existing fields.
+
 - **Web chunk deletion no longer reports success while leaving the target
   indexed** (#2016). Source access and stale line-provenance failures now stop
   before any index-only fallback, while failures after the source entry was

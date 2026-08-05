@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -576,7 +577,7 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
             # the server holds its lock (#819), so the content check is
             # POSIX-only; the two distinct files above are the
             # cross-platform half.
-            assert pid2.read_text().strip() == str(proc2.pid), (
+            assert pid2.read_text().splitlines()[0] == str(proc2.pid), (
                 "the second server must own its own pid file, not fall "
                 "through to the first one's contention branch"
             )
@@ -830,11 +831,13 @@ def test_server_main_acquires_portalocker_pid_lock(
         # in ``main()``'s closure (``_lock_fp``) and isn't reachable from
         # here. The cross-platform ``stat().st_size`` check above pins the
         # "non-empty" half of the contract; the exact-pid check below is
-        # additional POSIX-side coverage that the value is *this* process.
+        # additional POSIX-side coverage that the value is *this* process
+        # and includes a parseable generation timestamp.
         if os.name != "nt":
-            assert pid_file.read_text().strip() == str(os.getpid()), (
-                "pid file must contain this process's pid"
-            )
+            lines = pid_file.read_text().splitlines()
+            assert lines[0] == str(os.getpid()), "pid file must contain this process's pid"
+            assert lines[1] == "", "server pid metadata reserves the Web UI port slot"
+            assert datetime.fromisoformat(lines[2]).tzinfo is not None
         # The probe opens its own handle and tries LOCK_EX | LOCK_NB —
         # if main() is holding the lock, the probe must report alive.
         # ``probe_pid_file`` is designed to handle the Windows

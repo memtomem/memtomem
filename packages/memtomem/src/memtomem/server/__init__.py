@@ -7,6 +7,7 @@ All public symbols are re-exported here for backward compatibility:
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -734,6 +735,11 @@ def main(argv: list[str] | None = None) -> None:
 
     from memtomem._runtime_paths import ensure_runtime_dir, legacy_server_pid_path, server_pid_path
 
+    # Capture this before configuration and lock setup. ``mm upgrade`` uses
+    # the timestamp written beside the pid to distinguish a process that
+    # began before the package swap from one launched after it completed.
+    process_started = datetime.now(UTC).isoformat()
+
     args = _parse_server_args(argv)
     transport = _normalize_transport(args.transport)
     # These informational banners are safe on stdout: the stdio TTY guard exits
@@ -840,7 +846,11 @@ def main(argv: list[str] | None = None) -> None:
     else:
         _lock_fp.seek(0)
         _lock_fp.truncate()
-        _lock_fp.write(str(os.getpid()))
+        # Keep the pid on the first line for old readers. The blank second
+        # line is the optional Web-UI port slot understood by
+        # ``cli._liveness._parse_pid_payload``; the third line records this
+        # process generation's UTC start time.
+        _lock_fp.write(f"{os.getpid()}\n\n{process_started}\n")
         _lock_fp.flush()
 
         # Composite cleanup — single atexit registration, platform-aware order
