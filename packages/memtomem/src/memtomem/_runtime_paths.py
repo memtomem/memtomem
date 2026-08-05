@@ -59,7 +59,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 
 def _hint_quote(target: Path | str) -> str:
@@ -146,6 +146,20 @@ RuntimeDirReason = Literal[
     "unsafe_permissions",
 ]
 
+_T = TypeVar("_T")
+
+
+def _required_validation_field(
+    value: _T | None,
+    *,
+    reason: RuntimeDirReason,
+    field: str,
+) -> _T:
+    """Return a reason-specific field or reject an invalid error instance."""
+    if value is None:
+        raise ValueError(f"runtime-dir reason {reason!r} requires {field}")
+    return value
+
 
 class RuntimeDirValidationError(PermissionError):
     """Structured runtime-dir refusal with long and concise renderings."""
@@ -174,9 +188,13 @@ class RuntimeDirValidationError(PermissionError):
         target = scrub_text(str(self.target))
         command_target = _hint_quote(self.target)
         if self.reason == "cannot_stat":
-            assert self.cause is not None
+            cause = _required_validation_field(
+                self.cause,
+                reason=self.reason,
+                field="cause",
+            )
             return (
-                f"runtime dir {target}: cannot stat ({scrub_text(str(self.cause))}). "
+                f"runtime dir {target}: cannot stat ({scrub_text(str(cause))}). "
                 "Remove it and retry."
             )
         if self.reason == "symlink":
@@ -195,26 +213,48 @@ class RuntimeDirValidationError(PermissionError):
                 f"Remove it: rm -f -- {command_target}"
             )
         if self.reason == "wrong_owner":
-            assert self.actual_uid is not None and self.expected_uid is not None
+            actual_uid = _required_validation_field(
+                self.actual_uid,
+                reason=self.reason,
+                field="actual_uid",
+            )
+            expected_uid = _required_validation_field(
+                self.expected_uid,
+                reason=self.reason,
+                field="expected_uid",
+            )
             return (
-                f"runtime dir {target} is owned by uid {self.actual_uid} "
-                f"(expected {self.expected_uid}). "
+                f"runtime dir {target} is owned by uid {actual_uid} "
+                f"(expected {expected_uid}). "
                 "Retry with XDG_RUNTIME_DIR or TMPDIR set to a private directory "
                 "you own, or ask an administrator to remove it:\n"
                 f"rm -rf -- {command_target}"
             )
-        assert self.mode is not None and self.unsafe_bits is not None
+        mode = _required_validation_field(
+            self.mode,
+            reason=self.reason,
+            field="mode",
+        )
+        unsafe_bits = _required_validation_field(
+            self.unsafe_bits,
+            reason=self.reason,
+            field="unsafe_bits",
+        )
         return (
-            f"runtime dir {target} has unsafe permissions 0o{self.mode:o} "
-            f"(expected 0o700, group/world bits: 0o{self.unsafe_bits:o}). "
+            f"runtime dir {target} has unsafe permissions 0o{mode:o} "
+            f"(expected 0o700, group/world bits: 0o{unsafe_bits:o}). "
             f"Remove it and retry: rm -rf -- {command_target}"
         )
 
     def short_reason(self) -> str:
         """Return stable non-remediation text for a skipped candidate."""
         if self.reason == "cannot_stat":
-            assert self.cause is not None
-            return f"cannot stat ({type(self.cause).__name__})"
+            cause = _required_validation_field(
+                self.cause,
+                reason=self.reason,
+                field="cause",
+            )
+            return f"cannot stat ({type(cause).__name__})"
         if self.reason == "symlink":
             return "symlink"
         if self.reason == "junction":
@@ -222,10 +262,18 @@ class RuntimeDirValidationError(PermissionError):
         if self.reason == "not_directory":
             return "not a directory"
         if self.reason == "wrong_owner":
-            assert self.actual_uid is not None
-            return f"owned by uid {self.actual_uid}"
-        assert self.mode is not None
-        return f"unsafe permissions 0o{self.mode:o}"
+            actual_uid = _required_validation_field(
+                self.actual_uid,
+                reason=self.reason,
+                field="actual_uid",
+            )
+            return f"owned by uid {actual_uid}"
+        mode = _required_validation_field(
+            self.mode,
+            reason=self.reason,
+            field="mode",
+        )
+        return f"unsafe permissions 0o{mode:o}"
 
 
 def _is_safe_dir(path: Path) -> bool:
