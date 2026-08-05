@@ -248,14 +248,21 @@ def test_human_refusal_keeps_partial_stop_accounting(monkeypatch, tmp_path, fake
     calls, _configure = fake_uv
     first_path = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
     second_path = tmp_path / "server-bbbbbbbbbbbbbbbb.pid"
+    web_path = tmp_path / "web.pid"
     first_path.write_text("111")
     second_path.write_text("222")
+    web_path.write_text("333")
     states = [
         ServerState(alive=True, pid=111, pid_file=first_path),
         ServerState(alive=True, pid=222, pid_file=second_path),
     ]
-    _patch_liveness(monkeypatch, states)
-    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
+    _patch_liveness(
+        monkeypatch,
+        states,
+        web=ServerState(alive=True, pid=333, pid_file=web_path),
+    )
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
     monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
     probes = iter(
         [
@@ -273,8 +280,10 @@ def test_human_refusal_keeps_partial_stop_accounting(monkeypatch, tmp_path, fake
     result = CliRunner().invoke(cli, ["upgrade", "-y"])
     assert result.exit_code == 1, result.output
     assert "cannot verify" in result.output
-    assert "Stopped before failure: 111, 222" in result.output
-    assert f"Removed before failure: {second_path}" in result.output
+    assert "Stopped before failure: 111" in result.output
+    assert all(pid not in {222, 333} for pid, _sig in sent)
+    assert second_path.exists()
+    assert web_path.exists()
     assert calls == []
 
 
@@ -747,8 +756,8 @@ def test_unsignalable_startup_window_fails_after_bounded_retries(
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
     assert result.exit_code == 1, result.output
     assert "no signalable PID" in json.loads(result.stdout)["error"]
-    assert sleeps == [0.05, 0.1]
-    assert seen == [[transient], [transient], [transient]]
+    assert sleeps == [0.05, 0.1, 0.2]
+    assert seen == [[transient], [transient], [transient], [transient]]
     assert calls == []
 
 
@@ -892,6 +901,17 @@ def test_processes_started_after_install_are_not_recycled(
     assert payload["killed"] == []
     assert seen == [[], [], [server]]
     assert len(calls) == 1
+
+
+def test_generation_cutoff_equality_is_not_treated_as_new():
+    cutoff = upgrade_cmd.datetime.fromisoformat("2026-08-05T02:00:00+00:00")
+    state = ServerState(
+        alive=True,
+        pid=777,
+        pid_file=None,
+        started="2026-08-05T02:00:00+00:00",
+    )
+    assert upgrade_cmd._is_new_generation(state, cutoff) is False
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX generation verification")
@@ -1276,6 +1296,26 @@ def test_db_lock_warning_in_json_output(monkeypatch, tmp_path, fake_uv, force_tt
     payload = json.loads(result.output.strip().splitlines()[-1])
     assert payload["ok"] is True
     assert payload["db_lock_warning"] is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX late-process confirmation")
+def test_late_new_server_suppresses_spurious_db_lock_warning(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    _calls, _configure = fake_uv
+    late = ServerState(
+        alive=True,
+        pid=999,
+        pid_file=tmp_path / "server.pid",
+        started="2026-08-05T02:00:01+00:00",
+    )
+    seen = _patch_liveness(monkeypatch, _DEAD, snapshots=[[], [], [], [late]])
+    _patch_db_probe(monkeypatch, tmp_path, locked=True)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["db_lock_warning"] is False
+    assert seen == [[], [], [], [late]]
 
 
 def test_windows_live_server_does_not_suppress_db_lock_warning(

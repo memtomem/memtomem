@@ -65,9 +65,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and stops every attributable server and Web UI, reinstalls, then reconciles
   one post-install snapshot. New pid metadata carries a process start stamp,
   so processes launched after the package swap remain up while older or
-  unstamped holders are retired; lock-before-pid startup windows get two short
-  bounded retries before they become errors. The default flow uses three full
-  inventories rather than probing every pid path a fourth time. Upgrade also
+  unstamped holders are retired; lock-before-pid startup windows get three short
+  bounded retries before they become errors. The default flow has three full
+  inventory phases; retries add probes only while a startup gap is actually
+  observed, and a DB-lock warning gets one late confirmation inventory so a
+  just-started new server is not mislabeled as old code. Upgrade also
   distinguishes a modern shared legacy-lock alias from a separate exclusive
   old server, reports every probe failure in one pass, and prints the full
   dry-run plan before a diagnostic refusal. Windows retains its no-kill

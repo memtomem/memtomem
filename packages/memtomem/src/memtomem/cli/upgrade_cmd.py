@@ -64,9 +64,10 @@ _VERSION_PATTERN = re.compile(
 )
 
 # A holder can acquire its compatibility/runtime lock just before writing the
-# pid payload. Two short retries cover that normal startup window without
+# pid payload. Three short exponential retries (350 ms total) cover that
+# bounded startup window under load without charging the normal path or
 # turning a real unsignalable holder into an unbounded wait.
-_INVENTORY_RETRY_DELAYS = (0.05, 0.1)
+_INVENTORY_RETRY_DELAYS = (0.05, 0.1, 0.2)
 
 
 def _isatty() -> bool:
@@ -99,9 +100,16 @@ def _started_at(state: ServerState) -> datetime | None:
 
 
 def _is_new_generation(state: ServerState, installed_at: datetime) -> bool:
-    """Return whether *state* declares it started after installation."""
+    """Return whether *state* declares it started after installation.
+
+    The stamp is captured at process entry/pid publication, not Python's
+    module-import instant. The pre-install inventory bounds that tiny gap.
+    Both clocks are same-host wall clocks; strict ``>`` keeps equality on the
+    conservative retirement side (an NTP forward step remains a negligible
+    residual risk).
+    """
     started = _started_at(state)
-    return started is not None and started >= installed_at
+    return started is not None and started > installed_at
 
 
 def _same_process_generation(current: ServerState, previous: ServerState) -> bool:
@@ -420,13 +428,15 @@ def _stop_process_snapshot(
     grace: float,
     warnings_to_stderr: bool = False,
     installed_at: datetime | None = None,
+    continue_on_error: bool = False,
 ) -> tuple[list[int], list[Path], list[str], list[ServerState], ServerState]:
     """Stop attributable old processes and account for every outcome.
 
     When *installed_at* is provided, holders whose pid metadata says they
     started after that timestamp are already on the new generation and are
-    left running. Failures are accumulated so one bad holder does not prevent
-    cleanup attempts for the rest of the snapshot.
+    left running. Post-install cleanup can set *continue_on_error* so one bad
+    holder does not prevent best-effort retirement of the rest. The default
+    pre-install path stops immediately after the first failed retirement.
     """
     killed: list[int] = []
     removed: list[Path] = []
@@ -449,9 +459,16 @@ def _stop_process_snapshot(
             problems.append(error)
         if recheck.alive:
             remaining_servers.append(recheck)
+        if error is not None and not continue_on_error:
+            break
 
     remaining_web = ServerState(alive=False, pid=None, pid_file=None)
-    if web_state.alive and web_state.probe_error is None and web_state.pid is not None:
+    if (
+        (continue_on_error or not problems)
+        and web_state.alive
+        and web_state.probe_error is None
+        and web_state.pid is not None
+    ):
         if installed_at is not None and _is_new_generation(web_state, installed_at):
             remaining_web = web_state
         else:
@@ -852,6 +869,7 @@ def upgrade(
             grace=grace,
             warnings_to_stderr=json_out,
             installed_at=installed_at,
+            continue_on_error=True,
         )
         killed.extend(stopped)
         removed.extend(cleaned)
@@ -903,11 +921,26 @@ def upgrade(
     # warn-and-proceed heuristic for invisible writers.
     known_final_process = bool(_upgrade_server_stops(final_servers)) or final_web.alive
     db_path = _resolve_db_path()
-    db_lock_warning = (
+    db_lock_warning = False
+    if (
         db_path is not None
         and (is_windows or not known_final_process)
         and check_db_lock(db_path).locked
-    )
+    ):
+        db_lock_warning = True
+        if not is_windows:
+            # A new-generation process can start after the post-install
+            # reconciliation snapshot but before this DB probe. Confirm only
+            # the rare locked case once so we do not mislabel that verified
+            # process as an old invisible writer. Probe failures stay warning-
+            # side: only an actually observed holder suppresses the warning.
+            late_servers = enumerate_server_liveness()
+            late_web = check_web_liveness()
+            observed_late_process = any(
+                state.alive and state.probe_error is None for state in late_servers
+            ) or (late_web.alive and late_web.probe_error is None)
+            if observed_late_process:
+                db_lock_warning = False
 
     # ----- success -----
     if json_out:
