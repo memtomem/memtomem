@@ -50,6 +50,7 @@ from memtomem.context.settings_doctor import (
 from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.context.error_redact import redact_engine_reason
 from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
@@ -1212,6 +1213,25 @@ def _serialize_hook_copy_plan(plan: HookCopyPlan) -> dict[str, Any]:
     }
 
 
+def _sanitize_transfer_message(message: str, *roots: Path) -> str:
+    """Display-sanitize a free-text engine message that straddles two projects.
+
+    ``sanitize_diff_reason`` takes ONE root; a hook copy spans a source and a
+    destination project, which is exactly the multi-root generalization
+    :func:`~memtomem.context.error_redact.redact_engine_reason` documents. Used
+    for the engine's raw warning/error strings — the structured
+    ``src_project_root`` / ``dst_canonical`` / ``dst_target`` fields keep their
+    absolute form on purpose (the UI addresses files by them).
+
+    Two postures, one route: structured path FIELDS are contract, free-text
+    MESSAGES are sanitized. Messages are the surface that can carry a path
+    under neither root, or secret-shaped content, straight from a settings
+    file the caller never chose (#1412/#1550 sweep class; the malformed-matcher
+    message added in #1987 names the offending file).
+    """
+    return redact_engine_reason(message, *roots) or ""
+
+
 def _serialize_hook_copy_result(result: HookCopyResult) -> dict[str, Any]:
     payload = _serialize_hook_copy_plan(result.plan)
     payload["canonical"] = {
@@ -1224,7 +1244,10 @@ def _serialize_hook_copy_result(result: HookCopyResult) -> dict[str, Any]:
         "written": result.target_written,
         "already": result.target_already,
     }
-    payload["warnings"] = list(result.warnings)
+    payload["warnings"] = [
+        _sanitize_transfer_message(w, result.plan.src_project_root, result.plan.dst_project_root)
+        for w in result.warnings
+    ]
     payload["needs_sync"] = result.needs_sync
     payload["sync_command"] = result.sync_command
     return payload
@@ -1303,7 +1326,9 @@ async def copy_hook_to_project(
     except HookNotFoundError as exc:
         raise _error(404, "missing", str(exc)) from exc
     except (AmbiguousHookSelectorError, ValueError) as exc:
-        raise _error(400, "validation", str(exc)) from exc
+        raise _error(
+            400, "validation", _sanitize_transfer_message(str(exc), project_root, dst_root)
+        ) from exc
 
     if dry_run:
         return {"status": "plan", **_serialize_hook_copy_plan(plan)}

@@ -243,6 +243,14 @@ async def test_malformed_matcher_returns_validation_400_and_writes_nothing(
     assert detail["error_kind"] == "validation"
     assert "event 'SessionStart'" in detail["message"]
     assert not (other / CANONICAL_SETTINGS_FILE).exists()
+    # The engine message names the offending FILE (the CLI needs that); the
+    # web boundary sanitizes it. Structured path fields on the 200 payload
+    # stay absolute by contract — free-text messages do not (#1412/#1550).
+    assert str(cwd_root) not in detail["message"]
+    assert str(other) not in detail["message"]
+    # Not vacuous: the sanitizer strips the ROOT, not the whole path, so the
+    # project-relative remainder still tells the user which file to fix.
+    assert str(CANONICAL_SETTINGS_FILE) in detail["message"]
 
 
 # ── dry-run / confirm round-trips / apply ────────────────────────────
@@ -354,6 +362,32 @@ async def test_canonical_conflict_reports_conflicts_no_prompt(client, tmp_path) 
     assert payload["status"] == "conflicts"
     assert any("'rival'" in w for w in payload["warnings"])
     assert canonical.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_apply_warnings_are_path_sanitized(client, tmp_path, cwd_root) -> None:
+    """Apply-time warnings are free text from the engine → sanitized (#1412/#1550).
+
+    The malformed-JSON warning embeds the absolute destination path verbatim;
+    the malformed-matcher warning added in #1987 does the same. Neither root
+    may reach the wire, while the project-relative remainder must survive so
+    the warning still identifies the file.
+    """
+    other = _other_project(tmp_path)
+    canonical = other / CANONICAL_SETTINGS_FILE
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_text("{ not json", encoding="utf-8")
+    scope_id = await _register(client, other)
+
+    resp = await client.post(COPY_URL, json=_body(scope_id))
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["status"] == "conflicts"
+    assert payload["warnings"], "fixture produced no warning to sanitize"
+    joined = " ".join(payload["warnings"])
+    assert str(other) not in joined
+    assert str(cwd_root) not in joined
+    assert str(CANONICAL_SETTINGS_FILE) in joined
 
 
 # ── Gate A ───────────────────────────────────────────────────────────

@@ -224,6 +224,10 @@ def format_malformed_warning(finding: MalformedHookMatcher) -> str:
     :func:`find_malformed_matchers` produces (``canonical`` / ``tier``);
     copy and migrate build their own descriptive sources and render through
     :class:`~memtomem.context.settings.MalformedHookMatcherError` instead.
+
+    The copy/migrate hint is deliberately conditional ("may cause a related
+    …"): those operations inspect only the files they touch, so a malformed
+    rule in a third tier does not block an unrelated migration.
     """
     location = "canonical settings" if finding.tier is None else f"{finding.tier} tier"
     return (
@@ -231,8 +235,8 @@ def format_malformed_warning(finding: MalformedHookMatcher) -> str:
         f"{location} ({finding.path}), event '{finding.event}' rule "
         f"#{finding.rule_index}; `matcher` must be a string — omit it for "
         f"match-all, or quote the value. It is ignored by hook matching until "
-        f"fixed, and `mm context settings-copy` / `settings-migrate` refuse to "
-        f"run while it exists."
+        f"fixed, and may cause a related `mm context settings-copy` / "
+        f"`settings-migrate` to refuse to run."
     )
 
 

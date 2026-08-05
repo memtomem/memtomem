@@ -580,7 +580,10 @@ class TestSyncWarning:
         assert (project_root / ".claude" / "settings.local.json").is_file()
         assert "non-string matcher (list)" in result.output
         assert "user tier" in result.output
-        assert "settings-migrate` refuse to run" in result.output
+        # Conditional wording: copy/migrate only inspect the files they touch,
+        # so a malformed rule elsewhere does not block every such operation.
+        assert "may cause a related" in result.output
+        assert "settings-migrate` to refuse to run" in result.output
 
 
 # ── Web route response ─────────────────────────────────────────────

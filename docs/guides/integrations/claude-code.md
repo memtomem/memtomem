@@ -317,10 +317,14 @@ event, rule index, and matcher type. A matcher may be omitted for match-all;
 
 Malformed rules ride the same non-blocking warning surface as duplicates:
 `mm context sync|diff --include=settings`, the equivalent `mem_context_*` MCP
-tools, and the Web UI hooks panel (`target_hooks.malformed`) all report them.
+tools, and the Web UI hooks panel all report them. In the panel's payload,
+malformed rules in the **target tier** appear under `target_hooks.malformed`
+(with an `owned` flag), while malformed rules in the **canonical** file are
+dropped before indexing and reported as `matcher_warnings`.
+
 Claude Code ignores such a rule for hook matching, so it is invisible to
 duplicate detection and would otherwise go unnoticed until a copy or migrate
-refused to run.
+that touches that file refused to run.
 
 <details>
 <summary>Fixing duplicates — migrate and copy hooks across tiers and projects</summary>
