@@ -178,7 +178,7 @@
     }
   },
   "excluded": {
-    "/locales/en.json": "Fetched by i18n.js with cache: no-store.",
-    "/locales/ko.json": "Fetched by i18n.js with cache: no-store."
+    "/locales/en.json": "Fetched by i18n.js with cache: no-store; not browser-cacheable.",
+    "/locales/ko.json": "Fetched by i18n.js with cache: no-store; not browser-cacheable."
   }
 }

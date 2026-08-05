@@ -111,8 +111,8 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    ```
 
    `THIRD_PARTY_LICENSES.md` remains the supply-chain authority for upstream
-   package bytes; `cache-versions.json` separately binds those bytes to the URL
-   browsers cache. Both must be updated for a vendor asset change. See
+   package bytes; `web/cache-versions.json` separately binds those bytes to the
+   URL browsers cache. Both must be updated for a vendor asset change. See
    `CONTRIBUTING.md` for the canonical cache-key workflow.
 
 5. Smoke-test in a browser:

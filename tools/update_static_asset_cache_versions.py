@@ -26,14 +26,19 @@ def _parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--check",
-        action="store_true",
+        dest="mode",
+        action="store_const",
+        const="check",
         help="validate only (the default)",
     )
     mode.add_argument(
         "--write",
-        action="store_true",
+        dest="mode",
+        action="store_const",
+        const="write",
         help="append bindings after public versions have already been incremented",
     )
+    parser.set_defaults(mode="check")
     return parser
 
 
@@ -61,7 +66,7 @@ async def _run(*, write: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return asyncio.run(_run(write=args.write))
+        return asyncio.run(_run(write=args.mode == "write"))
     except (OSError, StaticCacheManifestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

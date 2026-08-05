@@ -21,7 +21,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 WEB_DIR = Path(__file__).parent
 STATIC_DIR = WEB_DIR / "static"
-MANIFEST_PATH = STATIC_DIR / "cache-versions.json"
+MANIFEST_PATH = WEB_DIR / "cache-versions.json"
 INDEX_PATH = STATIC_DIR / "index.html"
 
 SCHEMA_VERSION = 1
@@ -64,7 +64,7 @@ class _AssetReferenceParser(HTMLParser):
         if tag != "link" or not values.get("href"):
             return
         rel = {part.lower() for part in (values.get("rel") or "").split()}
-        if "stylesheet" in rel:
+        if rel & {"stylesheet", "modulepreload", "preload"}:
             self.urls.append(values["href"] or "")
 
 
@@ -152,6 +152,14 @@ def load_manifest(path: Path = MANIFEST_PATH) -> StaticCacheManifest:
     excluded: dict[str, str] = {}
     for raw_path, reason in raw_excluded.items():
         excluded_path = _validate_url_path(raw_path)
+        if excluded_path in assets:
+            raise StaticCacheManifestError(
+                f"{excluded_path}: path cannot appear in both assets and excluded"
+            )
+        if PurePosixPath(excluded_path).suffix.lower() in {".js", ".css"}:
+            raise StaticCacheManifestError(
+                f"{excluded_path}: excluded paths must not be cacheable JS/CSS assets"
+            )
         if not isinstance(reason, str) or not reason.strip():
             raise StaticCacheManifestError(f"{excluded_path}: exclusion reason must be non-empty")
         excluded[excluded_path] = reason
@@ -239,19 +247,48 @@ def discover_static_assets(static_dir: Path = STATIC_DIR) -> set[str]:
     }
 
 
-def _reference_versions(references: list[AssetReference]) -> tuple[dict[str, str], list[str]]:
+def _reference_versions(
+    references: list[AssetReference],
+) -> tuple[dict[str, str], set[str], list[str]]:
     versions: dict[str, str] = {}
+    referenced: set[str] = set()
+    conflicted: set[str] = set()
     errors: list[str] = []
     for reference in references:
+        referenced.add(reference.path)
+        if reference.path in conflicted:
+            continue
         previous = versions.get(reference.path)
         if previous is not None and previous != reference.version:
             errors.append(
                 f"{reference.path}: conflicting public versions {previous} and "
                 f"{reference.version} ({reference.surface})"
             )
+            versions.pop(reference.path)
+            conflicted.add(reference.path)
         else:
             versions[reference.path] = reference.version
-    return versions, errors
+    return versions, referenced, errors
+
+
+def _exclusion_errors(manifest: StaticCacheManifest, *, static_dir: Path = STATIC_DIR) -> list[str]:
+    errors: list[str] = []
+    recorded = set(manifest.assets)
+    excluded = set(manifest.excluded)
+    overlap = sorted(recorded & excluded)
+    if overlap:
+        errors.append(f"paths cannot appear in both assets and excluded: {overlap}")
+    cacheable = sorted(
+        path for path in excluded if PurePosixPath(path).suffix.lower() in {".js", ".css"}
+    )
+    if cacheable:
+        errors.append(f"excluded paths must not be cacheable JS/CSS assets: {cacheable}")
+    missing = sorted(
+        path for path in excluded if not (static_dir / path.removeprefix("/")).is_file()
+    )
+    if missing:
+        errors.append(f"excluded paths missing on disk: {missing}")
+    return errors
 
 
 def file_sha256(path: Path) -> str:
@@ -266,9 +303,9 @@ def contract_errors(
 ) -> list[str]:
     """Return every content/reference/manifest contract violation."""
 
-    ref_versions, errors = _reference_versions(references)
+    ref_versions, referenced, errors = _reference_versions(references)
+    errors.extend(_exclusion_errors(manifest, static_dir=static_dir))
     shipped = discover_static_assets(static_dir)
-    referenced = set(ref_versions)
     recorded = set(manifest.assets)
 
     if shipped != referenced:
@@ -286,7 +323,7 @@ def contract_errors(
         if orphan_manifest:
             errors.append(f"cache manifest entries no longer referenced: {orphan_manifest}")
 
-    for asset_path in sorted(referenced & recorded & shipped):
+    for asset_path in sorted(set(ref_versions) & recorded & shipped):
         current_version = ref_versions[asset_path]
         history = manifest.assets[asset_path]
         newest_version = max(history, key=lambda value: int(value))
@@ -322,9 +359,9 @@ def updated_manifest(
     function fails instead of blessing new bytes under a warm-cache URL.
     """
 
-    ref_versions, errors = _reference_versions(references)
+    ref_versions, referenced, errors = _reference_versions(references)
+    errors.extend(_exclusion_errors(manifest, static_dir=static_dir))
     shipped = discover_static_assets(static_dir)
-    referenced = set(ref_versions)
     recorded = set(manifest.assets)
     if shipped != referenced:
         errors.extend(

@@ -56,7 +56,7 @@ ready-made templates (issue #660).
 Every production JavaScript and CSS file under
 `packages/memtomem/src/memtomem/web/static/` has a numeric `?v=N` cache key in
 either `static/index.html` or the generated `/api/docs` HTML in `web/app.py`.
-`static/cache-versions.json` binds that public version to the SHA-256 of the
+`web/cache-versions.json` binds that public version to the SHA-256 of the
 exact bytes. The default test suite checks the shipped files, both HTML
 surfaces, and the manifest in both directions, so changing an asset without a
 new cache key fails locally and in CI.

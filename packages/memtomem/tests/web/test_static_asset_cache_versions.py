@@ -9,6 +9,7 @@ partition without a browser or a Git base.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,8 @@ async def test_real_static_tree_matches_the_content_aware_manifest() -> None:
     manifest = scm.load_manifest()
     references = await scm.collect_runtime_references()
 
+    assert scm.MANIFEST_PATH.parent == scm.WEB_DIR
+    assert scm.MANIFEST_PATH.parent != scm.STATIC_DIR
     assert "/app.js" in manifest.assets
     assert "/vendor/swagger/swagger-init.js" in manifest.assets
     assert set(manifest.assets) == scm.discover_static_assets()
@@ -41,8 +44,14 @@ async def test_real_static_tree_matches_the_content_aware_manifest() -> None:
 def test_no_store_locales_are_explicitly_excluded() -> None:
     manifest = scm.load_manifest()
     assert set(manifest.excluded) == {"/locales/en.json", "/locales/ko.json"}
+    assert all((scm.STATIC_DIR / path.removeprefix("/")).is_file() for path in manifest.excluded)
     i18n = (scm.STATIC_DIR / "i18n.js").read_text(encoding="utf-8")
-    assert "fetch(`/locales/${lang}.json`, { cache: 'no-store' })" in i18n
+    assert re.search(
+        r"fetch\s*\(\s*`/locales/\$\{lang\}\.json`\s*,\s*"
+        r"\{[^}]*\bcache\s*:\s*['\"]no-store['\"][^}]*\}\s*\)",
+        i18n,
+        re.DOTALL,
+    )
 
 
 def test_changed_bytes_with_the_same_public_version_fail(tmp_path: Path) -> None:
@@ -91,6 +100,22 @@ def test_updater_requires_the_next_numeric_version(tmp_path: Path) -> None:
         scm.updated_manifest(manifest, [_asset_reference(version="3")], static_dir=static)
 
 
+def test_numeric_version_order_handles_nine_to_ten(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    asset = static / "a.js"
+    asset.write_text("version nine\n", encoding="utf-8")
+    manifest = _fixture_manifest(asset, version="9")
+    asset.write_text("version ten\n", encoding="utf-8")
+
+    updated = scm.updated_manifest(manifest, [_asset_reference(version="10")], static_dir=static)
+
+    assert list(updated.assets["/a.js"]) == ["9", "10"]
+    rendered = json.loads(scm.render_manifest(updated))
+    assert list(rendered["assets"]["/a.js"]["versions"]) == ["9", "10"]
+    assert not scm.contract_errors(updated, [_asset_reference(version="10")], static_dir=static)
+
+
 def test_new_asset_can_bootstrap_its_first_binding(tmp_path: Path) -> None:
     static = tmp_path / "static"
     static.mkdir()
@@ -134,6 +159,62 @@ def test_missing_or_conflicting_reference_sets_fail(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("rel", "extra"),
+    [("modulepreload", ""), ("preload", ' as="script"')],
+)
+def test_preload_conflict_reports_only_the_actual_problem(
+    tmp_path: Path, rel: str, extra: str
+) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    asset = static / "a.js"
+    asset.write_text("bytes\n", encoding="utf-8")
+    manifest = _fixture_manifest(asset)
+    references = scm.references_from_html(
+        f'<script src="/a.js?v=1"></script><link rel="{rel}"{extra} href="/a.js?v=2">',
+        surface="fixture.html",
+    )
+
+    errors = scm.contract_errors(manifest, references, static_dir=static)
+
+    assert len(references) == 2
+    assert errors == ["/a.js: conflicting public versions 1 and 2 (fixture.html)"]
+
+
+def test_updater_refuses_orphan_manifest_entries(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    asset = static / "a.js"
+    asset.write_text("bytes\n", encoding="utf-8")
+    manifest = _fixture_manifest(asset)
+    manifest.assets["/retired.js"] = {"1": "0" * 64}
+
+    with pytest.raises(
+        scm.StaticCacheManifestError,
+        match="remove retired cache-manifest entries explicitly",
+    ):
+        scm.updated_manifest(manifest, [_asset_reference()], static_dir=static)
+
+
+def test_exclusions_must_exist_and_cannot_hide_cacheable_assets(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    missing = scm.StaticCacheManifest(assets={}, excluded={"/missing.json": "fixture exclusion"})
+    assert scm.contract_errors(missing, [], static_dir=static) == [
+        "excluded paths missing on disk: ['/missing.json']"
+    ]
+
+    cacheable = static / "hidden.js"
+    cacheable.write_text("bytes\n", encoding="utf-8")
+    invalid = scm.StaticCacheManifest(
+        assets={}, excluded={"/hidden.js": "invalid fixture exclusion"}
+    )
+    errors = scm.contract_errors(invalid, [], static_dir=static)
+    assert any("must not be cacheable JS/CSS" in error for error in errors)
+    assert any("missing a versioned HTML reference" in error for error in errors)
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "/a.js",
@@ -173,3 +254,44 @@ def test_manifest_parser_rejects_duplicate_and_unsafe_paths(tmp_path: Path) -> N
     )
     with pytest.raises(scm.StaticCacheManifestError, match="unsafe asset path"):
         scm.load_manifest(unsafe)
+
+
+def test_manifest_parser_rejects_asset_exclusion_overlap(tmp_path: Path) -> None:
+    path = tmp_path / "overlap.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "assets": {"/a.js": {"versions": {"1": "0" * 64}}},
+                "excluded": {"/a.js": "invalid overlap"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(scm.StaticCacheManifestError, match="both assets and excluded"):
+        scm.load_manifest(path)
+
+
+def test_canonical_manifest_error_rejects_noncanonical_json(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    asset = static / "a.js"
+    asset.write_text("bytes\n", encoding="utf-8")
+    manifest = _fixture_manifest(asset)
+    path = tmp_path / "cache-versions.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "assets": {"/a.js": {"versions": manifest.assets["/a.js"]}},
+                "excluded": {},
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    assert scm.canonical_manifest_error(manifest, path=path) == (
+        f"{path} is not canonical; run the cache manifest updater with --write"
+    )
