@@ -527,7 +527,7 @@ class TestCheckServerLivenessStoreScope:
         from memtomem._runtime_paths import server_pid_path
         from memtomem.cli._liveness import (
             check_server_liveness,
-            enumerate_server_liveness,
+            enumerate_server_liveness_inventory,
         )
 
         store_a = tmp_path / "a" / "memtomem.db"
@@ -540,7 +540,7 @@ class TestCheckServerLivenessStoreScope:
         stale.write_text("333", encoding="utf-8")
 
         with self._hold(pid_b), self._hold(pid_a):
-            states = enumerate_server_liveness()
+            states, warning = enumerate_server_liveness_inventory()
             aggregate = check_server_liveness()
 
         expected = sorted((pid_a, pid_b))
@@ -551,6 +551,7 @@ class TestCheckServerLivenessStoreScope:
             assert all(state.pid in {111, 222, None} for state in states)
         assert aggregate.pid_file == expected[0]
         assert stale not in [state.pid_file for state in states]
+        assert warning is None
 
     @pytest.mark.skipif(os.name == "nt", reason="legacy shared flock is POSIX-only")
     def test_legacy_probe_distinguishes_shared_alias_from_exclusive_holder(self, tmp_path: Path):
@@ -753,7 +754,7 @@ class TestCheckServerLivenessStoreScope:
 
         scoped = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
         agnostic = liveness.check_server_liveness()
-        states = liveness.enumerate_server_liveness()
+        states, _warning = liveness.enumerate_server_liveness_inventory()
 
         assert scoped.alive is True and scoped.probe_error is not None
         assert agnostic.alive is True and agnostic.probe_error is not None
@@ -825,17 +826,19 @@ class TestCheckServerLivenessStoreScope:
         assert state.probe_error is None
         assert state.probe_warning == detail
 
-    def test_generic_skip_detail_truncates_before_scrubbing(self):
+    def test_generic_skip_detail_is_bounded_without_splitting_scrub_escapes(self):
         import memtomem.cli._liveness as liveness
 
         candidate = Path("/tmp/speculative-runtime")
         detail = liveness._runtime_candidate_skip_detail(
             candidate,
-            OSError("x" * 116 + "\x1b" + "tail"),
+            OSError("\x1b" * 31),
         )
+        reason = detail.removeprefix(f"skipped: {candidate} (OSError: ").removesuffix(")")
 
         assert "\x1b" not in detail
-        assert "\\x1b..." in detail
+        assert reason == "\\x1b" * 29 + "..."
+        assert len(reason) <= liveness._SKIP_DETAIL_MAX_CHARS
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
     def test_loose_current_runtime_candidate_fails_closed_and_scrubs_path(
@@ -870,7 +873,7 @@ class TestCheckServerLivenessStoreScope:
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [candidate])
 
         files, detail = liveness._glob_server_pid_files()
-        states = liveness.enumerate_server_liveness()
+        states, _warning = liveness.enumerate_server_liveness_inventory()
         state = liveness.check_server_liveness()
 
         assert files is None
@@ -922,7 +925,7 @@ class TestCheckServerLivenessStoreScope:
         os.chmod(rt, 0o000)
         try:
             files, detail = liveness._glob_server_pid_files()
-            states = liveness.enumerate_server_liveness()
+            states, _warning = liveness.enumerate_server_liveness_inventory()
             state = liveness.check_server_liveness()
         finally:
             os.chmod(rt, 0o700)
@@ -977,7 +980,7 @@ class TestCheckServerLivenessStoreScope:
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [missing])
 
         files, detail = liveness._glob_server_pid_files()
-        states = liveness.enumerate_server_liveness()
+        states, warning = liveness.enumerate_server_liveness_inventory()
         state = liveness.check_server_liveness()
 
         assert files == []
@@ -986,4 +989,5 @@ class TestCheckServerLivenessStoreScope:
         assert state.alive is False
         assert state.pid_file is None
         assert state.probe_error is None
+        assert warning is None
         assert not missing.exists(), "read-only liveness probes must not create runtime dirs"

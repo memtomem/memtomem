@@ -120,6 +120,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   stop sends no signal in that case and prints an OS-level recovery path.
   Destructive `mm uninstall`, `mm reset`, and `mm upgrade` flows now warn when
   a successful liveness probe skipped an unsafe speculative runtime candidate.
+  The JSON modes for reset and upgrade conditionally add a top-level `warnings`
+  array when that narrowed inventory affects the command.
   Runtime-dir refusals carry structured reason codes so concise warnings cannot
   drift from their remediation text, and wrong-owner recovery points users to
   an administrator or a private `XDG_RUNTIME_DIR`/`TMPDIR` instead of presenting
