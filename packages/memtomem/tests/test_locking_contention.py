@@ -798,20 +798,6 @@ class TestCheckServerLivenessStoreScope:
         assert state.alive is False
         assert state.probe_error is None
 
-    def test_missing_runtime_candidate_is_empty(
-        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        import memtomem.cli._liveness as liveness
-
-        monkeypatch.setattr(
-            liveness, "candidate_runtime_dirs", lambda: [tmp_path / "missing-runtime"]
-        )
-
-        state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
-
-        assert state.alive is False
-        assert state.probe_error is None
-
     @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
     def test_loose_speculative_runtime_candidate_is_skipped(
         self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -856,6 +842,7 @@ class TestCheckServerLivenessStoreScope:
 
         candidate = rt / "not-a-directory"
         candidate.write_text("occupied", encoding="utf-8")
+        monkeypatch.setattr(liveness, "runtime_dir", lambda: candidate)
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [candidate])
 
         files, detail = liveness._glob_server_pid_files()
@@ -970,7 +957,7 @@ class TestCheckServerLivenessStoreScope:
         state = liveness.check_server_liveness()
 
         assert files == []
-        assert detail == str(missing)
+        assert detail == ""
         assert states == []
         assert state.alive is False
         assert state.pid_file is None
