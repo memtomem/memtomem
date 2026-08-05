@@ -99,10 +99,21 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
 4. Bump `?v=N` on the matching `<script>` / `<link>` references so users
    get the new bytes past their disk cache. The references live in:
    - `packages/memtomem/src/memtomem/web/static/index.html` (SPA assets)
-   - `packages/memtomem/src/memtomem/web/app.py` (Swagger UI URLs passed
-     into `get_swagger_ui_html`)
+   - `packages/memtomem/src/memtomem/web/app.py` (generated Swagger UI HTML)
 
-   See `feedback_static_asset_cache_bust.md`.
+   Then append the new version/SHA-256 binding and run the content-aware
+   contract. The updater refuses to bless changed bytes under an existing
+   public version:
+
+   ```bash
+   uv run python tools/update_static_asset_cache_versions.py --write
+   uv run pytest -q packages/memtomem/tests/web/test_static_asset_cache_versions.py
+   ```
+
+   `THIRD_PARTY_LICENSES.md` remains the supply-chain authority for upstream
+   package bytes; `cache-versions.json` separately binds those bytes to the URL
+   browsers cache. Both must be updated for a vendor asset change. See
+   `CONTRIBUTING.md` for the canonical cache-key workflow.
 
 5. Smoke-test in a browser:
    - Open `mm web`, render a markdown chunk and a syntax-highlighted
