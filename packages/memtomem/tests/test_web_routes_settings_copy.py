@@ -250,7 +250,11 @@ async def test_malformed_matcher_returns_validation_400_and_writes_nothing(
     assert str(other) not in detail["message"]
     # Not vacuous: the sanitizer strips the ROOT, not the whole path, so the
     # project-relative remainder still tells the user which file to fix.
-    assert str(CANONICAL_SETTINGS_FILE) in detail["message"]
+    # ``CANONICAL_SETTINGS_FILE`` is a POSIX-spelled constant but the remainder
+    # of a free-text message keeps NATIVE separators (unlike the structured
+    # path fields, which ``_safe_rel`` pins to POSIX for the UI, #1256) — so
+    # compare against the platform-native spelling or this fails on Windows.
+    assert str(Path(CANONICAL_SETTINGS_FILE)) in detail["message"]
 
 
 # ── dry-run / confirm round-trips / apply ────────────────────────────
@@ -387,7 +391,8 @@ async def test_apply_warnings_are_path_sanitized(client, tmp_path, cwd_root) -> 
     joined = " ".join(payload["warnings"])
     assert str(other) not in joined
     assert str(cwd_root) not in joined
-    assert str(CANONICAL_SETTINGS_FILE) in joined
+    # Native separators in the free-text remainder — see the sibling pin above.
+    assert str(Path(CANONICAL_SETTINGS_FILE)) in joined
 
 
 # ── Gate A ───────────────────────────────────────────────────────────
