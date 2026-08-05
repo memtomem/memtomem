@@ -21,6 +21,7 @@ from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     CodexSettingsGenerator,
     GeminiSettingsGenerator,
+    _merge_hooks_record,
     _stamp_status_markers,
     diff_settings,
     generate_all_settings,
@@ -242,6 +243,39 @@ class TestCodexGenerator:
         assert any("non-string matcher" in w for w in warnings), warnings
         if preexisting:
             assert "user-rule" in commands  # the user's own rule is untouched
+
+    @pytest.mark.parametrize("still_contributed", [True, False], ids=["in-pass-1", "in-pass-2"])
+    def test_owned_rule_removal_redacts_secret_shaped_event(self, still_contributed):
+        """Both owned-rule prune branches scrub the event name (#2030).
+
+        ``_merge_hooks_record`` names the event when it drops a memtomem-owned
+        rule whose matcher is non-string, and these warnings ride the same
+        generate / diff / sync output to the MCP wire as the doctor's. The two
+        branches differ only in whether the canonical still emits the event —
+        pass 1 walks existing rules under a contributed event, the trailing
+        sweep prunes owned rules under one the canonical dropped — so both are
+        pinned. Driven at the merge function rather than through a generator:
+        every generator that remaps events (Codex, Gemini, Kimi) filters an
+        unknown event out of the contributions first, which would silently
+        route both cases through the same branch.
+        """
+        secret_event = "api_key=AKIA1234567890ABCDEF"
+        owned = _stamp_status_markers({"hooks": {secret_event: [_rule("", "owned")]}})["hooks"][
+            secret_event
+        ][0]
+        owned["matcher"] = ["Bash"]
+        contributions = (
+            {"hooks": {secret_event: [_rule("Bash", "fresh")]}}
+            if still_contributed
+            else {"hooks": {}}
+        )
+
+        _merged, warnings = _merge_hooks_record({"hooks": {secret_event: [owned]}}, contributions)
+
+        removals = [w for w in warnings if "Removed a memtomem-managed hook rule" in w]
+        assert removals, warnings
+        assert not any("AKIA1234567890ABCDEF" in w for w in warnings)
+        assert all("'<redacted: secret-shape>'" in w for w in removals), removals
 
     def test_session_end_absent_matcher_is_match_all(self, tmp_path, all_home):
         """Omitting `matcher` is documented as match-all — never malformed."""

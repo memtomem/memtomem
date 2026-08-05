@@ -170,6 +170,145 @@ async def test_settings_surfaces_malformed_matcher_warning(malformed_project, to
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_secret_shaped_event_is_redacted_in_warning(tmp_path, monkeypatch, tool):
+    """A secret-shaped hook event never reaches the MCP wire verbatim (#2030).
+
+    ``event`` is a settings dict key, so nothing stops it from carrying secret
+    material; the path-only redaction the sibling pin mirrors would ship it
+    unchanged to the calling agent's transcript. Expectations are hardcoded
+    rather than recomputed through ``format_malformed_warning`` on purpose —
+    mirroring the implementation would pass whether or not the scrub fires.
+    """
+    secret_event = "api_key=AKIA1234567890ABCDEF"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(project / CANONICAL_SETTINGS_FILE, _bundled_hook())
+    _write_settings(
+        home / ".claude" / "settings.json",
+        {
+            secret_event: [
+                {
+                    "matcher": ["Bash"],
+                    "hooks": [{"type": "command", "command": "mm index", "timeout": 5000}],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+
+    assert "non-string matcher (list)" in out, "fixture did not surface a malformed warning"
+    assert "AKIA1234567890ABCDEF" not in out
+    assert "event '<redacted: secret-shape>' rule #0" in out
+    # The remediation suffix survives untruncated — the whole point of scrubbing
+    # the value instead of routing the line through ``redact_message``.
+    assert "`settings-migrate` to refuse to run." in out
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_secret_shaped_canonical_event_is_redacted_in_drop_warning(
+    tmp_path, monkeypatch, tool
+):
+    """Same scrub on the other malformed-warning producer (#2030 review).
+
+    ``_drop_nonstring_matchers`` warns about a malformed rule in the *canonical*
+    record, and its warnings reach the same MCP settings output — so redacting
+    only the tier-tier warning would still ship a secret-shaped canonical event
+    verbatim.
+    """
+    secret_event = "api_key=AKIA1234567890ABCDEF"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    set_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(
+        project / CANONICAL_SETTINGS_FILE,
+        {
+            secret_event: [
+                {
+                    "matcher": ["Bash"],
+                    "hooks": [{"type": "command", "command": "mm index", "timeout": 5000}],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+
+    assert "non-string matcher" in out, "fixture did not surface a drop warning"
+    assert "AKIA1234567890ABCDEF" not in out
+    assert "Hook rule under '<redacted: secret-shape>'" in out
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_secret_shaped_event_never_reaches_mcp_wire(tmp_path, monkeypatch, tool):
+    """Surface sweep: no settings warning ships the raw event (#2030 review).
+
+    The malformed-matcher axis is only one producer. An event key with a
+    perfectly *valid* matcher still reaches the per-runtime translators, which
+    warn by name when the event has no Codex / Kimi / Gemini equivalent — a
+    wider hole than the malformed one, since it needs no typo to trigger. The
+    runtime dirs are planted so every translator actually runs; without them
+    the targets are skipped as "runtime not installed" and the pin is vacuous.
+    """
+    secret_event = "api_key=AKIA1234567890ABCDEF"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    for runtime_dir in (".claude", ".codex", ".gemini", ".kimi"):
+        (project / runtime_dir).mkdir()
+    set_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(
+        project / CANONICAL_SETTINGS_FILE,
+        {
+            secret_event: [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": "mm index", "timeout": 5000}],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+
+    for runtime in ("Codex", "Kimi", "Gemini"):
+        assert f"no {runtime} equivalent" in out, f"{runtime} translator did not run"
+    assert "AKIA1234567890ABCDEF" not in out
+    assert out.count("Hook event '<redacted: secret-shape>'") == 3
+
+
+@pytest.mark.anyio
 async def test_no_dup_warning_when_only_active_tier(tmp_path, monkeypatch):
     """Negative pin: a hook only in the active (canonical) tier is not a
     duplicate, so no warning is emitted."""

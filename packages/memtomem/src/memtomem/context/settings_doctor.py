@@ -34,6 +34,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from memtomem.context.error_redact import redact_secret_value
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     MalformedHookMatcher,
@@ -228,11 +229,18 @@ def format_malformed_warning(finding: MalformedHookMatcher) -> str:
     The copy/migrate hint is deliberately conditional ("may cause a related
     …"): those operations inspect only the files they touch, so a malformed
     rule in a third tier does not block an unrelated migration.
+
+    ``event`` is a dict key read verbatim out of the caller's settings file, so
+    a secret-shaped one is scrubbed here rather than at a call site (#2030):
+    the MCP surface ships this string to the calling agent's transcript and on
+    to the model provider, and redacting only there would desync the wording
+    this function exists to keep identical across surfaces. Non-secret events —
+    every real hook event — are untouched.
     """
     location = "canonical settings" if finding.tier is None else f"{finding.tier} tier"
     return (
         f"hook rule with a non-string matcher ({finding.matcher_type}) in the "
-        f"{location} ({finding.path}), event '{finding.event}' rule "
+        f"{location} ({finding.path}), event '{redact_secret_value(finding.event)}' rule "
         f"#{finding.rule_index}; `matcher` must be a string — omit it for "
         f"match-all, or quote the value. It is ignored by hook matching until "
         f"fixed, and may cause a related `mm context settings-copy` / "
