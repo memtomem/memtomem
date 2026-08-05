@@ -170,6 +170,55 @@ async def test_settings_surfaces_malformed_matcher_warning(malformed_project, to
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_secret_shaped_event_is_redacted_in_warning(tmp_path, monkeypatch, tool):
+    """A secret-shaped hook event never reaches the MCP wire verbatim (#2030).
+
+    ``event`` is a settings dict key, so nothing stops it from carrying secret
+    material; the path-only redaction the sibling pin mirrors would ship it
+    unchanged to the calling agent's transcript. Expectations are hardcoded
+    rather than recomputed through ``format_malformed_warning`` on purpose —
+    mirroring the implementation would pass whether or not the scrub fires.
+    """
+    secret_event = "api_key=AKIA1234567890ABCDEF"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(project / CANONICAL_SETTINGS_FILE, _bundled_hook())
+    _write_settings(
+        home / ".claude" / "settings.json",
+        {
+            secret_event: [
+                {
+                    "matcher": ["Bash"],
+                    "hooks": [{"type": "command", "command": "mm index", "timeout": 5000}],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+
+    assert "non-string matcher (list)" in out, "fixture did not surface a malformed warning"
+    assert "AKIA1234567890ABCDEF" not in out
+    assert "event '<redacted: secret-shape>' rule #0" in out
+    # The remediation suffix survives untruncated — the whole point of scrubbing
+    # the value instead of routing the line through ``redact_message``.
+    assert "`settings-migrate` to refuse to run." in out
+
+
+@pytest.mark.anyio
 async def test_no_dup_warning_when_only_active_tier(tmp_path, monkeypatch):
     """Negative pin: a hook only in the active (canonical) tier is not a
     duplicate, so no warning is emitted."""

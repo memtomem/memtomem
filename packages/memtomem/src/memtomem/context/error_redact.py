@@ -131,6 +131,24 @@ def redact_message(message: str) -> str:
     return redacted
 
 
+def redact_secret_value(value: str) -> str:
+    """Replace a secret-shape *field value* with the marker, keeping its frame.
+
+    :func:`redact_message` is the wrong tool for a single interpolated field: a
+    hit there drops the whole message, so a warning whose only offending token
+    is one settings key would lose its remediation hint, and its 200-char cap
+    would truncate that hint even without a hit. This scrubs the value alone,
+    leaving the surrounding sentence intact.
+
+    Whole-value substitution, not span-splicing, for the same reason
+    :func:`redact_message` gives: assignment-anchored patterns like ``api_key=``
+    match the label, so splicing the matched span out would leave the secret
+    value behind. Field values here are short identifiers, so replacing all of
+    one costs no remediation value.
+    """
+    return _SECRET_REDACTED_MARKER if _privacy_scan(value) else value
+
+
 def _strip_project_roots(message: str, *project_roots: Path) -> tuple[str, bool]:
     """Relativize real root components and report prefix-collision attempts.
 
