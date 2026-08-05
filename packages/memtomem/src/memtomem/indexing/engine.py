@@ -598,6 +598,7 @@ class IndexEngine:
         retryable_errors: list[str] = []
         blocked_paths: list[str] = []
         blocked_project_shared = 0
+        applied_namespaces: list[str | None] = []
         # Keep the prepass vector positionally aligned with ``files``. A
         # successful upsert replaces its entry below with the authoritative
         # in-lock answer; no-write and failed outcomes retain this preview.
@@ -611,6 +612,7 @@ class IndexEngine:
                     # ``None`` is a real applied value, so key presence — not
                     # truthiness — decides whether to replace the prepass.
                     echo_namespaces[i] = r["resolved_namespace"]
+                    applied_namespaces.append(r["resolved_namespace"])
             elif isinstance(r, PrivacyRejection):
                 # ADR-0006 PR-A: un-adjudicated bulk index hit a secret-bearing
                 # file. Skip it, record it as blocked, and continue the run so a
@@ -655,6 +657,7 @@ class IndexEngine:
             retryable_errors=tuple(dict.fromkeys(retryable_errors)),
             new_chunk_ids=tuple(all_new_chunk_ids),
             resolved_namespaces=tuple(_distinct_sorted(echo_namespaces)),
+            applied_namespaces=tuple(_distinct_sorted(applied_namespaces)),
             blocked_files=len(blocked_paths),
             blocked_paths=tuple(blocked_paths),
             blocked_project_shared_files=blocked_project_shared,
@@ -894,6 +897,9 @@ class IndexEngine:
             retryable_errors=tuple(result.get("retryable_errors", ())),
             new_chunk_ids=tuple(result.get("new_chunk_ids", ())),
             resolved_namespaces=(
+                (result["resolved_namespace"],) if "resolved_namespace" in result else ()
+            ),
+            applied_namespaces=(
                 (result["resolved_namespace"],) if "resolved_namespace" in result else ()
             ),
         )
@@ -1533,11 +1539,13 @@ class IndexEngine:
           ``file, files_done, files_total, indexed, skipped``.
         - ``"complete"``: final summary — ``total_files, total_chunks,
           indexed_chunks, skipped_chunks, deleted_chunks, duration_ms,
-          errors, retryable_errors``. ``errors`` is a list of human-readable
-          strings in the same loose shape as ``IndexingStats.errors`` so
-          non-stream UI handlers reuse verbatim. ``retryable_errors`` is its
-          same-string retryable subset. Both are empty when the run had no
-          errors.
+          errors, retryable_errors, resolved_namespaces, applied_namespaces``.
+          ``errors`` is a list of human-readable strings in the same loose
+          shape as ``IndexingStats.errors`` so non-stream UI handlers reuse
+          verbatim. ``retryable_errors`` is its same-string retryable subset.
+          ``applied_namespaces`` is the authoritative subset of the hybrid
+          ``resolved_namespaces`` echo. Error lists are empty when the run had
+          no errors.
 
         Locking: each file is indexed under the same L2 sidecar →
         L3 ``_index_lock`` pair as ``index_file`` (via
@@ -1565,6 +1573,7 @@ class IndexEngine:
                     "errors": [f"path is outside configured memory directories: {path}"],
                     "retryable_errors": [],
                     "resolved_namespaces": [],
+                    "applied_namespaces": [],
                     "blocked_files": 0,
                     "blocked_paths": [],
                     "blocked_project_shared_files": 0,
@@ -1587,6 +1596,7 @@ class IndexEngine:
                     "errors": [f"index path does not exist: {path}"],
                     "retryable_errors": [],
                     "resolved_namespaces": [],
+                    "applied_namespaces": [],
                     "blocked_files": 0,
                     "blocked_paths": [],
                     "blocked_project_shared_files": 0,
@@ -1626,6 +1636,7 @@ class IndexEngine:
             all_errors: list[str] = []
             retryable_errors: list[str] = []
             blocked_paths: list[str] = []
+            applied_namespaces: list[str | None] = []
 
             for i, fp in enumerate(files, start=1):
                 # Per-file queue forwards ``chunk_progress`` ticks from the
@@ -1743,6 +1754,7 @@ class IndexEngine:
                     # ``None`` is a real applied value, so key presence — not
                     # truthiness — decides whether to replace the prepass.
                     echo_namespaces[i - 1] = result["resolved_namespace"]
+                    applied_namespaces.append(result["resolved_namespace"])
                 yield {
                     "type": "progress",
                     "file": str(fp),
@@ -1764,6 +1776,7 @@ class IndexEngine:
                 "errors": list(dict.fromkeys(all_errors)),
                 "retryable_errors": list(dict.fromkeys(retryable_errors)),
                 "resolved_namespaces": _distinct_sorted(echo_namespaces),
+                "applied_namespaces": _distinct_sorted(applied_namespaces),
                 "blocked_files": agg["blocked"],
                 "blocked_paths": blocked_paths,
                 "blocked_project_shared_files": agg["blocked_project_shared"],

@@ -61,6 +61,7 @@ function indexResult(overrides = {}) {
     duration_ms: 5,
     errors: [],
     resolved_namespaces: [],
+    applied_namespaces: [],
     blocked_files: 0,
     blocked_paths: [],
     blocked_project_shared_files: 0,

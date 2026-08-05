@@ -975,11 +975,13 @@ function debounce(fn, ms) {
 // Render a list of namespaces (preview placeholder OR result-row echo)
 // using the ``index.ns_render.*`` i18n family. ``mode`` selects the
 // suffix variant: ``'preview'`` for the placeholder hint,
-// ``'applied'`` for the post-index result row. ``namespaces`` is a
+// ``'applied'`` for a proven post-index result. Preview is the conservative
+// default; every production call site still passes its mode explicitly.
+// ``namespaces`` is a
 // distinct list of ``str | null`` (null = untagged ``default`` carve-out).
 // ``truncated`` and ``scanned`` come from the preview endpoint; passing
 // ``truncated=false`` / ``scanned=0`` skips the suffix.
-function renderResolvedNamespaces(namespaces, { truncated = false, scanned = 0, mode = 'applied' } = {}) {
+function renderResolvedNamespaces(namespaces, { truncated = false, scanned = 0, mode = 'preview' } = {}) {
   const list = Array.isArray(namespaces) ? namespaces : [];
   const isUntagged = list.length === 0 || (list.length === 1 && list[0] === null);
   let body;
@@ -997,6 +999,38 @@ function renderResolvedNamespaces(namespaces, { truncated = false, scanned = 0, 
     body += t('index.ns_render.truncated_suffix', { scanned });
   }
   return body;
+}
+
+// Result-only provenance renderer (#2035). ``resolved_namespaces`` remains
+// the legacy hybrid union; ``applied_namespaces`` is its authoritative subset.
+// Preserve the canonical resolved order while rendering values outside the
+// subset as preview-only. Missing/malformed provenance fails conservatively:
+// every resolved value is a preview. Do not call ``renderResolvedNamespaces``
+// for an empty subgroup because that helper deliberately maps ``[]`` to the
+// untagged label.
+function renderIndexResolvedNamespaces(result) {
+  const resolved = Array.isArray(result?.resolved_namespaces)
+    ? result.resolved_namespaces
+    : [];
+  const appliedSet = new Set(
+    Array.isArray(result?.applied_namespaces) ? result.applied_namespaces : [],
+  );
+  const applied = resolved.filter(ns => appliedSet.has(ns));
+  const previewOnly = resolved.filter(ns => !appliedSet.has(ns));
+
+  if (resolved.length === 0) {
+    return renderResolvedNamespaces(resolved, { mode: 'preview' });
+  }
+  if (applied.length === 0) {
+    return renderResolvedNamespaces(previewOnly, { mode: 'preview' });
+  }
+  if (previewOnly.length === 0) {
+    return renderResolvedNamespaces(applied, { mode: 'applied' });
+  }
+  return t('index.ns_render.mixed', {
+    applied: renderResolvedNamespaces(applied, { mode: 'applied' }),
+    preview: renderResolvedNamespaces(previewOnly, { mode: 'preview' }),
+  });
 }
 
 // ── B2: Copy to Clipboard ──
@@ -6803,7 +6837,7 @@ function _renderIndexResult(result, { registerAsSource, path }) {
   qs('r-duration').textContent = `${(Number(result.duration_ms) || 0).toFixed(0)} ms`;
   const nsCell = qs('r-namespace');
   if (nsCell) {
-    nsCell.textContent = renderResolvedNamespaces(result.resolved_namespaces, { mode: 'applied' });
+    nsCell.textContent = renderIndexResolvedNamespaces(result);
   }
 
   // Blocked (secret-redaction) row — count + up to 5 basenames + "…and N more".

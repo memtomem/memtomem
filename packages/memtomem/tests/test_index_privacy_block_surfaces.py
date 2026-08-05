@@ -73,6 +73,7 @@ class TestBulkIndexRedactionGate:
         assert stats.blocked_files == 1
         assert stats.indexed_chunks == 0
         assert stats.resolved_namespaces == (None,)
+        assert stats.applied_namespaces == ()
 
     async def test_force_unsafe_bypasses_bulk(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
@@ -106,6 +107,7 @@ class TestBulkIndexRedactionGate:
         assert complete["blocked_files"] == 1
         assert complete["indexed_chunks"] == 0
         assert complete["resolved_namespaces"] == [None]
+        assert complete["applied_namespaces"] == []
 
     async def test_single_file_index_raises(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
