@@ -555,7 +555,8 @@ def _merge_hooks_record(
                     # it with a warning; a hand-edit that kept the marker loses
                     # the edit by the marker's documented contract.
                     warnings.append(
-                        f"Removed a memtomem-managed hook rule under '{event}' "
+                        f"Removed a memtomem-managed hook rule under "
+                        f"'{redact_secret_value(event)}' "
                         f"with a non-string matcher "
                         f"({type(matcher).__name__}): 'matcher' must be a "
                         f"string. A previous memtomem version may have "
@@ -596,7 +597,8 @@ def _merge_hooks_record(
                 # Already present ignoring our marker — leave the user's copy
                 # untouched rather than rewrite it just to add the marker.
                 continue
-            label = f"{event}:{matcher}" if matcher else event
+            shown_event = redact_secret_value(event)
+            label = f"{shown_event}:{matcher}" if matcher else shown_event
             contrib_commands = _rule_commands(c)
             if contrib_commands and any(contrib_commands & _rule_commands(u) for u in same_user):
                 warnings.append(
@@ -641,7 +643,8 @@ def _merge_hooks_record(
                 continue
             if not isinstance(r.get("matcher", ""), str):
                 warnings.append(
-                    f"Removed a memtomem-managed hook rule under '{event}' "
+                    f"Removed a memtomem-managed hook rule under "
+                    f"'{redact_secret_value(event)}' "
                     f"with a non-string matcher "
                     f"({type(r.get('matcher')).__name__}): 'matcher' must be "
                     f"a string. A previous memtomem version may have written "
@@ -914,7 +917,8 @@ def _filter_codex_events(contributions: dict) -> tuple[dict, list[str]]:
     for event, rules in src_hooks.items():
         if event not in _CODEX_EVENTS:
             warnings.append(
-                f"Hook event '{event}' has no Codex equivalent and was dropped "
+                f"Hook event '{redact_secret_value(event)}' has no Codex "
+                f"equivalent and was dropped "
                 f"from the Codex hooks file. Codex supports: "
                 f"{', '.join(sorted(_CODEX_EVENTS))}."
             )
@@ -980,7 +984,9 @@ def _render_kimi_hooks(contributions: dict) -> tuple[str, list[str]]:
     for event, rules in src_hooks.items():
         kimi_event = _KIMI_EVENT_MAP.get(event)
         if kimi_event is None:
-            warnings.append(f"Hook event '{event}' has no Kimi equivalent and was dropped.")
+            warnings.append(
+                f"Hook event '{redact_secret_value(event)}' has no Kimi equivalent and was dropped."
+            )
             continue
         if not isinstance(rules, list):
             continue
@@ -992,8 +998,9 @@ def _render_kimi_hooks(contributions: dict) -> tuple[str, list[str]]:
                 mapped_matcher, unmapped = _map_kimi_matcher(matcher)
                 if mapped_matcher is None:
                     warnings.append(
-                        f"Hook '{event}:{matcher}' matcher token(s) "
-                        f"{', '.join(unmapped)} have no Kimi tool equivalent; rule dropped."
+                        f"Hook '{redact_secret_value(event)}:{matcher}' matcher "
+                        f"token(s) {', '.join(unmapped)} have no Kimi tool "
+                        f"equivalent; rule dropped."
                     )
                     continue
                 matcher = mapped_matcher
@@ -1148,7 +1155,8 @@ def _remap_for_gemini(contributions: dict) -> tuple[dict, list[str]]:
         gemini_event = _GEMINI_EVENT_MAP.get(event)
         if gemini_event is None:
             warnings.append(
-                f"Hook event '{event}' has no Gemini equivalent and was dropped. "
+                f"Hook event '{redact_secret_value(event)}' has no Gemini "
+                f"equivalent and was dropped. "
                 f"Gemini supports: {', '.join(sorted(_GEMINI_EVENT_MAP))}."
             )
             continue
@@ -1163,8 +1171,9 @@ def _remap_for_gemini(contributions: dict) -> tuple[dict, list[str]]:
                 mapped_matcher, unmapped = _map_gemini_matcher(matcher)
                 if mapped_matcher is None:
                     warnings.append(
-                        f"Hook '{event}:{matcher}' matcher token(s) "
-                        f"{', '.join(unmapped)} have no Gemini tool equivalent; "
+                        f"Hook '{redact_secret_value(event)}:{matcher}' matcher "
+                        f"token(s) {', '.join(unmapped)} have no Gemini tool "
+                        f"equivalent; "
                         f"rule dropped (would never fire). Known tools: "
                         f"{', '.join(sorted(set(_GEMINI_TOOL_MAP.values())))}."
                     )
