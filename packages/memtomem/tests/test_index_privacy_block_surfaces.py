@@ -62,6 +62,18 @@ class TestBulkIndexRedactionGate:
         # the whole run.
         assert stats.indexed_chunks > 0
 
+    async def test_blocked_only_run_keeps_the_prepass_namespace(self, bm25_only_components):
+        """A privacy block performs no namespace-bearing write, so its echo
+        retains the positional prepass value instead of disappearing."""
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "leak.md").write_text(_LEAK)
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.blocked_files == 1
+        assert stats.indexed_chunks == 0
+        assert stats.resolved_namespaces == (None,)
+
     async def test_force_unsafe_bypasses_bulk(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)

@@ -1638,7 +1638,9 @@ class TestBulkNamespacePrepass:
     per-file write still resolves inside its own critical section — a
     concurrent writer may have moved a file since the prepass — and a
     lookup failure there fails that file closed, with its retryable type
-    kept in ``stats.retryable_errors`` (issue #2018)."""
+    kept in ``stats.retryable_errors`` (issue #2018). Successful writes then
+    replace their positional prepass entry in the namespace echo with the
+    authoritative in-lock answer (issue #2019)."""
 
     async def test_stream_honors_a_namespace_moved_after_the_prepass(self, components, memory_dir):
         """The in-lock resolution stays authoritative: a file whose stored
@@ -1672,9 +1674,87 @@ class TestBulkNamespacePrepass:
         # namespace assertion is about a write the stream actually made.
         complete = next(ev for ev in events if ev["type"] == "complete")
         assert complete["errors"] == []
+        assert complete["resolved_namespaces"] == ["aaa", None]
         chunks = await components.storage.list_chunks_by_source(b)
         assert any("newer entry" in c.content for c in chunks)
         assert await components.storage.namespaces_for_source(b) == ["aaa"]
+
+    async def test_bulk_echo_replaces_a_stale_prepass_namespace(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The gathered path reports the authoritative in-lock answer, not a
+        stale prepass value and not the union of both values."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nnew content", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=[["old"], ["new"]]),
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        monkeypatch.undo()
+        assert stats.resolved_namespaces == ("new",)
+        assert await components.storage.namespaces_for_source(fp) == ["new"]
+
+    async def test_index_file_result_marks_only_namespace_bearing_upserts(
+        self, components, memory_dir
+    ):
+        """Applied ``None`` is distinguishable from a missing no-write key."""
+        engine = components.index_engine
+        fp = memory_dir / "untagged.md"
+        fp.write_text("# U\n\nplain note", encoding="utf-8")
+
+        first = await engine._index_file(fp, force=False)
+        second = await engine._index_file(fp, force=False)
+
+        assert first["indexed"] > 0
+        assert "resolved_namespace" in first
+        assert first["resolved_namespace"] is None
+        assert second["indexed"] == 0
+        assert "resolved_namespace" not in second
+
+    async def test_bulk_echo_keeps_positional_fallbacks_around_exceptions(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Exceptions must not compact results and shift later namespaces."""
+        engine = components.index_engine
+        for name in ("a.md", "b.md", "c.md"):
+            (memory_dir / name).write_text(f"# {name}\n\ncontent", encoding="utf-8")
+
+        monkeypatch.setattr(
+            engine,
+            "_resolve_namespaces_per_file",
+            AsyncMock(return_value=["fallback-a", "fallback-b", "fallback-c"]),
+        )
+
+        async def fake_index_file(fp, *_args, **_kwargs):
+            if fp.name == "a.md":
+                raise RuntimeError("raised failure")
+            if fp.name == "b.md":
+                return {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": ["returned failure"],
+                }
+            return {
+                "total": 1,
+                "indexed": 1,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [],
+                "resolved_namespace": "actual-c",
+            }
+
+        monkeypatch.setattr(engine, "_index_file", fake_index_file)
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.resolved_namespaces == ("actual-c", "fallback-a", "fallback-b")
 
     async def test_a_mid_run_lookup_failure_writes_nothing_for_that_file(
         self, components, memory_dir, monkeypatch
@@ -1771,6 +1851,7 @@ class TestBulkNamespacePrepass:
 
         assert stats.retryable_errors != ()
         assert stats.retryable_errors == stats.errors
+        assert stats.resolved_namespaces == (None,)
 
     async def test_stream_complete_event_flags_mid_run_lookup_failures_retryable(
         self, components, memory_dir, monkeypatch
@@ -1790,6 +1871,7 @@ class TestBulkNamespacePrepass:
         complete = next(ev for ev in events if ev["type"] == "complete")
         assert complete["retryable_errors"] != []
         assert complete["retryable_errors"] == complete["errors"]
+        assert complete["resolved_namespaces"] == [None]
 
     async def test_a_permanent_per_file_failure_is_not_flagged_retryable(
         self, components, memory_dir, monkeypatch
@@ -1876,9 +1958,10 @@ class TestBulkNamespacePrepass:
         # an unchanged file skips the UPSERT and would pass vacuously.
         fp.write_text("# K\n\nfirst entry\n\nsecond entry", encoding="utf-8")
 
-        await engine.index_path(memory_dir, recursive=True)
+        stats = await engine.index_path(memory_dir, recursive=True)
 
         assert await components.storage.namespaces_for_source(fp) == ["personal"]
+        assert stats.resolved_namespaces == ("personal",)
 
     async def test_bulk_force_applies_rules_not_preservation(self, components, memory_dir):
         """``force=True`` skips preservation on purpose (the documented way
@@ -1893,9 +1976,10 @@ class TestBulkNamespacePrepass:
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
         )
 
-        await engine.index_path(memory_dir, recursive=True, force=True)
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
 
         assert await components.storage.namespaces_for_source(fp) == ["ruled"]
+        assert stats.resolved_namespaces == ("ruled",)
 
 
 # ===========================================================================

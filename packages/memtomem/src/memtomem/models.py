@@ -234,12 +234,14 @@ class IndexingStats:
     # freshly created chunks — e.g. ``mem_consolidate_apply`` linking a new
     # summary — should read this instead of polling ``recall_chunks``.
     new_chunk_ids: tuple[UUID, ...] = ()
-    # Distinct namespaces ``IndexEngine._resolve_namespace`` returned across
-    # the indexed file set, in stable (sort) order. ``None`` represents the
+    # Distinct namespaces for the indexed file set, in stable (sort) order.
+    # Successful upserts report the authoritative in-lock resolution; files
+    # with no namespace-bearing write (unchanged, skipped, or failed) retain
+    # the pre-write preview. ``None`` represents the
     # ``default_namespace == "default"`` carve-out (untagged chunks). Empty
     # on zero-result paths. Surfaced in the web ``IndexResponse`` so the UI
-    # can echo what was *actually* applied — important when policy rules
-    # split a folder into multiple namespaces.
+    # can accurately echo concurrent namespace moves without dropping the
+    # historical preview for no-write outcomes.
     resolved_namespaces: tuple[str | None, ...] = ()
     # ADR-0006 PR-A: files skipped by the secret-redaction gate during
     # un-adjudicated bulk indexing (each such file raised ``PrivacyRejection``,
