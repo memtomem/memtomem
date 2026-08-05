@@ -440,6 +440,115 @@ class TestCheckServerLivenessStoreScope:
         assert exclusive.alive is True
         assert exclusive.legacy_lock_mode == "exclusive"
 
+    @pytest.mark.skipif(os.name == "nt", reason="legacy shared flock is POSIX-only")
+    def test_shared_legacy_holder_does_not_gate(self, rt: Path, tmp_path: Path):
+        """#2003: a shared legacy holder is a modern server's compatibility
+        alias — that server is gated by its own runtime pid file, so the
+        alias must not block work on an unrelated store sharing the HOME."""
+        from memtomem._runtime_paths import legacy_server_pid_path
+        from memtomem.cli._liveness import check_server_liveness
+
+        db = tmp_path / "store" / "memtomem.db"
+        with self._hold_shared(legacy_server_pid_path()):
+            scoped = check_server_liveness(db)
+            agnostic = check_server_liveness()
+
+        assert scoped.alive is False, (
+            "a shared legacy alias must not gate the store-scoped probe (#2003)"
+        )
+        assert agnostic.alive is False, (
+            "a shared legacy alias must not gate the store-agnostic probe (#2003)"
+        )
+
+    @pytest.mark.skipif(os.name == "nt", reason="legacy shared flock is POSIX-only")
+    def test_exclusive_legacy_holder_still_gates(self, rt: Path, tmp_path: Path):
+        from memtomem._runtime_paths import legacy_server_pid_path
+        from memtomem.cli._liveness import check_server_liveness
+
+        db = tmp_path / "store" / "memtomem.db"
+        with self._hold(legacy_server_pid_path()):
+            scoped = check_server_liveness(db)
+            agnostic = check_server_liveness()
+
+        assert scoped.alive is True and scoped.pid_file == legacy_server_pid_path(), (
+            "an exclusive legacy holder (pre-0.1.25 server) must still refuse"
+        )
+        assert agnostic.alive is True and agnostic.pid_file == legacy_server_pid_path()
+
+    @pytest.mark.skipif(os.name == "nt", reason="legacy shared flock is POSIX-only")
+    def test_unclassifiable_legacy_probe_fails_closed(
+        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Pins the fail-closed guard against simplifying the shared-skip
+        in ``_probe_legacy_gate`` to ``mode != "exclusive"`` — a probe that
+        could not classify the lock has no evidence and must gate."""
+        import memtomem.cli._liveness as liveness
+        from memtomem._runtime_paths import legacy_server_pid_path
+
+        broken = liveness.ServerState(
+            alive=True,
+            pid=None,
+            pid_file=legacy_server_pid_path(),
+            probe_error="legacy lock classification failed: boom",
+        )
+        monkeypatch.setattr(liveness, "probe_legacy_pid_file", lambda: broken)
+
+        db = tmp_path / "store" / "memtomem.db"
+        scoped = liveness.check_server_liveness(db)
+        agnostic = liveness.check_server_liveness()
+
+        assert scoped.alive is True and scoped.probe_error is not None
+        assert agnostic.alive is True and agnostic.probe_error is not None
+
+    def test_sees_server_in_the_sibling_runtime_dir(self, rt: Path, tmp_path: Path):
+        """#2003 review: a server whose runtime dir differs from the CLI's.
+
+        The ``rt`` fixture gives this CLI an ``XDG_RUNTIME_DIR``; a server
+        started without one (cron, an ``ssh`` shell, a container exec)
+        lands in the ``{gettempdir()}/memtomem-{uid}`` fallback instead.
+        Probing only the caller's own branch reported that live server as
+        dead, and ``mm uninstall`` / ``mm reset`` would delete state under
+        it — the legacy shared alias used to be the accidental backstop.
+        """
+        import tempfile
+
+        from memtomem._runtime_paths import server_pid_path
+        from memtomem.cli._liveness import check_server_liveness
+
+        uid = os.geteuid() if hasattr(os, "geteuid") else 0
+        sibling = Path(tempfile.gettempdir()) / f"memtomem-{uid}"
+        sibling.mkdir(parents=True, exist_ok=True)
+        assert sibling != rt, "fixture must give the CLI the other branch"
+
+        db = tmp_path / "store" / "memtomem.db"
+        with self._hold(sibling / server_pid_path(db).name):
+            scoped = check_server_liveness(db)
+            agnostic = check_server_liveness()
+
+        assert scoped.alive is True, (
+            "a live server in the sibling runtime dir must gate this store (#2003)"
+        )
+        assert agnostic.alive is True
+
+    def test_sibling_runtime_dir_candidates_cover_both_branches(self):
+        """Pins the candidate set itself, so a refactor that quietly drops
+        one branch fails here rather than as a silent fail-open."""
+        import tempfile
+
+        from memtomem._runtime_paths import candidate_runtime_dirs, runtime_dir
+
+        uid = os.geteuid() if hasattr(os, "geteuid") else 0
+        dirs = candidate_runtime_dirs()
+
+        assert dirs[0] == runtime_dir(), "caller's own branch must be probed first"
+        assert Path(tempfile.gettempdir()) / f"memtomem-{uid}" in dirs
+        if os.name != "nt":
+            assert Path(f"/run/user/{uid}") / "memtomem" in dirs, (
+                "the systemd location must be probed for a server whose "
+                "XDG_RUNTIME_DIR this process cannot read"
+            )
+        assert len(dirs) == len(set(dirs)), "candidates must be de-duplicated"
+
     def test_store_agnostic_probe_fails_closed_on_glob_error(
         self, rt: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -452,7 +561,11 @@ class TestCheckServerLivenessStoreScope:
             def __str__(self) -> str:
                 return "<runtime dir>"
 
-        monkeypatch.setattr(liveness, "runtime_dir", lambda: _Unsearchable())
+        # Patch the candidate resolver, not ``runtime_dir``: enumeration
+        # walks every candidate branch as of #2003, and an unsearchable
+        # directory anywhere in that set must fail the whole pass — a
+        # directory we cannot search is not a directory we can call empty.
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [_Unsearchable()])
 
         states = liveness.enumerate_server_liveness()
         state = liveness.check_server_liveness()

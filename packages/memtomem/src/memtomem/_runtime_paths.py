@@ -183,6 +183,47 @@ def runtime_dir() -> Path:
     return Path(tempfile.gettempdir()) / f"memtomem-{uid}"
 
 
+def candidate_runtime_dirs() -> list[Path]:
+    """Return every runtime dir a *live server* could have picked, for probing.
+
+    :func:`runtime_dir` resolves one directory from the current
+    environment, but a server started in a different context may have
+    taken the other branch — most plausibly ``$XDG_RUNTIME_DIR`` set for
+    the server (systemd user session) and unset for the CLI (cron, an
+    ``ssh`` shell, a container exec), or the reverse. Liveness probes that
+    only look at the caller's own branch then find no pid file and report
+    "dead" while the server is very much alive, which is how ``mm
+    uninstall`` / ``mm reset`` could delete state under it (#2003 review).
+
+    Three candidates, caller's own first, de-duplicated and without
+    creating anything:
+
+    1. :func:`runtime_dir` — what this environment resolves.
+    2. The ``{gettempdir()}/memtomem-{uid}`` fallback, for a server that
+       ran without a usable ``$XDG_RUNTIME_DIR``.
+    3. ``/run/user/{uid}/memtomem`` on POSIX, for the reverse case — we
+       have no ``$XDG_RUNTIME_DIR`` to read but the server did. This is
+       the systemd location the variable holds on every distro that sets
+       it, so it is a deterministic address rather than a guess. Probing
+       is read-only and its failure direction is fail-closed, so an
+       unrelated or non-existent path here can only cost a refusal, never
+       a wrongful delete.
+
+    Writers must keep using :func:`ensure_runtime_dir`: there is exactly
+    one correct directory to *write* to, and it is the one this
+    environment resolves.
+    """
+    uid = os.geteuid() if hasattr(os, "geteuid") else 0
+    dirs = [runtime_dir(), Path(tempfile.gettempdir()) / f"memtomem-{uid}"]
+    if os.name != "nt":
+        dirs.append(Path(f"/run/user/{uid}") / "memtomem")
+    seen: list[Path] = []
+    for d in dirs:
+        if d not in seen:
+            seen.append(d)
+    return seen
+
+
 def ensure_runtime_dir() -> Path:
     """Return the runtime directory, creating it with ``mode=0o700`` if missing.
 
@@ -330,11 +371,10 @@ _LEGACY_PID_NAME = ".server.pid"
 def legacy_server_pid_path() -> Path:
     """Return the pre-relocation pid file path (``~/.memtomem/.server.pid``).
 
-    Kept as a target for backward-compat probes during the transition
-    period. Both :mod:`memtomem.server` (startup mutual-exclusion against
-    a pre-#412 server still running at the legacy location) and
-    :mod:`memtomem.cli.uninstall_cmd` (mixed-version refusal) consult
-    this path.
+    No longer created or locked by servers as of #2003 (the transition-era
+    B1 interlock is retired); retained for CLI liveness probes — which gate
+    only on an exclusive pre-0.1.25 holder — and for ``mm uninstall``'s
+    legacy-file inventory.
 
     ``Path.home()`` is evaluated every call so tests that monkeypatch
     ``HOME`` get the isolated path — import-time binding would capture

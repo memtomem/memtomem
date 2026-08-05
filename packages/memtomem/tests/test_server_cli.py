@@ -31,11 +31,9 @@ def _isolate_runtime(
 
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
-    legacy_pid = tmp_path / "home" / ".memtomem" / ".server.pid"
     callbacks: list[tuple[Callable, tuple[object, ...], dict[str, object]]] = []
 
     monkeypatch.setattr(runtime_paths, "ensure_runtime_dir", lambda: runtime_dir)
-    monkeypatch.setattr(runtime_paths, "legacy_server_pid_path", lambda: legacy_pid)
     monkeypatch.setattr(
         "atexit.register",
         lambda fn, *args, **kwargs: callbacks.append((fn, args, kwargs)) or fn,
@@ -88,7 +86,6 @@ def test_stdio_pipe_runs_without_terminal_help(
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
     monkeypatch.setattr(server_mod, "_is_direct_stdio_terminal", lambda: False)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -109,7 +106,6 @@ def test_http_transport_alias_runs_streamable_http(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -147,7 +143,6 @@ def test_sse_transport_folds_mount_path_into_both_paths(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -187,7 +182,6 @@ def test_network_url_trailing_slash_is_normalized(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -220,7 +214,6 @@ def test_disable_dns_rebinding_protection_skips_allowed_hosts(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -253,7 +246,6 @@ def test_sse_transport_uses_default_endpoint_when_url_omitted(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -282,7 +274,6 @@ def test_http_transport_uses_default_endpoint_when_url_omitted(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -309,7 +300,6 @@ def test_default_network_url_uses_loopback_for_wildcard_host(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
@@ -357,7 +347,6 @@ def test_network_banner_prints_internal_and_public_url(
     from memtomem import server as server_mod
 
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
 
@@ -399,7 +388,6 @@ def test_network_banner_emits_wildcard_host_hint(
     from memtomem import server as server_mod
 
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
 
@@ -435,7 +423,6 @@ def test_network_banner_suppressed_when_url_overrides_wildcard_host(
     from memtomem import server as server_mod
 
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
 
@@ -484,7 +471,6 @@ def test_network_banner_suppresses_hint_for_advanced_configurations(
     from memtomem import server as server_mod
 
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
 
@@ -517,7 +503,6 @@ def test_disable_dns_rebinding_protection_pins_empty_allow_lists(
     from memtomem import server as server_mod
 
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
-    monkeypatch.setattr(server_mod, "_try_hold_legacy_flock", lambda _path: None)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: None)
 

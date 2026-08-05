@@ -75,6 +75,12 @@ def home(tmp_path, monkeypatch):
     fake_tempdir = tmp_path / "tempdir"
     fake_tempdir.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(fake_tempdir))
+    # Pin the env vars too — liveness probes walk the tempdir branch as
+    # well as the XDG one (#2003), and the spawned barrier children
+    # re-resolve it from the environment rather than inheriting the
+    # ``tempfile.tempdir`` monkeypatch.
+    for _var in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(_var, str(fake_tempdir))
     set_home(monkeypatch, h)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
     monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", h / ".memtomem" / "config.json")

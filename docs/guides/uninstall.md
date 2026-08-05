@@ -120,7 +120,7 @@ This moves aside:
 | `memories/` | User-created memories from `mem_add` |
 | `uploads/` | Files uploaded via the Web UI |
 | `.current_session` | Active session marker |
-| `.server.pid` | Legacy MCP server advisory lock (pre-#412 installs only) |
+| `.server.pid` | Legacy MCP server advisory lock — no longer created by current servers (#2003); still cleaned up. Blocks uninstall only when held *exclusively* (a genuine pre-0.1.25 server) |
 
 The running server's pid/flock file lives **outside** `~/.memtomem/` under
 `$XDG_RUNTIME_DIR/memtomem/server-<digest>.pid` (Linux w/ systemd) or
