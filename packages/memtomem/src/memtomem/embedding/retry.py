@@ -14,16 +14,24 @@ class RateLimitError(Exception):
     """Raised on a transient HTTP status (429, 5xx) to trigger retry via
     the with_retry decorator.
 
-    The optional retry_after attribute is honored by with_retry when set:
+    The optional ``retry_after`` attribute is honored by with_retry when set:
     the loop sleeps for max(exponential_delay, retry_after). ``message``
     lets a provider describe the actual condition (e.g. "Ollama returned
     HTTP 503") instead of the default rate-limit wording, so retry logs
     and the final wrapped error don't mislabel a server reload as
-    rate limiting.
+    rate limiting. ``status_code`` lets consumers distinguish 429 from 5xx
+    without coupling control flow to that human-readable message.
     """
 
-    def __init__(self, retry_after: float | None = None, message: str | None = None) -> None:
+    def __init__(
+        self,
+        retry_after: float | None = None,
+        message: str | None = None,
+        *,
+        status_code: int | None = None,
+    ) -> None:
         self.retry_after = retry_after
+        self.status_code = status_code
         super().__init__(message or f"Rate limited (retry_after={retry_after})")
 
 

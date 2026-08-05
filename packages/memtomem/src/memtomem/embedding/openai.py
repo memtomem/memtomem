@@ -68,6 +68,7 @@ class OpenAIEmbedder:
             ra_val = parse_retry_after(resp.headers.get("retry-after"))
             raise RateLimitError(
                 retry_after=ra_val,
+                status_code=resp.status_code,
                 message=(
                     None
                     if resp.status_code == 429
@@ -150,7 +151,7 @@ class OpenAIEmbedder:
                 f"OpenAI embedding request timed out. The API may be overloaded. Error: {exc}"
             ) from exc
         except RateLimitError as exc:
-            if str(exc).startswith("Rate limited"):
+            if exc.status_code == 429:
                 message = (
                     "OpenAI API rate limit exceeded after retries. "
                     "Please wait before retrying or upgrade your plan."

@@ -65,6 +65,7 @@ class OllamaEmbedder:
             raise RateLimitError(
                 retry_after=parse_retry_after(resp.headers.get("retry-after")),
                 message=f"Ollama returned transient HTTP {resp.status_code}",
+                status_code=resp.status_code,
             )
         resp.raise_for_status()
         data = resp.json()

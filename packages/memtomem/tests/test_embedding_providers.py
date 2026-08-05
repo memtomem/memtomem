@@ -26,7 +26,7 @@ from memtomem.embedding.ollama import OllamaEmbedder
 from memtomem.embedding.onnx import OnnxEmbedder, _verify_cpu_mem_arena
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.embedding.openai import OpenAIEmbedder
-from memtomem.embedding.retry import parse_retry_after, with_retry
+from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import ConfigError, EmbeddingError, RetryableEmbeddingError
 
 
@@ -434,6 +434,20 @@ class TestOpenAIEmbedder:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post = AsyncMock(return_value=resp_429)
         embedder._client = mock_client
+
+        with pytest.raises(RetryableEmbeddingError, match="rate limit"):
+            await embedder.embed_texts(["test"])
+
+    async def test_rate_limit_classification_does_not_depend_on_message(self):
+        """Structured status, not human wording, distinguishes 429 from 5xx."""
+        config = _openai_config()
+        embedder = OpenAIEmbedder(config)
+        embedder._embed_batch_with_retry = AsyncMock(
+            side_effect=RateLimitError(
+                message="custom quota wording",
+                status_code=429,
+            )
+        )
 
         with pytest.raises(RetryableEmbeddingError, match="rate limit"):
             await embedder.embed_texts(["test"])
