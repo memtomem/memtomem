@@ -210,14 +210,11 @@ def test_force_unsafe_rejected_with_debounce_modes():
     assert "only applies to direct indexing" in r.output
 
 
-def test_debounce_flush_surfaces_blocked_file_as_error(tmp_path, monkeypatch):
+def test_debounce_flush_drops_blocked_file_as_permanent(tmp_path, monkeypatch):
     """A secret-bearing file enqueued via ``--debounce-window`` and drained
-    via ``--flush`` must not be reported as ``Indexed`` and silently dropped
-    from the queue — it must surface as an ``Errors`` entry and stay queued
-    for retry, matching ``mm index``'s direct-run behavior. Before the fix,
-    ``_make_indexer`` discarded the ``IndexingStats`` return value entirely,
-    so a redaction-blocked (or any other per-file-failed) file was reported
-    as indexed with no way for a hook caller to ever learn it was skipped.
+    via ``--flush`` must be reported loudly and removed immediately. A privacy
+    refusal cannot resolve through blind retries, so it must not consume the
+    transient retry budget (#2026).
     """
     from memtomem.cli import _bootstrap
 
@@ -256,81 +253,36 @@ def test_debounce_flush_surfaces_blocked_file_as_error(tmp_path, monkeypatch):
     r = runner.invoke(cli, ["index", "--flush"])
     assert r.exit_code == 1, f"flush should report failure: {r.output}"
     assert "Indexed: 0" in r.output
-    assert "Errors: 1" in r.output
+    assert "Dropped (permanent): 1" in r.output
     assert "redaction_blocked" in r.output
-    assert "Remaining in queue: 1" in r.output
+    assert "fix the cause, then" in r.output
+    assert "Remaining in queue: 0" in r.output
 
-    # ``--json`` shape: same outcome, still queued for the next retry. The
-    # redaction gate's ``logger.warning`` calls share stdout/stderr with
+    # Enqueue the same still-blocked file again to pin the machine-readable
+    # shape independently. The new write creates a fresh queue entry, but the
+    # permanent classification still drops it on its first drain.
+    r = runner.invoke(cli, ["index", "--debounce-window", "999999", str(leak)])
+    assert r.exit_code == 0, f"re-enqueue failed: {r.output}"
+
+    # The redaction gate's ``logger.warning`` calls share stdout/stderr with
     # CliRunner, so the JSON dict — the last thing ``_print_drain_result``
     # emits — is the last line, not necessarily the whole output.
     r = runner.invoke(cli, ["index", "--flush", "--json"])
     assert r.exit_code == 1, f"flush --json should report failure: {r.output}"
     payload = json.loads(r.output.strip().splitlines()[-1])
     assert payload["indexed"] == []
-    assert len(payload["errors"]) == 1
-    assert "redaction_blocked" in payload["errors"][0]["message"]
-    assert payload["remaining"] == 1
-
-
-def test_debounce_flush_drops_poison_entry_after_cap(tmp_path, monkeypatch):
-    """A queue entry that fails on every drain is dropped after
-    ``_MAX_DRAIN_ATTEMPTS`` flushes, loudly: the human output and the
-    ``--json`` payload both carry a ``dropped`` record and the queue is
-    empty afterwards (#1574 item 3). Uses a redaction-blocked file as the
-    deterministic failure — the recorded decision is that blocked files
-    are capped too, since exempting them reintroduces unbounded retry.
-    """
-    from memtomem.cli import _bootstrap
-    from memtomem.indexing.debounce import _MAX_DRAIN_ATTEMPTS
-
-    for var in [k for k in os.environ if k.startswith("MEMTOMEM_")]:
-        monkeypatch.delenv(var, raising=False)
-
-    home = tmp_path / "home"
-    home.mkdir()
-    set_home(monkeypatch, home)
-    monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
-    monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(tmp_path / "debounce_queue.json"))
-
-    mem_dir = tmp_path / "memories"
-    mem_dir.mkdir()
-    secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
-    leak = mem_dir / "leak.md"
-    leak.write_text(f"# Leak\n\napi token: {secret}\n")
-
-    runner = CliRunner()
-    r = runner.invoke(
-        cli,
-        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
-    )
-    assert r.exit_code == 0, f"init failed: {r.output}"
-    r = runner.invoke(cli, ["index", "--debounce-window", "999999", str(leak)])
-    assert r.exit_code == 0, f"enqueue failed: {r.output}"
-
-    for i in range(_MAX_DRAIN_ATTEMPTS - 1):
-        r = runner.invoke(cli, ["index", "--flush"])
-        assert r.exit_code == 1, f"flush {i + 1} should fail: {r.output}"
-        assert "Remaining in queue: 1" in r.output, f"flush {i + 1}: {r.output}"
-
-    r = runner.invoke(cli, ["index", "--flush", "--json"])
-    assert r.exit_code == 1, f"final flush should report dropped input: {r.output}"
-    payload = json.loads(r.output.strip().splitlines()[-1])
     assert payload["errors"] == []
     assert len(payload["dropped"]) == 1
     assert payload["dropped"][0]["path"] == str(leak)
+    assert "redaction_blocked" in payload["dropped"][0]["message"]
+    assert payload["retryable_dropped"] == []
     assert payload["remaining"] == 0
 
-    # Genuinely gone — the next flush sees an empty queue.
-    r = runner.invoke(cli, ["index", "--flush", "--json"])
-    payload = json.loads(r.output.strip().splitlines()[-1])
-    assert payload["indexed"] == [] and payload["dropped"] == [] and payload["remaining"] == 0
 
-
-def test_debounce_flush_retries_terminal_error_then_drops(tmp_path, monkeypatch):
-    """Every failed file is visible and retained until the bounded retry cap."""
+def test_debounce_flush_drops_binary_error_immediately(tmp_path, monkeypatch):
+    """A deterministic binary-file refusal is permanent and drops on the
+    first drain rather than spending the retry budget."""
     from memtomem.cli import _bootstrap
-    from memtomem.indexing.debounce import _MAX_DRAIN_ATTEMPTS
 
     for var in [k for k in os.environ if k.startswith("MEMTOMEM_")]:
         monkeypatch.delenv(var, raising=False)
@@ -359,16 +311,12 @@ def test_debounce_flush_retries_terminal_error_then_drops(tmp_path, monkeypatch)
     r = runner.invoke(cli, ["index", "--debounce-window", "999999", str(binfile)])
     assert r.exit_code == 0, f"enqueue failed: {r.output}"
 
-    for _ in range(_MAX_DRAIN_ATTEMPTS - 1):
-        r = runner.invoke(cli, ["index", "--flush"])
-        assert r.exit_code == 1, r.output
-        assert "Errors: 1" in r.output
-        assert "Remaining in queue: 1" in r.output
-
     r = runner.invoke(cli, ["index", "--flush", "--json"])
     assert r.exit_code == 1, r.output
     payload = json.loads(r.output.strip().splitlines()[-1])
     assert payload["indexed"] == []
     assert payload["errors"] == []
     assert len(payload["dropped"]) == 1
+    assert "binary file detected" in payload["dropped"][0]["message"]
+    assert payload["retryable_dropped"] == []
     assert payload["remaining"] == 0

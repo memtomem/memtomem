@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+from collections import Counter
 from pathlib import Path
 
 import click
@@ -281,7 +282,11 @@ def _run_debounce(
 
 
 class _IndexingStatsError(RuntimeError):
-    """Turn a structured indexing failure into a retryable drain failure."""
+    """Carry a structured indexing failure's retry classification to drain."""
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def _make_indexer(comp):
@@ -290,11 +295,12 @@ def _make_indexer(comp):
     so the drain functions don't depend on the CLI bootstrap module.
 
     ``index_path`` aggregates per-file outcomes into ``IndexingStats``. Every
-    reported error or privacy block becomes a failed drain attempt so hook
-    automation cannot claim success. The queue's bounded retry cap eventually
-    drops terminal inputs loudly with a direct ``mm index <path>`` remediation;
-    excluded, unsupported, or already-removed inputs return ``"skipped"`` and
-    leave the queue without being mislabeled as indexed."""
+    reported error or privacy block becomes a classified drain failure so hook
+    automation cannot claim success. Retryable failures consume the queue's
+    bounded budget; permanent inputs are dropped immediately and loudly with a
+    direct ``mm index <path>`` remediation. Excluded, unsupported, or
+    already-removed inputs return ``"skipped"`` and leave the queue without
+    being mislabeled as indexed."""
 
     async def _do(path_str: str, namespace: str | None, force: bool) -> str:
         target = Path(path_str).expanduser().resolve()
@@ -317,7 +323,13 @@ def _make_indexer(comp):
         if stats.blocked_files or stats.errors:
             # ``stats.errors`` holds the redaction_blocked message(s) for the
             # blocked file(s); surface them (never the matched bytes).
-            raise _IndexingStatsError("; ".join(stats.errors) or "indexing blocked")
+            raise _IndexingStatsError(
+                "; ".join(stats.errors) or "indexing blocked",
+                # A directory can return permanent and retryable failures in
+                # one pass. Retain it while any child still warrants retry;
+                # once that child succeeds a permanent remainder drops next.
+                retryable=bool(stats.retryable_errors),
+            )
         if stats.total_files == 0 or (
             not existed_as_file and stats.deleted_chunks == 0 and not target.is_dir()
         ):
@@ -325,6 +337,27 @@ def _make_indexer(comp):
         return "indexed"
 
     return _do
+
+
+def _partition_drain_failures(
+    failures: list[tuple[str, str]], retryable_subset: list[tuple[str, str]]
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Partition an ordered same-entry subset without collapsing duplicates.
+
+    Current drains send explicit permanent failures straight to ``dropped``;
+    the permanent ``errors`` side remains defensive for older/custom
+    ``DrainResult`` producers that still populate the historical list.
+    """
+    remaining = Counter(retryable_subset)
+    permanent: list[tuple[str, str]] = []
+    retryable: list[tuple[str, str]] = []
+    for item in failures:
+        if remaining[item] > 0:
+            retryable.append(item)
+            remaining[item] -= 1
+        else:
+            permanent.append(item)
+    return permanent, retryable
 
 
 def _print_drain_result(result, *, as_json: bool, label: str) -> None:
@@ -335,7 +368,13 @@ def _print_drain_result(result, *, as_json: bool, label: str) -> None:
                     "indexed": result.indexed,
                     "skipped": result.skipped,
                     "errors": [{"path": p, "message": m} for p, m in result.errors],
+                    "retryable_errors": [
+                        {"path": p, "message": m} for p, m in result.retryable_errors
+                    ],
                     "dropped": [{"path": p, "message": m} for p, m in result.dropped],
+                    "retryable_dropped": [
+                        {"path": p, "message": m} for p, m in result.retryable_dropped
+                    ],
                     "remaining": result.remaining,
                 }
             )
@@ -346,12 +385,39 @@ def _print_drain_result(result, *, as_json: bool, label: str) -> None:
     click.echo(f"  Skipped: {len(result.skipped)}")
     if result.errors:
         click.echo(f"  Errors: {len(result.errors)}")
-        for p, m in result.errors:
-            click.echo(click.style(f"    {p}: {m}", fg="red"))
+        permanent_errors, retryable_errors = _partition_drain_failures(
+            result.errors, result.retryable_errors
+        )
+        for p, m in permanent_errors:
+            click.echo(click.style(f"    ERROR: {p}: {m}", fg="red"))
+        for p, m in retryable_errors:
+            click.echo(click.style(f"    ERROR (retryable): {p}: {m}", fg="yellow"))
+        if retryable_errors:
+            click.secho(
+                "  → Retry once the chunk store is reachable; queued entries will drain later.",
+                fg="yellow",
+            )
     if result.dropped:
         from memtomem.indexing.debounce import _MAX_DRAIN_ATTEMPTS
 
-        click.echo(f"  Dropped after {_MAX_DRAIN_ATTEMPTS} failed attempts:")
-        for p, m in result.dropped:
+        permanent_dropped, retryable_dropped = _partition_drain_failures(
+            result.dropped, result.retryable_dropped
+        )
+        if permanent_dropped:
+            click.echo(f"  Dropped (permanent): {len(permanent_dropped)}")
+        for p, m in permanent_dropped:
             click.echo(click.style(f"    {p}: {m} — fix the cause, then: mm index {p}", fg="red"))
+        if retryable_dropped:
+            click.echo(
+                f"  Dropped after {_MAX_DRAIN_ATTEMPTS} retryable attempts: "
+                f"{len(retryable_dropped)}"
+            )
+        for p, m in retryable_dropped:
+            click.echo(
+                click.style(
+                    f"    ERROR (retryable): {p}: {m} — once the chunk store is reachable: "
+                    f"mm index {p}",
+                    fg="yellow",
+                )
+            )
     click.echo(f"  Remaining in queue: {result.remaining}")

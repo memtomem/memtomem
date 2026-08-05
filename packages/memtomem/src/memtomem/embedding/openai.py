@@ -10,7 +10,7 @@ import httpx
 
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
-from memtomem.errors import EmbeddingError
+from memtomem.errors import EmbeddingError, RetryableEmbeddingError
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,17 @@ class OpenAIEmbedder:
             "/v1/embeddings",
             json={"input": batch, "model": self._config.model},
         )
-        if resp.status_code == 429:
+        if resp.status_code == 429 or resp.status_code >= 500:
             ra_val = parse_retry_after(resp.headers.get("retry-after"))
-            raise RateLimitError(retry_after=ra_val)
+            raise RateLimitError(
+                retry_after=ra_val,
+                status_code=resp.status_code,
+                message=(
+                    None
+                    if resp.status_code == 429
+                    else f"OpenAI returned transient HTTP {resp.status_code}"
+                ),
+            )
         resp.raise_for_status()
         data = resp.json()["data"]
         data.sort(key=lambda x: x["index"])
@@ -134,19 +142,23 @@ class OpenAIEmbedder:
         try:
             batch_results = await asyncio.gather(*[_safe_embed(b) for b in batches])
         except httpx.ConnectError as exc:
-            raise EmbeddingError(
+            raise RetryableEmbeddingError(
                 f"Cannot connect to OpenAI API. "
                 f"Check your network connection and base_url. Error: {exc}"
             ) from exc
         except httpx.TimeoutException as exc:
-            raise EmbeddingError(
+            raise RetryableEmbeddingError(
                 f"OpenAI embedding request timed out. The API may be overloaded. Error: {exc}"
             ) from exc
         except RateLimitError as exc:
-            raise EmbeddingError(
-                "OpenAI API rate limit exceeded after retries. "
-                "Please wait before retrying or upgrade your plan."
-            ) from exc
+            if exc.status_code == 429:
+                message = (
+                    "OpenAI API rate limit exceeded after retries. "
+                    "Please wait before retrying or upgrade your plan."
+                )
+            else:
+                message = f"OpenAI kept returning a transient HTTP error after retries: {exc}"
+            raise RetryableEmbeddingError(message) from exc
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 raise EmbeddingError(
@@ -155,7 +167,7 @@ class OpenAIEmbedder:
                 ) from exc
             raise EmbeddingError(f"OpenAI embedding request failed: {exc}") from exc
         except httpx.HTTPError as exc:
-            raise EmbeddingError(f"OpenAI embedding request failed: {exc}") from exc
+            raise RetryableEmbeddingError(f"OpenAI embedding transport failed: {exc}") from exc
 
         results: list[list[float]] = []
         for br in batch_results:

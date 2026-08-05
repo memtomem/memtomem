@@ -21,6 +21,11 @@ class TestRateLimitError:
         exc = RateLimitError(retry_after=5.0)
         assert exc.retry_after == 5.0
 
+    def test_status_code_attribute_set(self):
+        exc = RateLimitError(status_code=429, message="custom quota wording")
+        assert exc.status_code == 429
+        assert str(exc) == "custom quota wording"
+
     @pytest.mark.asyncio
     async def test_with_retry_honors_retry_after(self):
         call_count = 0

@@ -755,6 +755,7 @@ class TestShortEmbeddingArrayGuard:
         complete = next(e for e in events if e.get("type") == "complete")
         assert complete["errors"], "short embedding array must surface an error"
         assert any("Embedding failed" in err for err in complete["errors"])
+        assert complete["retryable_errors"] == []
         # The distinguishing pin vs. the bug: the buggy ``zip`` would have
         # committed N-1 chunks here. With the guard, the file stays un-hashed
         # and nothing lands.
@@ -2214,6 +2215,28 @@ class TestIndexFile:
         assert stats.total_chunks > 0
         assert stats.indexed_chunks > 0
         assert mock_embedder.embed_texts.called
+
+    async def test_retryable_embedding_failure_reaches_single_file_stats(
+        self, components, memory_dir
+    ):
+        """A provider outage folded into the per-file result must keep its
+        typed retry marker when ``index_file`` constructs ``IndexingStats``."""
+        from memtomem.errors import RetryableEmbeddingError
+
+        md_path = memory_dir / "flaky.md"
+        md_path.write_text("# Flaky\n\nRetry this content.\n", encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=RetryableEmbeddingError("provider unavailable")
+        )
+        mock_embedder.dimension = components.config.embedding.dimension
+        components.index_engine._embedder = mock_embedder
+
+        stats = await components.index_engine.index_file(md_path)
+
+        assert stats.errors != ()
+        assert stats.retryable_errors == stats.errors
 
     async def test_unchanged_file_skips_reembedding(self, components, memory_dir):
         """Re-indexing an unchanged file should skip embedding."""

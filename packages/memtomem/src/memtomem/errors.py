@@ -159,6 +159,14 @@ class NamespaceMutationBusyError(StorageError, RetryableError):
 class PermanentError(Exception):
     """Error that will not resolve with retries (e.g., invalid API key, malformed input)."""
 
+    retryable = False
+
+
+class RetryableEmbeddingError(EmbeddingError, RetryableError):
+    """Embedding provider failure classified as safe to retry."""
+
+    retryable = True
+
 
 class NamespaceResolutionError(IndexingError, RetryableError):
     """The namespace a file's chunks are stored under could not be read.

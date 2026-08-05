@@ -10,7 +10,7 @@ import httpx
 
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
-from memtomem.errors import EmbeddingError
+from memtomem.errors import EmbeddingError, RetryableEmbeddingError
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ class OllamaEmbedder:
             raise RateLimitError(
                 retry_after=parse_retry_after(resp.headers.get("retry-after")),
                 message=f"Ollama returned transient HTTP {resp.status_code}",
+                status_code=resp.status_code,
             )
         resp.raise_for_status()
         data = resp.json()
@@ -122,19 +123,19 @@ class OllamaEmbedder:
         try:
             batch_results = await asyncio.gather(*[_safe_embed(b) for b in batches])
         except httpx.ConnectError as e:
-            raise EmbeddingError(
+            raise RetryableEmbeddingError(
                 f"Cannot connect to Ollama at {self._config.base_url}. "
                 f"Please verify 'ollama serve' is running. Error: {e}"
             ) from e
         except httpx.TimeoutException as e:
-            raise EmbeddingError(
+            raise RetryableEmbeddingError(
                 f"Ollama embedding request timed out. "
                 f"The model '{self._config.model}' may still be loading. Error: {e}"
             ) from e
         except RateLimitError as e:
             # Retries exhausted on 429/5xx — most commonly Ollama returning
             # 503 for the whole backoff window while a large model loads.
-            raise EmbeddingError(
+            raise RetryableEmbeddingError(
                 f"Ollama kept returning a transient HTTP error after retries. "
                 f"The model '{self._config.model}' may still be loading. Error: {e}"
             ) from e
@@ -146,7 +147,7 @@ class OllamaEmbedder:
                 ) from e
             raise EmbeddingError(f"Ollama embedding failed: {e}") from e
         except httpx.HTTPError as e:
-            raise EmbeddingError(f"Ollama embedding failed: {e}") from e
+            raise RetryableEmbeddingError(f"Ollama embedding transport failed: {e}") from e
 
         results: list[list[float]] = []
         for br in batch_results:

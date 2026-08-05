@@ -352,10 +352,21 @@ function _buildMemoryDirsPanel(initialDirs) {
         { timeout: 300_000 },
       );
       const count = (resp && resp.indexed_chunks) || 0;
-      showToast(
-        t('toast.memory_dir.reindex_done', { path, count }),
-        (resp && resp.errors && resp.errors.length) ? 'error' : 'success',
-      );
+      const errors = Array.isArray(resp && resp.errors) ? resp.errors : [];
+      if (errors.length) {
+        const presentation = indexingErrorToast(
+          t('toast.memory_dir.reindex_partial', {
+            path,
+            count,
+            errors: errors.length,
+            first: errors[0],
+          }),
+          resp,
+        );
+        showToast(presentation.message, presentation.type);
+      } else {
+        showToast(t('toast.memory_dir.reindex_done', { path, count }), 'success');
+      }
       if (typeof _markDataStale === 'function') _markDataStale();
       if (typeof loadStats === 'function') loadStats();
     } catch (err) {
@@ -388,10 +399,11 @@ function _buildMemoryDirsPanel(initialDirs) {
     try {
       const resp = await api('POST', '/api/reindex', undefined, { timeout: 300_000 });
       if (resp.errors && resp.errors.length) {
-        showToast(
+        const presentation = indexingErrorToast(
           t('toast.reindex_partial', { count: resp.errors.length, first: resp.errors[0] }),
-          'error',
+          resp,
         );
+        showToast(presentation.message, presentation.type);
       } else {
         const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
         showToast(t('toast.reindex_complete', { count: total }), 'success');
@@ -982,27 +994,41 @@ function _mdApiErrorText(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
+function _memoryDirRetryOptions(classification, path) {
+  // An empty/missing error set has no evidence of permanence. Preserve the
+  // idempotent Retry affordance unless classification positively identifies
+  // one or more permanent errors and no retryable error (#2026 review).
+  const knownPermanent = classification.classificationKnown
+    && classification.hasOther
+    && !classification.hasRetryable;
+  return knownPermanent
+    ? {}
+    : { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } };
+}
+
 function _showMemoryDirAddOutcome(resp, path) {
   const stats = resp && resp.indexed;
   const status = resp && resp.index_status;
   if (status === 'failed') {
-    showToast(
+    const presentation = indexingErrorToast(
       t('toast.memory_dir.added_index_failed', { path }),
-      'error',
-      { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } },
+      stats,
     );
+    const options = _memoryDirRetryOptions(presentation.classification, path);
+    showToast(presentation.message, presentation.type, options);
     return;
   }
   if (status === 'partial') {
-    showToast(
+    const presentation = indexingErrorToast(
       t('toast.memory_dir.added_index_partial', {
         path,
         chunks: stats?.indexed_chunks || 0,
         files: stats?.total_files || 0,
       }),
-      'warning',
-      { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } },
+      stats,
     );
+    const options = _memoryDirRetryOptions(presentation.classification, path);
+    showToast(presentation.message, presentation.type, options);
     return;
   }
   if (status === 'not_requested') {
@@ -1192,10 +1218,20 @@ async function mdReindexOne(path, btn) {
       _completed = true;
       const indexed = event.indexed_chunks || 0;
       const errs = Array.isArray(event.errors) ? event.errors : [];
-      showToast(
-        t('toast.memory_dir.reindex_done', { path, count: indexed }),
-        errs.length ? 'error' : 'success',
-      );
+      if (errs.length) {
+        const presentation = indexingErrorToast(
+          t('toast.memory_dir.reindex_partial', {
+            path,
+            count: indexed,
+            errors: errs.length,
+            first: errs[0],
+          }),
+          event,
+        );
+        showToast(presentation.message, presentation.type);
+      } else {
+        showToast(t('toast.memory_dir.reindex_done', { path, count: indexed }), 'success');
+      }
       // ADR-0006 PR-B: surface files skipped by the redaction gate (no toggle
       // on per-dir reindex — surfacing only).
       if (typeof _blockedIndexToast === 'function') {
@@ -1206,10 +1242,11 @@ async function mdReindexOne(path, btn) {
       _cleanup();
     } else if (event.type === 'error') {
       _completed = true;
-      showToast(
+      const presentation = indexingErrorToast(
         t('toast.memory_dir.reindex_failed', { error: event.message || 'stream error' }),
-        'error',
+        event,
       );
+      showToast(presentation.message, presentation.type);
       _cleanup();
     }
       } },
@@ -1231,10 +1268,11 @@ async function mdReindexAll(btn) {
   try {
     const resp = await api('POST', '/api/reindex', undefined, { timeout: 300_000 });
     if (resp.errors && resp.errors.length) {
-      showToast(
+      const presentation = indexingErrorToast(
         t('toast.reindex_partial', { count: resp.errors.length, first: resp.errors[0] }),
-        'error',
+        resp,
       );
+      showToast(presentation.message, presentation.type);
     } else {
       const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
       showToast(t('toast.reindex_complete', { count: total }), 'success');

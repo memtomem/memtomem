@@ -46,20 +46,21 @@ from typing import IO, Awaitable, Callable, Iterable, Literal
 
 import portalocker
 
+from memtomem.errors import PermanentError, RetryableError
+
 logger = logging.getLogger(__name__)
 
 
 _DEFAULT_QUEUE_PATH = Path("~/.memtomem/index_debounce_queue.json").expanduser()
 _QUEUE_VERSION = 1
 
-# A deterministically-failing entry (permission error, parser bug, redaction
-# block) must not be retried forever — drain runs on every hook fire and every
-# ``Stop``-hook ``--flush``, so a poison entry turns each of those into a
-# guaranteed failure. After this many failed drain attempts the entry is
-# dropped loudly (logger.error + ``DrainResult.dropped``). A later re-enqueue
-# (i.e. a real new write to the file) resets the counter. This cap applies to
-# redaction-blocked files too — exempting them would reintroduce the
-# unbounded-retry class this exists to remove (#1574 item 3).
+# Retryable failures must not stay queued forever — drain runs on every hook
+# fire and every ``Stop``-hook ``--flush``, so a store outage that never clears
+# would otherwise turn each into a guaranteed failure. After this many
+# retryable attempts the entry is dropped loudly (logger.error +
+# ``DrainResult.dropped``); a later real write re-enqueues it with a fresh
+# budget. Permanent failures (parser errors, redaction blocks, malformed files)
+# bypass this budget and are dropped on their first drain (#2026).
 _MAX_DRAIN_ATTEMPTS = 5
 
 
@@ -72,7 +73,7 @@ class QueueEntry:
     last_seen: float
     namespace: str | None = None
     force: bool = False
-    attempts: int = 0  # failed drain attempts so far (see _MAX_DRAIN_ATTEMPTS)
+    attempts: int = 0  # retryable drain attempts so far (see _MAX_DRAIN_ATTEMPTS)
 
     @classmethod
     def from_dict(cls, d: dict) -> "QueueEntry":
@@ -92,7 +93,12 @@ class DrainResult:
     indexed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
+    # Ordered same-entry subset of ``errors``. Kept additive so callers that
+    # consume the historical pair lists do not need an ABI migration.
+    retryable_errors: list[tuple[str, str]] = field(default_factory=list)
     dropped: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
+    # Ordered same-entry subset of ``dropped`` whose retry budget was exhausted.
+    retryable_dropped: list[tuple[str, str]] = field(default_factory=list)
     remaining: int = 0
 
 
@@ -282,18 +288,41 @@ def _record_failure(
     exc: Exception,
     result: DrainResult,
 ) -> None:
-    """Count one failed drain attempt; keep the entry for retry until the
-    attempt cap is hit, then drop it loudly (log + ``result.dropped``)."""
+    """Record one classified failure and update the persistent queue.
+
+    Typed/explicitly permanent failures are dropped immediately. Retryable and
+    unknown failures consume the bounded budget: the cap already prevents an
+    unclassified exception from retrying forever, while treating it as
+    permanent could silently discard work during a transient outage.
+    """
     message = repr(exc)
+    item = (path_str, message)
+    marker = getattr(exc, "retryable", None)
+    explicitly_retryable = isinstance(exc, (RetryableError, TimeoutError)) or marker is True
+    explicitly_permanent = isinstance(exc, PermanentError) or marker is False
+    if explicitly_permanent and not explicitly_retryable:
+        del entries[path_str]
+        result.dropped.append(item)
+        logger.error(
+            "debounce queue: dropping %s after permanent indexing failure (%s); "
+            "fix the underlying cause and re-run: mm index %s",
+            path_str,
+            message,
+            path_str,
+        )
+        return
+
     entry.attempts += 1
     if entry.attempts < _MAX_DRAIN_ATTEMPTS:
-        result.errors.append((path_str, message))
+        result.errors.append(item)
+        result.retryable_errors.append(item)
         return
     del entries[path_str]
-    result.dropped.append((path_str, message))
+    result.dropped.append(item)
+    result.retryable_dropped.append(item)
     logger.error(
-        "debounce queue: dropping %s after %d failed indexing attempts (%s); "
-        "fix the underlying cause and re-run: mm index %s",
+        "debounce queue: dropping %s after %d retryable indexing attempts (%s); "
+        "re-run once the transient cause clears: mm index %s",
         path_str,
         entry.attempts,
         message,
@@ -333,8 +362,8 @@ async def drain_ready(
                     result.indexed.append(p)
                 del entries[p]
             except Exception as e:
-                # Keep the entry so the next hook call retries — until the
-                # attempt cap drops it (poison-entry guard, #1574 item 3).
+                # Classification decides whether the entry stays for another
+                # drain or is permanently removed on this attempt (#2026).
                 _record_failure(entries, p, entry, e, result)
         result.remaining = len(entries)
         _save(qp, entries)
@@ -373,9 +402,8 @@ async def drain_all(
                     result.indexed.append(p)
                 del entries[p]
             except Exception as e:
-                # Same poison-entry cap as drain_ready — this path runs on
-                # every Stop-hook ``--flush``, the highest-frequency
-                # automated drain, so it must not bypass the cap.
+                # Same classification + retry cap as drain_ready — this path
+                # runs on every Stop-hook ``--flush`` and must not drift.
                 _record_failure(entries, p, entry, e, result)
         result.remaining = len(entries)
         _save(qp, entries)

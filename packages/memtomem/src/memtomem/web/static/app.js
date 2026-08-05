@@ -1319,6 +1319,79 @@ function renderPageState(container, { kind, message, detail = '', retry = null }
   container.replaceChildren(state);
 }
 
+// Normalize every indexing failure shape into one ordered classification.
+// HTTP JSON and SSE ``complete`` events carry ``errors`` plus an ordered
+// same-string ``retryable_errors`` subset; fatal SSE events carry one
+// ``message`` plus a boolean ``retryable``. Duplicate strings are meaningful
+// (for example the same root-level message from two roots), so subtraction is
+// occurrence-counted rather than Set-based. Producers deduplicate both arrays
+// in lockstep per run; /api/reindex may then concatenate identical messages
+// from different roots, preserving the subset invariant occurrence by
+// occurrence.
+function classifyIndexingErrors(payload) {
+  const source = (payload && typeof payload === 'object') ? payload : {};
+  let errors = [];
+  let retryableSubset = [];
+  let classificationKnown = false;
+
+  if (Array.isArray(source.errors)) {
+    errors = source.errors.filter(error => typeof error === 'string');
+    if (Array.isArray(source.retryable_errors)) {
+      retryableSubset = source.retryable_errors.filter(error => typeof error === 'string');
+      classificationKnown = true;
+    }
+  } else if (typeof source.message === 'string') {
+    errors = [source.message];
+    if (typeof source.retryable === 'boolean') {
+      retryableSubset = source.retryable ? [source.message] : [];
+      classificationKnown = true;
+    }
+  }
+
+  const remaining = new Map();
+  for (const error of retryableSubset) {
+    remaining.set(error, (remaining.get(error) || 0) + 1);
+  }
+  const retryableErrors = [];
+  const otherErrors = [];
+  for (const error of errors) {
+    const count = remaining.get(error) || 0;
+    if (count > 0) {
+      retryableErrors.push(error);
+      remaining.set(error, count - 1);
+    } else {
+      otherErrors.push(error);
+    }
+  }
+
+  return {
+    errors,
+    retryableErrors,
+    otherErrors,
+    classificationKnown,
+    hasRetryable: retryableErrors.length > 0,
+    hasOther: otherErrors.length > 0,
+    firstRetryable: retryableErrors[0] || '',
+  };
+}
+
+function indexingErrorToast(baseMessage, payload) {
+  const classification = classifyIndexingErrors(payload);
+  if (!classification.hasRetryable) {
+    return { message: baseMessage, type: 'error', classification };
+  }
+  const hint = t('toast.indexing_retryable_errors', {
+    retryable: classification.retryableErrors.length,
+    errors: classification.errors.length,
+    first: classification.firstRetryable,
+  });
+  return {
+    message: `${baseMessage} ${hint}`,
+    type: classification.hasOther ? 'error' : 'warning',
+    classification,
+  };
+}
+
 // ── A1: Toast Notifications ──
 function showToast(message, type = 'success', options = {}) {
   // ``options.action`` ({ label, onClick }) renders an inline action
@@ -5369,9 +5442,13 @@ async function _reindexSourceFile(path, btn) {
       { timeout: 300_000 },
     );
     const count = (resp && resp.indexed_chunks) || 0;
-    const errors = (resp && resp.errors) || [];
+    const errors = Array.isArray(resp && resp.errors) ? resp.errors : [];
     if (errors.length) {
-      showToast(t('toast.source_reindex_partial', { count: errors.length, first: errors[0] }), 'error');
+      const presentation = indexingErrorToast(
+        t('toast.source_reindex_partial', { count: errors.length, first: errors[0] }),
+        resp,
+      );
+      showToast(presentation.message, presentation.type);
     } else {
       showToast(t('toast.source_reindexed', { count }), 'success');
     }
@@ -6757,14 +6834,15 @@ function _renderIndexResult(result, { registerAsSource, path }) {
     const more = errList.length - shown.length;
     qs('r-errors').textContent = (more > 0 ? [...shown, `…and ${more} more`] : shown).join('\n');
     errRow.hidden = false;
-    showToast(
+    const presentation = indexingErrorToast(
       t('toast.index_partial', {
         count: result.indexed_chunks,
         errors: errList.length,
         first: errList[0],
       }),
-      'error',
+      result,
     );
+    showToast(presentation.message, presentation.type);
   } else {
     qs('r-errors').textContent = '';
     errRow.hidden = true;
@@ -6887,12 +6965,22 @@ async function runIndexStream() {
       btnLoading(btn, false);
       _indexingEnd();
     } else if (event.type === 'error') {
-      throw new Error(event.message || 'Index stream error');
+      const streamError = new Error(event.message || 'Index stream error');
+      streamError.indexingPayload = event;
+      throw streamError;
     }
     }});
   } catch (err) {
     console.error('[index-stream] stream failed:', err);
-    showToast(t('toast.stream_fallback'), 'error');
+    if (err && err.indexingPayload) {
+      const presentation = indexingErrorToast(
+        t('toast.index_failed', { error: err.message }),
+        err.indexingPayload,
+      );
+      showToast(presentation.message, presentation.type);
+    } else {
+      showToast(t('toast.stream_fallback'), 'error');
+    }
     hide(progressEl);
     btnLoading(btn, false);
     _indexingEnd();
