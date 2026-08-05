@@ -404,6 +404,8 @@ class PrivacyRejection(Exception):
     (secret-in-log hygiene).
     """
 
+    retryable = False
+
     def __init__(self, *, path: Path, hit_count: int, scope: str, decision: str) -> None:
         self.path = path
         self.hit_count = hit_count
@@ -422,6 +424,10 @@ class _IndexFileBase(TypedDict):
 
 class IndexFileResult(_IndexFileBase, total=False):
     new_chunk_ids: list[UUID]
+    # Ordered same-string subset of ``errors`` whose underlying exception is
+    # typed retryable. Optional so every historical zero/permanent return shape
+    # remains valid.
+    retryable_errors: list[str]
     # Set to 1 by the stream path when a file is skipped by the ADR-0006
     # redaction gate; aggregated into ``IndexingStats.blocked_files``. The
     # non-stream path tracks blocks via the raised ``PrivacyRejection`` instead.
@@ -594,6 +600,7 @@ class IndexEngine:
             if isinstance(r, dict):
                 file_results.append(r)
                 all_errors.extend(r.get("errors", []))
+                retryable_errors.extend(r.get("retryable_errors", []))
             elif isinstance(r, PrivacyRejection):
                 # ADR-0006 PR-A: un-adjudicated bulk index hit a secret-bearing
                 # file. Skip it, record it as blocked, and continue the run so a
@@ -873,6 +880,7 @@ class IndexEngine:
             deleted_chunks=result["deleted"],
             duration_ms=duration,
             errors=tuple(result.get("errors", ())),
+            retryable_errors=tuple(result.get("retryable_errors", ())),
             new_chunk_ids=tuple(result.get("new_chunk_ids", ())),
         )
 
@@ -1430,12 +1438,14 @@ class IndexEngine:
                     len(diff_result.to_upsert),
                     exc,
                 )
+                message = f"Embedding failed: {exc}"
                 return {
                     "total": len(new_chunks),
                     "indexed": 0,
                     "skipped": len(new_chunks),
                     "deleted": 0,
-                    "errors": [f"Embedding failed: {exc}"],
+                    "errors": [message],
+                    "retryable_errors": [message] if isinstance(exc, RetryableError) else [],
                 }
 
         # Now safe to mutate DB — embedding succeeded.
@@ -1709,6 +1719,7 @@ class IndexEngine:
                 agg["blocked"] += result.get("blocked", 0)
                 agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
                 all_errors.extend(result.get("errors", []))
+                retryable_errors.extend(result.get("retryable_errors", []))
                 yield {
                     "type": "progress",
                     "file": str(fp),

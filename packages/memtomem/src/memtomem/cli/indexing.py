@@ -342,7 +342,12 @@ def _make_indexer(comp):
 def _partition_drain_failures(
     failures: list[tuple[str, str]], retryable_subset: list[tuple[str, str]]
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """Partition an ordered same-entry subset without collapsing duplicates."""
+    """Partition an ordered same-entry subset without collapsing duplicates.
+
+    Current drains send explicit permanent failures straight to ``dropped``;
+    the permanent ``errors`` side remains defensive for older/custom
+    ``DrainResult`` producers that still populate the historical list.
+    """
     remaining = Counter(retryable_subset)
     permanent: list[tuple[str, str]] = []
     retryable: list[tuple[str, str]] = []

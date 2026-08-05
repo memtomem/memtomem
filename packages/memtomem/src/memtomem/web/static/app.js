@@ -1324,7 +1324,10 @@ function renderPageState(container, { kind, message, detail = '', retry = null }
 // same-string ``retryable_errors`` subset; fatal SSE events carry one
 // ``message`` plus a boolean ``retryable``. Duplicate strings are meaningful
 // (for example the same root-level message from two roots), so subtraction is
-// occurrence-counted rather than Set-based.
+// occurrence-counted rather than Set-based. Producers deduplicate both arrays
+// in lockstep per run; /api/reindex may then concatenate identical messages
+// from different roots, preserving the subset invariant occurrence by
+// occurrence.
 function classifyIndexingErrors(payload) {
   const source = (payload && typeof payload === 'object') ? payload : {};
   let errors = [];

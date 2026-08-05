@@ -994,6 +994,18 @@ function _mdApiErrorText(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
+function _memoryDirRetryOptions(classification, path) {
+  // An empty/missing error set has no evidence of permanence. Preserve the
+  // idempotent Retry affordance unless classification positively identifies
+  // one or more permanent errors and no retryable error (#2026 review).
+  const knownPermanent = classification.classificationKnown
+    && classification.hasOther
+    && !classification.hasRetryable;
+  return knownPermanent
+    ? {}
+    : { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } };
+}
+
 function _showMemoryDirAddOutcome(resp, path) {
   const stats = resp && resp.indexed;
   const status = resp && resp.index_status;
@@ -1002,9 +1014,7 @@ function _showMemoryDirAddOutcome(resp, path) {
       t('toast.memory_dir.added_index_failed', { path }),
       stats,
     );
-    const options = presentation.classification.hasRetryable
-      ? { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } }
-      : {};
+    const options = _memoryDirRetryOptions(presentation.classification, path);
     showToast(presentation.message, presentation.type, options);
     return;
   }
@@ -1017,9 +1027,7 @@ function _showMemoryDirAddOutcome(resp, path) {
       }),
       stats,
     );
-    const options = presentation.classification.hasRetryable
-      ? { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } }
-      : {};
+    const options = _memoryDirRetryOptions(presentation.classification, path);
     showToast(presentation.message, presentation.type, options);
     return;
   }

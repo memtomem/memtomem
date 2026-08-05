@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from memtomem.errors import RetryableError
+from memtomem.errors import PermanentError, RetryableError
 from memtomem.indexing import debounce
 
 
@@ -157,7 +157,7 @@ class TestDrainReady:
         debounce.enqueue("/tmp/broken.py", now=100.0, queue_file=queue_file)
 
         async def indexer(p: str, ns: str | None, force: bool) -> None:
-            raise RuntimeError("synthetic permanent failure")
+            raise PermanentError("synthetic permanent failure")
 
         result = asyncio.run(
             debounce.drain_ready(
@@ -170,6 +170,25 @@ class TestDrainReady:
         assert result.retryable_dropped == []
         assert result.remaining == 0
         assert _read_raw(queue_file)["entries"] == {}
+
+    def test_unknown_indexer_error_uses_bounded_retry_budget(self, queue_file: Path) -> None:
+        """Unclassified failures may be transient, so the cap—not the first
+        attempt—is the safe fallback that prevents both loss and infinite retry."""
+        debounce.enqueue("/tmp/unknown.py", now=100.0, queue_file=queue_file)
+
+        async def indexer(p: str, ns: str | None, force: bool) -> None:
+            raise RuntimeError("unclassified store failure")
+
+        result = asyncio.run(
+            debounce.drain_ready(
+                window_seconds=5.0, indexer=indexer, now=110.0, queue_file=queue_file
+            )
+        )
+
+        assert result.retryable_errors == result.errors
+        assert result.dropped == []
+        assert result.remaining == 1
+        assert _read_raw(queue_file)["entries"]["/tmp/unknown.py"]["attempts"] == 1
 
     def test_indexer_receives_namespace_and_force_from_entry(self, queue_file: Path) -> None:
         debounce.enqueue(
@@ -258,7 +277,7 @@ class TestDrainAll:
         debounce.enqueue("/tmp/broken.py", now=100.0, queue_file=queue_file)
 
         async def indexer(p: str, ns: str | None, force: bool) -> None:
-            raise RuntimeError("synthetic permanent failure")
+            raise PermanentError("synthetic permanent failure")
 
         result = asyncio.run(debounce.drain_all(indexer=indexer, queue_file=queue_file))
 
@@ -317,6 +336,14 @@ class TestRetryableEntryCap:
         assert any("mm index /tmp/poison.py" in m for m in dropped_logs), (
             "the drop must be loud and name the remediation command"
         )
+
+        # Genuinely gone: a later flush must see an empty queue, not replay the
+        # entry whose retry budget was exhausted.
+        empty = asyncio.run(debounce.drain_all(indexer=indexer, queue_file=queue_file))
+        assert empty.indexed == []
+        assert empty.errors == []
+        assert empty.dropped == []
+        assert empty.remaining == 0
 
     def test_drain_all_applies_the_same_cap(self, queue_file: Path) -> None:
         """``drain_all`` backs the Stop-hook ``mm index --flush`` — the
@@ -394,7 +421,7 @@ class TestRetryableEntryCap:
             if p.endswith("retry.py"):
                 raise RetryableError("store unavailable")
             if p.endswith("permanent.py"):
-                raise RuntimeError("malformed input")
+                raise PermanentError("malformed input")
 
         result = asyncio.run(debounce.drain_all(indexer=indexer, queue_file=queue_file))
 
@@ -416,7 +443,7 @@ class TestRetryableEntryCap:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RetryableError("store unavailable")
-            raise RuntimeError("malformed after retry")
+            raise PermanentError("malformed after retry")
 
         first = asyncio.run(debounce.drain_all(indexer=indexer, queue_file=queue_file))
         assert first.retryable_errors == first.errors

@@ -32,6 +32,8 @@ from memtomem.cli.indexing import (
     _partition_drain_failures,
     _print_drain_result,
 )
+from memtomem.errors import RetryableEmbeddingError
+from memtomem.indexing import debounce
 from memtomem.indexing.debounce import DrainResult
 from memtomem.models import IndexingStats
 
@@ -228,6 +230,39 @@ class TestDebounceIndexClassification:
             asyncio.run(indexer(str(target), None, False))
 
         assert exc_info.value.retryable is expected_retryable
+
+    async def test_real_engine_embedding_outage_stays_in_debounce_queue(
+        self, components, memory_dir: Path, tmp_path: Path
+    ) -> None:
+        """Integration pin for the production path missed in the first review:
+        embedder → real ``index_file`` stats → ``_make_indexer`` → drain."""
+        target = memory_dir / "flaky.md"
+        target.write_text("# Flaky\n\nRetry this content.\n", encoding="utf-8")
+
+        class _UnavailableEmbedder:
+            dimension = components.config.embedding.dimension
+            model_name = "test-unavailable"
+
+            async def embed_texts(self, texts, *, on_progress=None):
+                raise RetryableEmbeddingError("provider unavailable")
+
+        components.index_engine._embedder = _UnavailableEmbedder()
+        queue_file = tmp_path / "debounce.json"
+        debounce.enqueue(str(target), now=100.0, queue_file=queue_file)
+
+        result = await debounce.drain_all(
+            indexer=_make_indexer(components),
+            queue_file=queue_file,
+        )
+
+        assert result.retryable_errors == result.errors
+        assert result.dropped == []
+        assert result.remaining == 1
+        snapshot = debounce.status_snapshot(queue_file=queue_file)
+        assert snapshot.depth == 1
+        assert snapshot.oldest_path == str(target)
+        queued = json.loads(queue_file.read_text(encoding="utf-8"))["entries"]
+        assert queued[str(target)]["attempts"] == 1
 
     def test_partition_preserves_duplicate_occurrences(self) -> None:
         duplicate = ("/tmp/a.md", "same message")

@@ -27,7 +27,7 @@ from memtomem.embedding.onnx import OnnxEmbedder, _verify_cpu_mem_arena
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.embedding.openai import OpenAIEmbedder
 from memtomem.embedding.retry import parse_retry_after, with_retry
-from memtomem.errors import ConfigError, EmbeddingError
+from memtomem.errors import ConfigError, EmbeddingError, RetryableEmbeddingError
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ class TestOllamaEmbedder:
         mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
         embedder._client = mock_client
 
-        with pytest.raises(EmbeddingError, match="Cannot connect to Ollama"):
+        with pytest.raises(RetryableEmbeddingError, match="Cannot connect to Ollama"):
             await embedder.embed_texts(["test"])
 
     @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
@@ -240,7 +240,7 @@ class TestOllamaEmbedder:
         mock_client.post = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
         embedder._client = mock_client
 
-        with pytest.raises(EmbeddingError, match="timed out"):
+        with pytest.raises(RetryableEmbeddingError, match="timed out"):
             await embedder.embed_texts(["test"])
 
     async def test_404_raises_model_not_found(self):
@@ -276,7 +276,7 @@ class TestOllamaEmbedder:
     @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
     async def test_persistent_503_exhausts_retries_as_embedding_error(self, mock_sleep):
         """503 on every attempt exhausts the backoff and surfaces as a
-        terminal EmbeddingError (never a raw RateLimitError/HTTPStatusError)."""
+        typed retryable embedding error (never a raw RateLimitError/HTTPStatusError)."""
         config = _ollama_config()
         embedder = OllamaEmbedder(config)
         resp_503 = _make_httpx_response(status_code=503, json_data={})
@@ -284,7 +284,9 @@ class TestOllamaEmbedder:
         mock_client.post = AsyncMock(return_value=resp_503)
         embedder._client = mock_client
 
-        with pytest.raises(EmbeddingError, match="transient HTTP error after retries") as ei:
+        with pytest.raises(
+            RetryableEmbeddingError, match="transient HTTP error after retries"
+        ) as ei:
             await embedder.embed_texts(["test"])
         assert mock_client.post.await_count == 3  # max_attempts, not 1
         # The status-aware sentinel message surfaces — not "Rate limited",
@@ -420,7 +422,7 @@ class TestOpenAIEmbedder:
 
     @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
     async def test_rate_limit_429_raises_embedding_error(self, mock_sleep):
-        """HTTP 429 triggers retries and ultimately raises EmbeddingError."""
+        """HTTP 429 triggers retries and ultimately stays typed retryable."""
         config = _openai_config()
         embedder = OpenAIEmbedder(config)
 
@@ -433,7 +435,34 @@ class TestOpenAIEmbedder:
         mock_client.post = AsyncMock(return_value=resp_429)
         embedder._client = mock_client
 
-        with pytest.raises(EmbeddingError, match="rate limit"):
+        with pytest.raises(RetryableEmbeddingError, match="rate limit"):
+            await embedder.embed_texts(["test"])
+
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_persistent_503_raises_retryable_embedding_error(self, mock_sleep):
+        """OpenAI 5xx responses use local backoff and remain retryable when exhausted."""
+        config = _openai_config()
+        embedder = OpenAIEmbedder(config)
+        resp_503 = _make_httpx_response(status_code=503, json_data={})
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=resp_503)
+        embedder._client = mock_client
+
+        with pytest.raises(RetryableEmbeddingError, match="transient HTTP error") as exc_info:
+            await embedder.embed_texts(["test"])
+
+        assert mock_client.post.await_count == 4
+        assert "HTTP 503" in str(exc_info.value)
+
+    async def test_read_error_is_retryable_for_debounce(self):
+        """A mid-request network flap reaches indexing as a retryable provider error."""
+        config = _openai_config()
+        embedder = OpenAIEmbedder(config)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(side_effect=httpx.ReadError("connection reset"))
+        embedder._client = mock_client
+
+        with pytest.raises(RetryableEmbeddingError, match="transport failed"):
             await embedder.embed_texts(["test"])
 
     async def test_auth_error_401_raises_embedding_error(self):
@@ -457,7 +486,7 @@ class TestOpenAIEmbedder:
         mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
         embedder._client = mock_client
 
-        with pytest.raises(EmbeddingError, match="Cannot connect to OpenAI"):
+        with pytest.raises(RetryableEmbeddingError, match="Cannot connect to OpenAI"):
             await embedder.embed_texts(["test"])
 
     async def test_short_data_array_raises(self):

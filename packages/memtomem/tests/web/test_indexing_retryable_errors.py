@@ -90,9 +90,7 @@ def test_classifier_preserves_order_duplicates_and_unknown_fallback(page, mm_web
     assert result["permanentToast"]["message"] == "Base failure."
 
 
-def test_memory_dir_add_offers_retry_only_for_known_retryable_failure(
-    page, mm_web_url: str
-) -> None:
+def test_memory_dir_add_hides_retry_only_for_known_permanent_failure(page, mm_web_url: str) -> None:
     _goto_ready(page, mm_web_url)
 
     result = page.evaluate(
@@ -138,7 +136,14 @@ def test_memory_dir_add_offers_retry_only_for_known_retryable_failure(
           }, '/tmp/legacy');
           const unknown = snapshot();
 
-          return { retryable, permanent, unknown };
+          container.replaceChildren();
+          _showMemoryDirAddOutcome({
+            index_status: 'failed',
+            indexed: { errors: [], retryable_errors: [] },
+          }, '/tmp/empty');
+          const empty = snapshot();
+
+          return { retryable, permanent, unknown, empty };
         }"""
     )
 
@@ -148,7 +153,9 @@ def test_memory_dir_add_offers_retry_only_for_known_retryable_failure(
     assert "toast-error" in result["permanent"]["className"]
     assert result["permanent"]["action"] is None
     assert "toast-error" in result["unknown"]["className"]
-    assert result["unknown"]["action"] is None
+    assert result["unknown"]["action"] is not None
+    assert "toast-error" in result["empty"]["className"]
+    assert result["empty"]["action"] is not None
 
 
 def test_retryable_guidance_reaches_index_source_and_memory_dir_consumers(

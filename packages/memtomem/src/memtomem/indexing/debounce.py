@@ -46,7 +46,7 @@ from typing import IO, Awaitable, Callable, Iterable, Literal
 
 import portalocker
 
-from memtomem.errors import RetryableError
+from memtomem.errors import PermanentError, RetryableError
 
 logger = logging.getLogger(__name__)
 
@@ -290,16 +290,17 @@ def _record_failure(
 ) -> None:
     """Record one classified failure and update the persistent queue.
 
-    Typed/explicitly retryable failures consume the bounded retry budget.
-    Unknown and permanent failures are dropped immediately so a malformed or
-    privacy-blocked file cannot waste attempts intended for transient outages.
+    Typed/explicitly permanent failures are dropped immediately. Retryable and
+    unknown failures consume the bounded budget: the cap already prevents an
+    unclassified exception from retrying forever, while treating it as
+    permanent could silently discard work during a transient outage.
     """
     message = repr(exc)
     item = (path_str, message)
-    retryable = (
-        isinstance(exc, (RetryableError, TimeoutError)) or getattr(exc, "retryable", False) is True
-    )
-    if not retryable:
+    marker = getattr(exc, "retryable", None)
+    explicitly_retryable = isinstance(exc, (RetryableError, TimeoutError)) or marker is True
+    explicitly_permanent = isinstance(exc, PermanentError) or marker is False
+    if explicitly_permanent and not explicitly_retryable:
         del entries[path_str]
         result.dropped.append(item)
         logger.error(
