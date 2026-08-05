@@ -16,7 +16,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from memtomem.context.settings import CANONICAL_SETTINGS_FILE
+from memtomem.context.settings import CANONICAL_SETTINGS_FILE, MalformedHookMatcherError
 from memtomem.context.settings_migrate import (
     MigrateMove,
     MigratePlan,
@@ -58,7 +58,7 @@ def _inner(command: str = "mm session start", *, type_: str = "command") -> dict
     return {"type": type_, "command": command, "timeout": 5000}
 
 
-def _rule(matcher: str = "Edit|Write", *, inners: list[dict] | None = None) -> dict:
+def _rule(matcher: object = "Edit|Write", *, inners: list[dict] | None = None) -> dict:
     """One hook rule with one or more inner hooks."""
     return {
         "matcher": matcher,
@@ -159,6 +159,24 @@ class TestPlanMigration:
         # Rule to write at target uses the canonical inner shape.
         assert move.rule_to_write_at_target["matcher"] == "Edit|Write"
         assert move.rule_to_write_at_target["hooks"][0]["command"] == "mm session start"
+
+    def test_omitted_matcher_remains_valid_match_all(self, project_root, fake_home):
+        rule = {"hooks": [_inner("mm index")]}
+        hooks = {"SessionStart": [rule]}
+        _write_canonical(project_root, hooks)
+        _write_settings(
+            fake_home / ".claude" / "settings.json",
+            _settings_doc(hooks),
+        )
+
+        plan = plan_migration(
+            project_root,
+            source_scope="user",
+            target_scope="project_local",
+        )
+
+        assert len(plan.moves) == 1
+        assert plan.moves[0].signature.matcher == ""
 
     def test_partial_overlap_already_at_target(self, project_root, fake_home):
         """Target already has the same canonical-signature inner hook —
@@ -280,6 +298,51 @@ class TestPlanMigration:
         assert len(plan.moves) == 1
         assert plan.moves[0].already_at_target is True
         assert plan.moves[0].conflict_at_target is False
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [None, 7, ["Bash"], {"tool": "Bash"}],
+    ids=["null", "int", "list", "dict"],
+)
+@pytest.mark.parametrize("location", ["canonical", "source", "target"])
+def test_malformed_matcher_in_any_related_file_rejects_whole_plan(
+    project_root, fake_home, malformed, location
+):
+    source_path = fake_home / ".claude" / "settings.json"
+    target_path = project_root / ".claude" / "settings.local.json"
+    healthy = _bundled_hook()
+    _write_canonical(project_root, healthy)
+    _write_settings(source_path, _settings_doc(healthy))
+    _write_settings(target_path, _settings_doc({}))
+    malformed_hooks = {
+        **healthy,
+        "SessionStart": [_rule(malformed, inners=[_inner("broken")])],
+    }
+    if location == "canonical":
+        _write_canonical(project_root, malformed_hooks)
+    elif location == "source":
+        _write_settings(source_path, _settings_doc(malformed_hooks))
+    else:
+        _write_settings(target_path, _settings_doc(malformed_hooks))
+    paths = [project_root / CANONICAL_SETTINGS_FILE, source_path, target_path]
+    before = {path: path.read_bytes() for path in paths}
+
+    with pytest.raises(MalformedHookMatcherError) as exc_info:
+        plan_migration(project_root, source_scope="user", target_scope="project_local")
+
+    message = str(exc_info.value)
+    assert "event 'SessionStart'" in message
+    assert "rule index 0" in message
+    assert type(malformed).__name__ in message
+    # The user has to hand-edit a file, so name it — not just the leg.
+    offender = {
+        "canonical": project_root / CANONICAL_SETTINGS_FILE,
+        "source": source_path,
+        "target": target_path,
+    }[location]
+    assert str(offender) in message
+    assert {path: path.read_bytes() for path in paths} == before
 
 
 # ── Apply unit tests ───────────────────────────────────────────────
@@ -417,6 +480,39 @@ class TestApplyMigration:
         assert user_doc["permissions"] == {"allow": ["Bash(ls *)"]}
         assert user_doc["model"] == "claude-3-5-sonnet"
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [None, 7, ["Bash"], {"tool": "Bash"}],
+        ids=["null", "int", "list", "dict"],
+    )
+    @pytest.mark.parametrize("location", ["source", "target"])
+    def test_apply_time_matcher_drift_refuses_all_writes(
+        self, project_root, fake_home, malformed, location
+    ):
+        _write_canonical(project_root, _bundled_hook())
+        source_path = fake_home / ".claude" / "settings.json"
+        _write_settings(source_path, _settings_doc(_bundled_hook()))
+        plan = plan_migration(
+            project_root,
+            source_scope="user",
+            target_scope="project_local",
+        )
+        path = plan.source_path if location == "source" else plan.target_path
+        _write_settings(
+            path,
+            _settings_doc({"SessionStart": [_rule(malformed, inners=[_inner("broken")])]}),
+        )
+        before = path.read_bytes()
+
+        result = apply_migration(plan)
+
+        assert result.target_written is False
+        assert result.source_written is False
+        assert any("Malformed hook matcher" in warning for warning in result.warnings)
+        assert path.read_bytes() == before
+        if location == "source":
+            assert not plan.target_path.exists()
+
 
 # ── CLI subcommand tests ───────────────────────────────────────────
 
@@ -535,6 +631,25 @@ class TestSettingsMigrateCli:
         result = CliRunner().invoke(settings_migrate_cmd, ["--from=user", "--to=user"])
         assert result.exit_code == 1
         assert "must differ" in result.output
+
+    def test_json_malformed_matcher_returns_error(self, project_root, fake_home, monkeypatch):
+        _write_canonical(
+            project_root,
+            {"SessionStart": [_rule(["Bash"], inners=[_inner("broken")])]},
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        result = CliRunner().invoke(
+            settings_migrate_cmd,
+            ["--from=user", "--to=project_local", "--json"],
+        )
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert "event 'SessionStart'" in payload["error"]
+        assert not (project_root / ".claude" / "settings.local.json").exists()
 
     def test_apply_with_target_conflict_exits_one(self, project_root, fake_home, monkeypatch):
         """Codex review (PR #876): all-conflict apply must exit 1

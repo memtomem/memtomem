@@ -9,6 +9,9 @@ duplicated in a non-active tier. Each test asserts the MCP output contains the
 exact warning line the MCP surface emits — ``format_warning`` over the
 path-redacted duplicate record (#1550/#1556) — so a future revert that forgets
 to thread the warnings fails CI immediately.
+
+The same surface carries the malformed-matcher axis (#1987), which duplicate
+detection cannot see because ``_iter_signatures`` skips non-string matchers.
 """
 
 from __future__ import annotations
@@ -21,7 +24,12 @@ import pytest
 
 from memtomem.context import error_redact
 from memtomem.context.settings import CANONICAL_SETTINGS_FILE
-from memtomem.context.settings_doctor import detect_duplicate_tiers, format_warning
+from memtomem.context.settings_doctor import (
+    detect_duplicate_tiers,
+    find_malformed_matchers,
+    format_malformed_warning,
+    format_warning,
+)
 from memtomem.server.tools.context import (
     _redact_reason,
     mem_context_diff,
@@ -107,6 +115,57 @@ async def test_diff_surfaces_cross_tier_dup_warning(dup_project):
 async def test_sync_surfaces_cross_tier_dup_warning(dup_project):
     _project, expected = dup_project
     out = await mem_context_sync(include="settings", scope="project_shared")
+    assert expected in out
+
+
+@pytest.fixture
+def malformed_project(tmp_path, monkeypatch):
+    """Project whose user tier holds a hook rule with a non-string matcher.
+
+    The malformed axis (#1987) is invisible to duplicate detection —
+    ``_iter_signatures`` skips non-string matchers — so it needs its own MCP
+    parity pin, with the same path redaction the duplicate leg gets.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(project / CANONICAL_SETTINGS_FILE, _bundled_hook())
+    _write_settings(
+        home / ".claude" / "settings.json",
+        {
+            "SessionStart": [
+                {
+                    "matcher": ["Bash"],
+                    "hooks": [{"type": "command", "command": "mm index", "timeout": 5000}],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    findings = find_malformed_matchers(project)
+    assert findings, "fixture did not create a malformed matcher"
+    redacted = replace(findings[0], path=Path(_redact_reason(str(findings[0].path), project)))
+    expected = format_malformed_warning(redacted)
+    assert str(tmp_path) not in expected, "home collapse did not fire — pin would be vacuous"
+    return project, expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_settings_surfaces_malformed_matcher_warning(malformed_project, tool):
+    _project, expected = malformed_project
+    out = await tool(include="settings", scope="project_shared")
     assert expected in out
 
 

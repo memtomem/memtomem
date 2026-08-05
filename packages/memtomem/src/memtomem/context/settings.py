@@ -78,6 +78,45 @@ class MalformedSettingsError(ValueError):
     """
 
 
+@dataclass(frozen=True)
+class MalformedHookMatcher:
+    """One present-but-non-string hook matcher and its source location."""
+
+    source: str
+    path: Path
+    event: str
+    rule_index: int
+    matcher_type: str
+    tier: str | None = None
+
+
+class MalformedHookMatcherError(ValueError):
+    """An explicit settings operation encountered malformed hook matchers.
+
+    The message names the offending **file path** for every finding, not
+    just the logical leg: copy and migrate raise this to tell the user to
+    go hand-edit something, and ``destination tier 'project_local'`` alone
+    leaves them guessing which file that is.
+    """
+
+    def __init__(self, findings: list[MalformedHookMatcher]) -> None:
+        self.findings = tuple(findings)
+        details = []
+        for finding in self.findings:
+            source = (
+                f"{finding.source} '{finding.tier}'" if finding.tier is not None else finding.source
+            )
+            details.append(
+                f"{source} ({finding.path}), event '{finding.event}', rule index "
+                f"{finding.rule_index}: non-string matcher ({finding.matcher_type})"
+            )
+        super().__init__(
+            "Malformed hook matcher(s) found: "
+            + "; ".join(details)
+            + ". 'matcher' must be a string. Omit it for match-all, or quote the value."
+        )
+
+
 _KIMI_TOML_TEXT_KEY = "__memtomem_kimi_config_toml__"
 _KIMI_BEGIN = "# BEGIN memtomem managed hooks"
 _KIMI_END = "# END memtomem managed hooks"
@@ -316,6 +355,51 @@ def _stamp_status_markers(contributions: dict) -> dict:
     return {**contributions, "hooks": out_hooks}
 
 
+def _normalize_matcher(value: object) -> str | None:
+    """Return a normalized matcher string, or ``None`` when malformed.
+
+    Callers pass ``rule.get("matcher", "")`` so an absent matcher remains the
+    valid match-all value ``""``. A present non-string can never collapse into
+    that identity.
+    """
+    if not isinstance(value, str):
+        return None
+    return value.strip()
+
+
+def _find_nonstring_matchers(
+    hooks_record: object,
+    *,
+    source: str,
+    path: Path,
+    tier: str | None = None,
+) -> list[MalformedHookMatcher]:
+    """Return located findings for every dict rule with a non-string matcher."""
+    if not isinstance(hooks_record, dict):
+        return []
+    findings: list[MalformedHookMatcher] = []
+    for event, rules in hooks_record.items():
+        if not isinstance(event, str) or not isinstance(rules, list):
+            continue
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            matcher = rule.get("matcher", "")
+            if _normalize_matcher(matcher) is not None:
+                continue
+            findings.append(
+                MalformedHookMatcher(
+                    source=source,
+                    tier=tier,
+                    path=path,
+                    event=event,
+                    rule_index=index,
+                    matcher_type=type(matcher).__name__,
+                )
+            )
+    return findings
+
+
 def _drop_nonstring_matchers(contributions: dict) -> tuple[dict, list[str]]:
     """Drop canonical hook rules whose ``matcher`` is present but not a string.
 
@@ -344,7 +428,7 @@ def _drop_nonstring_matchers(contributions: dict) -> tuple[dict, list[str]]:
             continue
         kept: list = []
         for rule in rules:
-            if isinstance(rule, dict) and not isinstance(rule.get("matcher", ""), str):
+            if isinstance(rule, dict) and _normalize_matcher(rule.get("matcher", "")) is None:
                 warnings.append(
                     f"Hook rule under '{event}' has a non-string matcher "
                     f"({type(rule.get('matcher')).__name__}) and was dropped: "

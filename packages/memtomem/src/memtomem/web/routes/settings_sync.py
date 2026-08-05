@@ -26,6 +26,7 @@ from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
     _drop_nonstring_matchers,
+    _normalize_matcher,
     _rule_content_equal,
     _rule_is_memtomem_owned,
     _safe_load_json,
@@ -49,6 +50,7 @@ from memtomem.context.settings_doctor import (
 from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.context.error_redact import redact_engine_reason
 from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
@@ -203,7 +205,7 @@ def _iter_hook_rules(hooks_record: dict) -> list[dict]:
         for index, rule in enumerate(rules):
             if not isinstance(rule, dict):
                 continue
-            if not isinstance(rule.get("matcher", ""), str):
+            if _normalize_matcher(rule.get("matcher", "")) is None:
                 # A present-but-non-string matcher is malformed (#1983). Callers
                 # key these rows by ``(event, matcher)``, so emitting one raises
                 # ``TypeError: unhashable type`` and 500s the whole panel. An
@@ -232,6 +234,10 @@ def _malformed_hook_rules(hooks_record: dict) -> list[dict]:
     ownership marker as authoritative — pre-validation releases really did
     write such rules); user rules are merely invisible to hook matching and
     stay untouched.
+
+    Both halves of the partition test validity through the shared
+    :func:`~memtomem.context.settings._normalize_matcher` (#1987), so the
+    "mirrors its iteration exactly" contract cannot drift on one side only.
     """
     rows: list[dict] = []
     for event, rules in hooks_record.items():
@@ -240,7 +246,7 @@ def _malformed_hook_rules(hooks_record: dict) -> list[dict]:
         for index, rule in enumerate(rules):
             if not isinstance(rule, dict):
                 continue
-            if isinstance(rule.get("matcher", ""), str):
+            if _normalize_matcher(rule.get("matcher", "")) is not None:
                 continue
             rows.append(
                 {
@@ -1207,6 +1213,25 @@ def _serialize_hook_copy_plan(plan: HookCopyPlan) -> dict[str, Any]:
     }
 
 
+def _sanitize_transfer_message(message: str, *roots: Path) -> str:
+    """Display-sanitize a free-text engine message that straddles two projects.
+
+    ``sanitize_diff_reason`` takes ONE root; a hook copy spans a source and a
+    destination project, which is exactly the multi-root generalization
+    :func:`~memtomem.context.error_redact.redact_engine_reason` documents. Used
+    for the engine's raw warning/error strings — the structured
+    ``src_project_root`` / ``dst_canonical`` / ``dst_target`` fields keep their
+    absolute form on purpose (the UI addresses files by them).
+
+    Two postures, one route: structured path FIELDS are contract, free-text
+    MESSAGES are sanitized. Messages are the surface that can carry a path
+    under neither root, or secret-shaped content, straight from a settings
+    file the caller never chose (#1412/#1550 sweep class; the malformed-matcher
+    message added in #1987 names the offending file).
+    """
+    return redact_engine_reason(message, *roots) or ""
+
+
 def _serialize_hook_copy_result(result: HookCopyResult) -> dict[str, Any]:
     payload = _serialize_hook_copy_plan(result.plan)
     payload["canonical"] = {
@@ -1219,7 +1244,10 @@ def _serialize_hook_copy_result(result: HookCopyResult) -> dict[str, Any]:
         "written": result.target_written,
         "already": result.target_already,
     }
-    payload["warnings"] = list(result.warnings)
+    payload["warnings"] = [
+        _sanitize_transfer_message(w, result.plan.src_project_root, result.plan.dst_project_root)
+        for w in result.warnings
+    ]
     payload["needs_sync"] = result.needs_sync
     payload["sync_command"] = result.sync_command
     return payload
@@ -1298,7 +1326,9 @@ async def copy_hook_to_project(
     except HookNotFoundError as exc:
         raise _error(404, "missing", str(exc)) from exc
     except (AmbiguousHookSelectorError, ValueError) as exc:
-        raise _error(400, "validation", str(exc)) from exc
+        raise _error(
+            400, "validation", _sanitize_transfer_message(str(exc), project_root, dst_root)
+        ) from exc
 
     if dry_run:
         return {"status": "plan", **_serialize_hook_copy_plan(plan)}

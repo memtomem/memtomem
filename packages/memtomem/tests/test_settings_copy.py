@@ -12,7 +12,11 @@ import json
 import pytest
 
 from memtomem.context.privacy_scan import PrivacyBlockedError
-from memtomem.context.settings import CANONICAL_SETTINGS_FILE, generate_all_settings
+from memtomem.context.settings import (
+    CANONICAL_SETTINGS_FILE,
+    MalformedHookMatcherError,
+    generate_all_settings,
+)
 from memtomem.context.settings_copy import (
     AmbiguousHookSelectorError,
     HookNotFoundError,
@@ -32,7 +36,7 @@ def _inner(command: str = "mm session start", *, timeout: int = 5000) -> dict:
     return {"type": "command", "command": command, "timeout": timeout}
 
 
-def _rule(matcher: str = "Edit|Write", *, inners: list[dict] | None = None) -> dict:
+def _rule(matcher: object = "Edit|Write", *, inners: list[dict] | None = None) -> dict:
     return {"matcher": matcher, "hooks": list(inners) if inners is not None else [_inner()]}
 
 
@@ -150,6 +154,17 @@ class TestPlanSelection:
         plan = _plan(src_project, dst_project, matcher="  Edit|Write  ")
         assert plan.signature.matcher == "Edit|Write"
 
+    def test_omitted_matcher_remains_valid_match_all(self, src_project, dst_project):
+        _write_doc(
+            src_project / CANONICAL_SETTINGS_FILE,
+            {"hooks": {"SessionStart": [{"hooks": [_inner("mm index")]}]}},
+        )
+
+        plan = _plan(src_project, dst_project, event="SessionStart", matcher="")
+
+        assert plan.signature.matcher == ""
+        assert plan.label == "SessionStart"
+
     def test_same_project_refused(self, src_project):
         with pytest.raises(ValueError, match="settings-migrate"):
             _plan(src_project, src_project)
@@ -173,6 +188,61 @@ class TestPlanSelection:
         assert plan.target_state == "conflict"
         assert "'rival cmd'" in plan.target_reason
         assert plan.has_conflict
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [None, 7, ["Bash"], {"tool": "Bash"}],
+    ids=["null", "int", "list", "dict"],
+)
+class TestMalformedMatcherPlanning:
+    def test_source_malformed_rejects_healthy_copy_too(self, src_project, dst_project, malformed):
+        _write_doc(
+            src_project / CANONICAL_SETTINGS_FILE,
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        _rule("Edit|Write", inners=[_inner("mm session start")]),
+                        _rule(malformed, inners=[_inner("broken")]),
+                    ]
+                }
+            },
+        )
+
+        with pytest.raises(MalformedHookMatcherError) as exc_info:
+            _plan(src_project, dst_project)
+
+        message = str(exc_info.value)
+        assert "source canonical settings" in message
+        assert "event 'PostToolUse'" in message
+        assert "rule index 1" in message
+        assert type(malformed).__name__ in message
+        # The user has to hand-edit a file, so name it — not just the leg.
+        assert str(src_project / CANONICAL_SETTINGS_FILE) in message
+        assert not (dst_project / CANONICAL_SETTINGS_FILE).exists()
+
+    @pytest.mark.parametrize("leg", ["canonical", "tier"])
+    def test_destination_malformed_rejects_plan(self, src_project, dst_project, malformed, leg):
+        path = (
+            dst_project / CANONICAL_SETTINGS_FILE
+            if leg == "canonical"
+            else dst_project / ".claude" / "settings.json"
+        )
+        _write_doc(
+            path,
+            {"hooks": {"SessionStart": [_rule(malformed, inners=[_inner("broken")])]}},
+        )
+        before = path.read_bytes()
+
+        with pytest.raises(MalformedHookMatcherError) as exc_info:
+            _plan(src_project, dst_project)
+
+        message = str(exc_info.value)
+        assert "event 'SessionStart'" in message
+        assert "rule index 0" in message
+        assert type(malformed).__name__ in message
+        assert str(path) in message
+        assert path.read_bytes() == before
 
 
 # ── Apply ───────────────────────────────────────────────────────────
@@ -361,6 +431,31 @@ class TestApplyMalformed:
         assert not result.canonical_written
         assert any("not a record" in w for w in result.warnings)
         assert (dst_project / CANONICAL_SETTINGS_FILE).read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [None, 7, ["Bash"], {"tool": "Bash"}],
+        ids=["null", "int", "list", "dict"],
+    )
+    @pytest.mark.parametrize("leg", ["canonical", "tier"])
+    def test_apply_time_matcher_drift_refuses_both_legs(
+        self, src_project, dst_project, malformed, leg
+    ):
+        plan = _plan(src_project, dst_project)
+        path = plan.dst_canonical_path if leg == "canonical" else plan.dst_target_path
+        _write_doc(
+            path,
+            {"hooks": {"SessionStart": [_rule(malformed, inners=[_inner("broken")])]}},
+        )
+        before = path.read_bytes()
+
+        result = apply_hook_copy(plan)
+
+        assert not result.canonical_written and not result.target_written
+        assert any("Malformed hook matcher" in warning for warning in result.warnings)
+        assert path.read_bytes() == before
+        if leg == "tier":
+            assert not plan.dst_canonical_path.exists()
 
 
 class TestApplyConcurrency:

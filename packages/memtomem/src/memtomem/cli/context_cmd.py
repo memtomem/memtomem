@@ -127,6 +127,8 @@ from memtomem.context.settings import (
 )
 from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
+    find_malformed_matchers,
+    format_malformed_warning,
     format_warning,
 )
 from memtomem.context.settings_copy import (
@@ -791,16 +793,24 @@ def _confirm_settings_host_writes(root: Path, *, scope: str, yes: bool) -> bool:
 
 
 def _print_duplicate_tier_warnings(root: Path, *, scope: str) -> None:
-    """Emit non-blocking warnings for memtomem hooks duplicated across tiers.
+    """Emit non-blocking warnings for cross-tier duplicates + malformed matchers.
 
     Per ADR-0010 §4 this is the primary detection surface: it fires in
     the user's actual sync workflow rather than behind a separate
     command. Output goes to stderr with yellow color and never blocks
-    the sync — duplicates are informational.
+    the sync — both axes are informational.
+
+    The malformed axis rides here rather than staying doctor-only because
+    ``_iter_signatures`` skips non-string matchers (#1987): a corrupted
+    managed tier rule no longer surfaces as a (spurious) duplicate, so
+    without this leg the sync workflow would report nothing at all about a
+    rule Claude Code silently ignores.
     """
     duplicates = detect_duplicate_tiers(root, active_scope=scope)
     for dup in duplicates:
         click.secho(f"  warning: {format_warning(dup, active_scope=scope)}", err=True, fg="yellow")
+    for finding in find_malformed_matchers(root):
+        click.secho(f"  warning: {format_malformed_warning(finding)}", err=True, fg="yellow")
 
 
 def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool) -> None:
@@ -4669,15 +4679,16 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
     signature detection used by the sync-time warning, exposed as a
     standalone subcommand for CI / scripting use.
 
-    Exit codes: ``0`` clean, ``1`` duplicates found.
+    Exit codes: ``0`` clean, ``1`` duplicates or malformed matchers found.
     """
     root = _find_project_root()
     scope = _resolve_cli_scope(scope_flag)
     duplicates = detect_duplicate_tiers(root, active_scope=scope)
+    malformed = find_malformed_matchers(root)
 
     if json_out:
         payload = {
-            "status": "duplicates" if duplicates else "clean",
+            "status": "duplicates" if duplicates else ("malformed" if malformed else "clean"),
             "active_scope": scope,
             "duplicates": [
                 {
@@ -4694,15 +4705,26 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
                 }
                 for dup in duplicates
             ],
+            "malformed_matchers": [
+                {
+                    "source": finding.source,
+                    "tier": finding.tier,
+                    "path": str(finding.path),
+                    "event": finding.event,
+                    "rule_index": finding.rule_index,
+                    "matcher_type": finding.matcher_type,
+                }
+                for finding in malformed
+            ],
         }
         click.echo(json.dumps(payload, indent=2))
     else:
-        if not duplicates:
+        if not duplicates and not malformed:
             click.secho(
                 f"✓ No memtomem-managed hooks duplicated outside the active scope ({scope}).",
                 fg="green",
             )
-        else:
+        if duplicates:
             click.secho(
                 f"✗ Found memtomem-managed hooks in {len(duplicates)} other "
                 f"tier(s) (active scope: {scope}):",
@@ -4717,8 +4739,21 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
                 "\nRun `mm context settings-migrate --from=<scope> "
                 "--to=<scope>` to move these into the active scope."
             )
+        if malformed:
+            click.secho(
+                f"✗ Found {len(malformed)} hook rule(s) with malformed matchers:",
+                fg="yellow",
+            )
+            for finding in malformed:
+                location = "canonical" if finding.source == "canonical" else f"{finding.tier} tier"
+                click.secho(f"  • {location} ({finding.path})", fg="yellow")
+                click.echo(
+                    f"      [{finding.event} rule #{finding.rule_index}] "
+                    f"non-string matcher ({finding.matcher_type})"
+                )
+            click.echo("\n`matcher` must be a string. Omit it for match-all, or quote the value.")
 
-    if duplicates:
+    if duplicates or malformed:
         raise click.exceptions.Exit(1)
 
 

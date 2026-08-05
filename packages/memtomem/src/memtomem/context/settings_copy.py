@@ -64,8 +64,12 @@ from memtomem.context._atomic import _file_lock, _lock_path_for
 from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
+    MalformedHookMatcher,
+    MalformedHookMatcherError,
     _MALFORMED,
     _SETTINGS_LOCK_BUDGET_S,
+    _find_nonstring_matchers,
+    _normalize_matcher,
     _read_with_mtime,
     _rule_content_equal,
 )
@@ -76,7 +80,6 @@ from memtomem.context.settings_doctor import (
     ALL_SCOPES,
     HookSignature,
     _normalize_command,
-    _normalize_matcher,
 )
 from memtomem.context.settings_migrate import (
     _safe_load_json_dict,
@@ -222,7 +225,8 @@ def _iter_canonical_candidates(
     for rule in rules:
         if not isinstance(rule, dict):
             continue
-        if _normalize_matcher(rule.get("matcher", "")) != matcher_norm:
+        rule_matcher = _normalize_matcher(rule.get("matcher", ""))
+        if rule_matcher is None or rule_matcher != matcher_norm:
             continue
         inner_list = rule.get("hooks", [])
         if not isinstance(inner_list, list):
@@ -249,6 +253,8 @@ def _available_labels(canonical_hooks: dict) -> list[str]:
             if not isinstance(rule, dict):
                 continue
             matcher = _normalize_matcher(rule.get("matcher", ""))
+            if matcher is None:
+                continue
             inner_list = rule.get("hooks", [])
             if not isinstance(inner_list, list):
                 continue
@@ -304,11 +310,13 @@ def _classify_leg(
     rules = hooks.get(sig.event, [])
     if not isinstance(rules, list):
         return ("conflict", f"{leg} 'hooks.{sig.event}' is not a list of rules")
-    same_matcher = [
-        rule
-        for rule in rules
-        if isinstance(rule, dict) and _normalize_matcher(rule.get("matcher", "")) == sig.matcher
-    ]
+    same_matcher: list[dict] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        matcher = _normalize_matcher(rule.get("matcher", ""))
+        if matcher is not None and matcher == sig.matcher:
+            same_matcher.append(rule)
     if not same_matcher:
         return ("missing", "")
     for rule in same_matcher:
@@ -395,6 +403,26 @@ def gate_a_scan(plan: HookCopyPlan, surface: str) -> None:
 # ── Planning ────────────────────────────────────────────────────────
 
 
+def _file_matcher_findings(
+    path: Path,
+    *,
+    source: str,
+    tier: str | None = None,
+) -> list[MalformedHookMatcher]:
+    """Return matcher findings from a readable JSON-object settings file."""
+    if not path.is_file():
+        return []
+    doc = _safe_load_json_dict(path)
+    if doc is None:
+        return []
+    return _find_nonstring_matchers(
+        doc.get("hooks", {}),
+        source=source,
+        tier=tier,
+        path=path,
+    )
+
+
 def plan_hook_copy(
     src_project_root: Path,
     *,
@@ -442,7 +470,32 @@ def plan_hook_copy(
     if not isinstance(canonical_hooks, dict):
         canonical_hooks = {}
 
+    dst_canonical_path = dst_root / CANONICAL_SETTINGS_FILE
+    dst_target_path = _resolve_tier_path(dst_root, dst_scope)
+    malformed = _find_nonstring_matchers(
+        canonical_hooks,
+        source="source canonical settings",
+        path=src_canonical_path,
+    )
+    malformed.extend(
+        _file_matcher_findings(
+            dst_canonical_path,
+            source="destination canonical settings",
+        )
+    )
+    malformed.extend(
+        _file_matcher_findings(
+            dst_target_path,
+            source="destination tier",
+            tier=dst_scope,
+        )
+    )
+    if malformed:
+        raise MalformedHookMatcherError(malformed)
+
     matcher_norm = _normalize_matcher(matcher)
+    if matcher_norm is None:
+        raise ValueError("hook matcher selector must be a string")
     candidates = _iter_canonical_candidates(canonical_hooks, event, matcher_norm)
     if not candidates:
         labels = _available_labels(canonical_hooks)
@@ -470,9 +523,6 @@ def plan_hook_copy(
 
     rule_for_canonical = {"matcher": sig.matcher, "hooks": [canonical_inner]}
     rule_for_target = _stamp_rule_for_target(sig.event, rule_for_canonical)
-
-    dst_canonical_path = dst_root / CANONICAL_SETTINGS_FILE
-    dst_target_path = _resolve_tier_path(dst_root, dst_scope)
 
     canonical_state, canonical_reason = _classify_dst_file(
         dst_canonical_path, sig, canonical_inner, leg="destination canonical settings"
@@ -582,6 +632,29 @@ def apply_hook_copy(
                 return result
             canonical_doc: dict = canonical_raw if isinstance(canonical_raw, dict) else {}
 
+            # Read both destination legs before the first write so a matcher
+            # that drifted to a non-string under either lock rejects the whole
+            # copy rather than leaving a canonical-only partial result.
+            target_raw, target_mtime_ns = _read_with_mtime(plan.dst_target_path)
+            target_doc: dict = target_raw if isinstance(target_raw, dict) else {}
+            malformed = _find_nonstring_matchers(
+                canonical_doc.get("hooks", {}),
+                source="destination canonical settings",
+                path=plan.dst_canonical_path,
+            )
+            if isinstance(target_raw, dict):
+                malformed.extend(
+                    _find_nonstring_matchers(
+                        target_doc.get("hooks", {}),
+                        source="destination tier",
+                        tier=plan.dst_scope,
+                        path=plan.dst_target_path,
+                    )
+                )
+            if malformed:
+                result.warnings.append(str(MalformedHookMatcherError(malformed)))
+                return result
+
             state, reason = _classify_leg(
                 canonical_doc,
                 plan.signature,
@@ -618,7 +691,6 @@ def apply_hook_copy(
                 result.canonical_written = True
 
             # ── tier leg ─────────────────────────────────────────────
-            target_raw, target_mtime_ns = _read_with_mtime(plan.dst_target_path)
             if target_raw is _MALFORMED:
                 result.warnings.append(
                     f"{plan.dst_target_path} is not valid JSON (or not a JSON "
@@ -627,7 +699,6 @@ def apply_hook_copy(
                     f"then re-run the copy or `{result.sync_command}`."
                 )
                 return result
-            target_doc: dict = target_raw if isinstance(target_raw, dict) else {}
 
             state, reason = _classify_leg(
                 target_doc,

@@ -36,6 +36,9 @@ from pathlib import Path
 
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
+    MalformedHookMatcher,
+    _find_nonstring_matchers,
+    _normalize_matcher,
     resolve_scope_path,
 )
 
@@ -96,18 +99,6 @@ def _load_settings_dict(path: Path) -> dict | None:
     return raw
 
 
-def _normalize_matcher(value: object) -> str:
-    """Strip whitespace + unify missing/empty matcher strings.
-
-    The matcher is a regex source consumed by Claude Code; alpha-sort
-    of alternations is **not** applied because ``Edit|Write`` and
-    ``Write|Edit`` are not interchangeable from Claude Code's side.
-    """
-    if not isinstance(value, str):
-        return ""
-    return value.strip()
-
-
 def _normalize_command(value: object) -> str:
     """Collapse runs of internal whitespace to single space + strip.
 
@@ -136,6 +127,8 @@ def _iter_signatures(hooks_record: object) -> Iterator[HookSignature]:
             if not isinstance(rule, dict):
                 continue
             matcher = _normalize_matcher(rule.get("matcher", ""))
+            if matcher is None:
+                continue
             inner = rule.get("hooks", [])
             if not isinstance(inner, list):
                 continue
@@ -180,6 +173,71 @@ def _resolved(path: Path) -> Path:
         return path.resolve(strict=False)
     except (OSError, RuntimeError):
         return path
+
+
+def find_malformed_matchers(project_root: Path) -> list[MalformedHookMatcher]:
+    """Find non-string matchers in canonical settings and all tier files.
+
+    This is the standalone doctor's companion diagnostic. Duplicate detection
+    keeps its historical return type, while malformed rules are reported
+    separately and never participate in signature comparison.
+    """
+    findings: list[MalformedHookMatcher] = []
+    canonical_path = project_root / CANONICAL_SETTINGS_FILE
+    canonical = _load_settings_dict(canonical_path)
+    if canonical is not None:
+        findings.extend(
+            _find_nonstring_matchers(
+                canonical.get("hooks", {}),
+                source="canonical",
+                path=canonical_path,
+            )
+        )
+
+    seen_paths: set[Path] = set()
+    for scope in ALL_SCOPES:
+        tier_path = resolve_scope_path(project_root, scope)
+        resolved = _resolved(tier_path)
+        if resolved in seen_paths:
+            continue
+        seen_paths.add(resolved)
+        tier = _load_settings_dict(tier_path)
+        if tier is None:
+            continue
+        findings.extend(
+            _find_nonstring_matchers(
+                tier.get("hooks", {}),
+                source="tier",
+                tier=scope,
+                path=tier_path,
+            )
+        )
+    return findings
+
+
+def format_malformed_warning(finding: MalformedHookMatcher) -> str:
+    """Human-readable warning string for one malformed matcher row.
+
+    The sibling of :func:`format_warning` for the malformed axis, shared by
+    the CLI sync surface and the MCP settings branches so both agree with
+    the standalone doctor's wording. Assumes the ``source`` vocabulary
+    :func:`find_malformed_matchers` produces (``canonical`` / ``tier``);
+    copy and migrate build their own descriptive sources and render through
+    :class:`~memtomem.context.settings.MalformedHookMatcherError` instead.
+
+    The copy/migrate hint is deliberately conditional ("may cause a related
+    …"): those operations inspect only the files they touch, so a malformed
+    rule in a third tier does not block an unrelated migration.
+    """
+    location = "canonical settings" if finding.tier is None else f"{finding.tier} tier"
+    return (
+        f"hook rule with a non-string matcher ({finding.matcher_type}) in the "
+        f"{location} ({finding.path}), event '{finding.event}' rule "
+        f"#{finding.rule_index}; `matcher` must be a string — omit it for "
+        f"match-all, or quote the value. It is ignored by hook matching until "
+        f"fixed, and may cause a related `mm context settings-copy` / "
+        f"`settings-migrate` to refuse to run."
+    )
 
 
 def detect_duplicate_tiers(
