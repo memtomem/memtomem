@@ -343,7 +343,7 @@
   "index.ns_render.untagged_applied": "(태그 없음)",
   "index.ns_render.single_applied": "{ns}",
   "index.ns_render.multi_applied": "{list} ({n}개 네임스페이스)",
-  "index.ns_render.mixed": "{applied}; {preview}",
+  "index.ns_render.mixed": "적용됨: {applied}; 미리보기 전용: {preview}",
   "index.ns_render.truncated_suffix": ", {scanned}개 이상 스캔",
   "index.upload_hint": "파일을 드롭하거나",
   "index.upload_browse": "찾아보기",

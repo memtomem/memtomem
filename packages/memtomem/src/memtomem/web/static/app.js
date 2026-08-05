@@ -1019,7 +1019,7 @@ function renderIndexResolvedNamespaces(result) {
   const previewOnly = resolved.filter(ns => !appliedSet.has(ns));
 
   if (resolved.length === 0) {
-    return renderResolvedNamespaces(resolved, { mode: 'preview' });
+    return renderResolvedNamespaces(resolved, { mode: 'applied' });
   }
   if (applied.length === 0) {
     return renderResolvedNamespaces(previewOnly, { mode: 'preview' });
@@ -1029,7 +1029,9 @@ function renderIndexResolvedNamespaces(result) {
   }
   return t('index.ns_render.mixed', {
     applied: renderResolvedNamespaces(applied, { mode: 'applied' }),
-    preview: renderResolvedNamespaces(previewOnly, { mode: 'preview' }),
+    // The mixed template labels this group explicitly, so render its values
+    // without a second preview suffix.
+    preview: renderResolvedNamespaces(previewOnly, { mode: 'applied' }),
   });
 }
 

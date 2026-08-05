@@ -1813,6 +1813,7 @@ class TestBulkNamespacePrepass:
 
         assert stats.resolved_namespaces == ("actual-c", "fallback-a", "fallback-b")
         assert stats.applied_namespaces == ("actual-c",)
+        assert set(stats.applied_namespaces) <= set(stats.resolved_namespaces)
 
     async def test_bulk_applied_subset_collapses_same_namespace_overlap(
         self, components, memory_dir, monkeypatch
@@ -1847,6 +1848,7 @@ class TestBulkNamespacePrepass:
 
         assert stats.resolved_namespaces == ("shared",)
         assert stats.applied_namespaces == ("shared",)
+        assert set(stats.applied_namespaces) <= set(stats.resolved_namespaces)
 
     async def test_a_mid_run_lookup_failure_writes_nothing_for_that_file(
         self, components, memory_dir, monkeypatch

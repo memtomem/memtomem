@@ -50,6 +50,19 @@ describe('Index result namespace provenance', () => {
     return document.getElementById('r-namespace').textContent;
   }
 
+  it('keeps an empty namespace result neutral', () => {
+    const text = render(indexResult());
+
+    expect(text).toBe(window.t('index.ns_render.untagged_applied'));
+    expect(text).not.toContain('preview');
+  });
+
+  it('defaults the low-level namespace renderer to preview mode', () => {
+    expect(window.renderResolvedNamespaces(['default-ns'])).toBe(
+      window.t('index.ns_render.single_preview', { ns: 'default-ns' }),
+    );
+  });
+
   it('renders a privacy-blocked-only namespace as preview', () => {
     const text = render(indexResult({
       resolved_namespaces: ['blocked-ns'],
@@ -93,8 +106,10 @@ describe('Index result namespace provenance', () => {
 
     expect(text).toBe(window.t('index.ns_render.mixed', {
       applied: window.t('index.ns_render.single_applied', { ns: 'applied-ns' }),
-      preview: window.t('index.ns_render.single_preview', { ns: 'preview-ns' }),
+      preview: window.t('index.ns_render.single_applied', { ns: 'preview-ns' }),
     }));
+    expect(text).toContain('Applied:');
+    expect(text).toContain('Preview only:');
   });
 
   it('treats a same-value applied/preview overlap as applied at value level', () => {
@@ -135,8 +150,9 @@ describe('Index result namespace provenance', () => {
 
     expect(text).toBe(window.t('index.ns_render.mixed', {
       applied: window.t('index.ns_render.single_applied', { ns: '적용' }),
-      preview: window.t('index.ns_render.single_preview', { ns: '예정' }),
+      preview: window.t('index.ns_render.single_applied', { ns: '예정' }),
     }));
-    expect(text).toContain('(미리보기)');
+    expect(text).toContain('적용됨:');
+    expect(text).toContain('미리보기 전용:');
   });
 });

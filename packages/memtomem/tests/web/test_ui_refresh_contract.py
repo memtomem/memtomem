@@ -89,7 +89,7 @@ def test_changed_static_assets_bump_cache_versions() -> None:
     # Issue #2026 changes the shared indexing-error classifier plus its Settings
     # and Sources consumers; all three scripts must invalidate cached copies
     # together or the cross-file helper calls can fail at runtime.
-    assert "/app.js?v=158" in html
+    assert "/app.js?v=159" in html
     assert "/settings-harness.js?v=9" in html
     assert "/settings-config.js?v=20" in html
     assert "/sources-memory-dirs.js?v=16" in html

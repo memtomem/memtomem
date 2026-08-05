@@ -87,6 +87,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Index results now distinguish namespaces actually applied from preview-only
+  fallbacks** (#2035). The additive `applied_namespaces` field on POST and SSE
+  responses identifies the authoritative subset of the legacy hybrid
+  `resolved_namespaces` echo. The Web UI uses that provenance to label blocked,
+  failed, unchanged, delete-only, and mixed runs accurately in English and
+  Korean.
+
 - **Hook settings operations no longer mistake malformed matchers for
   match-all** (#1987). A present `null`, number, array, or object matcher used
   to normalize to the same empty string as an omitted matcher, so the doctor
