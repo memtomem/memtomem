@@ -62,6 +62,18 @@ class TestBulkIndexRedactionGate:
         # the whole run.
         assert stats.indexed_chunks > 0
 
+    async def test_blocked_only_run_keeps_the_prepass_namespace(self, bm25_only_components):
+        """A privacy block performs no namespace-bearing write, so its echo
+        retains the positional prepass value instead of disappearing."""
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "leak.md").write_text(_LEAK)
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.blocked_files == 1
+        assert stats.indexed_chunks == 0
+        assert stats.resolved_namespaces == (None,)
+
     async def test_force_unsafe_bypasses_bulk(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)
@@ -81,6 +93,19 @@ class TestBulkIndexRedactionGate:
 
         assert complete["blocked_files"] == 1
         assert any("leak.md" in p for p in complete["blocked_paths"])
+
+    async def test_stream_blocked_only_run_keeps_the_prepass_namespace(self, bm25_only_components):
+        """A stream privacy block retains its positional preview and must not
+        manufacture an authoritative per-file namespace result."""
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "leak.md").write_text(_LEAK)
+
+        events = [ev async for ev in comp.index_engine.index_path_stream(mem_dir, recursive=True)]
+        complete = next(ev for ev in events if ev["type"] == "complete")
+
+        assert complete["blocked_files"] == 1
+        assert complete["indexed_chunks"] == 0
+        assert complete["resolved_namespaces"] == [None]
 
     async def test_single_file_index_raises(self, bm25_only_components):
         comp, mem_dir = bm25_only_components

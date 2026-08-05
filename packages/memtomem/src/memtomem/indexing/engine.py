@@ -428,6 +428,10 @@ class IndexFileResult(_IndexFileBase, total=False):
     # typed retryable. Optional so every historical zero/permanent return shape
     # remains valid.
     retryable_errors: list[str]
+    # Present only when at least one chunk was successfully upserted. The
+    # value comes from the authoritative namespace resolution inside the
+    # per-file critical section; ``None`` is the valid untagged carve-out.
+    resolved_namespace: str | None
     # Set to 1 by the stream path when a file is skipped by the ADR-0006
     # redaction gate; aggregated into ``IndexingStats.blocked_files``. The
     # non-stream path tracks blocks via the raised ``PrivacyRejection`` instead.
@@ -575,9 +579,7 @@ class IndexEngine:
         # critical section — a concurrent writer may have moved a file since
         # this prepass — and a lookup failure there fails that file closed,
         # keeping its type in ``retryable_errors`` below.
-        resolved_ns = _distinct_sorted(
-            await self._resolve_namespaces_per_file(files, namespace, force=force)
-        )
+        prepass_namespaces = await self._resolve_namespaces_per_file(files, namespace, force=force)
 
         async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
@@ -596,11 +598,19 @@ class IndexEngine:
         retryable_errors: list[str] = []
         blocked_paths: list[str] = []
         blocked_project_shared = 0
+        # Keep the prepass vector positionally aligned with ``files``. A
+        # successful upsert replaces its entry below with the authoritative
+        # in-lock answer; no-write and failed outcomes retain this preview.
+        echo_namespaces = list(prepass_namespaces)
         for i, r in enumerate(raw_results):
             if isinstance(r, dict):
                 file_results.append(r)
                 all_errors.extend(r.get("errors", []))
                 retryable_errors.extend(r.get("retryable_errors", []))
+                if "resolved_namespace" in r:
+                    # ``None`` is a real applied value, so key presence — not
+                    # truthiness — decides whether to replace the prepass.
+                    echo_namespaces[i] = r["resolved_namespace"]
             elif isinstance(r, PrivacyRejection):
                 # ADR-0006 PR-A: un-adjudicated bulk index hit a secret-bearing
                 # file. Skip it, record it as blocked, and continue the run so a
@@ -644,7 +654,7 @@ class IndexEngine:
             errors=tuple(dict.fromkeys(all_errors)),
             retryable_errors=tuple(dict.fromkeys(retryable_errors)),
             new_chunk_ids=tuple(all_new_chunk_ids),
-            resolved_namespaces=tuple(resolved_ns),
+            resolved_namespaces=tuple(_distinct_sorted(echo_namespaces)),
             blocked_files=len(blocked_paths),
             blocked_paths=tuple(blocked_paths),
             blocked_project_shared_files=blocked_project_shared,
@@ -678,8 +688,9 @@ class IndexEngine:
         The bulk paths' pre-write prepass (issue #2018): a store that cannot
         answer fails the whole run here, before any durable write, as the
         typed retryable error. The write path re-resolves inside each file's
-        critical section — that answer stays authoritative; these entries
-        only feed the ``resolved_namespaces`` echo.
+        critical section — that answer stays authoritative for successful
+        upserts. These entries are the fallback echo for files that perform
+        no namespace-bearing write or fail before returning a result.
         """
         return [await self.effective_namespace_for(f, explicit_ns, force=force) for f in files]
 
@@ -882,6 +893,9 @@ class IndexEngine:
             errors=tuple(result.get("errors", ())),
             retryable_errors=tuple(result.get("retryable_errors", ())),
             new_chunk_ids=tuple(result.get("new_chunk_ids", ())),
+            resolved_namespaces=(
+                (result["resolved_namespace"],) if "resolved_namespace" in result else ()
+            ),
         )
 
     async def is_duplicate(
@@ -1134,8 +1148,9 @@ class IndexEngine:
         embed_semaphore: asyncio.Semaphore | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
-        # new_chunk_ids (list[UUID]). Early zero-result paths may omit
-        # new_chunk_ids — consumers must tolerate missing keys.
+        # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
+        # at least one chunk was successfully upserted. Early/no-write paths
+        # may omit the optional keys — consumers must tolerate their absence.
 
         # Existence check FIRST — before the exclude guard. A file that is gone
         # from disk is a delete-by-source, and cleanup must never be blocked by
@@ -1473,7 +1488,7 @@ class IndexEngine:
             cast("SqliteBackend", self._storage), self._llm, file_path, new_chunks, self._config
         )
 
-        return {
+        result: IndexFileResult = {
             "total": len(new_chunks),
             "indexed": len(diff_result.to_upsert),
             "skipped": len(diff_result.unchanged),
@@ -1481,6 +1496,9 @@ class IndexEngine:
             "errors": [],
             "new_chunk_ids": truly_new_chunk_ids,
         }
+        if diff_result.to_upsert:
+            result["resolved_namespace"] = resolved_ns
+        return result
 
     async def index_path_stream(
         self,
@@ -1593,9 +1611,10 @@ class IndexEngine:
             # its own lock, and a failure there fails that file closed with
             # its type kept in ``retryable_errors``.
             resolved_files = [fp.resolve() for fp in files]
-            resolved_ns_for_event = _distinct_sorted(
-                await self._resolve_namespaces_per_file(resolved_files, namespace, force=force)
+            prepass_namespaces = await self._resolve_namespaces_per_file(
+                resolved_files, namespace, force=force
             )
+            echo_namespaces = list(prepass_namespaces)
             agg = {
                 "total_chunks": 0,
                 "indexed": 0,
@@ -1720,6 +1739,10 @@ class IndexEngine:
                 agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
                 all_errors.extend(result.get("errors", []))
                 retryable_errors.extend(result.get("retryable_errors", []))
+                if "resolved_namespace" in result:
+                    # ``None`` is a real applied value, so key presence — not
+                    # truthiness — decides whether to replace the prepass.
+                    echo_namespaces[i - 1] = result["resolved_namespace"]
                 yield {
                     "type": "progress",
                     "file": str(fp),
@@ -1740,7 +1763,7 @@ class IndexEngine:
                 "duration_ms": round(duration, 1),
                 "errors": list(dict.fromkeys(all_errors)),
                 "retryable_errors": list(dict.fromkeys(retryable_errors)),
-                "resolved_namespaces": resolved_ns_for_event,
+                "resolved_namespaces": _distinct_sorted(echo_namespaces),
                 "blocked_files": agg["blocked"],
                 "blocked_paths": blocked_paths,
                 "blocked_project_shared_files": agg["blocked_project_shared"],
