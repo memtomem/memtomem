@@ -3306,6 +3306,30 @@ class TestOwnedSubdirSquatters:
 class TestLivenessDbLockProbeHardening:
     """Direct unit pins for the probe policy split (#1949)."""
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
+    def test_uninstall_surfaces_skipped_speculative_runtime_candidate(self, home, monkeypatch):
+        from memtomem.cli import _liveness
+
+        state = _seed_state(home)
+        current = _liveness.runtime_dir()
+        loose = home / "loose-\x1b-runtime"
+        loose.mkdir(mode=0o755)
+        loose.chmod(0o755)
+        monkeypatch.setattr(
+            _liveness,
+            "candidate_runtime_dirs",
+            lambda: [current, loose],
+        )
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert result.output.count("narrowed runtime inventory") == 1
+        assert "unsafe permissions 0o755" in result.output
+        assert "\x1b" not in result.output
+        assert "\\x1b" in result.output
+        assert not state.exists()
+
     def test_check_db_lock_unresolvable_path_fails_open(self, home):
         from memtomem.cli._db_lock import check_db_lock
 
@@ -3371,6 +3395,34 @@ class TestLivenessDbLockProbeHardening:
 class TestUnverifiableLivenessBoundaryAndModes:
     """Follow-up coverage (#1949 review): the destructive-boundary honesty
     gate, both printer branches, and the probe_pid_file failure-mode split."""
+
+    def test_boundary_reprobe_surfaces_new_nonblocking_warning(self, home, monkeypatch):
+        from memtomem.cli import uninstall_cmd
+        from memtomem.cli._liveness import ServerState
+
+        state = _seed_state(home)
+        calls = {"n": 0}
+        clean = ServerState(alive=False, pid=None, pid_file=None)
+        narrowed = ServerState(
+            alive=False,
+            pid=None,
+            pid_file=None,
+            probe_warning="skipped: <runtime> (unsafe permissions 0o755)",
+        )
+
+        def _seq(db_path=None):
+            calls["n"] += 1
+            return clean if calls["n"] == 1 else narrowed
+
+        monkeypatch.setattr(uninstall_cmd, "_check_server_liveness", _seq)
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert calls["n"] >= 2, "the destructive-boundary reprobe must run"
+        assert result.exit_code == 0, result.output
+        assert result.output.count("narrowed runtime inventory") == 1
+        assert "skipped: <runtime> (unsafe permissions 0o755)" in result.output
+        assert not state.exists()
 
     def test_boundary_reprobe_refuses_when_pid_becomes_unprobeable(self, home, monkeypatch):
         """Pre-confirmation probe is clean; the boundary reprobe returns

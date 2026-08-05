@@ -521,7 +521,7 @@ def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_web_stop_signals_verified_pid_and_removes_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from memtomem.cli import _liveness
+    import portalocker
 
     runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
     runtime_dir.mkdir(mode=0o700)
@@ -530,18 +530,24 @@ def test_web_stop_signals_verified_pid_and_removes_metadata(
     info_file = runtime_dir / "web.json"
     pid_file.write_text("24680\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
     info_file.write_text('{"pid": 24680, "port": 18080}\n', encoding="utf-8")
-    states = iter(
-        [
-            ServerState(alive=True, pid=24680, pid_file=pid_file),
-            ServerState(alive=False, pid=None, pid_file=pid_file),
-            ServerState(alive=False, pid=None, pid_file=None),
-        ]
-    )
-    monkeypatch.setattr(_liveness, "check_web_liveness", lambda: next(states))
     signals: list[int] = []
-    monkeypatch.setattr(web_cmd.os, "kill", lambda pid, _sig: signals.append(pid))
 
-    result = CliRunner().invoke(web, ["stop"])
+    holder = pid_file.open("rb+")
+    portalocker.lock(holder, portalocker.LOCK_EX | portalocker.LOCK_NB)
+
+    def fake_kill(pid: int, _sig: int) -> None:
+        signals.append(pid)
+        portalocker.unlock(holder)
+        holder.close()
+
+    monkeypatch.setattr(web_cmd.os, "kill", fake_kill)
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        if not holder.closed:
+            with contextlib.suppress(Exception):
+                portalocker.unlock(holder)
+            holder.close()
 
     assert result.exit_code == 0, result.output
     assert signals == [24680]

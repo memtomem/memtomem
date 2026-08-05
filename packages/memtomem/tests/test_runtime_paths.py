@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from memtomem._runtime_paths import (
+    RuntimeDirValidationError,
     _hint_quote,
     ensure_runtime_dir,
     legacy_server_pid_path,
@@ -27,6 +28,7 @@ from memtomem._runtime_paths import (
     scrub_text,
     server_pid_path,
     store_pid_digest,
+    validate_runtime_dir,
 )
 from .helpers import set_home
 
@@ -185,8 +187,10 @@ class TestEnsureRuntimeDir:
         target.mkdir(mode=0o700)
         os.symlink(target, xdg / "memtomem")
 
-        with pytest.raises(PermissionError, match="symlink"):
+        with pytest.raises(RuntimeDirValidationError, match="symlink") as exc_info:
             ensure_runtime_dir()
+        assert exc_info.value.reason == "symlink"
+        assert exc_info.value.short_reason() == "symlink"
 
     def test_refuses_existing_loose_mode(self, tmp_path, monkeypatch):
         """Regression for M3 in the #412 review: a pre-existing dir at
@@ -198,8 +202,10 @@ class TestEnsureRuntimeDir:
         (xdg / "memtomem").mkdir(mode=0o755)
         os.chmod(xdg / "memtomem", 0o755)  # neutralize umask
 
-        with pytest.raises(PermissionError, match="unsafe permissions"):
+        with pytest.raises(RuntimeDirValidationError, match="unsafe permissions") as exc_info:
             ensure_runtime_dir()
+        assert exc_info.value.reason == "unsafe_permissions"
+        assert exc_info.value.short_reason() == "unsafe permissions 0o755"
 
     @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="owner check is POSIX-only")
     def test_refuses_existing_wrong_owner(self, tmp_path, monkeypatch):
@@ -216,7 +222,7 @@ class TestEnsureRuntimeDir:
         expected name lets us exercise that branch end-to-end.
         """
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        tmp_tmp = tmp_path / "tmp"
+        tmp_tmp = tmp_path / "tmp with space"
         tmp_tmp.mkdir()
         os.chmod(tmp_tmp, 0o700)
         monkeypatch.setenv("TMPDIR", str(tmp_tmp))
@@ -227,12 +233,21 @@ class TestEnsureRuntimeDir:
         # Pre-create the path that ``runtime_dir()`` will return under
         # the stubbed uid. Owned by us (``st_uid == real_uid``) but the
         # stubbed ``geteuid()`` returns ``stubbed_uid`` → mismatch.
-        (tmp_tmp / f"memtomem-{stubbed_uid}").mkdir(mode=0o700)
+        target = tmp_tmp / f"memtomem-{stubbed_uid}"
+        target.mkdir(mode=0o700)
         monkeypatch.setattr(os, "geteuid", lambda: stubbed_uid)
 
         try:
-            with pytest.raises(PermissionError, match="owned by uid"):
+            with pytest.raises(RuntimeDirValidationError, match="owned by uid") as exc_info:
                 ensure_runtime_dir()
+            message = str(exc_info.value)
+            command = f"rm -rf -- {_hint_quote(target)}"
+            assert "ask an administrator" in message
+            assert "XDG_RUNTIME_DIR or TMPDIR" in message
+            assert message.endswith(command)
+            assert f"{command}." not in message
+            assert exc_info.value.reason == "wrong_owner"
+            assert exc_info.value.short_reason() == f"owned by uid {real_uid}"
         finally:
             tempfile.tempdir = None  # reset cache for subsequent tests
 
@@ -244,8 +259,29 @@ class TestEnsureRuntimeDir:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
         (xdg / "memtomem").write_text("accidentally a file")
 
-        with pytest.raises(PermissionError, match="not a directory"):
+        with pytest.raises(RuntimeDirValidationError, match="not a directory") as exc_info:
             ensure_runtime_dir()
+        assert exc_info.value.reason == "not_directory"
+        assert exc_info.value.short_reason() == "not a directory"
+
+    def test_cannot_stat_reason_is_structured_and_scrubbed(self, tmp_path, monkeypatch):
+        target = tmp_path / "blocked-runtime"
+        real_stat = os.stat
+
+        def denied(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("denied\x1b")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", denied)
+
+        with pytest.raises(RuntimeDirValidationError, match="cannot stat") as exc_info:
+            validate_runtime_dir(target)
+
+        assert exc_info.value.reason == "cannot_stat"
+        assert exc_info.value.short_reason() == "cannot stat (PermissionError)"
+        assert "\x1b" not in str(exc_info.value)
+        assert "\\x1b" in str(exc_info.value)
 
 
 def _make_spacey_xdg(tmp_path: Path) -> Path:
@@ -345,10 +381,12 @@ class TestRemovalHintQuoting:
         (xdg / "memtomem").mkdir(mode=0o700)
         monkeypatch.setattr(Path, "is_junction", lambda self: True)
 
-        with pytest.raises(PermissionError) as exc:
+        with pytest.raises(RuntimeDirValidationError) as exc:
             ensure_runtime_dir()
         expected = f"rmdir -- {shlex.quote(str(xdg / 'memtomem'))}"
         assert expected in str(exc.value)
+        assert exc.value.reason == "junction"
+        assert exc.value.short_reason() == "junction"
 
     def test_control_char_path_renders_escaped_everywhere(self, tmp_path, monkeypatch):
         """A path with an embedded control character (ESC) must render

@@ -198,6 +198,63 @@ class TestResetJson:
     success and no-op exit 0; handled failures retain their JSON body and exit
     1. Text-path behavior is untouched."""
 
+    @pytest.mark.parametrize("as_json", [False, True])
+    def test_narrowed_inventory_warning_is_emitted_once(self, home, monkeypatch, as_json):
+        warning = "skipped: <runtime> (unsafe permissions 0o755)"
+        _patch_liveness(
+            monkeypatch,
+            server=ServerState(
+                alive=False,
+                pid=None,
+                pid_file=None,
+                probe_warning=warning,
+            ),
+        )
+        runner = CliRunner()
+        _init_and_index(home, runner)
+        args = ["reset", "-y"]
+        if as_json:
+            args.append("--json")
+
+        result = runner.invoke(cli, args)
+
+        assert result.exit_code == 0, result.output
+        if as_json:
+            payload = json.loads(result.output)
+            assert len(payload["warnings"]) == 1
+            assert warning in payload["warnings"][0]
+        else:
+            assert result.output.count("narrowed runtime inventory") == 1
+            assert warning in result.output
+
+    def test_destructive_boundary_surfaces_new_inventory_warning(self, home, monkeypatch):
+        warning = "skipped: <late-runtime> (junction)"
+        clean = ServerState(alive=False, pid=None, pid_file=None)
+        narrowed = ServerState(
+            alive=False,
+            pid=None,
+            pid_file=None,
+            probe_warning=warning,
+        )
+        calls = {"n": 0}
+
+        def probe_server(db_path=None):
+            assert db_path is not None
+            calls["n"] += 1
+            return narrowed if calls["n"] >= 3 else clean
+
+        monkeypatch.setattr(reset_cmd, "check_server_liveness", probe_server)
+        monkeypatch.setattr(reset_cmd, "check_web_liveness", lambda: _DEAD)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+
+        result = runner.invoke(cli, ["reset", "-y"])
+
+        assert calls["n"] >= 3
+        assert result.exit_code == 0, result.output
+        assert result.output.count("narrowed runtime inventory") == 1
+        assert warning in result.output
+
     def test_wipe_json_ack(self, home, monkeypatch):
         _patch_liveness(monkeypatch)
         runner = CliRunner()

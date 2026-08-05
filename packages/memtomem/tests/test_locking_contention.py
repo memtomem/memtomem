@@ -11,9 +11,10 @@ No ``skipif(win32)`` — the whole point of #625 is that these now serialize
 on every supported OS, replacing the prior msvcrt-branch / Windows-no-op /
 conservative assume-alive fallbacks.
 
-Tests use ``multiprocessing`` (not threads) because portalocker delegates
-to ``fcntl.flock`` / ``LockFileEx``, both of which are process-level — same
-process holding two refs would not contend.
+Most tests use ``multiprocessing`` because the production contract is
+cross-process serialization. Independent handles in one process can also
+contend, and the Web stop test uses that narrower shape to exercise the real
+liveness probe while a fake signal releases the held lock.
 
 Each worker gets its own ``mp.Queue`` (rather than sharing one). Python's
 multiprocessing docs guarantee FIFO order *only within a single producer*;
@@ -797,6 +798,7 @@ class TestCheckServerLivenessStoreScope:
 
         assert state.alive is False
         assert state.probe_error is None
+        assert state.probe_warning == f"skipped: {redirected} (symlink)"
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
     def test_loose_speculative_runtime_candidate_is_skipped(
@@ -804,15 +806,36 @@ class TestCheckServerLivenessStoreScope:
     ):
         import memtomem.cli._liveness as liveness
 
-        loose = tmp_path / "loose-runtime"
+        loose = tmp_path / "loose-\x1b-runtime"
         loose.mkdir(mode=0o755)
         loose.chmod(0o755)
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt, loose])
 
+        files, detail = liveness._glob_server_pid_files()
+        states, inventory_warning = liveness.enumerate_server_liveness_inventory()
         state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
 
+        assert files == []
+        assert states == []
+        assert detail == f"skipped: {liveness.scrub_text(str(loose))} (unsafe permissions 0o755)"
+        assert inventory_warning == detail
+        assert "\x1b" not in detail
+        assert "\\x1b" in detail
         assert state.alive is False
         assert state.probe_error is None
+        assert state.probe_warning == detail
+
+    def test_generic_skip_detail_truncates_before_scrubbing(self):
+        import memtomem.cli._liveness as liveness
+
+        candidate = Path("/tmp/speculative-runtime")
+        detail = liveness._runtime_candidate_skip_detail(
+            candidate,
+            OSError("x" * 116 + "\x1b" + "tail"),
+        )
+
+        assert "\x1b" not in detail
+        assert "\\x1b..." in detail
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
     def test_loose_current_runtime_candidate_fails_closed_and_scrubs_path(
@@ -831,6 +854,7 @@ class TestCheckServerLivenessStoreScope:
         assert state.alive is True
         assert state.pid is None
         assert state.probe_error is not None
+        assert "PermissionError" in state.probe_error
         assert "unsafe permissions" in state.probe_error
         assert "\x1b" not in state.probe_error
         assert "\\x1b" in state.probe_error
