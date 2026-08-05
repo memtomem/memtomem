@@ -87,6 +87,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Store-agnostic server discovery now fails closed when a runtime directory
+  cannot be searched** (#2038). The pid inventory used by `mm upgrade` now
+  surfaces permission and traversal errors instead of treating the directory
+  as empty, while absent runtime directories remain a normal empty state.
+
 - **Web UI asset edits can no longer silently reuse a stale browser cache key**
   (#2041). A checked-in manifest now binds every production JS/CSS `?v=N`
   reference in the SPA and Swagger UI to the file's SHA-256. The default test

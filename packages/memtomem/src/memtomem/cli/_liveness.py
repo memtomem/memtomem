@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, replace
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Literal
 
@@ -280,14 +281,10 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
     never re-resolves the runtime dir — if resolution itself was the
     failure, a second call would raise out of the fail-closed path.
 
-    Caveat, pre-dating #2003 and tracked separately: ``Path.glob``
-    *suppresses* the ``scandir`` errors it walks over, so an unreadable
-    candidate directory yields ``[]`` instead of raising and this
-    fail-closed branch does not fire for it. Discovery of unknown digests
-    is therefore fail-open; the named probes below (``server-<digest>.pid``
-    and the bare ``server.pid``) still fail closed because ``open()``
-    raises for real. Fixing that needs a ``scandir``-based walk that
-    surfaces the error.
+    The scan is explicit rather than using :meth:`Path.glob`: ``Path.glob``
+    suppresses traversal errors and would turn an unreadable directory into
+    an empty result. A missing candidate directory is legitimately empty;
+    every other scan failure keeps the pass fail-closed.
     """
     try:
         dirs = candidate_runtime_dirs()
@@ -296,9 +293,15 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
     found: list[Path] = []
     for rt in dirs:
         try:
-            found.extend(rt.glob("server-*.pid"))
+            with os.scandir(rt) as entries:
+                matches = [
+                    rt / entry.name for entry in entries if fnmatch(entry.name, "server-*.pid")
+                ]
+        except FileNotFoundError:
+            continue
         except OSError as exc:
             return None, f"{rt}: {exc}"
+        found.extend(matches)
     return sorted(found), ", ".join(str(rt) for rt in dirs)
 
 
