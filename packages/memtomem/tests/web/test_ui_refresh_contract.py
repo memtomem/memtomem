@@ -80,34 +80,6 @@ def test_header_utility_icons_are_dependency_free_inline_svg() -> None:
     assert ">☀️<" not in html
 
 
-def test_changed_static_assets_bump_cache_versions() -> None:
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
-
-    # v=141 / watchdog v=22 add the #1983 malformed-matcher banner (PR #1986).
-    assert "/style.css?v=141" in html
-    assert "/settings-hooks-watchdog.js?v=22" in html
-    # Issue #2035 adds the applied/preview namespace-provenance renderer.
-    assert "/app.js?v=159" in html
-    # Issue #2026 changes the shared indexing-error classifier plus its Settings
-    # and Sources consumers; all three consumers must invalidate cached copies
-    # together or their cross-file helper calls can fail at runtime.
-    assert "/settings-harness.js?v=9" in html
-    assert "/settings-config.js?v=20" in html
-    assert "/sources-memory-dirs.js?v=16" in html
-    # ADR-0030 PR-F: the new Global-library fragment + the pull.js bump that added
-    # its defaultTier param must carry fresh cache versions. v=3 adds the
-    # per-surface remediation hints on Pull refusals (#1869).
-    assert "/context-gateway-global.js?v=1" in html
-    assert "/context-gateway-pull.js?v=3" in html
-    # ADR-0030 PR-G3: the read-only skills version panel changed the detail JS
-    # and added its notice/marker styles — a client holding the cached pair
-    # would not mount the section at all. v=7 threads the artifact kind into the
-    # import privacy toast (#1869), which decides which remediation it shows.
-    assert "/context-gateway-detail.js?v=7" in html
-    assert "/context-gateway-controls.js?v=2" in html
-    assert "/context-gateway-actions.js?v=3" in html
-
-
 def test_theme_icon_follows_document_theme_without_duplicate_js_state() -> None:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     css = (STATIC / "style.css").read_text(encoding="utf-8")

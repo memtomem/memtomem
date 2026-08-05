@@ -51,6 +51,39 @@ the path of least resistance — see existing files like
 `test_memory_dirs_chunk_progress.py` and `test_settings_hooks_*.py` for
 ready-made templates (issue #660).
 
+### Static asset cache keys
+
+Every production JavaScript and CSS file under
+`packages/memtomem/src/memtomem/web/static/` has a numeric `?v=N` cache key in
+either `static/index.html` or the generated `/api/docs` HTML in `web/app.py`.
+`web/cache-versions.json` binds that public version to the SHA-256 of the
+exact bytes. The default test suite checks the shipped files, both HTML
+surfaces, and the manifest in both directions, so changing an asset without a
+new cache key fails locally and in CI.
+
+After editing or replacing a JS/CSS asset:
+
+1. Increment its `?v=N` reference by exactly one in `index.html` or `app.py`.
+2. Append the new version/digest binding with the guarded updater. It refuses
+   to overwrite a digest already bound to the same public version.
+3. Run the focused contract test:
+
+```bash
+uv run python tools/update_static_asset_cache_versions.py --write
+uv run pytest -q packages/memtomem/tests/web/test_static_asset_cache_versions.py
+```
+
+The updater never edits the HTML carrier for you: the cache-key change remains
+an intentional, reviewable step. Keep prior version/digest rows in the
+manifest. For a removed asset, remove its manifest entry explicitly; for a new
+asset, start at `v=1` and let the updater add its first binding.
+
+Locale JSON is outside this contract because `i18n.js` fetches it with
+`cache: 'no-store'`; the test pins that exclusion. HTML carriers, the favicon,
+runtime OpenAPI JSON, license/README files, source-map comments, and CSS `data:`
+URLs are not cacheable JS/CSS files. Vendored JS/CSS is included here and must
+also follow the supply-chain update procedure in `web/static/vendor/README.md`.
+
 ### Running
 
 ```bash

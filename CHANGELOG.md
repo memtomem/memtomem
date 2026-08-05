@@ -87,6 +87,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Web UI asset edits can no longer silently reuse a stale browser cache key**
+  (#2041). A checked-in manifest now binds every production JS/CSS `?v=N`
+  reference in the SPA and Swagger UI to the file's SHA-256. The default test
+  suite detects changed bytes, missing or conflicting references, and orphaned
+  entries without relying on a Git base; a guarded contributor tool appends a
+  new binding only after the public version has been incremented.
+
 - **Index results now distinguish namespaces actually applied from preview-only
   fallbacks** (#2035). The additive `applied_namespaces` field on POST and SSE
   responses identifies the authoritative subset of the legacy hybrid
