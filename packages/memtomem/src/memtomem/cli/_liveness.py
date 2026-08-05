@@ -65,6 +65,32 @@ def _exception_detail(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {scrub_text(str(exc))}"
 
 
+def _runtime_candidate_skip_detail(candidate: Path, exc: OSError) -> str:
+    """Describe one non-blocking speculative-candidate rejection concisely."""
+    path = scrub_text(str(candidate))
+    detail = scrub_text(str(exc))
+    prefix = f"runtime dir {path} "
+    reason_detail = detail[len(prefix) :] if detail.startswith(prefix) else detail
+    if reason_detail.startswith("has unsafe permissions "):
+        mode = reason_detail.removeprefix("has unsafe permissions ").split(maxsplit=1)[0]
+        reason = f"unsafe permissions {mode}"
+    elif reason_detail.startswith("is owned by uid "):
+        uid = reason_detail.removeprefix("is owned by uid ").split(maxsplit=1)[0]
+        reason = f"owned by uid {uid}"
+    elif reason_detail.startswith("is a symlink"):
+        reason = "symlink"
+    elif reason_detail.startswith("is a junction"):
+        reason = "junction"
+    elif reason_detail.startswith("exists but is not a directory"):
+        reason = "not a directory"
+    else:
+        reason_detail = reason_detail.replace(path, "<candidate>").split(". ", 1)[0]
+        if len(reason_detail) > 120:
+            reason_detail = f"{reason_detail[:117]}..."
+        reason = f"{type(exc).__name__}: {reason_detail}"
+    return f"skipped: {path} ({reason})"
+
+
 def _verify_opened_regular(
     fd: int,
     path: Path,
@@ -227,6 +253,20 @@ class ServerState:
     # Upgrade uses this distinction to avoid signaling a stale pid from a
     # shared alias while still stopping a genuinely separate old server.
     legacy_lock_mode: Literal["shared", "exclusive"] | None = None
+    # Non-blocking diagnostic for a successful probe that deliberately
+    # omitted an unsafe speculative runtime candidate. Destructive callers
+    # surface this before proceeding on the narrowed inventory (#2039).
+    probe_warning: str | None = None
+
+
+def _merge_probe_warnings(*warnings: str | None) -> str | None:
+    unique = list(dict.fromkeys(warning for warning in warnings if warning))
+    return "; ".join(unique) or None
+
+
+def _with_probe_warning(state: ServerState, *warnings: str | None) -> ServerState:
+    warning = _merge_probe_warnings(state.probe_warning, *warnings)
+    return state if warning == state.probe_warning else replace(state, probe_warning=warning)
 
 
 def _parse_pid_payload(text: str) -> tuple[int | None, int | None, str | None]:
@@ -479,6 +519,9 @@ def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
     it. Other candidates are speculative contexts. If one fails the writer
     policy, no server could currently resolve to it, so skip it rather than
     let an untrusted sibling candidate deny every liveness inventory (#2039).
+    The detail string is an error when the returned list is ``None`` and a
+    concise non-blocking warning about skipped speculative candidates on
+    success.
     """
     try:
         current_runtime = runtime_dir()
@@ -487,19 +530,18 @@ def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
         return None, f"runtime dir candidates unresolved: {_exception_detail(exc)}"
 
     validated: list[Path] = []
-    details: list[str] = []
+    warnings: list[str] = []
     for candidate in candidates:
         try:
             if validate_runtime_dir(candidate):
                 validated.append(candidate)
-                details.append(scrub_text(str(candidate)))
         except OSError as exc:
             if candidate == current_runtime:
                 return None, (
                     f"runtime dir candidate {scrub_text(str(candidate))}: {_exception_detail(exc)}"
                 )
-            details.append(f"skipped: {scrub_text(str(candidate))} ({_exception_detail(exc)})")
-    return validated, ", ".join(details)
+            warnings.append(_runtime_candidate_skip_detail(candidate, exc))
+    return validated, "; ".join(warnings)
 
 
 def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
@@ -512,12 +554,13 @@ def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
     is alive (#2003 review).
 
     Returns ``(paths, detail)`` with ``paths`` ``None`` when the candidate
-    set could not be resolved. Callers must fail closed on ``None`` rather
-    than fall back to the caller's own path: a probe that could not even
-    enumerate where a server might be has no evidence that none exists,
-    and silently narrowing the set would let a destructive command through
-    on an incomplete pass — the same contract :func:`_glob_server_pid_files`
-    keeps (#1949).
+    set could not be resolved. On success, ``detail`` retains any concise
+    warning for a skipped speculative candidate. Callers must fail closed on
+    ``None`` rather than fall back to the caller's own path: a probe that could
+    not even enumerate where a server might be has no evidence that none
+    exists, and silently narrowing the set would let a destructive command
+    through on an incomplete pass — the same contract
+    :func:`_glob_server_pid_files` keeps (#1949).
     """
     dirs, detail = _validated_runtime_dirs()
     if dirs is None:
@@ -529,13 +572,15 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
     """Enumerate per-store ``server-*.pid`` files across both runtime dirs.
 
     Returns ``(files, detail)`` — ``files`` is ``None`` when enumeration
-    failed, with ``detail`` describing where/why. Callers must treat
-    ``None`` as "could not enumerate" and fail closed (#1949) rather than
-    conclude no per-store server exists, and a failure in *any* candidate
-    directory fails the whole pass: a directory we cannot search is not a
-    directory we can call empty. The detail is captured here so the caller
-    never re-resolves the runtime dir — if resolution itself was the
-    failure, a second call would raise out of the fail-closed path.
+    failed, with ``detail`` describing where/why. On success, ``detail`` is a
+    non-blocking warning for any speculative candidate rejected by the writer
+    policy. Callers must treat ``None`` as "could not enumerate" and fail
+    closed (#1949) rather than conclude no per-store server exists, and a
+    failure in *any* validated candidate directory fails the whole pass: a
+    directory we cannot search is not a directory we can call empty. The
+    detail is captured here so the caller never re-resolves the runtime dir —
+    if resolution itself was the failure, a second call would raise out of the
+    fail-closed path.
 
     The scan is explicit rather than using :meth:`Path.glob`: ``Path.glob``
     suppresses traversal errors and would turn an unreadable directory into
@@ -575,6 +620,7 @@ def enumerate_server_liveness() -> list[ServerState]:
     #1949. Callers must refuse rather than treat that state as stoppable.
     """
     states: list[ServerState] = []
+    warning: str | None = None
     globbed, detail = _glob_server_pid_files()
     if globbed is None:
         states.append(
@@ -587,6 +633,7 @@ def enumerate_server_liveness() -> list[ServerState]:
         )
         candidates: list[Path] = []
     else:
+        warning = _merge_probe_warnings(detail)
         bare, bare_detail = _runtime_pid_candidates("server.pid")
         if bare is None:
             states.append(
@@ -598,18 +645,20 @@ def enumerate_server_liveness() -> list[ServerState]:
                 )
             )
             bare = []
+        else:
+            warning = _merge_probe_warnings(warning, bare_detail)
         candidates = [*globbed, *bare]
 
     for pid_file in candidates:
         state = probe_pid_file(pid_file)
         if state.alive:
-            states.append(state)
+            states.append(_with_probe_warning(state, warning))
 
     legacy_state = (
         probe_pid_file(legacy_server_pid_path()) if os.name == "nt" else probe_legacy_pid_file()
     )
     if legacy_state.alive:
-        states.append(legacy_state)
+        states.append(_with_probe_warning(legacy_state, warning))
     return states
 
 
@@ -648,14 +697,15 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
                 pid_file=None,
                 probe_error=f"could not resolve pid candidates ({scoped_detail or bare_detail})",
             )
+        warning = _merge_probe_warnings(scoped_detail, bare_detail)
         for pid_file in (*scoped, *bare):
             state = probe_pid_file(pid_file)
             if state.alive:
-                return state
+                return _with_probe_warning(state, warning)
         state = _probe_legacy_gate()
         if state.alive:
-            return state
-        return ServerState(alive=False, pid=None, pid_file=None)
+            return _with_probe_warning(state, warning)
+        return ServerState(alive=False, pid=None, pid_file=None, probe_warning=warning)
 
     globbed, detail = _glob_server_pid_files()
     if globbed is None:
@@ -673,14 +723,15 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
             pid_file=None,
             probe_error=f"could not resolve server.pid candidates ({bare_detail})",
         )
+    warning = _merge_probe_warnings(detail, bare_detail)
     for pid_file in (*globbed, *bare):
         state = probe_pid_file(pid_file)
         if state.alive:
-            return state
+            return _with_probe_warning(state, warning)
     state = _probe_legacy_gate()
     if state.alive:
-        return state
-    return ServerState(alive=False, pid=None, pid_file=None)
+        return _with_probe_warning(state, warning)
+    return ServerState(alive=False, pid=None, pid_file=None, probe_warning=warning)
 
 
 def check_web_liveness() -> ServerState:

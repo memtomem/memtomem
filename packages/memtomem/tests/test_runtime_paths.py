@@ -216,7 +216,7 @@ class TestEnsureRuntimeDir:
         expected name lets us exercise that branch end-to-end.
         """
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        tmp_tmp = tmp_path / "tmp"
+        tmp_tmp = tmp_path / "tmp with space"
         tmp_tmp.mkdir()
         os.chmod(tmp_tmp, 0o700)
         monkeypatch.setenv("TMPDIR", str(tmp_tmp))
@@ -227,15 +227,19 @@ class TestEnsureRuntimeDir:
         # Pre-create the path that ``runtime_dir()`` will return under
         # the stubbed uid. Owned by us (``st_uid == real_uid``) but the
         # stubbed ``geteuid()`` returns ``stubbed_uid`` → mismatch.
-        (tmp_tmp / f"memtomem-{stubbed_uid}").mkdir(mode=0o700)
+        target = tmp_tmp / f"memtomem-{stubbed_uid}"
+        target.mkdir(mode=0o700)
         monkeypatch.setattr(os, "geteuid", lambda: stubbed_uid)
 
         try:
             with pytest.raises(PermissionError, match="owned by uid") as exc_info:
                 ensure_runtime_dir()
             message = str(exc_info.value)
-            assert "Ask an administrator" in message
+            command = f"rm -rf -- {_hint_quote(target)}"
+            assert "ask an administrator" in message
             assert "XDG_RUNTIME_DIR or TMPDIR" in message
+            assert message.endswith(command)
+            assert f"{command}." not in message
         finally:
             tempfile.tempdir = None  # reset cache for subsequent tests
 
