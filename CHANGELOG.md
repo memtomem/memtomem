@@ -45,6 +45,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Hook settings operations no longer mistake malformed matchers for
+  match-all** (#1987). A present `null`, number, array, or object matcher used
+  to normalize to the same empty string as an omitted matcher, so the doctor
+  could report false duplicates and copy/migrate could emit a live match-all
+  rule or delete its source. The doctor now reports malformed rows explicitly;
+  copy and migrate reject the whole request before writing, including when a
+  matcher changes type between planning and apply.
+
 - **Web chunk deletion no longer reports success while leaving the target
   indexed** (#2016). Source access and stale line-provenance failures now stop
   before any index-only fallback, while failures after the source entry was

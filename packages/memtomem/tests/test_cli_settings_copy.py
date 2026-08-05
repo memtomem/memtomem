@@ -257,6 +257,20 @@ def test_same_project_destination_points_at_settings_migrate(cli_projects) -> No
     assert "settings-migrate" in result.output
 
 
+def test_malformed_matcher_refuses_cli_copy_and_writes_nothing(cli_projects) -> None:
+    source = cli_projects["a"] / CANONICAL_SETTINGS_FILE
+    doc = json.loads(source.read_text(encoding="utf-8"))
+    doc["hooks"]["SessionStart"] = [{"matcher": ["Bash"], "hooks": [_inner("broken")]}]
+    source.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+    result = _invoke(_copy_args(cli_projects["b"], "--to", "project_local"))
+
+    assert result.exit_code == 1
+    assert "Malformed hook matcher" in result.output
+    assert "event 'SessionStart'" in result.output
+    assert not (cli_projects["b"] / CANONICAL_SETTINGS_FILE).exists()
+
+
 # ── Gate A via the CLI ───────────────────────────────────────────────
 
 

@@ -24,6 +24,7 @@ from memtomem.context.settings import CANONICAL_SETTINGS_FILE
 from memtomem.context.settings_doctor import (
     HookSignature,
     detect_duplicate_tiers,
+    find_malformed_matchers,
     load_canonical_signatures,
 )
 from memtomem.web.app import create_app
@@ -274,6 +275,73 @@ class TestDetectDuplicateTiers:
         assert len(duplicates) == 1
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    [None, 7, ["Bash"], {"tool": "Bash"}],
+    ids=["null", "int", "list", "dict"],
+)
+class TestMalformedMatcherHandling:
+    def test_malformed_canonical_never_matches_tier_match_all(
+        self, project_root, fake_home, malformed
+    ):
+        _write_canonical(
+            project_root,
+            {"SessionStart": [_rule(malformed, "mm index")]},
+        )
+        _write_settings(
+            fake_home / ".claude" / "settings.json",
+            {"SessionStart": [_rule("", "mm index")]},
+        )
+
+        assert detect_duplicate_tiers(project_root, active_scope="project_local") == []
+        findings = find_malformed_matchers(project_root)
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.source == "canonical"
+        assert finding.tier is None
+        assert finding.event == "SessionStart"
+        assert finding.rule_index == 0
+        assert finding.matcher_type == type(malformed).__name__
+
+    def test_malformed_tier_never_matches_canonical_match_all(
+        self, project_root, fake_home, malformed
+    ):
+        _write_canonical(
+            project_root,
+            {"SessionStart": [_rule("", "mm index")]},
+        )
+        _write_settings(
+            fake_home / ".claude" / "settings.json",
+            {"SessionStart": [_rule(malformed, "mm index")]},
+        )
+
+        assert detect_duplicate_tiers(project_root, active_scope="project_local") == []
+        [finding] = find_malformed_matchers(project_root)
+        assert finding.source == "tier"
+        assert finding.tier == "user"
+        assert finding.event == "SessionStart"
+        assert finding.matcher_type == type(malformed).__name__
+
+
+def test_healthy_duplicate_beside_malformed_rule_is_still_reported(project_root, fake_home):
+    _write_canonical(
+        project_root,
+        {
+            "PostToolUse": [
+                _rule("Edit|Write", "mm session start"),
+                _rule(["Bash"], "broken"),
+            ]
+        },
+    )
+    _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
+
+    duplicates = detect_duplicate_tiers(project_root, active_scope="project_local")
+    assert len(duplicates) == 1
+    assert duplicates[0].entries[0].matcher == "Edit|Write"
+    [finding] = find_malformed_matchers(project_root)
+    assert finding.rule_index == 1
+
+
 # ── CLI doctor subcommand ──────────────────────────────────────────
 
 
@@ -335,6 +403,7 @@ class TestSettingsDoctorCli:
             "status": "clean",
             "active_scope": "user",
             "duplicates": [],
+            "malformed_matchers": [],
         }
 
     def test_json_duplicates_schema(self, project_root, fake_home, monkeypatch):
@@ -366,6 +435,57 @@ class TestSettingsDoctorCli:
             "matcher": "Edit|Write",
             "command_preview": "mm session start",
         }
+
+    def test_json_malformed_only_schema(self, project_root, fake_home, monkeypatch):
+        _write_canonical(
+            project_root,
+            {"SessionStart": [_rule(["Bash"], "mm index")]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "malformed"
+        assert payload["duplicates"] == []
+        assert payload["malformed_matchers"] == [
+            {
+                "source": "canonical",
+                "tier": None,
+                "path": str(project_root / CANONICAL_SETTINGS_FILE),
+                "event": "SessionStart",
+                "rule_index": 0,
+                "matcher_type": "list",
+            }
+        ]
+
+    def test_duplicates_keep_status_precedence_over_malformed(
+        self, project_root, fake_home, monkeypatch
+    ):
+        _write_canonical(
+            project_root,
+            {
+                "PostToolUse": [
+                    _rule("Edit|Write", "mm session start"),
+                    _rule(None, "broken"),
+                ]
+            },
+        )
+        _write_settings(fake_home / ".claude" / "settings.json", _bundled_hook())
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "duplicates"
+        assert len(payload["duplicates"]) == 1
+        assert len(payload["malformed_matchers"]) == 1
 
 
 # ── CLI sync warning ───────────────────────────────────────────────

@@ -305,10 +305,15 @@ non-active tiers before write and surface a non-blocking warning when
 duplicates exist. For CI / scripting use, run the on-demand check:
 
 ```bash
-mm context settings-doctor               # exits 0 if clean, 1 if duplicates
+mm context settings-doctor               # exits 0 if clean, 1 if duplicates/malformed
 mm context settings-doctor --json        # structured output for scripting
 mm context settings-doctor --scope=project_local   # one-shot scope override
 ```
+
+The doctor also reports any hook rule whose present `matcher` is not a string.
+JSON output includes a `malformed_matchers` array with the source, tier, path,
+event, rule index, and matcher type. A matcher may be omitted for match-all;
+`null`, numbers, arrays, and objects are malformed.
 
 <details>
 <summary>Fixing duplicates — migrate and copy hooks across tiers and projects</summary>
@@ -359,6 +364,11 @@ Re-runs are idempotent no-ops; a same-matcher rule with different content
 at the destination is skipped with the colliding entry named (never
 duplicated). When several entries share `(event, matcher)`, disambiguate
 with `--hook-command <substring>`.
+
+Both `settings-copy` and `settings-migrate` reject the entire request before
+writing when any related canonical, source-tier, or destination-tier file has
+a non-string matcher. Fix every reported row before retrying; malformed user
+rules are never rewritten or removed by these operations.
 
 </details>
 

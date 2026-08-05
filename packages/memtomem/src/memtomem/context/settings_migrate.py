@@ -31,8 +31,12 @@ from pathlib import Path
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
+    MalformedHookMatcher,
+    MalformedHookMatcherError,
     _MALFORMED,
     _SETTINGS_LOCK_BUDGET_S,
+    _find_nonstring_matchers,
+    _normalize_matcher,
     _read_with_mtime,
     _rule_content_equal,
     _stamp_status_markers,
@@ -41,7 +45,6 @@ from memtomem.context.settings import (
 from memtomem.context.settings_doctor import (
     HookSignature,
     _normalize_command,
-    _normalize_matcher,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,16 +147,19 @@ def _safe_load_json_dict(path: Path) -> dict | None:
     return raw
 
 
-def _signature_for_inner(event: str, matcher: str, inner: dict) -> HookSignature | None:
+def _signature_for_inner(event: str, matcher: object, inner: dict) -> HookSignature | None:
     """Return the canonical signature for one inner hook entry, or None."""
     if not isinstance(inner, dict):
+        return None
+    matcher_norm = _normalize_matcher(matcher)
+    if matcher_norm is None:
         return None
     command = _normalize_command(inner.get("command", ""))
     if not command:
         return None
     return HookSignature(
         event=event,
-        matcher=_normalize_matcher(matcher),
+        matcher=matcher_norm,
         command_shape=command,
     )
 
@@ -202,6 +208,8 @@ def _target_rule_lookup(
             if not isinstance(rule, dict):
                 continue
             matcher = _normalize_matcher(rule.get("matcher", ""))
+            if matcher is None:
+                continue
             out.setdefault((event, matcher), []).append(rule)
     return out
 
@@ -313,7 +321,40 @@ def plan_migration(
     except (OSError, RuntimeError):
         pass
 
-    canonical = _safe_load_json_dict(project_root / CANONICAL_SETTINGS_FILE)
+    canonical_path = project_root / CANONICAL_SETTINGS_FILE
+    canonical = _safe_load_json_dict(canonical_path)
+    source = _safe_load_json_dict(source_path)
+    target = _safe_load_json_dict(target_path)
+    malformed: list[MalformedHookMatcher] = []
+    if canonical is not None:
+        malformed.extend(
+            _find_nonstring_matchers(
+                canonical.get("hooks", {}),
+                source="canonical settings",
+                path=canonical_path,
+            )
+        )
+    if source is not None:
+        malformed.extend(
+            _find_nonstring_matchers(
+                source.get("hooks", {}),
+                source="source tier",
+                tier=source_scope,
+                path=source_path,
+            )
+        )
+    if target is not None:
+        malformed.extend(
+            _find_nonstring_matchers(
+                target.get("hooks", {}),
+                source="destination tier",
+                tier=target_scope,
+                path=target_path,
+            )
+        )
+    if malformed:
+        raise MalformedHookMatcherError(malformed)
+
     canonical_inners = _index_canonical_inners(canonical.get("hooks", {}) if canonical else {})
     if not canonical_inners:
         return MigratePlan(
@@ -324,7 +365,6 @@ def plan_migration(
             moves=(),
         )
 
-    source = _safe_load_json_dict(source_path)
     if source is None:
         return MigratePlan(
             source_scope=source_scope,
@@ -334,8 +374,8 @@ def plan_migration(
             moves=(),
         )
 
-    target = _safe_load_json_dict(target_path) or {}
-    target_index = _target_rule_lookup(target.get("hooks", {}))
+    target_doc = target or {}
+    target_index = _target_rule_lookup(target_doc.get("hooks", {}))
 
     # Walk source tier; for each inner entry whose signature is in
     # canonical_inners, build a MigrateMove. Multiple source inners
@@ -586,6 +626,31 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
                 )
                 return result
             target_existing: dict = target_raw if isinstance(target_raw, dict) else {}
+
+            # Pin both live tier documents before the first write. A matcher
+            # that drifted to a non-string must reject the whole migration;
+            # otherwise target-first ordering could add a match-all hook and
+            # source cleanup could erase the malformed rule.
+            source_raw, source_mtime_ns = _read_with_mtime(plan.source_path)
+            malformed = _find_nonstring_matchers(
+                target_existing.get("hooks", {}),
+                source="destination tier",
+                tier=plan.target_scope,
+                path=plan.target_path,
+            )
+            if isinstance(source_raw, dict):
+                malformed.extend(
+                    _find_nonstring_matchers(
+                        source_raw.get("hooks", {}),
+                        source="source tier",
+                        tier=plan.source_scope,
+                        path=plan.source_path,
+                    )
+                )
+            if malformed:
+                result.warnings.append(str(MalformedHookMatcherError(malformed)))
+                return result
+
             target_index = _target_rule_lookup(target_existing.get("hooks", {}))
 
             moves_to_write: list[MigrateMove] = []
@@ -653,7 +718,6 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
             # --- Source clean-up (target state still pinned by our locks) -
             if not sigs_to_drop:
                 return result
-            source_raw, source_mtime_ns = _read_with_mtime(plan.source_path)
             if source_raw is None:
                 # Source vanished between plan and apply (rare). Source is
                 # already clean from this command's POV; leave as-is.

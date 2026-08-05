@@ -225,6 +225,26 @@ async def test_same_project_destination_400(client, cwd_root) -> None:
     assert "settings-migrate" in resp.json()["detail"]["message"]
 
 
+@pytest.mark.asyncio
+async def test_malformed_matcher_returns_validation_400_and_writes_nothing(
+    client, tmp_path, cwd_root
+) -> None:
+    source = cwd_root / CANONICAL_SETTINGS_FILE
+    doc = json.loads(source.read_text(encoding="utf-8"))
+    doc["hooks"]["SessionStart"] = [{"matcher": {"tool": "Bash"}, "hooks": [_inner("broken")]}]
+    source.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    other = _other_project(tmp_path)
+    scope_id = await _register(client, other)
+
+    resp = await client.post(COPY_URL, json=_body(scope_id))
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "validation"
+    assert "event 'SessionStart'" in detail["message"]
+    assert not (other / CANONICAL_SETTINGS_FILE).exists()
+
+
 # ── dry-run / confirm round-trips / apply ────────────────────────────
 
 
