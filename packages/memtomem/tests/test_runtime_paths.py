@@ -21,10 +21,10 @@ import pytest
 
 from memtomem._runtime_paths import (
     _hint_quote,
-    _scrub,
     ensure_runtime_dir,
     legacy_server_pid_path,
     runtime_dir,
+    scrub_text,
     server_pid_path,
     store_pid_digest,
 )
@@ -353,7 +353,7 @@ class TestRemovalHintQuoting:
     def test_control_char_path_renders_escaped_everywhere(self, tmp_path, monkeypatch):
         """A path with an embedded control character (ESC) must render
         escaped in the *entire* message — ANSI-C ``$'...'`` form in the
-        command portion (byte-exact on paste), ``_scrub``-ed in the
+        command portion (byte-exact on paste), ``scrub_text``-ed in the
         ``runtime dir`` prose prefix. A single raw byte anywhere would
         misrender the terminal before the safe command is even reached."""
         xdg = tmp_path / "x\x1bdg"
@@ -453,19 +453,19 @@ class TestHintQuote:
 
 
 class TestScrub:
-    """``_scrub`` is the prose-side counterpart of ``_hint_quote``: the
+    """``scrub_text`` is the prose-side counterpart of ``_hint_quote``: the
     ``runtime dir {target}`` prefix renders the same environment-derived
     path, so a raw ESC/OSC there would reach the terminal before the
     safely quoted command ever does (#1956)."""
 
     def test_printable_text_passes_through(self):
-        assert _scrub("/tmp/my dir/memtomem-501") == "/tmp/my dir/memtomem-501"
+        assert scrub_text("/tmp/my dir/memtomem-501") == "/tmp/my dir/memtomem-501"
 
     def test_control_chars_become_byte_escapes(self):
-        assert _scrub("x\x1b]0;pwned\x07y") == "x\\x1b]0;pwned\\x07y"
+        assert scrub_text("x\x1b]0;pwned\x07y") == "x\\x1b]0;pwned\\x07y"
 
     def test_multibyte_non_printable_scrubs_filesystem_bytes(self):
-        assert _scrub("a​b") == "a\\xe2\\x80\\x8bb"
+        assert scrub_text("a​b") == "a\\xe2\\x80\\x8bb"
 
 
 @pytest.mark.skipif(

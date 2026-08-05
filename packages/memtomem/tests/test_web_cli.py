@@ -478,6 +478,29 @@ def test_web_status_uses_sidecar_metadata_when_pid_file_is_unreadable(
     assert "port=18080" in result.output
 
 
+def test_web_status_reports_unverified_state_without_error_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+
+    def fake_probe(_pid_file: Path) -> ServerState:
+        return ServerState(
+            alive=True,
+            pid=None,
+            pid_file=runtime_dir / "web.pid",
+            probe_error="simulated lock failure",
+        )
+
+    monkeypatch.setattr("memtomem.cli._liveness.probe_pid_file", fake_probe)
+
+    result = CliRunner().invoke(web, ["status"])
+
+    assert result.exit_code == 0
+    assert "running (unverified: simulated lock failure)" in result.output
+
+
 def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
     runtime_dir.mkdir(mode=0o700)
@@ -491,6 +514,38 @@ def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     assert result.exit_code == 2
     assert "removed stale pid file" in result.output
+    assert not pid_file.exists()
+    assert not info_file.exists()
+
+
+def test_web_stop_signals_verified_pid_and_removes_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from memtomem.cli import _liveness
+
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    pid_file = runtime_dir / "web.pid"
+    info_file = runtime_dir / "web.json"
+    pid_file.write_text("24680\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
+    info_file.write_text('{"pid": 24680, "port": 18080}\n', encoding="utf-8")
+    states = iter(
+        [
+            ServerState(alive=True, pid=24680, pid_file=pid_file),
+            ServerState(alive=False, pid=None, pid_file=pid_file),
+            ServerState(alive=False, pid=None, pid_file=None),
+        ]
+    )
+    monkeypatch.setattr(_liveness, "check_web_liveness", lambda: next(states))
+    signals: list[int] = []
+    monkeypatch.setattr(web_cmd.os, "kill", lambda pid, _sig: signals.append(pid))
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 0, result.output
+    assert signals == [24680]
+    assert "stopped pid=24680" in result.output
     assert not pid_file.exists()
     assert not info_file.exists()
 
@@ -516,6 +571,8 @@ def test_web_stop_refuses_symlinked_pid_without_signaling(
 
     assert result.exit_code == 1
     assert "Cannot verify whether the Web UI is running" in result.output
+    assert "No signal was sent" in result.output
+    assert "service manager" in result.output
     assert signals == [], "an unverified pid path must never reach os.kill"
 
 

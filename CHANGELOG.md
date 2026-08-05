@@ -106,9 +106,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   runtime directories, open pid files without following links, require one
   stable regular-file identity for the bounded metadata read and lock check,
   and discard oversized or invalid payloads before they can supply a PID.
+  The caller's resolved runtime directory remains fail-closed when unsafe,
+  while an unsafe speculative sibling is skipped because the writer policy
+  could not have selected it; this prevents a pre-created fallback directory
+  from denying every liveness inventory. A dangling pid-file link is now an
+  unverifiable live assumption rather than "stopped", and a linked current
+  runtime directory or live linked `~/.memtomem` parent makes the affected
+  probe refuse instead of following it.
   Web status/stop use the verified probe metadata and a bounded no-follow
   sidecar fallback, so an untrusted path can neither block indefinitely nor
-  cause a process to be signaled.
+  cause a process to be signaled. Status preserves its diagnostic exit
+  contract and labels an undecidable probe as `running (unverified: ...)`;
+  stop sends no signal in that case and prints an OS-level recovery path.
 
 - **Index results now distinguish namespaces actually applied from preview-only
   fallbacks** (#2035). The additive `applied_namespaces` field on POST and SSE

@@ -103,6 +103,11 @@ def _write_web_metadata(
 
 
 def _read_web_metadata() -> _WebMetadata:
+    """Read only the bounded sidecar fallback.
+
+    PID-file metadata comes from the verified liveness probe; reopening the
+    pid path here would split the bytes from the lock and identity checks.
+    """
     from memtomem.cli._liveness import _read_bounded_regular_file
 
     try:
@@ -521,17 +526,16 @@ def _web_status() -> None:
     from memtomem.cli._liveness import check_web_liveness
 
     state = check_web_liveness()
-    if state.probe_error is not None:
-        raise click.ClickException(
-            f"Cannot verify whether the Web UI is running: {state.probe_error}"
-        )
     metadata = _read_web_metadata()
     pid = state.pid if state.pid is not None else metadata.pid
     port = state.port if state.port is not None else metadata.port
     started = state.started if state.started is not None else metadata.started
     if state.alive:
+        status = "running"
+        if state.probe_error is not None:
+            status += f" (unverified: {state.probe_error})"
         click.echo(
-            f"running  pid={pid if pid is not None else '?'}  "
+            f"{status}  pid={pid if pid is not None else '?'}  "
             f"port={port if port is not None else '?'}  "
             f"started={started if started is not None else '?'}"
         )
@@ -549,7 +553,10 @@ def _web_stop() -> None:
     state = check_web_liveness()
     if state.probe_error is not None:
         raise click.ClickException(
-            f"Cannot verify whether the Web UI is running: {state.probe_error}"
+            f"Cannot verify whether the Web UI is running: {state.probe_error}\n"
+            "No signal was sent. Stop the Web UI through its service manager "
+            "or your operating system's process tools, then repair or remove "
+            "the unsafe runtime/pid entry named above and retry."
         )
     metadata = _read_web_metadata()
     pid = state.pid if state.pid is not None else metadata.pid

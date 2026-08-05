@@ -38,11 +38,13 @@ from typing import Literal
 import portalocker
 
 from memtomem._runtime_paths import (
-    _validate_runtime_dir,
     candidate_runtime_dirs,
     legacy_server_pid_path,
+    runtime_dir,
+    scrub_text,
     server_pid_path,
     store_pid_digest,
+    validate_runtime_dir,
     web_pid_path,
 )
 
@@ -59,8 +61,8 @@ class _UnsafeProbePathError(Exception):
 
 def _exception_detail(exc: BaseException) -> str:
     if isinstance(exc, _UnsafeProbePathError):
-        return str(exc)
-    return f"{type(exc).__name__}: {exc}"
+        return scrub_text(str(exc))
+    return f"{type(exc).__name__}: {scrub_text(str(exc))}"
 
 
 def _verify_opened_regular(
@@ -469,13 +471,17 @@ def _probe_legacy_gate() -> ServerState:
 
 
 def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
-    """Resolve existing runtime candidates and enforce the writer policy.
+    """Resolve existing runtime candidates under the writer policy.
 
-    A missing directory is an empty candidate. Any existing candidate that
-    could not have been accepted by :func:`ensure_runtime_dir` makes the
-    inventory incomplete and therefore fails closed.
+    A missing directory is an empty candidate. The caller's resolved
+    :func:`runtime_dir` fails closed when unsafe: it is the location a server
+    in this environment could have used before its policy changed underneath
+    it. Other candidates are speculative contexts. If one fails the writer
+    policy, no server could currently resolve to it, so skip it rather than
+    let an untrusted sibling candidate deny every liveness inventory (#2039).
     """
     try:
+        current_runtime = runtime_dir()
         candidates = candidate_runtime_dirs()
     except OSError as exc:
         return None, f"runtime dir candidates unresolved: {_exception_detail(exc)}"
@@ -483,11 +489,14 @@ def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
     validated: list[Path] = []
     for candidate in candidates:
         try:
-            if _validate_runtime_dir(candidate):
+            if validate_runtime_dir(candidate):
                 validated.append(candidate)
-        except (OSError, TypeError, ValueError) as exc:
-            return None, f"runtime dir candidate {candidate}: {_exception_detail(exc)}"
-    return validated, ", ".join(str(path) for path in validated)
+        except OSError as exc:
+            if candidate == current_runtime:
+                return None, (
+                    f"runtime dir candidate {scrub_text(str(candidate))}: {_exception_detail(exc)}"
+                )
+    return validated, ", ".join(scrub_text(str(path)) for path in validated)
 
 
 def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
@@ -543,7 +552,7 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
         except FileNotFoundError:
             continue
         except OSError as exc:
-            return None, f"{rt}: {exc}"
+            return None, f"{scrub_text(str(rt))}: {_exception_detail(exc)}"
         found.extend(matches)
     return sorted(found), detail
 
@@ -683,8 +692,8 @@ def check_web_liveness() -> ServerState:
     """
     pid_file = web_pid_path()
     try:
-        runtime_present = _validate_runtime_dir(pid_file.parent)
-    except (OSError, TypeError, ValueError) as exc:
+        runtime_present = validate_runtime_dir(pid_file.parent)
+    except OSError as exc:
         return ServerState(
             alive=True,
             pid=None,
