@@ -618,9 +618,11 @@ class TestCheckServerLivenessStoreScope:
         import memtomem.cli._liveness as liveness
 
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt])
+        real_scandir = os.scandir
 
         def _deny_scan(path):
-            assert Path(path) == rt
+            if Path(path) != rt:
+                return real_scandir(path)
             raise PermissionError("unsearchable runtime dir")
 
         monkeypatch.setattr(liveness.os, "scandir", _deny_scan)
@@ -639,9 +641,14 @@ class TestCheckServerLivenessStoreScope:
         class _Entry:
             name = "server-aaaaaaaaaaaaaaaa.pid"
 
+        real_scandir = os.scandir
+
         @contextlib.contextmanager
         def _broken_scan(path):
-            assert Path(path) == rt
+            if Path(path) != rt:
+                with real_scandir(path) as entries:
+                    yield entries
+                return
 
             def _entries():
                 yield _Entry()

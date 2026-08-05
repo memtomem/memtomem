@@ -90,7 +90,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **Store-agnostic server discovery now fails closed when a runtime directory
   cannot be searched** (#2038). The pid inventory used by `mm upgrade` now
   surfaces permission and traversal errors instead of treating the directory
-  as empty, while absent runtime directories remain a normal empty state.
+  as empty. Absent runtime directories remain a normal empty state; a
+  non-directory or symlink loop at a candidate path now refuses the upgrade
+  instead of silently proceeding.
 
 - **Web UI asset edits can no longer silently reuse a stale browser cache key**
   (#2041). A checked-in manifest now binds every production JS/CSS `?v=N`
