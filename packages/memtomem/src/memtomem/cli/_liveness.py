@@ -487,16 +487,19 @@ def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
         return None, f"runtime dir candidates unresolved: {_exception_detail(exc)}"
 
     validated: list[Path] = []
+    details: list[str] = []
     for candidate in candidates:
         try:
             if validate_runtime_dir(candidate):
                 validated.append(candidate)
+                details.append(scrub_text(str(candidate)))
         except OSError as exc:
             if candidate == current_runtime:
                 return None, (
                     f"runtime dir candidate {scrub_text(str(candidate))}: {_exception_detail(exc)}"
                 )
-    return validated, ", ".join(scrub_text(str(path)) for path in validated)
+            details.append(f"skipped: {scrub_text(str(candidate))} ({_exception_detail(exc)})")
+    return validated, ", ".join(details)
 
 
 def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:

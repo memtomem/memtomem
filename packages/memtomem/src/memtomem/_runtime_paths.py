@@ -276,7 +276,9 @@ def validate_runtime_dir(target: Path) -> bool:
             raise PermissionError(
                 f"runtime dir {scrub_text(str(target))} is owned by uid {st.st_uid} "
                 f"(expected {os.geteuid()}). "
-                f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
+                "Ask an administrator to remove it: "
+                f"rm -rf -- {_hint_quote(target)}. Alternatively, retry with "
+                "XDG_RUNTIME_DIR or TMPDIR set to a private directory you own."
             )
         unsafe = stat.S_IMODE(st.st_mode) & 0o077
         if unsafe:

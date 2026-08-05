@@ -231,8 +231,11 @@ class TestEnsureRuntimeDir:
         monkeypatch.setattr(os, "geteuid", lambda: stubbed_uid)
 
         try:
-            with pytest.raises(PermissionError, match="owned by uid"):
+            with pytest.raises(PermissionError, match="owned by uid") as exc_info:
                 ensure_runtime_dir()
+            message = str(exc_info.value)
+            assert "Ask an administrator" in message
+            assert "XDG_RUNTIME_DIR or TMPDIR" in message
         finally:
             tempfile.tempdir = None  # reset cache for subsequent tests
 

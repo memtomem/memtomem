@@ -809,8 +809,12 @@ class TestCheckServerLivenessStoreScope:
         loose.chmod(0o755)
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt, loose])
 
+        files, detail = liveness._glob_server_pid_files()
         state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
 
+        assert files == []
+        assert f"skipped: {loose}" in detail
+        assert "unsafe permissions" in detail
         assert state.alive is False
         assert state.probe_error is None
 
