@@ -62,13 +62,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   files became store-scoped, several legitimate `server-<digest>.pid` holders
   can coexist, but the upgrade probe returned only the first live state and
   left the others running the old binary. On POSIX, upgrade now inventories
-  and stops every attributable server and Web UI, reinstalls, then retires one
-  complete post-install snapshot; only different pids that appear afterwards
-  are accepted as the new generation. It also distinguishes a modern shared
-  legacy-lock alias from a separate exclusive old server, reports every probe
-  failure in one pass, and prints the full dry-run plan before a diagnostic
-  refusal. Windows retains its no-kill contract, so incomplete inventory is a
-  warning and users must restart every server and `mm web` manually.
+  and stops every attributable server and Web UI, reinstalls, then reconciles
+  one post-install snapshot. New pid metadata carries a process start stamp,
+  so processes launched after the package swap remain up while older or
+  unstamped holders are retired; lock-before-pid startup windows get two short
+  bounded retries before they become errors. The default flow uses three full
+  inventories rather than probing every pid path a fourth time. Upgrade also
+  distinguishes a modern shared legacy-lock alias from a separate exclusive
+  old server, reports every probe failure in one pass, and prints the full
+  dry-run plan before a diagnostic refusal. Windows retains its no-kill
+  contract: incomplete inventory is a warning, DB-lock warnings remain visible
+  even for a known live server, and users must restart every server and
+  `mm web` manually. JSON adds `inventory_complete`, `warnings`, and the
+  post-install partial-failure marker `cleanup_complete` without removing
+  existing fields.
 
 - **Web chunk deletion no longer reports success while leaving the target
   indexed** (#2016). Source access and stale line-provenance failures now stop

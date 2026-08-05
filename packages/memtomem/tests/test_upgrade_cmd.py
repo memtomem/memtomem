@@ -80,10 +80,10 @@ def _patch_liveness(
     snapshots: list[list[ServerState]] | None = None,
     web_snapshots: list[ServerState] | None = None,
 ) -> list[list[ServerState]]:
-    """Patch the initial, pre-install, retirement, and final snapshots."""
+    """Patch initial, pre-install, and post-install complete inventories."""
     initial = state if isinstance(state, list) else ([state] if state.alive else [])
-    server_snapshots = snapshots or [initial, [] if post is None else post, [], []]
-    web_sequence = web_snapshots or [web, _DEAD, _DEAD, _DEAD]
+    server_snapshots = snapshots or [initial, [] if post is None else post, []]
+    web_sequence = web_snapshots or [web, _DEAD, _DEAD]
     seen: list[list[ServerState]] = []
     seen_web: list[ServerState] = []
 
@@ -241,6 +241,41 @@ def test_running_server_sigterm_path(monkeypatch, tmp_path, fake_uv, force_tty):
     assert all(s != upgrade_cmd.signal.SIGKILL for _pid, s in sent)
     assert not pid_file.exists()
     assert calls  # uv was invoked
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX stop accounting")
+def test_human_refusal_keeps_partial_stop_accounting(monkeypatch, tmp_path, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    first_path = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    second_path = tmp_path / "server-bbbbbbbbbbbbbbbb.pid"
+    first_path.write_text("111")
+    second_path.write_text("222")
+    states = [
+        ServerState(alive=True, pid=111, pid_file=first_path),
+        ServerState(alive=True, pid=222, pid_file=second_path),
+    ]
+    _patch_liveness(monkeypatch, states)
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    probes = iter(
+        [
+            ServerState(
+                alive=True,
+                pid=111,
+                pid_file=first_path,
+                probe_error="PermissionError: denied",
+            ),
+            _DEAD,
+        ]
+    )
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _path: next(probes))
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 1, result.output
+    assert "cannot verify" in result.output
+    assert "Stopped before failure: 111, 222" in result.output
+    assert f"Removed before failure: {second_path}" in result.output
+    assert calls == []
 
 
 @pytest.mark.skipif(
@@ -649,6 +684,135 @@ def test_boundary_enumeration_error_refuses_after_completed_stops(
     assert calls == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX inventory stabilization")
+def test_lock_before_pid_startup_windows_are_retried(monkeypatch, tmp_path, fake_uv, force_tty):
+    """Shared-legacy-only and empty runtime-payload windows must settle."""
+    calls, _configure = fake_uv
+    runtime_pid = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    legacy_pid = tmp_path / ".server.pid"
+    runtime_pid.write_text("")
+    legacy_pid.write_text("")
+    monkeypatch.setattr(upgrade_cmd, "legacy_server_pid_path", lambda: legacy_pid)
+
+    shared_alias = ServerState(
+        alive=True,
+        pid=None,
+        pid_file=legacy_pid,
+        legacy_lock_mode="shared",
+    )
+    empty_runtime = ServerState(alive=True, pid=None, pid_file=runtime_pid)
+    ready_runtime = ServerState(alive=True, pid=321, pid_file=runtime_pid)
+    seen = _patch_liveness(
+        monkeypatch,
+        [shared_alias],
+        snapshots=[
+            [shared_alias],
+            [empty_runtime, shared_alias],
+            [ready_runtime, shared_alias],
+            [],
+            [],
+        ],
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(upgrade_cmd.time, "sleep", sleeps.append)
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _path: _DEAD)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["killed"] == [321]
+    assert sleeps == [0.05, 0.1]
+    assert seen == [
+        [shared_alias],
+        [empty_runtime, shared_alias],
+        [ready_runtime, shared_alias],
+        [],
+        [],
+    ]
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX inventory stabilization")
+def test_unsignalable_startup_window_fails_after_bounded_retries(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    calls, _configure = fake_uv
+    pid_file = tmp_path / "server.pid"
+    transient = ServerState(alive=True, pid=None, pid_file=pid_file)
+    seen = _patch_liveness(monkeypatch, transient, snapshots=[[transient]])
+    sleeps: list[float] = []
+    monkeypatch.setattr(upgrade_cmd.time, "sleep", sleeps.append)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 1, result.output
+    assert "no signalable PID" in json.loads(result.stdout)["error"]
+    assert sleeps == [0.05, 0.1]
+    assert seen == [[transient], [transient], [transient]]
+    assert calls == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX boundary stabilization")
+def test_preinstall_boundary_retries_empty_pid_payload(monkeypatch, tmp_path, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    pid_file = tmp_path / "server.pid"
+    transient = ServerState(alive=True, pid=None, pid_file=pid_file)
+    ready = ServerState(alive=True, pid=777, pid_file=pid_file)
+    seen = _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        snapshots=[[], [transient], [ready], [ready]],
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(upgrade_cmd.time, "sleep", sleeps.append)
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _path: _DEAD)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["killed"] == [777]
+    assert sleeps == [0.05]
+    assert seen == [[], [transient], [ready], [ready]]
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX post-install stabilization")
+def test_postinstall_snapshot_retries_before_accepting_new_generation(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    calls, _configure = fake_uv
+    cutoff = upgrade_cmd.datetime.fromisoformat("2026-08-05T02:00:00+00:00")
+    monkeypatch.setattr(upgrade_cmd, "_utc_now", lambda: cutoff)
+    pid_file = tmp_path / "server.pid"
+    transient = ServerState(alive=True, pid=None, pid_file=pid_file)
+    ready = ServerState(
+        alive=True,
+        pid=777,
+        pid_file=pid_file,
+        started="2026-08-05T02:00:00.001000+00:00",
+    )
+    seen = _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        snapshots=[[], [], [transient], [ready]],
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(upgrade_cmd.time, "sleep", sleeps.append)
+
+    def unexpected_kill(*_args):
+        raise AssertionError("the stabilized new generation must stay running")
+
+    monkeypatch.setattr(upgrade_cmd.os, "kill", unexpected_kill)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["killed"] == []
+    assert sleeps == [0.05]
+    assert seen == [[], [], [transient], [ready]]
+    assert len(calls) == 1
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only: Windows skips the post-stop clean-server boundary",
@@ -685,7 +849,49 @@ def test_server_starting_during_reinstall_is_recycled(monkeypatch, tmp_path, fak
     assert result.exit_code == 0, result.output
     assert events == [("install", None), ("term", 777)]
     assert len(calls) == 1
-    assert seen == [[], [], [new_server], [replacement]]
+    # Initial, pre-install, and post-install are the only unconditional
+    # complete inventories; the replacement uses the targeted path re-probe.
+    assert seen == [[], [], [new_server]]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX generation timestamps")
+def test_processes_started_after_install_are_not_recycled(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    calls, _configure = fake_uv
+    cutoff = upgrade_cmd.datetime.fromisoformat("2026-08-05T02:00:00+00:00")
+    monkeypatch.setattr(upgrade_cmd, "_utc_now", lambda: cutoff)
+    server = ServerState(
+        alive=True,
+        pid=777,
+        pid_file=tmp_path / "server.pid",
+        started="2026-08-05T02:00:00.001000+00:00",
+    )
+    web = ServerState(
+        alive=True,
+        pid=888,
+        pid_file=tmp_path / "web.pid",
+        port=8080,
+        started="2026-08-05T02:00:00.002000+00:00",
+    )
+    seen = _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        snapshots=[[], [], [server]],
+        web_snapshots=[_DEAD, _DEAD, web],
+    )
+
+    def unexpected_kill(*_args):
+        raise AssertionError("a verified new-generation process must remain running")
+
+    monkeypatch.setattr(upgrade_cmd.os, "kill", unexpected_kill)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["killed"] == []
+    assert seen == [[], [], [server]]
+    assert len(calls) == 1
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX generation verification")
@@ -711,6 +917,37 @@ def test_retirement_pid_still_present_reports_partial_failure(
     assert payload["reinstalled"] == "memtomem"
     assert payload["cleanup_complete"] is False
     assert "retirement pid 777 still holds" in payload["error"]
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX generation verification")
+def test_reused_pid_with_new_start_stamp_is_not_misclassified(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    calls, _configure = fake_uv
+    cutoff = upgrade_cmd.datetime.fromisoformat("2026-08-05T02:00:00+00:00")
+    monkeypatch.setattr(upgrade_cmd, "_utc_now", lambda: cutoff)
+    pid_file = tmp_path / "server.pid"
+    old = ServerState(
+        alive=True,
+        pid=777,
+        pid_file=pid_file,
+        started="2026-08-05T01:59:00+00:00",
+    )
+    replacement = ServerState(
+        alive=True,
+        pid=777,
+        pid_file=pid_file,
+        started="2026-08-05T02:00:01+00:00",
+    )
+    _patch_liveness(monkeypatch, _DEAD, snapshots=[[], [], [old]])
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _path: replacement)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["killed"] == [777]
     assert len(calls) == 1
 
 
@@ -1039,6 +1276,24 @@ def test_db_lock_warning_in_json_output(monkeypatch, tmp_path, fake_uv, force_tt
     payload = json.loads(result.output.strip().splitlines()[-1])
     assert payload["ok"] is True
     assert payload["db_lock_warning"] is True
+
+
+def test_windows_live_server_does_not_suppress_db_lock_warning(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    """Windows leaves known old processes up, so a DB lock still warns."""
+    _calls, _configure = fake_uv
+    monkeypatch.setattr(upgrade_cmd.sys, "platform", "win32")
+    pid_file = tmp_path / "server.pid"
+    state = ServerState(alive=True, pid=12345, pid_file=pid_file)
+    seen = _patch_liveness(monkeypatch, state)
+    _patch_db_probe(monkeypatch, tmp_path, locked=True)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["db_lock_warning"] is True
+    assert seen == [[state]]
 
 
 def test_no_db_lock_no_warning(monkeypatch, tmp_path, fake_uv, force_tty):

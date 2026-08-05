@@ -54,10 +54,10 @@ class ServerState:
 def _parse_pid_payload(text: str) -> tuple[int | None, int | None, str | None]:
     """Parse pid-file payloads.
 
-    Legacy server pid files are a single ``pid`` line. ``mm web`` writes
-    ``pid`` / ``port`` / ``started`` on separate lines. The first line stays
-    the pid so older call sites that only care about the process id remain
-    compatible.
+    Legacy server pid files are a single ``pid`` line. Current servers and
+    ``mm web`` write ``pid`` / optional ``port`` / ``started`` on separate
+    lines. The first line stays the pid so older call sites that only care
+    about the process id remain compatible.
     """
     lines = [line.strip() for line in text.splitlines()]
     try:
@@ -187,6 +187,10 @@ def probe_legacy_pid_file(pid_file: Path | None = None) -> ServerState:
         return state
 
     try:
+        # portalocker's POSIX backend uses ``flock`` (open-file-description
+        # scoped), so opening a second fd and closing it cannot release the
+        # holder's lock. This classification would not be safe with classic
+        # process-scoped ``fcntl`` record locks.
         fp = open(target, "rb+")
     except OSError as exc:
         return replace(state, probe_error=f"legacy lock classification failed: {exc}")

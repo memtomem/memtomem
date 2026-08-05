@@ -9,10 +9,10 @@ issue #443. The same applies to a backgrounded ``mm web`` — it holds
 (#1569). ``mm upgrade`` wraps the reinstall with process-level hygiene:
 
     enumerate live servers + probe web UI → SIGTERM (escalate to SIGKILL
-    after grace) → reinstall → snapshot and retire every process that may
-    still have the old generation imported → accept only later replacement
-    pids. A final ``BEGIN IMMEDIATE`` DB probe warns about writers the pid
-    files cannot explain (#1606).
+    after grace) → reinstall → reconcile one post-install snapshot using
+    process start stamps → retire old/unstamped holders while preserving the
+    new generation. A final ``BEGIN IMMEDIATE`` DB probe warns about writers
+    the pid files cannot explain (#1606).
 
 There is no ``--skip-pkill``: the kill-then-reinstall ordering is the
 whole reason this command exists. On Windows the kill stage is skipped
@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -42,6 +43,7 @@ from memtomem.cli._liveness import (
     ServerState,
     check_web_liveness,
     enumerate_server_liveness,
+    probe_legacy_pid_file,
     probe_pid_file,
 )
 from memtomem.cli._prompts import confirm as _confirm
@@ -61,6 +63,11 @@ _VERSION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# A holder can acquire its compatibility/runtime lock just before writing the
+# pid payload. Two short retries cover that normal startup window without
+# turning a real unsignalable holder into an unbounded wait.
+_INVENTORY_RETRY_DELAYS = (0.05, 0.1)
+
 
 def _isatty() -> bool:
     """CliRunner seam (mirrors ``uninstall_cmd._isatty``)."""
@@ -71,6 +78,46 @@ def _format_path(p: Path) -> str:
     home = str(Path.home())
     s = str(p)
     return s.replace(home, "~", 1) if s.startswith(home) else s
+
+
+def _utc_now() -> datetime:
+    """Clock seam for process-generation tests."""
+    return datetime.now(UTC)
+
+
+def _started_at(state: ServerState) -> datetime | None:
+    """Parse a pid payload's UTC generation stamp, if it has one."""
+    if state.started is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(state.started)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _is_new_generation(state: ServerState, installed_at: datetime) -> bool:
+    """Return whether *state* declares it started after installation."""
+    started = _started_at(state)
+    return started is not None and started >= installed_at
+
+
+def _same_process_generation(current: ServerState, previous: ServerState) -> bool:
+    """Conservatively compare a post-stop holder with its retirement target.
+
+    Start stamps disambiguate the vanishingly rare case where the kernel
+    recycles a PID during cleanup. Older pid payloads have no stamp, so a
+    matching PID remains fail-closed for backward compatibility.
+    """
+    if current.pid != previous.pid:
+        return False
+    current_started = _started_at(current)
+    previous_started = _started_at(previous)
+    if current_started is not None and previous_started is not None:
+        return current_started == previous_started
+    return True
 
 
 def _probe_problem(state: ServerState, label: str) -> str:
@@ -106,6 +153,7 @@ def _upgrade_server_stops(states: list[ServerState]) -> list[ServerState]:
 
 def _inventory_problems(server_states: list[ServerState], web_state: ServerState) -> list[str]:
     """Return every error or live state that cannot be safely retired."""
+    legacy_pid = legacy_server_pid_path()
     problems = [
         _probe_problem(state, "memtomem-server")
         for state in server_states
@@ -130,7 +178,7 @@ def _inventory_problems(server_states: list[ServerState], web_state: ServerState
     runtime_servers = [
         state
         for state in direct_servers
-        if state.pid_file != legacy_server_pid_path() and state.probe_error is None
+        if state.pid_file != legacy_pid and state.probe_error is None and state.pid is not None
     ]
     if shared_aliases and not runtime_servers:
         path = _format_path(shared_aliases[0].pid_file or legacy_server_pid_path())
@@ -143,6 +191,47 @@ def _inventory_problems(server_states: list[ServerState], web_state: ServerState
         path = _format_path(web_state.pid_file) if web_state.pid_file is not None else "?"
         problems.append(f"web UI: live lock {path} has no signalable PID")
     return problems
+
+
+def _has_startup_gap(server_states: list[ServerState], web_state: ServerState) -> bool:
+    """Return whether a normal pid-payload startup window may be visible."""
+    legacy_pid = legacy_server_pid_path()
+    direct_servers = _upgrade_server_stops(server_states)
+    if any(
+        state.alive and state.probe_error is None and state.pid is None for state in direct_servers
+    ):
+        return True
+    if web_state.alive and web_state.probe_error is None and web_state.pid is None:
+        return True
+
+    has_shared_alias = any(state.legacy_lock_mode == "shared" for state in server_states)
+    has_signalable_runtime = any(
+        state.pid_file != legacy_pid and state.probe_error is None and state.pid is not None
+        for state in direct_servers
+    )
+    return has_shared_alias and not has_signalable_runtime
+
+
+def _stabilize_process_inventory(
+    server_states: list[ServerState] | None = None,
+    web_state: ServerState | None = None,
+) -> tuple[list[ServerState], ServerState]:
+    """Retry only transient lock-before-payload startup snapshots.
+
+    Enumeration and real probe errors remain immediate failures. A held lock
+    with no pid, or a shared legacy alias whose runtime pid file has not yet
+    appeared, gets two bounded backoff retries before it becomes a hard
+    inventory problem.
+    """
+    current_servers = enumerate_server_liveness() if server_states is None else server_states
+    current_web = check_web_liveness() if web_state is None else web_state
+    for delay in _INVENTORY_RETRY_DELAYS:
+        if not _has_startup_gap(current_servers, current_web):
+            break
+        time.sleep(delay)
+        current_servers = enumerate_server_liveness()
+        current_web = check_web_liveness()
+    return current_servers, current_web
 
 
 def _inventory_failure_message(problems: list[str], *, package_changed: bool = False) -> str:
@@ -181,6 +270,11 @@ def _refuse_upgrade(
         click.echo(_json.dumps(payload))
     else:
         click.secho(message, fg="red")
+        if killed:
+            click.echo("Stopped before failure: " + ", ".join(str(pid) for pid in killed))
+        if removed:
+            for path in removed:
+                click.echo(f"Removed before failure: {_format_path(path)}")
     sys.exit(1)
 
 
@@ -199,18 +293,29 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _reprobe_process_state(state: ServerState) -> ServerState:
+    """Re-probe the same lock path while preserving legacy classification."""
+    if state.pid_file is None:
+        return ServerState(alive=False, pid=None, pid_file=None)
+    if os.name != "nt" and state.pid_file == legacy_server_pid_path():
+        return probe_legacy_pid_file(state.pid_file)
+    return probe_pid_file(state.pid_file)
+
+
 def _stop_server(
     state: ServerState,
     grace: float,
     *,
     warnings_to_stderr: bool = False,
-) -> tuple[list[int], list[Path]]:
+) -> tuple[list[int], list[Path], ServerState, str | None]:
     """SIGTERM the live pid-file holder, escalate to SIGKILL after ``grace`` seconds.
 
     Works on any :class:`ServerState` — the MCP server and ``mm web``
     both hold their pid file with the same flock contract. Returns
-    ``(killed_pids, removed_pid_files)``. Caller is responsible for
-    skipping this on Windows / when ``state.alive`` is False.
+    ``(killed_pids, removed_pid_files, post_stop_state, error)``. Returning
+    errors keeps partial kill/unlink accounting available to both human and
+    JSON callers. Caller is responsible for skipping this on Windows / when
+    ``state.alive`` is False.
     """
     killed: list[int] = []
     removed: list[Path] = []
@@ -224,9 +329,12 @@ def _stop_server(
             # Already gone between probe and kill.
             pid = None
         except PermissionError as exc:
-            raise click.ClickException(
-                f"cannot signal pid {pid}: {exc}. Stop the process manually and retry."
-            ) from exc
+            return (
+                killed,
+                removed,
+                state,
+                f"cannot signal pid {pid}: {exc}. Stop the process manually and retry.",
+            )
 
         # Poll for exit. server's ``_install_sigterm_handler`` (#439)
         # unlinks its own pid file on a clean SIGTERM, so the file may
@@ -251,11 +359,14 @@ def _stop_server(
     # an MCP client just respawned at the same path during the SIGKILL
     # settle window.
     if state.pid_file is not None:
-        recheck = probe_pid_file(state.pid_file)
+        recheck = _reprobe_process_state(state)
         if recheck.probe_error is not None:
-            raise click.ClickException(
+            return (
+                killed,
+                removed,
+                recheck,
                 f"cannot verify {_format_path(state.pid_file)} after stopping pid "
-                f"{state.pid}: {recheck.probe_error}"
+                f"{state.pid}: {recheck.probe_error}",
             )
         if recheck.alive:
             click.secho(
@@ -270,11 +381,16 @@ def _stop_server(
                 state.pid_file.unlink(missing_ok=True)
                 removed.append(state.pid_file)
             except OSError as exc:
-                raise click.ClickException(
-                    f"failed to remove stale pid file {state.pid_file}: {exc}"
-                ) from exc
+                return (
+                    killed,
+                    removed,
+                    recheck,
+                    f"failed to remove stale pid file {state.pid_file}: {exc}",
+                )
+    else:
+        recheck = ServerState(alive=False, pid=None, pid_file=None)
 
-    return killed, removed
+    return killed, removed, recheck, None
 
 
 def _cleanup_web_sidecar(web_state: ServerState, removed: list[Path]) -> None:
@@ -303,31 +419,55 @@ def _stop_process_snapshot(
     *,
     grace: float,
     warnings_to_stderr: bool = False,
-) -> tuple[list[int], list[Path]]:
-    """Stop every verified, directly attributable process in one snapshot."""
+    installed_at: datetime | None = None,
+) -> tuple[list[int], list[Path], list[str], list[ServerState], ServerState]:
+    """Stop attributable old processes and account for every outcome.
+
+    When *installed_at* is provided, holders whose pid metadata says they
+    started after that timestamp are already on the new generation and are
+    left running. Failures are accumulated so one bad holder does not prevent
+    cleanup attempts for the rest of the snapshot.
+    """
     killed: list[int] = []
     removed: list[Path] = []
+    problems: list[str] = []
+    remaining_servers: list[ServerState] = []
     for state in _upgrade_server_stops(server_states):
         if state.probe_error is not None or state.pid is None:
             continue
-        stopped, cleaned = _stop_server(
+        if installed_at is not None and _is_new_generation(state, installed_at):
+            remaining_servers.append(state)
+            continue
+        stopped, cleaned, recheck, error = _stop_server(
             state,
             grace=grace,
             warnings_to_stderr=warnings_to_stderr,
         )
         killed.extend(stopped)
         removed.extend(cleaned)
+        if error is not None:
+            problems.append(error)
+        if recheck.alive:
+            remaining_servers.append(recheck)
 
+    remaining_web = ServerState(alive=False, pid=None, pid_file=None)
     if web_state.alive and web_state.probe_error is None and web_state.pid is not None:
-        stopped, cleaned = _stop_server(
-            web_state,
-            grace=grace,
-            warnings_to_stderr=warnings_to_stderr,
-        )
-        killed.extend(stopped)
-        removed.extend(cleaned)
-        _cleanup_web_sidecar(web_state, removed)
-    return killed, removed
+        if installed_at is not None and _is_new_generation(web_state, installed_at):
+            remaining_web = web_state
+        else:
+            stopped, cleaned, recheck, error = _stop_server(
+                web_state,
+                grace=grace,
+                warnings_to_stderr=warnings_to_stderr,
+            )
+            killed.extend(stopped)
+            removed.extend(cleaned)
+            if error is not None:
+                problems.append(error)
+            _cleanup_web_sidecar(web_state, removed)
+            if recheck.alive:
+                remaining_web = recheck
+    return killed, removed, problems, remaining_servers, remaining_web
 
 
 def _resolve_db_path() -> Path | None:
@@ -470,6 +610,8 @@ def upgrade(
     is_windows = sys.platform == "win32"
     server_states = enumerate_server_liveness()
     web_state = check_web_liveness()
+    if not is_windows:
+        server_states, web_state = _stabilize_process_inventory(server_states, web_state)
     extras, extras_auto = _resolve_extras(extras_flag)
     install_cmd = _build_install_cmd(version, extras)
     pkg_target = install_cmd[-1]
@@ -586,24 +728,23 @@ def upgrade(
     killed: list[int] = []
     removed: list[Path] = []
     if planned_stops:
-        try:
-            stopped, cleaned = _stop_process_snapshot(
+        stopped, cleaned, stop_problems, _remaining_servers, _remaining_web = (
+            _stop_process_snapshot(
                 server_states,
                 web_state,
                 grace=grace,
                 warnings_to_stderr=json_out,
             )
-            killed.extend(stopped)
-            removed.extend(cleaned)
-        except click.ClickException as exc:
-            if json_out:
-                _refuse_upgrade(
-                    str(exc),
-                    json_out=True,
-                    killed=killed,
-                    removed=removed,
-                )
-            raise
+        )
+        killed.extend(stopped)
+        removed.extend(cleaned)
+        if stop_problems:
+            _refuse_upgrade(
+                _inventory_failure_message(stop_problems),
+                json_out=json_out,
+                killed=killed,
+                removed=removed,
+            )
 
     # ----- complete pre-install boundary (#2002) -----
     # A clean snapshot cannot be required here: MCP clients commonly respawn
@@ -611,8 +752,7 @@ def upgrade(
     # signalable inventory, then retire that generation after uv succeeds.
     # Windows deliberately keeps its no-kill, no-boundary compatibility path.
     if not is_windows:
-        boundary_servers = enumerate_server_liveness()
-        boundary_web = check_web_liveness()
+        boundary_servers, boundary_web = _stabilize_process_inventory()
         boundary_problems = _inventory_problems(boundary_servers, boundary_web)
         if boundary_problems:
             _refuse_upgrade(
@@ -676,40 +816,49 @@ def upgrade(
         click.echo(result.stderr.rstrip())
         sys.exit(1)
 
+    installed_at = _utc_now()
     final_servers = server_states
     final_web = web_state
     if not is_windows:
-        # ----- post-install generation retirement -----
-        # Every process in this snapshot may have imported the old package.
-        # Stop it once. A different pid appearing afterwards was started after
-        # the successful byte swap and is accepted as the new generation.
-        retirement_servers = enumerate_server_liveness()
-        retirement_web = check_web_liveness()
+        # ----- post-install generation reconciliation -----
+        # This is the third and final unconditional complete inventory
+        # (initial / pre-install boundary / post-install). Processes carrying
+        # a start timestamp at or after ``installed_at`` imported the new
+        # bytes and stay up; older or unstamped holders are retired once.
+        # Targeted per-path re-probes from _stop_server verify the result. A
+        # fourth complete inventory is used only if one of those re-probes
+        # catches the lock-before-pid startup window.
+        retirement_servers, retirement_web = _stabilize_process_inventory()
         cleanup_problems = _inventory_problems(retirement_servers, retirement_web)
-        retirement_states = [
-            *_upgrade_server_stops(retirement_servers),
-            *([retirement_web] if retirement_web.alive else []),
+        retirement_server_targets = [
+            state
+            for state in _upgrade_server_stops(retirement_servers)
+            if state.pid is not None
+            and state.probe_error is None
+            and not _is_new_generation(state, installed_at)
         ]
-        retirement_pids = {
-            state.pid
-            for state in retirement_states
-            if state.pid is not None and state.probe_error is None
-        }
+        retirement_web_target = (
+            retirement_web
+            if retirement_web.alive
+            and retirement_web.pid is not None
+            and retirement_web.probe_error is None
+            and not _is_new_generation(retirement_web, installed_at)
+            else None
+        )
 
-        try:
-            stopped, cleaned = _stop_process_snapshot(
-                retirement_servers,
-                retirement_web,
-                grace=grace,
-                warnings_to_stderr=json_out,
-            )
-            killed.extend(stopped)
-            removed.extend(cleaned)
-        except click.ClickException as exc:
-            cleanup_problems.append(str(exc))
+        stopped, cleaned, stop_problems, final_servers, final_web = _stop_process_snapshot(
+            retirement_servers,
+            retirement_web,
+            grace=grace,
+            warnings_to_stderr=json_out,
+            installed_at=installed_at,
+        )
+        killed.extend(stopped)
+        removed.extend(cleaned)
+        cleanup_problems.extend(stop_problems)
 
-        final_servers = enumerate_server_liveness()
-        final_web = check_web_liveness()
+        if _has_startup_gap(final_servers, final_web):
+            final_servers, final_web = _stabilize_process_inventory(final_servers, final_web)
         cleanup_problems.extend(_inventory_problems(final_servers, final_web))
 
         for state in _upgrade_server_stops(final_servers):
@@ -721,7 +870,7 @@ def upgrade(
                     "legacy memtomem-server: an exclusive compatibility holder remains "
                     f"at {path} (pid {state.pid}); its generation cannot be verified"
                 )
-            elif state.pid in retirement_pids:
+            elif any(_same_process_generation(state, old) for old in retirement_server_targets):
                 cleanup_problems.append(
                     f"memtomem-server: retirement pid {state.pid} still holds {path}"
                 )
@@ -729,7 +878,8 @@ def upgrade(
             final_web.alive
             and final_web.probe_error is None
             and final_web.pid is not None
-            and final_web.pid in retirement_pids
+            and retirement_web_target is not None
+            and _same_process_generation(final_web, retirement_web_target)
         ):
             path = _format_path(final_web.pid_file) if final_web.pid_file is not None else "?"
             cleanup_problems.append(f"web UI: retirement pid {final_web.pid} still holds {path}")
@@ -754,7 +904,9 @@ def upgrade(
     known_final_process = bool(_upgrade_server_stops(final_servers)) or final_web.alive
     db_path = _resolve_db_path()
     db_lock_warning = (
-        db_path is not None and not known_final_process and check_db_lock(db_path).locked
+        db_path is not None
+        and (is_windows or not known_final_process)
+        and check_db_lock(db_path).locked
     )
 
     # ----- success -----
