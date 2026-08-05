@@ -633,6 +633,38 @@ class TestCheckServerLivenessStoreScope:
         assert str(rt) in detail
         assert "unsearchable runtime dir" in detail
 
+    @pytest.mark.skipif(
+        os.name != "posix" or getattr(os, "geteuid", lambda: 0)() == 0,
+        reason="requires permission bits enforced for a non-root POSIX user",
+    )
+    def test_store_pid_scan_fails_closed_on_real_permission_error(
+        self, rt: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        pid_file = rt / "server-aaaaaaaaaaaaaaaa.pid"
+        pid_file.write_text("4242", encoding="utf-8")
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt])
+
+        os.chmod(rt, 0o000)
+        try:
+            files, detail = liveness._glob_server_pid_files()
+            states = liveness.enumerate_server_liveness()
+            state = liveness.check_server_liveness()
+        finally:
+            os.chmod(rt, 0o700)
+
+        assert files is None
+        assert str(rt) in detail
+        assert len(states) == 1
+        assert states[0].alive is True
+        assert states[0].pid_file is None
+        assert states[0].probe_error is not None
+        assert state.alive is True
+        assert state.pid_file is None
+        assert state.probe_error is not None
+        assert pid_file.exists(), "the hidden pid file must not be mistaken for an absent file"
+
     def test_store_pid_scan_fails_closed_during_iteration(
         self, rt: Path, monkeypatch: pytest.MonkeyPatch
     ):
