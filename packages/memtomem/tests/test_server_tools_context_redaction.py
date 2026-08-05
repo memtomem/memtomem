@@ -166,6 +166,16 @@ class TestNeutralRedactor:
         # AWS access-key shape trips the LTM secret-class scanner → whole-replace.
         assert redact_message("token AKIA1234567890ABCDEF leaked") == "<redacted: secret-shape>"
 
+    def test_secret_value_scrub_is_value_scoped(self) -> None:
+        """Field-value twin of the above: same marker, no cap, no path logic."""
+        from memtomem.context.error_redact import redact_secret_value
+
+        assert redact_secret_value("api_key=AKIA1234567890ABCDEF") == "<redacted: secret-shape>"
+        # An ordinary field value is returned untouched, including one longer
+        # than ``redact_message``'s 200-char cap — this scrub does not truncate.
+        assert redact_secret_value("SessionStart") == "SessionStart"
+        assert redact_secret_value("e" * 500) == "e" * 500
+
 
 # ── leg 1: diff-row reason + generate/sync skipped lines ─────────────────────
 
