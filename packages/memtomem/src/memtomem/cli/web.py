@@ -103,19 +103,21 @@ def _write_web_metadata(
 
 
 def _read_web_metadata() -> _WebMetadata:
-    from memtomem.cli._liveness import _parse_pid_payload
+    """Read only the bounded sidecar fallback.
 
-    pid_file = _web_pid_file()
-    try:
-        pid, port, started = _parse_pid_payload(pid_file.read_text(encoding="utf-8"))
-        if pid is not None or port is not None or started is not None:
-            return _WebMetadata(pid=pid, port=port, started=started)
-    except OSError:
-        pass
+    PID-file metadata comes from the verified liveness probe; reopening the
+    pid path here would split the bytes from the lock and identity checks.
+    """
+    from memtomem.cli._liveness import _read_bounded_regular_file
 
     try:
-        data = json.loads(_web_info_file().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = _read_bounded_regular_file(_web_info_file())
+        if raw is None:
+            return _WebMetadata()
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _WebMetadata()
+    if not isinstance(data, dict):
         return _WebMetadata()
     pid = data.get("pid")
     port = data.get("port")
@@ -504,15 +506,14 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _wait_for_pid_file_release(timeout: float) -> bool:
-    from memtomem.cli._liveness import probe_pid_file
+    from memtomem.cli._liveness import check_web_liveness
 
     deadline = time.monotonic() + timeout
-    pid_file = _web_pid_file()
     while time.monotonic() < deadline:
-        if not probe_pid_file(pid_file).alive:
+        if not check_web_liveness().alive:
             return True
         time.sleep(0.1)
-    return not probe_pid_file(pid_file).alive
+    return not check_web_liveness().alive
 
 
 def _remove_stale_web_files() -> None:
@@ -522,16 +523,19 @@ def _remove_stale_web_files() -> None:
 
 
 def _web_status() -> None:
-    from memtomem.cli._liveness import probe_pid_file
+    from memtomem.cli._liveness import check_web_liveness
 
-    state = probe_pid_file(_web_pid_file())
+    state = check_web_liveness()
     metadata = _read_web_metadata()
     pid = state.pid if state.pid is not None else metadata.pid
     port = state.port if state.port is not None else metadata.port
     started = state.started if state.started is not None else metadata.started
     if state.alive:
+        status = "running"
+        if state.probe_error is not None:
+            status += f" (unverified: {state.probe_error})"
         click.echo(
-            f"running  pid={pid if pid is not None else '?'}  "
+            f"{status}  pid={pid if pid is not None else '?'}  "
             f"port={port if port is not None else '?'}  "
             f"started={started if started is not None else '?'}"
         )
@@ -544,9 +548,20 @@ def _web_status() -> None:
 
 
 def _web_stop() -> None:
-    from memtomem.cli._liveness import probe_pid_file
+    from memtomem.cli._liveness import check_web_liveness
 
-    state = probe_pid_file(_web_pid_file())
+    state = check_web_liveness()
+    if state.probe_error is not None:
+        from memtomem._runtime_paths import scrub_text
+
+        tracked_path = state.pid_file if state.pid_file is not None else _web_pid_file()
+        raise click.ClickException(
+            f"Cannot verify whether the Web UI is running: {state.probe_error}\n"
+            "No signal was sent. Stop the Web UI through its service manager "
+            "or your operating system's process tools, then repair or remove "
+            f"the unsafe runtime/pid entry at {scrub_text(str(tracked_path))} "
+            "and retry."
+        )
     metadata = _read_web_metadata()
     pid = state.pid if state.pid is not None else metadata.pid
     if not state.alive:
@@ -582,7 +597,7 @@ def _web_stop() -> None:
             os.kill(pid, signal.SIGKILL)
             _wait_for_pid_file_release(2)
 
-    if not probe_pid_file(_web_pid_file()).alive:
+    if not check_web_liveness().alive:
         _remove_stale_web_files()
         click.echo(f"stopped pid={pid}")
         return

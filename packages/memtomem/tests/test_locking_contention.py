@@ -254,6 +254,132 @@ class TestLivenessProbeContention:
         assert state.alive is False
         assert state.pid == 4242
 
+    def test_probe_parses_bounded_three_line_payload(self, tmp_path: Path):
+        from memtomem.cli._liveness import probe_pid_file
+
+        pid_file = tmp_path / "web.pid"
+        pid_file.write_text("4242\n18080\n2026-08-05T10:00:00+00:00\n", encoding="utf-8")
+
+        state = probe_pid_file(pid_file)
+
+        assert state.alive is False
+        assert state.pid == 4242
+        assert state.port == 18080
+        assert state.started == "2026-08-05T10:00:00+00:00"
+
+    @pytest.mark.parametrize(
+        ("payload_size", "expected_pid"),
+        [(4096, 4242), (4097, None)],
+    )
+    def test_pid_payload_limit_exact_boundary(
+        self, tmp_path: Path, payload_size: int, expected_pid: int | None
+    ):
+        from memtomem.cli._liveness import probe_pid_file
+
+        prefix = b"4242\n"
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_bytes(prefix + b"x" * (payload_size - len(prefix)))
+
+        state = probe_pid_file(pid_file)
+
+        assert state.alive is False
+        assert state.pid == expected_pid
+
+    @pytest.mark.requires_symlinks
+    def test_probe_rejects_symlink_without_reading_target(self, tmp_path: Path):
+        from memtomem.cli._liveness import probe_pid_file
+
+        target = tmp_path / "unrelated.lock"
+        target.write_text("987654\n", encoding="utf-8")
+        link = tmp_path / "server.pid"
+        link.symlink_to(target)
+
+        state = probe_pid_file(link)
+
+        assert state.alive is True
+        assert state.pid is None, "a symlink target must never supply a signalable PID"
+        assert state.pid_file == link
+        assert state.probe_error is not None
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is POSIX-only")
+    def test_probe_rejects_fifo_without_blocking(self, tmp_path: Path):
+        from memtomem.cli._liveness import probe_pid_file
+
+        fifo = tmp_path / "server.pid"
+        os.mkfifo(fifo)
+
+        started = time.monotonic()
+        state = probe_pid_file(fifo)
+
+        assert time.monotonic() - started < 1.0
+        assert state.alive is True
+        assert state.pid is None
+        assert state.probe_error is not None
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX device-node coverage")
+    def test_probe_rejects_device_node(self):
+        from memtomem.cli._liveness import probe_pid_file
+
+        state = probe_pid_file(Path("/dev/null"))
+
+        assert state.alive is True
+        assert state.pid is None
+        assert state.probe_error is not None
+
+    def test_oversized_live_payload_never_exposes_pid(self, tmp_path: Path, monkeypatch):
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_bytes(b"987654\n" + b"x" * _liveness._PID_PAYLOAD_MAX_BYTES)
+
+        def _already_locked(*_args, **_kwargs):
+            raise portalocker.AlreadyLocked("held")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", _already_locked)
+        state = _liveness.probe_pid_file(pid_file)
+
+        assert state.alive is True
+        assert state.pid is None, "an oversized valid-looking prefix must not be parsed"
+        assert state.probe_error is None, "observed lock contention remains authoritative"
+
+    def test_invalid_utf8_metadata_does_not_break_stale_probe(self, tmp_path: Path):
+        from memtomem.cli._liveness import probe_pid_file
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_bytes(b"4242\n\xff\n")
+
+        state = probe_pid_file(pid_file)
+
+        assert state.alive is False
+        assert state.pid is None
+
+    def test_post_lock_identity_failure_discards_pid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text("987654\n", encoding="utf-8")
+        real_verify = _liveness._verify_opened_regular
+        calls = 0
+
+        def _verify(fd, path, path_stat, parent_stat):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise _liveness._UnsafeProbePathError("simulated inode replacement")
+            return real_verify(fd, path, path_stat, parent_stat)
+
+        monkeypatch.setattr(_liveness, "_verify_opened_regular", _verify)
+        state = _liveness.probe_pid_file(pid_file)
+
+        assert calls == 2
+        assert state.alive is True
+        assert state.pid is None
+        assert state.probe_error is not None
+
 
 # ------------------------------------------- check_server_liveness (#1990)
 
@@ -441,6 +567,50 @@ class TestCheckServerLivenessStoreScope:
         assert exclusive.legacy_lock_mode == "exclusive"
 
     @pytest.mark.skipif(os.name == "nt", reason="legacy shared flock is POSIX-only")
+    def test_legacy_contended_probe_discards_pid_after_identity_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        legacy = tmp_path / ".server.pid"
+        legacy.write_text("987654\n", encoding="utf-8")
+        monkeypatch.setattr(
+            _liveness,
+            "probe_pid_file",
+            lambda _path: _liveness.ServerState(
+                alive=True,
+                pid=987654,
+                pid_file=legacy,
+            ),
+        )
+
+        real_verify = _liveness._verify_opened_regular
+        calls = 0
+
+        def _verify(fd, path, path_stat, parent_stat):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise _liveness._UnsafeProbePathError("simulated inode replacement")
+            return real_verify(fd, path, path_stat, parent_stat)
+
+        def _already_locked(*_args, **_kwargs):
+            raise portalocker.AlreadyLocked("held")
+
+        monkeypatch.setattr(_liveness, "_verify_opened_regular", _verify)
+        monkeypatch.setattr(_liveness.portalocker, "lock", _already_locked)
+
+        state = _liveness.probe_legacy_pid_file(legacy)
+
+        assert calls == 2
+        assert state.alive is True
+        assert state.pid is None
+        assert state.legacy_lock_mode is None
+        assert state.probe_error is not None
+
+    @pytest.mark.skipif(os.name == "nt", reason="legacy shared flock is POSIX-only")
     def test_shared_legacy_holder_does_not_gate(self, rt: Path, tmp_path: Path):
         """#2003: a shared legacy holder is a modern server's compatibility
         alias — that server is gated by its own runtime pid file, so the
@@ -526,6 +696,7 @@ class TestCheckServerLivenessStoreScope:
         uid = os.geteuid() if hasattr(os, "geteuid") else 0
         sibling = Path(tempfile.gettempdir()) / f"memtomem-{uid}"
         sibling.mkdir(parents=True, exist_ok=True)
+        sibling.chmod(0o700)
         assert sibling != rt, "fixture must give the CLI the other branch"
 
         db = tmp_path / "store" / "memtomem.db"
@@ -587,6 +758,83 @@ class TestCheckServerLivenessStoreScope:
         assert agnostic.alive is True and agnostic.probe_error is not None
         assert any(s.probe_error is not None for s in states)
 
+    @pytest.mark.requires_symlinks
+    def test_symlinked_current_runtime_candidate_fails_closed(
+        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        target = tmp_path / "redirect-target"
+        target.mkdir(mode=0o700)
+        target.chmod(0o700)
+        (target / "server.pid").write_text("987654\n", encoding="utf-8")
+        redirected = tmp_path / "runtime-link"
+        redirected.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(liveness, "runtime_dir", lambda: redirected)
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [redirected])
+
+        state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
+
+        assert state.alive is True
+        assert state.pid is None
+        assert state.probe_error is not None
+        assert "symlink" in state.probe_error
+
+    @pytest.mark.requires_symlinks
+    def test_symlinked_speculative_runtime_candidate_is_skipped(
+        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        target = tmp_path / "redirect-target"
+        target.mkdir(mode=0o700)
+        target.chmod(0o700)
+        redirected = tmp_path / "runtime-link"
+        redirected.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt, redirected])
+
+        state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
+
+        assert state.alive is False
+        assert state.probe_error is None
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
+    def test_loose_speculative_runtime_candidate_is_skipped(
+        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        loose = tmp_path / "loose-runtime"
+        loose.mkdir(mode=0o755)
+        loose.chmod(0o755)
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt, loose])
+
+        state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
+
+        assert state.alive is False
+        assert state.probe_error is None
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
+    def test_loose_current_runtime_candidate_fails_closed_and_scrubs_path(
+        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        loose = tmp_path / "loose-\x1b-runtime"
+        loose.mkdir(mode=0o755)
+        loose.chmod(0o755)
+        monkeypatch.setattr(liveness, "runtime_dir", lambda: loose)
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [loose])
+
+        state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
+
+        assert state.alive is True
+        assert state.pid is None
+        assert state.probe_error is not None
+        assert "unsafe permissions" in state.probe_error
+        assert "\x1b" not in state.probe_error
+        assert "\\x1b" in state.probe_error
+
     def test_store_agnostic_probe_fails_closed_on_non_directory_candidate(
         self, rt: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -594,6 +842,7 @@ class TestCheckServerLivenessStoreScope:
 
         candidate = rt / "not-a-directory"
         candidate.write_text("occupied", encoding="utf-8")
+        monkeypatch.setattr(liveness, "runtime_dir", lambda: candidate)
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [candidate])
 
         files, detail = liveness._glob_server_pid_files()
@@ -708,7 +957,7 @@ class TestCheckServerLivenessStoreScope:
         state = liveness.check_server_liveness()
 
         assert files == []
-        assert detail == str(missing)
+        assert detail == ""
         assert states == []
         assert state.alive is False
         assert state.pid_file is None

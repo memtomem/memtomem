@@ -70,7 +70,7 @@ def _hint_quote(target: Path | str) -> str:
     metacharacters would otherwise yield a command that deletes the wrong
     path when pasted (``rm -rf /tmp/my dir/memtomem-501`` splits into two
     args). Prose renderings of the same path (the ``runtime dir {target}``
-    prefix) go through :func:`_scrub` instead — display-safe, not a shell
+    prefix) go through :func:`scrub_text` instead — display-safe, not a shell
     token.
 
     A printable path is :func:`shlex.quote`-d. A path carrying any
@@ -114,7 +114,7 @@ def _hint_quote(target: Path | str) -> str:
     return "$'" + "".join(out) + "'"
 
 
-def _scrub(text: str) -> str:
+def scrub_text(text: str) -> str:
     """Make environment-derived *text* safe to print as prose.
 
     Non-printable characters (terminal control/escape sequences smuggled
@@ -233,6 +233,62 @@ def candidate_runtime_dirs() -> list[Path]:
     return seen
 
 
+def validate_runtime_dir(target: Path) -> bool:
+    """Validate one runtime directory without creating it.
+
+    Returns ``False`` only when *target* is absent. Every existing path must
+    satisfy the same redirect, ownership, and permission policy as
+    :func:`ensure_runtime_dir`; otherwise ``PermissionError`` is raised with
+    the existing remediation text. Read-only liveness probes use this helper
+    for candidate directories that may belong to another process context.
+    """
+    try:
+        st = os.stat(target, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PermissionError(
+            f"runtime dir {scrub_text(str(target))}: cannot stat ({scrub_text(str(exc))}). "
+            f"Remove it and retry."
+        ) from exc
+
+    if stat.S_ISLNK(st.st_mode):
+        raise PermissionError(
+            f"runtime dir {scrub_text(str(target))} is a symlink; refusing to follow. "
+            f"Remove it: rm -f -- {_hint_quote(target)}"
+        )
+    # Windows junctions redirect exactly like a symlink but keep
+    # ``S_IFDIR``, so ``S_ISLNK`` above never sees them. Without this
+    # every consumer treats the *target* as the runtime dir — and the
+    # uninstall path stages and deletes what it finds there.
+    if target.is_junction():
+        raise PermissionError(
+            f"runtime dir {scrub_text(str(target))} is a junction; refusing to follow. "
+            f"Remove it: rmdir -- {_hint_quote(target)}"
+        )
+    if not stat.S_ISDIR(st.st_mode):
+        raise PermissionError(
+            f"runtime dir {scrub_text(str(target))} exists but is not a directory. "
+            f"Remove it: rm -f -- {_hint_quote(target)}"
+        )
+    if os.name != "nt":
+        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+            raise PermissionError(
+                f"runtime dir {scrub_text(str(target))} is owned by uid {st.st_uid} "
+                f"(expected {os.geteuid()}). "
+                f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
+            )
+        unsafe = stat.S_IMODE(st.st_mode) & 0o077
+        if unsafe:
+            raise PermissionError(
+                f"runtime dir {scrub_text(str(target))} has unsafe permissions "
+                f"0o{stat.S_IMODE(st.st_mode):o} (expected 0o700, "
+                f"group/world bits: 0o{unsafe:o}). "
+                f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
+            )
+    return True
+
+
 def ensure_runtime_dir() -> Path:
     """Return the runtime directory, creating it with ``mode=0o700`` if missing.
 
@@ -248,51 +304,7 @@ def ensure_runtime_dir() -> Path:
     on silent success).
     """
     target = runtime_dir()
-    try:
-        st = os.stat(target, follow_symlinks=False)
-    except FileNotFoundError:
-        st = None
-    except OSError as exc:
-        raise PermissionError(
-            f"runtime dir {_scrub(str(target))}: cannot stat ({_scrub(str(exc))}). "
-            f"Remove it and retry."
-        ) from exc
-
-    if st is not None:
-        if stat.S_ISLNK(st.st_mode):
-            raise PermissionError(
-                f"runtime dir {_scrub(str(target))} is a symlink; refusing to follow. "
-                f"Remove it: rm -f -- {_hint_quote(target)}"
-            )
-        # Windows junctions redirect exactly like a symlink but keep
-        # ``S_IFDIR``, so ``S_ISLNK`` above never sees them. Without this
-        # every consumer treats the *target* as the runtime dir — and the
-        # uninstall path stages and deletes what it finds there.
-        if target.is_junction():
-            raise PermissionError(
-                f"runtime dir {_scrub(str(target))} is a junction; refusing to follow. "
-                f"Remove it: rmdir -- {_hint_quote(target)}"
-            )
-        if not stat.S_ISDIR(st.st_mode):
-            raise PermissionError(
-                f"runtime dir {_scrub(str(target))} exists but is not a directory. "
-                f"Remove it: rm -f -- {_hint_quote(target)}"
-            )
-        if os.name != "nt":
-            if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
-                raise PermissionError(
-                    f"runtime dir {_scrub(str(target))} is owned by uid {st.st_uid} "
-                    f"(expected {os.geteuid()}). "
-                    f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
-                )
-            unsafe = stat.S_IMODE(st.st_mode) & 0o077
-            if unsafe:
-                raise PermissionError(
-                    f"runtime dir {_scrub(str(target))} has unsafe permissions "
-                    f"0o{stat.S_IMODE(st.st_mode):o} (expected 0o700, "
-                    f"group/world bits: 0o{unsafe:o}). "
-                    f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
-                )
+    if validate_runtime_dir(target):
         return target
 
     # Missing — create with 0o700, then chmod explicitly to neutralize any

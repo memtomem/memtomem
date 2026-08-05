@@ -3325,7 +3325,7 @@ class TestLivenessDbLockProbeHardening:
         assert state.pid_file == link
         assert state.probe_error is not None
 
-    def test_probe_pid_file_dangling_link_reads_dead(self, home):
+    def test_probe_pid_file_dangling_link_fails_closed(self, home):
         from memtomem.cli._liveness import probe_pid_file
 
         link = home / "pid-dangling"
@@ -3334,8 +3334,10 @@ class TestLivenessDbLockProbeHardening:
         except OSError:
             pytest.skip("symlinks unavailable")
         state = probe_pid_file(link)
-        assert state.alive is False, "a dangling pid link is genuinely absent (ENOENT)"
-        assert state.probe_error is None
+        assert state.alive is True, "a pid entry that is itself a link must never be followed"
+        assert state.pid is None
+        assert state.pid_file == link
+        assert state.probe_error is not None
 
     def test_unverifiable_liveness_refusal_is_honest_and_force_overrides(self, home, monkeypatch):
         """Seam-level pin (no FS tricks — runs on Windows too): a
