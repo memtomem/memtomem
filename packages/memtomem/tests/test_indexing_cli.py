@@ -17,13 +17,23 @@ this module focuses on the stream-converted ``_index`` direct-CLI flow:
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import click
 
-from memtomem.cli.indexing import _index
+from memtomem.cli.indexing import (
+    _IndexingStatsError,
+    _index,
+    _make_indexer,
+    _partition_drain_failures,
+    _print_drain_result,
+)
+from memtomem.indexing.debounce import DrainResult
+from memtomem.models import IndexingStats
 
 
 def _make_complete_event(
@@ -170,6 +180,109 @@ class TestIndexStreamConversion:
         assert f"ERROR (retryable): {retryable}" in out
         assert out.count(retryable) == 1
         assert "re-run the same `mm index` command once the chunk store is reachable" in out
+
+
+class TestDebounceIndexClassification:
+    @pytest.mark.parametrize(
+        ("errors", "retryable_errors", "blocked_files", "expected_retryable"),
+        [
+            (("broken.md: malformed",), (), 0, False),
+            (("busy.md: store unavailable",), ("busy.md: store unavailable",), 0, True),
+            (
+                ("broken.md: malformed", "busy.md: store unavailable"),
+                ("busy.md: store unavailable",),
+                0,
+                True,
+            ),
+            ((), (), 1, False),
+        ],
+    )
+    def test_make_indexer_preserves_stats_retryability(
+        self,
+        tmp_path: Path,
+        errors: tuple[str, ...],
+        retryable_errors: tuple[str, ...],
+        blocked_files: int,
+        expected_retryable: bool,
+    ) -> None:
+        target = tmp_path / "memo.md"
+        target.write_text("# memo\n", encoding="utf-8")
+        stats = IndexingStats(
+            total_files=1,
+            total_chunks=0,
+            indexed_chunks=0,
+            skipped_chunks=0,
+            deleted_chunks=0,
+            duration_ms=1.0,
+            errors=errors,
+            blocked_files=blocked_files,
+            retryable_errors=retryable_errors,
+        )
+
+        class _FakeEngine:
+            async def index_file(self, *args, **kwargs):
+                return stats
+
+        indexer = _make_indexer(SimpleNamespace(index_engine=_FakeEngine()))
+        with pytest.raises(_IndexingStatsError) as exc_info:
+            asyncio.run(indexer(str(target), None, False))
+
+        assert exc_info.value.retryable is expected_retryable
+
+    def test_partition_preserves_duplicate_occurrences(self) -> None:
+        duplicate = ("/tmp/a.md", "same message")
+        permanent, retryable = _partition_drain_failures(
+            [duplicate, duplicate],
+            [duplicate],
+        )
+        assert permanent == [duplicate]
+        assert retryable == [duplicate]
+
+    def test_human_output_separates_pending_permanent_and_exhausted(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pending = ("/tmp/pending.md", "store unavailable")
+        permanent = ("/tmp/broken.md", "malformed")
+        exhausted = ("/tmp/exhausted.md", "store unavailable")
+        result = DrainResult(
+            errors=[pending],
+            retryable_errors=[pending],
+            dropped=[permanent, exhausted],
+            retryable_dropped=[exhausted],
+        )
+
+        _print_drain_result(result, as_json=False, label="Flushed")
+
+        out = capsys.readouterr().out
+        assert "ERROR (retryable): /tmp/pending.md" in out
+        assert "queued entries will drain later" in out
+        assert "Dropped (permanent): 1" in out
+        assert "fix the cause, then: mm index /tmp/broken.md" in out
+        assert "Dropped after 5 retryable attempts: 1" in out
+        exhausted_line = next(line for line in out.splitlines() if "/tmp/exhausted.md" in line)
+        assert "once the chunk store is reachable" in exhausted_line
+        assert "fix the cause" not in exhausted_line
+
+    def test_json_output_keeps_legacy_arrays_and_adds_retryable_subsets(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        duplicate = ("/tmp/a.md", "same message")
+        result = DrainResult(
+            errors=[duplicate, duplicate],
+            retryable_errors=[duplicate],
+            dropped=[duplicate, duplicate],
+            retryable_dropped=[duplicate],
+            remaining=1,
+        )
+
+        _print_drain_result(result, as_json=True, label="Flushed")
+
+        payload = json.loads(capsys.readouterr().out)
+        assert len(payload["errors"]) == 2
+        assert len(payload["retryable_errors"]) == 1
+        assert len(payload["dropped"]) == 2
+        assert len(payload["retryable_dropped"]) == 1
+        assert payload["errors"][0] == {"path": "/tmp/a.md", "message": "same message"}
 
 
 class TestIndexKeyboardInterrupt:

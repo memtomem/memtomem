@@ -1567,23 +1567,29 @@ function _showReindexWarning(applied) {
   if (needsReindex) {
     warn.querySelector('#cfg-reindex-btn').addEventListener('click', async (e) => {
       const btn = e.target;
+      let completed = false;
       btnLoading(btn, true);
       try {
         const res = await api('POST', '/api/reindex?force=true', undefined, { timeout: 300_000 });
         if (res.errors && res.errors.length) {
-          showToast(t('toast.reindex_partial', { count: res.errors.length, first: res.errors[0] }), 'error');
+          const presentation = indexingErrorToast(
+            t('toast.reindex_partial', { count: res.errors.length, first: res.errors[0] }),
+            res,
+          );
+          showToast(presentation.message, presentation.type);
         } else {
           const total = (res.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
           showToast(t('toast.reindex_complete', { count: total }), 'success');
+          completed = true;
+          btn.textContent = t('common.done');
         }
-        btn.textContent = t('common.done');
-        btn.disabled = true;
         _markDataStale();
         loadStats();
       } catch (err) {
         showToast(t('toast.reindex_failed', { error: err.message }), 'error');
       } finally {
         btnLoading(btn, false);
+        if (completed) btn.disabled = true;
       }
     });
   }
