@@ -118,10 +118,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   cause a process to be signaled. Status preserves its diagnostic exit
   contract and labels an undecidable probe as `running (unverified: ...)`;
   stop sends no signal in that case and prints an OS-level recovery path.
-  `mm uninstall` now warns when its successful liveness probe skipped an
-  unsafe speculative runtime candidate, and wrong-owner recovery points users
-  to an administrator or a private `XDG_RUNTIME_DIR`/`TMPDIR` instead of
-  presenting an unexecutable removal command as the only remedy.
+  Destructive `mm uninstall`, `mm reset`, and `mm upgrade` flows now warn when
+  a successful liveness probe skipped an unsafe speculative runtime candidate.
+  Runtime-dir refusals carry structured reason codes so concise warnings cannot
+  drift from their remediation text, and wrong-owner recovery points users to
+  an administrator or a private `XDG_RUNTIME_DIR`/`TMPDIR` instead of presenting
+  an unexecutable removal command as the only remedy.
 
 - **Index results now distinguish namespaces actually applied from preview-only
   fallbacks** (#2035). The additive `applied_namespaces` field on POST and SSE

@@ -812,15 +812,30 @@ class TestCheckServerLivenessStoreScope:
         monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt, loose])
 
         files, detail = liveness._glob_server_pid_files()
+        states, inventory_warning = liveness.enumerate_server_liveness_inventory()
         state = liveness.check_server_liveness(Path("/tmp/store/memtomem.db"))
 
         assert files == []
+        assert states == []
         assert detail == f"skipped: {liveness.scrub_text(str(loose))} (unsafe permissions 0o755)"
+        assert inventory_warning == detail
         assert "\x1b" not in detail
         assert "\\x1b" in detail
         assert state.alive is False
         assert state.probe_error is None
         assert state.probe_warning == detail
+
+    def test_generic_skip_detail_truncates_before_scrubbing(self):
+        import memtomem.cli._liveness as liveness
+
+        candidate = Path("/tmp/speculative-runtime")
+        detail = liveness._runtime_candidate_skip_detail(
+            candidate,
+            OSError("x" * 116 + "\x1b" + "tail"),
+        )
+
+        assert "\x1b" not in detail
+        assert "\\x1b..." in detail
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX runtime permission policy")
     def test_loose_current_runtime_candidate_fails_closed_and_scrubs_path(
@@ -839,6 +854,7 @@ class TestCheckServerLivenessStoreScope:
         assert state.alive is True
         assert state.pid is None
         assert state.probe_error is not None
+        assert "PermissionError" in state.probe_error
         assert "unsafe permissions" in state.probe_error
         assert "\x1b" not in state.probe_error
         assert "\\x1b" in state.probe_error

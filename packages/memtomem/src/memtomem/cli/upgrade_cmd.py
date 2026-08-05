@@ -42,7 +42,7 @@ from memtomem.cli._db_lock import check_db_lock
 from memtomem.cli._liveness import (
     ServerState,
     check_web_liveness,
-    enumerate_server_liveness,
+    enumerate_server_liveness_inventory,
     probe_legacy_pid_file,
     probe_pid_file,
 )
@@ -223,7 +223,8 @@ def _has_startup_gap(server_states: list[ServerState], web_state: ServerState) -
 def _stabilize_process_inventory(
     server_states: list[ServerState] | None = None,
     web_state: ServerState | None = None,
-) -> tuple[list[ServerState], ServerState]:
+    server_warning: str | None = None,
+) -> tuple[list[ServerState], ServerState, str | None]:
     """Retry only transient lock-before-payload startup snapshots.
 
     Enumeration and real probe errors remain immediate failures. A held lock
@@ -231,15 +232,48 @@ def _stabilize_process_inventory(
     appeared, gets two bounded backoff retries before it becomes a hard
     inventory problem.
     """
-    current_servers = enumerate_server_liveness() if server_states is None else server_states
+    collected_warnings = [
+        warning
+        for warning in [server_warning, *(state.probe_warning for state in server_states or [])]
+        if warning
+    ]
+    if server_states is None:
+        current_servers, current_warning = enumerate_server_liveness_inventory()
+        if current_warning:
+            collected_warnings.append(current_warning)
+    else:
+        current_servers = server_states
     current_web = check_web_liveness() if web_state is None else web_state
     for delay in _INVENTORY_RETRY_DELAYS:
         if not _has_startup_gap(current_servers, current_web):
             break
         time.sleep(delay)
-        current_servers = enumerate_server_liveness()
+        current_servers, current_warning = enumerate_server_liveness_inventory()
+        if current_warning:
+            collected_warnings.append(current_warning)
         current_web = check_web_liveness()
-    return current_servers, current_web
+    warning = "; ".join(dict.fromkeys(collected_warnings)) or None
+    return current_servers, current_web, warning
+
+
+def _record_runtime_inventory_warning(
+    warnings: list[str], detail: str | None, *, emit: bool
+) -> None:
+    if detail is None:
+        return
+    warning = (
+        "Server liveness probe used a narrowed runtime inventory "
+        f"({detail}). Only validated runtime directories were checked."
+    )
+    if warning in warnings:
+        return
+    warnings.append(warning)
+    if emit:
+        click.secho(f"  Warning: {warning}", fg="yellow")
+
+
+def _json_with_warnings(payload: dict[str, object], warnings: list[str]) -> dict[str, object]:
+    return {**payload, **({"warnings": warnings} if warnings else {})}
 
 
 def _inventory_failure_message(problems: list[str], *, package_changed: bool = False) -> str:
@@ -625,10 +659,12 @@ def upgrade(
     ``mm upgrade`` adds the missing process-level hygiene step around it.
     """
     is_windows = sys.platform == "win32"
-    server_states = enumerate_server_liveness()
+    server_states, server_warning = enumerate_server_liveness_inventory()
     web_state = check_web_liveness()
     if not is_windows:
-        server_states, web_state = _stabilize_process_inventory(server_states, web_state)
+        server_states, web_state, server_warning = _stabilize_process_inventory(
+            server_states, web_state, server_warning
+        )
     extras, extras_auto = _resolve_extras(extras_flag)
     install_cmd = _build_install_cmd(version, extras)
     pkg_target = install_cmd[-1]
@@ -652,6 +688,7 @@ def upgrade(
         if is_windows
         else []
     )
+    _record_runtime_inventory_warning(warnings, server_warning, emit=False)
     # Windows skips the kill stage entirely, so a truthful plan/dry-run
     # must not claim we would kill or remove anything there.
     planned_stops = [] if is_windows else live_states
@@ -720,6 +757,7 @@ def upgrade(
         _refuse_upgrade(
             _inventory_failure_message(initial_problems),
             json_out=json_out,
+            extra={"warnings": warnings} if warnings else None,
         )
 
     # ----- confirm -----
@@ -727,7 +765,7 @@ def upgrade(
         if not _isatty():
             msg = "Refusing to upgrade without confirmation in a non-interactive shell. Pass -y."
             if json_out:
-                click.echo(_json.dumps({"ok": False, "error": msg}))
+                click.echo(_json.dumps(_json_with_warnings({"ok": False, "error": msg}, warnings)))
                 sys.exit(1)
             click.secho(msg, fg="red")
             raise click.Abort()
@@ -736,7 +774,9 @@ def upgrade(
         if not _confirm("\nProceed with upgrade?", default=True, err=json_out):
             # Voluntary cancel → exit 0; keep JSON schema consistent.
             if json_out:
-                click.echo(_json.dumps({"ok": True, "cancelled": True}))
+                click.echo(
+                    _json.dumps(_json_with_warnings({"ok": True, "cancelled": True}, warnings))
+                )
             else:
                 click.echo("Cancelled — nothing was changed.")
             return
@@ -761,6 +801,7 @@ def upgrade(
                 json_out=json_out,
                 killed=killed,
                 removed=removed,
+                extra={"warnings": warnings} if warnings else None,
             )
 
     # ----- complete pre-install boundary (#2002) -----
@@ -769,7 +810,8 @@ def upgrade(
     # signalable inventory, then retire that generation after uv succeeds.
     # Windows deliberately keeps its no-kill, no-boundary compatibility path.
     if not is_windows:
-        boundary_servers, boundary_web = _stabilize_process_inventory()
+        boundary_servers, boundary_web, boundary_warning = _stabilize_process_inventory()
+        _record_runtime_inventory_warning(warnings, boundary_warning, emit=not json_out)
         boundary_problems = _inventory_problems(boundary_servers, boundary_web)
         if boundary_problems:
             _refuse_upgrade(
@@ -777,6 +819,7 @@ def upgrade(
                 json_out=json_out,
                 killed=killed,
                 removed=removed,
+                extra={"warnings": warnings} if warnings else None,
             )
 
     # ----- reinstall -----
@@ -787,12 +830,15 @@ def upgrade(
         if json_out:
             click.echo(
                 _json.dumps(
-                    {
-                        "ok": False,
-                        "error": msg,
-                        "killed": killed,
-                        "removed": [str(path) for path in removed],
-                    }
+                    _json_with_warnings(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "killed": killed,
+                            "removed": [str(path) for path in removed],
+                        },
+                        warnings,
+                    )
                 )
             )
             sys.exit(1)
@@ -803,12 +849,15 @@ def upgrade(
         if json_out:
             click.echo(
                 _json.dumps(
-                    {
-                        "ok": False,
-                        "error": msg,
-                        "killed": killed,
-                        "removed": [str(path) for path in removed],
-                    }
+                    _json_with_warnings(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "killed": killed,
+                            "removed": [str(path) for path in removed],
+                        },
+                        warnings,
+                    )
                 )
             )
             sys.exit(1)
@@ -819,13 +868,16 @@ def upgrade(
         if json_out:
             click.echo(
                 _json.dumps(
-                    {
-                        "ok": False,
-                        "error": f"uv tool install failed (rc={result.returncode})",
-                        "stderr": result.stderr,
-                        "killed": killed,
-                        "removed": [str(p) for p in removed],
-                    }
+                    _json_with_warnings(
+                        {
+                            "ok": False,
+                            "error": f"uv tool install failed (rc={result.returncode})",
+                            "stderr": result.stderr,
+                            "killed": killed,
+                            "removed": [str(p) for p in removed],
+                        },
+                        warnings,
+                    )
                 )
             )
             sys.exit(1)
@@ -845,7 +897,8 @@ def upgrade(
         # Targeted per-path re-probes from _stop_server verify the result. A
         # fourth complete inventory is used only if one of those re-probes
         # catches the lock-before-pid startup window.
-        retirement_servers, retirement_web = _stabilize_process_inventory()
+        retirement_servers, retirement_web, retirement_warning = _stabilize_process_inventory()
+        _record_runtime_inventory_warning(warnings, retirement_warning, emit=not json_out)
         cleanup_problems = _inventory_problems(retirement_servers, retirement_web)
         retirement_server_targets = [
             state
@@ -876,7 +929,10 @@ def upgrade(
         cleanup_problems.extend(stop_problems)
 
         if _has_startup_gap(final_servers, final_web):
-            final_servers, final_web = _stabilize_process_inventory(final_servers, final_web)
+            final_servers, final_web, final_warning = _stabilize_process_inventory(
+                final_servers, final_web
+            )
+            _record_runtime_inventory_warning(warnings, final_warning, emit=not json_out)
         cleanup_problems.extend(_inventory_problems(final_servers, final_web))
 
         for state in _upgrade_server_stops(final_servers):
@@ -904,15 +960,18 @@ def upgrade(
 
         cleanup_problems = list(dict.fromkeys(cleanup_problems))
         if cleanup_problems:
+            extra: dict[str, object] = {
+                "reinstalled": pkg_target,
+                "cleanup_complete": False,
+            }
+            if warnings:
+                extra["warnings"] = warnings
             _refuse_upgrade(
                 _inventory_failure_message(cleanup_problems, package_changed=True),
                 json_out=json_out,
                 killed=killed,
                 removed=removed,
-                extra={
-                    "reinstalled": pkg_target,
-                    "cleanup_complete": False,
-                },
+                extra=extra,
             )
 
     # ----- unexplained DB writer warning (#1606) -----
@@ -934,7 +993,8 @@ def upgrade(
             # the rare locked case once so we do not mislabel that verified
             # process as an old invisible writer. Probe failures stay warning-
             # side: only an actually observed holder suppresses the warning.
-            late_servers = enumerate_server_liveness()
+            late_servers, late_warning = enumerate_server_liveness_inventory()
+            _record_runtime_inventory_warning(warnings, late_warning, emit=not json_out)
             late_web = check_web_liveness()
             # Match the normal ``known_final_process`` authority filter: a
             # shared legacy alias alone is not enough. Suppress only for a

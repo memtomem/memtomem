@@ -38,6 +38,7 @@ from typing import Literal
 import portalocker
 
 from memtomem._runtime_paths import (
+    RuntimeDirValidationError,
     candidate_runtime_dirs,
     legacy_server_pid_path,
     runtime_dir,
@@ -62,32 +63,21 @@ class _UnsafeProbePathError(Exception):
 def _exception_detail(exc: BaseException) -> str:
     if isinstance(exc, _UnsafeProbePathError):
         return scrub_text(str(exc))
+    if isinstance(exc, RuntimeDirValidationError):
+        return f"PermissionError: {scrub_text(str(exc))}"
     return f"{type(exc).__name__}: {scrub_text(str(exc))}"
 
 
 def _runtime_candidate_skip_detail(candidate: Path, exc: OSError) -> str:
     """Describe one non-blocking speculative-candidate rejection concisely."""
     path = scrub_text(str(candidate))
-    detail = scrub_text(str(exc))
-    prefix = f"runtime dir {path} "
-    reason_detail = detail[len(prefix) :] if detail.startswith(prefix) else detail
-    if reason_detail.startswith("has unsafe permissions "):
-        mode = reason_detail.removeprefix("has unsafe permissions ").split(maxsplit=1)[0]
-        reason = f"unsafe permissions {mode}"
-    elif reason_detail.startswith("is owned by uid "):
-        uid = reason_detail.removeprefix("is owned by uid ").split(maxsplit=1)[0]
-        reason = f"owned by uid {uid}"
-    elif reason_detail.startswith("is a symlink"):
-        reason = "symlink"
-    elif reason_detail.startswith("is a junction"):
-        reason = "junction"
-    elif reason_detail.startswith("exists but is not a directory"):
-        reason = "not a directory"
+    if isinstance(exc, RuntimeDirValidationError):
+        reason = exc.short_reason()
     else:
-        reason_detail = reason_detail.replace(path, "<candidate>").split(". ", 1)[0]
-        if len(reason_detail) > 120:
-            reason_detail = f"{reason_detail[:117]}..."
-        reason = f"{type(exc).__name__}: {reason_detail}"
+        raw_detail = str(exc).replace(str(candidate), "<candidate>").split(". ", 1)[0]
+        if len(raw_detail) > 120:
+            raw_detail = f"{raw_detail[:117]}..."
+        reason = f"{type(exc).__name__}: {scrub_text(raw_detail)}"
     return f"skipped: {path} ({reason})"
 
 
@@ -605,15 +595,17 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
     return sorted(found), detail
 
 
-def enumerate_server_liveness() -> list[ServerState]:
-    """Return every live or unverifiable server pid-lock state.
+def enumerate_server_liveness_inventory() -> tuple[list[ServerState], str | None]:
+    """Return live/unverifiable server states and any narrowed-inventory warning.
 
     Candidates are deterministic: sorted per-store ``server-*.pid`` files,
     then the transitional bare ``server.pid`` and the legacy
     ``~/.memtomem/.server.pid`` path. The returned states describe lock files,
     not necessarily unique processes: modern POSIX servers can also share the
-    legacy compatibility lock. An empty list means a complete pass found no
-    live holder.
+    legacy compatibility lock. An empty list with a ``None`` warning means a
+    complete pass found no live holder; a non-``None`` warning records the
+    speculative candidates deliberately skipped from that otherwise
+    successful pass.
 
     An enumeration failure is represented by a fail-closed ``ServerState``
     with ``probe_error`` set, preserving the liveness probe contract from
@@ -659,6 +651,17 @@ def enumerate_server_liveness() -> list[ServerState]:
     )
     if legacy_state.alive:
         states.append(_with_probe_warning(legacy_state, warning))
+    return states, warning
+
+
+def enumerate_server_liveness() -> list[ServerState]:
+    """Return every live or unverifiable server pid-lock state.
+
+    Compatibility wrapper for callers that only consume states. Destructive
+    inventory users should call :func:`enumerate_server_liveness_inventory`
+    so a warning survives even when no live state exists.
+    """
+    states, _warning = enumerate_server_liveness_inventory()
     return states
 
 

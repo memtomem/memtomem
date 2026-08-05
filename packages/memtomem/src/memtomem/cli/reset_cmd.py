@@ -170,7 +170,7 @@ def _refuse_registry(probe: UninstallProbeResult, *, as_json: bool = False) -> N
         )
 
 
-def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -> None:
+def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -> str | None:
     """Refuse (exit 2; exit 1 + ``ok: false`` under ``--json``) on any
     evidence of a live writer.
 
@@ -185,7 +185,7 @@ def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -
     if registry.state != "NONE":
         _refuse_registry(registry, as_json=as_json)
     if force:
-        return
+        return None
     server = check_server_liveness(db_path)
     if server.alive:
         who = f"pid {server.pid}" if server.pid is not None else "pid unknown, flock held"
@@ -213,6 +213,22 @@ def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -
             "it, or pass --force to override.",
             as_json=as_json,
         )
+    return server.probe_warning
+
+
+def _record_probe_warning(warnings: list[str], detail: str | None, *, as_json: bool) -> None:
+    """Retain one narrowed-inventory warning across reset's three probes."""
+    if detail is None:
+        return
+    warning = (
+        "Server liveness probe used a narrowed runtime inventory "
+        f"({detail}). Only validated runtime directories were checked."
+    )
+    if warning in warnings:
+        return
+    warnings.append(warning)
+    if not as_json:
+        click.secho(f"Warning: {warning}", fg="yellow")
 
 
 async def _acquire_barrier_settled() -> HeldBarrier:
@@ -383,10 +399,16 @@ async def _run(
             embedding_model=cfg.embedding.model,
         )
 
+    warnings: list[str] = []
+
     # Un-barriered pass first: rich per-cause messages without making the
     # common live-server case wait out a barrier timeout (uninstall
     # precedent). --yes must never skip any gate (uninstall -y precedent).
-    _check_gates(db_path, force=force, as_json=as_json)
+    _record_probe_warning(
+        warnings,
+        _check_gates(db_path, force=force, as_json=as_json),
+        as_json=as_json,
+    )
 
     # Phase A (#1945): initialize() may run migrations, i.e. write to a DB
     # we have only *probed* to be unowned — and a probe is a snapshot.
@@ -399,7 +421,11 @@ async def _run(
     barrier = await _acquire_barrier_or_refuse(as_json=as_json)
     close_confirmed = True
     try:
-        _check_gates(db_path, force=force, as_json=as_json)
+        _record_probe_warning(
+            warnings,
+            _check_gates(db_path, force=force, as_json=as_json),
+            as_json=as_json,
+        )
         storage = _make_backend()
         # From construction on, the store may be open: release only after
         # a *confirmed* close (#1936 polarity — see _release_or_retain).
@@ -423,7 +449,10 @@ async def _run(
 
     if total == 0:
         if as_json:
-            click.echo(json.dumps({"ok": True, "deleted": {}, "backup": None}))
+            payload: dict[str, object] = {"ok": True, "deleted": {}, "backup": None}
+            if warnings:
+                payload["warnings"] = warnings
+            click.echo(json.dumps(payload))
         else:
             click.echo("Database is already empty — nothing to reset.")
         return
@@ -441,7 +470,10 @@ async def _run(
             err=as_json,
         ):
             if as_json:
-                click.echo(json.dumps({"ok": False, "reason": "cancelled at confirmation prompt"}))
+                payload = {"ok": False, "reason": "cancelled at confirmation prompt"}
+                if warnings:
+                    payload["warnings"] = warnings
+                click.echo(json.dumps(payload))
                 raise click.exceptions.Exit(1)
             click.echo("Cancelled.")
             return
@@ -455,7 +487,11 @@ async def _run(
     barrier = await _acquire_barrier_or_refuse(as_json=as_json)
     close_confirmed = True  # nothing open until the wipe backend below
     try:
-        _check_gates(db_path, force=force, as_json=as_json)
+        _record_probe_warning(
+            warnings,
+            _check_gates(db_path, force=force, as_json=as_json),
+            as_json=as_json,
+        )
 
         # Consent was given for the file we counted in Phase A. If it
         # vanished (a racing ``mm uninstall`` during the prompt) or was
@@ -490,9 +526,13 @@ async def _run(
                 backup_path = _backup_db(db_path)
             except (sqlite3.Error, OSError) as exc:
                 if as_json:
-                    click.echo(
-                        json.dumps({"ok": False, "reason": f"backup failed ({exc}); nothing wiped"})
-                    )
+                    payload = {
+                        "ok": False,
+                        "reason": f"backup failed ({exc}); nothing wiped",
+                    }
+                    if warnings:
+                        payload["warnings"] = warnings
+                    click.echo(json.dumps(payload))
                     sys.exit(1)
                 click.secho(f"Backup failed ({exc}); aborting without wiping.", fg="red")
                 sys.exit(1)
@@ -513,15 +553,14 @@ async def _run(
         _release_or_retain(barrier, close_confirmed)
 
     if as_json:
-        click.echo(
-            json.dumps(
-                {
-                    "ok": True,
-                    "deleted": {table: count for table, count in deleted.items() if count > 0},
-                    "backup": str(backup_path) if backup_path else None,
-                }
-            )
-        )
+        payload = {
+            "ok": True,
+            "deleted": {table: count for table, count in deleted.items() if count > 0},
+            "backup": str(backup_path) if backup_path else None,
+        }
+        if warnings:
+            payload["warnings"] = warnings
+        click.echo(json.dumps(payload))
         return
     click.secho("Database reset complete.", fg="green")
     for table, count in deleted.items():

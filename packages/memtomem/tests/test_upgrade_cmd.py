@@ -79,6 +79,7 @@ def _patch_liveness(
     post: list[ServerState] | None = None,
     snapshots: list[list[ServerState]] | None = None,
     web_snapshots: list[ServerState] | None = None,
+    server_warning: str | None = None,
 ) -> list[list[ServerState]]:
     """Patch initial, pre-install, and post-install complete inventories."""
     initial = state if isinstance(state, list) else ([state] if state.alive else [])
@@ -87,22 +88,50 @@ def _patch_liveness(
     seen: list[list[ServerState]] = []
     seen_web: list[ServerState] = []
 
-    def enumerate_servers() -> list[ServerState]:
+    def enumerate_servers() -> tuple[list[ServerState], str | None]:
         snapshot = server_snapshots[min(len(seen), len(server_snapshots) - 1)]
         seen.append(snapshot)
-        return snapshot
+        state_warning = next(
+            (item.probe_warning for item in snapshot if item.probe_warning is not None),
+            None,
+        )
+        return snapshot, server_warning or state_warning
 
     def probe_web() -> ServerState:
         snapshot = web_sequence[min(len(seen_web), len(web_sequence) - 1)]
         seen_web.append(snapshot)
         return snapshot
 
-    monkeypatch.setattr(upgrade_cmd, "enumerate_server_liveness", enumerate_servers)
+    monkeypatch.setattr(
+        upgrade_cmd,
+        "enumerate_server_liveness_inventory",
+        enumerate_servers,
+    )
     monkeypatch.setattr(upgrade_cmd, "check_web_liveness", probe_web)
     return seen
 
 
 # ---------------------------------------------------------------- tests
+
+
+@pytest.mark.parametrize("json_out", [False, True])
+def test_narrowed_empty_inventory_warning_is_reported(monkeypatch, fake_uv, force_tty, json_out):
+    warning = "skipped: <runtime> (unsafe permissions 0o755)"
+    _patch_liveness(monkeypatch, _DEAD, server_warning=warning)
+    args = ["upgrade", "--dry-run"]
+    if json_out:
+        args.append("--json")
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    if json_out:
+        payload = json.loads(result.output)
+        assert len(payload["warnings"]) == 1
+        assert warning in payload["warnings"][0]
+    else:
+        assert result.output.count("narrowed runtime inventory") == 1
+        assert warning in result.output
 
 
 @pytest.mark.skipif(

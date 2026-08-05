@@ -59,6 +59,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 
 def _hint_quote(target: Path | str) -> str:
@@ -134,6 +135,97 @@ def scrub_text(text: str) -> str:
         else:
             out.extend(f"\\x{b:02x}" for b in os.fsencode(ch))
     return "".join(out)
+
+
+RuntimeDirReason = Literal[
+    "cannot_stat",
+    "symlink",
+    "junction",
+    "not_directory",
+    "wrong_owner",
+    "unsafe_permissions",
+]
+
+
+class RuntimeDirValidationError(PermissionError):
+    """Structured runtime-dir refusal with long and concise renderings."""
+
+    def __init__(
+        self,
+        target: Path,
+        reason: RuntimeDirReason,
+        *,
+        cause: OSError | None = None,
+        actual_uid: int | None = None,
+        expected_uid: int | None = None,
+        mode: int | None = None,
+        unsafe_bits: int | None = None,
+    ) -> None:
+        self.target = target
+        self.reason = reason
+        self.cause = cause
+        self.actual_uid = actual_uid
+        self.expected_uid = expected_uid
+        self.mode = mode
+        self.unsafe_bits = unsafe_bits
+        super().__init__(self._long_message())
+
+    def _long_message(self) -> str:
+        target = scrub_text(str(self.target))
+        command_target = _hint_quote(self.target)
+        if self.reason == "cannot_stat":
+            assert self.cause is not None
+            return (
+                f"runtime dir {target}: cannot stat ({scrub_text(str(self.cause))}). "
+                "Remove it and retry."
+            )
+        if self.reason == "symlink":
+            return (
+                f"runtime dir {target} is a symlink; refusing to follow. "
+                f"Remove it: rm -f -- {command_target}"
+            )
+        if self.reason == "junction":
+            return (
+                f"runtime dir {target} is a junction; refusing to follow. "
+                f"Remove it: rmdir -- {command_target}"
+            )
+        if self.reason == "not_directory":
+            return (
+                f"runtime dir {target} exists but is not a directory. "
+                f"Remove it: rm -f -- {command_target}"
+            )
+        if self.reason == "wrong_owner":
+            assert self.actual_uid is not None and self.expected_uid is not None
+            return (
+                f"runtime dir {target} is owned by uid {self.actual_uid} "
+                f"(expected {self.expected_uid}). "
+                "Retry with XDG_RUNTIME_DIR or TMPDIR set to a private directory "
+                "you own, or ask an administrator to remove it:\n"
+                f"rm -rf -- {command_target}"
+            )
+        assert self.mode is not None and self.unsafe_bits is not None
+        return (
+            f"runtime dir {target} has unsafe permissions 0o{self.mode:o} "
+            f"(expected 0o700, group/world bits: 0o{self.unsafe_bits:o}). "
+            f"Remove it and retry: rm -rf -- {command_target}"
+        )
+
+    def short_reason(self) -> str:
+        """Return stable non-remediation text for a skipped candidate."""
+        if self.reason == "cannot_stat":
+            assert self.cause is not None
+            return f"cannot stat ({type(self.cause).__name__})"
+        if self.reason == "symlink":
+            return "symlink"
+        if self.reason == "junction":
+            return "junction"
+        if self.reason == "not_directory":
+            return "not a directory"
+        if self.reason == "wrong_owner":
+            assert self.actual_uid is not None
+            return f"owned by uid {self.actual_uid}"
+        assert self.mode is not None
+        return f"unsafe permissions 0o{self.mode:o}"
 
 
 def _is_safe_dir(path: Path) -> bool:
@@ -247,46 +339,33 @@ def validate_runtime_dir(target: Path) -> bool:
     except FileNotFoundError:
         return False
     except OSError as exc:
-        raise PermissionError(
-            f"runtime dir {scrub_text(str(target))}: cannot stat ({scrub_text(str(exc))}). "
-            f"Remove it and retry."
-        ) from exc
+        raise RuntimeDirValidationError(target, "cannot_stat", cause=exc) from exc
 
     if stat.S_ISLNK(st.st_mode):
-        raise PermissionError(
-            f"runtime dir {scrub_text(str(target))} is a symlink; refusing to follow. "
-            f"Remove it: rm -f -- {_hint_quote(target)}"
-        )
+        raise RuntimeDirValidationError(target, "symlink")
     # Windows junctions redirect exactly like a symlink but keep
     # ``S_IFDIR``, so ``S_ISLNK`` above never sees them. Without this
     # every consumer treats the *target* as the runtime dir — and the
     # uninstall path stages and deletes what it finds there.
     if target.is_junction():
-        raise PermissionError(
-            f"runtime dir {scrub_text(str(target))} is a junction; refusing to follow. "
-            f"Remove it: rmdir -- {_hint_quote(target)}"
-        )
+        raise RuntimeDirValidationError(target, "junction")
     if not stat.S_ISDIR(st.st_mode):
-        raise PermissionError(
-            f"runtime dir {scrub_text(str(target))} exists but is not a directory. "
-            f"Remove it: rm -f -- {_hint_quote(target)}"
-        )
+        raise RuntimeDirValidationError(target, "not_directory")
     if os.name != "nt":
         if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
-            raise PermissionError(
-                f"runtime dir {scrub_text(str(target))} is owned by uid {st.st_uid} "
-                f"(expected {os.geteuid()}). "
-                "Retry with XDG_RUNTIME_DIR or TMPDIR set to a private directory "
-                "you own, or ask an administrator to remove it:\n"
-                f"rm -rf -- {_hint_quote(target)}"
+            raise RuntimeDirValidationError(
+                target,
+                "wrong_owner",
+                actual_uid=st.st_uid,
+                expected_uid=os.geteuid(),
             )
         unsafe = stat.S_IMODE(st.st_mode) & 0o077
         if unsafe:
-            raise PermissionError(
-                f"runtime dir {scrub_text(str(target))} has unsafe permissions "
-                f"0o{stat.S_IMODE(st.st_mode):o} (expected 0o700, "
-                f"group/world bits: 0o{unsafe:o}). "
-                f"Remove it and retry: rm -rf -- {_hint_quote(target)}"
+            raise RuntimeDirValidationError(
+                target,
+                "unsafe_permissions",
+                mode=stat.S_IMODE(st.st_mode),
+                unsafe_bits=unsafe,
             )
     return True
 

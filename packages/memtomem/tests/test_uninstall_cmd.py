@@ -3312,7 +3312,7 @@ class TestLivenessDbLockProbeHardening:
 
         state = _seed_state(home)
         current = _liveness.runtime_dir()
-        loose = home.parent / "loose-\x1b-runtime"
+        loose = home / "loose-\x1b-runtime"
         loose.mkdir(mode=0o755)
         loose.chmod(0o755)
         monkeypatch.setattr(
