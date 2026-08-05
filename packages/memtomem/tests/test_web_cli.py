@@ -458,7 +458,8 @@ def test_web_status_uses_sidecar_metadata_when_pid_file_is_unreadable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
-    runtime_dir.mkdir()
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
     (runtime_dir / "web.json").write_text(
         '{"pid": 24680, "port": 18080, "started": "2026-05-13T10:15:32+00:00"}\n',
         encoding="utf-8",
@@ -479,7 +480,8 @@ def test_web_status_uses_sidecar_metadata_when_pid_file_is_unreadable(
 
 def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
-    runtime_dir.mkdir()
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
     pid_file = runtime_dir / "web.pid"
     info_file = runtime_dir / "web.json"
     pid_file.write_text("999999\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
@@ -491,3 +493,74 @@ def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "removed stale pid file" in result.output
     assert not pid_file.exists()
     assert not info_file.exists()
+
+
+@pytest.mark.requires_symlinks
+def test_web_stop_refuses_symlinked_pid_without_signaling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    target = tmp_path / "unrelated.lock"
+    target.write_text("987654\n", encoding="utf-8")
+    (runtime_dir / "web.pid").symlink_to(target)
+    signals: list[int] = []
+
+    def fake_kill(pid: int, _sig: int) -> None:
+        signals.append(pid)
+
+    monkeypatch.setattr(web_cmd.os, "kill", fake_kill)
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 1
+    assert "Cannot verify whether the Web UI is running" in result.output
+    assert signals == [], "an unverified pid path must never reach os.kill"
+
+
+@pytest.mark.requires_symlinks
+def test_web_status_does_not_follow_metadata_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    target = tmp_path / "unrelated.json"
+    target.write_text('{"pid": 24680, "port": 18080}\n', encoding="utf-8")
+    (runtime_dir / "web.json").symlink_to(target)
+
+    def fake_probe(_pid_file: Path) -> ServerState:
+        return ServerState(alive=True, pid=None, pid_file=runtime_dir / "web.pid")
+
+    monkeypatch.setattr("memtomem.cli._liveness.probe_pid_file", fake_probe)
+
+    result = CliRunner().invoke(web, ["status"])
+
+    assert result.exit_code == 0
+    assert "pid=?" in result.output
+    assert "24680" not in result.output
+
+
+def test_web_status_discards_oversized_metadata_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from memtomem.cli import _liveness
+
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    (runtime_dir / "web.json").write_bytes(
+        b'{"pid": 24680, "padding": "' + b"x" * _liveness._PID_PAYLOAD_MAX_BYTES + b'"}'
+    )
+
+    def fake_probe(_pid_file: Path) -> ServerState:
+        return ServerState(alive=True, pid=None, pid_file=runtime_dir / "web.pid")
+
+    monkeypatch.setattr("memtomem.cli._liveness.probe_pid_file", fake_probe)
+
+    result = CliRunner().invoke(web, ["status"])
+
+    assert result.exit_code == 0
+    assert "pid=?" in result.output
+    assert "24680" not in result.output

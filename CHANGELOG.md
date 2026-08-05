@@ -101,6 +101,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   entries without relying on a Git base; a guarded contributor tool appends a
   new binding only after the public version has been incremented.
 
+- **PID liveness probes no longer follow redirected or non-regular paths**
+  (#2039). Server, upgrade, uninstall/reset, and Web UI probes now validate
+  runtime directories, open pid files without following links, require one
+  stable regular-file identity for the bounded metadata read and lock check,
+  and discard oversized or invalid payloads before they can supply a PID.
+  Web status/stop use the verified probe metadata and a bounded no-follow
+  sidecar fallback, so an untrusted path can neither block indefinitely nor
+  cause a process to be signaled.
+
 - **Index results now distinguish namespaces actually applied from preview-only
   fallbacks** (#2035). The additive `applied_namespaces` field on POST and SSE
   responses identifies the authoritative subset of the legacy hybrid

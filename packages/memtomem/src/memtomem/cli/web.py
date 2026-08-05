@@ -103,19 +103,16 @@ def _write_web_metadata(
 
 
 def _read_web_metadata() -> _WebMetadata:
-    from memtomem.cli._liveness import _parse_pid_payload
-
-    pid_file = _web_pid_file()
-    try:
-        pid, port, started = _parse_pid_payload(pid_file.read_text(encoding="utf-8"))
-        if pid is not None or port is not None or started is not None:
-            return _WebMetadata(pid=pid, port=port, started=started)
-    except OSError:
-        pass
+    from memtomem.cli._liveness import _read_bounded_regular_file
 
     try:
-        data = json.loads(_web_info_file().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = _read_bounded_regular_file(_web_info_file())
+        if raw is None:
+            return _WebMetadata()
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _WebMetadata()
+    if not isinstance(data, dict):
         return _WebMetadata()
     pid = data.get("pid")
     port = data.get("port")
@@ -504,15 +501,14 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _wait_for_pid_file_release(timeout: float) -> bool:
-    from memtomem.cli._liveness import probe_pid_file
+    from memtomem.cli._liveness import check_web_liveness
 
     deadline = time.monotonic() + timeout
-    pid_file = _web_pid_file()
     while time.monotonic() < deadline:
-        if not probe_pid_file(pid_file).alive:
+        if not check_web_liveness().alive:
             return True
         time.sleep(0.1)
-    return not probe_pid_file(pid_file).alive
+    return not check_web_liveness().alive
 
 
 def _remove_stale_web_files() -> None:
@@ -522,9 +518,13 @@ def _remove_stale_web_files() -> None:
 
 
 def _web_status() -> None:
-    from memtomem.cli._liveness import probe_pid_file
+    from memtomem.cli._liveness import check_web_liveness
 
-    state = probe_pid_file(_web_pid_file())
+    state = check_web_liveness()
+    if state.probe_error is not None:
+        raise click.ClickException(
+            f"Cannot verify whether the Web UI is running: {state.probe_error}"
+        )
     metadata = _read_web_metadata()
     pid = state.pid if state.pid is not None else metadata.pid
     port = state.port if state.port is not None else metadata.port
@@ -544,9 +544,13 @@ def _web_status() -> None:
 
 
 def _web_stop() -> None:
-    from memtomem.cli._liveness import probe_pid_file
+    from memtomem.cli._liveness import check_web_liveness
 
-    state = probe_pid_file(_web_pid_file())
+    state = check_web_liveness()
+    if state.probe_error is not None:
+        raise click.ClickException(
+            f"Cannot verify whether the Web UI is running: {state.probe_error}"
+        )
     metadata = _read_web_metadata()
     pid = state.pid if state.pid is not None else metadata.pid
     if not state.alive:
@@ -582,7 +586,7 @@ def _web_stop() -> None:
             os.kill(pid, signal.SIGKILL)
             _wait_for_pid_file_release(2)
 
-    if not probe_pid_file(_web_pid_file()).alive:
+    if not check_web_liveness().alive:
         _remove_stale_web_files()
         click.echo(f"stopped pid={pid}")
         return

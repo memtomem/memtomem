@@ -27,7 +27,9 @@ invisible and would be reported dead while holding the WAL.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 from dataclasses import dataclass, replace
 from fnmatch import fnmatch
 from pathlib import Path
@@ -36,12 +38,172 @@ from typing import Literal
 import portalocker
 
 from memtomem._runtime_paths import (
+    _validate_runtime_dir,
     candidate_runtime_dirs,
     legacy_server_pid_path,
     server_pid_path,
     store_pid_digest,
     web_pid_path,
 )
+
+
+_PID_PAYLOAD_MAX_BYTES = 4096
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_BINARY = getattr(os, "O_BINARY", 0)
+
+
+class _UnsafeProbePathError(Exception):
+    """A pid/metadata path could not be proven to be one stable regular file."""
+
+
+def _exception_detail(exc: BaseException) -> str:
+    if isinstance(exc, _UnsafeProbePathError):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _verify_opened_regular(
+    fd: int,
+    path: Path,
+    path_stat: os.stat_result,
+    parent_stat: os.stat_result,
+) -> None:
+    """Require *fd*, *path*, and its parent to retain one no-follow identity."""
+    try:
+        descriptor_stat = os.fstat(fd)
+        current_path_stat = os.stat(path, follow_symlinks=False)
+        current_parent_stat = os.stat(path.parent, follow_symlinks=False)
+        parent_is_junction = path.parent.is_junction()
+    except OSError as exc:
+        raise _UnsafeProbePathError(
+            f"pid path changed during probe ({type(exc).__name__}: {exc})"
+        ) from exc
+
+    if not stat.S_ISREG(descriptor_stat.st_mode):
+        raise _UnsafeProbePathError(f"pid path {path} is not a regular file")
+    if not stat.S_ISREG(current_path_stat.st_mode):
+        raise _UnsafeProbePathError(f"pid path {path} is not a regular file")
+    if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+        path_stat.st_dev,
+        path_stat.st_ino,
+    ) or (current_path_stat.st_dev, current_path_stat.st_ino) != (
+        path_stat.st_dev,
+        path_stat.st_ino,
+    ):
+        raise _UnsafeProbePathError(f"pid path {path} changed identity during probe")
+    if not stat.S_ISDIR(current_parent_stat.st_mode) or parent_is_junction:
+        raise _UnsafeProbePathError(f"pid parent {path.parent} is redirected or not a directory")
+    if (current_parent_stat.st_dev, current_parent_stat.st_ino) != (
+        parent_stat.st_dev,
+        parent_stat.st_ino,
+    ):
+        raise _UnsafeProbePathError(f"pid parent {path.parent} changed identity during probe")
+
+
+def _open_verified_regular(
+    path: Path, *, writable: bool
+) -> tuple[int, os.stat_result, os.stat_result] | None:
+    """Open one stable regular file without following its final component.
+
+    ``None`` means the parent or file was absent at the initial snapshot. Once
+    an entry has been observed, every open/stat/type/identity failure is
+    raised as :class:`_UnsafeProbePathError` so liveness callers fail closed.
+    ``O_NONBLOCK`` prevents a FIFO swapped in after the initial stat from
+    blocking the open; the descriptor ``fstat`` rejects it before any read or
+    lock operation.
+    """
+    try:
+        parent_stat = os.stat(path.parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _UnsafeProbePathError(
+            f"cannot inspect pid parent {path.parent} ({type(exc).__name__}: {exc})"
+        ) from exc
+    try:
+        parent_is_junction = path.parent.is_junction()
+    except OSError as exc:
+        raise _UnsafeProbePathError(
+            f"cannot inspect pid parent {path.parent} ({type(exc).__name__}: {exc})"
+        ) from exc
+    if stat.S_ISLNK(parent_stat.st_mode):
+        # A dangling parent link cannot contain a live pid file. Preserve the
+        # uninstall inventory boundary for a stale ``~/.memtomem`` link while
+        # still refusing every parent link whose target exists.
+        try:
+            os.stat(path.parent)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise _UnsafeProbePathError(
+                f"cannot inspect pid parent {path.parent} ({type(exc).__name__}: {exc})"
+            ) from exc
+    if not stat.S_ISDIR(parent_stat.st_mode) or parent_is_junction:
+        raise _UnsafeProbePathError(f"pid parent {path.parent} is redirected or not a directory")
+
+    try:
+        path_stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _UnsafeProbePathError(
+            f"cannot inspect pid path {path} ({type(exc).__name__}: {exc})"
+        ) from exc
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise _UnsafeProbePathError(f"pid path {path} is not a regular file")
+
+    flags = (os.O_RDWR if writable else os.O_RDONLY) | _NOFOLLOW | _NONBLOCK | _BINARY
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise _UnsafeProbePathError(
+            f"cannot open pid path {path} ({type(exc).__name__}: {exc})"
+        ) from exc
+    try:
+        _verify_opened_regular(fd, path, path_stat, parent_stat)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+    return fd, path_stat, parent_stat
+
+
+def _read_bounded_fd(fd: int, limit: int = _PID_PAYLOAD_MAX_BYTES) -> bytes | None:
+    """Read through EOF or ``limit + 1``; ``None`` means oversized."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    size = 0
+    while size <= limit:
+        block = os.read(fd, limit + 1 - size)
+        if not block:
+            return b"".join(chunks)
+        chunks.append(block)
+        size += len(block)
+    return None
+
+
+def _read_bounded_regular_file(path: Path, limit: int = _PID_PAYLOAD_MAX_BYTES) -> bytes | None:
+    """Best-effort bounded read of a stable, no-follow regular file."""
+    try:
+        opened = _open_verified_regular(path, writable=False)
+    except (OSError, _UnsafeProbePathError):
+        return None
+    if opened is None:
+        return None
+    fd, path_stat, parent_stat = opened
+    try:
+        try:
+            payload = _read_bounded_fd(fd, limit)
+            if payload is None:
+                return None
+            _verify_opened_regular(fd, path, path_stat, parent_stat)
+            return payload
+        except (OSError, _UnsafeProbePathError):
+            return None
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -100,89 +262,100 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     "pid file exists → assume alive" Windows fallback (see #448, #625).
     """
     try:
-        present = pid_file.exists()
-    except OSError as exc:
-        # #1949: on py3.12 ``Path.exists()`` propagates errors outside its
-        # ignore-set (e.g. ``EACCES`` for a pid file linked through an
-        # unsearchable directory). Fail *closed* — same as the ``open()``
-        # failure below: "cannot inspect the lock file" is not "no writer."
-        # ``probe_error`` records that ``alive`` is an assumption so callers
-        # refuse honestly instead of claiming a held flock. A dangling pid
-        # link stays ``alive=False`` (ENOENT is in the ignore-set).
+        opened = _open_verified_regular(pid_file, writable=True)
+    except (OSError, _UnsafeProbePathError) as exc:
         return ServerState(
             alive=True,
             pid=None,
             pid_file=pid_file,
-            probe_error=f"{type(exc).__name__}: {exc}",
+            probe_error=_exception_detail(exc),
         )
-    if not present:
+    if opened is None:
         return ServerState(alive=False, pid=None, pid_file=None)
 
-    pid: int | None
-    port: int | None
-    started: str | None
-    try:
-        pid, port, started = _parse_pid_payload(pid_file.read_text())
-    except OSError:
-        pid, port, started = None, None, None
-
-    # ``"rb+"`` (read-write) not ``"rb"``: portalocker's default Windows
-    # backend (``MsvcrtLocker``) calls ``msvcrt.locking``, which the C
-    # runtime requires to be opened for writing — read-only handles fail
-    # with ``EACCES`` and look indistinguishable from a real holder.
-    # POSIX ``flock`` doesn't care about access mode, but the file is
-    # already user-owned, so always opening R/W keeps both backends happy.
-    try:
-        fp = open(pid_file, "rb+")
-    except OSError as exc:
-        # Cannot open the lock file to probe it — fail closed as before,
-        # but record why so uninstall can refuse honestly rather than
-        # assert an observed flock (#1949). ``pid``/``port``/``started``
-        # (if the earlier read_text succeeded) are still forwarded.
-        return ServerState(
-            alive=True,
-            pid=pid,
-            pid_file=pid_file,
-            port=port,
-            started=started,
-            probe_error=f"{type(exc).__name__}: {exc}",
-        )
-
+    fd, path_stat, parent_stat = opened
+    pid: int | None = None
+    port: int | None = None
+    started: str | None = None
     try:
         try:
-            portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-        except (portalocker.AlreadyLocked, BlockingIOError):
-            # Genuine contention: another handle holds the lock. Every
-            # portalocker 3.x backend maps a *lock-failed* Win32/POSIX error
-            # to ``AlreadyLocked`` (a ``LockException`` subclass) — POSIX
-            # EACCES/EAGAIN, Windows ``LOCK_FAILED`` — so this is observed
-            # evidence, not an assumption. ``probe_error`` stays None.
-            # ``BlockingIOError`` is kept as a defensive raw-``flock`` signal.
+            payload = _read_bounded_fd(fd)
+        except OSError:
+            payload = None
+        if payload is not None:
+            try:
+                pid, port, started = _parse_pid_payload(payload.decode("utf-8"))
+            except UnicodeDecodeError:
+                pass
+
+        # portalocker's Windows backend locks from the current file offset and
+        # requires a writable handle. Reset after the bounded metadata read,
+        # then wrap this same verified descriptor as ``rb+``.
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            fp = os.fdopen(fd, "rb+", buffering=0)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                os.close(fd)
             return ServerState(
                 alive=True,
-                pid=pid,
+                pid=None,
                 pid_file=pid_file,
-                port=port,
-                started=started,
+                probe_error=_exception_detail(exc),
             )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+
+    lock_owned = False
+    try:
+        contended = False
+        try:
+            portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            lock_owned = True
+        except (portalocker.AlreadyLocked, BlockingIOError):
+            # Genuine contention is positive liveness evidence. Metadata may
+            # still be absent on Windows (mandatory range lock) or because a
+            # bounded/UTF-8 payload check rejected it.
+            contended = True
         except (portalocker.LockException, OSError) as exc:
-            # A *non-contention* lock failure (I/O error, ENOLCK, NFS
-            # EOFError, a Windows error outside the lock-failed set) — the
-            # probe could not decide. Fail closed as before, but record why
-            # so uninstall refuses honestly instead of asserting a held
-            # flock it never observed (#1949). Portalocker wraps these as a
-            # bare ``LockException``, distinct from ``AlreadyLocked`` above.
             return ServerState(
                 alive=True,
                 pid=pid,
                 pid_file=pid_file,
                 port=port,
                 started=started,
-                probe_error=f"{type(exc).__name__}: {exc}",
+                probe_error=_exception_detail(exc),
+            )
+
+        try:
+            # The PID is signalable only if the path still names the exact
+            # regular inode whose bytes and lock state were inspected.
+            _verify_opened_regular(fp.fileno(), pid_file, path_stat, parent_stat)
+        except _UnsafeProbePathError as exc:
+            return ServerState(
+                alive=True,
+                pid=None,
+                pid_file=pid_file,
+                probe_error=_exception_detail(exc),
+            )
+
+        if contended:
+            return ServerState(
+                alive=True,
+                pid=pid,
+                pid_file=pid_file,
+                port=port,
+                started=started,
             )
         portalocker.unlock(fp)
+        lock_owned = False
         return ServerState(alive=False, pid=pid, pid_file=pid_file, port=port, started=started)
     finally:
+        if lock_owned:
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fp)
         fp.close()
 
 
@@ -201,27 +374,76 @@ def probe_legacy_pid_file(pid_file: Path | None = None) -> ServerState:
         return state
 
     try:
-        # portalocker's POSIX backend uses ``flock`` (open-file-description
-        # scoped), so opening a second fd and closing it cannot release the
-        # holder's lock. This classification would not be safe with classic
-        # process-scoped ``fcntl`` record locks.
-        fp = open(target, "rb+")
-    except OSError as exc:
-        return replace(state, probe_error=f"legacy lock classification failed: {exc}")
+        opened = _open_verified_regular(target, writable=True)
+    except (OSError, _UnsafeProbePathError) as exc:
+        return replace(
+            state,
+            pid=None,
+            port=None,
+            started=None,
+            probe_error=f"legacy lock classification failed: {_exception_detail(exc)}",
+        )
+    if opened is None:
+        return replace(
+            state,
+            pid=None,
+            port=None,
+            started=None,
+            probe_error="legacy lock classification failed: pid path disappeared",
+        )
 
+    fd, path_stat, parent_stat = opened
     try:
+        fp = os.fdopen(fd, "rb+", buffering=0)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return replace(
+            state,
+            pid=None,
+            port=None,
+            started=None,
+            probe_error=f"legacy lock classification failed: {_exception_detail(exc)}",
+        )
+
+    lock_owned = False
+    try:
+        contended = False
         try:
+            # portalocker's POSIX backend uses ``flock``
+            # (open-file-description scoped), so this second descriptor cannot
+            # release the holder's lock when it closes.
             portalocker.lock(fp, portalocker.LOCK_SH | portalocker.LOCK_NB)
+            lock_owned = True
         except (portalocker.AlreadyLocked, BlockingIOError):
-            return replace(state, legacy_lock_mode="exclusive")
+            contended = True
         except (portalocker.LockException, OSError) as exc:
-            return replace(state, probe_error=f"legacy lock classification failed: {exc}")
+            return replace(
+                state,
+                probe_error=f"legacy lock classification failed: {_exception_detail(exc)}",
+            )
+        try:
+            _verify_opened_regular(fp.fileno(), target, path_stat, parent_stat)
+        except _UnsafeProbePathError as exc:
+            return replace(
+                state,
+                pid=None,
+                port=None,
+                started=None,
+                probe_error=f"legacy lock classification failed: {_exception_detail(exc)}",
+            )
+        if contended:
+            return replace(state, legacy_lock_mode="exclusive")
         portalocker.unlock(fp)
+        lock_owned = False
         # If the holder exited between the exclusive and shared probes this
         # can conservatively look like a shared alias. It is never signaled,
         # and the next complete inventory pass resolves the race.
         return replace(state, legacy_lock_mode="shared")
     finally:
+        if lock_owned:
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fp)
         fp.close()
 
 
@@ -246,6 +468,28 @@ def _probe_legacy_gate() -> ServerState:
     return state
 
 
+def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
+    """Resolve existing runtime candidates and enforce the writer policy.
+
+    A missing directory is an empty candidate. Any existing candidate that
+    could not have been accepted by :func:`ensure_runtime_dir` makes the
+    inventory incomplete and therefore fails closed.
+    """
+    try:
+        candidates = candidate_runtime_dirs()
+    except OSError as exc:
+        return None, f"runtime dir candidates unresolved: {_exception_detail(exc)}"
+
+    validated: list[Path] = []
+    for candidate in candidates:
+        try:
+            if _validate_runtime_dir(candidate):
+                validated.append(candidate)
+        except (OSError, TypeError, ValueError) as exc:
+            return None, f"runtime dir candidate {candidate}: {_exception_detail(exc)}"
+    return validated, ", ".join(str(path) for path in validated)
+
+
 def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
     """Return ``name`` under every runtime dir a live server could have picked.
 
@@ -263,10 +507,10 @@ def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
     on an incomplete pass — the same contract :func:`_glob_server_pid_files`
     keeps (#1949).
     """
-    try:
-        return [rt / name for rt in candidate_runtime_dirs()], ""
-    except OSError as exc:
-        return None, f"runtime dir candidates unresolved: {exc}"
+    dirs, detail = _validated_runtime_dirs()
+    if dirs is None:
+        return None, detail
+    return [rt / name for rt in dirs], detail
 
 
 def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
@@ -286,10 +530,9 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
     an empty result. A missing candidate directory is legitimately empty;
     every other scan failure keeps the pass fail-closed.
     """
-    try:
-        dirs = candidate_runtime_dirs()
-    except OSError as exc:
-        return None, f"runtime dir unresolved: {exc}"
+    dirs, detail = _validated_runtime_dirs()
+    if dirs is None:
+        return None, detail
     found: list[Path] = []
     for rt in dirs:
         try:
@@ -302,7 +545,7 @@ def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
         except OSError as exc:
             return None, f"{rt}: {exc}"
         found.extend(matches)
-    return sorted(found), ", ".join(str(rt) for rt in dirs)
+    return sorted(found), detail
 
 
 def enumerate_server_liveness() -> list[ServerState]:
@@ -438,4 +681,16 @@ def check_web_liveness() -> ServerState:
     that only care about the MCP server (and their tests) are unaffected
     (#1569).
     """
-    return probe_pid_file(web_pid_path())
+    pid_file = web_pid_path()
+    try:
+        runtime_present = _validate_runtime_dir(pid_file.parent)
+    except (OSError, TypeError, ValueError) as exc:
+        return ServerState(
+            alive=True,
+            pid=None,
+            pid_file=pid_file,
+            probe_error=f"runtime directory validation failed: {_exception_detail(exc)}",
+        )
+    if not runtime_present:
+        return ServerState(alive=False, pid=None, pid_file=None)
+    return probe_pid_file(pid_file)
