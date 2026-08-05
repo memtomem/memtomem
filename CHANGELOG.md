@@ -7,6 +7,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Pinned Context agent selection now matches the session CLI** (#2006).
+  `mm pinned list|get|set|delete|compose` accept `--agent-id` and `-a`, while
+  the existing `--agent` spelling remains a warning-free compatibility alias
+  for scripts. `mm agent share --target` is unchanged because it selects a
+  complete namespace rather than a bare agent id.
+
 - **A namespaced write goes to that namespace's own day file** (#2005,
   ADR-0032). The default target was `{date}.md` for everyone, and a namespace
   is applied per `index_file` call across the *whole* file — so when a later
