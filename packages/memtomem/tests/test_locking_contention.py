@@ -587,32 +587,130 @@ class TestCheckServerLivenessStoreScope:
         assert agnostic.alive is True and agnostic.probe_error is not None
         assert any(s.probe_error is not None for s in states)
 
-    def test_store_agnostic_probe_fails_closed_on_glob_error(
+    def test_store_agnostic_probe_fails_closed_on_non_directory_candidate(
         self, rt: Path, monkeypatch: pytest.MonkeyPatch
     ):
         import memtomem.cli._liveness as liveness
 
-        class _Unsearchable:
-            def glob(self, pattern: str):
-                raise OSError("unsearchable runtime dir")
+        candidate = rt / "not-a-directory"
+        candidate.write_text("occupied", encoding="utf-8")
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [candidate])
 
-            def __str__(self) -> str:
-                return "<runtime dir>"
-
-        # Patch the candidate resolver, not ``runtime_dir``: enumeration
-        # walks every candidate branch as of #2003, and an unsearchable
-        # directory anywhere in that set must fail the whole pass — a
-        # directory we cannot search is not a directory we can call empty.
-        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [_Unsearchable()])
-
+        files, detail = liveness._glob_server_pid_files()
         states = liveness.enumerate_server_liveness()
         state = liveness.check_server_liveness()
 
+        assert files is None
+        assert str(candidate) in detail
         assert len(states) == 1
         assert states[0].alive is True
+        assert states[0].pid_file is None
+        assert states[0].probe_error is not None
+        assert str(candidate) in states[0].probe_error
+        assert state.alive is True
+        assert state.pid_file is None
+        assert state.probe_error is not None
+        assert str(candidate) in state.probe_error
+
+    def test_store_pid_scan_surfaces_permission_error(
+        self, rt: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt])
+        real_scandir = os.scandir
+
+        def _deny_scan(path):
+            if Path(path) != rt:
+                return real_scandir(path)
+            raise PermissionError("unsearchable runtime dir")
+
+        monkeypatch.setattr(liveness.os, "scandir", _deny_scan)
+
+        files, detail = liveness._glob_server_pid_files()
+
+        assert files is None
+        assert str(rt) in detail
+        assert "unsearchable runtime dir" in detail
+
+    @pytest.mark.skipif(
+        os.name != "posix" or getattr(os, "geteuid", lambda: 0)() == 0,
+        reason="requires permission bits enforced for a non-root POSIX user",
+    )
+    def test_store_pid_scan_fails_closed_on_real_permission_error(
+        self, rt: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        pid_file = rt / "server-aaaaaaaaaaaaaaaa.pid"
+        pid_file.write_text("4242", encoding="utf-8")
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt])
+
+        os.chmod(rt, 0o000)
+        try:
+            files, detail = liveness._glob_server_pid_files()
+            states = liveness.enumerate_server_liveness()
+            state = liveness.check_server_liveness()
+        finally:
+            os.chmod(rt, 0o700)
+
+        assert files is None
+        assert str(rt) in detail
+        assert len(states) == 1
+        assert states[0].alive is True
+        assert states[0].pid_file is None
         assert states[0].probe_error is not None
         assert state.alive is True
-        assert state.probe_error is not None, (
-            "an unenumerable runtime dir is an assumption, not observed "
-            "evidence — probe_error must say so (#1949)"
-        )
+        assert state.pid_file is None
+        assert state.probe_error is not None
+        assert pid_file.exists(), "the hidden pid file must not be mistaken for an absent file"
+
+    def test_store_pid_scan_fails_closed_during_iteration(
+        self, rt: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        class _Entry:
+            name = "server-aaaaaaaaaaaaaaaa.pid"
+
+        real_scandir = os.scandir
+
+        @contextlib.contextmanager
+        def _broken_scan(path):
+            if Path(path) != rt:
+                with real_scandir(path) as entries:
+                    yield entries
+                return
+
+            def _entries():
+                yield _Entry()
+                raise PermissionError("runtime dir changed during scan")
+
+            yield _entries()
+
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt])
+        monkeypatch.setattr(liveness.os, "scandir", _broken_scan)
+
+        files, detail = liveness._glob_server_pid_files()
+
+        assert files is None
+        assert str(rt) in detail
+        assert "runtime dir changed during scan" in detail
+
+    def test_missing_runtime_candidate_is_empty(self, rt: Path, monkeypatch: pytest.MonkeyPatch):
+        import memtomem.cli._liveness as liveness
+
+        missing = rt / "missing"
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [missing])
+
+        files, detail = liveness._glob_server_pid_files()
+        states = liveness.enumerate_server_liveness()
+        state = liveness.check_server_liveness()
+
+        assert files == []
+        assert detail == str(missing)
+        assert states == []
+        assert state.alive is False
+        assert state.pid_file is None
+        assert state.probe_error is None
+        assert not missing.exists(), "read-only liveness probes must not create runtime dirs"
