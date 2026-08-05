@@ -19,7 +19,7 @@ _AGENT_ID_OPTION = click.option(
     "-a",
     "agent_id",
     default=None,
-    help="Agent identifier.",
+    help="Agent identifier",
 )
 
 

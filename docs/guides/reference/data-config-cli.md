@@ -319,6 +319,11 @@ mm agent list                          # list registered agents (--json for scri
 mm agent share <chunk_id> --target shared    # copy a chunk into the shared scope (default target: shared)
 mm agent migrate                       # migrate legacy agent records into the registry (--dry-run to preview)
 
+# Pinned Context — agent-specific blocks use --agent-id (or -a).
+# The legacy --agent spelling remains accepted without a warning.
+mm pinned set response-style --agent-id planner --content "Prefer concise answers."
+mm pinned list --agent-id planner
+
 # Wiki — host-global canonical library (~/.memtomem-wiki); ADR-0008 / ADR-0027
 # Author, check, and commit canonical artifacts here, then project them into a
 # project with `mm context install`. The wiki is GLOBAL; install/status are
@@ -464,8 +469,6 @@ mm session list                                               # list sessions
 mm session events <id>                                        # show events for a session
 mm session wrap -- CMD                                        # wrap a command with session lifecycle
 mm activity log                                               # log agent activity event
-# Agent selection: use --agent-id (or -a) for session and pinned commands.
-# `mm pinned` also accepts the legacy --agent spelling without a warning.
 # Scripting: list/events/log support --json (see CONTRIBUTING.md → CLI output convention)
 # Write routing: `mm session start --agent-id X` sends subsequent `mm add` writes to
 # `agent-runtime:X` (override per call with `mm add --namespace`, or read them back with

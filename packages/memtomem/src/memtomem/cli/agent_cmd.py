@@ -432,7 +432,7 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
 
 
 @agent.command("debug-resolve", hidden=True)
-@click.option("--agent-id", default=None, help="Explicit agent_id (mem_agent_search arg).")
+@click.option("--agent-id", "-a", default=None, help="Explicit agent_id (mem_agent_search arg).")
 @click.option(
     "--current-agent-id",
     default=None,
