@@ -936,9 +936,21 @@ def upgrade(
             # side: only an actually observed holder suppresses the warning.
             late_servers = enumerate_server_liveness()
             late_web = check_web_liveness()
+            # Match the normal ``known_final_process`` authority filter: a
+            # shared legacy alias alone is not enough. Suppress only for a
+            # directly attributable holder whose start stamp proves it began
+            # after this install; unstamped/path-foreign old binaries keep the
+            # conservative warning.
             observed_late_process = any(
-                state.alive and state.probe_error is None for state in late_servers
-            ) or (late_web.alive and late_web.probe_error is None)
+                state.alive
+                and state.probe_error is None
+                and _is_new_generation(state, installed_at)
+                for state in _upgrade_server_stops(late_servers)
+            ) or (
+                late_web.alive
+                and late_web.probe_error is None
+                and _is_new_generation(late_web, installed_at)
+            )
             if observed_late_process:
                 db_lock_warning = False
 

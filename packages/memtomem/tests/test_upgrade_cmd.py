@@ -1303,6 +1303,8 @@ def test_late_new_server_suppresses_spurious_db_lock_warning(
     monkeypatch, tmp_path, fake_uv, force_tty
 ):
     _calls, _configure = fake_uv
+    cutoff = upgrade_cmd.datetime.fromisoformat("2026-08-05T02:00:00+00:00")
+    monkeypatch.setattr(upgrade_cmd, "_utc_now", lambda: cutoff)
     late = ServerState(
         alive=True,
         pid=999,
@@ -1315,6 +1317,21 @@ def test_late_new_server_suppresses_spurious_db_lock_warning(
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["db_lock_warning"] is False
+    assert seen == [[], [], [], [late]]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX late-process confirmation")
+def test_late_unstamped_server_keeps_db_lock_warning(monkeypatch, tmp_path, fake_uv, force_tty):
+    _calls, _configure = fake_uv
+    cutoff = upgrade_cmd.datetime.fromisoformat("2026-08-05T02:00:00+00:00")
+    monkeypatch.setattr(upgrade_cmd, "_utc_now", lambda: cutoff)
+    late = ServerState(alive=True, pid=999, pid_file=tmp_path / "server.pid")
+    seen = _patch_liveness(monkeypatch, _DEAD, snapshots=[[], [], [], [late]])
+    _patch_db_probe(monkeypatch, tmp_path, locked=True)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["db_lock_warning"] is True
     assert seen == [[], [], [], [late]]
 
 
