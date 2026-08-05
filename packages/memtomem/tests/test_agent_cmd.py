@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
@@ -362,8 +363,9 @@ class TestAgentDebugResolve:
     an MCP client.
     """
 
-    def test_explicit_agent_id_with_shared(self):
-        result = CliRunner().invoke(cli, ["agent", "debug-resolve", "--agent-id", "planner"])
+    @pytest.mark.parametrize("agent_flag", ("--agent-id", "-a"))
+    def test_explicit_agent_id_with_shared(self, agent_flag):
+        result = CliRunner().invoke(cli, ["agent", "debug-resolve", agent_flag, "planner"])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["agent_namespace"] == "agent-runtime:planner"

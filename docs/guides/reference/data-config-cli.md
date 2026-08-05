@@ -319,6 +319,11 @@ mm agent list                          # list registered agents (--json for scri
 mm agent share <chunk_id> --target shared    # copy a chunk into the shared scope (default target: shared)
 mm agent migrate                       # migrate legacy agent records into the registry (--dry-run to preview)
 
+# Pinned Context — agent-specific blocks use --agent-id (or -a).
+# The legacy --agent spelling remains accepted without a warning.
+mm pinned set response-style --agent-id planner --content "Prefer concise answers."
+mm pinned list --agent-id planner
+
 # Wiki — host-global canonical library (~/.memtomem-wiki); ADR-0008 / ADR-0027
 # Author, check, and commit canonical artifacts here, then project them into a
 # project with `mm context install`. The wiki is GLOBAL; install/status are
