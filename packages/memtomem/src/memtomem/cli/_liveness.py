@@ -35,6 +35,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Literal
 
+import click
 import portalocker
 
 from memtomem._runtime_paths import (
@@ -51,6 +52,7 @@ from memtomem._runtime_paths import (
 
 
 _PID_PAYLOAD_MAX_BYTES = 4096
+_SKIP_DETAIL_MAX_CHARS = 120
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _BINARY = getattr(os, "O_BINARY", 0)
@@ -68,6 +70,24 @@ def _exception_detail(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {scrub_text(str(exc))}"
 
 
+def _scrub_text_bounded(text: str, max_chars: int = _SKIP_DETAIL_MAX_CHARS) -> str:
+    """Scrub *text* while keeping every generated escape whole and bounded."""
+    tokens = [scrub_text(char) for char in text]
+    rendered = "".join(tokens)
+    if len(rendered) <= max_chars:
+        return rendered
+
+    budget = max_chars - 3
+    kept: list[str] = []
+    length = 0
+    for token in tokens:
+        if length + len(token) > budget:
+            break
+        kept.append(token)
+        length += len(token)
+    return f"{''.join(kept)}..."
+
+
 def _runtime_candidate_skip_detail(candidate: Path, exc: OSError) -> str:
     """Describe one non-blocking speculative-candidate rejection concisely."""
     path = scrub_text(str(candidate))
@@ -75,9 +95,7 @@ def _runtime_candidate_skip_detail(candidate: Path, exc: OSError) -> str:
         reason = exc.short_reason()
     else:
         raw_detail = str(exc).replace(str(candidate), "<candidate>").split(". ", 1)[0]
-        if len(raw_detail) > 120:
-            raw_detail = f"{raw_detail[:117]}..."
-        reason = f"{type(exc).__name__}: {scrub_text(raw_detail)}"
+        reason = f"{type(exc).__name__}: {_scrub_text_bounded(raw_detail)}"
     return f"skipped: {path} ({reason})"
 
 
@@ -252,6 +270,33 @@ class ServerState:
 def _merge_probe_warnings(*warnings: str | None) -> str | None:
     unique = list(dict.fromkeys(warning for warning in warnings if warning))
     return "; ".join(unique) or None
+
+
+def format_narrowed_inventory_warning(detail: str) -> str:
+    """Render one shared user-facing narrowed-inventory warning."""
+    return (
+        "Server liveness probe used a narrowed runtime inventory "
+        f"({detail}). Only validated runtime directories were checked."
+    )
+
+
+def record_narrowed_inventory_warning(
+    warnings: list[str],
+    detail: str | None,
+    *,
+    emit: bool,
+    indent: str = "",
+) -> str | None:
+    """Deduplicate, retain, and optionally print one inventory warning."""
+    if detail is None:
+        return None
+    warning = format_narrowed_inventory_warning(detail)
+    if warning in warnings:
+        return None
+    warnings.append(warning)
+    if emit:
+        click.secho(f"{indent}Warning: {warning}", fg="yellow")
+    return warning
 
 
 def _with_probe_warning(state: ServerState, *warnings: str | None) -> ServerState:
@@ -652,17 +697,6 @@ def enumerate_server_liveness_inventory() -> tuple[list[ServerState], str | None
     if legacy_state.alive:
         states.append(_with_probe_warning(legacy_state, warning))
     return states, warning
-
-
-def enumerate_server_liveness() -> list[ServerState]:
-    """Return every live or unverifiable server pid-lock state.
-
-    Compatibility wrapper for callers that only consume states. Destructive
-    inventory users should call :func:`enumerate_server_liveness_inventory`
-    so a warning survives even when no live state exists.
-    """
-    states, _warning = enumerate_server_liveness_inventory()
-    return states
 
 
 def check_server_liveness(db_path: Path | None = None) -> ServerState:

@@ -227,6 +227,27 @@ class TestResetJson:
             assert result.output.count("narrowed runtime inventory") == 1
             assert warning in result.output
 
+    def test_live_server_refusal_json_retains_inventory_warning(self, home, monkeypatch):
+        warning = "skipped: <runtime> (unsafe permissions 0o755)"
+        _patch_liveness(
+            monkeypatch,
+            server=ServerState(
+                alive=True,
+                pid=4242,
+                pid_file=home / "server.pid",
+                probe_warning=warning,
+            ),
+        )
+
+        result = CliRunner().invoke(cli, ["reset", "-y", "--json"])
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert "MCP server still running" in payload["reason"]
+        assert len(payload["warnings"]) == 1
+        assert warning in payload["warnings"][0]
+
     def test_destructive_boundary_surfaces_new_inventory_warning(self, home, monkeypatch):
         warning = "skipped: <late-runtime> (junction)"
         clean = ServerState(alive=False, pid=None, pid_file=None)

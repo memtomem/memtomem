@@ -64,7 +64,11 @@ from memtomem._instance_registry import (
 )
 from memtomem._settlement import settle_shielded_value
 from memtomem.cli._db_lock import check_db_lock, sqlite_file_uri
-from memtomem.cli._liveness import check_server_liveness, check_web_liveness
+from memtomem.cli._liveness import (
+    check_server_liveness,
+    check_web_liveness,
+    record_narrowed_inventory_warning,
+)
 from memtomem.cli._prompts import confirm as _confirm
 
 
@@ -98,13 +102,23 @@ def reset(yes: bool, backup: bool, force: bool, as_json: bool) -> None:
     asyncio.run(_run(yes, backup=backup, force=force, as_json=as_json))
 
 
-def _refuse(message: str, hint: str, *, cause: str | None = None, as_json: bool = False) -> None:
+def _refuse(
+    message: str,
+    hint: str,
+    *,
+    cause: str | None = None,
+    as_json: bool = False,
+    warnings: list[str] | None = None,
+) -> None:
     if as_json:
         # Write-command JSON error shape (CONTRIBUTING): keep stdout
         # machine-readable while signaling the handled failure via exit 1.
         parts = [message, f"Cause: {cause}" if cause else None, hint]
         reason = " ".join(p for p in parts if p)
-        click.echo(json.dumps({"ok": False, "reason": reason}))
+        payload: dict[str, object] = {"ok": False, "reason": reason}
+        if warnings:
+            payload["warnings"] = warnings
+        click.echo(json.dumps(payload))
         sys.exit(1)
     click.secho(message, fg="red")
     if cause:
@@ -170,7 +184,13 @@ def _refuse_registry(probe: UninstallProbeResult, *, as_json: bool = False) -> N
         )
 
 
-def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -> str | None:
+def _check_gates(
+    db_path: Path,
+    *,
+    force: bool = False,
+    as_json: bool = False,
+    warnings: list[str],
+) -> None:
     """Refuse (exit 2; exit 1 + ``ok: false`` under ``--json``) on any
     evidence of a live writer.
 
@@ -185,8 +205,13 @@ def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -
     if registry.state != "NONE":
         _refuse_registry(registry, as_json=as_json)
     if force:
-        return None
+        return
     server = check_server_liveness(db_path)
+    record_narrowed_inventory_warning(
+        warnings,
+        server.probe_warning,
+        emit=not as_json,
+    )
     if server.alive:
         who = f"pid {server.pid}" if server.pid is not None else "pid unknown, flock held"
         _refuse(
@@ -194,6 +219,7 @@ def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -
             "writer racing the wipe can lose data or corrupt the WAL.",
             "Stop the server first, or pass --force to override.",
             as_json=as_json,
+            warnings=warnings,
         )
     web = check_web_liveness()
     if web.alive:
@@ -204,6 +230,7 @@ def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -
             "UI writes to this database.",
             "Stop it first (mm web is a foreground process), or pass --force to override.",
             as_json=as_json,
+            warnings=warnings,
         )
     db_lock = check_db_lock(db_path)
     if db_lock.locked:
@@ -212,23 +239,8 @@ def _check_gates(db_path: Path, *, force: bool = False, as_json: bool = False) -
             f"Find it with `lsof {db_path}` (or `ps aux | grep memtomem`), stop "
             "it, or pass --force to override.",
             as_json=as_json,
+            warnings=warnings,
         )
-    return server.probe_warning
-
-
-def _record_probe_warning(warnings: list[str], detail: str | None, *, as_json: bool) -> None:
-    """Retain one narrowed-inventory warning across reset's three probes."""
-    if detail is None:
-        return
-    warning = (
-        "Server liveness probe used a narrowed runtime inventory "
-        f"({detail}). Only validated runtime directories were checked."
-    )
-    if warning in warnings:
-        return
-    warnings.append(warning)
-    if not as_json:
-        click.secho(f"Warning: {warning}", fg="yellow")
 
 
 async def _acquire_barrier_settled() -> HeldBarrier:
@@ -256,7 +268,9 @@ async def _acquire_barrier_settled() -> HeldBarrier:
     return result
 
 
-async def _acquire_barrier_or_refuse(*, as_json: bool = False) -> HeldBarrier:
+async def _acquire_barrier_or_refuse(
+    *, as_json: bool = False, warnings: list[str] | None = None
+) -> HeldBarrier:
     """Acquire the barrier or refuse the way the gates do.
 
     Deliberately no ``--force`` hint in either refusal: a held flock is
@@ -277,6 +291,7 @@ async def _acquire_barrier_or_refuse(*, as_json: bool = False) -> HeldBarrier:
             f"barrier ({exc}). Refusing to reset.",
             "Stop it and re-run mm reset.",
             as_json=as_json,
+            warnings=warnings,
         )
         raise  # unreachable — _refuse exits; keeps the return type honest
     except OSError as exc:
@@ -285,6 +300,7 @@ async def _acquire_barrier_or_refuse(*, as_json: bool = False) -> HeldBarrier:
             "Repair the reported path, then retry — this is an infrastructure "
             "failure, not a running process.",
             as_json=as_json,
+            warnings=warnings,
         )
         raise  # unreachable — _refuse exits; keeps the return type honest
 
@@ -404,11 +420,7 @@ async def _run(
     # Un-barriered pass first: rich per-cause messages without making the
     # common live-server case wait out a barrier timeout (uninstall
     # precedent). --yes must never skip any gate (uninstall -y precedent).
-    _record_probe_warning(
-        warnings,
-        _check_gates(db_path, force=force, as_json=as_json),
-        as_json=as_json,
-    )
+    _check_gates(db_path, force=force, as_json=as_json, warnings=warnings)
 
     # Phase A (#1945): initialize() may run migrations, i.e. write to a DB
     # we have only *probed* to be unowned — and a probe is a snapshot.
@@ -418,14 +430,10 @@ async def _run(
     # across the prompt, where an uninstall could acquire the barrier,
     # re-probe past our idle connection, and stage the live DB file out
     # from under us.
-    barrier = await _acquire_barrier_or_refuse(as_json=as_json)
+    barrier = await _acquire_barrier_or_refuse(as_json=as_json, warnings=warnings)
     close_confirmed = True
     try:
-        _record_probe_warning(
-            warnings,
-            _check_gates(db_path, force=force, as_json=as_json),
-            as_json=as_json,
-        )
+        _check_gates(db_path, force=force, as_json=as_json, warnings=warnings)
         storage = _make_backend()
         # From construction on, the store may be open: release only after
         # a *confirmed* close (#1936 polarity — see _release_or_retain).
@@ -484,14 +492,10 @@ async def _run(
     # prompt holds the barrier shared for its process lifetime, so it
     # surfaces here as a timeout refusal — the mechanism working, not a
     # degraded message.
-    barrier = await _acquire_barrier_or_refuse(as_json=as_json)
+    barrier = await _acquire_barrier_or_refuse(as_json=as_json, warnings=warnings)
     close_confirmed = True  # nothing open until the wipe backend below
     try:
-        _record_probe_warning(
-            warnings,
-            _check_gates(db_path, force=force, as_json=as_json),
-            as_json=as_json,
-        )
+        _check_gates(db_path, force=force, as_json=as_json, warnings=warnings)
 
         # Consent was given for the file we counted in Phase A. If it
         # vanished (a racing ``mm uninstall`` during the prompt) or was
@@ -513,6 +517,7 @@ async def _run(
                 "gave was for a different database.",
                 "Re-run mm reset to reset the database that is there now.",
                 as_json=as_json,
+                warnings=warnings,
             )
 
         backup_path: Path | None = None

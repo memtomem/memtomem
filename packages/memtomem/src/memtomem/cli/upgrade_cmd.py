@@ -45,6 +45,7 @@ from memtomem.cli._liveness import (
     enumerate_server_liveness_inventory,
     probe_legacy_pid_file,
     probe_pid_file,
+    record_narrowed_inventory_warning,
 )
 from memtomem.cli._prompts import confirm as _confirm
 
@@ -254,22 +255,6 @@ def _stabilize_process_inventory(
         current_web = check_web_liveness()
     warning = "; ".join(dict.fromkeys(collected_warnings)) or None
     return current_servers, current_web, warning
-
-
-def _record_runtime_inventory_warning(
-    warnings: list[str], detail: str | None, *, emit: bool
-) -> None:
-    if detail is None:
-        return
-    warning = (
-        "Server liveness probe used a narrowed runtime inventory "
-        f"({detail}). Only validated runtime directories were checked."
-    )
-    if warning in warnings:
-        return
-    warnings.append(warning)
-    if emit:
-        click.secho(f"  Warning: {warning}", fg="yellow")
 
 
 def _json_with_warnings(payload: dict[str, object], warnings: list[str]) -> dict[str, object]:
@@ -688,7 +673,7 @@ def upgrade(
         if is_windows
         else []
     )
-    _record_runtime_inventory_warning(warnings, server_warning, emit=False)
+    record_narrowed_inventory_warning(warnings, server_warning, emit=False)
     # Windows skips the kill stage entirely, so a truthful plan/dry-run
     # must not claim we would kill or remove anything there.
     planned_stops = [] if is_windows else live_states
@@ -811,7 +796,12 @@ def upgrade(
     # Windows deliberately keeps its no-kill, no-boundary compatibility path.
     if not is_windows:
         boundary_servers, boundary_web, boundary_warning = _stabilize_process_inventory()
-        _record_runtime_inventory_warning(warnings, boundary_warning, emit=not json_out)
+        record_narrowed_inventory_warning(
+            warnings,
+            boundary_warning,
+            emit=not json_out,
+            indent="  ",
+        )
         boundary_problems = _inventory_problems(boundary_servers, boundary_web)
         if boundary_problems:
             _refuse_upgrade(
@@ -898,7 +888,12 @@ def upgrade(
         # fourth complete inventory is used only if one of those re-probes
         # catches the lock-before-pid startup window.
         retirement_servers, retirement_web, retirement_warning = _stabilize_process_inventory()
-        _record_runtime_inventory_warning(warnings, retirement_warning, emit=not json_out)
+        record_narrowed_inventory_warning(
+            warnings,
+            retirement_warning,
+            emit=not json_out,
+            indent="  ",
+        )
         cleanup_problems = _inventory_problems(retirement_servers, retirement_web)
         retirement_server_targets = [
             state
@@ -932,7 +927,12 @@ def upgrade(
             final_servers, final_web, final_warning = _stabilize_process_inventory(
                 final_servers, final_web
             )
-            _record_runtime_inventory_warning(warnings, final_warning, emit=not json_out)
+            record_narrowed_inventory_warning(
+                warnings,
+                final_warning,
+                emit=not json_out,
+                indent="  ",
+            )
         cleanup_problems.extend(_inventory_problems(final_servers, final_web))
 
         for state in _upgrade_server_stops(final_servers):
@@ -994,7 +994,12 @@ def upgrade(
             # process as an old invisible writer. Probe failures stay warning-
             # side: only an actually observed holder suppresses the warning.
             late_servers, late_warning = enumerate_server_liveness_inventory()
-            _record_runtime_inventory_warning(warnings, late_warning, emit=not json_out)
+            record_narrowed_inventory_warning(
+                warnings,
+                late_warning,
+                emit=not json_out,
+                indent="  ",
+            )
             late_web = check_web_liveness()
             # Match the normal ``known_final_process`` authority filter: a
             # shared legacy alias alone is not enough. Suppress only for a

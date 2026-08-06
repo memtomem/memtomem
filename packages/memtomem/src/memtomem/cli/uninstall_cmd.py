@@ -64,7 +64,7 @@ from memtomem._instance_registry import (
 from memtomem._runtime_paths import _hint_quote, runtime_dir, scrub_text, server_pid_path
 from memtomem.cli._db_lock import DbLockState as _DbLockState  # noqa: F401  (test seam)
 from memtomem.cli._db_lock import check_db_lock as _check_db_lock
-from memtomem.cli._liveness import ServerState
+from memtomem.cli._liveness import ServerState, record_narrowed_inventory_warning
 from memtomem.cli._liveness import check_server_liveness as _check_server_liveness
 from memtomem.cli._liveness import probe_pid_file as _probe_pid_file  # noqa: F401  (test seam)
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
@@ -710,17 +710,6 @@ def _refuse_unverifiable_liveness(server: ServerState, *, is_windows: bool) -> N
         )
 
 
-def _print_liveness_probe_warning(server: ServerState) -> None:
-    """Surface a successful but deliberately narrowed runtime inventory."""
-    if server.probe_warning is None:
-        return
-    click.secho(
-        "  Warning: server liveness probe used a narrowed runtime inventory "
-        f"({server.probe_warning}). Only validated runtime directories were checked.",
-        fg="yellow",
-    )
-
-
 def _print_group(group: _Group) -> None:
     if not group.paths:
         return
@@ -1172,8 +1161,13 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
 
     if config_error is not None:
         click.secho(f"  Warning: config unreadable, using defaults: {config_error}", fg="yellow")
-    _print_liveness_probe_warning(server)
-    reported_probe_warning = server.probe_warning
+    reported_probe_warnings: list[str] = []
+    record_narrowed_inventory_warning(
+        reported_probe_warnings,
+        server.probe_warning,
+        emit=True,
+        indent="  ",
+    )
 
     inv = _collect_inventory(db_path)
     externals = _probe_external_integrations()
@@ -1409,9 +1403,12 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         server = _check_server_liveness(db_path)
         db_lock = _check_db_lock(db_path)
         registry_state = _probe_registry_liveness()
-        if server.probe_warning != reported_probe_warning:
-            _print_liveness_probe_warning(server)
-            reported_probe_warning = server.probe_warning
+        record_narrowed_inventory_warning(
+            reported_probe_warnings,
+            server.probe_warning,
+            emit=True,
+            indent="  ",
+        )
         heuristics_block = (server.alive or db_lock.locked) and (not force or is_windows)
         if registry_state.state == "UNTRUSTED":
             # A link that appeared while the user sat on the prompt is the
