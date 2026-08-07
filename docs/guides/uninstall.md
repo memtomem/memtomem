@@ -122,17 +122,21 @@ This moves aside:
 | `.current_session` | Active session marker |
 | `.server.pid` | Legacy MCP server advisory lock — no longer created by current servers (#2003); still cleaned up. Blocks uninstall only when held *exclusively* (a genuine pre-0.1.25 server) |
 
-The running server's pid/flock file lives **outside** `~/.memtomem/` under
-`$XDG_RUNTIME_DIR/memtomem/server-<digest>.pid` (Linux w/ systemd) or
-`$TMPDIR/memtomem-$UID/server-<digest>.pid` (macOS, BSD), where `<digest>` is
-derived from the resolved SQLite path so servers on different stores don't
-share one lock (#1990). Servers started by older versions still hold the bare
-`server.pid` name; `mm uninstall` inventories only the pid files attributable
-to the store it is deleting (plus that transitional bare name) and leaves
-other stores' `server-*.pid` files alone. Retained registry and
-lifecycle-lock sidecars are volatile and self-clean. Do not use a wildcard
-runtime-directory deletion: it can erase active liveness evidence or another
-user's state.
+The running server's pid/flock file lives **outside** `~/.memtomem/` at the
+stable per-user runtime anchor: `/tmp/memtomem-<euid>/server-<digest>.pid` on
+POSIX, or `<LocalAppData Known Folder>\Temp\memtomem-0\server-<digest>.pid`
+on Windows.
+This location does not depend on `XDG_RUNTIME_DIR`, `TMPDIR`, `TEMP`, or `TMP`,
+so a service and an interactive shell rendezvous on the same liveness evidence
+(#2037). `<digest>` comes from the resolved SQLite path, so servers on
+different stores do not share one pid lock (#1990).
+
+During the transition, `mm uninstall` also inspects safe pre-#2037 runtime
+locations it can derive. It inventories only pid files attributable to the
+store being deleted (plus the transitional bare `server.pid`) and leaves other
+stores' `server-*.pid` files alone. Retained registry and lifecycle-lock
+sidecars are volatile and self-clean. Do not use a wildcard runtime-directory
+deletion: it can erase active liveness evidence or another store's state.
 
 ## 4. Clean up project-scoped files (optional)
 

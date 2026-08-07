@@ -672,34 +672,23 @@ class TestCheckServerLivenessStoreScope:
         assert scoped.alive is True and scoped.probe_error is not None
         assert agnostic.alive is True and agnostic.probe_error is not None
 
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason=(
-            "no sibling branch exists on Windows: runtime_dir() skips "
-            "$XDG_RUNTIME_DIR entirely there, so the tempdir fallback is the "
-            "only branch and is already the caller's own"
-        ),
-    )
-    def test_sees_server_in_the_sibling_runtime_dir(self, rt: Path, tmp_path: Path):
-        """#2003 review: a server whose runtime dir differs from the CLI's.
-
-        The ``rt`` fixture gives this CLI an ``XDG_RUNTIME_DIR``; a server
-        started without one (cron, an ``ssh`` shell, a container exec)
-        lands in the ``{gettempdir()}/memtomem-{uid}`` fallback instead.
-        Probing only the caller's own branch reported that live server as
-        dead, and ``mm uninstall`` / ``mm reset`` would delete state under
-        it — the legacy shared alias used to be the accidental backstop.
-        """
-        import tempfile
+    def test_sees_server_in_a_transition_runtime_dir(
+        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A pre-#2037 server at a safe derivable root remains visible."""
 
         from memtomem._runtime_paths import server_pid_path
         from memtomem.cli._liveness import check_server_liveness
 
-        uid = os.geteuid() if hasattr(os, "geteuid") else 0
-        sibling = Path(tempfile.gettempdir()) / f"memtomem-{uid}"
+        sibling = tmp_path / "legacy-runtime"
         sibling.mkdir(parents=True, exist_ok=True)
-        sibling.chmod(0o700)
-        assert sibling != rt, "fixture must give the CLI the other branch"
+        if os.name != "nt":
+            sibling.chmod(0o700)
+        assert sibling != rt
+
+        import memtomem.cli._liveness as liveness
+
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt, sibling])
 
         db = tmp_path / "store" / "memtomem.db"
         with self._hold(sibling / server_pid_path(db).name):
@@ -707,21 +696,21 @@ class TestCheckServerLivenessStoreScope:
             agnostic = check_server_liveness()
 
         assert scoped.alive is True, (
-            "a live server in the sibling runtime dir must gate this store (#2003)"
+            "a live server in a transition runtime dir must gate this store"
         )
         assert agnostic.alive is True
 
-    def test_sibling_runtime_dir_candidates_cover_both_branches(self):
-        """Pins the candidate set itself, so a refactor that quietly drops
-        one branch fails here rather than as a silent fail-open."""
+    def test_runtime_candidates_cover_stable_and_transition_roots(self, monkeypatch):
+        """Pins the stable-first transition set against a silent narrowing."""
         import tempfile
 
         from memtomem._runtime_paths import _is_safe_dir, candidate_runtime_dirs, runtime_dir
 
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
         uid = os.geteuid() if hasattr(os, "geteuid") else 0
         dirs = candidate_runtime_dirs()
 
-        assert dirs[0] == runtime_dir(), "caller's own branch must be probed first"
+        assert dirs[0] == runtime_dir(), "the stable anchor must be probed first"
         assert Path(tempfile.gettempdir()) / f"memtomem-{uid}" in dirs
         if os.name != "nt":
             # Gated on the same safety check ``runtime_dir`` applies to
@@ -740,6 +729,23 @@ class TestCheckServerLivenessStoreScope:
                     "closed and blocks uninstall with no user remedy"
                 )
         assert len(dirs) == len(set(dirs)), "candidates must be de-duplicated"
+
+    def test_web_probe_sees_transition_runtime_root(
+        self, rt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.cli._liveness as liveness
+
+        legacy = tmp_path / "legacy-runtime"
+        legacy.mkdir(mode=0o700)
+        if os.name != "nt":
+            legacy.chmod(0o700)
+        monkeypatch.setattr(liveness, "candidate_runtime_dirs", lambda: [rt, legacy])
+
+        with self._hold(legacy / "web.pid"):
+            state = liveness.check_web_liveness()
+
+        assert state.alive is True
+        assert state.pid_file == legacy / "web.pid"
 
     def test_unresolvable_pid_candidates_fail_closed(self, monkeypatch: pytest.MonkeyPatch):
         """A probe that cannot enumerate *where* a server might be has no

@@ -1,11 +1,4 @@
-"""Tests for :mod:`memtomem._runtime_paths` (#412).
-
-Runtime files (pid, flock) resolve to ``$XDG_RUNTIME_DIR/memtomem`` when
-the platform provides one, and a per-user temp subdir otherwise. The
-resolver is side-effect free — ``runtime_dir()`` must NOT create the
-directory; ``ensure_runtime_dir()`` is the explicit opt-in and enforces
-the security contract (symlink / owner / mode).
-"""
+"""Tests for the stable runtime-coordination anchor (#412, #2037)."""
 
 from __future__ import annotations
 
@@ -19,10 +12,14 @@ from pathlib import Path
 
 import pytest
 
+import memtomem._runtime_paths as runtime_paths
 from memtomem._runtime_paths import (
     RuntimeDirValidationError,
     _hint_quote,
+    _legacy_environment_runtime_dir,
+    candidate_runtime_dirs,
     ensure_runtime_dir,
+    ensure_runtime_dir_at,
     legacy_server_pid_path,
     runtime_dir,
     scrub_text,
@@ -51,88 +48,31 @@ def _make_safe_xdg(tmp_path: Path) -> Path:
     reason="XDG / POSIX mode-bit semantics; Windows coverage lives in TestWindowsRuntimeDir",
 )
 class TestRuntimeDir:
-    def test_uses_xdg_runtime_dir_when_set(self, tmp_path, monkeypatch):
+    def test_anchor_is_invariant_to_xdg_and_tmp_environment(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        baseline = runtime_dir()
         xdg = _make_safe_xdg(tmp_path)
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        monkeypatch.setenv("TMPDIR", str(tmp_path / "other-tmp"))
+        tempfile.tempdir = None
+        try:
+            assert runtime_dir() == baseline
+        finally:
+            tempfile.tempdir = None
 
-        assert runtime_dir() == xdg / "memtomem"
-
-    def test_does_not_create_directory(self, tmp_path, monkeypatch):
-        """Plain ``runtime_dir()`` must be a pure path resolver. Inventory
-        walks rely on it to probe for ``server.pid`` without leaving an
-        empty subdir behind on machines where the runtime path doesn't
-        exist yet."""
-        xdg = _make_safe_xdg(tmp_path)
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
-
+    def test_resolver_does_not_create_directory(self):
         result = runtime_dir()
         assert not result.exists(), "runtime_dir() must not mkdir"
 
-    def test_falls_back_to_tempdir_when_xdg_unset(self, monkeypatch):
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-
-        result = runtime_dir()
-
-        assert result.parent == Path(tempfile.gettempdir())
-        assert result.name.startswith("memtomem-")
-
-    def test_falls_back_when_xdg_path_is_missing_or_stale(self, tmp_path, monkeypatch):
-        """``XDG_RUNTIME_DIR`` is exported but the target isn't on disk —
-        either it was never materialised (some remote-ssh configs) or it
-        has been reaped after a session ended. Both produce a missing
-        directory at stat time and must fall through to the tempdir form,
-        not mkdir against a non-existent parent."""
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "does-not-exist"))
-
-        result = runtime_dir()
-
-        assert result.parent == Path(tempfile.gettempdir())
-
-    @pytest.mark.requires_symlinks
-    def test_falls_back_when_xdg_is_symlink(self, tmp_path, monkeypatch):
-        """Attacker on a shared host pre-creates ``$XDG_RUNTIME_DIR`` as a
-        symlink into the user's home. ``_is_safe_dir`` must reject it —
-        the whole point of ``follow_symlinks=False`` is to catch this
-        before ``ensure_runtime_dir`` follows the link and writes the
-        pid file somewhere the user didn't expect."""
-        real = _make_safe_xdg(tmp_path)
-        link = tmp_path / "xdg-link"
-        os.symlink(real, link)
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(link))
-
-        result = runtime_dir()
-
-        assert result.parent == Path(tempfile.gettempdir()), (
-            "symlinked XDG base must fall through to tempdir, not be followed"
-        )
-
-    def test_falls_back_when_xdg_is_world_readable(self, tmp_path, monkeypatch):
-        """``XDG_RUNTIME_DIR=/tmp`` (world-writable) is the canonical
-        misconfiguration: falling through to the per-user tempdir form
-        still gives owner-only ``memtomem-{uid}``, while using the bad
-        base would place ``server.pid`` in a directory anyone can list."""
-        loose = tmp_path / "loose-xdg"
-        loose.mkdir()
-        os.chmod(loose, 0o755)  # group + world read/execute
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(loose))
-
-        result = runtime_dir()
-
-        assert result.parent == Path(tempfile.gettempdir())
-
-    @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="owner check is POSIX-only")
-    def test_falls_back_when_xdg_owner_mismatch(self, tmp_path, monkeypatch):
-        """Stubbing ``geteuid`` to return a different uid simulates a
-        root-owned ``$XDG_RUNTIME_DIR`` left over from a ``sudo`` run.
-        The owner check must see the mismatch and fall through."""
+    def test_legacy_candidate_retains_safe_nonstandard_xdg(self, tmp_path, monkeypatch):
         xdg = _make_safe_xdg(tmp_path)
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
-        real_uid = os.geteuid()
-        monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
 
-        result = runtime_dir()
-
-        assert result.parent == Path(tempfile.gettempdir())
+        assert _legacy_environment_runtime_dir() == xdg / "memtomem"
+        assert runtime_dir() == Path("/tmp") / f"memtomem-{os.geteuid()}"
+        assert candidate_runtime_dirs()[0] == runtime_dir()
+        assert xdg / "memtomem" in candidate_runtime_dirs()
 
 
 @pytest.mark.skipif(
@@ -181,11 +121,10 @@ class TestEnsureRuntimeDir:
         ``mkdir(exist_ok=True)`` followed the link silently and
         ``open(server_pid_path(), "w")`` wrote into the target. Now the
         validator raises before we touch the file."""
-        xdg = _make_safe_xdg(tmp_path)
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        runtime = runtime_dir()
         target = tmp_path / "real-target"
         target.mkdir(mode=0o700)
-        os.symlink(target, xdg / "memtomem")
+        os.symlink(target, runtime)
 
         with pytest.raises(RuntimeDirValidationError, match="symlink") as exc_info:
             ensure_runtime_dir()
@@ -197,10 +136,9 @@ class TestEnsureRuntimeDir:
         mode 0o755 used to be silently accepted, leaking the pid file
         into a group/world-readable location. The contract now enforces
         0o700 and surfaces remediation ``rm -rf`` in the error."""
-        xdg = _make_safe_xdg(tmp_path)
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
-        (xdg / "memtomem").mkdir(mode=0o755)
-        os.chmod(xdg / "memtomem", 0o755)  # neutralize umask
+        runtime = runtime_dir()
+        runtime.mkdir(mode=0o755)
+        os.chmod(runtime, 0o755)  # neutralize umask
 
         with pytest.raises(RuntimeDirValidationError, match="unsafe permissions") as exc_info:
             ensure_runtime_dir()
@@ -221,43 +159,27 @@ class TestEnsureRuntimeDir:
         cover. Pre-creating the fallback subdir at the stubbed uid's
         expected name lets us exercise that branch end-to-end.
         """
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        tmp_tmp = tmp_path / "tmp with space"
-        tmp_tmp.mkdir()
-        os.chmod(tmp_tmp, 0o700)
-        monkeypatch.setenv("TMPDIR", str(tmp_tmp))
-        tempfile.tempdir = None  # tempfile caches ``gettempdir()`` — invalidate
-
+        target = runtime_dir()
         real_uid = os.geteuid()
         stubbed_uid = real_uid + 1
-        # Pre-create the path that ``runtime_dir()`` will return under
-        # the stubbed uid. Owned by us (``st_uid == real_uid``) but the
-        # stubbed ``geteuid()`` returns ``stubbed_uid`` → mismatch.
-        target = tmp_tmp / f"memtomem-{stubbed_uid}"
         target.mkdir(mode=0o700)
         monkeypatch.setattr(os, "geteuid", lambda: stubbed_uid)
 
-        try:
-            with pytest.raises(RuntimeDirValidationError, match="owned by uid") as exc_info:
-                ensure_runtime_dir()
-            message = str(exc_info.value)
-            command = f"rm -rf -- {_hint_quote(target)}"
-            assert "ask an administrator" in message
-            assert "XDG_RUNTIME_DIR or TMPDIR" in message
-            assert message.endswith(command)
-            assert f"{command}." not in message
-            assert exc_info.value.reason == "wrong_owner"
-            assert exc_info.value.short_reason() == f"owned by uid {real_uid}"
-        finally:
-            tempfile.tempdir = None  # reset cache for subsequent tests
+        with pytest.raises(RuntimeDirValidationError, match="owned by uid") as exc_info:
+            ensure_runtime_dir()
+        message = str(exc_info.value)
+        command = f"rm -rf -- {_hint_quote(target)}"
+        assert "Ask an administrator" in message
+        assert "XDG_RUNTIME_DIR or TMPDIR" not in message
+        assert message.endswith(command)
+        assert exc_info.value.reason == "wrong_owner"
+        assert exc_info.value.short_reason() == f"owned by uid {real_uid}"
 
     def test_refuses_non_directory(self, tmp_path, monkeypatch):
         """A regular file where we expected a directory — unlikely but
         the validator should refuse rather than try to ``mkdir`` over
         it (which would ``FileExistsError`` anyway, just less clearly)."""
-        xdg = _make_safe_xdg(tmp_path)
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
-        (xdg / "memtomem").write_text("accidentally a file")
+        runtime_dir().write_text("accidentally a file")
 
         with pytest.raises(RuntimeDirValidationError, match="not a directory") as exc_info:
             ensure_runtime_dir()
@@ -319,7 +241,7 @@ class TestRemovalHintQuoting:
         os.symlink(target, xdg / "memtomem")
 
         with pytest.raises(PermissionError) as exc:
-            ensure_runtime_dir()
+            ensure_runtime_dir_at(xdg / "memtomem")
         expected = f"rm -f -- {shlex.quote(str(xdg / 'memtomem'))}"
         assert expected in str(exc.value)
 
@@ -329,7 +251,7 @@ class TestRemovalHintQuoting:
         (xdg / "memtomem").write_text("accidentally a file")
 
         with pytest.raises(PermissionError) as exc:
-            ensure_runtime_dir()
+            ensure_runtime_dir_at(xdg / "memtomem")
         expected = f"rm -f -- {shlex.quote(str(xdg / 'memtomem'))}"
         assert expected in str(exc.value)
 
@@ -340,7 +262,7 @@ class TestRemovalHintQuoting:
         os.chmod(xdg / "memtomem", 0o755)  # neutralize umask
 
         with pytest.raises(PermissionError) as exc:
-            ensure_runtime_dir()
+            ensure_runtime_dir_at(xdg / "memtomem")
         expected = f"rm -rf -- {shlex.quote(str(xdg / 'memtomem'))}"
         assert expected in str(exc.value)
 
@@ -365,7 +287,7 @@ class TestRemovalHintQuoting:
 
         try:
             with pytest.raises(PermissionError) as exc:
-                ensure_runtime_dir()
+                ensure_runtime_dir_at(target)
             expected = f"rm -rf -- {shlex.quote(str(target))}"
             assert expected in str(exc.value)
         finally:
@@ -382,7 +304,7 @@ class TestRemovalHintQuoting:
         monkeypatch.setattr(Path, "is_junction", lambda self: True)
 
         with pytest.raises(RuntimeDirValidationError) as exc:
-            ensure_runtime_dir()
+            ensure_runtime_dir_at(xdg / "memtomem")
         expected = f"rmdir -- {shlex.quote(str(xdg / 'memtomem'))}"
         assert expected in str(exc.value)
         assert exc.value.reason == "junction"
@@ -402,7 +324,7 @@ class TestRemovalHintQuoting:
         os.chmod(xdg / "memtomem", 0o755)
 
         with pytest.raises(PermissionError) as exc:
-            ensure_runtime_dir()
+            ensure_runtime_dir_at(xdg / "memtomem")
         msg = str(exc.value)
         assert "rm -rf -- $'" in msg and "\\x1b" in msg
         # No raw control byte may survive anywhere — prose included.
@@ -424,7 +346,7 @@ class TestRemovalHintQuoting:
         os.chmod(base / "memtomem", 0o755)
 
         with pytest.raises(PermissionError) as exc:
-            ensure_runtime_dir()
+            ensure_runtime_dir_at(Path("-rf") / "memtomem")
         msg = str(exc.value)
         assert "rm -rf -- -rf/memtomem" in msg
         # The command portion must tokenize so the path is a lone operand.
@@ -516,7 +438,7 @@ class TestServerPidPath:
         xdg = _make_safe_xdg(tmp_path)
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
 
-        assert server_pid_path() == xdg / "memtomem" / "server.pid"
+        assert server_pid_path() == runtime_dir() / "server.pid"
 
     def test_does_not_create_parent(self, tmp_path, monkeypatch):
         xdg = _make_safe_xdg(tmp_path)
@@ -525,7 +447,7 @@ class TestServerPidPath:
         server_pid_path()
         server_pid_path(tmp_path / "store" / "memtomem.db")
 
-        assert not (xdg / "memtomem").exists(), (
+        assert not runtime_dir().exists(), (
             "server_pid_path() is a path resolver; use ensure_runtime_dir() "
             "explicitly when opening the file"
         )
@@ -536,7 +458,7 @@ class TestServerPidPath:
 
         p = server_pid_path(tmp_path / "a" / "memtomem.db")
 
-        assert p.parent == xdg / "memtomem"
+        assert p.parent == runtime_dir()
         assert re.fullmatch(r"server-[0-9a-f]{16}\.pid", p.name), p.name
 
     def test_different_stores_get_different_names(self, tmp_path, monkeypatch):
@@ -573,7 +495,7 @@ class TestServerPidPath:
         xdg = _make_safe_xdg(tmp_path)
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
 
-        assert server_pid_path(":memory:") == xdg / "memtomem" / "server.pid"
+        assert server_pid_path(":memory:") == runtime_dir() / "server.pid"
         assert store_pid_digest(":memory:") is None
         assert store_pid_digest("file:mem?mode=memory") is None
 
@@ -592,28 +514,32 @@ class TestWindowsRuntimeDir:
     """Windows counterpart to ``TestRuntimeDir`` / ``TestEnsureRuntimeDir``.
 
     The runtime resolver collapses to one branch on Windows
-    (``tempfile.gettempdir() / 'memtomem-0'``) and the security gates
+    (``FOLDERID_LocalAppData / 'Temp' / 'memtomem-0'``) and the security gates
     that depend on POSIX mode bits or ``geteuid`` are off — see the
     module docstring of ``_runtime_paths``. These tests pin the
     NTFS-equivalent behaviour so a future contributor can't silently
     re-enable a check that doesn't have NTFS semantics.
     """
 
-    def test_runtime_dir_uses_tempdir_with_uid_zero(self, monkeypatch):
+    def test_runtime_dir_uses_known_folder_with_uid_zero(self, tmp_path, monkeypatch):
         """Windows has no ``geteuid``, so the suffix collapses to ``0``;
         ``%LOCALAPPDATA%\\Temp\\`` is already per-user, so the cross-user
         collision risk that motivates the suffix on shared ``/tmp`` does
         not apply here."""
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        local_app_data = tmp_path / "LocalAppData"
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        monkeypatch.setattr(runtime_paths, "_windows_local_app_data", lambda: local_app_data)
 
         result = runtime_dir()
 
-        assert result == Path(tempfile.gettempdir()) / "memtomem-0"
+        assert result == local_app_data / "Temp" / "memtomem-0"
 
-    def test_runtime_dir_does_not_create(self, monkeypatch):
+    def test_runtime_dir_does_not_create(self, tmp_path, monkeypatch):
         """Pure resolver — same contract as POSIX. The uninstall
         inventory walk needs this to be side-effect free."""
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        local_app_data = tmp_path / "LocalAppData"
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        monkeypatch.setattr(runtime_paths, "_windows_local_app_data", lambda: local_app_data)
 
         result = runtime_dir()
         # Don't assert non-existence: a previous test in the session may
@@ -623,35 +549,35 @@ class TestWindowsRuntimeDir:
         runtime_dir()
         assert result.exists() == before
 
-    def test_runtime_dir_ignores_xdg_on_windows(self, tmp_path, monkeypatch):
+    def test_runtime_dir_ignores_environment_on_windows(self, tmp_path, monkeypatch):
         """``XDG_RUNTIME_DIR`` is a Linux/systemd convention; honoring
         it on Windows would require validating the base without POSIX
         mode bits, which is half-baked. Always fall through to tempdir
         on Windows so behaviour is uniform regardless of environment."""
         xdg = tmp_path / "xdg"
         xdg.mkdir()
+        local_app_data = tmp_path / "LocalAppData"
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        monkeypatch.setattr(runtime_paths, "_windows_local_app_data", lambda: local_app_data)
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        monkeypatch.setenv("TMP", str(tmp_path / "other-tmp"))
 
         result = runtime_dir()
 
-        assert result.parent == Path(tempfile.gettempdir())
-        assert result.name == "memtomem-0"
+        assert result == local_app_data / "Temp" / "memtomem-0"
 
     def test_ensure_creates_directory(self, tmp_path, monkeypatch):
         """``ensure_runtime_dir`` mkdirs the resolved path. Mode bits
         are not asserted: NTFS synthesizes them and the ``chmod`` call
         is effectively a no-op for POSIX-style permissions."""
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        monkeypatch.setenv("TEMP", str(tmp_path))
-        monkeypatch.setenv("TMP", str(tmp_path))
-        tempfile.tempdir = None  # invalidate the gettempdir() cache
+        local_app_data = tmp_path / "LocalAppData"
+        (local_app_data / "Temp").mkdir(parents=True)
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        monkeypatch.setattr(runtime_paths, "_windows_local_app_data", lambda: local_app_data)
 
-        try:
-            d = ensure_runtime_dir()
-            assert d.exists() and d.is_dir()
-            assert d == Path(tempfile.gettempdir()) / "memtomem-0"
-        finally:
-            tempfile.tempdir = None
+        d = ensure_runtime_dir()
+        assert d.exists() and d.is_dir()
+        assert d == local_app_data / "Temp" / "memtomem-0"
 
     def test_ensure_idempotent_on_windows(self, tmp_path, monkeypatch):
         """Regression for #637 — pre-fix, the second call would refuse
@@ -659,33 +585,27 @@ class TestWindowsRuntimeDir:
         mode bits like ``0o666`` and ``stat.S_IMODE(...) & 0o077`` is
         non-zero. After the fix the mode-bit gate is skipped on
         Windows so successive calls are idempotent."""
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        monkeypatch.setenv("TEMP", str(tmp_path))
-        monkeypatch.setenv("TMP", str(tmp_path))
-        tempfile.tempdir = None
+        local_app_data = tmp_path / "LocalAppData"
+        (local_app_data / "Temp").mkdir(parents=True)
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        monkeypatch.setattr(runtime_paths, "_windows_local_app_data", lambda: local_app_data)
 
-        try:
-            ensure_runtime_dir()
-            # Must not raise on the second pass.
-            ensure_runtime_dir()
-        finally:
-            tempfile.tempdir = None
+        ensure_runtime_dir()
+        # Must not raise on the second pass.
+        ensure_runtime_dir()
 
     def test_ensure_refuses_non_directory(self, tmp_path, monkeypatch):
         """Same contract as POSIX: a regular file at the runtime path
         is rejected with a clear remediation hint, regardless of NTFS
         mode-bit synthesis."""
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        monkeypatch.setenv("TEMP", str(tmp_path))
-        monkeypatch.setenv("TMP", str(tmp_path))
-        tempfile.tempdir = None
+        local_app_data = tmp_path / "LocalAppData"
+        (local_app_data / "Temp").mkdir(parents=True)
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        monkeypatch.setattr(runtime_paths, "_windows_local_app_data", lambda: local_app_data)
+        (local_app_data / "Temp" / "memtomem-0").write_text("a file")
 
-        try:
-            (Path(tempfile.gettempdir()) / "memtomem-0").write_text("a file")
-            with pytest.raises(PermissionError, match="not a directory"):
-                ensure_runtime_dir()
-        finally:
-            tempfile.tempdir = None
+        with pytest.raises(PermissionError, match="not a directory"):
+            ensure_runtime_dir()
 
     @pytest.mark.requires_symlinks
     def test_ensure_refuses_existing_symlink(self, tmp_path, monkeypatch):
@@ -693,19 +613,16 @@ class TestWindowsRuntimeDir:
         but once present they are exploitable identically to POSIX
         symlinks. Auto-skipped via ``requires_symlinks`` when the
         runner can't create one (see conftest)."""
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        monkeypatch.setenv("TEMP", str(tmp_path))
-        monkeypatch.setenv("TMP", str(tmp_path))
-        tempfile.tempdir = None
+        local_app_data = tmp_path / "LocalAppData"
+        (local_app_data / "Temp").mkdir(parents=True)
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
+        monkeypatch.setattr(runtime_paths, "_windows_local_app_data", lambda: local_app_data)
+        target = tmp_path / "real-target"
+        target.mkdir()
+        os.symlink(target, local_app_data / "Temp" / "memtomem-0")
 
-        try:
-            target = tmp_path / "real-target"
-            target.mkdir()
-            os.symlink(target, Path(tempfile.gettempdir()) / "memtomem-0")
-            with pytest.raises(PermissionError, match="symlink"):
-                ensure_runtime_dir()
-        finally:
-            tempfile.tempdir = None
+        with pytest.raises(PermissionError, match="symlink"):
+            ensure_runtime_dir()
 
 
 class TestLegacyServerPidPath:
@@ -720,12 +637,12 @@ class TestLegacyServerPidPath:
 
 @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="uid fallback only meaningful on POSIX")
 class TestUidFallback:
-    def test_fallback_dir_contains_effective_uid(self, monkeypatch):
-        """On systems without ``$XDG_RUNTIME_DIR``, the dir name
-        includes ``geteuid()`` so a shared ``/tmp`` doesn't silently
-        collide between users."""
+    def test_stable_dir_contains_effective_uid(self, monkeypatch):
+        """The stable shared-``/tmp`` anchor includes the effective uid."""
+        monkeypatch.delenv("_MEMTOMEM_TEST_RUNTIME_DIR")
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
 
         result = runtime_dir()
 
+        assert result.parent == Path("/tmp")
         assert result.name == f"memtomem-{os.geteuid()}"

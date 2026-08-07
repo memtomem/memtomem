@@ -881,9 +881,9 @@ class TestPidRecyclingDoesNotFalsePositive:
 class TestRuntimePidCleanedWithOther:
     """The runtime pid file lives outside ``~/.memtomem/`` but is still
     transient server state — uninstall must clean it up so a reinstall
-    starts fresh. The runtime subdir is rmdir'd if we empty it."""
+    starts fresh. Retained lock infrastructure may keep the runtime root."""
 
-    def test_runtime_pid_deleted_and_subdir_pruned(self, home):
+    def test_runtime_pid_deleted_and_lock_infrastructure_retained(self, home):
         """Both pid names attributable to this store — the store-scoped
         ``server-<digest>.pid`` and the transitional bare ``server.pid``
         (#1990) — are staged, and the emptied subdir is pruned."""
@@ -901,8 +901,8 @@ class TestRuntimePidCleanedWithOther:
         assert result.exit_code == 0, result.output
         assert not pid_file.exists(), "transitional runtime pid file must be deleted"
         assert not scoped_pid.exists(), "store-scoped runtime pid file must be deleted"
-        # subdir should be gone too — we own it
-        assert not runtime_dir().exists(), "empty runtime subdir must be pruned"
+        assert runtime_dir().exists(), "the retained lifecycle barrier keeps the root"
+        assert (runtime_dir() / "lifecycle.lock").exists()
 
     def test_runtime_subdir_preserved_when_unrelated_files_present(self, home):
         """Pin the empty-check precondition on the ``rmdir`` call so a
@@ -928,6 +928,47 @@ class TestRuntimePidCleanedWithOther:
         assert not (rt / "server.pid").exists()
         assert sibling.exists(), "unrelated file in runtime subdir must survive"
         assert runtime_dir().exists(), "runtime subdir must not be pruned when other files remain"
+
+    def test_transition_roots_are_inventoried_and_cleaned(self, home, tmp_path, monkeypatch):
+        """Store-owned pid files and stale sentinels are removed from every
+        safe derivable root; a foreign store's scoped pid remains untouched."""
+        import memtomem._instance_registry as registry
+        from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
+        from memtomem.cli import uninstall_cmd
+
+        state = _seed_state(home)
+        canonical = ensure_runtime_dir()
+        legacy = tmp_path / "legacy-runtime"
+        legacy.mkdir(mode=0o700)
+        if os.name != "nt":
+            legacy.chmod(0o700)
+        roots = [canonical, legacy]
+        monkeypatch.setattr(uninstall_cmd, "candidate_runtime_dirs", lambda: roots)
+        monkeypatch.setattr(registry, "candidate_runtime_dirs", lambda: roots)
+
+        owned_name = server_pid_path(state / "memtomem.db").name
+        foreign_name = server_pid_path(tmp_path / "foreign.db").name
+        assert owned_name != foreign_name
+        owned_pids: list[Path] = []
+        sentinels: list[Path] = []
+        for root in roots:
+            owned = root / owned_name
+            owned.write_text("0", encoding="utf-8")
+            owned_pids.append(owned)
+            instances = root / "instances"
+            instances.mkdir()
+            sentinel = instances / "12345-1-aaaaaaaaaaaaaaaa-aaaaaaaa-bbbbbbbb.lock"
+            sentinel.touch()
+            sentinels.append(sentinel)
+        foreign = legacy / foreign_name
+        foreign.write_text("0", encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert all(not path.exists() for path in owned_pids)
+        assert all(not path.exists() for path in sentinels)
+        assert foreign.exists(), "a different store's scoped pid is not uninstall-owned"
 
 
 class TestForeignStorePidFiles:

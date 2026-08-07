@@ -42,12 +42,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   command). This is store-attributable evidence, so unlike the legacy alias it
   gates the right store.
 
-  Known limit, tracked separately: a server under a *non-standard*
-  `XDG_RUNTIME_DIR` that the CLI's environment does not name remains outside
-  this reach, and the instance registry does **not** cover it either — it
-  anchors on the same caller-local `runtime_dir()`. Closing that needs one
-  environment-independent per-user anchor shared by the pid files, the
-  registry, and the lifecycle barrier.
+  That caller-local identity limit is fixed for current processes by #2037's
+  stable per-user coordination anchor. Derivable pre-#2037 locations remain
+  transition candidates for liveness, registry, cleanup, and destructive
+  lifecycle fencing.
 
 - **A namespaced write goes to that namespace's own day file** (#2005,
   ADR-0032). The default target was `{date}.md` for everyone, and a namespace
@@ -87,6 +85,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Runtime coordination no longer depends on the caller's environment**
+  (#2037). On POSIX, all new server/Web pid files, instance sentinels,
+  registry sidecars, and lifecycle barriers rendezvous at the literal
+  `/tmp/memtomem-<euid>` anchor; on Windows they use
+  `FOLDERID_LocalAppData\Temp\memtomem-0` resolved through the Known Folder
+  API. `XDG_RUNTIME_DIR`, `TMPDIR`, `TEMP`, and `TMP` can therefore differ
+  between a server and `mm uninstall` / `mm reset` without hiding the live
+  process or splitting the barrier.
+
+  During transition, probes and registry enumeration also aggregate every
+  safe pre-#2037 location the caller can derive. Destructive commands take
+  the canonical barrier first, then fence those historical roots in a stable
+  order under one timeout; uninstall inventories their store-owned pid files
+  and stale sentinels without touching another store's scoped pid. A process
+  from an older binary that is already running under a non-standard,
+  caller-unknowable `XDG_RUNTIME_DIR` cannot be retroactively discovered;
+  restart it once with the upgraded binary to move it onto the stable anchor.
+
 - **Store-agnostic server discovery now fails closed when a runtime directory
   cannot be searched** (#2038). The pid inventory used by `mm upgrade` now
   surfaces permission and traversal errors instead of treating the directory
@@ -124,8 +140,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   array when that narrowed inventory affects the command.
   Runtime-dir refusals carry structured reason codes so concise warnings cannot
   drift from their remediation text, and wrong-owner recovery points users to
-  an administrator or a private `XDG_RUNTIME_DIR`/`TMPDIR` instead of presenting
-  an unexecutable removal command as the only remedy.
+  an administrator instead of presenting an unexecutable removal command as
+  the only remedy.
 
 - **Index results now distinguish namespaces actually applied from preview-only
   fallbacks** (#2035). The additive `applied_namespaces` field on POST and SSE

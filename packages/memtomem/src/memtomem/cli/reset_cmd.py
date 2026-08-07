@@ -17,15 +17,16 @@ Destructive by intent, so it carries the same operational gates as
   and the lifecycle barrier below are per-user, not per-store, so a live
   server on an *unrelated* custom store also refuses reset. Fail-closed
   is the accepted trade-off — no store-scoped fail-closed probe exists.
-* **Lifecycle barrier** (#1936, #1945) — probes are snapshots, so each
-  of reset's two write boundaries re-probes *under* an exclusive hold of
-  ``runtime_dir()/lifecycle.lock``: once around ``initialize()`` (which
-  may migrate, i.e. write), once around backup + ``reset_all()``. A
-  starting server takes the barrier shared before opening storage, so it
-  either blocks or is already visible to the re-probe. The barrier is
-  never held across the confirmation prompt — that would fail-close
-  legitimate server startups for as long as the user sits on it, the
-  shape #1936 explicitly rejected for uninstall.
+* **Lifecycle barrier** (#1936, #1945, #2037) — probes are snapshots, so
+  each of reset's two write boundaries re-probes under one logical exclusive
+  hold: the stable per-user barrier first, then safe derivable pre-#2037
+  barriers during transition. This happens once around ``initialize()``
+  (which may migrate, i.e. write), once around backup + ``reset_all()``. A
+  starting current server takes the stable barrier shared before opening
+  storage, while a transition-era server is caught at its historical root;
+  either blocks or is already visible to the re-probe. The barrier is never
+  held across the confirmation prompt — that would fail-close legitimate
+  server startups for as long as the user sits on it.
 * ``--force`` bypasses only the pid/web/db-lock heuristics, for
   stale-pid recovery (uninstall parity). It never overrides registry
   evidence or a held barrier — those are positive liveness, not

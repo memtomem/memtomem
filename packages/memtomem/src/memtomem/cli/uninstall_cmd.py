@@ -61,7 +61,14 @@ from memtomem._instance_registry import instances_dir as _instances_dir
 from memtomem._instance_registry import (
     probe_all_for_uninstall as _probe_registry_liveness,
 )
-from memtomem._runtime_paths import _hint_quote, runtime_dir, scrub_text, server_pid_path
+from memtomem._runtime_paths import (
+    _hint_quote,
+    candidate_runtime_dirs,
+    runtime_dir,
+    scrub_text,
+    server_pid_path,
+    validate_runtime_dir,
+)
 from memtomem.cli._db_lock import DbLockState as _DbLockState  # noqa: F401  (test seam)
 from memtomem.cli._db_lock import check_db_lock as _check_db_lock
 from memtomem.cli._liveness import ServerState, record_narrowed_inventory_warning
@@ -136,7 +143,7 @@ def _stageable_owned_entry(path: Path) -> bool:
     return _entry_present(path)
 
 
-def _real_registry_dir() -> Path | None:
+def _real_registry_dir(root: Path | None = None) -> Path | None:
     """The sentinel directory iff it is an actual directory.
 
     ``lstat`` semantics — a symlinked ``instances/`` is treated as
@@ -157,7 +164,7 @@ def _real_registry_dir() -> Path | None:
     ``ensure_runtime_dir`` refuses that anchor too, but this path must
     not depend on something else having run first.
     """
-    d = _instances_dir()
+    d = _instances_dir() if root is None else _instances_dir(root)
     if _is_dir_link(d.parent):
         return None
     try:
@@ -169,19 +176,55 @@ def _real_registry_dir() -> Path | None:
     return d
 
 
+def _inventory_runtime_roots() -> tuple[Path, ...]:
+    """Return safe, existing canonical and transition roots for inventory.
+
+    The registry and lifecycle gates own fail-closed diagnostics.  This helper
+    is deliberately inert: it never creates a directory and never traverses a
+    candidate that fails the runtime-dir trust policy.
+    """
+    try:
+        canonical = runtime_dir()
+        candidates = candidate_runtime_dirs()
+    except OSError:
+        return ()
+    # Preserve the module-level path seams used by recovery tests and embedders.
+    if not candidates or candidates[0] != canonical:
+        candidates = [canonical]
+    roots: list[Path] = []
+    for candidate in candidates:
+        try:
+            if validate_runtime_dir(candidate):
+                roots.append(candidate)
+        except OSError:
+            continue
+    return tuple(dict.fromkeys(roots))
+
+
+def _real_registry_dirs(roots: tuple[Path, ...] | None = None) -> tuple[Path, ...]:
+    """Return every real registry directory under known runtime roots."""
+    canonical = runtime_dir()
+    found: list[Path] = []
+    for root in _inventory_runtime_roots() if roots is None else roots:
+        directory = _real_registry_dir() if root == canonical else _real_registry_dir(root)
+        if directory is not None:
+            found.append(directory)
+    return tuple(found)
+
+
 def _registry_has_sentinels() -> bool:
     """True when the instance-registry sentinel directory has any entries.
 
     Sidecar-only leftovers return ``False`` (the sidecar lives outside
     the directory and is retained infrastructure, #1935).
     """
-    d = _real_registry_dir()
-    if d is None:
-        return False
-    try:
-        return any(d.iterdir())
-    except OSError:
-        return False
+    for directory in _real_registry_dirs():
+        try:
+            if any(directory.iterdir()):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _prune_if_empty(path: Path) -> bool:
@@ -241,6 +284,7 @@ class _Inventory:
 
     state_dir: Path
     db_path: Path
+    runtime_roots: tuple[Path, ...]
     db_files: _Group
     config_files: _Group
     fragment_files: _Group
@@ -344,6 +388,7 @@ def _make_group(label: str, paths: Iterable[Path]) -> _Group:
 
 def _collect_inventory(db_path: Path) -> _Inventory:
     state_dir = _DEFAULT_STATE_DIR
+    runtime_roots = _inventory_runtime_roots()
 
     # Database + WAL/SHM/journal siblings (handles custom storage path).
     db_paths: list[Path] = []
@@ -430,8 +475,9 @@ def _collect_inventory(db_path: Path) -> _Inventory:
         candidate = state_dir / name
         if _entry_present(candidate):
             other.append(candidate)
-    # New-location pid files live outside state_dir (#412: on
-    # ``$XDG_RUNTIME_DIR/memtomem/`` or a per-user temp subdir). Include
+    # Runtime pid files live outside state_dir (#412). Include them under the
+    # stable anchor and every safe transition root that this caller can derive.
+    # Include
     # only the ones attributable to *this* store — the store-scoped
     # ``server-<digest>.pid`` and the transitional bare ``server.pid``
     # (#1990) — in the transient "other" group so they're cleaned with
@@ -441,9 +487,12 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     # A crashed foreign server can leave its stale file behind — bounded
     # to one per store, and kernel-cleaned where the runtime dir is the
     # XDG tmpfs.
-    for runtime_pid in dict.fromkeys((server_pid_path(db_path), server_pid_path())):
-        if _entry_present(runtime_pid):
-            other.append(runtime_pid)
+    scoped_name = server_pid_path(db_path).name
+    bare_name = server_pid_path().name
+    for root in runtime_roots:
+        for runtime_pid in dict.fromkeys((root / scoped_name, root / bare_name)):
+            if _entry_present(runtime_pid):
+                other.append(runtime_pid)
     # #1935: instance-registry sentinels are transient runtime files like
     # the pid files above; the refusal gate guarantees none of them is
     # live by the time staging runs. The two lock files outside that
@@ -452,8 +501,7 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     # deliberately absent: retained infrastructure, see module docstring.
     # Inventorying the barrier would also mean staging a file with an open
     # handle, which Windows refuses outright.
-    reg_dir = _real_registry_dir()
-    if reg_dir is not None:
+    for reg_dir in _real_registry_dirs(runtime_roots):
         try:
             other.extend(sorted(p for p in reg_dir.iterdir() if p.is_file()))
         except OSError:
@@ -462,6 +510,7 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     return _Inventory(
         state_dir=state_dir,
         db_path=db_path,
+        runtime_roots=runtime_roots,
         db_files=_make_group("Database", db_paths),
         config_files=_make_group("Config", config_files),
         fragment_files=_make_group("Fragments", fragments),
@@ -899,13 +948,13 @@ def _stage_inventory(
     """
     state_dir = _DEFAULT_STATE_DIR
     custom_db_dir = inv.db_path.parent if inv.db_path.parent != state_dir else None
-    rt = runtime_dir()
+    runtime_roots = inv.runtime_roots
 
     staging_name = f"{_STAGING_PREFIX}{os.getpid()}"
     plan = _build_stage_plan(inv, keep_config=keep_config, keep_data=keep_data)
 
     def _anchor_for(path: Path) -> Path:
-        for anchor in (state_dir, custom_db_dir, rt):
+        for anchor in (state_dir, custom_db_dir, *runtime_roots):
             if anchor is None:
                 continue
             try:
@@ -1098,11 +1147,11 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # ``_real_registry_dir`` already refuses a symlinked ``instances/``;
     # ``_prune_if_empty`` is what keeps every prune here off directory
     # links in general.
-    reg_dir = _real_registry_dir()
-    if reg_dir is not None:
+    for reg_dir in _real_registry_dirs(inv.runtime_roots):
         _prune_if_empty(reg_dir)
 
-    _prune_if_empty(runtime_dir())
+    for root in inv.runtime_roots:
+        _prune_if_empty(root)
 
     return ", ".join(completed) if completed else "nothing"
 
