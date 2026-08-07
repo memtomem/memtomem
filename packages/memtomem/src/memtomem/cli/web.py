@@ -102,7 +102,7 @@ def _write_web_metadata(
     info_file.write_text(json.dumps(info_payload, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _read_web_metadata() -> _WebMetadata:
+def _read_web_metadata(pid_file: Path | None = None) -> _WebMetadata:
     """Read only the bounded sidecar fallback.
 
     PID-file metadata comes from the verified liveness probe; reopening the
@@ -111,7 +111,8 @@ def _read_web_metadata() -> _WebMetadata:
     from memtomem.cli._liveness import _read_bounded_regular_file
 
     try:
-        raw = _read_bounded_regular_file(_web_info_file())
+        info_file = (pid_file or _web_pid_file()).with_name(_WEB_INFO_NAME)
+        raw = _read_bounded_regular_file(info_file)
         if raw is None:
             return _WebMetadata()
         data = json.loads(raw.decode("utf-8"))
@@ -516,8 +517,9 @@ def _wait_for_pid_file_release(timeout: float) -> bool:
     return not check_web_liveness().alive
 
 
-def _remove_stale_web_files() -> None:
-    for path in (_web_pid_file(), _web_info_file()):
+def _remove_stale_web_files(pid_file: Path | None = None) -> None:
+    target = pid_file or _web_pid_file()
+    for path in (target, target.with_name(_WEB_INFO_NAME)):
         with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
 
@@ -526,7 +528,7 @@ def _web_status() -> None:
     from memtomem.cli._liveness import check_web_liveness
 
     state = check_web_liveness()
-    metadata = _read_web_metadata()
+    metadata = _read_web_metadata(state.pid_file)
     pid = state.pid if state.pid is not None else metadata.pid
     port = state.port if state.port is not None else metadata.port
     started = state.started if state.started is not None else metadata.started
@@ -562,11 +564,11 @@ def _web_stop() -> None:
             f"the unsafe runtime/pid entry at {scrub_text(str(tracked_path))} "
             "and retry."
         )
-    metadata = _read_web_metadata()
+    metadata = _read_web_metadata(state.pid_file)
     pid = state.pid if state.pid is not None else metadata.pid
     if not state.alive:
         if state.pid_file is not None:
-            _remove_stale_web_files()
+            _remove_stale_web_files(state.pid_file)
             click.echo("stopped  (removed stale pid file)")
             raise SystemExit(2)
         with contextlib.suppress(OSError):
@@ -597,8 +599,9 @@ def _web_stop() -> None:
             os.kill(pid, signal.SIGKILL)
             _wait_for_pid_file_release(2)
 
-    if not check_web_liveness().alive:
-        _remove_stale_web_files()
+    final_state = check_web_liveness()
+    if not final_state.alive:
+        _remove_stale_web_files(state.pid_file)
         click.echo(f"stopped pid={pid}")
         return
     raise click.ClickException(f"failed to stop pid {pid}")

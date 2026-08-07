@@ -962,6 +962,30 @@ class TestCrossProcess:
             _stop(same)
             _stop(other)
 
+    def test_live_registration_in_transition_root_is_aggregated(
+        self, rt, db, tmp_path, monkeypatch
+    ):
+        legacy = tmp_path / "legacy-runtime"
+        monkeypatch.setattr(reg, "candidate_runtime_dirs", lambda: [rt, legacy])
+        q, release = _CTX.Queue(), _CTX.Event()
+        holder = _CTX.Process(
+            target=_child_register_hold,
+            args=(str(legacy), str(db), q, release),
+        )
+        holder.start()
+        try:
+            _, registered, child_pid = _drain_until(q, "registered")
+            assert registered
+
+            result = reg.enumerate_live_instances(reg.store_digest_for(db))
+            assert result.complete
+            assert [item.pid for item in result.instances] == [child_pid]
+            assert reg.probe_all_for_uninstall().state == "LIVE"
+        finally:
+            release.set()
+            holder.join(timeout=30)
+            _stop(holder)
+
     def test_two_children_same_store_sorted(self, rt, db):
         qs = [_CTX.Queue() for _ in range(2)]
         release = _CTX.Event()

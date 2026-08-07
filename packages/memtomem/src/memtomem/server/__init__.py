@@ -671,17 +671,17 @@ def main(argv: list[str] | None = None) -> None:
     # liveness probes still fail closed on an *exclusive* legacy holder,
     # and ``mm uninstall`` still inventories the file for cleanup.
 
-    # Runtime files (pid / flock) live on ``$XDG_RUNTIME_DIR/memtomem``
-    # when the platform provides one, otherwise a per-user temp subdir.
-    # This keeps ``~/.memtomem/`` untouched during MCP handshake — it is
-    # created only when persistent storage is first written (#412).
+    # Runtime files (pid / flock) use one environment-independent per-user
+    # anchor (#2037): literal ``/tmp/memtomem-<euid>`` on POSIX and the
+    # LocalAppData Known Folder's Temp child on Windows. This keeps
+    # ``~/.memtomem/`` untouched during MCP handshake — it is created only
+    # when persistent storage is first written (#412).
     # The name is scoped to the resolved store (#1990) so servers on
     # different databases don't contend for one per-user lock; when the
     # store can't be resolved the bare transitional name keeps today's
-    # fail-closed behavior. The file is anchored to the exact directory
-    # ``ensure_runtime_dir`` validated and created — re-resolving via
-    # ``server_pid_path`` could land on a different (unvalidated) runtime
-    # dir if the environment shifted between the two calls.
+    # fail-closed behavior. The file stays anchored to the exact directory
+    # ``ensure_runtime_dir`` validated and created, preserving one resolution
+    # and the path seam used by tests and embedders.
     db_path = _resolve_store_db_path()
     pid_file = ensure_runtime_dir() / server_pid_path(db_path).name
 

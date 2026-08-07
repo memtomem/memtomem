@@ -1,26 +1,20 @@
 """Runtime-state path resolution.
 
-Runtime files (pid files, locks, sockets) belong on ``$XDG_RUNTIME_DIR``
-when the platform provides one — the kernel auto-cleans them at logout,
-no stale artifacts survive a reboot, and they never mingle with the
-user's persistent data under ``~/.memtomem/``.
+All cooperating memtomem processes rendezvous through one per-user path
+that does not depend on the calling process's environment (#2037):
 
-Resolution order:
+* POSIX: ``/tmp/memtomem-{euid}`` — literal ``/tmp``; ``XDG_RUNTIME_DIR``
+  and the ``TMP*`` variables never affect writer identity.
+* Windows: ``<FOLDERID_LocalAppData>\\Temp\\memtomem-0`` — resolved through
+  the shell Known Folder API rather than ``TEMP``/``TMP``/``USERPROFILE``.
 
-1. ``$XDG_RUNTIME_DIR/memtomem`` — Linux + systemd (and any other OS that
-   exports the var). Per-user, ``tmpfs``-backed, kernel-managed lifecycle.
-   Accepted only if the base is a real directory (not a symlink), owned
-   by the effective uid, and has mode ``0o700`` (no group/world bits).
-   Skipped on Windows: ``XDG_RUNTIME_DIR`` is a Linux/systemd convention,
-   and the POSIX-mode-bit gate that protects it is meaningless against
-   NTFS ACLs.
-2. ``{tempfile.gettempdir()}/memtomem-{uid}`` — macOS (where
-   ``gettempdir()`` resolves to a per-user ``/var/folders/.../T/`` already),
-   Linux without systemd, and Windows (where ``gettempdir()`` returns
-   ``%LOCALAPPDATA%\\Temp\\`` — already per-user). On Windows ``uid``
-   collapses to ``0`` since there is no ``geteuid``; the cross-user
-   collision risk that motivated the suffix on shared ``/tmp`` does not
-   apply on Windows because the temp base is per-user already.
+This stable anchor holds server/Web pid files, instance-registry sentinels,
+the registry mutation sidecar, and the lifecycle barrier. It remains outside
+the persistent ``~/.memtomem/`` store, preserving lazy MCP handshakes (#412).
+
+For a transition period :func:`candidate_runtime_dirs` also returns the old
+environment-derived locations. Those are read/fence candidates only; new
+writers always use :func:`runtime_dir`.
 
 Security posture for the runtime directory itself:
 
@@ -33,8 +27,8 @@ Security posture for the runtime directory itself:
   symlinks need Developer Mode/admin to create but are exploitable the
   same way once present). Junctions need their own check: they redirect
   identically while keeping ``S_IFDIR``, so ``S_ISLNK`` never sees one.
-  Only this directory is judged — an ancestor may be a junction
-  (``%TEMP%`` itself is on some machines) without being refused.
+  Only this directory is judged — an ancestor may be a junction without
+  being refused.
 - POSIX only — refuse any pre-existing directory not owned by the
   effective uid or not at mode ``0o700``. This trades convenience for a
   predictable contract: a ``root``-owned leftover from ``sudo mm …`` or
@@ -45,9 +39,23 @@ Security posture for the runtime directory itself:
   mode bits as ``0o666``/``0o777`` (the values do not reflect the real
   ACL), so ``& 0o077`` would always trip and ``ensure_runtime_dir`` would
   refuse the second invocation against its own previously-created dir.
-  Proper NTFS owner-SID validation needs ``pywin32`` / ``ctypes`` calls
-  into ``GetSecurityInfo`` and is out of scope; we rely on
-  ``%LOCALAPPDATA%\\Temp\\`` already being per-user.
+  Proper NTFS owner-SID validation needs ``GetSecurityInfo`` and is out of
+  scope; we rely on the OS-resolved LocalAppData known folder being per-user.
+
+The literal POSIX name is a deliberate coordination protocol, with two
+operational constraints. First, every peer must see the same host ``/tmp``
+mount: ``PrivateTmp=`` and other per-service/polyinstantiated temporary
+namespaces split the rendezvous and are unsupported. Second, a predictable
+name in world-writable ``/tmp`` can be pre-created by another local user. The
+owner/mode/redirect checks above make that a fail-closed denial of service,
+never an unsafe follow; recovery may require an administrator because an
+environment override would recreate the identity split this module removes.
+
+Active pid, sentinel, and lifecycle files are BSD-flock-held. Standard
+``systemd-tmpfiles`` ageing honors those locks, but an administrator-supplied
+cleaner that ignores BSD locks can still unlink a live coordination name.
+Such policies must exclude ``/tmp/memtomem-*``; the CLI cannot detect a name
+that was unlinked while another process still holds its old inode.
 """
 
 from __future__ import annotations
@@ -58,8 +66,26 @@ import shlex
 import stat
 import sys
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal, TypeVar
+
+
+_TEST_RUNTIME_DIR_ENV = "_MEMTOMEM_TEST_RUNTIME_DIR"
+
+
+def _test_runtime_dir_override() -> Path | None:
+    """Return the pytest-only coordination root inherited by subprocesses.
+
+    The full suite starts real server/Web subprocesses; without an inherited
+    seam they would touch the developer's live per-user locks.  Requiring
+    pytest's own marker as well as the private variable prevents this from
+    becoming a supported production override that could recreate #2037.
+    """
+    raw = os.environ.get(_TEST_RUNTIME_DIR_ENV)
+    if not raw or "PYTEST_CURRENT_TEST" not in os.environ:
+        return None
+    return Path(raw)
 
 
 def _hint_quote(target: Path | str) -> str:
@@ -226,8 +252,7 @@ class RuntimeDirValidationError(PermissionError):
             return (
                 f"runtime dir {target} is owned by uid {actual_uid} "
                 f"(expected {expected_uid}). "
-                "Retry with XDG_RUNTIME_DIR or TMPDIR set to a private directory "
-                "you own, or ask an administrator to remove it:\n"
+                "Ask an administrator to remove it, then retry:\n"
                 f"rm -rf -- {command_target}"
             )
         mode = _required_validation_field(
@@ -299,21 +324,60 @@ def _is_safe_dir(path: Path) -> bool:
     return True
 
 
-def runtime_dir() -> Path:
-    """Return the memtomem runtime directory path *without* creating it.
+@lru_cache(maxsize=1)
+def _windows_local_app_data() -> Path:
+    """Resolve ``FOLDERID_LocalAppData`` without consulting environment vars.
 
-    See module docstring for resolution order. Use :func:`ensure_runtime_dir`
-    when the directory needs to exist (e.g. opening a pid file for write);
-    the plain form is safe to call during read-only introspection such as
-    the uninstall inventory walk, which must not leave behind an empty dir.
-
-    The ``$XDG_RUNTIME_DIR`` branch is gated on :func:`_is_safe_dir` —
-    a misconfigured export (``XDG_RUNTIME_DIR=/tmp``, or a user-created
-    symlink) silently falls through to the tempdir form so we never
-    place the pid file in a world-readable location just because the
-    environment was wrong. The branch is skipped entirely on Windows
-    (see module docstring).
+    ``Path.home`` and ``tempfile.gettempdir`` both inherit caller-local
+    environment, which is exactly the split #2037 removes.  The shell Known
+    Folder API resolves the current token's LocalAppData location instead.
+    Keep imports local so non-Windows interpreters never need Win32 ctypes
+    symbols merely to import this module.
     """
+    if os.name != "nt":
+        raise OSError("FOLDERID_LocalAppData is only available on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    folder_id = _GUID(
+        0xF1B32785,
+        0x6FBA,
+        0x4FCF,
+        (ctypes.c_ubyte * 8)(0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91),
+    )
+    raw_path = ctypes.c_void_p()
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    sh_get_known_folder_path = shell32.SHGetKnownFolderPath
+    sh_get_known_folder_path.argtypes = [
+        ctypes.POINTER(_GUID),
+        wintypes.DWORD,
+        wintypes.HANDLE,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    sh_get_known_folder_path.restype = ctypes.c_long
+    result = sh_get_known_folder_path(ctypes.byref(folder_id), 0, None, ctypes.byref(raw_path))
+    if result != 0 or not raw_path.value:
+        code = result & 0xFFFFFFFF
+        raise OSError(f"SHGetKnownFolderPath(FOLDERID_LocalAppData) failed: 0x{code:08x}")
+    try:
+        return Path(ctypes.wstring_at(raw_path.value))
+    finally:
+        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree(raw_path)
+
+
+def _legacy_environment_runtime_dir() -> Path:
+    """Resolve the pre-#2037 writer location for compatibility probes only."""
     if os.name != "nt":
         xdg = os.environ.get("XDG_RUNTIME_DIR", "")
         if xdg and _is_safe_dir(Path(xdg)):
@@ -323,45 +387,36 @@ def runtime_dir() -> Path:
     return Path(tempfile.gettempdir()) / f"memtomem-{uid}"
 
 
+def runtime_dir() -> Path:
+    """Return the canonical coordination directory without creating it."""
+    test_override = _test_runtime_dir_override()
+    if test_override is not None:
+        return test_override
+    if os.name == "nt":
+        return _windows_local_app_data() / "Temp" / "memtomem-0"
+    # The literal shared path is the cross-environment coordination protocol,
+    # not an untrusted temporary-file choice; ``ensure_runtime_dir`` validates
+    # the predictable leaf before any writer uses it.
+    return Path("/tmp") / f"memtomem-{os.geteuid()}"  # nosec B108
+
+
 def candidate_runtime_dirs() -> list[Path]:
-    """Return every runtime dir a *live server* could have picked, for probing.
+    """Return canonical and historical runtime dirs for transition probes.
 
-    :func:`runtime_dir` resolves one directory from the current
-    environment, but a server started in a different context may have
-    taken the other branch — most plausibly ``$XDG_RUNTIME_DIR`` set for
-    the server (systemd user session) and unset for the CLI (cron, an
-    ``ssh`` shell, a container exec), or the reverse. Liveness probes that
-    only look at the caller's own branch then find no pid file and report
-    "dead" while the server is very much alive, which is how ``mm
-    uninstall`` / ``mm reset`` could delete state under it (#2003 review).
-
-    Three candidates, caller's own first, de-duplicated and without
-    creating anything:
-
-    1. :func:`runtime_dir` — what this environment resolves.
-    2. The ``{gettempdir()}/memtomem-{uid}`` fallback, for a server that
-       ran without a usable ``$XDG_RUNTIME_DIR``.
-    3. ``/run/user/{uid}/memtomem`` on POSIX, for the reverse case — we
-       have no ``$XDG_RUNTIME_DIR`` to read but the server did. This is
-       the systemd location the variable holds on every distro that sets
-       it, so it is a deterministic address rather than a guess.
-
-       Included only when its base passes :func:`_is_safe_dir`, the same
-       gate :func:`runtime_dir` applies to ``$XDG_RUNTIME_DIR``. A base
-       that fails it is one no server could have resolved *to*, so probing
-       it proves nothing — and probing it anyway is actively harmful: an
-       existing-but-unsearchable ``/run/user/{uid}`` makes ``Path.exists``
-       raise ``EACCES``, which fails closed and would refuse every scoped
-       destructive command with no remediation the user can act on
-       (#2003 review). A base that is simply absent is skipped the same
-       way, costing nothing.
-
-    Writers must keep using :func:`ensure_runtime_dir`: there is exactly
-    one correct directory to *write* to, and it is the one this
-    environment resolves.
+    The canonical directory is always first. Historical candidates retain
+    the pre-#2037 caller-derived XDG/temp path plus the deterministic systemd
+    path that #2036 already probed. Writers must use :func:`runtime_dir` only.
     """
+    test_override = _test_runtime_dir_override()
+    if test_override is not None:
+        return [test_override]
+
     uid = os.geteuid() if hasattr(os, "geteuid") else 0
-    dirs = [runtime_dir(), Path(tempfile.gettempdir()) / f"memtomem-{uid}"]
+    dirs = [
+        runtime_dir(),
+        _legacy_environment_runtime_dir(),
+        Path(tempfile.gettempdir()) / f"memtomem-{uid}",
+    ]
     if os.name != "nt":
         systemd_base = Path(f"/run/user/{uid}")
         if _is_safe_dir(systemd_base):
@@ -432,7 +487,16 @@ def ensure_runtime_dir() -> Path:
     owner-execute bit supplied to ``mkdir``, leaving an unusable directory
     on silent success).
     """
-    target = runtime_dir()
+    return ensure_runtime_dir_at(runtime_dir())
+
+
+def ensure_runtime_dir_at(target: Path) -> Path:
+    """Validate/create an explicit canonical or historical runtime leaf.
+
+    Destructive commands use this only while fencing derivable pre-#2037
+    locations. Keeping the target lexical across the retry avoids resolving a
+    different environment-derived directory after a concurrent mkdir.
+    """
     if validate_runtime_dir(target):
         return target
 
@@ -443,7 +507,7 @@ def ensure_runtime_dir() -> Path:
     try:
         target.mkdir(mode=0o700, exist_ok=False)
     except FileExistsError:
-        return ensure_runtime_dir()
+        return ensure_runtime_dir_at(target)
     try:
         os.chmod(target, 0o700)
     except OSError:

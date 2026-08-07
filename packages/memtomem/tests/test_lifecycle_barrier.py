@@ -225,6 +225,75 @@ class TestBarrierContention:
             _stop(holder)
 
 
+class TestCompositeDestructiveBarrier:
+    """Transition fencing covers stable and derivable pre-#2037 roots."""
+
+    def test_legacy_shared_holder_refuses_destructive_acquire(self, rt, tmp_path, monkeypatch):
+        legacy = tmp_path / "legacy-runtime"
+        monkeypatch.setattr(reg, "candidate_runtime_dirs", lambda: [rt, legacy])
+        q, release = _CTX.Queue(), _CTX.Event()
+        holder = _CTX.Process(target=_child_hold_shared, args=(str(legacy), q, release))
+        holder.start()
+        try:
+            _drain_until(q, "held")
+            with pytest.raises(reg.BarrierTimeout):
+                reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.3)
+        finally:
+            release.set()
+            holder.join(timeout=30)
+            _stop(holder)
+
+    def test_composite_hold_is_canonical_first_then_sorted(self, rt, tmp_path, monkeypatch):
+        z_root = tmp_path / "z-runtime"
+        a_root = tmp_path / "a-runtime"
+        monkeypatch.setattr(reg, "candidate_runtime_dirs", lambda: [rt, z_root, a_root])
+
+        barrier = reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+        try:
+            assert barrier.paths == (
+                rt / "lifecycle.lock",
+                a_root / "lifecycle.lock",
+                z_root / "lifecycle.lock",
+            )
+        finally:
+            barrier.release()
+
+    def test_later_root_failure_releases_partial_hold(self, rt, tmp_path, monkeypatch):
+        legacy = tmp_path / "legacy-runtime"
+        monkeypatch.setattr(reg, "candidate_runtime_dirs", lambda: [rt, legacy])
+        real_acquire = reg._acquire_barrier_file
+        acquired = []
+
+        def fail_second(path, flags, deadline, budget):
+            if path.parent == legacy:
+                raise OSError("legacy barrier unavailable")
+            fp = real_acquire(path, flags, deadline, budget)
+            acquired.append(fp)
+            return fp
+
+        monkeypatch.setattr(reg, "_acquire_barrier_file", fail_second)
+
+        with pytest.raises(OSError, match="legacy barrier unavailable"):
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+
+        assert len(acquired) == 1
+        assert acquired[0].closed, "a failed composite acquire must close prior holds"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership/mode validation")
+    def test_unsafe_legacy_root_refuses_and_names_that_path(self, rt, tmp_path, monkeypatch):
+        legacy = tmp_path / "legacy-runtime"
+        legacy.mkdir(mode=0o755)
+        legacy.chmod(0o755)
+        monkeypatch.setattr(reg, "candidate_runtime_dirs", lambda: [rt, legacy])
+
+        with pytest.raises(PermissionError) as exc_info:
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+
+        assert getattr(exc_info.value, "target", None) == legacy
+        assert str(legacy) in str(exc_info.value)
+        assert "unsafe permissions" in str(exc_info.value)
+
+
 # --------------------------------------------------------- acquire polarity
 
 

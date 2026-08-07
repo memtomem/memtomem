@@ -19,10 +19,9 @@ the compatibility alias that 0.1.26-through-pre-#2003 servers took (current
 servers take none), and such a server is gated by its own
 ``server[-<digest>].pid`` instead.
 
-Runtime pid files are probed under *both* :func:`runtime_dir` branches, not
-just the one this environment resolves: a server whose context differed
-(``$XDG_RUNTIME_DIR`` set for it, unset for us, or the reverse) is otherwise
-invisible and would be reported dead while holding the WAL.
+Current runtime pid files use one environment-independent per-user anchor
+(#2037). During transition, probes also inspect every safe pre-#2037 location
+the caller can derive, so common XDG-vs-temp launches remain discoverable.
 """
 
 from __future__ import annotations
@@ -530,8 +529,8 @@ def _probe_legacy_gate() -> ServerState:
     A shared holder is the compatibility alias taken by 0.1.26-through-
     pre-#2003 servers (current servers take none), not an independent
     server: such a server is gated by its own ``server[-<digest>].pid``,
-    which :func:`check_server_liveness` probes under both runtime-dir
-    branches first, so the alias must not additionally block work on an
+    which :func:`check_server_liveness` probes under stable and transition
+    runtime roots first, so the alias must not additionally block work on an
     unrelated store sharing the same HOME. Exclusive holders (pre-0.1.25)
     and classification failures (``probe_error``) still gate fail-closed.
     Windows never had the compatibility lock, so a plain exclusive probe is
@@ -548,12 +547,11 @@ def _probe_legacy_gate() -> ServerState:
 def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
     """Resolve existing runtime candidates under the writer policy.
 
-    A missing directory is an empty candidate. The caller's resolved
-    :func:`runtime_dir` fails closed when unsafe: it is the location a server
-    in this environment could have used before its policy changed underneath
-    it. Other candidates are speculative contexts. If one fails the writer
-    policy, no server could currently resolve to it, so skip it rather than
-    let an untrusted sibling candidate deny every liveness inventory (#2039).
+    A missing directory is an empty candidate. The stable
+    :func:`runtime_dir` fails closed when unsafe because every current writer
+    uses it. Other candidates are speculative pre-#2037 contexts. If one
+    fails the historical writer policy, skip it rather than let an untrusted
+    sibling candidate deny every liveness inventory (#2039).
     The detail string is an error when the returned list is ``None`` and a
     concise non-blocking warning about skipped speculative candidates on
     success.
@@ -582,11 +580,9 @@ def _validated_runtime_dirs() -> tuple[list[Path] | None, str]:
 def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
     """Return ``name`` under every runtime dir a live server could have picked.
 
-    A server started in a different context may have taken the other
-    :func:`runtime_dir` branch — ``$XDG_RUNTIME_DIR`` set for the server
-    (systemd user session) and unset for the CLI, or the reverse — so
-    probing only the caller's own branch reports "dead" for a server that
-    is alive (#2003 review).
+    Current writers always use the stable first candidate. Historical
+    candidates retain the common pre-#2037 XDG-vs-temp launch contexts so an
+    older server remains visible during the transition.
 
     Returns ``(paths, detail)`` with ``paths`` ``None`` when the candidate
     set could not be resolved. On success, ``detail`` retains any concise
@@ -604,7 +600,7 @@ def _runtime_pid_candidates(name: str) -> tuple[list[Path] | None, str]:
 
 
 def _glob_server_pid_files() -> tuple[list[Path] | None, str]:
-    """Enumerate per-store ``server-*.pid`` files across both runtime dirs.
+    """Enumerate per-store ``server-*.pid`` files across all runtime roots.
 
     Returns ``(files, detail)`` — ``files`` is ``None`` when enumeration
     failed, with ``detail`` describing where/why. On success, ``detail`` is a
@@ -772,7 +768,7 @@ def check_server_liveness(db_path: Path | None = None) -> ServerState:
 
 
 def check_web_liveness() -> ServerState:
-    """Probe ``mm web``'s pid file (``web.pid``).
+    """Probe ``mm web``'s pid file across canonical and historical roots.
 
     Same portalocker contract as the server probe: ``web._web_pid_lock``
     holds ``LOCK_EX`` on the file for the UI process lifetime, and
@@ -781,16 +777,22 @@ def check_web_liveness() -> ServerState:
     that only care about the MCP server (and their tests) are unaffected
     (#1569).
     """
-    pid_file = web_pid_path()
-    try:
-        runtime_present = validate_runtime_dir(pid_file.parent)
-    except OSError as exc:
+    candidates, detail = _runtime_pid_candidates(web_pid_path().name)
+    if candidates is None:
         return ServerState(
             alive=True,
             pid=None,
-            pid_file=pid_file,
-            probe_error=f"runtime directory validation failed: {_exception_detail(exc)}",
+            pid_file=None,
+            probe_error=f"could not resolve web.pid candidates ({detail})",
         )
-    if not runtime_present:
-        return ServerState(alive=False, pid=None, pid_file=None)
-    return probe_pid_file(pid_file)
+    warning = _merge_probe_warnings(detail)
+    stale: ServerState | None = None
+    for pid_file in candidates:
+        state = probe_pid_file(pid_file)
+        if state.alive:
+            return _with_probe_warning(state, warning)
+        if state.pid_file is not None and stale is None:
+            stale = state
+    if stale is not None:
+        return _with_probe_warning(stale, warning)
+    return ServerState(alive=False, pid=None, pid_file=None, probe_warning=warning)

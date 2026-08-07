@@ -228,16 +228,28 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_runtime_dir(
+    tmp_path,
+    _real_home_write_guard: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Keep all runtime coordination, including subprocesses, per-test."""
+    target = tmp_path / "mm-runtime"
+    monkeypatch.setenv("_MEMTOMEM_TEST_RUNTIME_DIR", str(target))
+    return target
+
+
+@pytest.fixture(autouse=True)
 def _isolated_instance_registry(
     tmp_path,
+    _isolated_runtime_dir: Path,
     _real_home_write_guard: None,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Point the instance registry (#1935) at a per-test directory suite-wide.
 
-    The registry lives under ``_runtime_paths.runtime_dir()`` — the
-    developer's *real* per-user runtime dir on macOS (tempdir-based, no
-    ``XDG_RUNTIME_DIR``). Without isolation, any test that drives
+    The registry lives under the stable ``_runtime_paths.runtime_dir()``.
+    Without isolation, any test that drives
     ``collect_status_report`` against a real DB file, or a lifespan test
     that reaches ``ensure_initialized``, would probe (and its stale-GC
     would *mutate*) the real registry — including a genuinely live
@@ -252,7 +264,7 @@ def _isolated_instance_registry(
     """
     import memtomem._instance_registry as _reg
 
-    rt = tmp_path / "mm-runtime"
+    rt = _isolated_runtime_dir
 
     def _rt():
         return rt

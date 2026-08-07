@@ -384,6 +384,8 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     # and resolves to tempfile.gettempdir() / f"memtomem-{uid}". Patch the
     # resolver itself so isolation works on every OS.
     monkeypatch.setattr("memtomem._runtime_paths.runtime_dir", lambda: target)
+    monkeypatch.setattr("memtomem.cli._liveness.runtime_dir", lambda: target)
+    monkeypatch.setattr("memtomem.cli._liveness.candidate_runtime_dirs", lambda: [target])
     return target
 
 
@@ -507,6 +509,30 @@ def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
     runtime_dir.chmod(0o700)
     pid_file = runtime_dir / "web.pid"
     info_file = runtime_dir / "web.json"
+    pid_file.write_text("999999\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
+    info_file.write_text('{"pid": 999999, "port": 18080}\n', encoding="utf-8")
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 2
+    assert "removed stale pid file" in result.output
+    assert not pid_file.exists()
+    assert not info_file.exists()
+
+
+def test_web_stop_removes_stale_files_from_transition_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    canonical = _isolate_runtime(monkeypatch, tmp_path)
+    legacy = tmp_path / "legacy-runtime"
+    legacy.mkdir(mode=0o700)
+    legacy.chmod(0o700)
+    monkeypatch.setattr(
+        "memtomem.cli._liveness.candidate_runtime_dirs",
+        lambda: [canonical, legacy],
+    )
+    pid_file = legacy / "web.pid"
+    info_file = legacy / "web.json"
     pid_file.write_text("999999\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
     info_file.write_text('{"pid": 999999, "port": 18080}\n', encoding="utf-8")
 

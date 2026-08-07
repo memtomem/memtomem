@@ -120,6 +120,18 @@ def _pin_store_pid_name(env: dict[str, str], home: Path) -> str:
     return f"server-{store_pid_digest(db)}.pid"
 
 
+def _subprocess_runtime_dir(env: dict[str, str]) -> Path:
+    """Return the suite's inherited subprocess-safe runtime anchor.
+
+    Production has one fixed OS anchor (#2037). The suite uses a private,
+    pytest-gated equivalent so these real server processes cannot contend
+    with a developer's running memtomem server.
+    """
+    raw = env.get("_MEMTOMEM_TEST_RUNTIME_DIR")
+    assert raw, "the autouse runtime isolation fixture must reach subprocess tests"
+    return Path(raw)
+
+
 def _spawn_server(env: dict[str, str]) -> subprocess.Popen:
     """Start ``memtomem-server`` as a subprocess that keeps its stdin
     open — without that, the MCP stdio loop sees EOF immediately and
@@ -202,9 +214,9 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
 
     Also pins the #412 headline claim: with a fresh ``HOME`` (no
     pre-existing ``~/.memtomem/``), the server handshake must not
-    create the state directory. The pid / flock write now lives on
-    ``$XDG_RUNTIME_DIR/memtomem/server.pid``, so the persistent data
-    root stays untouched until a tool call writes to it.
+    create the state directory. The pid / flock write lives on the stable
+    per-user runtime anchor, so the persistent data root stays untouched
+    until a tool call writes to it.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -216,7 +228,7 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
-    pid_file = xdg / "memtomem" / _pin_store_pid_name(env, home)
+    pid_file = _subprocess_runtime_dir(env) / _pin_store_pid_name(env, home)
 
     proc = _spawn_server(env)
     try:
@@ -225,7 +237,7 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
         # Headline claim for #412: the handshake must leave HOME alone.
         assert not (home / ".memtomem").exists(), (
             "~/.memtomem/ must not be created by MCP handshake (#412 goal); "
-            "the server only writes to $XDG_RUNTIME_DIR/memtomem/"
+            "the server only writes to its stable runtime anchor"
         )
 
         proc.send_signal(signal.SIGTERM)
@@ -242,15 +254,13 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
         _cleanup_proc(proc)
 
 
-def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
-    """With ``$XDG_RUNTIME_DIR`` unset the server must land on the
-    ``{tempfile.gettempdir()}/memtomem-{uid}/`` fallback, not silently
-    refuse to start or write somewhere unexpected.
+def test_server_stable_anchor_is_not_redirected_by_tmp_env(tmp_path: Path) -> None:
+    """Different TMP/XDG values do not redirect server coordination.
 
-    Covers the code path that the default sigterm test skips (XDG set).
-    Uses an isolated tempdir under ``tmp_path`` so we don't litter the
-    real ``/var/folders/.../T/`` (POSIX) or ``%LOCALAPPDATA%\\Temp``
-    (Windows) during the run.
+    The production resolver invariant is pinned in ``test_runtime_paths``;
+    this live-process test verifies that the server reaches the suite's
+    inherited stable-anchor equivalent and leaves the environment-named temp
+    directory untouched.
 
     Cross-platform notes (#817):
 
@@ -258,12 +268,6 @@ def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
       Windows; setting both keeps the subprocess hermetic on either OS
       (mirrors ``tests/helpers.py::set_home``, which we cannot reuse here
       because it operates on ``monkeypatch`` not on a subprocess env dict).
-    - ``tempfile.gettempdir()`` reads ``TMPDIR`` on POSIX but on Windows
-      it picks the first of ``TMP`` / ``TEMP`` / ``USERPROFILE`` it
-      finds. Set all three to land in our isolated dir regardless of
-      backend.
-    - The ``uid`` suffix collapses to ``0`` on Windows (``os.geteuid``
-      doesn't exist) — mirror ``_runtime_paths.runtime_dir()`` line 99.
     - The ``0o700`` mode-bit assert is POSIX-only: NTFS synthesizes
       mode bits and ``_runtime_paths.ensure_runtime_dir`` deliberately
       skips the chmod gate on Windows.
@@ -272,9 +276,6 @@ def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
     home.mkdir()
     tmp_tmp = tmp_path / "tmp"
     tmp_tmp.mkdir()
-    uid = os.geteuid() if hasattr(os, "geteuid") else 0
-    expected_dir = tmp_tmp / f"memtomem-{uid}"
-
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
@@ -282,15 +283,15 @@ def test_server_uses_tempdir_fallback_when_xdg_unset(tmp_path: Path) -> None:
     env["TMP"] = str(tmp_tmp)
     env["TEMP"] = str(tmp_tmp)
     env.pop("XDG_RUNTIME_DIR", None)
+    expected_dir = _subprocess_runtime_dir(env)
     expected_pid = expected_dir / _pin_store_pid_name(env, home)
 
     proc = _spawn_server(env)
     try:
         _wait_for_pid_file(proc, expected_pid)
         if os.name != "nt":
-            assert stat_mode(expected_dir) == 0o700, (
-                "tempdir fallback must create the subdir at owner-only mode"
-            )
+            assert stat_mode(expected_dir) == 0o700, "stable runtime dir must be owner-only"
+        assert not any(tmp_tmp.iterdir()), "TMP variables must not receive coordination state"
         assert not (home / ".memtomem").exists()
     finally:
         _cleanup_proc(proc)
@@ -321,11 +322,11 @@ def test_server_start_creates_no_legacy_pid_file_end_to_end(tmp_path: Path) -> N
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
-    xdg_pid = xdg / "memtomem" / _pin_store_pid_name(env, home)
+    runtime_pid = _subprocess_runtime_dir(env) / _pin_store_pid_name(env, home)
 
     proc = _spawn_server(env)
     try:
-        _wait_for_pid_file(proc, xdg_pid)
+        _wait_for_pid_file(proc, runtime_pid)
         assert not legacy_pid.exists(), (
             "server must not create the legacy pid file (#2003); the B1 "
             "interlock was retired and re-materializing the file keeps the "
@@ -373,14 +374,14 @@ def test_server_ignores_exclusive_legacy_holder(tmp_path: Path) -> None:
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
-    xdg_pid = xdg / "memtomem" / _pin_store_pid_name(env, home)
+    runtime_pid = _subprocess_runtime_dir(env) / _pin_store_pid_name(env, home)
 
     holder = open(legacy_pid, "a+b")  # held for test scope
     try:
         _fcntl.flock(holder, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         proc = _spawn_server(env)
         try:
-            _wait_for_pid_file(proc, xdg_pid)
+            _wait_for_pid_file(proc, runtime_pid)
             assert proc.poll() is None, "server must start regardless of the legacy holder (#2003)"
             proc.send_signal(signal.SIGTERM)
             try:
@@ -410,12 +411,9 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
     two distinct ``server-*.pid`` files, both servers alive, and the
     second server's stderr free of the same-store contention warning.
 
-    The runtime dir is isolated on every platform: ``XDG_RUNTIME_DIR`` for
-    the POSIX branch and ``TMPDIR``/``TMP``/``TEMP`` for the tempdir
-    fallback, because ``runtime_dir()`` ignores ``XDG_RUNTIME_DIR`` on
-    Windows entirely. Pinning only the XDG var would send the Windows
-    servers to the shared real temp dir, the expected pid paths would
-    never appear, and the test would sit in ``_wait_for_pid_file``.
+    The real subprocesses inherit the suite's private stable-anchor equivalent
+    on every platform; the XDG/TMP variables below deliberately differ from
+    that location and must not redirect it.
 
     """
     home = tmp_path / "home"
@@ -428,13 +426,6 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
         os.chmod(xdg, 0o700)
 
     from memtomem._runtime_paths import store_pid_digest
-
-    # Mirrors ``_runtime_paths.runtime_dir()``: XDG on POSIX, the per-user
-    # tempdir subdir on Windows (where ``uid`` collapses to 0).
-    if os.name == "nt":
-        runtime = tmp_tmp / "memtomem-0"
-    else:
-        runtime = xdg / "memtomem"
 
     db1 = tmp_path / "store-a" / "memtomem.db"
     db2 = tmp_path / "store-b" / "memtomem.db"
@@ -450,11 +441,13 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
         env["MEMTOMEM_STORAGE__SQLITE_PATH"] = str(db)
         return env
 
+    first_env = _env_for(db1)
+    runtime = _subprocess_runtime_dir(first_env)
     pid1 = runtime / f"server-{store_pid_digest(db1)}.pid"
     pid2 = runtime / f"server-{store_pid_digest(db2)}.pid"
     assert pid1 != pid2, "different stores must derive different pid file names"
 
-    proc1 = _spawn_server(_env_for(db1))
+    proc1 = _spawn_server(first_env)
     proc2 = None
     try:
         _wait_for_pid_file(proc1, pid1)
@@ -555,12 +548,9 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
     the ``MsvcrtLocker`` Windows backend happy (read-only handles
     fail with ``EACCES``).
 
-    Both runtime-dir branches are pinned (``XDG_RUNTIME_DIR`` plus the
-    ``TMPDIR``/``TMP``/``TEMP`` fallback ``runtime_dir()`` uses on
-    Windows). With only the XDG var set, a Windows server would open its
-    pid file in the shared real temp dir, never contend with the holder
-    here, and the whole scenario would silently degrade into an
-    uncontended start that still satisfies the content assertion.
+    The holder and child both use the suite's private stable-anchor
+    equivalent, so the test contends on the exact file without touching a
+    developer's real runtime state.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -570,11 +560,6 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
     tmp_tmp.mkdir()
     if os.name != "nt":
         os.chmod(xdg, 0o700)
-    sub = tmp_tmp / "memtomem-0" if os.name == "nt" else xdg / "memtomem"
-    sub.mkdir()
-    if os.name != "nt":
-        os.chmod(sub, 0o700)
-
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
@@ -582,6 +567,10 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
     env["TMPDIR"] = str(tmp_tmp)
     env["TMP"] = str(tmp_tmp)
     env["TEMP"] = str(tmp_tmp)
+    sub = _subprocess_runtime_dir(env)
+    sub.mkdir()
+    if os.name != "nt":
+        os.chmod(sub, 0o700)
     # Wide terminal so the rich log handler doesn't hard-wrap the
     # contention warning asserted below (wrap points shift with width).
     env["COLUMNS"] = "300"
@@ -661,10 +650,8 @@ def test_server_main_acquires_portalocker_pid_lock(
        monkeypatching ``signal.signal``) is cleaner — that's the entire
        intent boundary.
     2. Stub ``mcp.run`` to a no-op so the asyncio loop never starts.
-    3. Pin ``Path.home()`` and ``XDG_RUNTIME_DIR`` to tmp paths so
-       ``server_pid_path()`` lands inside ``tmp_path``. Otherwise the
-       test would write a real pid file into the developer's runtime
-       dir.
+    3. Pin ``Path.home()``, ``ensure_runtime_dir``, and ``server_pid_path``
+       to tmp paths so no real runtime or persistent state is touched.
     4. Capture ``atexit.register`` calls. Without this the lock fd and
        pid file outlive the test even though ``mcp.run`` is no-op'd —
        ``main()`` registers cleanups via ``atexit`` expecting them to

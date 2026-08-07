@@ -33,8 +33,8 @@ Layout (all under :func:`memtomem._runtime_paths.runtime_dir`):
     both bounded by one shared timeout. It is retained infrastructure:
     never parsed, probed, GC'd, staged, or deleted (unlinking a lock
     file has the classic waiter race — a blocked waiter acquires the
-    orphaned inode while newcomers lock a fresh one). The runtime dir is
-    volatile (``$XDG_RUNTIME_DIR`` / per-user tmp), so it self-cleans.
+    orphaned inode while newcomers lock a fresh one). The stable runtime dir
+    lives in the per-user OS temp tree, so it is volatile.
 
 ``lifecycle.lock``
     The lifecycle barrier (#1936), also outside the scanned directory and
@@ -42,8 +42,9 @@ Layout (all under :func:`memtomem._runtime_paths.runtime_dir`):
     deleted. A reader/writer flock closing the window between "a server
     opens the store" and "that server publishes its sentinel above": the
     server takes it **shared** before storage opens and holds it for the
-    process lifetime, while the destructive CLIs take it **exclusive**
-    across their final liveness re-probe and their write phase:
+    process lifetime, while the destructive CLIs take the stable barrier and
+    every safe derivable pre-#2037 barrier **exclusive** across their final
+    liveness re-probe and their write phase:
     ``mm uninstall`` over the whole staging of state, ``mm reset`` (#1945)
     over each of its two write boundaries (``initialize`` and the wipe).
     Both sides fail closed — a barrier that cannot be acquired means a
@@ -51,13 +52,13 @@ Layout (all under :func:`memtomem._runtime_paths.runtime_dir`):
     deletion may proceed on a guess. Lock ordering is always **barrier →
     mutation sidecar**; no path acquires them the other way round.
 
-    Scope, stated honestly: the barrier only closes the race between
-    peers that *both* implement it. A pre-#1936 server ignores this file
-    entirely, and a secondary server deliberately continues after losing
-    the ``server.pid`` flock, so an older binary can still open the store
-    inside uninstall's window. No mechanism can teach an already-shipped
-    binary; for stale peers the residual window is the pre-existing
-    #1936 bug, unchanged.
+    Scope, stated honestly: the barrier only closes the race between peers
+    that implement it. A pre-#1936 server ignores this file entirely. A
+    pre-#2037 server under a derivable legacy root is fenced during transition,
+    but one already running under a non-standard XDG root unknown to this
+    caller cannot be inferred retroactively. No mechanism can teach an
+    already-shipped binary; restarting it on the current version moves it to
+    the stable anchor.
 
 Failure polarity is per-surface: the status path **fails open** (an
 incomplete enumeration produces no warning — a degraded advisory, never
@@ -95,7 +96,13 @@ from typing import IO, Literal, NoReturn
 
 import portalocker
 
-from memtomem._runtime_paths import ensure_runtime_dir, runtime_dir
+from memtomem._runtime_paths import (
+    candidate_runtime_dirs,
+    ensure_runtime_dir,
+    ensure_runtime_dir_at,
+    runtime_dir,
+    validate_runtime_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,19 +189,19 @@ except ImportError:
     _BARRIER_LOCK_ERRORS = _LOCK_CONTENDED
 
 
-def instances_dir() -> Path:
+def instances_dir(root: Path | None = None) -> Path:
     """Return the sentinel directory path without creating it."""
-    return runtime_dir() / "instances"
+    return (runtime_dir() if root is None else root) / "instances"
 
 
-def registry_sidecar_path() -> Path:
+def registry_sidecar_path(root: Path | None = None) -> Path:
     """Return the mutation-sidecar path (outside :func:`instances_dir`)."""
-    return runtime_dir() / "instances.registry.lock"
+    return (runtime_dir() if root is None else root) / "instances.registry.lock"
 
 
-def lifecycle_barrier_path() -> Path:
+def lifecycle_barrier_path(root: Path | None = None) -> Path:
     """Return the lifecycle-barrier path (outside :func:`instances_dir`)."""
-    return runtime_dir() / "lifecycle.lock"
+    return (runtime_dir() if root is None else root) / "lifecycle.lock"
 
 
 def store_digest_for(db_path: Path | str) -> str | None:
@@ -323,6 +330,10 @@ class _RuntimeDirRefused(Exception):
     stay UNKNOWN (#1942).
     """
 
+    def __init__(self, path: Path, detail: str) -> None:
+        self.path = path
+        super().__init__(detail)
+
 
 # ── module state ─────────────────────────────────────────────────────────
 # ``_state_guard`` covers the procid, the active dict, and atexit
@@ -353,7 +364,7 @@ def _process_id_locked() -> str:
 
 
 @contextlib.contextmanager
-def _mutation_lock(deadline: float):
+def _mutation_lock(deadline: float, *, root: Path | None = None):
     """Two-layer bounded registry mutation lock.
 
     Raises :class:`_MutationLockTimeout` when either layer cannot be
@@ -367,13 +378,14 @@ def _mutation_lock(deadline: float):
     fp: IO[bytes] | None = None
     try:
         try:
-            ensure_runtime_dir()
+            target = ensure_runtime_dir() if root is None else ensure_runtime_dir_at(root)
         except PermissionError as exc:
-            raise _RuntimeDirRefused(str(exc)) from exc
+            refused = runtime_dir() if root is None else root
+            raise _RuntimeDirRefused(refused, str(exc)) from exc
         # ``a+b`` — portalocker's Windows backend needs a writable handle
         # (``msvcrt.locking`` rejects read-only ones), and ``w`` would
         # truncate; see ``cli/_liveness.py``. Don't simplify.
-        fp = open(registry_sidecar_path(), "a+b")
+        fp = open(registry_sidecar_path(target), "a+b")
         while True:
             try:
                 portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
@@ -431,7 +443,7 @@ class BarrierTimeout(Exception):
 
 @dataclass(eq=False)
 class HeldBarrier:
-    """A held lifecycle-barrier flock: its path, handle, and owner pid.
+    """One logical lifecycle hold backed by one or more ordered flocks.
 
     ``eq=False`` keeps the default identity hash: several shared holders
     coexist in one process (two ``AppContext``s), they all share one path,
@@ -443,7 +455,13 @@ class HeldBarrier:
     path: Path
     pid: int
     _fp: IO[bytes] = field(repr=False)
+    _additional: tuple[tuple[Path, IO[bytes]], ...] = field(default=(), repr=False)
     _closed: bool = field(default=False, repr=False)
+
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        """Every path owned by this logical hold, in acquisition order."""
+        return (self.path, *(path for path, _fp in self._additional))
 
     def release(self) -> None:
         """Drop this hold. Idempotent; never raises; never unlinks.
@@ -461,10 +479,12 @@ class HeldBarrier:
                 return
             self._closed = True
             _active_barriers.discard(self)
-        with contextlib.suppress(Exception):
-            portalocker.unlock(self._fp)
-        with contextlib.suppress(Exception):
-            self._fp.close()
+        handles = ((self.path, self._fp), *self._additional)
+        for _path, fp in reversed(handles):
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fp)
+            with contextlib.suppress(Exception):
+                fp.close()
 
 
 def _is_lock_contention(exc: BaseException) -> bool:
@@ -544,8 +564,35 @@ def _raise_lock_io_failure(exc: BaseException, path: Path) -> NoReturn:
     raise OSError(f"lifecycle barrier lock failed at {path}: {exc}") from exc
 
 
-def _acquire_barrier(flags: int, timeout_s: float | None) -> HeldBarrier:
-    """Acquire the lifecycle barrier with ``flags``, bounded by a deadline.
+def _acquire_barrier_file(path: Path, flags: int, deadline: float, budget: float) -> IO[bytes]:
+    """Acquire one already-resolved barrier path under a shared deadline."""
+    fp = open(path, "a+b")
+    locked = False
+    try:
+        while True:
+            try:
+                portalocker.lock(fp, flags | portalocker.LOCK_NB)
+                locked = True
+                return fp
+            except _BARRIER_LOCK_ERRORS as exc:
+                if not _is_lock_contention(exc):
+                    _raise_lock_io_failure(exc, path)
+                if time.monotonic() >= deadline:
+                    raise BarrierTimeout(f"lifecycle barrier busy after {budget:.1f}s") from exc
+                time.sleep(0.05)
+    except BaseException:
+        if locked:
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fp)
+        with contextlib.suppress(Exception):
+            fp.close()
+        raise
+
+
+def _acquire_barrier(
+    flags: int, timeout_s: float | None, *, roots: tuple[Path, ...] | None = None
+) -> HeldBarrier:
+    """Acquire one logical lifecycle barrier, bounded by one deadline.
 
     One fresh descriptor per acquisition — flock conflicts are per open
     file description, so shared holders never block each other while an
@@ -556,51 +603,60 @@ def _acquire_barrier(flags: int, timeout_s: float | None) -> HeldBarrier:
     """
     budget = _BARRIER_TIMEOUT_S if timeout_s is None else timeout_s
     deadline = time.monotonic() + budget
-    # Outside the poll loop on purpose: a runtime dir that cannot be
-    # created or a barrier path that cannot be opened is not contention,
-    # and the original error (``PermissionError`` naming the path, with
-    # its remediation hint) must reach the caller unwrapped.
-    ensure_runtime_dir()
-    # Resolved once: the module-level resolvers are monkeypatchable seams,
-    # and a second call could raise (or answer differently) *after* the
-    # flock is held — leaving the lock owned by a descriptor no one tracks.
-    path = lifecycle_barrier_path()
-    # ``a+b`` for the same reason as the mutation sidecar — portalocker's
-    # Windows backend needs a writable handle and ``w`` would truncate.
-    fp = open(path, "a+b")
-    # Everything from here to the successful return runs under one
-    # ownership block: until the tracked ``HeldBarrier`` exists, nothing
-    # but this handler can release the lock, so no failure may escape it.
-    locked = False
+    resolved_roots: tuple[Path, ...]
+    if roots is None:
+        canonical = ensure_runtime_dir()
+        resolved_roots = (canonical,)
+    else:
+        resolved_roots = roots
+    acquired: list[tuple[Path, IO[bytes]]] = []
     try:
-        while True:
-            try:
-                portalocker.lock(fp, flags | portalocker.LOCK_NB)
-                locked = True
-                break
-            except _BARRIER_LOCK_ERRORS as exc:
-                # Split before the deadline check: a lock-*call* I/O failure
-                # is infrastructure, not contention — retrying cannot help,
-                # and waiting out the budget would only delay (and, at the
-                # deadline, mislabel) the repair advice (#1957).
-                if not _is_lock_contention(exc):
-                    _raise_lock_io_failure(exc, path)
-                if time.monotonic() >= deadline:
-                    raise BarrierTimeout(f"lifecycle barrier busy after {budget:.1f}s") from exc
-                time.sleep(0.05)
-        barrier = HeldBarrier(path=path, pid=os.getpid(), _fp=fp)
+        for root in resolved_roots:
+            path = lifecycle_barrier_path(root)
+            acquired.append((path, _acquire_barrier_file(path, flags, deadline, budget)))
+        first_path, first_fp = acquired[0]
+        barrier = HeldBarrier(
+            path=first_path,
+            pid=os.getpid(),
+            _fp=first_fp,
+            _additional=tuple(acquired[1:]),
+        )
         with _state_guard:
             _active_barriers.add(barrier)
     except BaseException:
-        # A hold nobody can release is worse than no hold: drop it and
-        # fail closed rather than leaning on descriptor finalization.
-        if locked:
+        for _path, fp in reversed(acquired):
             with contextlib.suppress(Exception):
                 portalocker.unlock(fp)
-        with contextlib.suppress(Exception):
-            fp.close()
+            with contextlib.suppress(Exception):
+                fp.close()
         raise
     return barrier
+
+
+def _destructive_barrier_roots() -> tuple[Path, ...]:
+    """Ensure canonical then derivable legacy roots in deadlock-safe order.
+
+    Every destructive process takes the canonical lock first, so only one can
+    proceed to the historical set. Creating a missing safe historical leaf
+    prevents an old server from appearing there after the final probe.
+    """
+    canonical = ensure_runtime_dir()
+    candidates = candidate_runtime_dirs()
+    # Preserve the established module-level ``runtime_dir`` test seam: a
+    # patched canonical with an unpatched candidate resolver must never reach
+    # the developer's real coordination roots.
+    if not candidates or candidates[0] != canonical:
+        candidates = [canonical]
+    others = sorted({path for path in candidates if path != canonical}, key=str)
+    ensured = [canonical]
+    for candidate in others:
+        # Do not skip an unsafe existing historical leaf. It may have become
+        # unsafe after an old server opened and locked its barrier; treating
+        # it as speculative would let a destructive command proceed without
+        # proving that holder absent. Refuse fail-closed and preserve the
+        # exact legacy path in RuntimeDirValidationError for CLI remediation.
+        ensured.append(ensure_runtime_dir_at(candidate))
+    return tuple(ensured)
 
 
 def acquire_server_lifecycle_barrier(timeout_s: float | None = None) -> HeldBarrier:
@@ -636,7 +692,11 @@ def acquire_uninstall_lifecycle_barrier(timeout_s: float | None = None) -> HeldB
     which the CLIs route to a repair-the-path remediation (#1951). (Name
     kept for API stability; not uninstall-specific.)
     """
-    return _acquire_barrier(portalocker.LOCK_EX, timeout_s)
+    return _acquire_barrier(
+        portalocker.LOCK_EX,
+        timeout_s,
+        roots=_destructive_barrier_roots(),
+    )
 
 
 @dataclass
@@ -989,43 +1049,65 @@ def _aged(path: Path) -> bool:
         return False
 
 
-def enumerate_live_instances(store_digest: str) -> EnumerationResult:
-    """Enumerate live registrations for one store (advisory / status path).
+def _candidate_registry_roots() -> tuple[list[Path] | None, tuple[Path, OSError] | None]:
+    """Resolve canonical plus existing historical registry roots.
 
-    This process's own active registrations are included directly
-    without probing — a second same-process handle can *acquire* the
-    lock on Windows (see ``indexing/debounce.py``), so a self-probe
-    would misclassify self as stale. Every other entry, same-pid ones
-    included, is probed. Stale entries older than the grace period are
-    opportunistically removed; unparseable names follow the same
-    unlocked+grace rule. Fails open: any uncertainty yields
-    ``complete=False`` and the caller must not warn.
+    ``None`` means the candidate set itself could not be resolved.  A returned
+    ``(path, error)`` records an existing candidate that failed the writer
+    trust policy; advisory callers become incomplete, destructive callers
+    report it as UNTRUSTED.
     """
-    # Both the directory AND the own-registration snapshot are taken only
-    # UNDER the mutation lock, deadline started before acquisition: an
-    # unlocked directory snapshot could miss a registrar that publishes
-    # right after it, and an unlocked ``_active`` snapshot could miss a
-    # same-process registration that publishes while we wait for the lock
-    # — on Windows the later scan would then probe our own fresh sentinel
-    # and misread it as stale (second same-process handles can acquire).
-    # Ordering is mutation lock → ``_state_guard``, same as registration.
+    try:
+        canonical = runtime_dir()
+        candidates = candidate_runtime_dirs()
+    except OSError:
+        logger.debug("instance-registry roots could not be resolved", exc_info=True)
+        return None, None
+
+    if not candidates or candidates[0] != canonical:
+        candidates = [canonical]
+
+    roots: list[Path] = []
+    refusal: tuple[Path, OSError] | None = None
+    for candidate in candidates:
+        if candidate == canonical:
+            roots.append(candidate)
+            continue
+        try:
+            if validate_runtime_dir(candidate):
+                roots.append(candidate)
+        except OSError as exc:
+            if refusal is None:
+                refusal = (candidate, exc)
+    return roots, refusal
+
+
+def _active_for_root(root: Path) -> dict[Path, "RegisteredInstance"]:
+    """Return the in-process registrations published beneath ``root``."""
+    return {path: inst for path, inst in _active.items() if path.parent.parent == root}
+
+
+def _enumerate_live_instances_at(
+    root: Path, store_digest: str, deadline: float
+) -> EnumerationResult:
+    """Enumerate one canonical or historical registry under one deadline."""
     results: list[InstanceInfo] = []
     complete = True
-    deadline = time.monotonic() + _LOCK_TIMEOUT_S
     try:
-        with _mutation_lock(deadline):
+        canonical = runtime_dir()
+        lock_root = None if root == canonical else root
+        with _mutation_lock(deadline, root=lock_root):
             with _state_guard:
-                own = dict(_active)
+                own = _active_for_root(root)
             for path in own:
                 info = _parse_entry(path)
                 if info is not None and info.digest == store_digest:
                     results.append(info)
-            directory = instances_dir()
+            directory = instances_dir() if lock_root is None else instances_dir(root)
             dir_state = _dir_state(directory)
             if dir_state == "missing":
                 return EnumerationResult(_sorted(results), True)
             if dir_state == "untrusted":
-                # symlink (dangling included) / non-dir — fail open
                 return EnumerationResult(_sorted(results), False)
             try:
                 entries = sorted(directory.iterdir())
@@ -1042,29 +1124,118 @@ def enumerate_live_instances(store_digest: str) -> EnumerationResult:
                 if state == "live":
                     if info is not None and info.digest == store_digest:
                         results.append(info)
-                    # live-but-unparseable: nothing to count, never GC'd
                 elif state == "stale":
                     if _aged(entry):
                         _gc_stale_entry(entry)
                 elif state in ("unknown", "untrusted"):
-                    # Both are uncertainty for the fail-open status path —
-                    # an untrusted entry (stray subdir, link, unreadable
-                    # file) is no more probeable than a transient failure,
-                    # and is never GC'd (only ``"stale"`` reaches
-                    # ``_gc_stale_entry`` — never delete what you cannot
-                    # judge).
                     complete = False
-                # "gone": deleted concurrently — nothing to do
-    except _MutationLockTimeout:
+    except (_MutationLockTimeout, _RuntimeDirRefused):
         return EnumerationResult(_sorted(results), False)
     except Exception:
-        logger.debug("instance enumeration failed", exc_info=True)
+        logger.debug("instance enumeration failed for %s", root, exc_info=True)
         return EnumerationResult(_sorted(results), False)
+    return EnumerationResult(_sorted(results), complete)
+
+
+def enumerate_live_instances(store_digest: str) -> EnumerationResult:
+    """Enumerate live registrations for one store across all known roots.
+
+    This process's own active registrations are included directly
+    without probing — a second same-process handle can *acquire* the
+    lock on Windows (see ``indexing/debounce.py``), so a self-probe
+    would misclassify self as stale. Every other entry, same-pid ones
+    included, is probed. Stale entries older than the grace period are
+    opportunistically removed; unparseable names follow the same
+    unlocked+grace rule. Fails open: any uncertainty yields
+    ``complete=False`` and the caller must not warn.
+
+    Canonical and pre-#2037 environment-derived registries are aggregated.
+    One shared deadline bounds candidate resolution, lock acquisition, and
+    traversal. Any incomplete root keeps the advisory surface silent.
+    """
+    deadline = time.monotonic() + _LOCK_TIMEOUT_S
+    roots, refusal = _candidate_registry_roots()
+    if roots is None:
+        return EnumerationResult((), False)
+    results: list[InstanceInfo] = []
+    complete = refusal is None
+    for root in roots:
+        outcome = _enumerate_live_instances_at(root, store_digest, deadline)
+        results.extend(outcome.instances)
+        complete = complete and outcome.complete
     return EnumerationResult(_sorted(results), complete)
 
 
 def _sorted(results: list[InstanceInfo]) -> tuple[InstanceInfo, ...]:
     return tuple(sorted(results, key=lambda i: (i.pid, i.procid)))
+
+
+def _probe_registry_root_for_uninstall(root: Path, deadline: float) -> UninstallProbeResult:
+    """Run the fail-closed all-store probe against one registry root."""
+    try:
+        canonical = runtime_dir()
+        lock_root = None if root == canonical else root
+        with _mutation_lock(deadline, root=lock_root):
+            with _state_guard:
+                if _active_for_root(root):
+                    return UninstallProbeResult("LIVE")
+            directory = instances_dir() if lock_root is None else instances_dir(root)
+            dir_state = _dir_state(directory)
+            if dir_state == "missing":
+                return UninstallProbeResult("NONE")
+            if dir_state == "untrusted":
+                return UninstallProbeResult(
+                    "UNTRUSTED", untrusted_path=directory, untrusted_kind="redirected"
+                )
+            try:
+                entries = list(directory.iterdir())
+            except PermissionError:
+                return UninstallProbeResult(
+                    "UNTRUSTED", untrusted_path=directory, untrusted_kind="unprobeable"
+                )
+            except OSError:
+                return UninstallProbeResult("UNKNOWN")
+            untrusted_entry: Path | None = None
+            saw_unknown = False
+            for entry in entries:
+                if time.monotonic() >= deadline:
+                    saw_unknown = True
+                    break
+                try:
+                    state = _probe_entry(entry)
+                except (OSError, portalocker.LockException):
+                    logger.debug("entry probe raised, treating as unknown", exc_info=True)
+                    saw_unknown = True
+                    continue
+                if state == "live":
+                    return UninstallProbeResult("LIVE")
+                if state == "untrusted":
+                    if untrusted_entry is None:
+                        untrusted_entry = entry
+                elif state == "unknown":
+                    saw_unknown = True
+            if untrusted_entry is not None:
+                return UninstallProbeResult(
+                    "UNTRUSTED",
+                    untrusted_path=untrusted_entry,
+                    untrusted_kind="unprobeable",
+                )
+            if saw_unknown:
+                return UninstallProbeResult("UNKNOWN")
+            return UninstallProbeResult("NONE")
+    except _MutationLockTimeout:
+        return UninstallProbeResult("UNKNOWN")
+    except _RuntimeDirRefused as exc:
+        logger.debug("uninstall registry probe refused runtime dir", exc_info=True)
+        return UninstallProbeResult(
+            "UNTRUSTED",
+            untrusted_path=exc.path,
+            untrusted_kind="redirected",
+            detail=str(exc),
+        )
+    except Exception:
+        logger.debug("uninstall registry probe failed", exc_info=True)
+        return UninstallProbeResult("UNKNOWN")
 
 
 def probe_all_for_uninstall() -> UninstallProbeResult:
@@ -1093,94 +1264,30 @@ def probe_all_for_uninstall() -> UninstallProbeResult:
     remembers the first untrusted path and any unknown, and resolves by
     precedence at loop end and at deadline expiry alike.
     """
-    # Same rule as enumeration: the ``_active`` check and the directory
-    # listing both happen only under the mutation lock, deadline started
-    # before acquisition — an unlocked snapshot (or an unlocked
-    # missing-dir fast path) can race a registrar mid-critical-section
-    # and judge NONE against a stale view.
     deadline = time.monotonic() + _LOCK_TIMEOUT_S
-    try:
-        with _mutation_lock(deadline):
-            with _state_guard:
-                if _active:
-                    return UninstallProbeResult("LIVE")
-            directory = instances_dir()
-            dir_state = _dir_state(directory)
-            if dir_state == "missing":
-                return UninstallProbeResult("NONE")
-            if dir_state == "untrusted":
-                # symlink (dangling included) / non-dir — never trust,
-                # never traverse, never call it empty
-                return UninstallProbeResult(
-                    "UNTRUSTED", untrusted_path=directory, untrusted_kind="redirected"
-                )
-            try:
-                entries = list(directory.iterdir())
-            except PermissionError:
-                # A real private directory we cannot list (mode-000 /
-                # ACL-denied) — persistent, and the offending path is
-                # exactly this directory. Any other listing OSError is a
-                # transient failure and stays UNKNOWN below.
-                return UninstallProbeResult(
-                    "UNTRUSTED", untrusted_path=directory, untrusted_kind="unprobeable"
-                )
-            except OSError:
-                return UninstallProbeResult("UNKNOWN")
-            untrusted_entry: Path | None = None
-            saw_unknown = False
-            for entry in entries:
-                if time.monotonic() >= deadline:
-                    saw_unknown = True
-                    break
-                try:
-                    state = _probe_entry(entry)
-                except (OSError, portalocker.LockException):
-                    # ``_probe_entry`` is nearly total, but an unlock/close
-                    # can still escape — as ``OSError`` on POSIX or (per
-                    # portalocker's Windows backend) ``LockException``,
-                    # which is not an ``OSError``. Absorb either as this
-                    # entry's ``unknown`` so it cannot unwind the loop and
-                    # demote an ``untrusted`` already seen on an earlier
-                    # entry (#1938 precedence).
-                    logger.debug("entry probe raised, treating as unknown", exc_info=True)
-                    saw_unknown = True
-                    continue
-                if state == "live":
-                    return UninstallProbeResult("LIVE")
-                if state == "untrusted":
-                    if untrusted_entry is None:
-                        untrusted_entry = entry
-                elif state == "unknown":
-                    saw_unknown = True
-            if untrusted_entry is not None:
-                return UninstallProbeResult(
-                    "UNTRUSTED",
-                    untrusted_path=untrusted_entry,
-                    untrusted_kind="unprobeable",
-                )
-            if saw_unknown:
-                return UninstallProbeResult("UNKNOWN")
-            return UninstallProbeResult("NONE")
-    except _MutationLockTimeout:
+    roots, refused = _candidate_registry_roots()
+    if roots is None:
         return UninstallProbeResult("UNKNOWN")
-    except _RuntimeDirRefused as exc:
-        # ``ensure_runtime_dir`` refused the runtime dir itself —
-        # symlink, junction, wrong owner, unsafe mode (#1940).
-        # Persistent until the user removes/repairs it, so it must not
-        # collapse into UNKNOWN's "retry" advice. Only this translated
-        # signal is attributed: any other error inside the lock (sidecar
-        # open, an entry's unlock/close) proves nothing about the
-        # runtime dir and stays UNKNOWN below. Carry the exception's
-        # message (the precise cause + removal hint) as ``detail`` so the
-        # CLI can surface owner/mode specifics the generic sentence hides
-        # (#1948).
-        logger.debug("uninstall registry probe refused runtime dir", exc_info=True)
-        return UninstallProbeResult(
+    first_untrusted: UninstallProbeResult | None = None
+    saw_unknown = False
+    if refused is not None:
+        path, exc = refused
+        first_untrusted = UninstallProbeResult(
             "UNTRUSTED",
-            untrusted_path=runtime_dir(),
+            untrusted_path=path,
             untrusted_kind="redirected",
             detail=str(exc),
         )
-    except Exception:
-        logger.debug("uninstall registry probe failed", exc_info=True)
+    for root in roots:
+        result = _probe_registry_root_for_uninstall(root, deadline)
+        if result.state == "LIVE":
+            return result
+        if result.state == "UNTRUSTED" and first_untrusted is None:
+            first_untrusted = result
+        elif result.state == "UNKNOWN":
+            saw_unknown = True
+    if first_untrusted is not None:
+        return first_untrusted
+    if saw_unknown:
         return UninstallProbeResult("UNKNOWN")
+    return UninstallProbeResult("NONE")
