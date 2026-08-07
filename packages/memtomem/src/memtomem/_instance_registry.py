@@ -650,6 +650,11 @@ def _destructive_barrier_roots() -> tuple[Path, ...]:
     others = sorted({path for path in candidates if path != canonical}, key=str)
     ensured = [canonical]
     for candidate in others:
+        # Do not skip an unsafe existing historical leaf. It may have become
+        # unsafe after an old server opened and locked its barrier; treating
+        # it as speculative would let a destructive command proceed without
+        # proving that holder absent. Refuse fail-closed and preserve the
+        # exact legacy path in RuntimeDirValidationError for CLI remediation.
         ensured.append(ensure_runtime_dir_at(candidate))
     return tuple(ensured)
 

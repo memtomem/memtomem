@@ -521,6 +521,17 @@ class TestWindowsRuntimeDir:
     re-enable a check that doesn't have NTFS semantics.
     """
 
+    def test_real_known_folder_api_smoke(self):
+        """Exercise the real ctypes signature and process-lifetime cache."""
+        runtime_paths._windows_local_app_data.cache_clear()
+        result = runtime_paths._windows_local_app_data()
+
+        assert result.is_absolute()
+        assert result.exists()
+        assert result.is_dir()
+        assert runtime_paths._windows_local_app_data() == result
+        assert runtime_paths._windows_local_app_data.cache_info().hits == 1
+
     def test_runtime_dir_uses_known_folder_with_uid_zero(self, tmp_path, monkeypatch):
         """Windows has no ``geteuid``, so the suffix collapses to ``0``;
         ``%LOCALAPPDATA%\\Temp\\`` is already per-user, so the cross-user

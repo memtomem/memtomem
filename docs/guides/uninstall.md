@@ -138,6 +138,26 @@ stores' `server-*.pid` files alone. Retained registry and lifecycle-lock
 sidecars are volatile and self-clean. Do not use a wildcard runtime-directory
 deletion: it can erase active liveness evidence or another store's state.
 
+Two POSIX deployment constraints follow from the stable `/tmp` anchor:
+
+- Every memtomem process for one user must see the same host `/tmp` mount.
+  Do not launch `memtomem-server` or `mm web` with systemd `PrivateTmp=true`,
+  `pam_namespace` `/tmp` polyinstantiation, or an equivalent private mount
+  namespace. Those mechanisms deliberately make the service's `/tmp`
+  invisible to the interactive `mm uninstall`/`mm reset` process.
+- Active coordination files carry BSD locks, which standard
+  [`systemd-tmpfiles` ageing](https://systemd.io/TEMPORARY_DIRECTORIES/)
+  respects. If the host uses another `/tmp` cleaner that ignores BSD locks,
+  configure it to exclude `/tmp/memtomem-*`; otherwise it can unlink a live
+  pid or sentinel name while the process still holds the old inode.
+
+The predictable `/tmp/memtomem-<euid>` name also permits another local user to
+pre-create it as a denial of service. memtomem never follows or repairs such a
+path: owner, mode, symlink, and junction validation refuses fail-closed, and
+an administrator may need to remove the foreign entry. There is intentionally
+no `XDG_RUNTIME_DIR`/`TMPDIR` escape hatch because that would split process
+identity again.
+
 ## 4. Clean up project-scoped files (optional)
 
 If you used `mm context generate` or `mm init`, remove the project-local

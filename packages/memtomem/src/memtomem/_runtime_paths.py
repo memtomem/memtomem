@@ -41,6 +41,21 @@ Security posture for the runtime directory itself:
   refuse the second invocation against its own previously-created dir.
   Proper NTFS owner-SID validation needs ``GetSecurityInfo`` and is out of
   scope; we rely on the OS-resolved LocalAppData known folder being per-user.
+
+The literal POSIX name is a deliberate coordination protocol, with two
+operational constraints. First, every peer must see the same host ``/tmp``
+mount: ``PrivateTmp=`` and other per-service/polyinstantiated temporary
+namespaces split the rendezvous and are unsupported. Second, a predictable
+name in world-writable ``/tmp`` can be pre-created by another local user. The
+owner/mode/redirect checks above make that a fail-closed denial of service,
+never an unsafe follow; recovery may require an administrator because an
+environment override would recreate the identity split this module removes.
+
+Active pid, sentinel, and lifecycle files are BSD-flock-held. Standard
+``systemd-tmpfiles`` ageing honors those locks, but an administrator-supplied
+cleaner that ignores BSD locks can still unlink a live coordination name.
+Such policies must exclude ``/tmp/memtomem-*``; the CLI cannot detect a name
+that was unlinked while another process still holds its old inode.
 """
 
 from __future__ import annotations
@@ -51,6 +66,7 @@ import shlex
 import stat
 import sys
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal, TypeVar
 
@@ -308,6 +324,7 @@ def _is_safe_dir(path: Path) -> bool:
     return True
 
 
+@lru_cache(maxsize=1)
 def _windows_local_app_data() -> Path:
     """Resolve ``FOLDERID_LocalAppData`` without consulting environment vars.
 
@@ -377,7 +394,10 @@ def runtime_dir() -> Path:
         return test_override
     if os.name == "nt":
         return _windows_local_app_data() / "Temp" / "memtomem-0"
-    return Path("/tmp") / f"memtomem-{os.geteuid()}"
+    # The literal shared path is the cross-environment coordination protocol,
+    # not an untrusted temporary-file choice; ``ensure_runtime_dir`` validates
+    # the predictable leaf before any writer uses it.
+    return Path("/tmp") / f"memtomem-{os.geteuid()}"  # nosec B108
 
 
 def candidate_runtime_dirs() -> list[Path]:

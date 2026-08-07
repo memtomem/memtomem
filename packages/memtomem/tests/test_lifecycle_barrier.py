@@ -279,6 +279,20 @@ class TestCompositeDestructiveBarrier:
         assert len(acquired) == 1
         assert acquired[0].closed, "a failed composite acquire must close prior holds"
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership/mode validation")
+    def test_unsafe_legacy_root_refuses_and_names_that_path(self, rt, tmp_path, monkeypatch):
+        legacy = tmp_path / "legacy-runtime"
+        legacy.mkdir(mode=0o755)
+        legacy.chmod(0o755)
+        monkeypatch.setattr(reg, "candidate_runtime_dirs", lambda: [rt, legacy])
+
+        with pytest.raises(PermissionError) as exc_info:
+            reg.acquire_uninstall_lifecycle_barrier(timeout_s=5.0)
+
+        assert getattr(exc_info.value, "target", None) == legacy
+        assert str(legacy) in str(exc_info.value)
+        assert "unsafe permissions" in str(exc_info.value)
+
 
 # --------------------------------------------------------- acquire polarity
 

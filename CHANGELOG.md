@@ -102,6 +102,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   from an older binary that is already running under a non-standard,
   caller-unknowable `XDG_RUNTIME_DIR` cannot be retroactively discovered;
   restart it once with the upgraded binary to move it onto the stable anchor.
+  POSIX peers must also share the host `/tmp` namespace: `PrivateTmp=true`,
+  `pam_namespace` polyinstantiation, and equivalent private mounts are not
+  supported because they intentionally hide one peer's anchor from another.
+  Standard `systemd-tmpfiles` ageing honors the BSD locks on active
+  coordination files; sites using a cleaner that ignores those locks must
+  exclude `/tmp/memtomem-*`. Predictable-name squatting remains a fail-closed
+  local denial of service and may require administrator cleanup.
 
 - **Store-agnostic server discovery now fails closed when a runtime directory
   cannot be searched** (#2038). The pid inventory used by `mm upgrade` now
