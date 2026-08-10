@@ -318,5 +318,7 @@ uvx --from 'memtomem==0.4.0' mm mem init --scope project_local
 - 도구별 수동 설정: [MCP Client Setup](mcp-clients.md)
 - Claude Code 심화: [Claude Code integration](integrations/claude-code.md)
 - Codex 심화: [Codex integration](integrations/codex.md)
+- Kimi Code 연동: [Kimi Code integration](integrations/kimi-code.md)
+- 세 도구 순차 공동 개발: [공통 Handoff 가이드](integrations/cross-runtime-handoff.md)
 - 기존 노트 인덱싱·저장 범위: [Core memory tools](reference/core-memory-tools.md)
 - 임베딩·한국어 의미 검색: [Embeddings](embeddings.md)

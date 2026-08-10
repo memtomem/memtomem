@@ -7,7 +7,8 @@ One install bundles:
 
 - **Exact-pinned MCP server** — launched on demand with the reviewed core version
 - **Read workflows** — `/memtomem:search`, `/memtomem:recall`, `/memtomem:status`
-- **Explicit workflows** — `/memtomem:remember`, `/memtomem:index`, `/memtomem:setup`
+- **Explicit workflows** — `/memtomem:remember`, `/memtomem:index`, `/memtomem:setup`,
+  `/memtomem:handoff`
 
 The base plugin does not run background hooks or destructive curation. Install
 `memtomem-automation@memtomem` separately to opt into prompt-time retrieval and
@@ -40,6 +41,8 @@ uvx --from 'memtomem==0.4.0' mm mem init --scope project_local
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and
 verifies search. One-shot indexing does not add a watched source directory.
+Use `/memtomem:handoff save` to leave a compact, project-local checkpoint for
+Claude Code, Codex CLI, or Kimi Code; see the cross-runtime guide below.
 
 If you previously registered the server manually, what happens depends on
 the manual entry's command. If it matches the plugin's exact launch command
@@ -61,3 +64,5 @@ shows how to check which case you are in.
 - [memtomem README](https://github.com/memtomem/memtomem) — project overview
 - [MCP clients guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md)
   — manual registration for other clients
+- [Cross-runtime handoff guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/cross-runtime-handoff.md)
+  — sequential Claude Code, Codex CLI, and Kimi Code work on one Mac

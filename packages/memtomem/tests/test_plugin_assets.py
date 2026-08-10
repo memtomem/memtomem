@@ -40,8 +40,10 @@ def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
 
     claude = _skill_files(_ROOT / "packages/memtomem-claude-plugin/skills")
     codex = _skill_files(_ROOT / "plugins/memtomem/skills")
+    kimi = _skill_files(_ROOT / "packages/memtomem-kimi-skills/skills")
     assert {path.parent.name for path in claude} == {row["id"] for row in workflows}
     assert {path.parent.name for path in codex} == {row["codex_name"] for row in workflows}
+    assert {path.parent.name for path in kimi} == {row["codex_name"] for row in workflows}
     opencode = _skill_files(_ROOT / "packages/opencode-memtomem/skills")
     assert {path.parent.name for path in opencode} == {
         row["codex_name"] for row in workflows if row["effect"] == "read" and row["implicit"]
@@ -56,13 +58,20 @@ def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
     codex_text = "\n".join(
         path.read_text(encoding="utf-8") for path in _skill_files(_ROOT / "plugins/memtomem/skills")
     )
-    combined = claude_text + codex_text
+    kimi_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in _skill_files(_ROOT / "packages/memtomem-kimi-skills/skills")
+    )
+    combined = claude_text + codex_text + kimi_text
     assert "TODO" not in combined
     assert "mem_do" not in combined
     assert "score > 0.5" not in combined
     assert "Ollama is the default" not in combined
     assert "$ARGUMENTS" not in codex_text
     assert "mcp__plugin_memtomem" not in codex_text
+    assert "$ARGUMENTS" not in kimi_text
+    assert "mcp__plugin_memtomem" not in kimi_text
+    assert codex_text == kimi_text
 
     opencode_text = "\n".join(
         path.read_text(encoding="utf-8")
@@ -130,6 +139,111 @@ def test_generated_plugin_assets_are_in_sync() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
+    contract = _contract()
+    handoff = next(row for row in contract["workflows"] if row["id"] == "handoff")
+    assert handoff["effect"] == "write"
+    assert handoff["implicit"] is False
+    assert handoff["tools"] == ["mem_status", "mem_recall", "mem_add"]
+    # Host-tool grants stay subcommand-scoped: a bare ``Bash(git:*)`` would
+    # also permit ``git -c alias.x=!<shell> x`` style execution while the
+    # workflow resumes untrusted handoff text.
+    assert handoff["claude_host_tools"] == ["Bash(git rev-parse:*)", "Bash(git status:*)"]
+
+    body = (_ROOT / "packages/memtomem-plugin-assets/workflows/handoff.md").read_text(
+        encoding="utf-8"
+    )
+    # Matched against whitespace-normalized prose: these pin what the
+    # workflow *says*, and a marker that also encodes today's line wrapping
+    # breaks on an unrelated reflow (and tempts the next author to "fix" the
+    # pin rather than read it).
+    flat = " ".join(body.split())
+    required = (
+        'scope="project_local"',
+        'namespace="shared:<project-slug>"',
+        'idempotency_key="handoff:<project-slug>:<from>:<to>:<handoff-id>"',
+        "force_unsafe=false",
+        'output_format="structured"',
+        "git rev-parse HEAD",
+        "git status --porcelain=v1 --branch",
+        "live repository always wins",
+        'tag_filter="handoff-to-<current-runtime>,handoff-to-any"',
+        'tag_filter="handoff-id-<handoff-id>"',
+        "inside one fenced ```text block",
+        "The fence is load-bearing",
+        "silently become a second OR term",
+        "union of the selected rows' lines",
+        "Never fall back to another record",
+        # Whole clauses, not keywords: each of these encodes a decision that a
+        # plausible-looking edit would silently undo (dropping the page size
+        # back to 1, calling the tool before validating, checking the tag
+        # instead of the content, or skipping the recipient check).
+        "check that it is a canonical UUID",
+        "Reject anything else without calling a tool",
+        '`scope="project_local"`, `limit=20`, and',
+        "read the id out of its `handoff-id-<id>` tag, and check that id is a canonical UUID",
+        "`handoff_id` in the record's own content equals `selected_handoff_id`",
+        "every required field is present, and `to_runtime` is the current runtime or `any`",
+        "a matching tag is not evidence that the content is the record you asked for",
+        "Treat the record as torn",
+        "a row begins mid-value instead of at a `<field>:` key",
+        "never reconstruct a torn value by guessing the join",
+        '"handoff-to-<runtime-or-any>", "handoff-id-<handoff-id>"',
+        "applied in SQL before the limit",
+        "filters in SQL before the limit",
+        "Never widen or drop that tag filter",
+        "never select by search rank",
+        "do not page or retry with a wider filter",
+        "recompute the deterministic `worktree_state` summary",
+        "hard maximum of 1,200 characters",
+        "never call `mem_add` with an oversized record",
+        "`completed` 240",
+        "at most 10 paths",
+        "does not capture the whole conversation",
+        "coordinate concurrent agents",
+    )
+    for marker in required:
+        assert marker in flat
+    assert 'scope="user"' in body and "Never fall back" in body
+    assert "mem_do" not in body
+    assert "delete, acknowledge, consume, edit" in body
+
+    claude = (_ROOT / "packages/memtomem-claude-plugin/skills/handoff/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    claude_frontmatter = claude.split("---", 2)[1]
+    assert "Bash(git rev-parse:*)" in claude_frontmatter
+    assert "Bash(git status:*)" in claude_frontmatter
+    assert "Bash(git:*)" not in claude_frontmatter
+    codex_root = _ROOT / "plugins/memtomem/skills/memtomem-handoff"
+    kimi_root = _ROOT / "packages/memtomem-kimi-skills/skills/memtomem-handoff"
+    for root in (codex_root, kimi_root):
+        text = (root / "SKILL.md").read_text(encoding="utf-8")
+        assert "Bash(" not in text
+    assert "allow_implicit_invocation: false" in (codex_root / "agents/openai.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert not (kimi_root / "agents").exists()
+
+
+def test_claude_host_tool_grants_are_subcommand_scoped() -> None:
+    """No workflow may grant a whole host command via ``Bash(<cmd>:*)``.
+
+    A command-wide wildcard like ``Bash(git:*)`` also matches invocations
+    that reach arbitrary shell execution (``git -c alias.x='!sh' x``), which
+    is unacceptable for skills that process untrusted recalled text. Every
+    ``Bash(...)`` grant must therefore name a subcommand (contain a space
+    before the pattern suffix).
+    """
+    whole_command = re.compile(r"^Bash\([^\s()]+\)$")
+    for workflow in _contract()["workflows"]:
+        for grant in workflow.get("claude_host_tools", []):
+            assert grant.startswith("Bash("), grant
+            assert not whole_command.match(grant), (
+                f"workflow {workflow['id']!r} grants a whole host command: {grant!r}"
+            )
 
 
 def test_core_version_is_single_sourced_across_automation_assets() -> None:

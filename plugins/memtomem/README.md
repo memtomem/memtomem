@@ -1,8 +1,8 @@
 # memtomem for Codex
 
-This plugin bundles the exact-pinned memtomem MCP server and six focused
+This plugin bundles the exact-pinned memtomem MCP server and seven focused
 skills for search, date-based recall, status, explicit saves, explicit
-indexing, and first-time setup.
+indexing, first-time setup, and sequential cross-runtime handoff.
 
 ## Install from this repository
 
@@ -43,9 +43,15 @@ The plugin does not self-authorize these trust steps. After initialization,
 use `$memtomem-setup` with an explicit path; it performs a one-shot index
 without silently registering a watched source.
 
+Use `$memtomem-handoff` explicitly with `save` or `resume` to exchange a
+compact project-local checkpoint with Claude Code or Kimi Code. It does not
+capture a conversation or coordinate concurrent workers.
+
 ## Docs
 
 - [Korean Claude Code/Codex vibe-coding quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)
   — initialize one store, install one plugin, and verify a memory round trip
 - [Codex integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/codex.md)
   — complete skill reference and advanced MCP settings
+- [Cross-runtime handoff guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/cross-runtime-handoff.md)
+  — one-Mac Claude Code, Codex CLI, and Kimi Code handoff

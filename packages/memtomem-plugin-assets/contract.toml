@@ -3,10 +3,11 @@ version = "0.4.0"
 tool_mode = "core"
 
 [plugins]
-claude_version = "0.4.0"
-codex_version = "0.2.0"
-automation_version = "0.2.0"
-opencode_version = "0.2.0"
+claude_version = "0.4.1"
+codex_version = "0.2.1"
+automation_version = "0.2.1"
+opencode_version = "0.2.1"
+kimi_version = "0.1.0"
 
 [opencode]
 package = "opencode-memtomem"
@@ -95,3 +96,18 @@ input_kind = "memory source path"
 ui_name = "memtomem Setup"
 ui_description = "Set up and verify memory search"
 default_prompt = "Use $memtomem-setup to configure a first searchable directory."
+
+[[workflows]]
+id = "handoff"
+codex_name = "memtomem-handoff"
+title = "Hand off project work"
+description = "Explicitly save or resume a compact project handoff shared by Claude Code, Codex CLI, Kimi Code, and other compatible runtimes."
+tools = ["mem_status", "mem_recall", "mem_add"]
+claude_host_tools = ["Bash(git rev-parse:*)", "Bash(git status:*)"]
+effect = "write"
+implicit = false
+argument_hint = "[save|resume] [target runtime or handoff id]"
+input_kind = "handoff operation (save or resume)"
+ui_name = "memtomem Handoff"
+ui_description = "Save or resume a project handoff"
+default_prompt = "Use $memtomem-handoff to save this work for the next coding agent."

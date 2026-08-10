@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **User-controlled cross-runtime handoff workflow.** A new explicit
+  `handoff` workflow (Claude plugin skill, Codex/Kimi portable skills, and
+  OpenCode command) saves and resumes a compact project checkpoint through
+  the shared `project_local` tier so Claude Code, Codex CLI, Kimi Code, and
+  OpenCode can take turns on one repository. Resume is target-aware: each
+  record carries composite `handoff-to-<runtime>` and `handoff-id-<id>` tags,
+  and resume looks records up with `mem_recall`, whose tag filter runs in SQL
+  before `limit`. A record addressed to this runtime therefore cannot be
+  crowded out by newer handoffs for other runtimes, and an exact id stays
+  reachable at any age without paging. The record is written inside a fenced
+  block so the chunker keeps it atomic — `indexing.max_chunk_tokens` is
+  settable down to 64, well under a full-size record, and an unfenced record
+  would split into tag-sharing fragments that a bounded lookup could land on.
+  Resume validates the id as a canonical UUID before using it in a filter —
+  on both the requested-id and newest-record paths, since the id on the
+  second one comes from a tag written by an earlier session — and verifies
+  the `handoff_id` in the record's own content, its required fields, and its
+  `to_runtime` before acting, with no fallback to another record. A legacy
+  unfenced record whose long value was torn across chunks is reported as
+  torn rather than silently mis-parsed. The Claude skill's host-tool grant is
+  scoped to `git rev-parse` / `git status` only.
+
 ## [0.4.0] — 2026-08-10
 
 ### Breaking — read before upgrading
