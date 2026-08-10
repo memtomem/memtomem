@@ -38,15 +38,18 @@ dependencies = [
     "pathspec>=0.12",
     "croniter>=2.0",
     "portalocker>=3.0",
-    # Windows shared locks. ``_instance_registry`` takes the lifecycle barrier
-    # with ``LOCK_SH`` and ``cli/_liveness`` probes the legacy pid file the
-    # same way. portalocker 3.x declared ``pywin32; platform_system ==
+    # Windows shared locks. ``_instance_registry`` takes the startup side of
+    # the lifecycle barrier with ``LOCK_SH`` on every OS — that is the whole
+    # obligation. (``cli/_liveness`` also takes a shared lock, but all three
+    # of its callers gate on ``os.name``/``sys.platform``, so Windows is
+    # routed to the exclusive probe and never reaches it.)
+    # portalocker 3.x declared ``pywin32; platform_system ==
     # "Windows"`` unconditionally, so this came for free; 4.0.0 moved it
     # behind a ``win32`` extra and made ``MsvcrtLocker`` the default Windows
     # locker — and msvcrt has no shared lock, so that locker raises
     # ``ImportError`` for ``LOCK_SH`` when pywin32 is absent. ``ImportError``
     # is in neither ``_LOCK_CONTENDED`` nor ``_BARRIER_LOCK_ERRORS``, so it
-    # would escape both call sites unhandled rather than degrade.
+    # would escape the barrier unhandled rather than degrade.
     #
     # Declared directly rather than as ``portalocker[win32]``: the floor is
     # still ``>=3.0`` and 3.x has no such extra, so the extra spelling would

@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 _ROOT = Path(__file__).resolve().parents[3]
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
 _DOCKER_RE = re.compile(r"^docker://[^\s@]+@sha256:[0-9a-f]{64}$")
 _USES_LINE_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)")
-_WIN_MARKER_RE = re.compile(
-    r"""sys_platform\s*==\s*['"]win32['"]|platform_system\s*==\s*['"]Windows['"]"""
-)
 
 
 def _assert_pinned_ref(reference: str) -> None:
@@ -212,52 +212,93 @@ def test_every_plugin_version_is_semver() -> None:
         assert re.fullmatch(r"\d+\.\d+\.\d+", version)
 
 
-def test_windows_shared_locks_declare_pywin32() -> None:
-    """A ``LOCK_SH`` call site obliges a direct ``pywin32`` declaration.
+def _shared_lock_call_sites() -> list[str]:
+    """Files under ``src`` that acquire a portalocker lock in shared mode.
 
-    portalocker 3.x listed ``pywin32; platform_system == "Windows"`` as an
-    unconditional dependency, so shared Windows locks worked for free. 4.0.0
-    moved it behind a ``win32`` extra and made ``MsvcrtLocker`` the default
-    Windows locker; msvcrt has no shared lock, so that locker raises
-    ``ImportError`` when ``LockFlags.SHARED`` is requested without pywin32.
-    ``ImportError`` is in neither ``_LOCK_CONTENDED`` nor
-    ``_BARRIER_LOCK_ERRORS``, so it escapes the barrier and the liveness
-    probe unhandled — a crash, not a degraded lock.
+    AST rather than a substring scan: ``"LOCK_SH" in text`` also fires on the
+    prose that explains the lock, and misses a call spelled
+    ``LockFlags.SHARED``. Both matter — the first makes the guard un-droppable
+    for the wrong reason, the second silently disarms it.
+    """
+    shared = {"LOCK_SH", "SHARED"}
+    found: set[str] = set()
+    for path in (_ROOT / "packages/memtomem/src/memtomem").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in shared:
+                found.add(path.relative_to(_ROOT).as_posix())
+                break
+    return sorted(found)
+
+
+def test_windows_shared_locks_declare_pywin32() -> None:
+    """The shared lifecycle barrier obliges a direct ``pywin32`` declaration.
+
+    ``_instance_registry.acquire_startup_lifecycle_barrier`` takes the barrier
+    with ``LOCK_SH`` on every OS, Windows included. portalocker 3.x listed
+    ``pywin32; platform_system == "Windows"`` unconditionally, so that worked
+    for free. 4.0.0 moved it behind a ``win32`` extra and made
+    ``MsvcrtLocker`` the default Windows locker; msvcrt has no shared lock, so
+    that locker raises ``ImportError`` when ``LockFlags.SHARED`` is requested
+    without pywin32. ``ImportError`` is in neither ``_LOCK_CONTENDED`` nor
+    ``_BARRIER_LOCK_ERRORS``, so it escapes the barrier unhandled — a crash,
+    not a degraded lock.
 
     ``mcp`` supplies pywin32 transitively today, which is precisely why this
     needs pinning: the resolve is correct by luck, not by contract.
 
-    Scope is derived rather than enumerated — the guard finds the call sites
-    itself, so a third one added later is covered, and removing the last one
-    legitimately releases the requirement.
+    Deliberately **no skip branch**. An earlier version released the
+    requirement when it found no shared-lock call site, which turns any
+    refactor of the spelling into a silent disarm. The absence of a shared
+    lock is asserted as a failure instead, so dropping the pin has to be a
+    deliberate edit to this test.
     """
-    src = _ROOT / "packages/memtomem/src/memtomem"
-    users = sorted(
-        path.relative_to(_ROOT).as_posix()
-        for path in src.rglob("*.py")
-        if "LOCK_SH" in path.read_text(encoding="utf-8")
+    users = _shared_lock_call_sites()
+    assert users, (
+        "no shared-lock call site found under src/ — if the lifecycle barrier "
+        "no longer takes LOCK_SH, drop the pywin32 pin and this guard together, "
+        "deliberately"
     )
-    if not users:
-        pytest.skip("no LOCK_SH call sites remain; the pywin32 pin may be dropped")
 
     with (_ROOT / "packages/memtomem/pyproject.toml").open("rb") as handle:
-        dependencies = tomllib.load(handle)["project"]["dependencies"]
-    pins = [dep for dep in dependencies if re.match(r"^\s*pywin32\b", dep)]
+        project = tomllib.load(handle)["project"]
+    pins = [
+        requirement
+        for requirement in map(Requirement, project["dependencies"])
+        if canonicalize_name(requirement.name) == "pywin32"
+    ]
     assert pins, (
-        "portalocker.LOCK_SH is used in "
+        "shared locks are taken in "
         + ", ".join(users)
-        + ", but pyproject declares no pywin32 dependency — shared locks raise "
+        + ", but pyproject declares no pywin32 dependency — they raise "
         "ImportError on Windows without it (portalocker >= 4.0)"
     )
+
+    # Evaluate the marker instead of pattern-matching it. A substring check
+    # cannot tell `sys_platform == "win32"` from a marker that is too narrow
+    # (`... and python_version < "3.13"`) or too broad (`... or ...`) — and
+    # "win32" is itself a substring of "pywin32", so a markerless pin passes a
+    # naive check outright.
+    floor = tuple(int(part) for part in project["requires-python"].lstrip(">=").split("."))
+    supported = [f"{floor[0]}.{minor}" for minor in range(floor[1], floor[1] + 4)]
     for pin in pins:
-        # Match the marker explicitly rather than searching the whole
-        # requirement for "win32": the package name contains that substring,
-        # so a markerless "pywin32>=226" would satisfy a naive check.
-        _, separator, marker = pin.partition(";")
-        assert separator, (
-            f"pywin32 pin {pin!r} has no environment marker; it would install on every platform"
+        assert pin.marker is not None, (
+            f"pywin32 pin {str(pin)!r} has no environment marker; it would "
+            "install on every platform"
         )
-        assert _WIN_MARKER_RE.search(marker), (
-            f"pywin32 pin {pin!r} has marker {marker.strip()!r}, which does not "
-            "restrict it to Windows"
-        )
+        for python_version in supported:
+            assert pin.marker.evaluate(
+                {
+                    "sys_platform": "win32",
+                    "platform_system": "Windows",
+                    "python_version": python_version,
+                }
+            ), f"pywin32 pin {str(pin)!r} does not apply on Windows / Python {python_version}"
+        for sys_platform, platform_system in (("linux", "Linux"), ("darwin", "Darwin")):
+            assert not pin.marker.evaluate(
+                {
+                    "sys_platform": sys_platform,
+                    "platform_system": platform_system,
+                    "python_version": supported[0],
+                }
+            ), f"pywin32 pin {str(pin)!r} also applies on {sys_platform}"
