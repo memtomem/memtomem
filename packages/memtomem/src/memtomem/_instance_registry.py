@@ -130,8 +130,13 @@ _BARRIER_TIMEOUT_S = 2.0
 
 # Exception tuple matching ``cli/_liveness.py:probe_pid_file`` (#817):
 # POSIX raises ``BlockingIOError``; portalocker's Windows backend wraps
-# Win32 errors as ``LockException``. This is the *catch* set — every shape
-# a non-blocking ``portalocker.lock`` can produce, contention or not.
+# Win32 errors as ``LockException``. This is the *catch* set — every shape a
+# non-blocking ``portalocker.lock`` can produce, contention or not, with one
+# documented hole: portalocker 3.x re-raises a non-``ERROR_LOCK_VIOLATION``
+# ``pywintypes.error`` raw, and that type derives from ``Exception``, not
+# ``OSError``. Only the barrier needs to survive it, and only the barrier
+# widens for it — see ``_BARRIER_LOCK_ERRORS`` below for why the other sites
+# keep the narrower catch.
 # ``_acquire_barrier`` (#1957) and ``_mutation_lock`` (#1939) narrow it
 # further with ``_is_lock_contention``: both poll a held lock but must let
 # a lock-call I/O failure escape, because each has a caller that would
