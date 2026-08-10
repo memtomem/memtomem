@@ -152,14 +152,16 @@ _LOCK_CONTENDED = (portalocker.LockException, BlockingIOError, OSError)
 _WIN_TRANSIENT_SHARING = frozenset({32, 33})
 
 # Non-blocking-lock errnos that mean "held by someone else": POSIX
-# ``fcntl.flock`` documents both ``EACCES`` and ``EAGAIN`` for a held
-# lock, and portalocker's own backends map exactly this pair to
-# ``AlreadyLocked``. Every version across the supported ``portalocker>=3.0``
-# range does so (source-verified, see :func:`_is_lock_contention`), so these
-# errnos are *not* the primary gate — they are the defensive one. Contention
-# is judged by errno on the exception or its chained cause in addition to
-# ``isinstance(exc, AlreadyLocked)``, covering a raw ``OSError`` leaking out
-# of some backend and a future version that regresses to a bare
+# ``fcntl.flock`` documents both ``EACCES`` and ``EAGAIN`` for a held lock,
+# and the POSIX backend of every source-verified release (3.0 through 4.1)
+# maps exactly this pair to ``AlreadyLocked``. Scoped to POSIX on purpose —
+# the Windows msvcrt backend treats a wider errno set as contention, and the
+# floor is a floor, so a release past 4.1 is unverified by construction.
+# These errnos are therefore *not* the primary gate — they are the defensive
+# one, and the ``>=3.0`` range is what the pin allows, not what it proves.
+# Contention is judged by errno on the exception or its chained cause in
+# addition to ``isinstance(exc, AlreadyLocked)``, covering a raw ``OSError``
+# leaking out of some backend and a future version that regresses to a bare
 # ``LockException`` (the #1944 type-drift note).
 _CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
 
@@ -505,10 +507,11 @@ def _is_lock_contention(exc: BaseException) -> bool:
     in ``_probe_entry`` as-is: that surface maps its own I/O uncertainty to
     ``"unknown"``, so a bare ``False`` there would need that translation.
 
-    Across the supported range (portalocker 3.0/3.1/3.2 and 4.0/4.1,
-    source-verified) genuine contention is *always* the
-    ``AlreadyLocked`` subclass — POSIX
-    ``EACCES``/``EAGAIN`` and Windows ``ERROR_LOCK_VIOLATION`` alike — so
+    Across every source-verified release (portalocker 3.0/3.1/3.2 and
+    4.0/4.1 — the floor is ``>=3.0``, so anything past 4.1 is unverified by
+    construction) genuine contention is *always* the ``AlreadyLocked``
+    subclass — POSIX ``EACCES``/``EAGAIN`` and Windows
+    ``ERROR_LOCK_VIOLATION`` alike — so
     the ``isinstance`` check below catches it regardless of how the
     original error is chained. The errno/winerror probes are defensive:
     the cause probes cover a future version that might raise a bare
