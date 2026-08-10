@@ -479,8 +479,8 @@ class TestPollLoopClassifier:
 
     def test_already_locked_without_cause_is_contention(self, rt, monkeypatch):
         """The ``isinstance`` branch stands alone — across portalocker
-        3.0/3.1/3.2 a held lock is always ``AlreadyLocked``, cause or not
-        (guards the #1944 type-drift note)."""
+        3.0/3.1/3.2 and 4.0/4.1 a held lock is always ``AlreadyLocked``,
+        cause or not (guards the #1944 type-drift note)."""
         self._patch_lock(monkeypatch, portalocker.AlreadyLocked("busy"))
         with pytest.raises(reg.BarrierTimeout):
             reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
@@ -517,8 +517,10 @@ class TestPollLoopClassifier:
         assert reg._is_lock_contention(_FakePywinError(reg._WINERROR_LOCK_VIOLATION)) is True
 
     def test_raw_non_violation_winerror_is_not_contention(self):
-        """A raw non-33 ``pywintypes.error`` (portalocker re-raises these
-        unwrapped) is a lock-call failure, not contention: the classifier
+        """A raw non-33 ``pywintypes.error`` (portalocker 3.x re-raises these
+        unwrapped; 4.0.0 wraps them in ``LockException``, but the ``>=3.0``
+        floor keeps 3.x reachable) is a lock-call failure, not contention: the
+        classifier
         rejects it and the normalizer turns it into an ``OSError`` naming the
         barrier path. Pure-function pin, so it runs on POSIX CI."""
         boom = _FakePywinError(32, "sharing violation")
