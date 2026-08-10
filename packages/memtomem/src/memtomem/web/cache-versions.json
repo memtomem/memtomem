@@ -58,7 +58,8 @@
     },
     "/context-portal.js": {
       "versions": {
-        "14": "82be53021f2a77b30d164fe03b9bc1aea67345267fc064362b60dc6378a303ec"
+        "14": "82be53021f2a77b30d164fe03b9bc1aea67345267fc064362b60dc6378a303ec",
+        "15": "fd8a9071ff948f3d7c5d6124e27e35a5085727b12c0f48b5121e6261de110f96"
       }
     },
     "/i18n.js": {
