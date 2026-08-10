@@ -14,20 +14,17 @@ Native Windows has not yet been verified.
 
 ## Install
 
-The published npm release is `opencode-memtomem@0.1.3`, bundling core
-`0.3.13`. Version `0.2.1` — the one this repository's source describes,
-bundling core `0.4.0` — is not on npm yet. Until it is, the manual MCP
-configuration below is the recommended path; it pulls the `0.4.0` runtime
-from PyPI directly. That matters more than usual for this release: `0.3.13`
-declares no upper bound on `mcp`, so a fresh resolve of it picks up `mcp`
-2.x and fails at import (#1978).
-
-After `0.2.1` is published, add it through OpenCode's singular `plugin`
-configuration key (there is no `opencode plugin add` command):
+The published npm release is `opencode-memtomem@0.2.1`, bundling core
+`0.4.0`. Add it through OpenCode's singular `plugin` configuration key
+(there is no `opencode plugin add` command):
 
 ```json
 {"plugin": ["opencode-memtomem@0.2.1"]}
 ```
+
+Upgrade if your `plugin` array still pins `0.1.3` or older: those releases
+bundle core `0.3.13`, which declares no upper bound on `mcp`, so a fresh
+resolve picks up `mcp` 2.x and fails at import (#1978).
 
 For development from this repository, build the package and point the same
 `plugin` array at `packages/opencode-memtomem/dist/server.js`.
