@@ -14,6 +14,9 @@ _ROOT = Path(__file__).resolve().parents[3]
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
 _DOCKER_RE = re.compile(r"^docker://[^\s@]+@sha256:[0-9a-f]{64}$")
 _USES_LINE_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)")
+_WIN_MARKER_RE = re.compile(
+    r"""sys_platform\s*==\s*['"]win32['"]|platform_system\s*==\s*['"]Windows['"]"""
+)
 
 
 def _assert_pinned_ref(reference: str) -> None:
@@ -207,3 +210,54 @@ def test_every_plugin_version_is_semver() -> None:
     contract = _contract()
     for version in contract["plugins"].values():
         assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+
+
+def test_windows_shared_locks_declare_pywin32() -> None:
+    """A ``LOCK_SH`` call site obliges a direct ``pywin32`` declaration.
+
+    portalocker 3.x listed ``pywin32; platform_system == "Windows"`` as an
+    unconditional dependency, so shared Windows locks worked for free. 4.0.0
+    moved it behind a ``win32`` extra and made ``MsvcrtLocker`` the default
+    Windows locker; msvcrt has no shared lock, so that locker raises
+    ``ImportError`` when ``LockFlags.SHARED`` is requested without pywin32.
+    ``ImportError`` is in neither ``_LOCK_CONTENDED`` nor
+    ``_BARRIER_LOCK_ERRORS``, so it escapes the barrier and the liveness
+    probe unhandled — a crash, not a degraded lock.
+
+    ``mcp`` supplies pywin32 transitively today, which is precisely why this
+    needs pinning: the resolve is correct by luck, not by contract.
+
+    Scope is derived rather than enumerated — the guard finds the call sites
+    itself, so a third one added later is covered, and removing the last one
+    legitimately releases the requirement.
+    """
+    src = _ROOT / "packages/memtomem/src/memtomem"
+    users = sorted(
+        path.relative_to(_ROOT).as_posix()
+        for path in src.rglob("*.py")
+        if "LOCK_SH" in path.read_text(encoding="utf-8")
+    )
+    if not users:
+        pytest.skip("no LOCK_SH call sites remain; the pywin32 pin may be dropped")
+
+    with (_ROOT / "packages/memtomem/pyproject.toml").open("rb") as handle:
+        dependencies = tomllib.load(handle)["project"]["dependencies"]
+    pins = [dep for dep in dependencies if re.match(r"^\s*pywin32\b", dep)]
+    assert pins, (
+        "portalocker.LOCK_SH is used in "
+        + ", ".join(users)
+        + ", but pyproject declares no pywin32 dependency — shared locks raise "
+        "ImportError on Windows without it (portalocker >= 4.0)"
+    )
+    for pin in pins:
+        # Match the marker explicitly rather than searching the whole
+        # requirement for "win32": the package name contains that substring,
+        # so a markerless "pywin32>=226" would satisfy a naive check.
+        _, separator, marker = pin.partition(";")
+        assert separator, (
+            f"pywin32 pin {pin!r} has no environment marker; it would install on every platform"
+        )
+        assert _WIN_MARKER_RE.search(marker), (
+            f"pywin32 pin {pin!r} has marker {marker.strip()!r}, which does not "
+            "restrict it to Windows"
+        )
