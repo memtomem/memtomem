@@ -1672,17 +1672,19 @@ class TestSessionSummaryPhaseB:
 
         # Verify cap count AND that linked chunks are a subset of the
         # session's source chunks (catches a bug that would link
-        # arbitrary chunks not in the recall_chunks output). We can't
-        # assert "exactly newest 3" because tests seed all 6 chunks in
-        # the same second, and ORDER BY created_at DESC has no stable
-        # secondary sort across two queries when timestamps tie — in
-        # production a session spans real time so the tail-drop
-        # ordering is well-defined.
-        planner_ids = {
-            c.id
+        # arbitrary chunks not in the recall_chunks output). Which 3
+        # survive the cap is decided by ``recall_chunks``' total order:
+        # ``ORDER BY created_at DESC, <scope priority>, id DESC`` (#516).
+        # created_at now carries microsecond precision, so same-batch rows
+        # normally differ on the first key already; ``id DESC`` still
+        # settles exact-equal timestamps. The selection is reproducible
+        # and asserted exactly below.
+        planner_chunks = [
+            c
             for c in await app.storage.recall_chunks(limit=100)
             if c.metadata.namespace == "agent-runtime:planner"
-        }
+        ]
+        planner_ids = {c.id for c in planner_chunks}
         linked_ids = {
             cid
             for cid in planner_ids
@@ -1691,6 +1693,17 @@ class TestSessionSummaryPhaseB:
         assert len(linked_ids) == 3, f"expected cap=3 links, got {len(linked_ids)}"
         assert linked_ids.issubset(planner_ids), (
             "linked targets must come from the session's source chunks"
+        )
+        # "Newest 3" per the same total order recall_chunks uses (equal
+        # scope priority here): created_at DESC, then id DESC.
+        expected = {
+            c.id
+            for c in sorted(planner_chunks, key=lambda c: (c.created_at, str(c.id)), reverse=True)[
+                :3
+            ]
+        }
+        assert linked_ids == expected, (
+            "cap selection diverged from recall_chunks' created_at DESC, id DESC order"
         )
 
     @pytest.mark.asyncio

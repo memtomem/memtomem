@@ -1218,6 +1218,39 @@ class TestSubcommandHelp:
         assert "--until" in result.output
         assert "--format" in result.output
 
+    def test_recall_until_partial_date_is_inclusive_of_the_period(
+        self, runner: CliRunner, monkeypatch
+    ) -> None:
+        """``--until 2025-03`` must cover all of March (exclusive upper bound
+        2025-04-01), matching MCP ``mem_recall`` and the flag's own help text —
+        without ``end_of_period=True`` it parsed to 2025-03-01 and
+        ``--since 2025-03 --until 2025-03`` returned zero rows."""
+        from contextlib import asynccontextmanager
+        from datetime import datetime, timezone
+        from unittest.mock import AsyncMock
+
+        comp = MagicMock()
+        comp.storage.recall_chunks = AsyncMock(return_value=[])
+        comp.config.search.system_namespace_prefixes = []
+
+        @asynccontextmanager
+        async def fake_components():
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", lambda: fake_components())
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda _comp: None
+        )
+
+        result = runner.invoke(
+            cli, ["recall", "--since", "2025-03", "--until", "2025-03", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+
+        kwargs = comp.storage.recall_chunks.call_args.kwargs
+        assert kwargs["since"] == datetime(2025, 3, 1, tzinfo=timezone.utc)
+        assert kwargs["until"] == datetime(2025, 4, 1, tzinfo=timezone.utc)
+
     def test_embedding_reset_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["embedding-reset", "--help"])
         assert result.exit_code == 0

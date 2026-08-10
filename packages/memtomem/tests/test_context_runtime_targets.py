@@ -118,6 +118,59 @@ def test_project_scope_without_root_raises_valueerror() -> None:
         runtime_fanout_root("agents", "claude", "project_shared", project_root=None)
 
 
+# ---------------------------------------------------------------------------
+# Callable user-scope entries — resolved at call time (Kimi Code home)
+# ---------------------------------------------------------------------------
+
+
+def test_kimi_user_scope_defaults_to_kimi_code_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_home(monkeypatch, str(tmp_path))
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
+    for artifact, tail in (("agents", "agents"), ("skills", "skills")):
+        out = runtime_fanout_root(artifact, "kimi", "user", project_root=None)
+        assert out == (tmp_path / ".kimi-code" / tail).resolve()
+
+
+def test_kimi_user_scope_honors_kimi_code_home_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """$KIMI_CODE_HOME relocates the whole home — the callable entry must
+    resolve through it, never the default spelling."""
+    set_home(monkeypatch, str(tmp_path / "home"))
+    relocated = tmp_path / "relocated"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(relocated))
+    out = runtime_fanout_root("skills", "kimi", "user", project_root=None)
+    assert out == (relocated / "skills").resolve()
+
+
+def test_callable_entry_in_project_tier_raises_typeerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Callable table entries are user-scope-only by design — a project-tier
+    callable is a programming error and must fail loud, not be path-joined."""
+    monkeypatch.setitem(
+        RUNTIME_FANOUT_TABLE,
+        ("agents", "kimi", "project_shared"),
+        lambda: Path("boom"),
+    )
+    with pytest.raises(TypeError, match="only valid for user scope"):
+        runtime_fanout_root("agents", "kimi", "project_shared", project_root=tmp_path)
+
+
+def test_callable_entry_returning_non_path_raises_typeerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(
+        RUNTIME_FANOUT_TABLE,
+        ("agents", "kimi", "user"),
+        lambda: "not-a-path",
+    )
+    with pytest.raises(TypeError, match="expected Path"):
+        runtime_fanout_root("agents", "kimi", "user", project_root=None)
+
+
 def test_project_local_without_root_returns_none_first() -> None:
     """project_local entries are None — that branch wins before the
     project_root check, so passing None is harmless for project_local."""

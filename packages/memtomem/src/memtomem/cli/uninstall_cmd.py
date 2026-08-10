@@ -525,6 +525,13 @@ def _collect_inventory(db_path: Path) -> _Inventory:
 
 
 def _probe_external_integrations() -> list[_External]:
+    from memtomem.context._kimi_home import (
+        KIMI_CODE_DIRNAME,
+        KIMI_LEGACY_DIRNAME,
+        kimi_code_home,
+        kimi_legacy_home,
+    )
+
     home = Path.home()
     candidates: list[Path] = [
         home / ".claude.json",
@@ -532,14 +539,13 @@ def _probe_external_integrations() -> list[_External]:
         home / ".cursor" / "mcp.json",
         home / ".codeium" / "windsurf" / "mcp_config.json",
         home / ".gemini" / "settings.json",
-        home / ".kimi" / "mcp.json",
+        home / KIMI_CODE_DIRNAME / "mcp.json",
+        home / KIMI_LEGACY_DIRNAME / "mcp.json",
         home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
     ]
-    kimi_share_dir = os.environ.get("KIMI_SHARE_DIR")
-    if kimi_share_dir:
-        kimi_share_mcp = Path(kimi_share_dir).expanduser() / "mcp.json"
-        if kimi_share_mcp not in candidates:
-            candidates.append(kimi_share_mcp)
+    for kimi_mcp in (kimi_legacy_home(home) / "mcp.json", kimi_code_home(home) / "mcp.json"):
+        if kimi_mcp not in candidates:
+            candidates.append(kimi_mcp)
 
     # #1949: no ``exists()`` precheck here or in the loop below — on py3.12
     # it raises (not returns False) for a candidate linked through an

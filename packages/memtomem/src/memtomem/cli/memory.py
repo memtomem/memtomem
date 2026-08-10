@@ -430,6 +430,12 @@ async def _add(
 @click.option("--until", default=None, help="End date (exclusive, same formats)")
 @click.option("--limit", "-l", default=20, help="Number of recent chunks")
 @click.option("--source-filter", "-s", default=None, help="Filter by source")
+@click.option(
+    "--tag-filter",
+    "-t",
+    default=None,
+    help="Comma-separated tags, matching ANY (applied before --limit)",
+)
 @click.option("--namespace", "-n", default=None, help="Namespace filter")
 @click.option(
     "--scope",
@@ -446,13 +452,14 @@ def recall(
     until: str | None,
     limit: int,
     source_filter: str | None,
+    tag_filter: str | None,
     namespace: str | None,
     scope: str | None,
     fmt: str,
 ) -> None:
     """Recall recent memory chunks."""
     try:
-        asyncio.run(_recall(since, until, limit, source_filter, namespace, scope, fmt))
+        asyncio.run(_recall(since, until, limit, source_filter, tag_filter, namespace, scope, fmt))
     except click.ClickException:
         raise
     except Exception as e:
@@ -464,6 +471,7 @@ async def _recall(
     until: str | None,
     limit: int,
     source_filter: str | None,
+    tag_filter: str | None,
     namespace: str | None,
     scope: str | None,
     fmt: str,
@@ -474,7 +482,7 @@ async def _recall(
     from memtomem.server.tools.search import _resolve_project_context_root
 
     since_dt = _parse_recall_date(since) if since else None
-    until_dt = _parse_recall_date(until) if until else None
+    until_dt = _parse_recall_date(until, end_of_period=True) if until else None
 
     async with cli_components() as comp:
         ns_filter = NamespaceFilter.parse(
@@ -488,6 +496,7 @@ async def _recall(
             until=until_dt,
             limit=limit,
             source_filter=source_filter,
+            tag_filter=tag_filter,
             namespace_filter=ns_filter,
             scope_filter=scope_filter,
             project_context_root=project_context_root,

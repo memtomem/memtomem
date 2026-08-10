@@ -30,7 +30,7 @@ configuration; environment variables have the highest precedence.
 - [3. Windsurf](#3-windsurf)
 - [4. Claude Desktop](#4-claude-desktop)
 - [5. Gemini CLI](#5-gemini-cli)
-- [6. Kimi CLI](#6-kimi-cli)
+- [6. Kimi Code](#6-kimi-code)
 - [7. Codex CLI](#7-codex-cli)
 - [8. OpenCode](#8-opencode)
 - [9. Antigravity](#9-antigravity)
@@ -213,10 +213,14 @@ Restart Gemini CLI after configuration.
 
 ---
 
-## 6. Kimi CLI
+## 6. Kimi Code
 
-Kimi CLI reads MCP servers from `~/.kimi/mcp.json` by default. If
-`KIMI_SHARE_DIR` is set, write `mcp.json` under that directory instead.
+Kimi Code reads MCP servers from `~/.kimi-code/mcp.json` by default. If
+`KIMI_CODE_HOME` is set, write `mcp.json` under that directory instead.
+memtomem still treats the legacy `~/.kimi/mcp.json` and `KIMI_SHARE_DIR`
+override as an install marker during upgrades and cleans them up on
+uninstall, but registration status is decided from the current Kimi Code
+home only, and new configuration is always written there.
 
 ```json
 {
@@ -235,7 +239,13 @@ You can also let `mm init` write the file:
 mm init --mcp kimi
 ```
 
-Restart Kimi CLI after configuration.
+Restart Kimi Code after configuration.
+
+> **Upgrading from memtomem 0.3.14:** that release fanned out user-scope
+> agents and skills to the legacy `~/.kimi/agents/` and `~/.kimi/skills/`
+> directories, which modern Kimi Code does not read and later memtomem
+> versions no longer manage. Audit those legacy directories and remove the
+> entries memtomem pushed — keep anything you authored by hand.
 
 ---
 

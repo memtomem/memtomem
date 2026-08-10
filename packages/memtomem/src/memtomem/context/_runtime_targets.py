@@ -41,9 +41,11 @@ Design rules:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from memtomem.config import TargetScope
+from memtomem.context._kimi_home import kimi_code_home
 from memtomem.context._names import InvalidNameError, is_internal_artifact_dir, validate_name
 from memtomem.context.scope_resolver import ArtifactKind
 
@@ -74,7 +76,12 @@ _GEMINI_COMMANDS_REL = Path(".gemini/commands")
 # Full table — every (artifact, runtime, scope) tuple populated.
 # ``None`` = "no fan-out by design" (loud-emit-on-call). Lookup uses
 # direct dict access; missing keys raise KeyError (fail-loud).
-RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] = {
+# User-scope entries whose real location depends on the environment are
+# stored as zero-arg callables resolved at call time (user scope only —
+# ``runtime_fanout_root`` fail-louds on a callable in a project tier).
+RUNTIME_FANOUT_TABLE: dict[
+    tuple[ArtifactKind, str, TargetScope], Path | Callable[[], Path] | None
+] = {
     # ── agents ───────────────────────────────────────────────────────
     ("agents", "claude", "user"): Path("~/.claude/agents"),
     ("agents", "claude", "project_shared"): _CLAUDE_AGENTS_REL,
@@ -85,7 +92,15 @@ RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] =
     ("agents", "codex", "user"): Path("~/.codex/agents"),  # agents.py:12
     ("agents", "codex", "project_shared"): _CODEX_AGENTS_REL,
     ("agents", "codex", "project_local"): NO_FANOUT,
-    ("agents", "kimi", "user"): Path("~/.kimi/agents"),
+    # Kimi Code v0.1.0 moved the user home to ``~/.kimi-code``; user-scope
+    # fan-out and import must target it, or modern Kimi never loads pushed
+    # artifacts. Stored as callables because ``$KIMI_CODE_HOME`` relocates
+    # the whole home at resolve time (a static Path cannot read the env,
+    # and a relocated install must not be pushed to the default path).
+    # Legacy ``~/.kimi`` stays a registry install marker and an uninstall
+    # inventory item only. Project-relative ``.kimi/`` is a separate
+    # project-dir convention and is unchanged.
+    ("agents", "kimi", "user"): lambda: kimi_code_home() / "agents",
     ("agents", "kimi", "project_shared"): _KIMI_AGENTS_REL,
     ("agents", "kimi", "project_local"): NO_FANOUT,
     # ── skills ───────────────────────────────────────────────────────
@@ -100,7 +115,7 @@ RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] =
     ),  # Agent Skills Open Spec — see docstring rule 5
     ("skills", "codex", "project_shared"): _CODEX_SKILLS_REL,
     ("skills", "codex", "project_local"): NO_FANOUT,
-    ("skills", "kimi", "user"): Path("~/.kimi/skills"),
+    ("skills", "kimi", "user"): lambda: kimi_code_home() / "skills",  # see agents note
     ("skills", "kimi", "project_shared"): _KIMI_SKILLS_REL,
     ("skills", "kimi", "project_local"): NO_FANOUT,
     # ── commands ─────────────────────────────────────────────────────
@@ -227,8 +242,20 @@ def runtime_fanout_root(
     if entry is None:
         return None
     if scope == "user":
-        return entry.expanduser().resolve()
+        resolved = entry() if callable(entry) else entry
+        if not isinstance(resolved, Path):
+            raise TypeError(
+                f"runtime_fanout_root({artifact!r}, {runtime!r}, {scope!r}): "
+                f"callable entry returned {type(resolved).__name__}, expected Path."
+            )
+        return resolved.expanduser().resolve()
     # project_shared / project_local — entry is a project-relative tail.
+    # Callables are user-scope-only by design; fail loud rather than join.
+    if not isinstance(entry, Path):
+        raise TypeError(
+            f"runtime_fanout_root({artifact!r}, {runtime!r}, {scope!r}): "
+            "callable table entries are only valid for user scope."
+        )
     if project_root is None:
         raise ValueError(
             f"runtime_fanout_root({artifact!r}, {runtime!r}, {scope!r}) "

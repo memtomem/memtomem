@@ -314,7 +314,7 @@ class TestProbeExternalParsedMCP:
         assert "mcp.json" in result.output
 
     def test_kimi_share_dir_mcp_servers_memtomem_reported(self, home, monkeypatch):
-        """Kimi MCP config under ``$KIMI_SHARE_DIR`` is reported when present."""
+        """Legacy Kimi MCP config under ``$KIMI_SHARE_DIR`` remains reportable."""
         self._seed_state_dir(home)
         share_dir = home / "kimi-share"
         monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
@@ -328,6 +328,23 @@ class TestProbeExternalParsedMCP:
         assert result.exit_code == 0, result.output
         assert "External integrations" in result.output
         assert "kimi-share" in result.output
+        assert "mcp.json" in result.output
+
+    def test_kimi_code_home_mcp_servers_memtomem_reported(self, home, monkeypatch):
+        """Current Kimi MCP config under ``$KIMI_CODE_HOME`` is reported."""
+        self._seed_state_dir(home)
+        kimi_home = home / "kimi-code-home"
+        monkeypatch.setenv("KIMI_CODE_HOME", str(kimi_home))
+        path = kimi_home / "mcp.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"mcpServers": {"memtomem": {"command": "mm-server"}}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" in result.output
+        assert "kimi-code-home" in result.output
         assert "mcp.json" in result.output
 
     def test_json_unrelated_text_not_reported(self, home):

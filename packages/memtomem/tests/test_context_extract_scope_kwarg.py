@@ -137,14 +137,39 @@ def test_extract_skills_project_shared_reads_project_runtime(home: Path, proj: P
 
 def test_extract_skills_user_reads_kimi_user_runtime(home: Path, proj: Path) -> None:
     """Kimi joined the skills extract order (#1229) — at user scope the
-    source is ``~/.kimi/skills`` and the destination stays user-tier."""
-    _write_skill(home / ".kimi" / "skills", "kimi_user_skill")
+    source is ``~/.kimi-code/skills`` (the Kimi Code v0.1.0 home) and the
+    destination stays user-tier. A legacy-only ``~/.kimi/skills`` dir is
+    not read: modern Kimi does not load it."""
+    _write_skill(home / ".kimi-code" / "skills", "kimi_user_skill")
+    _write_skill(home / ".kimi" / "skills", "kimi_legacy_skill")
 
     result = extract_skills_to_canonical(proj, scope="user")
     names = [p.name for p in result.imported]
     assert "kimi_user_skill" in names
+    assert "kimi_legacy_skill" not in names
     for p in result.imported:
         assert (home / ".memtomem" / "skills") in p.parents
+
+
+def test_extract_skills_user_honors_kimi_code_home_override(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``$KIMI_CODE_HOME`` relocates the user-scope Kimi import source.
+
+    The registry already honors the override when deciding whether Kimi is
+    registered; if import/fan-out ignored it, a relocated install would be
+    reported as configured while the gateway read and wrote a directory
+    Kimi never looks at.
+    """
+    relocated = home / "elsewhere" / "kimi-code"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(relocated))
+    _write_skill(relocated / "skills", "relocated_skill")
+    _write_skill(home / ".kimi-code" / "skills", "default_home_skill")
+
+    result = extract_skills_to_canonical(proj, scope="user")
+    names = [p.name for p in result.imported]
+    assert "relocated_skill" in names
+    assert "default_home_skill" not in names
 
 
 def test_extract_skills_project_local_no_fanout(home: Path, proj: Path) -> None:

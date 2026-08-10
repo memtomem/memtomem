@@ -124,7 +124,8 @@ stands.
 
 B requires reading client config files
 (e.g. `~/.claude.json`, `~/.codex/config.toml`, the Antigravity CLI/IDE
-`mcp_config.json` / `mcp.json` set, `~/.kimi/mcp.json` — the authoritative set
+`mcp_config.json` / `mcp.json` set, `~/.kimi-code/mcp.json` (plus the legacy
+`~/.kimi/mcp.json` discovery path) — the authoritative set
 is `docs/guides/mcp-clients.md`) to answer "installed?" and
 "memtomem/mms registered?". These files contain provider tokens and API
 keys. The detection layer is therefore constrained:

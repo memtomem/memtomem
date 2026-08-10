@@ -1,9 +1,10 @@
 """Tests for the read-only runtime/client registration registry (ADR-0021 §B).
 
 Covers: per-client multi-location detection, the Antigravity ``servers`` key,
-Codex TOML, Kimi ``$KIMI_SHARE_DIR``, coarse error classification, the
-secret-non-egress trust boundary, the gemini->antigravity client replacement,
-and the ``docs/guides/mcp-clients.md`` source-of-truth conformance.
+Codex TOML, current Kimi ``$KIMI_CODE_HOME`` plus legacy discovery, coarse
+error classification, the secret-non-egress trust boundary, the
+gemini->antigravity client replacement, and the
+``docs/guides/mcp-clients.md`` source-of-truth conformance.
 """
 
 from __future__ import annotations
@@ -128,27 +129,44 @@ def test_codex_toml(tmp_path: Path) -> None:
     assert status.registered_locations == ("user",)
 
 
-# --- Kimi: default dir and $KIMI_SHARE_DIR override ---------------------------
+# --- Kimi: current home and legacy discovery ---------------------------------
 
 
 def test_kimi_default_dir(tmp_path: Path) -> None:
-    _write_json(tmp_path / ".kimi" / "mcp.json", {"mcpServers": {"memtomem": {}}})
+    _write_json(tmp_path / ".kimi-code" / "mcp.json", {"mcpServers": {"memtomem": {}}})
     assert rr.probe_runtime("kimi", home=tmp_path).memtomem_registered is True
 
 
-def test_kimi_share_dir_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_kimi_legacy_share_dir_is_install_marker_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy-only config marks the client installed but NOT registered.
+
+    Modern Kimi Code executes from ``~/.kimi-code`` and only offers to migrate
+    ``~/.kimi`` / ``$KIMI_SHARE_DIR`` state, so a legacy-only ``mcp.json`` must
+    not report an active registration — that would hide an unconfigured
+    current install behind a false ``registered`` status.
+    """
     share = tmp_path / "share"
     monkeypatch.setenv("KIMI_SHARE_DIR", str(share))
-    _write_json(share / "mcp.json", {"mcpServers": {"mms": {}}})
+    _write_json(share / "mcp.json", {"mcpServers": {"mms": {}, "memtomem": {}}})
     status = rr.probe_runtime("kimi", home=tmp_path)
     assert status.installed is True
-    assert status.mms_registered is True
+    assert status.mms_registered is False
+    assert status.memtomem_registered is False
+    assert status.registered_locations == ()
+
+
+def test_kimi_legacy_home_dir_is_install_marker_only(tmp_path: Path) -> None:
+    """Same rule for the default legacy ``~/.kimi`` directory."""
+    _write_json(tmp_path / ".kimi" / "mcp.json", {"mcpServers": {"memtomem": {}}})
+    status = rr.probe_runtime("kimi", home=tmp_path)
+    assert status.installed is True
+    assert status.memtomem_registered is False
 
 
 def test_kimi_installed_via_kimi_code_home(tmp_path: Path) -> None:
-    """A Kimi Code install with only ``~/.kimi-code/`` (no ``~/.kimi/mcp.json``
-    yet) is still detected as installed — the CLI's data home, distinct from the
-    MCP-config dir (ADR-0021 §1 false-negative-detection fix)."""
+    """A Kimi Code data home without an MCP config is still installed."""
     (tmp_path / ".kimi-code").mkdir()
     status = rr.probe_runtime("kimi", home=tmp_path)
     assert status.installed is True
@@ -156,12 +174,13 @@ def test_kimi_installed_via_kimi_code_home(tmp_path: Path) -> None:
 
 
 def test_kimi_code_home_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``$KIMI_CODE_HOME`` relocates the install marker."""
+    """``$KIMI_CODE_HOME`` relocates both the install marker and MCP config."""
     custom = tmp_path / "relocated-kimi-code"
-    custom.mkdir()
     monkeypatch.setenv("KIMI_CODE_HOME", str(custom))
-    # Neither ~/.kimi nor ~/.kimi-code exists under home; detection rides the env.
-    assert rr.probe_runtime("kimi", home=tmp_path).installed is True
+    _write_json(custom / "mcp.json", {"mcpServers": {"memtomem": {}}})
+    status = rr.probe_runtime("kimi", home=tmp_path)
+    assert status.installed is True
+    assert status.memtomem_registered is True
 
 
 def test_kimi_not_installed_when_no_marker(tmp_path: Path) -> None:
@@ -237,10 +256,13 @@ def _find_repo_doc() -> Path:
 _CONFIG_TOKEN_RE = re.compile(
     r"`([^`]*(?:claude\.json|\.mcp\.json|mcp_config\.json|mcp\.json|config\.toml))`"
 )
-_INSCOPE_TITLES = ("Claude Code", "Kimi CLI", "Codex CLI", "Antigravity")
+_INSCOPE_TITLES = ("Claude Code", "Kimi Code", "Codex CLI", "Antigravity")
 _OUT_OF_SCOPE_TITLES = ("Cursor", "Windsurf", "Claude Desktop", "Gemini CLI")
-# Documented in-scope tokens the registry intentionally does not probe (none today).
-_DOC_TOKENS_NOT_PROBED: frozenset[str] = frozenset()
+# Documented in-scope tokens the registry intentionally does not probe.
+# The legacy Kimi layout is documented as an upgrade/install marker only —
+# modern Kimi Code executes from ``~/.kimi-code``, so a legacy-only config
+# must never count as an active registration (see _LOCATIONS["kimi"]).
+_DOC_TOKENS_NOT_PROBED: frozenset[str] = frozenset({"~/.kimi/mcp.json"})
 
 
 def _inscope_doc_config_paths(doc: str) -> set[str]:
@@ -283,7 +305,7 @@ def test_registry_covers_documented_locations() -> None:
     rename_hint = "in-scope section not parsed — was a ## heading renamed in mcp-clients.md?"
     assert "~/.claude.json" in documented, rename_hint
     assert "~/.codex/config.toml" in documented, rename_hint
-    assert "~/.kimi/mcp.json" in documented, rename_hint
+    assert "~/.kimi-code/mcp.json" in documented, rename_hint
     assert any("antigravity-cli/mcp_config.json" in t for t in documented), rename_hint
     assert any("Antigravity/User/mcp.json" in t for t in documented), rename_hint
 
