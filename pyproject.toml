@@ -40,6 +40,11 @@ disable_error_code = ["has-type", "attr-defined"]
 [dependency-groups]
 dev = [
     "memtomem[all]",
+    # Imported directly by test_supply_chain_contracts to parse the PEP 508
+    # requirements in packages/memtomem/pyproject.toml. Arrives via pytest in
+    # practice; declared because that guard's whole argument is that a
+    # transitive dependency is not a contract.
+    "packaging>=22",
     "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=6.0",

@@ -1252,6 +1252,7 @@ source = { virtual = "." }
 dev = [
     { name = "memtomem", extra = ["all"] },
     { name = "mypy" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1266,6 +1267,7 @@ dev = [
 dev = [
     { name = "memtomem", extras = ["all"], editable = "packages/memtomem" },
     { name = "mypy", specifier = ">=2.1.0" },
+    { name = "packaging", specifier = ">=22" },
     { name = "pytest", specifier = ">=9.1.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "pytest-cov", specifier = ">=6.0" },
