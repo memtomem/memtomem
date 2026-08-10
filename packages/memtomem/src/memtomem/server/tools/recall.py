@@ -1,4 +1,19 @@
-"""Tool: mem_recall."""
+"""Tool: mem_recall.
+
+``tag_filter`` semantics, kept here rather than in the wire docstring — the
+nine core descriptions share a hard character budget
+(``test_core_descriptions_fit_the_budget``) and every one of them sits in the
+model's context on every turn, so rationale belongs in the source:
+
+* Comma-separated tags match **ANY**, not all. Two independent facts therefore
+  need one combined tag rather than two tags — the handoff workflow's
+  ``handoff-to-<runtime>`` is that shape, because ``handoff,to-<runtime>``
+  would also admit non-handoff memories.
+* The filter is applied in SQL *before* ``limit``, unlike ``mem_search``, whose
+  tag filter runs after the ranked candidate pool is capped (the search
+  pipeline's stage order is fixed). That is the difference that lets a caller
+  select "the newest tagged row" from one bounded page.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +36,7 @@ async def mem_recall(
     since: str | None = None,
     until: str | None = None,
     source_filter: str | None = None,
+    tag_filter: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
     output_format: Literal["compact", "structured"] = "compact",
@@ -35,6 +51,7 @@ async def mem_recall(
         since: Inclusive start date (YYYY, YYYY-MM, YYYY-MM-DD, or ISO datetime)
         until: Exclusive end date — same formats as *since*
         source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
+        tag_filter: Comma-separated tags, matching ANY; applied before *limit*.
         namespace: Namespace scope — single, comma-separated, or glob (e.g. "project:*")
         limit: Maximum number of chunks to return (default 20)
         output_format: Output format — "compact" (default, human-readable) or "structured"
@@ -86,6 +103,7 @@ async def mem_recall(
         since=since_dt,
         until=until_dt,
         source_filter=source_filter,
+        tag_filter=tag_filter,
         limit=limit,
         namespace_filter=ns_filter,
         scope_filter=scope_filter,

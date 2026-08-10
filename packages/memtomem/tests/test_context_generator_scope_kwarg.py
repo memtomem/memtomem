@@ -124,6 +124,29 @@ def test_kimi_skills_project_uses_dot_kimi(tmp_path: Path) -> None:
     assert out == (tmp_path / ".kimi" / "skills" / "skill1").resolve()
 
 
+def test_kimi_skills_user_scope_uses_kimi_code_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User scope targets the Kimi Code v0.1.0 home, not the legacy dir."""
+    set_home(monkeypatch, str(tmp_path))
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
+    out = KimiSkillsGenerator().target_dir(Path("/ignored"), "skill1", scope="user")
+    assert out == (tmp_path / ".kimi-code" / "skills" / "skill1").resolve()
+
+
+def test_kimi_skills_user_scope_honors_kimi_code_home_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Push must follow a relocated Kimi home, matching the registry probe."""
+    set_home(monkeypatch, str(tmp_path))
+    relocated = tmp_path / "relocated"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(relocated))
+    out = KimiSkillsGenerator().target_dir(Path("/ignored"), "skill1", scope="user")
+    assert out == (relocated / "skills" / "skill1").resolve()
+    agents = KimiAgentsGenerator().target_file(Path("/ignored"), "foo", scope="user")
+    assert agents == (relocated / "agents" / "foo.yaml").resolve()
+
+
 def test_gemini_skills_project_local_returns_none(tmp_path: Path) -> None:
     assert GeminiSkillsGenerator().target_dir(tmp_path, "skill1", scope="project_local") is None
 

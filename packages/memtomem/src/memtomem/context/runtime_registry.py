@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from memtomem.context._kimi_home import kimi_code_home, kimi_legacy_home
 
 try:
     import tomllib
@@ -106,22 +107,14 @@ def _claude_local(data: object, root: Path | None) -> dict | None:
 # --- path resolvers -----------------------------------------------------------
 
 
-def _kimi_dir(home: Path) -> Path:
-    share = os.environ.get("KIMI_SHARE_DIR")
-    return Path(share).expanduser() if share else home / ".kimi"
+def _kimi_legacy_dir(home: Path) -> Path:
+    """Return the legacy Kimi share directory retained for discovery only."""
+    return kimi_legacy_home(home)
 
 
 def _kimi_code_home(home: Path) -> Path:
-    """Kimi Code CLI's primary data dir — ``~/.kimi-code`` (or ``$KIMI_CODE_HOME``).
-
-    Distinct from :func:`_kimi_dir`: the CLI keeps its sessions / logs / config
-    under ``~/.kimi-code/`` while the cross-client-compatible **MCP** config lives
-    at ``~/.kimi/mcp.json``. Used only as an install marker so a Kimi Code install
-    that has not yet written ``~/.kimi/mcp.json`` is still detected — the
-    false-negative runtime-detection drift tracked in ADR-0021 §1.
-    """
-    home_env = os.environ.get("KIMI_CODE_HOME")
-    return Path(home_env).expanduser() if home_env else home / ".kimi-code"
+    """Kimi Code data, MCP, and skill home (``~/.kimi-code`` by default)."""
+    return kimi_code_home(home)
 
 
 @dataclass(frozen=True)
@@ -172,7 +165,16 @@ _LOCATIONS: dict[str, tuple[_Location, ...]] = {
     "codex": (
         _Location("user", "toml", lambda h, r: h / ".codex" / "config.toml", _toml_mcp_servers),
     ),
-    "kimi": (_Location("user", "json", lambda h, r: _kimi_dir(h) / "mcp.json", _mcp_servers),),
+    # Registration is decided from the current Kimi Code home only. A config
+    # under the legacy ``~/.kimi`` / ``$KIMI_SHARE_DIR`` layout is *not* an
+    # active registration — modern Kimi Code executes from ``~/.kimi-code``
+    # and only offers to migrate legacy state — so counting it here would
+    # report a false ``registered`` for an unconfigured current install. The
+    # legacy dir stays an install marker (below) and an uninstall inventory
+    # item (uninstall_cmd), nothing more.
+    "kimi": (
+        _Location("user", "json", lambda h, r: _kimi_code_home(h) / "mcp.json", _mcp_servers),
+    ),
 }
 
 # Existence of any marker => the client is considered installed.
@@ -184,9 +186,9 @@ _INSTALLED_MARKERS: dict[str, Callable[[Path], tuple[Path, ...]]] = {
         h / "Library" / "Application Support" / "Antigravity",
     ),
     "codex": lambda h: (h / ".codex" / "config.toml", h / ".codex"),
-    # ``~/.kimi`` holds the MCP config; ``~/.kimi-code`` is the CLI's data home.
-    # Either present => installed (ADR-0021 §1 false-negative-detection fix).
-    "kimi": lambda h: (_kimi_dir(h), _kimi_code_home(h)),
+    # ``~/.kimi-code`` is current; keep legacy ``~/.kimi`` as an install marker
+    # so upgrades remain discoverable (ADR-0021 §1 false-negative-detection fix).
+    "kimi": lambda h: (_kimi_code_home(h), _kimi_legacy_dir(h)),
 }
 
 

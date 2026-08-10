@@ -320,10 +320,13 @@ mem_recall(namespace="project:*", limit=5)
 | `since` | Inclusive start date | `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, ISO datetime |
 | `until` | Exclusive end date | same formats |
 | `source_filter` | File path substring or glob | `"notes"`, `"*.md"` |
+| `tag_filter` | Comma-separated tags, matching ANY | `"handoff,decision"` |
 | `namespace` | Single, comma-separated, or glob | `"work"`, `"project:*"` |
 | `limit` | Max results (default 20, max 500) | `10` |
 | `output_format` | `"compact"` (default) or `"structured"` (JSON with `hints` field) | `"structured"` |
 | `scope` | Memory tier filter: one value, comma list, or glob | `"project_shared"` |
+
+`tag_filter` is applied in SQL *before* `limit`, unlike `mem_search`, whose tag filter runs after the ranked candidate cap (the search pipeline's stage order is fixed). Use `mem_recall` when a tagged match must not be crowded out by newer untagged rows.
 
 Like `mem_search`, `mem_recall` hides system namespaces (`archive:*` by default) when no namespace is pinned and appends a trust-UX hint if any chunks were filtered or if an embedding dimension mismatch is detected. `output_format="structured"` exposes those as a `hints` array for programmatic consumers.
 

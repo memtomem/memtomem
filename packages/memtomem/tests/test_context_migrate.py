@@ -748,11 +748,20 @@ _RUNTIME_REL = {
         "claude": ".claude/skills",
         "gemini": ".gemini/skills",
         # Codex skills live under the vendor-neutral Agent Skills path,
-        # kimi under .kimi/ — mirrored from RUNTIME_FANOUT_TABLE so the
-        # divergence-guard tests can exercise non-claude skill runtimes.
+        # kimi under .kimi/ (project) — mirrored from RUNTIME_FANOUT_TABLE so
+        # the divergence-guard tests can exercise non-claude skill runtimes.
         "codex": ".agents/skills",
         "kimi": ".kimi/skills",
     },
+}
+
+# User-scope overrides where the home-dir layout differs from the
+# project-relative convention — kimi's user home is the Kimi Code v0.1.0
+# ``~/.kimi-code`` layout (RUNTIME_FANOUT_TABLE), while project fan-out
+# keeps the ``.kimi/`` project-dir convention.
+_RUNTIME_REL_USER_OVERRIDE: dict[str, dict[str, str]] = {
+    "skills": {"kimi": ".kimi-code/skills"},
+    "agents": {"kimi": ".kimi-code/agents"},
 }
 _AGENT_BODY_CLEAN = "---\nname: foo\ndescription: a clean test agent\n---\n\nhello world\n"
 _COMMAND_BODY_CLEAN = "---\nname: foo\ndescription: a clean test command\n---\n\nhello $ARGUMENTS\n"
@@ -834,6 +843,7 @@ def _runtime_fanout_path(
     """Compute the runtime fan-out file/dir path for a given (kind, runtime, scope, name)."""
     rel = _RUNTIME_REL[kind][runtime]
     if scope == "user":
+        rel = _RUNTIME_REL_USER_OVERRIDE.get(kind, {}).get(runtime, rel)
         base = layout["user_home"] / rel
     elif scope == "project_shared":
         base = layout["project_root"] / rel

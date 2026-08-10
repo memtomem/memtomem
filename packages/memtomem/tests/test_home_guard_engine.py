@@ -72,7 +72,7 @@ def test_derivation_is_exactly_the_four_settings_targets(fake_home: Path) -> Non
         fake_home / ".claude" / "settings.json",
         fake_home / ".codex" / "hooks.json",
         fake_home / ".gemini" / "settings.json",
-        fake_home / ".kimi" / "config.toml",
+        fake_home / ".kimi-code" / "config.toml",
     }
 
 

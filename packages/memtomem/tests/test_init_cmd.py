@@ -173,35 +173,59 @@ def test_write_mcp_json_preserves_existing_permissions(
 def test_write_kimi_mcp_json_merges_preserving_other_servers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    share_dir = tmp_path / "kimi-share"
-    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
-    share_dir.mkdir(parents=True)
-    (share_dir / "mcp.json").write_text(
+    kimi_home = tmp_path / "kimi-code-home"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(kimi_home))
+    kimi_home.mkdir(parents=True)
+    (kimi_home / "mcp.json").write_text(
         json.dumps({"mcpServers": {"other": {"command": "other-server", "args": []}}}),
         encoding="utf-8",
     )
 
     written = _write_kimi_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
 
-    assert written == share_dir / "mcp.json"
+    assert written == kimi_home / "mcp.json"
     data = json.loads(written.read_text(encoding="utf-8"))
     assert data["mcpServers"]["other"] == {"command": "other-server", "args": []}
     assert data["mcpServers"]["memtomem"]["command"] == "uvx"
 
 
+def test_write_kimi_mcp_json_empty_env_falls_back_to_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Set-but-empty ``KIMI_CODE_HOME`` means unset (kimi_code_home semantics),
+    not ``Path("")`` — which used to resolve to the cwd and drop a stray
+    ``./mcp.json`` there while every other Kimi surface probed ``~/.kimi-code``.
+    HOME and cwd are distinct dirs so the two outcomes can't be conflated."""
+    from .helpers import set_home
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    set_home(monkeypatch, fake_home)
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.setenv("KIMI_CODE_HOME", "")
+
+    written = _write_kimi_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert written == fake_home / ".kimi-code" / "mcp.json"
+    assert written.is_file()
+    assert not (workdir / "mcp.json").exists()
+
+
 def test_write_kimi_mcp_json_corrupt_existing_is_actionable_and_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    share_dir = tmp_path / "kimi-share"
-    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
-    share_dir.mkdir(parents=True)
+    kimi_home = tmp_path / "kimi-code-home"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(kimi_home))
+    kimi_home.mkdir(parents=True)
     corrupt = "{not json"
-    (share_dir / "mcp.json").write_text(corrupt, encoding="utf-8")
+    (kimi_home / "mcp.json").write_text(corrupt, encoding="utf-8")
 
     with pytest.raises(click.ClickException, match=r"not valid JSON(.|\n)*re-run mm init"):
         _write_kimi_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
 
-    assert (share_dir / "mcp.json").read_text(encoding="utf-8") == corrupt
+    assert (kimi_home / "mcp.json").read_text(encoding="utf-8") == corrupt
 
 
 def _make_test_profile(
@@ -2756,7 +2780,7 @@ class TestFreshFlag:
 class TestMcpPasteHints:
     """The wizard's MCP step writes a Claude-Code-scoped ``.mcp.json`` and must
     surface what the user still has to do for Cursor / Windsurf / Claude
-    Desktop / Antigravity CLI / Gemini CLI / Kimi CLI (none of which auto-load
+    Desktop / Antigravity CLI / Gemini CLI / Kimi Code (none of which auto-load
     the project file).
 
     Regression for #246: earlier wording implied ``.mcp.json`` is the config
@@ -2790,7 +2814,7 @@ class TestMcpPasteHints:
         # which the generated .mcp.json omits — the hint must flag it.
         assert '(add "type": "stdio" to the memtomem entry)' in out
         assert "Gemini CLI" in out and "~/.gemini/settings.json" in out
-        assert "Kimi CLI" in out and "~/.kimi/mcp.json" in out
+        assert "Kimi Code" in out and "~/.kimi-code/mcp.json" in out
         assert "Claude Code picks up ./.mcp.json in this project automatically" in out
 
     def test_choice_3_skip_emits_no_hints(
@@ -2835,7 +2859,7 @@ class TestMcpPasteHints:
         assert "(for Cursor, Windsurf, etc.)" not in out, "old auto-compat wording leaked back in"
         assert "Claude Code project scope" in out
         assert "copy into your editor's config file" in out
-        assert "Kimi CLI" in out
+        assert "Kimi Code" in out
 
     def test_choice_4_writes_kimi_mcp_json(
         self,
@@ -2847,8 +2871,8 @@ class TestMcpPasteHints:
 
         from memtomem.cli.init_cmd import _write_config_and_summary
 
-        share_dir = tmp_path / "kimi-share"
-        monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+        kimi_home = tmp_path / "kimi-code-home"
+        monkeypatch.setenv("KIMI_CODE_HOME", str(kimi_home))
         set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
 
@@ -2857,8 +2881,8 @@ class TestMcpPasteHints:
         _write_config_and_summary(state, tmp_path)
 
         out = unstyle(capsys.readouterr().out)
-        mcp_path = share_dir / "mcp.json"
-        assert f"Kimi CLI MCP config: wrote {mcp_path}" in out
+        mcp_path = kimi_home / "mcp.json"
+        assert f"Kimi Code MCP config: wrote {mcp_path}" in out
         data = json.loads(mcp_path.read_text(encoding="utf-8"))
         assert data["mcpServers"]["memtomem"] == {
             "command": sys.executable,

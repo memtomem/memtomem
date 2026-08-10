@@ -51,10 +51,18 @@ config file, then restart the editor.
 | Antigravity IDE | MCP Servers panel → remove the memtomem entry |
 | Gemini CLI (consumer free/Pro/Ultra service ended 2026-06-18; enterprise licenses and paid API keys remain supported) | `~/.gemini/settings.json` |
 | Codex CLI | `~/.codex/config.toml` (remove the `[mcp_servers.memtomem]` section) |
-| Kimi | `~/.kimi/mcp.json` (or `$KIMI_SHARE_DIR/mcp.json` if that variable is set) |
+| Kimi Code | `~/.kimi-code/mcp.json` (or `$KIMI_CODE_HOME/mcp.json`; also remove a legacy `~/.kimi/mcp.json` or `$KIMI_SHARE_DIR/mcp.json` entry if present) |
 
 Also delete any project-level `.mcp.json` files that contain a memtomem server
 block.
+
+> **Upgraded from memtomem 0.3.14 with Kimi Code?** 0.3.14 fanned out
+> user-scope agents and skills to the legacy `~/.kimi/agents/` and
+> `~/.kimi/skills/` directories. Later versions target `~/.kimi-code/` (or
+> `$KIMI_CODE_HOME`), so neither fan-out cleanup nor `mm uninstall` touches
+> those legacy copies. Audit the entries under legacy `~/.kimi/agents/` and
+> `~/.kimi/skills/` yourself and remove the ones memtomem pushed — keep
+> anything you authored by hand.
 
 ## 2. Uninstall the Python package
 

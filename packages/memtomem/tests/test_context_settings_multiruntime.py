@@ -776,9 +776,10 @@ def every_home(tmp_path, monkeypatch):
     registered generator (Claude, Codex, Gemini, Kimi)."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    for marker in (".claude", ".codex", ".gemini", ".kimi"):
+    for marker in (".claude", ".codex", ".gemini", ".kimi-code"):
         (fake_home / marker).mkdir()
     set_home(monkeypatch, fake_home)
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
     return fake_home
 
 
@@ -808,7 +809,7 @@ _USER_MATCHERS = {
 
 def _kimi_rows(home):
     """The ``[[hooks]]`` rows memtomem rendered into Kimi's config.toml."""
-    text = (home / ".kimi" / "config.toml").read_text(encoding="utf-8")
+    text = (home / ".kimi-code" / "config.toml").read_text(encoding="utf-8")
     return tomllib.loads(text).get("hooks", []), text
 
 
@@ -883,7 +884,9 @@ class TestNonStringMatcherIsDropped:
             + "\n",
             encoding="utf-8",
         )
-        (every_home / ".kimi" / "config.toml").write_text('model = "kimi-k2"\n', encoding="utf-8")
+        (every_home / ".kimi-code" / "config.toml").write_text(
+            'model = "kimi-k2"\n', encoding="utf-8"
+        )
 
         bad = _rule("", "bad", timeout=2)
         bad["matcher"] = matcher

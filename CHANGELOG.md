@@ -5,6 +5,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mem_recall` accepts `tag_filter`.** Comma-separated tags, matching ANY,
+  applied in SQL *before* `limit` — unlike `mem_search`, whose tag filter
+  runs after the ranked candidate cap (fixed pipeline stage order). A tagged
+  record therefore cannot be crowded out of a bounded page by newer untagged
+  rows, and an exactly-tagged record stays reachable at any age without
+  paging. Because matching is ANY-of, two independent facts need one combined
+  tag rather than two tags. Also available as `mm recall --tag-filter`.
+- **Kimi Code integration follows the `~/.kimi-code` home** (Kimi Code
+  v0.1.0). `mm init --mcp kimi` writes `$KIMI_CODE_HOME/mcp.json`
+  (default `~/.kimi-code/mcp.json`), user-scope Context Gateway fan-out and
+  import use `~/.kimi-code/{skills,agents}`, and registration status is
+  decided from the current home only. The legacy `~/.kimi` /
+  `$KIMI_SHARE_DIR` layout remains an install marker and an uninstall
+  inventory item, but a legacy-only config no longer reports the client as
+  registered. The settings/hooks fan-out surface follows the same home, so a
+  modern-only install no longer silently skips user-scope hook sync.
+
+### Fixed
+
+- **`mem_recall` orders tied timestamps deterministically** (#516).
+  Chunk `created_at`/`updated_at` are now stored at microsecond precision,
+  so distinct writes in the same second no longer tie on the sort key —
+  "the newest row" means recency, not UUID luck. Rows written by earlier
+  releases keep their second-precision timestamps and sort correctly
+  alongside new rows (the fractional part only extends the ISO-8601 prefix;
+  no migration needed). The SQL ordering additionally ends in `id DESC`, a
+  total tie-break for exact-equal timestamps, so the page boundary can
+  never include or drop a row incidentally across otherwise identical
+  calls.
+- **CLI `mm recall --until` now treats partial dates as inclusive of the
+  named period**, matching MCP `mem_recall` and the flag's documented
+  semantics: `--until 2025-03` means "through the end of March"
+  (exclusive bound 2025-04-01), where it previously parsed to 2025-03-01
+  and silently excluded the entire month.
+
 ### Changed
 
 - **Pinned Context agent selection now matches the session CLI** (#2006).

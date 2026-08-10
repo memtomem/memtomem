@@ -944,7 +944,7 @@ class SqliteBackend(
                             c.metadata.language,
                             json.dumps(list(c.metadata.tags)),
                             c.metadata.namespace,
-                            c.updated_at.isoformat(timespec="seconds"),
+                            c.updated_at.isoformat(timespec="microseconds"),
                             c.metadata.valid_from_unix,
                             c.metadata.valid_to_unix,
                             c.metadata.scope,
@@ -1019,8 +1019,8 @@ class SqliteBackend(
                             c.metadata.language,
                             json.dumps(list(c.metadata.tags)),
                             c.metadata.namespace,
-                            c.created_at.isoformat(timespec="seconds"),
-                            c.updated_at.isoformat(timespec="seconds"),
+                            c.created_at.isoformat(timespec="microseconds"),
+                            c.updated_at.isoformat(timespec="microseconds"),
                             c.metadata.overlap_before,
                             c.metadata.overlap_after,
                             c.metadata.valid_from_unix,
@@ -2193,9 +2193,16 @@ class SqliteBackend(
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
+        # ``id DESC`` is the final, total tie-break. ``created_at`` is stored at
+        # microsecond precision, so distinct writes almost never tie on the
+        # first key; rows migrated from the old second-precision format (or
+        # written in the same microsecond) still need the page boundary
+        # decided, not left to whatever order SQLite chose (#516). Mixed
+        # precisions compare correctly: both are UTC ISO-8601 strings and the
+        # fractional part only extends the prefix.
         rows = db.execute(
             f"SELECT * FROM chunks {where} "
-            f"ORDER BY created_at DESC, {scope_sort_priority_case()} LIMIT ?",
+            f"ORDER BY created_at DESC, {scope_sort_priority_case()}, id DESC LIMIT ?",
             params,
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]

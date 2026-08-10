@@ -76,3 +76,7 @@ tests/
 
 # Standalone test sandbox
 /tmp/memtomem-test/
+
+# memtomem local artifacts (ADR-0011 project_local tier)
+.memtomem/*.local/
+.memtomem/.staging/

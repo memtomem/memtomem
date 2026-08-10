@@ -297,7 +297,7 @@ machine):
 
 ```bash
 mm context sync --include=skills --scope user
-# fans out from ~/.memtomem/skills/ → ~/.claude/skills/, ~/.gemini/skills/, ~/.agents/skills/ (Codex), ~/.kimi/skills/
+# fans out from ~/.memtomem/skills/ → ~/.claude/skills/, ~/.gemini/skills/, ~/.agents/skills/ (Codex), ~/.kimi-code/skills/
 ```
 
 ## Push vs Pull — reading the status

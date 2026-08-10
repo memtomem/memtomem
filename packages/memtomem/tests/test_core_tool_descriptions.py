@@ -27,6 +27,13 @@ def _wire_descriptions() -> dict[str, str]:
 
     Not ``inspect.getdoc`` / ``__doc__``: those differ from the wire strings
     by a character or two, which would make a byte budget quietly off-by-N.
+
+    The wire size also depends on the **interpreter**: the same tree measured
+    ~570 characters larger on 3.12 than on 3.13, spread across every tool in
+    proportion to its parameter count. CI's ``test (ubuntu-latest)`` job runs
+    3.12 (the repo's target), so that is the number this budget is against —
+    a local check on a newer interpreter can pass while CI fails. Measure with
+    ``uv run --python 3.12`` before trusting a local result.
     """
     tools = asyncio.run(mcp.list_tools())
     return {t.name: (t.description or "") for t in tools if t.name in _CORE_TOOLS}

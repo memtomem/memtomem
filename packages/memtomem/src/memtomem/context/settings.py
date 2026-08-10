@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Protocol
 
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
+from memtomem.context._kimi_home import kimi_code_home
 from memtomem.context.error_redact import redact_secret_value
 
 logger = logging.getLogger(__name__)
@@ -797,7 +798,7 @@ def _gemini_target_file(project_root: Path, scope: str) -> Path | None:
 def _kimi_target_file(project_root: Path, scope: str) -> Path | None:
     """Kimi config file per scope. ``project_local`` has no fan-out."""
     if scope == "user":
-        return Path.home() / ".kimi" / "config.toml"
+        return kimi_code_home() / "config.toml"
     if scope == "project_shared":
         return project_root / ".kimi" / "config.toml"
     if scope == "project_local":
@@ -1269,7 +1270,7 @@ class KimiSettingsGenerator:
     name: str = "kimi_settings"
 
     def is_available(self, project_root: Path) -> bool:
-        return (Path.home() / ".kimi").is_dir() or (project_root / ".kimi").is_dir()
+        return kimi_code_home().is_dir() or (project_root / ".kimi").is_dir()
 
     def target_file(self, project_root: Path, scope: str) -> Path | None:
         return _kimi_target_file(project_root, scope)

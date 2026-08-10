@@ -77,11 +77,12 @@ def claude_home_missing(tmp_path, monkeypatch):
 
 @pytest.fixture
 def kimi_home(tmp_path, monkeypatch):
-    """Redirect HOME so writes target a temp Kimi config dir."""
+    """Redirect HOME so writes target a temp Kimi Code config dir."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    (fake_home / ".kimi").mkdir()
+    (fake_home / ".kimi-code").mkdir()
     set_home(monkeypatch, fake_home)
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
     return fake_home
 
 
@@ -650,9 +651,46 @@ class TestClaudeSettingsMergeMalformed:
         assert "record keyed by event name" in r.reason
 
 
+class TestKimiSettingsAvailability:
+    """The Kimi settings surface keys on the modern ``~/.kimi-code`` home
+    (via ``kimi_code_home``), not the legacy ``~/.kimi`` dir — legacy is
+    discovery/uninstall inventory only (``_kimi_home`` module docstring)."""
+
+    def test_legacy_only_home_is_not_available(self, tmp_path, monkeypatch):
+        from memtomem.context.settings import KimiSettingsGenerator
+
+        fake_home = tmp_path / "home"
+        (fake_home / ".kimi").mkdir(parents=True)
+        set_home(monkeypatch, fake_home)
+        monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
+        project_root = tmp_path / "proj"
+        project_root.mkdir()
+
+        assert not KimiSettingsGenerator().is_available(project_root)
+
+    def test_kimi_code_home_env_relocates_target_and_availability(self, tmp_path, monkeypatch):
+        from memtomem.context.settings import KimiSettingsGenerator, _kimi_target_file
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        set_home(monkeypatch, fake_home)
+        relocated = tmp_path / "relocated-kimi"
+        relocated.mkdir()
+        monkeypatch.setenv("KIMI_CODE_HOME", str(relocated))
+        project_root = tmp_path / "proj"
+        project_root.mkdir()
+
+        assert KimiSettingsGenerator().is_available(project_root)
+        assert _kimi_target_file(project_root, "user") == relocated / "config.toml"
+        # Project tier is a separate project-dir convention — unchanged.
+        assert _kimi_target_file(project_root, "project_shared") == (
+            project_root / ".kimi" / "config.toml"
+        )
+
+
 class TestKimiSettingsMerge:
     def test_writes_managed_toml_block_and_preserves_existing_config(self, kimi_home, tmp_path):
-        target = kimi_home / ".kimi" / "config.toml"
+        target = kimi_home / ".kimi-code" / "config.toml"
         target.write_text('theme = "dark"\n', encoding="utf-8")
         _make_canonical_settings(
             tmp_path,
@@ -680,7 +718,7 @@ class TestKimiSettingsMerge:
         assert parsed["hooks"][0]["matcher"] == "Shell"
 
     def test_replaces_existing_managed_block(self, kimi_home, tmp_path):
-        target = kimi_home / ".kimi" / "config.toml"
+        target = kimi_home / ".kimi-code" / "config.toml"
         target.write_text(
             'theme = "dark"\n\n'
             "# BEGIN memtomem managed hooks\n"
@@ -713,7 +751,7 @@ class TestKimiSettingsMerge:
         ``pattern.sub``) corrupted ``config.toml`` into unparseable TOML.
         Sync twice and require an exact command round-trip both times.
         """
-        target = kimi_home / ".kimi" / "config.toml"
+        target = kimi_home / ".kimi-code" / "config.toml"
         target.write_text('theme = "dark"\n', encoding="utf-8")
         nasty = 'grep "\\bfoo" C:\\tools\\hook.exe && printf "a\\nb"'
         _make_canonical_settings(
@@ -744,7 +782,7 @@ class TestKimiSettingsMerge:
         ``timeout = True`` — Python's ``str(True)`` is not valid TOML, and the
         invalid write bricked the target into a permanent per-target error
         status on every later sync and diff (#1229)."""
-        target = kimi_home / ".kimi" / "config.toml"
+        target = kimi_home / ".kimi-code" / "config.toml"
         target.write_text('theme = "dark"\n', encoding="utf-8")
         _make_canonical_settings(
             tmp_path,

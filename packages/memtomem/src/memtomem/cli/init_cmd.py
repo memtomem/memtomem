@@ -1154,7 +1154,7 @@ def _step_mcp(state: dict) -> None:
     click.echo("        (pick this if the memtomem Claude Code *plugin* is installed —")
     click.echo("        it already bundles the server, and a manual entry would run a")
     click.echo("        second copy against the same store)")
-    click.echo("    [4] Kimi CLI (write ~/.kimi/mcp.json or $KIMI_SHARE_DIR/mcp.json)")
+    click.echo("    [4] Kimi Code (write ~/.kimi-code/mcp.json or $KIMI_CODE_HOME/mcp.json)")
     state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
     click.echo()
 
@@ -1164,7 +1164,7 @@ def _claude_desktop_config_hint() -> str:
 
     Claude Desktop is the only editor in ``_emit_mcp_paste_hints`` whose
     config location is OS-specific; Cursor / Windsurf / Antigravity CLI /
-    Gemini CLI / Kimi CLI all use a single ``~/<dot-dir>/...`` layout that
+    Gemini CLI / Kimi Code all use a single ``~/<dot-dir>/...`` layout that
     works on every platform."""
     if sys.platform == "darwin":
         return "~/Library/Application Support/Claude/claude_desktop_config.json"
@@ -1194,7 +1194,7 @@ def _emit_mcp_paste_hints() -> None:
     Claude Code auto-loads a project-root ``.mcp.json``; other editors do not
     and expect their own config file. Shown after every path that writes the
     file so users know the generated JSON is a template, not a drop-in config
-    for Cursor/Windsurf/Claude Desktop/Antigravity CLI/Gemini CLI/Kimi CLI.
+    for Cursor/Windsurf/Claude Desktop/Antigravity CLI/Gemini CLI/Kimi Code.
 
     Antigravity CLI (``agy``, Google's successor to Gemini CLI) reads MCP
     servers from its own ``~/.gemini/antigravity-cli/mcp_config.json`` (key
@@ -1210,7 +1210,7 @@ def _emit_mcp_paste_hints() -> None:
     click.echo("    Antigravity CLI → paste into ~/.gemini/antigravity-cli/mcp_config.json")
     click.echo('                      (add "type": "stdio" to the memtomem entry)')
     click.echo("    Gemini CLI      → paste into ~/.gemini/settings.json (deprecated 2026-06-18)")
-    click.echo("    Kimi CLI        → paste into ~/.kimi/mcp.json")
+    click.echo("    Kimi Code       → paste into ~/.kimi-code/mcp.json")
     click.echo("  (Claude Code picks up ./.mcp.json in this project automatically.)")
 
 
@@ -2528,7 +2528,7 @@ def _write_config_and_summary(
         _emit_mcp_paste_hints()
     elif mcp_choice == 4:
         kimi_path = _write_kimi_mcp_json(server_cmd, server_args, mcp_env)
-        click.echo(f"  Kimi CLI MCP config: wrote {kimi_path}")
+        click.echo(f"  Kimi Code MCP config: wrote {kimi_path}")
 
     # Summary
     click.echo()
@@ -2768,9 +2768,10 @@ def _write_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, 
 
 
 def _write_kimi_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, str]) -> Path:
-    """Write or update Kimi CLI's MCP config file."""
-    base = Path(os.environ.get("KIMI_SHARE_DIR", "~/.kimi")).expanduser()
-    mcp_path = base / "mcp.json"
+    """Write or update Kimi Code's MCP config file."""
+    from memtomem.context._kimi_home import kimi_code_home
+
+    mcp_path = kimi_code_home() / "mcp.json"
     mcp_path.parent.mkdir(parents=True, exist_ok=True)
     _merge_mcp_server_entry(mcp_path, _mcp_server_entry(server_cmd, server_args, mcp_env))
     return mcp_path

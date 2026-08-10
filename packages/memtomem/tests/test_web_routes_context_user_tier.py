@@ -153,7 +153,7 @@ class TestUserTierSync:
                 str(home / ".agents" / "skills" / "uskill"),
                 str(home / ".claude" / "skills" / "uskill"),
                 str(home / ".gemini" / "skills" / "uskill"),
-                str(home / ".kimi" / "skills" / "uskill"),
+                str(home / ".kimi-code" / "skills" / "uskill"),
             ],
         }
         assert not (home / ".claude" / "skills").exists()
