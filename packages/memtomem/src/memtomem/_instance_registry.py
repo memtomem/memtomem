@@ -168,14 +168,17 @@ _CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
 # add a Windows-only dependency for a single integer.
 _WINERROR_LOCK_VIOLATION = 33
 
-# The barrier poll loop's catch set. On Windows the Win32 backend maps
-# ``ERROR_LOCK_VIOLATION`` to ``AlreadyLocked`` but re-raises every *other*
-# ``pywintypes.error`` **raw** — and that type derives from ``Exception``,
-# not ``OSError``, so ``_LOCK_CONTENDED`` alone would let a non-contention
-# Win32 lock failure escape ``_acquire_barrier`` unhandled, past the CLIs'
-# ``except OSError`` repair branch (#1957). Catch it here so the classifier
-# routes it too. Barrier-only: the other ``_LOCK_CONTENDED`` sites keep
-# their narrower catch (a raw ``pywintypes.error`` there is out of scope).
+# The barrier poll loop's catch set. On portalocker 3.x the Win32 backend
+# maps ``ERROR_LOCK_VIOLATION`` to ``AlreadyLocked`` but re-raises every
+# *other* ``pywintypes.error`` **raw** — and that type derives from
+# ``Exception``, not ``OSError``, so ``_LOCK_CONTENDED`` alone would let a
+# non-contention Win32 lock failure escape ``_acquire_barrier`` unhandled,
+# past the CLIs' ``except OSError`` repair branch (#1957). 4.0.0 closed that
+# upstream (the ``else`` branch now wraps in ``LockException``), but the
+# floor stays ``portalocker>=3.0``, so a 3.x install still needs this catch
+# — keep it until the floor moves. Barrier-only: the other
+# ``_LOCK_CONTENDED`` sites keep their narrower catch (a raw
+# ``pywintypes.error`` there is out of scope).
 # The ``import`` is Windows-only and best-effort — absent pywin32, portalocker
 # could not have raised it, so the POSIX tuple is complete.
 try:
@@ -500,8 +503,9 @@ def _is_lock_contention(exc: BaseException) -> bool:
     in ``_probe_entry`` as-is: that surface maps its own I/O uncertainty to
     ``"unknown"``, so a bare ``False`` there would need that translation.
 
-    Across the supported range (portalocker 3.0/3.1/3.2, source-verified)
-    genuine contention is *always* the ``AlreadyLocked`` subclass — POSIX
+    Across the supported range (portalocker 3.0/3.1/3.2 and 4.0/4.1,
+    source-verified) genuine contention is *always* the
+    ``AlreadyLocked`` subclass — POSIX
     ``EACCES``/``EAGAIN`` and Windows ``ERROR_LOCK_VIOLATION`` alike — so
     the ``isinstance`` check below catches it regardless of how the
     original error is chained. The errno/winerror probes are defensive:

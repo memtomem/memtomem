@@ -479,8 +479,8 @@ class TestPollLoopClassifier:
 
     def test_already_locked_without_cause_is_contention(self, rt, monkeypatch):
         """The ``isinstance`` branch stands alone — across portalocker
-        3.0/3.1/3.2 a held lock is always ``AlreadyLocked``, cause or not
-        (guards the #1944 type-drift note)."""
+        3.0/3.1/3.2 and 4.0/4.1 a held lock is always ``AlreadyLocked``,
+        cause or not (guards the #1944 type-drift note)."""
         self._patch_lock(monkeypatch, portalocker.AlreadyLocked("busy"))
         with pytest.raises(reg.BarrierTimeout):
             reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)

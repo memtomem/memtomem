@@ -367,9 +367,10 @@ class TestRegistrationRetry:
         # A durable sidecar-flock failure must propagate to the never-raise
         # handler and return ``None`` after exactly one lock call, never be
         # polled to a timeout and retried (#1939). The ``LockException``
-        # wrapper is the real production shape: portalocker 3.2 maps a
+        # wrapper is the real production shape: portalocker maps a
         # non-contention ``OSError`` (``EIO``/``ENOLCK``) to a bare
-        # ``LockException`` (not the ``AlreadyLocked`` subclass), which
+        # ``LockException`` (not the ``AlreadyLocked`` subclass) on both
+        # 3.x and 4.x, which
         # ``_is_lock_contention`` rejects, so the poll loop re-raises it
         # despite the retry.
         calls = {"n": 0}
