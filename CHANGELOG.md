@@ -5,6 +5,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-10
+
+### Breaking — read before upgrading
+
+**memtomem 0.4.0 requires the `mcp` 2.0 SDK, and memtomem-stm must be upgraded
+in lockstep.**
+
+The dependency floor moves from `mcp[cli]<2` to `mcp[cli]>=2.0.0,<3`. The 2.0
+SDK removed the `mcp.server.fastmcp` package that 0.3.14 was built on, and it
+offers no dual 1.x/2.x compatibility layer, so the floor is hard: no
+configuration or flag lets 0.4.0 run against `mcp` 1.x. An environment still
+pinned to `mcp` 1.x will fail to resolve, or — if the pin is bypassed — fail at
+import.
+
+If you run the STM proxy, **upgrade `memtomem-stm` to 0.2.0 at the same time**.
+The two servers share the `mcp` package inside one environment, and STM 0.2.0
+carries the matching migration; STM 0.1.x is built against `mcp` 1.x and cannot
+coexist with this release. Upgrading only one side leaves whichever server lost
+the version race unable to start. STM 0.2.0 ships alongside this release for
+exactly that reason. Prefer a single transaction — for example
+`uv tool upgrade memtomem memtomem-stm`, or reinstalling both packages together
+into the same virtualenv — over one package at a time.
+
+Wire behavior is unchanged. Tool names, parameters, and responses are identical;
+SSE serves the same paths a mounted `--url` produced before; and
+`serverInfo.version` is now set through the SDK's supported `version=` argument
+instead of a patched private attribute. No stored data, configuration file, or
+database migration is affected.
+
+**Also breaking, for MCP callers only:** `mem_tag_rename`, `mem_tag_delete`, and
+`mem_tag_merge` now default to `dry_run=true`. Pass an explicit `dry_run=false`
+to keep the previous apply-immediately behavior.
+
 ### Added
 
 - **`mem_recall` accepts `tag_filter`.** Comma-separated tags, matching ANY,
@@ -24,23 +57,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   registered. The settings/hooks fan-out surface follows the same home, so a
   modern-only install no longer silently skips user-scope hook sync.
 
-### Fixed
-
-- **`mem_recall` orders tied timestamps deterministically** (#516).
-  Chunk `created_at`/`updated_at` are now stored at microsecond precision,
-  so distinct writes in the same second no longer tie on the sort key —
-  "the newest row" means recency, not UUID luck. Rows written by earlier
-  releases keep their second-precision timestamps and sort correctly
-  alongside new rows (the fractional part only extends the ISO-8601 prefix;
-  no migration needed). The SQL ordering additionally ends in `id DESC`, a
-  total tie-break for exact-equal timestamps, so the page boundary can
-  never include or drop a row incidentally across otherwise identical
-  calls.
-- **CLI `mm recall --until` now treats partial dates as inclusive of the
-  named period**, matching MCP `mem_recall` and the flag's documented
-  semantics: `--until 2025-03` means "through the end of March"
-  (exclusive bound 2025-04-01), where it previously parsed to 2025-03-01
-  and silently excluded the entire month.
+- **Indexing surfaces now report which failures are worth retrying** (#2018,
+  #2020, #2025). `IndexingStats` carries a `retryable_errors` tuple — the
+  same-string subset of `errors` whose cause was a typed `RetryableError` —
+  because `asyncio.gather(return_exceptions=True)` erases exception types when
+  a bulk run flattens per-file failures. The field is propagated verbatim to
+  every consumer: `mm index`, `mm shell`, and `mm init` print the retryable
+  failures separately and append a surface-specific resume command, and the Web
+  API adds `retryable_errors` to `/api/reindex` per-root results, its aggregate,
+  and the memory-dir add response. It is unconditional rather than
+  omitted-when-empty so a client can tell "no retryable failures" from "this
+  server predates the field". The same run also resolves every file's namespace
+  once, before the first write, so a store outage mid-run can no longer leave a
+  partially stamped bulk index.
 
 ### Changed
 
@@ -120,7 +149,62 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Day files written before this change may hold several namespaces; they are
   not migrated, and the guard refuses further mixing into them.
 
+- **MCP `mem_tag_rename` / `mem_tag_delete` / `mem_tag_merge` now default to
+  `dry_run=true`** (#1992). Previously the MCP surface applied these bulk
+  rewrites immediately while the CLI equivalents (`mm tags rename` etc.)
+  defaulted to preview — an agent probing what a tag covers could rewrite the
+  corpus. The three tools now preview by default and require an explicit
+  `dry_run=false` to write, matching the CLI and the existing `policy_run`
+  convention. **Breaking for MCP callers** that relied on the implicit apply:
+  pass `dry_run=false` to keep the old behavior. Dry-run responses now end
+  with an explicit "pass dry_run=false to apply" hint. `dry_run` is also
+  strict now: only a literal JSON boolean is accepted — coercible values
+  (`0`, `"false"`, `""`, `null`) are refused instead of silently reaching
+  the apply path via lax coercion or the unvalidated `mem_do` dispatch.
+
+- **Migrated to the `mcp` 2.0 SDK; the requirement is now `mcp[cli]>=2.0.0,<3`**
+  (#1978). 2.0 removed `mcp.server.fastmcp`, which 0.3.14 worked around by
+  capping below it. The server now builds on `mcp.server.mcpserver.MCPServer`,
+  pins `serverInfo.version` through the SDK's new `version=` argument instead
+  of patching a private attribute, and passes host/port/paths/transport
+  security to `run()` — 2.0 moved those off the settings object. The floor is
+  hard: the SDK offers no dual 1.x/2.x support, so **`mcp` 1.x installs must
+  upgrade together with memtomem**. Wire behavior is unchanged; SSE keeps
+  serving the same paths a mounted `--url` produced before, including the
+  advertised message endpoint.
+- **MCP resource handlers no longer receive a context parameter unless their
+  URI is templated.** The 2.0 SDK rejects `Context` injection on static
+  resources, so `memtomem://sources`, `://namespaces`, `://tags` and
+  `://stats` read the lifespan's `AppContext` directly. `memtomem://chunks/{chunk_id}`
+  is templated and is unaffected. No client-visible change.
+
+- **`resolved_namespaces` is now a hybrid echo rather than a pure preview**
+  (#2019). Bulk index responses previously echoed only what the pre-write
+  namespace resolver predicted. A file whose upsert succeeded now contributes
+  the authoritative in-lock resolution instead, so a namespace another writer
+  moved concurrently is reported as it actually landed; files with no
+  namespace-bearing write — unchanged, skipped, privacy-blocked, or failed —
+  still contribute the pre-write preview. A value in this field is therefore no
+  longer evidence that any chunk was written. Read `applied_namespaces` when you
+  need that guarantee; it is the distinct subset known to have been applied.
+
 ### Fixed
+
+- **`mem_recall` orders tied timestamps deterministically** (#516).
+  Chunk `created_at`/`updated_at` are now stored at microsecond precision,
+  so distinct writes in the same second no longer tie on the sort key —
+  "the newest row" means recency, not UUID luck. Rows written by earlier
+  releases keep their second-precision timestamps and sort correctly
+  alongside new rows (the fractional part only extends the ISO-8601 prefix;
+  no migration needed). The SQL ordering additionally ends in `id DESC`, a
+  total tie-break for exact-equal timestamps, so the page boundary can
+  never include or drop a row incidentally across otherwise identical
+  calls.
+- **CLI `mm recall --until` now treats partial dates as inclusive of the
+  named period**, matching MCP `mem_recall` and the flag's documented
+  semantics: `--until 2025-03` means "through the end of March"
+  (exclusive bound 2025-04-01), where it previously parsed to 2025-03-01
+  and silently excluded the entire month.
 
 - **Runtime coordination no longer depends on the caller's environment**
   (#2037). On POSIX, all new server/Web pid files, instance sentinels,
@@ -256,7 +340,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   before writing answer 503 with one shared, path-free "nothing was changed"
   body; `/api/reindex` reports per registered root, so the roots it already
   finished keep their results; the SSE index stream — which has no status
-  code — marks the event `retryable` and says which files did land; and
+  code — marks the event `retryable` and states the same "nothing was
+  changed" post-condition as the single-shot routes, because every file's
+  namespace is now resolved before the first write; and
   `POST /api/add`, which appends before indexing and has no idempotency key,
   now asks the lookup *before* the append so a caller told to retry cannot
   duplicate the entry. The mixed-namespace write guard also treated *any* `stat` failure
@@ -324,39 +410,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   reset were unaffected. Re-run `mm index --force <path>` to repair an
   affected store.
 
-### Changed
-
-- **MCP `mem_tag_rename` / `mem_tag_delete` / `mem_tag_merge` now default to
-  `dry_run=true`** (#1992). Previously the MCP surface applied these bulk
-  rewrites immediately while the CLI equivalents (`mm tags rename` etc.)
-  defaulted to preview — an agent probing what a tag covers could rewrite the
-  corpus. The three tools now preview by default and require an explicit
-  `dry_run=false` to write, matching the CLI and the existing `policy_run`
-  convention. **Breaking for MCP callers** that relied on the implicit apply:
-  pass `dry_run=false` to keep the old behavior. Dry-run responses now end
-  with an explicit "pass dry_run=false to apply" hint. `dry_run` is also
-  strict now: only a literal JSON boolean is accepted — coercible values
-  (`0`, `"false"`, `""`, `null`) are refused instead of silently reaching
-  the apply path via lax coercion or the unvalidated `mem_do` dispatch.
-
-- **Migrated to the `mcp` 2.0 SDK; the requirement is now `mcp[cli]>=2.0.0,<3`**
-  (#1978). 2.0 removed `mcp.server.fastmcp`, which 0.3.14 worked around by
-  capping below it. The server now builds on `mcp.server.mcpserver.MCPServer`,
-  pins `serverInfo.version` through the SDK's new `version=` argument instead
-  of patching a private attribute, and passes host/port/paths/transport
-  security to `run()` — 2.0 moved those off the settings object. The floor is
-  hard: the SDK offers no dual 1.x/2.x support, so **`mcp` 1.x installs must
-  upgrade together with memtomem**. Wire behavior is unchanged; SSE keeps
-  serving the same paths a mounted `--url` produced before, including the
-  advertised message endpoint.
-- **MCP resource handlers no longer receive a context parameter unless their
-  URI is templated.** The 2.0 SDK rejects `Context` injection on static
-  resources, so `memtomem://sources`, `://namespaces`, `://tags` and
-  `://stats` read the lifespan's `AppContext` directly. `memtomem://chunks/{chunk_id}`
-  is templated and is unaffected. No client-visible change.
-
-### Fixed
-
 - **A malformed hook `matcher` no longer takes down settings fan-out**
   (#1983). The canonical `.memtomem/settings.json` is user-authored, and a
   `"matcher": ["Bash"]` typo raised an uncaught `TypeError` — out of the
@@ -379,6 +432,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   warning on the next sync: releases without this validation stamped and wrote
   such rules themselves before Gemini aborted the run, and keeping them would
   strand the broken rule beside its corrected replacement after an upgrade.
+
+- **The debounce queue no longer spends its retry budget on failures that will
+  never succeed, and no longer discards work during a transient outage** (#2026,
+  #2032). Every drain failure used to count identically against the five-attempt
+  cap, so a parser error or redaction block was retried on every hook fire until
+  the budget ran out, while a store or embedding-provider blip was reported with
+  the same "fix the underlying cause" wording as a permanently broken file.
+  Failures are now classified: an explicitly permanent one is dropped on its
+  first drain with a direct `mm index <path>` remediation, and only retryable or
+  unclassified failures consume the budget, which now ends with "re-run once the
+  transient cause clears". `DrainResult` gains the additive `retryable_errors`
+  and `retryable_dropped` subsets, surfaced in `mm index --drain --json`.
+  Embedding transport failures are classified structurally rather than by
+  message: connection errors, timeouts, HTTP 429, and any 5xx from an
+  OpenAI-compatible provider now raise the new `RetryableEmbeddingError`, so a
+  provider outage is retried instead of poisoning the queue entry.
+
+- **The watcher's startup backfill retries a retryable failure instead of
+  dropping the whole directory for the process lifetime** (#2021, #2027).
+  `_startup_backfill` caught every exception per root, so a transient namespace
+  lookup failure — the likeliest kind while the process is still warming up —
+  left that memory directory unindexed until an unrelated filesystem event
+  touched a file or the server restarted. Each root now gets up to three bounded
+  attempts with exponential backoff when the walk raises a `RetryableError` or
+  returns a non-empty `stats.retryable_errors`. Re-walking is cheap because the
+  content-hash diff skips unchanged chunks, and indexed counts accumulate across
+  attempts without double-counting. Permanent failures keep the single-shot
+  log-and-continue, and blocked paths are reported once per root rather than
+  once per attempt. This affects installs that have opted into
+  `indexing.startup_backfill`, which remains off by default.
+
+- **`mm config set` accepts the JSON-array spelling the configuration guide
+  shows, and names a way forward when it rejects a key** (#1993, #2012). A JSON
+  array was previously accepted silently and stored as a one-element list
+  holding the JSON text, so `indexing.exclude_patterns '["*node_modules*"]'`
+  became a pattern that could never match — invisible in the worst way, because
+  `mm purge --matching-excluded` then reports "no stored chunks match", which
+  reads exactly like the exclusion working. The shared coercion layer now parses
+  a leading-`[` value as JSON, so `PATCH /api/config` and the MCP config action
+  get the fix too. A leading-`[` value that fails to parse still falls back to
+  comma splitting unless it also ends with `]` and carries a double quote — the
+  shape only a botched array has — which keeps gitignore character classes such
+  as `[abc]*.log` working as literal patterns. Separately, rejecting a
+  non-mutable key used to print one line and exit; it now suggests the nearest
+  canonical key, lists the section's mutable fields, and points at
+  `mm config show`.
+
+- **The Web UI's folder-index "Index without privacy gate" checkbox is one-shot**
+  (#1998, #1999). The control was never reset after a run, so a single forced
+  index silently kept bypassing the secret-redaction gate for every subsequent
+  index started from that panel. Its value is now captured and the box cleared
+  synchronously before the stream request, mirroring the memory-dir add flow's
+  twin control, so the bypass cannot outlive the run it was armed for regardless
+  of how the run ends. Reindex-all and per-directory reindex never carried
+  `force_unsafe` and are unaffected.
+
+### Security
+
+- **A secret-shaped hook event name no longer reaches the calling agent's
+  transcript** (#2030, #2031). Hook event keys are read verbatim out of the
+  user's settings file, and the settings warning formatters interpolated them
+  directly while the MCP surface redacted only the file path — so an event named
+  like `api_key=AKIA...` travelled to the calling agent and on to its model
+  provider. The same leak existed on four more producers, including one that
+  needs no malformed rule at all: an unknown event with a perfectly valid
+  matcher reaches the per-runtime translators, which name it in their "no Codex
+  / Kimi / Gemini equivalent" drop warnings, so a healthy settings file leaked a
+  secret-shaped key. A new `redact_secret_value` helper performs whole-value
+  secret-shape substitution with no path logic and no length cap, and every
+  event interpolated into a settings warning routes through it. The scrub lives
+  inside the shared formatters rather than at the MCP call site, so CLI and MCP
+  wording stay identical. Non-secret event names — every real hook event — are
+  returned untouched, and the remediation hint each warning carries is
+  preserved, which a whole-message redaction would have destroyed.
+
+- **Both blocking OSV advisories are cleared** (#2054). The vendored DOMPurify
+  build moves from 3.4.12 to 3.4.13, fixing GHSA-55q2-fjhq-7xh7, in which
+  removing an `IN_PLACE` hook left a detached subtree still executable. Because
+  vendored bytes must never change under a live cache key, the asset's public
+  key advances to `?v=4` with the matching content binding appended to
+  `cache-versions.json`, and `THIRD_PARTY_LICENSES.md` carries the new version,
+  upstream URL, SHA-256, and license tag. The JS test toolchain additionally
+  pins `nanoid` to `^3.3.17` through the existing `overrides` block to clear
+  GHSA-2v37-7h3g-55p8; that dependency is dev-only — postcss pulls it in
+  transitively under vitest — and reaches no shipped artifact. The constraint is
+  `^3.3.17` rather than the open-ended `>=3.3.17`, which would resolve to the
+  ESM-only nanoid 5.x and break postcss's own `^3.3.16` requirement.
 
 ## [0.3.14] — 2026-08-01
 

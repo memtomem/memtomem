@@ -7,9 +7,9 @@ and three read-only skills. It does not add event hooks or automatic indexing.
 ## Install
 
 The published npm release is `opencode-memtomem@0.1.3` (bundling core
-`0.3.13`). Version `0.1.4`, which this source tree describes and which
-bundles core `0.3.14`, is not on npm yet; until it publishes, prefer the
-manual MCP configuration below, which pulls `0.3.14` from PyPI. `0.3.13`
+`0.3.13`). Version `0.2.0`, which this source tree describes and which
+bundles core `0.4.0`, is not on npm yet; until it publishes, prefer the
+manual MCP configuration below, which pulls `0.4.0` from PyPI. `0.3.13`
 declares no upper bound on `mcp` and a fresh resolve of it now fails at
 import against `mcp` 2.x (#1978).
 
@@ -17,17 +17,17 @@ Do not use an `opencode plugin add` command; OpenCode loads npm plugins from
 the singular `plugin` array in `opencode.json`:
 
 ```json
-{"plugin": ["opencode-memtomem@0.1.4"]}
+{"plugin": ["opencode-memtomem@0.2.0"]}
 ```
 
 Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
 `uvx` must be available on `PATH`; the plugin starts the exact-pinned
-`memtomem==0.3.14` runtime on demand. For development from this repository,
+`memtomem==0.4.0` runtime on demand. For development from this repository,
 point the same `plugin` array at `packages/opencode-memtomem/dist/server.js`.
 
 If you only need the MCP tools — without the bundled commands and skills —
 configure the local MCP server directly instead, which pulls the
-`memtomem[all]==0.3.14` runtime from PyPI:
+`memtomem[all]==0.4.0` runtime from PyPI:
 
 ```json
 {
@@ -35,7 +35,7 @@ configure the local MCP server directly instead, which pulls the
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.14", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.4.0", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core"}
