@@ -23,8 +23,8 @@ The published npm release is `opencode-memtomem@0.2.1`, bundling core
 ```
 
 Upgrade if your `plugin` array still pins `0.1.3` or older: those releases
-bundle core `0.3.13`, which declares no upper bound on `mcp`, so a fresh
-resolve picks up `mcp` 2.x and fails at import (#1978).
+bundle pre-`0.3.14` cores, whose `mcp` dependency has no `<2` upper bound,
+so a fresh resolve picks up `mcp` 2.x and fails at import (#1978).
 
 For development from this repository, build the package and point the same
 `plugin` array at `packages/opencode-memtomem/dist/server.js`.

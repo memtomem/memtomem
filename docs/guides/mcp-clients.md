@@ -321,8 +321,8 @@ The published npm plugin is `opencode-memtomem@0.2.1` (bundling core
 `{"plugin": ["opencode-memtomem@0.2.1"]}` in `opencode.json`. The plugin
 supplies an exact-pinned MCP server, seven commands, three read-only skills,
 and conservative permissions. Upgrade any pin still on `0.1.3` or older:
-those bundle core `0.3.13`, which declares no upper bound on `mcp` and fails
-at import against `mcp` 2.x (#1978).
+those bundle pre-`0.3.14` cores, whose `mcp` dependency has no `<2` upper
+bound, so they fail at import against `mcp` 2.x (#1978).
 
 If you only need the MCP tools — without the plugin's bundled commands and
 skills — configure the released MCP server directly instead:

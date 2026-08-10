@@ -16,9 +16,9 @@ the singular `plugin` array in `opencode.json`:
 {"plugin": ["opencode-memtomem@0.2.1"]}
 ```
 
-Upgrade if your pin is still `0.1.3` or older: those bundle core `0.3.13`,
-which declares no upper bound on `mcp`, so a fresh resolve picks up `mcp`
-2.x and fails at import (#1978).
+Upgrade if your pin is still `0.1.3` or older: those bundle pre-`0.3.14`
+cores, whose `mcp` dependency has no `<2` upper bound, so a fresh resolve
+picks up `mcp` 2.x and fails at import (#1978).
 
 Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
 `uvx` must be available on `PATH`; the plugin starts the exact-pinned
