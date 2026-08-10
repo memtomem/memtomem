@@ -18,6 +18,7 @@ for automation and advanced setup.
 - [Tool Usage Guidelines (Add to CLAUDE.md)](#tool-usage-guidelines-add-to-claudemd)
 - [Usage Scenarios](#usage-scenarios)
 - [Built-in Memory vs memtomem Comparison](#built-in-memory-vs-memtomem-comparison)
+- [Cross-runtime handoff](#cross-runtime-handoff)
 - [Frequently Asked Questions](#frequently-asked-questions)
 - [Cross-runtime agent context with mm context](#cross-runtime-agent-context-with-mm-context)
 - [Next Steps](#next-steps)
@@ -46,7 +47,7 @@ The most powerful automation pipeline is achieved when combined with Claude Code
 
 ### Option A: Install the safe base plugin
 
-The memtomem plugin bundles the exact-pinned MCP server and six focused slash
+The memtomem plugin bundles the exact-pinned MCP server and seven focused slash
 commands. Read workflows can be selected automatically; write and setup
 workflows require direct invocation.
 
@@ -503,6 +504,17 @@ Restart Claude Code or use the `/mcp` command to reconnect to MCP servers. Old p
 Yes. Auto-memory automatically extracts from conversations, while memtomem only handles explicitly indexed/added targets.
 
 ---
+
+## Cross-runtime handoff
+
+`/memtomem:handoff save` writes a compact project-local checkpoint that Codex
+CLI or Kimi Code can resume from the same store. `/memtomem:handoff resume`
+rechecks the stored commit and worktree summary against live Git before using
+it. The workflow is explicit and sequential; it does not synchronize whole
+chats or coordinate concurrent workers.
+
+See [Cross-runtime sequential handoff](cross-runtime-handoff.md) for the
+three-client installation and verification flow.
 
 ## Cross-runtime agent context with `mm context`
 

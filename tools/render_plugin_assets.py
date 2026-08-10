@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the shipped Claude, Codex, and OpenCode assets from one contract."""
+"""Render the shipped Claude, Codex, Kimi, and OpenCode assets from one contract."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ ASSETS = ROOT / "packages" / "memtomem-plugin-assets"
 CONTRACT = ASSETS / "contract.toml"
 CLAUDE_ROOT = ROOT / "packages" / "memtomem-claude-plugin"
 CODEX_ROOT = ROOT / "plugins" / "memtomem"
+KIMI_ROOT = ROOT / "packages" / "memtomem-kimi-skills"
 OPENCODE_ROOT = ROOT / "packages" / "opencode-memtomem"
 
 
@@ -26,15 +27,16 @@ def _yaml_q(value: str) -> str:
     return _q(value)
 
 
-def _allowed_tools(tools: list[str]) -> str:
+def _allowed_tools(workflow: dict) -> str:
     names: list[str] = []
-    for tool in tools:
+    for tool in workflow["tools"]:
         names.extend(
             [
                 f"mcp__plugin_memtomem_memtomem__{tool}",
                 f"mcp__memtomem__{tool}",
             ]
         )
+    names.extend(workflow.get("claude_host_tools", []))
     return ", ".join(names)
 
 
@@ -46,7 +48,7 @@ def _claude_skill(workflow: dict, body: str) -> str:
     ]
     if hint := workflow.get("argument_hint"):
         frontmatter.append(f"argument-hint: {hint}")
-    frontmatter.append(f"allowed-tools: {_allowed_tools(workflow['tools'])}")
+    frontmatter.append(f"allowed-tools: {_allowed_tools(workflow)}")
     if not workflow["implicit"]:
         frontmatter.append("disable-model-invocation: true")
     frontmatter.extend(["---", "", f"# {workflow['title']}", ""])
@@ -61,7 +63,7 @@ def _claude_skill(workflow: dict, body: str) -> str:
     return "\n".join(frontmatter) + body.strip() + "\n"
 
 
-def _codex_skill(workflow: dict, body: str) -> str:
+def _portable_skill(workflow: dict, body: str) -> str:
     lines = [
         "---",
         f"name: {workflow['codex_name']}",
@@ -176,6 +178,7 @@ def expected_files() -> dict[Path, str]:
     files: dict[Path, str] = {
         CLAUDE_ROOT / ".mcp.json": _mcp_config(contract["core"]),
         CODEX_ROOT / ".mcp.json": _mcp_config(contract["core"]),
+        KIMI_ROOT / "VERSION": contract["plugins"]["kimi_version"] + "\n",
         OPENCODE_ROOT / "src" / "generated.ts": _opencode_generated(contract),
     }
     for workflow in contract["workflows"]:
@@ -191,8 +194,10 @@ def expected_files() -> dict[Path, str]:
             workflow, claude_body
         )
         codex_dir = CODEX_ROOT / "skills" / workflow["codex_name"]
-        files[codex_dir / "SKILL.md"] = _codex_skill(workflow, body)
+        files[codex_dir / "SKILL.md"] = _portable_skill(workflow, body)
         files[codex_dir / "agents" / "openai.yaml"] = _openai_yaml(workflow)
+        kimi_dir = KIMI_ROOT / "skills" / workflow["codex_name"]
+        files[kimi_dir / "SKILL.md"] = _portable_skill(workflow, body)
         if workflow["implicit"] and workflow["effect"] == "read":
             files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
                 workflow, body, contract["opencode"]["version_range"]

@@ -13,14 +13,14 @@ async function apply(config = {}, input = {}) {
   return config;
 }
 
-test("installs exact MCP, six commands, three read skills, and safe permissions", async () => {
+test("installs exact MCP, seven commands, three read skills, and safe permissions", async () => {
   const config = await apply();
   assert.deepEqual(config.mcp.memtomem.command, [
     "uvx", "--from", "memtomem==0.4.0", "memtomem-server",
   ]);
   assert.equal(config.mcp.memtomem.environment.MEMTOMEM_TOOL_MODE, "core");
   assert.equal(config.mcp.memtomem.timeout, 60000);
-  assert.equal(Object.keys(config.command).length, 6);
+  assert.equal(Object.keys(config.command).length, 7);
   assert.equal(config.skills.paths.length, 3);
   assert.equal(config.permission.memtomem_mem_search, "allow");
   assert.equal(config.permission["memtomem_*"], "ask");

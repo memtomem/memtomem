@@ -146,6 +146,17 @@ def test_codex_plugin_matches_contract_and_marketplace() -> None:
     )
 
 
+def test_kimi_skill_bundle_matches_contract() -> None:
+    contract = _contract()
+    root = _ROOT / "packages/memtomem-kimi-skills"
+    assert (root / "VERSION").read_text(encoding="utf-8").strip() == contract["plugins"][
+        "kimi_version"
+    ]
+    assert "Kimi Code skill bundle, not a plugin" in (root / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_opencode_plugin_matches_contract() -> None:
     contract = _contract()
     package = _json("packages/opencode-memtomem/package.json")

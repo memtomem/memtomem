@@ -1,6 +1,6 @@
 # Codex x memtomem Integration Guide
 
-The native Codex plugin bundles an exact-pinned memtomem MCP server and six
+The native Codex plugin bundles an exact-pinned memtomem MCP server and seven
 skills. BM25 is enabled by default; an embedding provider is optional.
 
 Prefer a short Korean first-success path? Follow the [Claude Code·Codex CLI
@@ -47,9 +47,14 @@ skills, and MCP server are reloaded.
 | `memtomem-remember` | Persist a user-requested memory | Explicit only |
 | `memtomem-index` | Index a selected path | Explicit only |
 | `memtomem-setup` | Status → explicit path → index → search | Explicit only |
+| `memtomem-handoff` | Save or resume a compact project-local handoff | Explicit only |
 
 The plugin exposes memtomem's nine core MCP tools. The shipped skills do not
 use the broad `mem_do` gateway.
+
+For a sequential Claude Code → Codex CLI → Kimi Code workflow on one Mac,
+follow the [cross-runtime handoff guide](cross-runtime-handoff.md). Handoff
+records are summaries, not synchronized chats or task locks.
 
 ## Verify
 

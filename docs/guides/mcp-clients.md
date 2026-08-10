@@ -84,7 +84,7 @@ These commands reuse the persistent environment that provides `mm`. If you
 intentionally do not install memtomem, replace `memtomem-server` with `uvx
 --isolated --from "memtomem[all]==0.4.0" memtomem-server`.
 
-For the safe plugin experience (bundled MCP server plus six focused skills),
+For the safe plugin experience (bundled MCP server plus seven focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
 indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
 Note that both manual commands above differ from the plugin's pinned launch
@@ -247,13 +247,24 @@ Restart Kimi Code after configuration.
 > versions no longer manage. Audit those legacy directories and remove the
 > entries memtomem pushed — keep anything you authored by hand.
 
+Kimi can load the repository's portable Agent Skills bundle without a native
+plugin surface:
+
+```bash
+kimi --skills-dir /path/to/memtomem/packages/memtomem-kimi-skills/skills
+```
+
+The MCP registration and skill bundle are separate: keep exactly one
+`memtomem` MCP entry. See the [Kimi Code integration guide](integrations/kimi-code.md)
+and the [cross-runtime handoff guide](integrations/cross-runtime-handoff.md).
+
 ---
 
 ## 7. Codex CLI
 
 ### Option A: Install the memtomem plugin
 
-The repository marketplace bundles the exact-pinned MCP server and six Codex
+The repository marketplace bundles the exact-pinned MCP server and seven Codex
 skills:
 
 ```bash
@@ -306,12 +317,12 @@ Call mem_status to check the memtomem connection status
 ## 8. OpenCode
 
 The published npm plugin is `opencode-memtomem@0.1.3` (bundling core
-`0.3.13`); `0.2.0`, bundling core `0.4.0`, is not on npm yet. Until it
+`0.3.13`); `0.2.1`, bundling core `0.4.0`, is not on npm yet. Until it
 publishes, prefer the direct MCP configuration below — `0.3.13` declares no
 upper bound on `mcp` and a fresh resolve of it fails at import against `mcp`
-2.x (#1978). Once `0.2.0` is available, add it through OpenCode's plugin
-form — `{"plugin": ["opencode-memtomem@0.2.0"]}` in `opencode.json`. The
-plugin supplies an exact-pinned MCP server, six commands, three read-only
+2.x (#1978). Once `0.2.1` is available, add it through OpenCode's plugin
+form — `{"plugin": ["opencode-memtomem@0.2.1"]}` in `opencode.json`. The
+plugin supplies an exact-pinned MCP server, seven commands, three read-only
 skills, and conservative permissions.
 
 If you only need the MCP tools — without the plugin's bundled commands and
