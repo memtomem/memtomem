@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 _ROOT = Path(__file__).resolve().parents[3]
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
 _DOCKER_RE = re.compile(r"^docker://[^\s@]+@sha256:[0-9a-f]{64}$")
 _USES_LINE_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)")
+# The exact requirement contract for the pywin32 pin — see
+# test_windows_shared_locks_declare_pywin32 for why these are matched
+# literally rather than evaluated over a sampled environment matrix.
+_PYWIN32_SPECIFIER = ">=226"
+_WINDOWS_ONLY_MARKERS = frozenset({'sys_platform == "win32"', 'platform_system == "Windows"'})
 
 
 def _assert_pinned_ref(reference: str) -> None:
@@ -207,3 +215,104 @@ def test_every_plugin_version_is_semver() -> None:
     contract = _contract()
     for version in contract["plugins"].values():
         assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+
+
+def _shared_lock_mentions() -> list[str]:
+    """Files under ``src`` that name a shared lock flag in executable code.
+
+    A deletion tripwire, deliberately **over-approximating**. It matches any
+    attribute access named ``LOCK_SH`` or ``SHARED``, so it also counts the
+    POSIX-gated ``cli/_liveness`` site and would count an unrelated enum
+    member spelled ``SHARED``. That is the safe direction: over-counting keeps
+    the pywin32 pin required, while under-counting would release it. It is
+    *not* a claim about which sites run on Windows — that judgment lives in
+    the pyproject comment, which names the lifecycle barrier as the whole
+    obligation.
+
+    AST rather than a substring scan: ``"LOCK_SH" in text`` also fires on the
+    prose explaining the lock, and misses a call spelled
+    ``LockFlags.SHARED``. The first makes the tripwire un-clearable for the
+    wrong reason, the second silently disarms it.
+    """
+    shared = {"LOCK_SH", "SHARED"}
+    found: set[str] = set()
+    for path in (_ROOT / "packages/memtomem/src/memtomem").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in shared:
+                found.add(path.relative_to(_ROOT).as_posix())
+                break
+    return sorted(found)
+
+
+def test_windows_shared_locks_declare_pywin32() -> None:
+    """The shared lifecycle barrier obliges a direct ``pywin32`` declaration.
+
+    ``_instance_registry.acquire_server_lifecycle_barrier`` takes the barrier
+    with ``LOCK_SH`` on every OS, Windows included. portalocker 3.x listed
+    ``pywin32; platform_system == "Windows"`` unconditionally, so that worked
+    for free. 4.0.0 moved it behind a ``win32`` extra and made
+    ``MsvcrtLocker`` the default Windows locker; msvcrt has no shared lock, so
+    that locker raises ``ImportError`` when ``LockFlags.SHARED`` is requested
+    without pywin32. ``ImportError`` is in neither ``_LOCK_CONTENDED`` nor
+    ``_BARRIER_LOCK_ERRORS``, so it escapes the barrier unhandled — a crash,
+    not a degraded lock.
+
+    ``mcp`` supplies pywin32 transitively today, which is precisely why this
+    needs pinning: the resolve is correct by luck, not by contract.
+
+    Deliberately **no skip branch**. An earlier version released the
+    requirement when it found no shared-lock call site, which turns any
+    refactor of the spelling into a silent disarm. The absence of a shared
+    lock is asserted as a failure instead, so dropping the pin has to be a
+    deliberate edit to this test.
+    """
+    users = _shared_lock_mentions()
+    assert users, (
+        "no shared-lock call site found under src/ — if the lifecycle barrier "
+        "no longer takes LOCK_SH, drop the pywin32 pin and this guard together, "
+        "deliberately"
+    )
+
+    with (_ROOT / "packages/memtomem/pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)["project"]
+    pins = [
+        requirement
+        for requirement in map(Requirement, project["dependencies"])
+        if canonicalize_name(requirement.name) == "pywin32"
+    ]
+    assert pins, (
+        "shared locks are taken in "
+        + ", ".join(users)
+        + ", but pyproject declares no pywin32 dependency — they raise "
+        "ImportError on Windows without it (portalocker >= 4.0)"
+    )
+
+    # Match the marker's canonical form exactly rather than sampling it.
+    # `requires-python` has no upper bound, so no finite sample of Python
+    # versions can prove a marker is version-independent: a marker reading
+    # `sys_platform == "win32" and python_version < "3.16"` satisfies every
+    # sampled minor while excluding a supported one. Pinning the normalized
+    # string removes the whole class — `packaging` normalizes whitespace and
+    # quoting, so only the *shape* is pinned, not the spelling. A different
+    # but equivalent marker is a deliberate edit here, not a silent pass.
+    for pin in pins:
+        assert pin.url is None, (
+            f"pywin32 pin {str(pin)!r} resolves from a direct URL, bypassing "
+            "the index and its version contract"
+        )
+        assert str(pin.specifier) == _PYWIN32_SPECIFIER, (
+            f"pywin32 pin {str(pin)!r} has specifier {str(pin.specifier)!r}, "
+            f"expected {_PYWIN32_SPECIFIER!r} — portalocker 3.x asked for the "
+            "same floor, so anything lower reintroduces the gap this pin closes"
+        )
+        assert pin.marker is not None, (
+            f"pywin32 pin {str(pin)!r} has no environment marker; it would "
+            "install on every platform"
+        )
+        assert str(pin.marker) in _WINDOWS_ONLY_MARKERS, (
+            f"pywin32 pin {str(pin)!r} has marker {str(pin.marker)!r}; expected "
+            f"one of {sorted(_WINDOWS_ONLY_MARKERS)} — a marker that also "
+            "mentions python_version is not Windows-only across every "
+            "supported interpreter"
+        )
