@@ -154,11 +154,13 @@ _WIN_TRANSIENT_SHARING = frozenset({32, 33})
 # Non-blocking-lock errnos that mean "held by someone else": POSIX
 # ``fcntl.flock`` documents both ``EACCES`` and ``EAGAIN`` for a held
 # lock, and portalocker's own backends map exactly this pair to
-# ``AlreadyLocked``. Which *exception type* carries them varies across the
-# supported ``portalocker>=3.0`` range (``AlreadyLocked`` vs a bare
-# ``LockException``, the #1944 gate note), so contention is judged by
-# errno on the exception or its chained cause — never by
-# ``isinstance(exc, AlreadyLocked)`` alone.
+# ``AlreadyLocked``. Every version across the supported ``portalocker>=3.0``
+# range does so (source-verified, see :func:`_is_lock_contention`), so these
+# errnos are *not* the primary gate — they are the defensive one. Contention
+# is judged by errno on the exception or its chained cause in addition to
+# ``isinstance(exc, AlreadyLocked)``, covering a raw ``OSError`` leaking out
+# of some backend and a future version that regresses to a bare
+# ``LockException`` (the #1944 type-drift note).
 _CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
 
 # Windows ``ERROR_LOCK_VIOLATION`` — the one ``pywintypes.error`` code the
