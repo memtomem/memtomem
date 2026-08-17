@@ -1390,3 +1390,128 @@ class TestFilterOnlySearch:
 
         assert [r.chunk.id for r in results] == [fresh.id, ancient.id]
         assert results[0].score > results[1].score
+
+
+class TestPipelineEntityBoost:
+    """Stage 7b: query entities matched against stored ``chunk_entities``."""
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+
+    def _make_pipeline(self, results_in, *, entity_boost_config=None, matches=None):
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        storage = AsyncMock()
+        storage.bm25_search = AsyncMock(return_value=results_in)
+        storage.dense_search = AsyncMock(return_value=[])
+        storage.increment_access = AsyncMock()
+        storage.save_query_history = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_embeddings_for_chunks = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.get_matching_entities = AsyncMock(return_value=matches or {})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+
+        return SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=False),
+            entity_boost_config=entity_boost_config,
+        )
+
+    @pytest.mark.asyncio
+    async def test_boost_reorders_on_entity_match(self):
+        from memtomem.config import EntityBoostConfig
+
+        top = self._make_result("chunk0", rank=1, score=0.50)
+        lower = self._make_result("chunk1", rank=2, score=0.40)
+        pipeline = self._make_pipeline(
+            [top, lower],
+            entity_boost_config=EntityBoostConfig(enabled=True, max_boost=2.0),
+            matches={str(lower.chunk.id): {("technology", "sqlite")}},
+        )
+
+        results, _ = await pipeline.search("sqlite migration", top_k=5)
+
+        assert results[0].chunk.id == lower.chunk.id
+        assert results[0].score == pytest.approx(0.80)
+        # The unmatched chunk keeps its score — the boost never penalizes.
+        assert results[1].score == pytest.approx(0.50)
+
+    @pytest.mark.asyncio
+    async def test_disabled_never_touches_storage(self):
+        from memtomem.config import EntityBoostConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(3)]
+        pipeline = self._make_pipeline(
+            results_in, entity_boost_config=EntityBoostConfig(enabled=False)
+        )
+
+        await pipeline.search("sqlite migration", top_k=5)
+
+        pipeline._storage.get_matching_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unwired_config_is_inert(self):
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(3)]
+        pipeline = self._make_pipeline(results_in)  # entity_boost_config=None
+
+        await pipeline.search("sqlite migration", top_k=5)
+
+        pipeline._storage.get_matching_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_query_without_entities_skips_storage(self):
+        """No query entities → no signal → no wasted storage round-trip."""
+        from memtomem.config import EntityBoostConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(3)]
+        pipeline = self._make_pipeline(
+            results_in, entity_boost_config=EntityBoostConfig(enabled=True)
+        )
+
+        await pipeline.search("what did we conclude about that", top_k=5)
+
+        pipeline._storage.get_matching_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_filter_only_path_skips_the_stage(self):
+        """The empty-query path matches no query entities by construction."""
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import EntityBoostConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(3)]
+        pipeline = self._make_pipeline(
+            results_in, entity_boost_config=EntityBoostConfig(enabled=True)
+        )
+        pipeline._storage.recall_chunks = AsyncMock(return_value=[r.chunk for r in results_in])
+
+        results, _ = await pipeline.search("", top_k=5, tag_filter=["notes"])
+
+        # Pin that this really took the filter-only branch, so the assertion
+        # below is about that path rather than an empty result set.
+        pipeline._storage.recall_chunks.assert_awaited()
+        pipeline._storage.bm25_search.assert_not_called()
+        assert len(results) == 3
+        pipeline._storage.get_matching_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_min_confidence_is_forwarded(self):
+        from memtomem.config import EntityBoostConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(3)]
+        pipeline = self._make_pipeline(
+            results_in,
+            entity_boost_config=EntityBoostConfig(enabled=True, min_confidence=0.6),
+        )
+
+        await pipeline.search("sqlite migration", top_k=5)
+
+        _, kwargs = pipeline._storage.get_matching_entities.call_args
+        assert kwargs["min_confidence"] == pytest.approx(0.6)

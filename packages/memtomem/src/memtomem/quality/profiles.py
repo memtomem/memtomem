@@ -40,6 +40,7 @@ from memtomem.config import (
     AccessConfig,
     ContextWindowConfig,
     DecayConfig,
+    EntityBoostConfig,
     ImportanceConfig,
     Mem2MemConfig,
     MMRConfig,
@@ -56,6 +57,7 @@ from memtomem.secret_masking import is_secret_key
 
 __all__ = [
     "PROFILE_SCHEMA_VERSION",
+    "SUPPORTED_PROFILE_SCHEMA_VERSIONS",
     "PROFILE_KIND",
     "RetrievalProfileDoc",
     "load_profile_document",
@@ -65,8 +67,49 @@ __all__ = [
     "profile_warnings",
 ]
 
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
 PROFILE_KIND = "retrieval_profile"
+
+# Versions this build can load. New documents are written at
+# ``PROFILE_SCHEMA_VERSION``; older ones keep their own canonical shape so an
+# existing profile's identity does not move when a new ranking stage adds a
+# section (see ``_SECTIONS_BY_VERSION``).
+SUPPORTED_PROFILE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
+
+# Sections eligible per schema version. A version only ever *gains* sections:
+# v2 added ``entity_boost`` with the Stage-7b entity-match boost. Canonicalizing
+# a v1 document against the v1 set keeps its fingerprint byte-identical to what
+# this repo produced before that stage existed, so upgrading the package does
+# not read as profile drift.
+_SECTIONS_BY_VERSION: dict[int, frozenset[str]] = {
+    1: frozenset(
+        {
+            "search",
+            "decay",
+            "mmr",
+            "access",
+            "importance",
+            "context_window",
+            "rerank",
+            "query_expansion",
+            "session_summary",
+        }
+    ),
+    2: frozenset(
+        {
+            "search",
+            "decay",
+            "mmr",
+            "access",
+            "importance",
+            "entity_boost",
+            "context_window",
+            "rerank",
+            "query_expansion",
+            "session_summary",
+        }
+    ),
+}
 
 # Each eligible section maps to the config section class used to resolve
 # omitted knobs to package defaults (and to run that section's own validators).
@@ -77,6 +120,7 @@ _SECTION_CLASSES: dict[str, type[BaseModel]] = {
     "mmr": MMRConfig,
     "access": AccessConfig,
     "importance": ImportanceConfig,
+    "entity_boost": EntityBoostConfig,
     "context_window": ContextWindowConfig,
     "rerank": RerankConfig,
     "query_expansion": QueryExpansionConfig,
@@ -102,6 +146,7 @@ _ELIGIBLE_FIELDS: dict[str, tuple[str, ...]] = {
     "mmr": ("enabled", "lambda_param"),
     "access": ("enabled", "max_boost"),
     "importance": ("enabled", "max_boost", "weights"),
+    "entity_boost": ("enabled", "max_boost", "query_entity_types", "min_confidence"),
     "context_window": ("enabled", "window_size"),
     "rerank": ("enabled", "provider", "model", "oversample", "min_pool", "max_pool"),
     "query_expansion": ("enabled", "max_terms", "strategy"),
@@ -179,6 +224,19 @@ def _guard_float_list(v: Any, name: str, *, length: int) -> list[float]:
     if any(x < 0 for x in out):
         raise ValueError(f"{name} entries must be >= 0")
     return out
+
+
+def _guard_str_list(v: Any, name: str) -> list[str]:
+    _reject_null(v, name)
+    if not isinstance(v, list):
+        raise ValueError(f"{name} must be a list of strings")
+    if not v:
+        raise ValueError(f"{name} must not be empty")
+    for x in v:
+        _reject_null(x, f"{name}[]")
+        if not isinstance(x, str):
+            raise ValueError(f"{name} entries must be strings")
+    return list(v)
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +338,30 @@ class ImportanceKnobs(_Knobs):
     def _weights(cls, v: Any) -> Any:
         # Four recency/access/importance/length weights (see ImportanceConfig).
         return _guard_float_list(v, "weights", length=4)
+
+
+class EntityBoostKnobs(_Knobs):
+    enabled: bool | None = None
+    max_boost: float | None = None
+    query_entity_types: list[str] | None = None
+    min_confidence: float | None = None
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _bool(cls, v: Any, info: Any) -> Any:
+        return _guard_bool(v, info.field_name)
+
+    @field_validator("max_boost", "min_confidence", mode="before")
+    @classmethod
+    def _float(cls, v: Any, info: Any) -> Any:
+        return _guard_float(v, info.field_name)
+
+    @field_validator("query_entity_types", mode="before")
+    @classmethod
+    def _types(cls, v: Any) -> Any:
+        # Membership in the valid-type vocabulary is EntityBoostConfig's
+        # validator; this guard only enforces shape.
+        return _guard_str_list(v, "query_entity_types")
 
 
 class ContextWindowKnobs(_Knobs):
@@ -404,6 +486,7 @@ class ProfileKnobs(_Knobs):
     mmr: MMRKnobs = MMRKnobs()
     access: AccessKnobs = AccessKnobs()
     importance: ImportanceKnobs = ImportanceKnobs()
+    entity_boost: EntityBoostKnobs = EntityBoostKnobs()
     context_window: ContextWindowKnobs = ContextWindowKnobs()
     rerank: RerankKnobs = RerankKnobs()
     query_expansion: QueryExpansionKnobs = QueryExpansionKnobs()
@@ -437,8 +520,25 @@ class RetrievalProfileDoc(BaseModel):
         # subclass and 1.0 == 1, so the annotation alone is not enough).
         if "schema_version" in data:
             sv = data["schema_version"]
-            if type(sv) is not int or sv != PROFILE_SCHEMA_VERSION:
-                raise ValueError(f"schema_version must be {PROFILE_SCHEMA_VERSION}")
+            if type(sv) is not int or sv not in SUPPORTED_PROFILE_SCHEMA_VERSIONS:
+                supported = ", ".join(str(v) for v in SUPPORTED_PROFILE_SCHEMA_VERSIONS)
+                raise ValueError(f"schema_version must be one of: {supported}")
+            # A section introduced in a later version cannot appear in an older
+            # document — silently honoring it would give the document a
+            # different meaning than its declared version promises.
+            known = _SECTIONS_BY_VERSION[sv]
+            newer = sorted(
+                section
+                for section in (data.get("knobs") or {})
+                if isinstance(data.get("knobs"), dict)
+                and section not in known
+                and section in _SECTION_CLASSES
+            )
+            if newer:
+                raise ValueError(
+                    f"knobs section(s) {', '.join(newer)} require schema_version "
+                    f"{PROFILE_SCHEMA_VERSION}, document declares {sv}"
+                )
         if data.get("kind") != PROFILE_KIND:
             raise ValueError(f"kind must be {PROFILE_KIND!r}")
 
@@ -557,9 +657,16 @@ def canonicalize_profile(doc: RetrievalProfileDoc) -> dict[str, Any]:
     and running that section's own validators — then the eligible fields are
     extracted and float-normalized. An omitted field and its explicitly-written
     default therefore produce the same canonical value.
+
+    Only the sections its declared ``schema_version`` knows about are included,
+    so a document written before a ranking stage existed keeps the exact
+    canonical shape — and therefore the exact fingerprint — it had then.
     """
+    sections = _SECTIONS_BY_VERSION[doc.schema_version]
     canonical: dict[str, Any] = {}
     for section, cls in _SECTION_CLASSES.items():
+        if section not in sections:
+            continue
         knobs = getattr(doc.knobs, section)
         set_fields = knobs.model_dump(exclude_none=True)
         resolved = cls(**set_fields)
@@ -579,7 +686,9 @@ def profile_doc_fingerprint(doc: RetrievalProfileDoc) -> tuple[str, dict[str, An
     config (which folds in the pinned ambient sections).
     """
     canonical = canonicalize_profile(doc)
-    payload = {"schema_version": PROFILE_SCHEMA_VERSION, "knobs": canonical}
+    # The document's own version, not the build's: a v1 profile keeps the
+    # identity it had before newer sections existed.
+    payload = {"schema_version": doc.schema_version, "knobs": canonical}
     return _sha256_json(payload), canonical
 
 

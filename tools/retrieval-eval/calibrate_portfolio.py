@@ -278,7 +278,7 @@ async def calibrate(runs: int = 3, factor: float = 0.9) -> dict[str, Any]:
 
     from memtomem.config import Mem2MemConfig
     import memtomem.config as _cfg
-    from memtomem.server.component_factory import close_components, create_components
+    from memtomem.runtime import close_components, create_components
 
     tmp = Path(mkdtemp(prefix="b2v2_cal_"))
     db_path = tmp / "golden.db"

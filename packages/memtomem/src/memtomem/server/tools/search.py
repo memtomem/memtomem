@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from pathlib import Path
 from uuid import UUID
 
 from memtomem.chunking.markdown import _parse_validity_bound
 from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
+
+# Shared by the MCP tools, the CLI, the web routes, and the in-process
+# LangGraph adapter; re-exported from this module so the long-standing
+# import path — and the test patches that target it — keep working.
+from memtomem.runtime.project_context import (
+    _resolve_project_context_from_dirs as _resolve_project_context_from_dirs,
+    _resolve_project_context_root as _resolve_project_context_root,
+)
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -27,73 +33,6 @@ from memtomem.server.validation import MAX_QUERY_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_project_context_from_dirs(project_memory_dirs) -> Path | None:
-    """Same as :func:`_resolve_project_context_root` but takes the dirs
-    list directly (no ``app`` / ``comp`` wrapper).
-
-    Used by web routes that have ``Mem2MemConfig`` directly via
-    ``get_config`` and by any caller that already extracted the
-    registered project tier list. The wrapper :func:`_resolve_project_context_root`
-    delegates here so MCP tool callers (``app``) and CLI callers
-    (``comp``) keep their existing one-arg signature.
-    """
-    project_dirs = list(project_memory_dirs)
-    if not project_dirs:
-        return None
-    try:
-        cwd = Path(os.getcwd()).resolve()
-    except OSError:
-        return None
-    best_root: Path | None = None
-    best_depth = -1
-    for d in project_dirs:
-        try:
-            resolved = Path(d).expanduser().resolve()
-        except OSError:
-            continue
-        # ``resolved`` is expected to be ``<root>/.memtomem/memories``
-        # or ``<root>/.memtomem/memories.local``. Project root is
-        # grandparent.
-        if resolved.parent.name != ".memtomem":
-            continue
-        project_root = resolved.parent.parent
-        try:
-            cwd.relative_to(project_root)
-        except ValueError:
-            continue
-        depth = len(project_root.parts)
-        if depth > best_depth:
-            best_depth = depth
-            best_root = project_root
-    return best_root
-
-
-def _resolve_project_context_root(app) -> Path | None:
-    """Find the registered project root that contains the current cwd.
-
-    Returns the project root for the current process, or ``None`` if no
-    registered project tier covers the current cwd. Used by MCP read
-    tools as the always-on context-boundary anchor (ADR-0011 §6) so a
-    memtomem server started from inside a project naturally pins memory
-    queries to that project's project_shared / project_local rows.
-
-    Resolution: for each ``project_memory_dir`` registered in the user
-    config, derive its project root (the grandparent of the
-    ``.memtomem/memories[.local]`` entry); if the current cwd lives
-    under that root, return it. Multiple matching roots → return the
-    deepest match (most specific project context wins for nested
-    project layouts).
-
-    Empty ``project_memory_dirs`` → ``None``. Permission errors during
-    resolve → ``None``.
-
-    Accepts either ``app`` (MCP) or ``comp`` (CLI) — both expose
-    ``.config.indexing.project_memory_dirs`` so the duck-typed access
-    is symmetric.
-    """
-    return _resolve_project_context_from_dirs(app.config.indexing.project_memory_dirs)
 
 
 @mcp.tool()
@@ -155,7 +94,7 @@ async def mem_search(
     field names the model), ``rrf``, ``bm25``/``dense``, or ``none``
     (filter-only enumeration — no relevance scale). Compare scores only within
     one scale, and only across servers with the same optional modifier stages
-    (time decay, access/importance boosts) enabled.
+    (time decay, access/importance/entity boosts) enabled.
     """
     if not query.strip():
         return "Error: query cannot be empty."

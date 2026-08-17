@@ -44,6 +44,7 @@ def apply_importance_boost(
 ) -> list[SearchResult]:
     """Apply importance-based boost to search results and re-sort."""
     from memtomem.models import SearchResult as SR
+    from memtomem.search.access import boosted_score
 
     if not results:
         return results
@@ -52,7 +53,9 @@ def apply_importance_boost(
     for r in results:
         imp = importance_scores.get(str(r.chunk.id), 0.0)
         factor = 1.0 + (max_boost - 1.0) * imp  # imp in [0,1] maps to boost [1.0, max_boost]
-        boosted.append(SR(chunk=r.chunk, score=r.score * factor, rank=r.rank, source=r.source))
+        boosted.append(
+            SR(chunk=r.chunk, score=boosted_score(r.score, factor), rank=r.rank, source=r.source)
+        )
 
     boosted.sort(key=lambda r: r.score, reverse=True)
     return [
