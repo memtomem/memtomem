@@ -3038,9 +3038,9 @@
   "deterministic": true,
   "fingerprints": {
     "case_set": "a6fda5fcfc0d51b6abcf177e12ede56f27c782e3f537af42c429d38f84f5dccc",
-    "corpus": "08516823c6d6c746b47f57e26025b68492d321650eba45699a67a6cd18d7bf7b",
-    "index": "8330f0a8e68610c9aac5dc8809d8d9dc625f680f892391dbc5d2fe9d5bbd1844",
-    "profile": "e7f433e0427012008183bab8e0a8af96f66e1a7b541a8fff2f71d5f05329aec3"
+    "corpus": "f2152bb3decd7c77d222c5391f4fcb876c4aea4a39b5f1088c0ebc9b25ce0709",
+    "index": "b4b9822deb27d4585bbda0587cbad4fc5963c64ed99cbdfeae370fef6cf21301",
+    "profile": "fc68180663c8c23509a48b6ce040fd3b530ac3661deb879fdc00df017a3a508b"
   },
   "kind": "replay_report",
   "nondeterministic_stages": [],
@@ -3059,6 +3059,9 @@
       "model": "",
       "policy_fingerprint": "none:v1",
       "provider": "none"
+    },
+    "entity_boost": {
+      "enabled": false
     },
     "importance": {
       "enabled": false

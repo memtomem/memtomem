@@ -338,6 +338,20 @@ async def collect_status_report(app: AppContext) -> dict:
             }
         )
 
+    # Entity-match boost ranks on ``chunk_entities`` rows, which only exist for
+    # chunks a scan has visited — an enabled boost over an empty table is inert
+    # rather than broken, and silently so. Same shape as the MMR advisory above.
+    if config.entity_boost.enabled and hasattr(app.storage, "get_entity_type_counts"):
+        if not await app.storage.get_entity_type_counts():
+            warnings.append(
+                {
+                    "kind": "entity_boost_no_entities",
+                    "detail": "entity_boost.enabled=True but no entities have been "
+                    "extracted — the boost is inert until a scan runs",
+                    "fix": 'run mem_do(action="entity_scan") to populate entities',
+                }
+            )
+
     # #1935: two live memtomem-server processes with this store open. The
     # registry probe is filesystem work behind a bounded cross-process
     # lock, so it runs off the event loop; any failure or incomplete pass
@@ -712,6 +726,11 @@ def _revert_to_stored(app: AppContext) -> str:
         decay_config=config.decay,
         mmr_config=config.mmr,
         access_config=config.access,
+        # Kept in step with the full wiring in ``component_factory`` for the
+        # scoring stages: omitting a boost config here silently disables that
+        # stage until restart (``importance_config`` was missing here).
+        importance_config=config.importance,
+        entity_boost_config=config.entity_boost,
         context_window_config=config.context_window,
         llm_provider=app.llm_provider,
         session_summary_config=config.session_summary,

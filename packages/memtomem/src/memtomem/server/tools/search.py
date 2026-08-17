@@ -94,7 +94,7 @@ async def mem_search(
     field names the model), ``rrf``, ``bm25``/``dense``, or ``none``
     (filter-only enumeration — no relevance scale). Compare scores only within
     one scale, and only across servers with the same optional modifier stages
-    (time decay, access/importance boosts) enabled.
+    (time decay, access/importance/entity boosts) enabled.
     """
     if not query.strip():
         return "Error: query cannot be empty."

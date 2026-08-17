@@ -7,6 +7,23 @@ import math
 from memtomem.models import SearchResult
 
 
+def boosted_score(score: float, factor: float) -> float:
+    """Apply a ``>= 1.0`` boost factor so the score always moves up.
+
+    Shared by every modifier stage (access, importance, entity-match). Plain
+    multiplication only promotes on a non-negative scale: cross-encoder rerank
+    scores are raw logits and are routinely negative, where ``-0.3 * 1.5``
+    is ``-0.45`` — the boosted chunk sinks below an unboosted ``-0.9``. On a
+    negative score the equivalent move toward zero is division, which keeps the
+    transform monotonic in ``factor``, continuous at zero, and identical to the
+    historical behavior everywhere scores are non-negative (BM25, dense, RRF,
+    and rerank providers that emit [0, 1] relevance).
+    """
+    if score < 0:
+        return score / factor if factor else score
+    return score * factor
+
+
 def access_boost(access_count: int, max_boost: float = 1.5) -> float:
     """Log-scale boost based on access count.
 
@@ -41,7 +58,7 @@ def apply_access_boost(
         boosted.append(
             SearchResult(
                 chunk=r.chunk,
-                score=r.score * factor,
+                score=boosted_score(r.score, factor),
                 rank=r.rank,
                 source=r.source,
             )

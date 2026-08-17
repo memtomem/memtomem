@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Iterable, Iterator
@@ -405,6 +406,21 @@ class MMRConfig(ConfigModel):
         return v
 
 
+def _validated_max_boost(v: float) -> float:
+    """Shared guard for every boost stage's ``max_boost``.
+
+    ``NaN`` slips past a bare ``v < 1.0`` (every comparison against NaN is
+    False) and then multiplies into every search score; ``inf`` passes the same
+    way and makes the boosted scores unorderable and the quality-lab payload
+    unserializable. Both are rejected before they can reach a ranking stage.
+    """
+    if not math.isfinite(v):
+        raise ValueError("max_boost must be a finite number")
+    if v < 1.0:
+        raise ValueError("max_boost must be >= 1.0")
+    return v
+
+
 class AccessConfig(ConfigModel):
     enabled: bool = False
     max_boost: float = 1.5  # maximum score multiplier for highly accessed chunks
@@ -412,9 +428,7 @@ class AccessConfig(ConfigModel):
     @field_validator("max_boost")
     @classmethod
     def must_be_at_least_one(cls, v: float) -> float:
-        if v < 1.0:
-            raise ValueError("max_boost must be >= 1.0")
-        return v
+        return _validated_max_boost(v)
 
 
 _NAMESPACE_MAX_LEN = 128
@@ -631,8 +645,62 @@ class ImportanceConfig(ConfigModel):
     @field_validator("max_boost")
     @classmethod
     def must_be_at_least_one(cls, v: float) -> float:
-        if v < 1.0:
-            raise ValueError("max_boost must be >= 1.0")
+        return _validated_max_boost(v)
+
+
+class EntityBoostConfig(ConfigModel):
+    """Stage-7b entity-match boost (see ``search/entity_boost.py``).
+
+    Like ``access`` / ``importance`` this section is deliberately absent from
+    ``MUTABLE_FIELDS`` — changing a ranking stage takes a restart, not a live
+    ``mm config set``.
+    """
+
+    enabled: bool = False
+    max_boost: float = 1.5
+    # Types extracted from the *query*. Conservative default: the
+    # decision/action_item regexes are line-anchored patterns that never fire on
+    # a short query, and ``concept`` needs literal quotes (BM25 already handles
+    # those well).
+    query_entity_types: Annotated[list[str], REPLACE] = Field(
+        default_factory=lambda: ["technology", "person", "date"]
+    )
+    # Coarse floor on stored confidence. Not calibrated across the corpus —
+    # regex values are hardcoded per pattern and LLM values are model-supplied —
+    # so it filters classes of row (0.6 drops PascalCase technology guesses),
+    # it does not rank.
+    min_confidence: float = 0.0
+
+    @field_validator("max_boost")
+    @classmethod
+    def must_be_at_least_one(cls, v: float) -> float:
+        return _validated_max_boost(v)
+
+    @field_validator("query_entity_types")
+    @classmethod
+    def valid_entity_types(cls, v: list[str]) -> list[str]:
+        from memtomem.tools.entity_extraction import _VALID_ENTITY_TYPES
+
+        if not v:
+            raise ValueError("query_entity_types must not be empty")
+        if set(v) - set(_VALID_ENTITY_TYPES):
+            # Names the vocabulary, never the rejected input: retrieval-profile
+            # documents route their rejection messages to users, and that
+            # boundary's contract is that no submitted value is echoed back.
+            raise ValueError(
+                f"query_entity_types entries must be one of: "
+                f"{', '.join(sorted(_VALID_ENTITY_TYPES))}"
+            )
+        # Canonicalized to sorted-unique: extraction consumes this as a set, so
+        # order and repeats cannot change retrieval — but the raw list reaches
+        # the profile fingerprint, where they would read as a ranking change.
+        return sorted(set(v))
+
+    @field_validator("min_confidence")
+    @classmethod
+    def confidence_in_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("min_confidence must be between 0.0 and 1.0")
         return v
 
 
@@ -942,6 +1010,7 @@ class Mem2MemConfig(BaseSettings):
     rerank: RerankConfig = Field(default_factory=RerankConfig)
     query_expansion: QueryExpansionConfig = Field(default_factory=QueryExpansionConfig)
     importance: ImportanceConfig = Field(default_factory=ImportanceConfig)
+    entity_boost: EntityBoostConfig = Field(default_factory=EntityBoostConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     consolidation_schedule: ConsolidationScheduleConfig = Field(
         default_factory=ConsolidationScheduleConfig

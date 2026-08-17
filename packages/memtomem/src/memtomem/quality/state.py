@@ -34,6 +34,11 @@ __all__ = ["current_fingerprints", "nondeterministic_stages"]
 #: leg that calls one is not byte-reproducible. ``none``/``onnx`` are local.
 _REMOTE_EMBEDDING_PROVIDERS = frozenset({"ollama", "openai"})
 
+#: Stand-in written over an entity row's confidence once it has passed this
+#: config's ``min_confidence`` gate. The entity boost is presence-only, so two
+#: rows that both clear the floor rank identically whatever their stored values.
+_GATED_CONFIDENCE = "gated"
+
 
 def current_fingerprints(
     storage: SqliteBackend, config: Mem2MemConfig
@@ -64,6 +69,24 @@ def current_fingerprints(
         if (config.access.enabled or config.importance.enabled)
         else None
     )
+    # Narrow to the rows this config's boost can actually read: the stage only
+    # matches the active ``query_entity_types`` and ignores anything below
+    # ``min_confidence``, so folding the rest in would report drift the ranking
+    # never sees (the same rule as the presence gating above, one level finer).
+    entity_rows = None
+    if config.entity_boost.enabled:
+        active_types = set(config.entity_boost.query_entity_types)
+        floor = config.entity_boost.min_confidence
+        # Rows that survive the gate are equivalent to this config regardless of
+        # how far above the floor they sit — the boost is presence-only — so the
+        # value is normalized away here rather than in the hasher, which stays
+        # honest for callers (``experiment._shared_snapshot``) that need to see
+        # a raw confidence change.
+        entity_rows = [
+            (*row[:6], _GATED_CONFIDENCE)
+            for row in storage.read_entity_rows()
+            if row[4] in active_types and (row[6] or 0.0) >= floor
+        ]
 
     index_fp = index_fingerprint(
         corpus_rows,
@@ -72,6 +95,7 @@ def current_fingerprints(
         embedding_info,
         link_rows=link_rows,
         access_rows=access_rows,
+        entity_rows=entity_rows,
     )
     return (
         {"profile": profile_fp, "corpus": corpus_fingerprint(corpus_rows), "index": index_fp},
