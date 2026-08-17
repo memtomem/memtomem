@@ -435,4 +435,24 @@ mem_delete(source_file="/path/to/notes.md")      # all chunks from a file
 mem_delete(namespace="old-project")              # all chunks in a namespace
 ```
 
+The three forms differ in what they touch on disk, and that difference decides
+whether the deletion survives:
+
+- `source_file=` and `namespace=` remove **index rows only** — the `.md` files
+  stay exactly as they are. Because the content is still on disk inside an
+  indexed directory, the next indexing pass puts the chunks back: a watcher
+  event when the file is next written, an explicit `mm mem rescan`, or any
+  discovery walk. Use them to clear stale rows, not to make a memory stay gone.
+- `chunk_id=` is the outlier: it removes the chunk's line range from the
+  markdown file itself and re-indexes. The content is gone from disk, so
+  re-indexing has nothing to restore.
+
+> **Note**: to keep a file out of the index for good, exclude it and then
+> reclaim the rows it already has — add a matching glob to
+> `indexing.exclude_patterns` and run `mm purge --matching-excluded` (dry-run
+> by default; `--apply` performs the deletion). See
+> [Configuration](../configuration.md) for how the exclude patterns are
+> evaluated. Deleting rows without an exclude rule is a point-in-time cleanup,
+> not an opt-out.
+
 ---
