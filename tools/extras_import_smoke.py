@@ -14,11 +14,19 @@ Keeping the probe table here rather than inline in each workflow means the
 two callers cannot drift apart, and ``--check-coverage`` fails closed when
 ``pyproject.toml`` and this table disagree.
 
-The guard is deliberately per-*distribution*, not per-extra: an extra that
-gains a dependency must gain a probe for it, or coverage fails. Requirements
-are parsed with :mod:`packaging` (a base dependency) so environment markers,
-extras, and version specifiers are read the way pip reads them rather than
-approximated with regexes.
+Two deliberate limits keep the guard small enough to trust:
+
+* It models only plain, unconditional requirements. A requirement carrying
+  an environment marker or a direct URL is **rejected**, not interpreted —
+  the coverage check and the smoke run in different interpreters, so any
+  marker logic here could validate a set the smoke never installs.
+* Coverage is over each extra's *direct* requirements. Transitive breakage
+  is left to ``uv pip check`` and the release preflight.
+
+``--check-coverage`` needs ``packaging`` and is only ever run from the repo
+checkout; ``run_imports`` deliberately imports nothing beyond the standard
+library, because it also runs inside the isolated ``[all]`` release venv,
+where ``packaging`` is not a declared dependency.
 """
 
 from __future__ import annotations
@@ -27,17 +35,13 @@ import argparse
 import importlib
 import sys
 import tomllib
-from importlib.metadata import distribution
+from importlib.metadata import distribution, packages_distributions
 from pathlib import Path
 
-from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
-
 # How to prove each distribution an extra installs actually arrived, keyed by
-# distribution name. The usual probe is the top-level module it provides; a
-# distribution that installs no importable module is probed as
-# ``dist:`` instead (verified through installed metadata). Every *active*
-# direct requirement of an extra must appear here — see ``--check-coverage``.
+# distribution name. The value is the top-level module that distribution
+# provides — verified to *belong* to it, not merely to be importable — or
+# ``DIST_ONLY`` for a distribution that installs no importable module.
 EXTRA_PROBES: dict[str, dict[str, str]] = {
     "onnx": {"fastembed": "fastembed", "urllib3": "urllib3"},
     "ollama": {"ollama": "ollama"},
@@ -66,10 +70,25 @@ UMBRELLA_EXTRA = "all"
 # ``all`` installs the extras above rather than distributions of its own.
 META_EXTRAS = frozenset({UMBRELLA_EXTRA})
 
-# Probe prefix for a distribution that installs no importable top-level
+# Probe value for a distribution that installs no importable top-level
 # module. Spelled explicitly rather than left blank: "nothing to import" and
 # "nobody wrote the probe" must not look alike to the guard.
-DIST_PREFIX = "dist:"
+DIST_ONLY = "<dist-only>"
+
+
+def _canonicalize(name: str) -> str:
+    """PEP 503 name normalization, without importing ``packaging``."""
+    out = []
+    previous_dash = False
+    for char in name.strip().lower():
+        if char in "-_.":
+            if not previous_dash:
+                out.append("-")
+            previous_dash = True
+        else:
+            out.append(char)
+            previous_dash = False
+    return "".join(out)
 
 
 def _optional_dependencies(repo_root: Path) -> dict[str, list[str]]:
@@ -78,56 +97,10 @@ def _optional_dependencies(repo_root: Path) -> dict[str, list[str]]:
         return tomllib.load(handle)["project"]["optional-dependencies"]
 
 
-def _is_active(requirement: Requirement) -> bool:
-    """True when this requirement installs something in *this* environment.
-
-    A marker-excluded requirement installs nothing here, so binding a probe
-    to it would let an unrelated copy of the same distribution — pulled in by
-    another extra or by the base dependencies — satisfy the probe.
-    """
-    return requirement.marker is None or requirement.marker.evaluate()
-
-
-def _active_requirements(requirements: list[str]) -> dict[str, Requirement]:
-    """Canonical distribution name -> requirement, for active requirements."""
-    active: dict[str, Requirement] = {}
-    for text in requirements:
-        parsed = Requirement(text)
-        if canonicalize_name(parsed.name) == canonicalize_name(PROJECT_NAME):
-            continue  # self-reference: an umbrella edge, not a distribution
-        if _is_active(parsed):
-            active[canonicalize_name(parsed.name)] = parsed
-    return active
-
-
-def _inactive_names(requirements: list[str]) -> set[str]:
-    return {
-        canonicalize_name(parsed.name)
-        for parsed in map(Requirement, requirements)
-        if not _is_active(parsed)
-    }
-
-
-def _umbrella_members(requirements: list[str]) -> set[str]:
-    """Extras named in an unconditional ``memtomem[...]`` self-reference.
-
-    A marker makes the reference conditional, so it installs nothing on the
-    interpreters the marker excludes and cannot count as coverage. Version
-    specifiers are irrelevant and allowed (``memtomem[web]>=0.4``).
-    """
-    members: set[str] = set()
-    for text in requirements:
-        parsed = Requirement(text)
-        if canonicalize_name(parsed.name) != canonicalize_name(PROJECT_NAME):
-            continue
-        if parsed.marker is not None:
-            continue
-        members |= set(parsed.extras)
-    return members
-
-
 def check_coverage(repo_root: Path) -> int:
     """Fail when the probe table and pyproject disagree in any direction."""
+    from packaging.requirements import Requirement  # noqa: PLC0415 - see module docstring
+
     optional = _optional_dependencies(repo_root)
     declared = set(optional) - META_EXTRAS
     probed = set(EXTRA_PROBES)
@@ -138,43 +111,68 @@ def check_coverage(repo_root: Path) -> int:
     if unknown := sorted(probed - declared):
         errors.append(f"probes for undeclared extras: {unknown}")
 
+    def parse(extra: str, text: str) -> Requirement | None:
+        """Parse a requirement, rejecting forms this guard does not model."""
+        parsed = Requirement(text)
+        if parsed.marker is not None:
+            errors.append(
+                f"extra '{extra}' declares '{text}' with an environment "
+                f"marker — not modeled, because coverage and the smoke run in "
+                f"different interpreters; handle it explicitly instead"
+            )
+            return None
+        if parsed.url is not None:
+            errors.append(f"extra '{extra}' declares '{text}' as a direct URL — not modeled")
+            return None
+        return parsed
+
+    # Self-references are umbrella edges, not distributions: they need no
+    # probe, but the extras they name must exist.
+    self_referenced: dict[str, set[str]] = {}
+    for extra in sorted(set(optional)):
+        members: set[str] = set()
+        for text in optional[extra]:
+            parsed = parse(extra, text)
+            if parsed is None:
+                continue
+            if _canonicalize(parsed.name) == _canonicalize(PROJECT_NAME):
+                members |= set(parsed.extras)
+        if unknown_members := sorted(members - set(optional)):
+            errors.append(
+                f"extra '{extra}' references '{PROJECT_NAME}{sorted(unknown_members)}', "
+                f"which is not a declared extra"
+            )
+        self_referenced[extra] = members
+
     if UMBRELLA_EXTRA not in optional:
         errors.append(
             f"no '{UMBRELLA_EXTRA}' extra declared — the smoke installs it, so "
             f"without it nothing would be probed at all"
         )
-    elif outside := sorted(declared - _umbrella_members(optional[UMBRELLA_EXTRA])):
+    elif outside := sorted(declared - self_referenced.get(UMBRELLA_EXTRA, set())):
         errors.append(
             f"extras missing from '{UMBRELLA_EXTRA}': {outside} — the smoke "
-            f"installs '{UMBRELLA_EXTRA}', so their probes would never run "
-            f"(only an unconditional '{PROJECT_NAME}[...]' reference counts)"
+            f"installs '{UMBRELLA_EXTRA}', so their probes would never run"
         )
 
     for extra in sorted(probed & declared):
-        # Canonicalize probe keys too, so the table may spell a distribution
-        # the way its module does (``tree_sitter_python``) without the guard
-        # reading that as a different distribution.
-        probes = {canonicalize_name(name): probe for name, probe in EXTRA_PROBES[extra].items()}
-        active = _active_requirements(optional[extra])
-        if unprobed := sorted(set(active) - set(probes)):
+        probes = {_canonicalize(name): probe for name, probe in EXTRA_PROBES[extra].items()}
+        required = {
+            _canonicalize(parsed.name)
+            for text in optional[extra]
+            if (parsed := parse(extra, text)) is not None
+            and _canonicalize(parsed.name) != _canonicalize(PROJECT_NAME)
+        }
+        if unprobed := sorted(required - set(probes)):
             errors.append(
                 f"extra '{extra}' installs {unprobed} with no probe — every "
                 f"distribution an extra adds must be proved to arrive"
             )
-        if stale := sorted(set(probes) - set(active)):
-            inactive = _inactive_names(optional[extra])
-            for name in stale:
-                if name in inactive:
-                    errors.append(
-                        f"extra '{extra}' probes '{name}', which its marker "
-                        f"excludes in this environment — the probe would be "
-                        f"satisfied by some other extra's copy"
-                    )
-                else:
-                    errors.append(
-                        f"extra '{extra}' probes '{name}', which it does not "
-                        f"declare (declares: {sorted(active)})"
-                    )
+        if foreign := sorted(set(probes) - required):
+            errors.append(
+                f"extra '{extra}' probes {foreign}, which it does not declare "
+                f"(declares: {sorted(required)})"
+            )
         if empty := sorted(name for name, probe in probes.items() if not probe):
             errors.append(f"extra '{extra}' has empty probes for {empty}")
 
@@ -182,24 +180,48 @@ def check_coverage(repo_root: Path) -> int:
         total = sum(len(probes) for probes in EXTRA_PROBES.values())
         print(f"extras coverage OK ({len(probed)} extras, {total} distributions probed)")
         return 0
-    for error in errors:
+    for error in dict.fromkeys(errors):  # stable order, no duplicates
         print(f"ERROR: {error}", file=sys.stderr)
     print(f"Add or remove entries in {Path(__file__).name}:EXTRA_PROBES.", file=sys.stderr)
     return 1
 
 
 def run_imports() -> int:
-    """Run every probe in the current interpreter."""
+    """Run every probe in the current interpreter.
+
+    Each probe proves two things about its own distribution: that the
+    distribution is installed, and that the module named is one the
+    distribution actually provides. Checking only that "some module imports"
+    would let an unrelated module — or a copy another extra installed —
+    stand in for it.
+    """
     failures: list[str] = []
+    owners = packages_distributions()
     for extra, probes in sorted(EXTRA_PROBES.items()):
         for dist_name, probe in sorted(probes.items()):
+            label = f"{extra}: {dist_name}"
             try:
-                if probe.startswith(DIST_PREFIX):
-                    distribution(probe[len(DIST_PREFIX) :])
-                else:
-                    importlib.import_module(probe)
+                distribution(dist_name)
             except Exception as exc:  # noqa: BLE001 - report every failure, not the first
-                failures.append(f"{extra}: probe {probe} for {dist_name} failed: {exc!r}")
+                failures.append(f"{label} is not installed: {exc!r}")
+                continue
+            if probe == DIST_ONLY:
+                continue
+            try:
+                importlib.import_module(probe)
+            except Exception as exc:  # noqa: BLE001 - report every failure, not the first
+                failures.append(f"{label}: import {probe} failed: {exc!r}")
+                continue
+            providers = {_canonicalize(name) for name in owners.get(probe, [])}
+            if _canonicalize(dist_name) not in providers:
+                # No fallback when ``providers`` is empty: a module no
+                # distribution claims (a stdlib name, say) is precisely the
+                # substitution this check exists to catch.
+                failures.append(
+                    f"{label}: module '{probe}' is provided by "
+                    f"{sorted(providers) or 'no installed distribution'}, not by "
+                    f"'{dist_name}' — the probe proves nothing about this extra"
+                )
     if failures:
         for failure in failures:
             print(f"ERROR: {failure}", file=sys.stderr)
