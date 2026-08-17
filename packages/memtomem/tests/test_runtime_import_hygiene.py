@@ -13,24 +13,33 @@ an earlier test importing ``memtomem.server`` would mask the regression
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
-_ASSERT_CLEAN = """
+_TRANSPORT_ROOTS = ("mcp", "memtomem.server", "memtomem.web")
+
+_ASSERT_CLEAN = f"""
 import sys
 
+roots = {_TRANSPORT_ROOTS!r}
 leaked = sorted(
     name
     for name in sys.modules
-    if name == "mcp" or name.startswith("mcp.")
-    or name == "memtomem.server" or name.startswith("memtomem.server.")
+    if any(name == root or name.startswith(root + ".") for root in roots)
 )
 assert not leaked, "transport modules leaked into the runtime import graph: " + repr(leaked)
 """
 
 
-def _run(body: str) -> None:
-    subprocess.run([sys.executable, "-c", body + _ASSERT_CLEAN], check=True)
+def _run(body: str, *, home: Path | None = None) -> None:
+    env = None
+    if home is not None:
+        # Isolate ambient config: MemtomemStore resolves ``config.d`` and
+        # persisted overrides from the real home directory otherwise.
+        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+    subprocess.run([sys.executable, "-c", body + _ASSERT_CLEAN], check=True, env=env)
 
 
 def test_runtime_import_does_not_pull_in_the_mcp_server() -> None:
@@ -74,4 +83,46 @@ async def main():
 
 asyncio.run(main())
 """
+    )
+
+
+def test_memtomem_store_init_and_close_stay_off_the_transport_stack(tmp_path) -> None:
+    """The named consumer, not just the layer it is supposed to use.
+
+    The checks above import ``memtomem.runtime`` directly, so they would stay
+    green if ``MemtomemStore`` quietly went back to
+    ``memtomem.server.component_factory`` — the regression this whole move
+    exists to prevent. Drive the adapter itself instead.
+
+    Scope note: only the lazy-init and close path is asserted. ``search`` is
+    not clean yet — it lazy-imports ``_resolve_project_context_root`` from
+    ``memtomem.server.tools.search``, the last core→server edge in this
+    adapter. Extend this case to cover ``search``/``add`` in the change that
+    relocates that helper.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    db_path = tmp_path / "store.db"
+    _run(
+        f"""
+import asyncio
+
+from memtomem.integrations.langgraph import MemtomemStore
+
+store = MemtomemStore(
+    config_overrides={{
+        "storage": {{"sqlite_path": {str(db_path)!r}}},
+        "embedding": {{"provider": "none", "dimension": 0}},
+    }}
+)
+
+async def main():
+    comp = await store._ensure_init()
+    assert comp.search_pipeline is not None
+    await store.close()
+    assert store._components is None
+
+asyncio.run(main())
+""",
+        home=home,
     )

@@ -113,7 +113,7 @@ GENRES = {"runbook", "postmortem", "adr", "troubleshooting"}
 async def measure_topic(topic: str) -> None:
     from memtomem.config import Mem2MemConfig
     import memtomem.config as _cfg
-    from memtomem.server.component_factory import close_components, create_components
+    from memtomem.runtime import close_components, create_components
 
     if topic not in QUERIES:
         available = ", ".join(sorted(QUERIES))
