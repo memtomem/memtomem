@@ -63,7 +63,7 @@ Restating the issue's scope honesty, confirmed by the mechanics:
     `0 / (k + rank) = 0` in fusion and with `candidate_k ≥ top_k` the top-k is
     purely dense-ranked. This isolates the dense-quality loss that fusion masks.
 - Truncation + L2-renorm is applied by a `TruncatingEmbedder` wrapper installed
-  via a monkeypatch on `component_factory.create_embedder` — **no production code
+  via a monkeypatch on `memtomem.runtime.components.create_embedder` — **no production code
   is changed**. Native full-dimension vectors are cached across tracks, so each
   unique text is embedded exactly once for the whole sweep (312 unique texts
   embedded; 4680 subsequent lookups served from cache — the bge-m3 model still

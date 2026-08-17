@@ -182,3 +182,122 @@ class TestEntityMixin:
         counts = await storage.get_entity_type_counts()
         assert counts["person"] == 2
         assert counts["tech"] == 1
+
+
+class TestGetMatchingEntities:
+    """Batched query-entity → chunk matching (Stage-7b boost input)."""
+
+    @pytest.mark.asyncio
+    async def test_matches_are_case_insensitive(self, storage):
+        chunk = make_chunk("sqlite notes")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "technology", "entity_value": "SQLite"}]
+        )
+
+        matches = await storage.get_matching_entities([str(chunk.id)], [("technology", "sqlite")])
+        assert matches == {str(chunk.id): {("technology", "sqlite")}}
+
+    @pytest.mark.asyncio
+    async def test_no_substring_match(self, storage):
+        # "git" must not match stored "github" — a substring rule would let one
+        # query term hit every value containing it.
+        chunk = make_chunk("github notes")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "technology", "entity_value": "github"}]
+        )
+
+        assert await storage.get_matching_entities([str(chunk.id)], [("technology", "git")]) == {}
+
+    @pytest.mark.asyncio
+    async def test_type_must_also_match(self, storage):
+        chunk = make_chunk("ambiguous")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "concept", "entity_value": "rust"}]
+        )
+
+        assert await storage.get_matching_entities([str(chunk.id)], [("technology", "rust")]) == {}
+
+    @pytest.mark.asyncio
+    async def test_distinct_collapses_duplicate_rows(self, storage):
+        # A namespace merge can leave duplicate rows (no uniqueness constraint),
+        # so the boost counts distinct keys, never rows.
+        chunk = make_chunk("dupes")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        for _ in range(3):
+            db.execute(
+                "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
+                "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(chunk.id), "technology", "sqlite", 1.0, 0, "2026-01-01T00:00:00"),
+            )
+        db.commit()
+
+        matches = await storage.get_matching_entities([str(chunk.id)], [("technology", "sqlite")])
+        assert matches == {str(chunk.id): {("technology", "sqlite")}}
+
+    @pytest.mark.asyncio
+    async def test_min_confidence_filters(self, storage):
+        chunk = make_chunk("low confidence guess")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [{"entity_type": "technology", "entity_value": "SomeGuess", "confidence": 0.5}],
+        )
+
+        keys = [("technology", "someguess")]
+        assert await storage.get_matching_entities([str(chunk.id)], keys) != {}
+        assert await storage.get_matching_entities([str(chunk.id)], keys, min_confidence=0.6) == {}
+
+    @pytest.mark.asyncio
+    async def test_only_requested_chunks(self, storage):
+        c1, c2 = make_chunk("first"), make_chunk("second")
+        await storage.upsert_chunks([c1, c2])
+        for c in (c1, c2):
+            await storage.upsert_entities(
+                str(c.id), [{"entity_type": "technology", "entity_value": "sqlite"}]
+            )
+
+        matches = await storage.get_matching_entities([str(c1.id)], [("technology", "sqlite")])
+        assert set(matches) == {str(c1.id)}
+
+    @pytest.mark.asyncio
+    async def test_partial_match_reports_only_present_keys(self, storage):
+        chunk = make_chunk("partial")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "technology", "entity_value": "sqlite"}]
+        )
+
+        matches = await storage.get_matching_entities(
+            [str(chunk.id)], [("technology", "sqlite"), ("person", "@alice")]
+        )
+        assert matches == {str(chunk.id): {("technology", "sqlite")}}
+
+    @pytest.mark.asyncio
+    async def test_empty_inputs_short_circuit(self, storage):
+        chunk = make_chunk("x")
+        await storage.upsert_chunks([chunk])
+        assert await storage.get_matching_entities([], [("technology", "sqlite")]) == {}
+        assert await storage.get_matching_entities([str(chunk.id)], []) == {}
+
+
+class TestReadEntityRows:
+    @pytest.mark.asyncio
+    async def test_rows_carry_durable_identity(self, storage):
+        chunk = make_chunk("fingerprint input")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [{"entity_type": "technology", "entity_value": "sqlite", "confidence": 0.9}],
+        )
+
+        rows = storage.read_entity_rows()
+        assert len(rows) == 1
+        content_hash, namespace, source_file, start_line, etype, value, conf = rows[0]
+        assert etype == "technology"
+        assert value == "sqlite"
+        assert conf == pytest.approx(0.9)
+        assert content_hash  # durable identity, not the storage-local uuid

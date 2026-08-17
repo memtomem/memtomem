@@ -46,7 +46,7 @@ from memtomem.quality.replay import MAX_AS_OF_UNIX, replay_cases, resolve_case_i
 
 if TYPE_CHECKING:
     from memtomem.quality.gate import GatePolicy
-    from memtomem.server.component_factory import Components
+    from memtomem.runtime.components import Components
 
 __all__ = [
     "EXPERIMENT_SCHEMA_VERSION",
@@ -92,6 +92,7 @@ def _shared_snapshot(storage: Any) -> dict[str, str]:
             storage.stored_embedding_info,
             link_rows=storage.read_link_topology_rows(),
             access_rows=storage.read_access_counts(),
+            entity_rows=storage.read_entity_rows(),
         ),
     }
 
@@ -231,7 +232,7 @@ async def _replay_profile(
             name=name, source="ambient", document=None, document_fingerprint=None, report=report
         )
 
-    from memtomem.server.component_factory import close_components, create_components
+    from memtomem.runtime.components import close_components, create_components
 
     candidate_config = apply_profile(components.config, doc)
     # Defense in depth: the profile schema forbids the tokenizer (it is pinned by

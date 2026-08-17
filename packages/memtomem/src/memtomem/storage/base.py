@@ -363,6 +363,18 @@ class StorageBackend(Protocol):
     async def update_importance_scores(self, scores: dict[str, float]) -> int: ...
     async def get_importance_scores(self, chunk_ids: list) -> dict[str, float]: ...
 
+    # Entity-match boost (Stage 7b). The rest of the entity surface
+    # (upsert/scan/search) is reached by duck typing from the entity tools;
+    # this one is declared because the search pipeline types storage as
+    # ``StorageBackend``.
+    async def get_matching_entities(
+        self,
+        chunk_ids: list[str],
+        entity_keys: list[tuple[str, str]],
+        min_confidence: float = 0.0,
+    ) -> dict[str, set[tuple[str, str]]]: ...
+    async def get_entity_type_counts(self) -> dict[str, int]: ...
+
     # Analytics (replaces direct _get_db() access in tools)
     async def get_health_report(self, namespace: str | None = None) -> dict: ...
     async def get_frequently_accessed(

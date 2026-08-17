@@ -898,6 +898,24 @@ class EvalCaseMixin:
             .fetchall()
         )
 
+    def read_entity_rows(self) -> list[tuple]:
+        """(content_hash, namespace, source_file, start_line, type, value, confidence) per entity.
+
+        Keyed by durable chunk identity like :meth:`read_access_counts`, since the
+        Stage-7b boost ranks per chunk. ``position``/``created_at`` are excluded —
+        the boost never reads them, so they must not manufacture drift. Only an
+        input when entity boost is enabled.
+        """
+        return (
+            self._get_read_db()
+            .execute(
+                "SELECT c.content_hash, c.namespace, c.source_file, c.start_line, "
+                "e.entity_type, e.entity_value, e.confidence "
+                "FROM chunk_entities e JOIN chunks c ON c.id = e.chunk_id"
+            )
+            .fetchall()
+        )
+
     def validate_case_filters(self, filters: object) -> None:
         """Validate a case's ``filters`` against the portable vocabulary.
 

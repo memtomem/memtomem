@@ -34,7 +34,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "memtomem"
 # - ``pipeline.py``: internal pipeline calls already inside ``search``
 #   threading the kwarg from the outer invocation.
 # - ``consolidation_engine.py``: archive lookups by chunk_id.
-# - ``component_factory.py``: pipeline construction time, not search.
+# - ``runtime/components.py``: pipeline construction time, not search.
 # - ``hot_reload.py``, ``tag_management.py``: cache invalidation hooks.
 # - ``test_*``: tests file scanning is excluded from this guard
 #   already (the SRC_ROOT walk only covers ``src/memtomem``).
@@ -53,7 +53,7 @@ _ALLOWED_CALLSITES: set[tuple[str, str]] = {
 _ALLOWED_FILES: set[str] = {
     "memtomem/storage/sqlite_backend.py",  # backend internals; threading happens at the outer
     "memtomem/search/pipeline.py",  # threaded inside, see _ALLOWED_CALLSITES above
-    "memtomem/server/component_factory.py",
+    "memtomem/runtime/components.py",
     "memtomem/web/hot_reload.py",
     "memtomem/services/tag_management.py",
 }

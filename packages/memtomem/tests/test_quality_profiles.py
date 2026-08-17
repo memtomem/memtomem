@@ -97,6 +97,7 @@ def test_canonical_covers_every_eligible_field():
         "mmr",
         "access",
         "importance",
+        "entity_boost",
         "context_window",
         "rerank",
         "query_expansion",
@@ -198,7 +199,9 @@ _SECRET = "ghp_" + "a" * 36  # a shape the privacy scanner flags, charset-valid
         (_doc(name="Bad Name!"), None),
         (_doc(name=_SECRET), _SECRET),
         (_doc({}, description="see /etc/passwd"), "passwd"),
-        ({"schema_version": 2, "kind": PROFILE_KIND, "name": "p"}, None),
+        # An unsupported (future) schema version. Bumped past
+        # SUPPORTED_PROFILE_SCHEMA_VERSIONS when v2 landed with entity_boost.
+        ({"schema_version": 99, "kind": PROFILE_KIND, "name": "p"}, None),
         ({"schema_version": True, "kind": PROFILE_KIND, "name": "p"}, None),
         ({"schema_version": 1, "kind": "something_else", "name": "p"}, None),
     ],
@@ -356,3 +359,83 @@ def test_clean_profile_has_no_warnings():
     ambient = Mem2MemConfig()
     doc = load_profile_document(_doc({"decay": {"enabled": True}}))
     assert profile_warnings(apply_profile(ambient, doc), doc) == []
+
+
+# --------------------------------------------------------------------------- #
+# Schema versioning — a new ranking section must not move an old profile's identity
+# --------------------------------------------------------------------------- #
+def _versioned_doc(version, knobs=None, name="alpha"):
+    return {
+        "schema_version": version,
+        "kind": "retrieval_profile",
+        "name": name,
+        "knobs": knobs or {},
+    }
+
+
+def test_v1_documents_still_load():
+    doc = load_profile_document(_versioned_doc(1))
+    assert doc.schema_version == 1
+
+
+def test_v1_canonical_excludes_sections_it_predates():
+    v1 = canonicalize_profile(load_profile_document(_versioned_doc(1)))
+    v2 = canonicalize_profile(load_profile_document(_versioned_doc(2)))
+    assert "entity_boost" not in v1
+    assert "entity_boost" in v2
+    # Everything the two versions share is canonicalized identically.
+    assert {k: v for k, v in v2.items() if k != "entity_boost"} == v1
+
+
+def test_v1_fingerprint_is_unaffected_by_the_new_section():
+    # The regression Codex flagged: adding a section must not silently change
+    # the identity of every profile already written at v1.
+    v1_fp = profile_doc_fingerprint(load_profile_document(_versioned_doc(1)))[0]
+    v2_fp = profile_doc_fingerprint(load_profile_document(_versioned_doc(2)))[0]
+    assert v1_fp != v2_fp  # different documents, different identity
+    # Stable across reloads of the same v1 document.
+    assert profile_doc_fingerprint(load_profile_document(_versioned_doc(1)))[0] == v1_fp
+
+
+def test_v1_document_may_not_carry_a_v2_section():
+    with pytest.raises(EvalCaseValidationError, match="entity_boost"):
+        load_profile_document(_versioned_doc(1, {"entity_boost": {"enabled": True}}))
+
+
+def test_unsupported_schema_version_is_rejected():
+    with pytest.raises(EvalCaseValidationError, match="schema_version"):
+        load_profile_document(_versioned_doc(3))
+
+
+def test_v1_apply_leaves_entity_boost_at_ambient():
+    ambient = Mem2MemConfig()
+    ambient.entity_boost.enabled = True
+    applied = apply_profile(ambient, load_profile_document(_versioned_doc(1)))
+    assert applied.entity_boost.enabled is True  # pinned, not reset by the profile
+
+
+def test_v2_apply_sets_entity_boost():
+    ambient = Mem2MemConfig()
+    applied = apply_profile(
+        ambient,
+        load_profile_document(
+            _versioned_doc(2, {"entity_boost": {"enabled": True, "max_boost": 1.9}})
+        ),
+    )
+    assert applied.entity_boost.enabled is True
+    assert applied.entity_boost.max_boost == 1.9
+
+
+def test_entity_boost_knobs_reject_unknown_field():
+    with pytest.raises(EvalCaseValidationError):
+        load_profile_document(_versioned_doc(2, {"entity_boost": {"nope": 1}}))
+
+
+def test_entity_boost_query_types_validated_against_vocabulary():
+    with pytest.raises(EvalCaseValidationError) as exc:
+        load_profile_document(
+            _versioned_doc(2, {"entity_boost": {"query_entity_types": ["nonsense"]}})
+        )
+    # Same contract as every other rejection here: the vocabulary is named, the
+    # submitted value is not echoed back.
+    assert "nonsense" not in str(exc.value)
