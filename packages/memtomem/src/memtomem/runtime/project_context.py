@@ -6,9 +6,20 @@ in the runtime layer because all four entry points need it: the MCP tools, the
 CLI, the web routes, and the in-process LangGraph adapter. It reads only
 configuration and the cwd, so it pulls in no transport.
 
-``memtomem.server.tools.search`` re-exports both names; callers that patch
-``memtomem.server.tools.search._resolve_project_context_root`` in tests keep
-working, because the consumers import it from there at call time.
+``memtomem.server.tools.search`` re-exports both names, so no call site had to
+move. That leaves three different places a test can patch, and which one works
+depends on how the consumer binds the name:
+
+- ``memtomem.runtime.project_context`` — for callers that import from the
+  defining module (``integrations/langgraph.py``).
+- ``memtomem.server.tools.search`` — for callers that import from the
+  re-export *inside a function*, so the lookup happens per call. Most MCP
+  tools and ``cli/memory.py`` work this way, and the long-standing patch
+  target in the suite is this one.
+- the consumer's own module — for callers that bind at import time
+  (``cli/search.py``, ``web/routes/{search,chunks,timeline}.py``). Patching
+  either module above does not reach these; their local name is already
+  resolved.
 """
 
 from __future__ import annotations
