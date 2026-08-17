@@ -313,12 +313,23 @@ def index_fingerprint(
         # entity_type, entity_value, confidence). ``entity_value`` is
         # content-derived so it is hashed (same rule as fts_content above);
         # ``entity_type`` is a closed six-value vocabulary, not content, so it
-        # stays readable. Multiplicity-preserving: the duplicate rows a
-        # namespace merge can leave behind are real state and read as drift.
+        # stays readable.
+        #
+        # Folded as the *match set*, not the raw rows: the boost matches
+        # case-insensitively with ``SELECT DISTINCT``, so "SQLite" vs "sqlite"
+        # and the duplicate rows a namespace merge can leave behind are
+        # indistinguishable to ranking. Hashing them raw would report drift on
+        # indexes that rank identically. Confidence is dropped for the same
+        # reason — it gates via ``min_confidence`` before this point (see
+        # ``quality/state.py``), and past that gate its value is inert.
         payload["entities"] = sorted(
-            _chunk_identity(content_hash, namespace, source, start_line)
-            + [str(entity_type), _sha256_text(entity_value or ""), str(confidence)]
-            for content_hash, namespace, source, start_line, entity_type, entity_value, confidence in entity_rows  # noqa: E501
+            {
+                tuple(
+                    _chunk_identity(content_hash, namespace, source, start_line)
+                    + [str(entity_type), _sha256_text((entity_value or "").lower())]
+                )
+                for content_hash, namespace, source, start_line, entity_type, entity_value, _conf in entity_rows  # noqa: E501
+            }
         )
     return _sha256_json(payload)
 

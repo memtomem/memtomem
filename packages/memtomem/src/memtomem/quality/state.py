@@ -64,7 +64,19 @@ def current_fingerprints(
         if (config.access.enabled or config.importance.enabled)
         else None
     )
-    entity_rows = storage.read_entity_rows() if config.entity_boost.enabled else None
+    # Narrow to the rows this config's boost can actually read: the stage only
+    # matches the active ``query_entity_types`` and ignores anything below
+    # ``min_confidence``, so folding the rest in would report drift the ranking
+    # never sees (the same rule as the presence gating above, one level finer).
+    entity_rows = None
+    if config.entity_boost.enabled:
+        active_types = set(config.entity_boost.query_entity_types)
+        floor = config.entity_boost.min_confidence
+        entity_rows = [
+            row
+            for row in storage.read_entity_rows()
+            if row[4] in active_types and (row[6] or 0.0) >= floor
+        ]
 
     index_fp = index_fingerprint(
         corpus_rows,

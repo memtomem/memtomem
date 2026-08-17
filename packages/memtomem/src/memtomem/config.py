@@ -673,11 +673,13 @@ class EntityBoostConfig(ConfigModel):
 
         if not v:
             raise ValueError("query_entity_types must not be empty")
-        invalid = sorted(set(v) - set(_VALID_ENTITY_TYPES))
-        if invalid:
+        if set(v) - set(_VALID_ENTITY_TYPES):
+            # Names the vocabulary, never the rejected input: retrieval-profile
+            # documents route their rejection messages to users, and that
+            # boundary's contract is that no submitted value is echoed back.
             raise ValueError(
-                f"invalid entity types: {', '.join(invalid)} "
-                f"(valid: {', '.join(sorted(_VALID_ENTITY_TYPES))})"
+                f"query_entity_types entries must be one of: "
+                f"{', '.join(sorted(_VALID_ENTITY_TYPES))}"
             )
         return v
 

@@ -19,6 +19,7 @@ import re
 from collections.abc import Sequence
 
 from memtomem.models import SearchResult
+from memtomem.search.access import boosted_score
 
 # Deterministic cap on the query-side entity set. Bounds both the SQL OR-clause
 # and the coverage denominator; not a config knob because it exists to keep the
@@ -120,7 +121,7 @@ def apply_entity_boost(
         boosted.append(
             SearchResult(
                 chunk=r.chunk,
-                score=r.score * factor,
+                score=boosted_score(r.score, factor),
                 rank=r.rank,
                 source=r.source,
             )

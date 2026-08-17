@@ -198,8 +198,16 @@ Scan indexed chunks and extract structured entities (people, dates, decisions, t
 mem_entity_scan(dry_run=True)                       # preview
 mem_entity_scan()                                   # extract & store
 mem_entity_scan(entity_types=["person", "decision"])# specific types only
+mem_entity_scan(overwrite=True)                     # re-extract already-scanned chunks
 mem_entity_search(entity_type="person")             # query extracted entities
 ```
+
+By default a chunk that already has entities is skipped. `overwrite=True`
+re-extracts every matching chunk, and a chunk whose content no longer yields
+any entity has its old rows **cleared** — reported as `Chunks cleared` in the
+summary. That matters once [entity boost](../configuration.md#entity-match-boost)
+is enabled: entities left over from a previous version of the content would keep
+boosting the chunk for a query it no longer matches.
 
 > **LLM enhancement**: When LLM is enabled, `mem_entity_scan` uses LLM-based structured extraction for higher accuracy (especially person names and decisions). Falls back to regex/pattern matching when LLM is disabled or fails.
 

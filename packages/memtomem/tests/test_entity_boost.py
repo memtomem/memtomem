@@ -142,3 +142,48 @@ class TestApplyEntityBoost:
         r = _make_result(0.5)
         out = apply_entity_boost([r], {str(r.chunk.id): {("technology", "x")}}, 0)
         assert out[0].score == pytest.approx(0.5)
+
+
+class TestNegativeScoreBoost:
+    """A boost must never demote — including on the rerank scale, where local
+    cross-encoders emit raw logits that are routinely negative."""
+
+    def test_scalar_moves_negative_scores_up(self):
+        from memtomem.search.access import boosted_score
+
+        assert boosted_score(-0.3, 1.5) == pytest.approx(-0.2)
+        assert boosted_score(0.3, 1.5) == pytest.approx(0.45)
+        assert boosted_score(0.0, 1.5) == pytest.approx(0.0)
+        assert boosted_score(-0.3, 1.0) == pytest.approx(-0.3)  # no-op factor
+
+    def test_stronger_factor_never_lowers_the_score(self):
+        from memtomem.search.access import boosted_score
+
+        for score in (-2.0, -0.3, 0.0, 0.3, 2.0):
+            weak, strong = boosted_score(score, 1.2), boosted_score(score, 2.0)
+            assert strong >= weak >= score
+
+    def test_matched_result_outranks_unmatched_on_negative_scale(self):
+        matched = _make_result(-0.30)
+        unmatched = _make_result(-0.90)
+        boosted = apply_entity_boost(
+            [matched, unmatched],
+            {str(matched.chunk.id): {("technology", "sqlite")}},
+            1,
+            max_boost=1.5,
+        )
+        assert boosted[0].chunk.id == matched.chunk.id
+        assert boosted[0].score == pytest.approx(-0.2)
+        assert boosted[1].score == pytest.approx(-0.9)
+
+    def test_sibling_boosts_share_the_contract(self):
+        from memtomem.search.access import apply_access_boost
+        from memtomem.search.importance import apply_importance_boost
+
+        hi, lo = _make_result(-0.3), _make_result(-0.9)
+        for boosted in (
+            apply_access_boost([hi, lo], {str(hi.chunk.id): 100}),
+            apply_importance_boost([hi, lo], {str(hi.chunk.id): 1.0}),
+        ):
+            assert boosted[0].chunk.id == hi.chunk.id
+            assert boosted[0].score > hi.score

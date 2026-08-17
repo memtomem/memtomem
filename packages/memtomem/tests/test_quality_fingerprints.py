@@ -423,21 +423,34 @@ class TestEntityRowsFingerprint:
         b = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "rust", 0.9)])
         assert a != b
 
-    def test_confidence_change_drifts(self):
-        # min_confidence gates on it, so it is a ranking input.
+    def test_confidence_is_not_folded(self):
+        # min_confidence gates rows out before they reach here (quality/state.py);
+        # past that gate the stored value is inert, so it must not manufacture
+        # drift between indexes that rank identically.
         a = self._base(
             entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
         )
         b = self._base(
             entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.5)]
         )
-        assert a != b
+        assert a == b
 
-    def test_duplicate_rows_drift(self):
-        # A namespace merge can duplicate rows; that is real state, so the
-        # multiplicity-preserving fold must see it.
+    def test_case_only_difference_is_not_drift(self):
+        # Matching is case-insensitive, so these two indexes rank identically.
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "SQLite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        assert a == b
+
+    def test_duplicate_rows_are_not_drift(self):
+        # A namespace merge can duplicate rows, but the boost reads them through
+        # SELECT DISTINCT and counts distinct keys — duplicates cannot change a
+        # ranking, so they must not read as drift.
         one = [("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
-        assert self._base(entity_rows=one) != self._base(entity_rows=one * 2)
+        assert self._base(entity_rows=one) == self._base(entity_rows=one * 2)
 
     def test_swap_between_duplicate_content_drifts(self):
         # Same content hash, different chunk identity — the boost ranks per
