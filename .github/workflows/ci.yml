@@ -255,6 +255,40 @@ jobs:
       - run: npm test
       - run: npm run pack:check
 
+  packaging-smoke:
+    # Mirrors the wheel-install half of the release preflight so a dependency
+    # bump that breaks an extra's install or import fails here, on the PR,
+    # instead of at tag time when the release is already in flight (#2071).
+    name: packaging-smoke (wheel + all extras)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Every declared extra has an import probe
+        run: uv run --no-project --python 3.12 python tools/extras_import_smoke.py
+          --check-coverage --repo-root .
+      - name: Build wheel
+        run: uv build packages/memtomem --out-dir ci-dist
+      - name: Base install imports and runs
+        run: |
+          set -euo pipefail
+          wheel=$(find ci-dist -maxdepth 1 -name '*.whl' -print -quit)
+          uv venv --python 3.12 "$RUNNER_TEMP/ci-base"
+          uv pip install --python "$RUNNER_TEMP/ci-base/bin/python" "$wheel"
+          uv pip check --python "$RUNNER_TEMP/ci-base/bin/python"
+          "$RUNNER_TEMP/ci-base/bin/mm" --version
+      - name: All-extras install imports
+        run: |
+          set -euo pipefail
+          wheel=$(find ci-dist -maxdepth 1 -name '*.whl' -print -quit)
+          uv venv --python 3.12 "$RUNNER_TEMP/ci-all"
+          uv pip install --python "$RUNNER_TEMP/ci-all/bin/python" "${wheel}[all]"
+          uv pip check --python "$RUNNER_TEMP/ci-all/bin/python"
+          "$RUNNER_TEMP/ci-all/bin/python" tools/extras_import_smoke.py
+
   vendored-assets:
     name: vendored-assets (OSV blocking)
     runs-on: ubuntu-latest
