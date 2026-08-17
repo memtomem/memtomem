@@ -95,14 +95,20 @@ uv tool install --reinstall 'memtomem[onnx,web]'
 | Extra | Adds |
 |---|---|
 | `onnx` | Local FastEmbed embeddings and reranking |
-| `ollama` | Ollama Python SDK integration |
-| `openai` | OpenAI Python SDK integration |
+| `ollama` | Installs the Ollama Python SDK — not required for the Ollama provider |
+| `openai` | Installs the OpenAI Python SDK — not required for the OpenAI provider |
 | `korean` | Kiwi Korean tokenizer |
 | `code` | Tree-sitter Python, JavaScript, and TypeScript chunking |
 | `web` | FastAPI/uvicorn Web UI runtime |
 | `langfuse` | Langfuse tracing |
 | `langgraph` | `MemtomemStore` and `MemtomemBaseStore` adapters |
 | `all` | Every extra above |
+
+The `ollama` and `openai` extras are the two exceptions to the "extra unlocks a
+feature" rule: both providers call their HTTP APIs directly through `httpx`, a
+base dependency, so **the Ollama and OpenAI providers work without installing
+either extra**. The extras only vendor the official SDKs for code of your own
+that wants them; they are kept for backwards compatibility.
 
 ### Option B: Project dependency (per-project isolation)
 
