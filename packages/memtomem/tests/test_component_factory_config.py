@@ -6,7 +6,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_factory_can_skip_already_resolved_ambient_config(monkeypatch):
     import memtomem.config as _cfg
-    import memtomem.server.component_factory as _factory
+    import memtomem.runtime.components as _factory
 
     def _unexpected(_config):
         raise AssertionError("ambient configuration was loaded again")

@@ -397,3 +397,204 @@ class TestStorageReadHelpers:
         )
         assert fp1 == fp2  # deterministic across reads
         assert corpus_fingerprint(corpus_rows)
+
+
+class TestEntityRowsFingerprint:
+    """Entity rows are a ranking input only when the Stage-7b boost is on."""
+
+    def _base(self, **kw):
+        return index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, **kw)
+
+    def test_entity_rows_only_count_when_provided(self):
+        rows = [("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        assert self._base(entity_rows=rows) != self._base()
+
+    def test_value_change_drifts(self):
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "duckdb", 0.9)]
+        )
+        assert a != b
+
+    def test_type_change_drifts(self):
+        a = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "rust", 0.9)])
+        b = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "rust", 0.9)])
+        assert a != b
+
+    def test_confidence_change_drifts(self):
+        # The hasher keeps confidence: a raw change can cross some candidate
+        # profile's min_confidence floor. Normalizing it past that gate is
+        # quality/state.py's job (see TestGatedConfidenceNormalization), so the
+        # profile-independent snapshot in experiment.py stays able to see a
+        # concurrent writer nudging a value.
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.5)]
+        )
+        assert a != b
+
+    def test_case_only_difference_is_not_drift(self):
+        # Matching is case-insensitive, so these two indexes rank identically.
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "SQLite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        assert a == b
+
+    def test_duplicate_rows_are_not_drift(self):
+        # A namespace merge can duplicate rows, but the boost reads them through
+        # SELECT DISTINCT and counts distinct keys — duplicates cannot change a
+        # ranking, so they must not read as drift.
+        one = [("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        assert self._base(entity_rows=one) == self._base(entity_rows=one * 2)
+
+    def test_swap_between_duplicate_content_drifts(self):
+        # Same content hash, different chunk identity — the boost ranks per
+        # chunk, so moving an entity between them is drift.
+        a = self._base(
+            entity_rows=[
+                ("dup", "default", "/n/a.md", 0, "technology", "sqlite", 0.9),
+                ("dup", "default", "/n/b.md", 4, "technology", "duckdb", 0.9),
+            ]
+        )
+        b = self._base(
+            entity_rows=[
+                ("dup", "default", "/n/a.md", 0, "technology", "duckdb", 0.9),
+                ("dup", "default", "/n/b.md", 4, "technology", "sqlite", 0.9),
+            ]
+        )
+        assert a != b
+
+    def test_row_order_is_irrelevant(self):
+        rows = [
+            ("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9),
+            ("hash-2", "default", "/n/b.md", 4, "person", "@alice", 0.7),
+        ]
+        assert self._base(entity_rows=rows) == self._base(entity_rows=list(reversed(rows)))
+
+
+class TestEntityBoostProfileKnob:
+    def test_disabled_collapses_to_flag(self):
+        from memtomem.config import Mem2MemConfig
+
+        _, knobs = profile_fingerprint(Mem2MemConfig())
+        assert knobs["entity_boost"] == {"enabled": False}
+
+    def test_enabled_exposes_params(self):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+
+        config = Mem2MemConfig()
+        config.entity_boost = EntityBoostConfig(enabled=True, max_boost=1.8, min_confidence=0.6)
+        _, knobs = profile_fingerprint(config)
+        assert knobs["entity_boost"]["max_boost"] == 1.8
+        assert knobs["entity_boost"]["min_confidence"] == 0.6
+        # Canonicalized to sorted-unique by the config validator — extraction
+        # consumes them as a set, so declaration order must not reach the hash.
+        assert knobs["entity_boost"]["query_entity_types"] == ["date", "person", "technology"]
+
+    def test_knob_change_drifts_profile_fingerprint(self):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+
+        a, b = Mem2MemConfig(), Mem2MemConfig()
+        a.entity_boost = EntityBoostConfig(enabled=True, max_boost=1.5)
+        b.entity_boost = EntityBoostConfig(enabled=True, max_boost=2.0)
+        assert profile_fingerprint(a)[0] != profile_fingerprint(b)[0]
+
+
+class TestEntityFoldingParity:
+    """The fingerprint's fold must be SQLite's, or it lies in one direction."""
+
+    def _base(self, **kw):
+        return index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, **kw)
+
+    def test_ascii_case_difference_is_not_drift(self):
+        # SQLite NOCASE matches these, so they rank identically.
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "SQLite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        assert a == b
+
+    def test_non_ascii_case_difference_is_drift(self):
+        # SQLite does NOT match these, so they rank differently — a Python
+        # str.lower() fold would have collapsed them into one fingerprint.
+        a = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "Éclair", 0.9)])
+        b = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "éclair", 0.9)])
+        assert a != b
+
+
+class TestGatedConfidenceNormalization:
+    """Which layer applies min_confidence, and what each one may forget.
+
+    quality/state.py filters by the *candidate config's* floor and then
+    normalizes the surviving values away — presence-only ranking cannot tell
+    0.7 from 0.9. quality/experiment.py's shared snapshot must NOT do that: it
+    exists to catch a concurrent writer, and a confidence nudge can cross some
+    other profile's floor.
+    """
+
+    def _rows(self, conf, etype="technology"):
+        return [("hash-1", "default", "/n/a.md", 0, etype, "sqlite", conf)]
+
+    def _fp(self, storage_rows, config):
+        from unittest.mock import MagicMock
+
+        from memtomem.quality.state import current_fingerprints
+
+        storage = MagicMock()
+        storage.read_corpus_fingerprint_rows.return_value = _BASE_CORPUS
+        storage.read_vector_fingerprint_rows.return_value = _VECTORS
+        storage.read_fts_fingerprint_rows.return_value = _FTS
+        storage.stored_embedding_info = _EMB
+        storage.read_link_topology_rows.return_value = []
+        storage.read_access_counts.return_value = []
+        storage.read_entity_rows.return_value = storage_rows
+        return current_fingerprints(storage, config)[0]["index"]
+
+    def _config(self, *, min_confidence=0.0, types=None):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+
+        cfg = Mem2MemConfig()
+        cfg.entity_boost = EntityBoostConfig(
+            enabled=True,
+            min_confidence=min_confidence,
+            query_entity_types=types or ["technology", "person", "date"],
+        )
+        return cfg
+
+    def test_above_floor_values_are_equivalent(self):
+        cfg = self._config(min_confidence=0.6)
+        assert self._fp(self._rows(0.7), cfg) == self._fp(self._rows(0.9), cfg)
+
+    def test_crossing_the_floor_is_drift(self):
+        cfg = self._config(min_confidence=0.6)
+        assert self._fp(self._rows(0.5), cfg) != self._fp(self._rows(0.7), cfg)
+
+    def test_inactive_type_is_excluded(self):
+        cfg = self._config(types=["person"])
+        # A technology row cannot be matched by a person-only config.
+        assert self._fp(self._rows(0.9), cfg) == self._fp([], cfg)
+
+    def test_disabled_boost_folds_no_entity_rows(self):
+        from memtomem.config import Mem2MemConfig
+
+        off = Mem2MemConfig()
+        assert off.entity_boost.enabled is False
+        assert self._fp(self._rows(0.9), off) == self._fp([], off)
+
+    def test_shared_snapshot_keeps_raw_confidence(self):
+        # experiment.py passes ungated rows straight through, so the hasher
+        # itself must retain confidence.
+        from memtomem.quality.fingerprints import index_fingerprint
+
+        a = index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, entity_rows=self._rows(0.5))
+        b = index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, entity_rows=self._rows(0.9))
+        assert a != b

@@ -129,6 +129,14 @@ def profile_fingerprint(config: Mem2MemConfig) -> tuple[str, dict[str, Any]]:
             config.importance.enabled,
             {"max_boost": config.importance.max_boost, "weights": list(config.importance.weights)},
         ),
+        "entity_boost": _stage(
+            config.entity_boost.enabled,
+            {
+                "max_boost": config.entity_boost.max_boost,
+                "query_entity_types": list(config.entity_boost.query_entity_types),
+                "min_confidence": config.entity_boost.min_confidence,
+            },
+        ),
         "context_window": _stage(
             config.context_window.enabled, {"window_size": config.context_window.window_size}
         ),
@@ -247,6 +255,7 @@ def index_fingerprint(
     *,
     link_rows: Sequence[Sequence[Any]] | None = None,
     access_rows: Sequence[Sequence[Any]] | None = None,
+    entity_rows: Sequence[Sequence[Any]] | None = None,
 ) -> str:
     """Hash the corpus state plus the derived index artifacts ranking reads.
 
@@ -262,9 +271,10 @@ def index_fingerprint(
     start_line, fts_content)``.
 
     ``link_rows`` should be passed only when session-summary rescue is enabled,
-    and ``access_rows`` only when access or importance boost is enabled — those
-    are retrieval inputs only under those configs, so folding them in
-    unconditionally would flag drift the ranking never sees.
+    ``access_rows`` only when access or importance boost is enabled, and
+    ``entity_rows`` only when entity boost is enabled — those are retrieval
+    inputs only under those configs, so folding them in unconditionally would
+    flag drift the ranking never sees.
     """
     vectors = sorted(
         _chunk_identity(content_hash, namespace, source, start_line) + [_sha256_text_bytes(blob)]
@@ -297,6 +307,46 @@ def index_fingerprint(
         # chunks is drift. Coerce to str for a total, None-safe sort.
         payload["access"] = sorted(
             ["" if v is None else str(v) for v in row] for row in access_rows
+        )
+    if entity_rows is not None:
+        # Rows are (content_hash, namespace, source_file, start_line,
+        # entity_type, entity_value, confidence). ``entity_value`` is
+        # content-derived so it is hashed (same rule as fts_content above);
+        # ``entity_type`` is a closed six-value vocabulary, not content, so it
+        # stays readable.
+        #
+        # Folded as the *match set*, not the raw rows: the boost matches
+        # case-insensitively with ``SELECT DISTINCT``, so "SQLite" vs "sqlite"
+        # and the duplicate rows a namespace merge can leave behind are
+        # indistinguishable to ranking. Hashing them raw would report drift on
+        # indexes that rank identically.
+        #
+        # Confidence is kept. Past a candidate's ``min_confidence`` gate its
+        # exact value is inert, but that is the *caller's* fact to apply, and
+        # ``quality/state.py`` does apply it (filter + normalize). The
+        # profile-independent snapshot in ``quality/experiment.py`` passes raw
+        # rows precisely so a concurrent writer nudging a confidence across
+        # some candidate's threshold still registers — dropping it here would
+        # blind that snapshot to a real mid-run mutation.
+        #
+        # ``fold_entity_value`` and not ``str.lower()``: the fold has to be the
+        # one SQLite performs, or the reverse error appears — Python folds
+        # ``É``→``é`` where SQLite does not, so two indexes that rank
+        # *differently* would share a fingerprint.
+        from memtomem.tools.entity_extraction import fold_entity_value
+
+        payload["entities"] = sorted(
+            {
+                tuple(
+                    _chunk_identity(content_hash, namespace, source, start_line)
+                    + [
+                        str(entity_type),
+                        _sha256_text(fold_entity_value(entity_value or "")),
+                        str(conf),
+                    ]
+                )
+                for content_hash, namespace, source, start_line, entity_type, entity_value, conf in entity_rows  # noqa: E501
+            }
         )
     return _sha256_json(payload)
 

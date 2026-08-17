@@ -35,8 +35,8 @@
     "pack:check": "npm pack --dry-run"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.14",
-    "@types/node": "26.1.2",
+    "@opencode-ai/plugin": "1.18.18",
+    "@types/node": "26.2.0",
     "typescript": "5.9.3"
   },
   "publishConfig": {

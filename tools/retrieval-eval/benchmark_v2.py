@@ -154,7 +154,7 @@ async def _evaluate_track(
 ) -> dict[str, Any]:
     from memtomem.config import Mem2MemConfig
     import memtomem.config as config_module
-    from memtomem.server.component_factory import close_components, create_components
+    from memtomem.runtime import close_components, create_components
 
     tmp = Path(mkdtemp(prefix=f"retrieval_v2_{track}_"))
     memory_root = tmp / "memories"

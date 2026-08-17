@@ -48,6 +48,16 @@ _AGENT_BODY_CLEAN = "---\nname: foo\ndescription: a clean test agent\n---\n\nhel
 _SKILL_BODY_CLEAN = "---\nname: foo\ndescription: a clean test skill\n---\n\nhello\n"
 _SECRET_LITERAL = "AKIA1234567890ABCDEF"  # AWS-key shape — caught by privacy.enforce_write_guard
 
+# A shared lock deadline hands each acquisition ``(t0 + BUDGET) - t1``. When
+# both monotonic reads land on the same tick — routine on Windows, whose clock
+# granularity is ~15.6 ms — that expression rounds to a half-ULP ABOVE
+# ``BUDGET`` for a measurable slice of process uptimes (~0.1% sampled over
+# 256-4096 s at BUDGET=5). Femtoseconds of extra allowance is not a budget
+# violation, so the upper bound carries a tolerance far below anything
+# observable. Bounds that compare two captured budgets to each other need no
+# tolerance — the rounding cancels.
+_BUDGET_TOLERANCE_S = 1e-6
+
 
 @pytest.fixture
 def two_projects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
@@ -1417,7 +1427,7 @@ def test_lock_timeout_budget_shared_across_pair(two_projects, monkeypatch):
 
     assert len(seen) == 2
     assert all(t is not None for t in seen)
-    assert seen[0] <= 5.0
+    assert seen[0] <= 5.0 + _BUDGET_TOLERANCE_S
     # The 0.1s spent inside the first acquisition must come off the
     # second's allowance.
     assert seen[1] <= seen[0] - 0.05
