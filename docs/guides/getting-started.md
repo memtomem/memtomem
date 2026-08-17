@@ -107,8 +107,8 @@ uv tool install --reinstall 'memtomem[onnx,web]'
 The `ollama` and `openai` extras are the two exceptions to the "extra unlocks a
 feature" rule: both providers call their HTTP APIs directly through `httpx`, a
 base dependency, so **the Ollama and OpenAI providers work without installing
-either extra**. The extras only vendor the official SDKs for code of your own
-that wants them; they are kept for backwards compatibility.
+either extra**. The two extras only install the official SDK packages, which
+memtomem itself never imports; they are kept for backwards compatibility.
 
 ### Option B: Project dependency (per-project isolation)
 
