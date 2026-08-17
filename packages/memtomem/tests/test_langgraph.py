@@ -711,9 +711,9 @@ class TestSearchDelegation:
 
     @pytest.mark.asyncio
     async def test_maps_pipeline_results_to_dicts(self, monkeypatch):
-        import memtomem.server.tools.search as search_tools
+        import memtomem.runtime.project_context as project_context
 
-        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+        monkeypatch.setattr(project_context, "_resolve_project_context_root", lambda comp: None)
 
         chunk = self._chunk()
         store, pipeline = self._store_with_pipeline(
@@ -746,10 +746,10 @@ class TestSearchDelegation:
         agent pins the namespace; the resolved project context root is
         threaded through to the pipeline (ADR-0011 PR-D round 9).
         """
-        import memtomem.server.tools.search as search_tools
+        import memtomem.runtime.project_context as project_context
 
         monkeypatch.setattr(
-            search_tools, "_resolve_project_context_root", lambda comp: "/proj/root"
+            project_context, "_resolve_project_context_root", lambda comp: "/proj/root"
         )
 
         store, pipeline = self._store_with_pipeline([])
