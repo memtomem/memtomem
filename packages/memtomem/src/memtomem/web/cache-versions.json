@@ -3,7 +3,8 @@
   "assets": {
     "/app.js": {
       "versions": {
-        "159": "1c14eca3a752e38455010d4b047be31bfb86e7a6b810be8073ed2533c790259f"
+        "159": "1c14eca3a752e38455010d4b047be31bfb86e7a6b810be8073ed2533c790259f",
+        "160": "f20b7aa7a13e724ab2b319d27685430b89cded4f1939f1ff04c4ee18cdb2e8b2"
       }
     },
     "/chunk-progress.js": {

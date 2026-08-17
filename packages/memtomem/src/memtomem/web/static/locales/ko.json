@@ -1553,6 +1553,8 @@
   "confirm.bulk_delete_msg": "{count}개 청크가 소스 파일과 인덱스에서 영구적으로 제거됩니다. 이 작업은 취소할 수 없습니다.",
   "confirm.source_delete_title": "소스 삭제",
   "confirm.source_delete_msg": "다음 소스의 모든 청크를 삭제하시겠습니까?\n{path}",
+  "confirm.source_delete_shared_title": "공유 소스 삭제",
+  "confirm.source_delete_shared_msg": "이 파일은 저장소에 커밋된 project_shared 청크를 포함합니다. 삭제하면 이 프로젝트를 쓰는 모든 사람에게서 사라지며, 부분 삭제는 불가능합니다:\n{path}",
   "confirm.merge_dupe_title": "중복 병합",
   "confirm.merge_dupe_keep_a_msg": "A를 유지하고 B를 삭제합니다.",
   "confirm.merge_dupe_keep_b_msg": "B를 유지하고 A를 삭제합니다.",
