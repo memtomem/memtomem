@@ -59,22 +59,29 @@ def extract_query_entities(
     - The result is capped deterministically by ``(position, type, value)`` so
       the same query always yields the same key set — the boost has to be
       reproducible for cached and replayed searches.
+
+    Values are folded with :func:`~memtomem.tools.entity_extraction.fold_entity_value`
+    (ASCII-only, matching the SQLite collation that does the actual comparison)
+    rather than ``str.lower()``, so the keys this returns mean exactly what the
+    storage lookup will match.
     """
     if not query or not entity_types:
         return []
 
-    from memtomem.tools.entity_extraction import extract_entities
+    from memtomem.tools.entity_extraction import extract_entities, fold_entity_value
 
     extracted = extract_entities(query, list(entity_types))
     if not extracted:
         return []
 
-    ordered = sorted(extracted, key=lambda e: (e.position, e.entity_type, e.entity_value.lower()))
+    ordered = sorted(
+        extracted, key=lambda e: (e.position, e.entity_type, fold_entity_value(e.entity_value))
+    )
 
     keys: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for e in ordered:
-        value = e.entity_value.lower()
+        value = fold_entity_value(e.entity_value)
         if e.entity_type == "technology" and not _is_word_boundary_match(query, value):
             continue
         key = (e.entity_type, value)

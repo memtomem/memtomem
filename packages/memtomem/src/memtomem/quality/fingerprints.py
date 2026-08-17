@@ -322,11 +322,18 @@ def index_fingerprint(
         # indexes that rank identically. Confidence is dropped for the same
         # reason — it gates via ``min_confidence`` before this point (see
         # ``quality/state.py``), and past that gate its value is inert.
+        #
+        # ``fold_entity_value`` and not ``str.lower()``: the fold has to be the
+        # one SQLite performs, or the reverse error appears — Python folds
+        # ``É``→``é`` where SQLite does not, so two indexes that rank
+        # *differently* would share a fingerprint.
+        from memtomem.tools.entity_extraction import fold_entity_value
+
         payload["entities"] = sorted(
             {
                 tuple(
                     _chunk_identity(content_hash, namespace, source, start_line)
-                    + [str(entity_type), _sha256_text((entity_value or "").lower())]
+                    + [str(entity_type), _sha256_text(fold_entity_value(entity_value or ""))]
                 )
                 for content_hash, namespace, source, start_line, entity_type, entity_value, _conf in entity_rows  # noqa: E501
             }

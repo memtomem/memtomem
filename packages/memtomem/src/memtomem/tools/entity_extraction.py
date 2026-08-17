@@ -17,6 +17,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ASCII A–Z only — deliberately the same folding SQLite's ``NOCASE`` collation
+# and ``lower()`` apply, which is where entity matching actually happens
+# (``chunk_entities``). Python's ``str.lower()`` would fold ``É``→``é`` while
+# SQLite would not, so a Python-side fold makes the entity-match boost's own
+# fingerprint claim two indexes equivalent that in fact rank differently. One
+# folding contract, defined here, used by every side that compares entity
+# values. Non-ASCII entity values therefore match case-sensitively; lifting
+# that needs a normalized stored column, not a wider fold on one side.
+_ASCII_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def fold_entity_value(value: str) -> str:
+    """Fold an entity value for comparison, matching SQLite ``NOCASE``."""
+    return value.translate(_ASCII_CASE_FOLD)
+
+
 _MONTHS = (
     "January",
     "February",

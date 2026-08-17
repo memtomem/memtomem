@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Iterable, Iterator
@@ -405,6 +406,21 @@ class MMRConfig(ConfigModel):
         return v
 
 
+def _validated_max_boost(v: float) -> float:
+    """Shared guard for every boost stage's ``max_boost``.
+
+    ``NaN`` slips past a bare ``v < 1.0`` (every comparison against NaN is
+    False) and then multiplies into every search score; ``inf`` passes the same
+    way and makes the boosted scores unorderable and the quality-lab payload
+    unserializable. Both are rejected before they can reach a ranking stage.
+    """
+    if not math.isfinite(v):
+        raise ValueError("max_boost must be a finite number")
+    if v < 1.0:
+        raise ValueError("max_boost must be >= 1.0")
+    return v
+
+
 class AccessConfig(ConfigModel):
     enabled: bool = False
     max_boost: float = 1.5  # maximum score multiplier for highly accessed chunks
@@ -412,9 +428,7 @@ class AccessConfig(ConfigModel):
     @field_validator("max_boost")
     @classmethod
     def must_be_at_least_one(cls, v: float) -> float:
-        if v < 1.0:
-            raise ValueError("max_boost must be >= 1.0")
-        return v
+        return _validated_max_boost(v)
 
 
 _NAMESPACE_MAX_LEN = 128
@@ -631,9 +645,7 @@ class ImportanceConfig(ConfigModel):
     @field_validator("max_boost")
     @classmethod
     def must_be_at_least_one(cls, v: float) -> float:
-        if v < 1.0:
-            raise ValueError("max_boost must be >= 1.0")
-        return v
+        return _validated_max_boost(v)
 
 
 class EntityBoostConfig(ConfigModel):
@@ -662,9 +674,7 @@ class EntityBoostConfig(ConfigModel):
     @field_validator("max_boost")
     @classmethod
     def must_be_at_least_one(cls, v: float) -> float:
-        if v < 1.0:
-            raise ValueError("max_boost must be >= 1.0")
-        return v
+        return _validated_max_boost(v)
 
     @field_validator("query_entity_types")
     @classmethod
@@ -681,7 +691,10 @@ class EntityBoostConfig(ConfigModel):
                 f"query_entity_types entries must be one of: "
                 f"{', '.join(sorted(_VALID_ENTITY_TYPES))}"
             )
-        return v
+        # Canonicalized to sorted-unique: extraction consumes this as a set, so
+        # order and repeats cannot change retrieval — but the raw list reaches
+        # the profile fingerprint, where they would read as a ranking change.
+        return sorted(set(v))
 
     @field_validator("min_confidence")
     @classmethod

@@ -656,7 +656,16 @@ penalized, only un-boosted.
 Valid `query_entity_types` values are `person`, `date`, `decision`, `action_item`,
 `technology`, and `concept`. The default omits `decision`/`action_item` (their
 patterns are line-anchored and do not fire on short queries) and `concept` (it
-requires literal quotes, which BM25 already handles well).
+requires literal quotes, which BM25 already handles well). The list is order- and
+duplicate-insensitive — it is canonicalized to sorted-unique, since extraction
+consumes it as a set.
+
+> **Matching is case-insensitive for ASCII only.** Comparison happens in SQLite,
+> whose `NOCASE` collation folds `A–Z` and nothing else, so `SQLite` and `sqlite`
+> match while `Éclair` and `éclair` do not. Scripts without case (Korean, CJK,
+> Arabic) are unaffected. Accented entity values therefore match
+> case-sensitively; lifting that needs a normalized stored column rather than a
+> wider fold on one side, so it is deliberately out of scope here.
 
 `min_confidence` is a coarse filter, not a calibrated threshold: regex-extracted
 entities carry hardcoded per-pattern confidences while LLM-extracted ones carry

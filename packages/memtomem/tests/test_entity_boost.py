@@ -187,3 +187,86 @@ class TestNegativeScoreBoost:
         ):
             assert boosted[0].chunk.id == hi.chunk.id
             assert boosted[0].score > hi.score
+
+
+class TestFoldingContract:
+    """One folding contract across matching, query keys, and fingerprints.
+
+    Comparison happens in SQLite (``NOCASE`` / ``lower()``), which folds ASCII
+    only. A Python-side ``str.lower()`` would fold more, and every place that
+    disagrees with SQLite either misses a match or claims two differently-
+    ranking indexes are equivalent.
+    """
+
+    def test_folds_ascii(self):
+        from memtomem.tools.entity_extraction import fold_entity_value
+
+        assert fold_entity_value("SQLite") == "sqlite"
+        assert fold_entity_value("GIT") == "git"
+
+    def test_leaves_non_ascii_case_alone(self):
+        from memtomem.tools.entity_extraction import fold_entity_value
+
+        # SQLite would not fold these either — agreeing with it is the point.
+        assert fold_entity_value("Éclair") != fold_entity_value("éclair")
+        assert fold_entity_value("Éclair") == "Éclair"
+
+    def test_non_cased_scripts_pass_through(self):
+        from memtomem.tools.entity_extraction import fold_entity_value
+
+        assert fold_entity_value("한글") == "한글"
+
+    def test_query_keys_use_the_same_fold(self):
+        assert extract_query_entities("SQLite migration", ["technology"]) == [
+            ("technology", "sqlite")
+        ]
+
+    def test_matches_sqlite_nocase(self):
+        import sqlite3
+
+        from memtomem.tools.entity_extraction import fold_entity_value
+
+        db = sqlite3.connect(":memory:")
+        for a, b in (("SQLite", "sqlite"), ("Éclair", "éclair"), ("GIT", "git")):
+            sql_equal = bool(db.execute("SELECT ? = ? COLLATE NOCASE", (a, b)).fetchone()[0])
+            assert (fold_entity_value(a) == fold_entity_value(b)) is sql_equal
+        db.close()
+
+
+class TestBoostConfigGuards:
+    def test_non_finite_max_boost_rejected_on_every_boost_stage(self):
+        from memtomem.config import AccessConfig, EntityBoostConfig, ImportanceConfig
+
+        # NaN slips past a bare `v < 1.0` and would multiply into every score.
+        for cls in (EntityBoostConfig, AccessConfig, ImportanceConfig):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with pytest.raises(ValueError, match="finite"):
+                    cls(max_boost=bad)
+            assert cls(max_boost=2.0).max_boost == 2.0
+
+    def test_query_entity_types_canonicalized(self):
+        from memtomem.config import EntityBoostConfig
+
+        # Extraction consumes these as a set, so order and repeats cannot change
+        # retrieval — and must not change the profile fingerprint either.
+        assert EntityBoostConfig(
+            query_entity_types=["person", "date", "person"]
+        ).query_entity_types == ["date", "person"]
+
+    def test_reordered_types_share_a_profile_fingerprint(self):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+        from memtomem.quality.fingerprints import profile_fingerprint
+
+        a, b = Mem2MemConfig(), Mem2MemConfig()
+        a.entity_boost = EntityBoostConfig(enabled=True, query_entity_types=["person", "date"])
+        b.entity_boost = EntityBoostConfig(enabled=True, query_entity_types=["date", "person"])
+        assert profile_fingerprint(a)[0] == profile_fingerprint(b)[0]
+
+    def test_a_different_type_set_is_still_drift(self):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+        from memtomem.quality.fingerprints import profile_fingerprint
+
+        a, b = Mem2MemConfig(), Mem2MemConfig()
+        a.entity_boost = EntityBoostConfig(enabled=True, query_entity_types=["person", "date"])
+        b.entity_boost = EntityBoostConfig(enabled=True, query_entity_types=["person"])
+        assert profile_fingerprint(a)[0] != profile_fingerprint(b)[0]

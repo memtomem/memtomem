@@ -492,7 +492,9 @@ class TestEntityBoostProfileKnob:
         _, knobs = profile_fingerprint(config)
         assert knobs["entity_boost"]["max_boost"] == 1.8
         assert knobs["entity_boost"]["min_confidence"] == 0.6
-        assert knobs["entity_boost"]["query_entity_types"] == ["technology", "person", "date"]
+        # Canonicalized to sorted-unique by the config validator — extraction
+        # consumes them as a set, so declaration order must not reach the hash.
+        assert knobs["entity_boost"]["query_entity_types"] == ["date", "person", "technology"]
 
     def test_knob_change_drifts_profile_fingerprint(self):
         from memtomem.config import EntityBoostConfig, Mem2MemConfig
@@ -501,3 +503,27 @@ class TestEntityBoostProfileKnob:
         a.entity_boost = EntityBoostConfig(enabled=True, max_boost=1.5)
         b.entity_boost = EntityBoostConfig(enabled=True, max_boost=2.0)
         assert profile_fingerprint(a)[0] != profile_fingerprint(b)[0]
+
+
+class TestEntityFoldingParity:
+    """The fingerprint's fold must be SQLite's, or it lies in one direction."""
+
+    def _base(self, **kw):
+        return index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, **kw)
+
+    def test_ascii_case_difference_is_not_drift(self):
+        # SQLite NOCASE matches these, so they rank identically.
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "SQLite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        assert a == b
+
+    def test_non_ascii_case_difference_is_drift(self):
+        # SQLite does NOT match these, so they rank differently — a Python
+        # str.lower() fold would have collapsed them into one fingerprint.
+        a = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "Éclair", 0.9)])
+        b = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "éclair", 0.9)])
+        assert a != b
