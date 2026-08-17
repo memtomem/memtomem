@@ -64,6 +64,7 @@ def current_fingerprints(
         if (config.access.enabled or config.importance.enabled)
         else None
     )
+    entity_rows = storage.read_entity_rows() if config.entity_boost.enabled else None
 
     index_fp = index_fingerprint(
         corpus_rows,
@@ -72,6 +73,7 @@ def current_fingerprints(
         embedding_info,
         link_rows=link_rows,
         access_rows=access_rows,
+        entity_rows=entity_rows,
     )
     return (
         {"profile": profile_fp, "corpus": corpus_fingerprint(corpus_rows), "index": index_fp},

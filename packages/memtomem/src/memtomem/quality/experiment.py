@@ -92,6 +92,7 @@ def _shared_snapshot(storage: Any) -> dict[str, str]:
             storage.stored_embedding_info,
             link_rows=storage.read_link_topology_rows(),
             access_rows=storage.read_access_counts(),
+            entity_rows=storage.read_entity_rows(),
         ),
     }
 

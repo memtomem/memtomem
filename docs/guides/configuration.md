@@ -30,6 +30,7 @@ For interactive setup, run `mm init` instead of editing env vars by hand.
 - [Rerank (Cross-Encoder)](#rerank-cross-encoder)
 - [Access Frequency Boost](#access-frequency-boost)
 - [Importance Boost](#importance-boost)
+- [Entity Match Boost](#entity-match-boost)
 - [Decay](#decay)
 - [MMR (Maximal Marginal Relevance)](#mmr-maximal-marginal-relevance)
 - [Namespace](#namespace)
@@ -621,6 +622,50 @@ Computes a composite importance score from four factors:
 | Recency | 0.2 | Exponential decay (`e^(-0.01 × age_days)`) |
 
 The composite score (0–1) maps to a boost of `[1.0, max_boost]`. Runs as Stage 7 in the search pipeline.
+
+## Entity Match Boost
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_ENTITY_BOOST__ENABLED` | `false` | Enable entity-match score boost |
+| `MEMTOMEM_ENTITY_BOOST__MAX_BOOST` | `1.5` | Maximum score multiplier (must be ≥ 1.0) |
+| `MEMTOMEM_ENTITY_BOOST__QUERY_ENTITY_TYPES` | `["technology", "person", "date"]` | Entity types extracted from the query |
+| `MEMTOMEM_ENTITY_BOOST__MIN_CONFIDENCE` | `0.0` | Ignore stored entities below this confidence (0.0–1.0) |
+
+Entities are extracted from the **query** (regex only — never the LLM, which would
+add latency to every search) and matched against the entities stored for each
+candidate chunk. The score multiplier is the fraction of query entities the chunk
+carries:
+
+```
+factor = 1.0 + (max_boost - 1.0) × (matched entities / query entities)
+```
+
+So a query mentioning `sqlite` and `@alice` boosts a chunk carrying both by the
+full `max_boost`, one carrying only `sqlite` by half of it, and leaves a chunk
+carrying neither untouched. Runs as Stage 7b in the search pipeline (after the
+importance boost, before context-window expansion).
+
+**Requires a scan.** Entities only exist for chunks
+[`mem_entity_scan`](reference/organization-maintenance.md) has visited — enabling
+this boost over an unscanned store does nothing, and `mem_status` reports an
+`entity_boost_no_entities` warning when that is the case. Editing a chunk's
+content drops its entities until the next scan. Chunks without entities are never
+penalized, only un-boosted.
+
+Valid `query_entity_types` values are `person`, `date`, `decision`, `action_item`,
+`technology`, and `concept`. The default omits `decision`/`action_item` (their
+patterns are line-anchored and do not fire on short queries) and `concept` (it
+requires literal quotes, which BM25 already handles well).
+
+`min_confidence` is a coarse filter, not a calibrated threshold: regex-extracted
+entities carry hardcoded per-pattern confidences while LLM-extracted ones carry
+model-supplied values. `0.6` is the useful setting — it drops the speculative
+PascalCase technology guesses (0.5) while keeping known-term matches (0.9).
+
+> Enabling this boost makes `chunk_entities` a ranking input, so running a scan
+> changes the Quality Lab index fingerprint. That is intended — the ranking
+> genuinely changed.
 
 ## Decay
 

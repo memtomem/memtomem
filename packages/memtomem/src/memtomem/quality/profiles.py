@@ -40,6 +40,7 @@ from memtomem.config import (
     AccessConfig,
     ContextWindowConfig,
     DecayConfig,
+    EntityBoostConfig,
     ImportanceConfig,
     Mem2MemConfig,
     MMRConfig,
@@ -77,6 +78,7 @@ _SECTION_CLASSES: dict[str, type[BaseModel]] = {
     "mmr": MMRConfig,
     "access": AccessConfig,
     "importance": ImportanceConfig,
+    "entity_boost": EntityBoostConfig,
     "context_window": ContextWindowConfig,
     "rerank": RerankConfig,
     "query_expansion": QueryExpansionConfig,
@@ -102,6 +104,7 @@ _ELIGIBLE_FIELDS: dict[str, tuple[str, ...]] = {
     "mmr": ("enabled", "lambda_param"),
     "access": ("enabled", "max_boost"),
     "importance": ("enabled", "max_boost", "weights"),
+    "entity_boost": ("enabled", "max_boost", "query_entity_types", "min_confidence"),
     "context_window": ("enabled", "window_size"),
     "rerank": ("enabled", "provider", "model", "oversample", "min_pool", "max_pool"),
     "query_expansion": ("enabled", "max_terms", "strategy"),
@@ -179,6 +182,19 @@ def _guard_float_list(v: Any, name: str, *, length: int) -> list[float]:
     if any(x < 0 for x in out):
         raise ValueError(f"{name} entries must be >= 0")
     return out
+
+
+def _guard_str_list(v: Any, name: str) -> list[str]:
+    _reject_null(v, name)
+    if not isinstance(v, list):
+        raise ValueError(f"{name} must be a list of strings")
+    if not v:
+        raise ValueError(f"{name} must not be empty")
+    for x in v:
+        _reject_null(x, f"{name}[]")
+        if not isinstance(x, str):
+            raise ValueError(f"{name} entries must be strings")
+    return list(v)
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +296,30 @@ class ImportanceKnobs(_Knobs):
     def _weights(cls, v: Any) -> Any:
         # Four recency/access/importance/length weights (see ImportanceConfig).
         return _guard_float_list(v, "weights", length=4)
+
+
+class EntityBoostKnobs(_Knobs):
+    enabled: bool | None = None
+    max_boost: float | None = None
+    query_entity_types: list[str] | None = None
+    min_confidence: float | None = None
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _bool(cls, v: Any, info: Any) -> Any:
+        return _guard_bool(v, info.field_name)
+
+    @field_validator("max_boost", "min_confidence", mode="before")
+    @classmethod
+    def _float(cls, v: Any, info: Any) -> Any:
+        return _guard_float(v, info.field_name)
+
+    @field_validator("query_entity_types", mode="before")
+    @classmethod
+    def _types(cls, v: Any) -> Any:
+        # Membership in the valid-type vocabulary is EntityBoostConfig's
+        # validator; this guard only enforces shape.
+        return _guard_str_list(v, "query_entity_types")
 
 
 class ContextWindowKnobs(_Knobs):
@@ -404,6 +444,7 @@ class ProfileKnobs(_Knobs):
     mmr: MMRKnobs = MMRKnobs()
     access: AccessKnobs = AccessKnobs()
     importance: ImportanceKnobs = ImportanceKnobs()
+    entity_boost: EntityBoostKnobs = EntityBoostKnobs()
     context_window: ContextWindowKnobs = ContextWindowKnobs()
     rerank: RerankKnobs = RerankKnobs()
     query_expansion: QueryExpansionKnobs = QueryExpansionKnobs()

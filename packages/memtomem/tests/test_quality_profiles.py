@@ -97,6 +97,7 @@ def test_canonical_covers_every_eligible_field():
         "mmr",
         "access",
         "importance",
+        "entity_boost",
         "context_window",
         "rerank",
         "query_expansion",

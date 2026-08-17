@@ -397,3 +397,94 @@ class TestStorageReadHelpers:
         )
         assert fp1 == fp2  # deterministic across reads
         assert corpus_fingerprint(corpus_rows)
+
+
+class TestEntityRowsFingerprint:
+    """Entity rows are a ranking input only when the Stage-7b boost is on."""
+
+    def _base(self, **kw):
+        return index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, **kw)
+
+    def test_entity_rows_only_count_when_provided(self):
+        rows = [("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        assert self._base(entity_rows=rows) != self._base()
+
+    def test_value_change_drifts(self):
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "duckdb", 0.9)]
+        )
+        assert a != b
+
+    def test_type_change_drifts(self):
+        a = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "rust", 0.9)])
+        b = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "rust", 0.9)])
+        assert a != b
+
+    def test_confidence_change_drifts(self):
+        # min_confidence gates on it, so it is a ranking input.
+        a = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        )
+        b = self._base(
+            entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.5)]
+        )
+        assert a != b
+
+    def test_duplicate_rows_drift(self):
+        # A namespace merge can duplicate rows; that is real state, so the
+        # multiplicity-preserving fold must see it.
+        one = [("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
+        assert self._base(entity_rows=one) != self._base(entity_rows=one * 2)
+
+    def test_swap_between_duplicate_content_drifts(self):
+        # Same content hash, different chunk identity — the boost ranks per
+        # chunk, so moving an entity between them is drift.
+        a = self._base(
+            entity_rows=[
+                ("dup", "default", "/n/a.md", 0, "technology", "sqlite", 0.9),
+                ("dup", "default", "/n/b.md", 4, "technology", "duckdb", 0.9),
+            ]
+        )
+        b = self._base(
+            entity_rows=[
+                ("dup", "default", "/n/a.md", 0, "technology", "duckdb", 0.9),
+                ("dup", "default", "/n/b.md", 4, "technology", "sqlite", 0.9),
+            ]
+        )
+        assert a != b
+
+    def test_row_order_is_irrelevant(self):
+        rows = [
+            ("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9),
+            ("hash-2", "default", "/n/b.md", 4, "person", "@alice", 0.7),
+        ]
+        assert self._base(entity_rows=rows) == self._base(entity_rows=list(reversed(rows)))
+
+
+class TestEntityBoostProfileKnob:
+    def test_disabled_collapses_to_flag(self):
+        from memtomem.config import Mem2MemConfig
+
+        _, knobs = profile_fingerprint(Mem2MemConfig())
+        assert knobs["entity_boost"] == {"enabled": False}
+
+    def test_enabled_exposes_params(self):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+
+        config = Mem2MemConfig()
+        config.entity_boost = EntityBoostConfig(enabled=True, max_boost=1.8, min_confidence=0.6)
+        _, knobs = profile_fingerprint(config)
+        assert knobs["entity_boost"]["max_boost"] == 1.8
+        assert knobs["entity_boost"]["min_confidence"] == 0.6
+        assert knobs["entity_boost"]["query_entity_types"] == ["technology", "person", "date"]
+
+    def test_knob_change_drifts_profile_fingerprint(self):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+
+        a, b = Mem2MemConfig(), Mem2MemConfig()
+        a.entity_boost = EntityBoostConfig(enabled=True, max_boost=1.5)
+        b.entity_boost = EntityBoostConfig(enabled=True, max_boost=2.0)
+        assert profile_fingerprint(a)[0] != profile_fingerprint(b)[0]

@@ -636,6 +636,59 @@ class ImportanceConfig(ConfigModel):
         return v
 
 
+class EntityBoostConfig(ConfigModel):
+    """Stage-7b entity-match boost (see ``search/entity_boost.py``).
+
+    Like ``access`` / ``importance`` this section is deliberately absent from
+    ``MUTABLE_FIELDS`` — changing a ranking stage takes a restart, not a live
+    ``mm config set``.
+    """
+
+    enabled: bool = False
+    max_boost: float = 1.5
+    # Types extracted from the *query*. Conservative default: the
+    # decision/action_item regexes are line-anchored patterns that never fire on
+    # a short query, and ``concept`` needs literal quotes (BM25 already handles
+    # those well).
+    query_entity_types: Annotated[list[str], REPLACE] = Field(
+        default_factory=lambda: ["technology", "person", "date"]
+    )
+    # Coarse floor on stored confidence. Not calibrated across the corpus —
+    # regex values are hardcoded per pattern and LLM values are model-supplied —
+    # so it filters classes of row (0.6 drops PascalCase technology guesses),
+    # it does not rank.
+    min_confidence: float = 0.0
+
+    @field_validator("max_boost")
+    @classmethod
+    def must_be_at_least_one(cls, v: float) -> float:
+        if v < 1.0:
+            raise ValueError("max_boost must be >= 1.0")
+        return v
+
+    @field_validator("query_entity_types")
+    @classmethod
+    def valid_entity_types(cls, v: list[str]) -> list[str]:
+        from memtomem.tools.entity_extraction import _VALID_ENTITY_TYPES
+
+        if not v:
+            raise ValueError("query_entity_types must not be empty")
+        invalid = sorted(set(v) - set(_VALID_ENTITY_TYPES))
+        if invalid:
+            raise ValueError(
+                f"invalid entity types: {', '.join(invalid)} "
+                f"(valid: {', '.join(sorted(_VALID_ENTITY_TYPES))})"
+            )
+        return v
+
+    @field_validator("min_confidence")
+    @classmethod
+    def confidence_in_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("min_confidence must be between 0.0 and 1.0")
+        return v
+
+
 class WebhookConfig(ConfigModel):
     enabled: bool = False
     url: str = ""
@@ -942,6 +995,7 @@ class Mem2MemConfig(BaseSettings):
     rerank: RerankConfig = Field(default_factory=RerankConfig)
     query_expansion: QueryExpansionConfig = Field(default_factory=QueryExpansionConfig)
     importance: ImportanceConfig = Field(default_factory=ImportanceConfig)
+    entity_boost: EntityBoostConfig = Field(default_factory=EntityBoostConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     consolidation_schedule: ConsolidationScheduleConfig = Field(
         default_factory=ConsolidationScheduleConfig

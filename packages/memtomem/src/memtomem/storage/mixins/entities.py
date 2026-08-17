@@ -139,6 +139,62 @@ class EntityMixin:
         ).fetchall()
         return {r[0] for r in rows}
 
+    async def get_matching_entities(
+        self,
+        chunk_ids: list[str],
+        entity_keys: list[tuple[str, str]],
+        min_confidence: float = 0.0,
+    ) -> dict[str, set[tuple[str, str]]]:
+        """Return, per chunk, which of ``entity_keys`` that chunk carries.
+
+        Powers the Stage-7b entity-match boost. Inverted on purpose: only rows
+        matching a query entity come back, so the transfer is bounded by
+        ``len(entity_keys) * len(chunk_ids)`` tiny tuples rather than every
+        entity of every candidate (``decision``/``action_item`` values run to
+        200 chars).
+
+        Args:
+            chunk_ids: Candidate chunk ids (already namespace/scope-filtered by
+                the caller — this query does not re-join ``chunks``).
+            entity_keys: ``(entity_type, lowercased value)`` pairs to look for.
+            min_confidence: Ignore stored rows below this confidence.
+
+        Returns:
+            ``chunk_id`` → set of matched ``(entity_type, lowercased value)``.
+            Chunks with no match are absent from the mapping.
+
+        Matching is exact and case-insensitive (``COLLATE NOCASE``, ASCII-only —
+        adequate for this entity vocabulary), never substring: a substring match
+        would let query entity "git" hit stored "github" and every value
+        containing it. ``DISTINCT`` collapses the duplicate rows a namespace
+        merge can leave behind (the table has no uniqueness constraint), so the
+        caller counts distinct keys, never rows.
+        """
+        if not chunk_ids or not entity_keys:
+            return {}
+        from memtomem.storage.sqlite_helpers import placeholders
+
+        db = self._get_read_db()
+        ph = placeholders(len(chunk_ids))
+        key_clause = " OR ".join(
+            ["(entity_type = ? AND entity_value = ? COLLATE NOCASE)"] * len(entity_keys)
+        )
+        params: list[object] = [*chunk_ids, min_confidence]
+        for entity_type, value in entity_keys:
+            params.extend((entity_type, value))
+
+        rows = db.execute(
+            f"SELECT DISTINCT chunk_id, entity_type, lower(entity_value) "
+            f"FROM chunk_entities "
+            f"WHERE chunk_id IN ({ph}) AND confidence >= ? AND ({key_clause})",
+            params,
+        ).fetchall()
+
+        matches: dict[str, set[tuple[str, str]]] = {}
+        for chunk_id, entity_type, value in rows:
+            matches.setdefault(chunk_id, set()).add((entity_type, value))
+        return matches
+
     async def get_entity_type_counts(self) -> dict[str, int]:
         """Return count of entities per type."""
         db = self._get_read_db()

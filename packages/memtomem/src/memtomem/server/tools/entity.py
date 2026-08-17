@@ -100,6 +100,12 @@ async def mem_entity_scan(
                     ],
                 )
 
+    # Entities are a ranking input once the Stage-7b boost is enabled, so a
+    # scan that wrote rows invalidates cached search results — same contract as
+    # the other explicit bulk mutations (import, consolidate).
+    if not dry_run and total_entities:
+        app.search_pipeline.invalidate_cache()
+
     # Format result
     lines = [
         f"Entity scan {'(dry run) ' if dry_run else ''}complete",

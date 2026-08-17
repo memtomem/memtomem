@@ -238,6 +238,7 @@ async def create_components(
             rerank_config=config.rerank,
             expansion_config=config.query_expansion,
             importance_config=config.importance,
+            entity_boost_config=config.entity_boost,
             context_window_config=config.context_window,
             llm_provider=llm,
             session_summary_config=config.session_summary,
