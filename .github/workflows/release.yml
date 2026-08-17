@@ -89,8 +89,7 @@ jobs:
           uv venv --python 3.12 "$RUNNER_TEMP/release-all"
           uv pip install --python "$RUNNER_TEMP/release-all/bin/python" "${wheel}[all]"
           uv pip check --python "$RUNNER_TEMP/release-all/bin/python"
-          "$RUNNER_TEMP/release-all/bin/python" -c \
-            'import fastapi, fastembed, kiwipiepy, langfuse, ollama, openai, tree_sitter, urllib3'
+          "$RUNNER_TEMP/release-all/bin/python" tools/extras_import_smoke.py
           uv venv --python 3.12 "$RUNNER_TEMP/release-sdist"
           uv pip install --python "$RUNNER_TEMP/release-sdist/bin/python" "$sdist"
           uv pip check --python "$RUNNER_TEMP/release-sdist/bin/python"
