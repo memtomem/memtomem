@@ -165,7 +165,7 @@ truncation of the default 1024-dim `BAAI/bge-m3` vectors — slicing each vector
 a shorter prefix and re-normalizing to unit L2 — at dimensions `1024/512/256/128`,
 in both the fused (BM25 + RRF weights `[1.0, 1.0]`) and dense-only (weights
 `[0.0, 1.0]`) pipeline. Truncation is applied by a `TruncatingEmbedder` wrapper
-installed via a monkeypatch on `component_factory.create_embedder`; no production
+installed via a monkeypatch on `memtomem.runtime.components.create_embedder`; no production
 code is changed, and native full-dimension vectors are cached so each unique text
 is embedded once for the whole sweep.
 

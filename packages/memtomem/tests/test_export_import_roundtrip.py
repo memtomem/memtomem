@@ -175,7 +175,7 @@ async def _make_components(tmp_path: Path, tag: str) -> tuple[Components, Path]:
     config.llm.enabled = False
 
     import memtomem.config as _cfg
-    from memtomem.server import component_factory as _factory
+    from memtomem.runtime import components as _factory
 
     _orig_config_d = _cfg.load_config_d
     _orig_overrides = _cfg.load_config_overrides
