@@ -54,7 +54,7 @@ class TestConfigOverridesStrict:
     @staticmethod
     def _patch_factory(monkeypatch):
         import memtomem.config as _cfg
-        import memtomem.server.component_factory as _factory
+        import memtomem.runtime.components as _factory
 
         async def _fake_create(_, **_kwargs):
             return MagicMock()
@@ -121,7 +121,7 @@ class TestConfigOverridesStrict:
         ambient ``~/.memtomem`` database or memory directories.
         """
         import memtomem.config as _cfg
-        import memtomem.server.component_factory as _factory
+        import memtomem.runtime.components as _factory
         from memtomem.integrations.langgraph import MemtomemStore
 
         isolated_db = tmp_path / "isolated.db"
@@ -711,9 +711,9 @@ class TestSearchDelegation:
 
     @pytest.mark.asyncio
     async def test_maps_pipeline_results_to_dicts(self, monkeypatch):
-        import memtomem.server.tools.search as search_tools
+        import memtomem.runtime.project_context as project_context
 
-        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+        monkeypatch.setattr(project_context, "_resolve_project_context_root", lambda comp: None)
 
         chunk = self._chunk()
         store, pipeline = self._store_with_pipeline(
@@ -746,10 +746,10 @@ class TestSearchDelegation:
         agent pins the namespace; the resolved project context root is
         threaded through to the pipeline (ADR-0011 PR-D round 9).
         """
-        import memtomem.server.tools.search as search_tools
+        import memtomem.runtime.project_context as project_context
 
         monkeypatch.setattr(
-            search_tools, "_resolve_project_context_root", lambda comp: "/proj/root"
+            project_context, "_resolve_project_context_root", lambda comp: "/proj/root"
         )
 
         store, pipeline = self._store_with_pipeline([])
@@ -1037,7 +1037,7 @@ class TestScratchDelegation:
 class TestCloseAndContextManager:
     @pytest.mark.asyncio
     async def test_close_releases_components(self, monkeypatch):
-        import memtomem.server.component_factory as factory
+        import memtomem.runtime.components as factory
         from memtomem.integrations.langgraph import MemtomemStore
 
         closed = []
@@ -1067,7 +1067,7 @@ class TestCloseAndContextManager:
     @pytest.mark.asyncio
     async def test_context_manager_inits_on_enter_and_closes_on_exit(self, monkeypatch):
         import memtomem.config as _cfg
-        import memtomem.server.component_factory as factory
+        import memtomem.runtime.components as factory
         from memtomem.integrations.langgraph import MemtomemStore
 
         comp = MagicMock()

@@ -4,7 +4,8 @@ Stage order (keyword path, fixed — see ``CLAUDE.md`` invariants):
 expansion → BM25 + dense (parallel, with always-on scope-context filter
 per ADR-0011 §6) → RRF fusion → cross-encoder rerank (optional) →
 source/tag filter → validity filter → time-decay → MMR → access-freq
-boost → importance boost → context-window expansion.
+boost → importance boost → entity-match boost → context-window
+expansion.
 
 Stage 1 enrichment (session-summary rescue, RFC P1 Phase C): between
 retrieval and fusion, when ``namespace is None`` and a
@@ -26,11 +27,13 @@ surface freshest-context-first.
 
 Empty-query path (``query=""`` / ``None`` with ``tag_filter`` /
 ``source_filter`` set, #750) routes through ``_filter_only_search``
-and skips expansion / BM25 / dense / RRF / rerank / MMR — none of
-those have a meaningful signal without a query. Validity → decay →
-access → importance → context-window still apply so the rank
-reflects recency × access × importance. The scope-context filter
-applies in this branch too via ``recall_chunks``.
+and skips expansion / BM25 / dense / RRF / rerank / MMR / entity-match
+boost — none of those have a meaningful signal without a query (the
+entity boost matches *query* entities, so with no query there is
+nothing to match; a "chunk has entities" prior would be a different
+feature). Validity → decay → access → importance → context-window
+still apply so the rank reflects recency × access × importance. The
+scope-context filter applies in this branch too via ``recall_chunks``.
 """
 
 from __future__ import annotations
@@ -307,7 +310,8 @@ class RetrievalStats:
     # keeps its scale even when it yielded zero results — public
     # formatters omit the key for empty responses either way). Base
     # means pre-modifier: decay / access /
-    # importance boosts (Stages 4/6/7, all default-off) multiply on top
+    # importance / entity-match boosts (Stages 4/6/7/7b, all default-off)
+    # multiply on top
     # when enabled, so absolute thresholds are only portable across
     # servers with the same modifier config. Unlike ``rerank_applied``
     # (the pre-Stage-3b decision), this is derived from the results
@@ -367,6 +371,7 @@ class SearchPipeline:
         rerank_config: RerankConfig | None = None,
         expansion_config: object | None = None,
         importance_config: object | None = None,
+        entity_boost_config: object | None = None,
         context_window_config: ContextWindowConfig | None = None,
         llm_provider: LLMProvider | None = None,
         session_summary_config: SessionSummaryConfig | None = None,
@@ -381,6 +386,7 @@ class SearchPipeline:
         self._retired_rerank_entries: set[_RerankerEntry] = set()
         self._expansion_config = expansion_config
         self._importance_config = importance_config
+        self._entity_boost_config = entity_boost_config
         self._context_window_config = context_window_config
         self._llm_provider = llm_provider
         self._session_summary_config = session_summary_config
@@ -1600,6 +1606,39 @@ class SearchPipeline:
                     max_boost=getattr(self._importance_config, "max_boost", 1.5),
                 )
 
+            # Stage 7b: Entity-match boost
+            if (
+                self._entity_boost_config
+                and getattr(self._entity_boost_config, "enabled", False)
+                and fused
+            ):
+                from memtomem.search.entity_boost import apply_entity_boost, extract_query_entities
+
+                entity_keys = extract_query_entities(
+                    query,
+                    getattr(
+                        self._entity_boost_config,
+                        "query_entity_types",
+                        ("technology", "person", "date"),
+                    ),
+                )
+                # No entities in the query → no signal. Skip before touching
+                # storage rather than issuing a query that can only match
+                # nothing.
+                if entity_keys:
+                    entity_matches = await self._storage.get_matching_entities(
+                        [str(r.chunk.id) for r in fused],
+                        entity_keys,
+                        min_confidence=getattr(self._entity_boost_config, "min_confidence", 0.0),
+                    )
+                    if entity_matches:
+                        fused = apply_entity_boost(
+                            fused,
+                            entity_matches,
+                            len(entity_keys),
+                            max_boost=getattr(self._entity_boost_config, "max_boost", 1.5),
+                        )
+
             # Stage 8: Context window expansion (post-scoring, does not affect ranking)
             ctx_win = self._resolve_context_window(context_window)
             if ctx_win > 0 and fused:
@@ -1620,7 +1659,7 @@ class SearchPipeline:
 
             # Re-stamp ``via_session_summary`` for any chunk that came in
             # via the rescue leg. Downstream stages (decay, MMR, access,
-            # importance, reranker, context expansion) construct fresh
+            # importance, entity-match, reranker, context expansion) construct fresh
             # ``SearchResult`` instances with default field values and so
             # silently drop the flag — restoring here at the boundary keeps
             # propagation a single-source-of-truth concern of the pipeline

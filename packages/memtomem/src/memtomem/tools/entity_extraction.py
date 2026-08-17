@@ -17,6 +17,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ASCII A–Z only — deliberately the same folding SQLite's ``NOCASE`` collation
+# and ``lower()`` apply, which is where entity matching actually happens
+# (``chunk_entities``). Python's ``str.lower()`` would fold ``É``→``é`` while
+# SQLite would not, so a Python-side fold makes the entity-match boost's own
+# fingerprint claim two indexes equivalent that in fact rank differently. One
+# folding contract, defined here, used by every side that compares entity
+# values. Non-ASCII entity values therefore match case-sensitively; lifting
+# that needs a normalized stored column, not a wider fold on one side.
+_ASCII_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def fold_entity_value(value: str) -> str:
+    """Fold an entity value for comparison, matching SQLite ``NOCASE``."""
+    return value.translate(_ASCII_CASE_FOLD)
+
+
 _MONTHS = (
     "January",
     "February",
@@ -185,11 +201,14 @@ def extract_entities(
     if "concept" in types:
         results.extend(_extract_concepts(text))
 
-    # Deduplicate by (type, value)
+    # Deduplicate by (type, value), folding exactly as the storage comparison
+    # does. ``str.lower()`` here would collapse two values SQLite keeps
+    # distinct — dropping one of them from a query's key set costs a real
+    # match, and on the index side it would drop a storable row.
     seen: set[tuple[str, str]] = set()
     unique: list[ExtractedEntity] = []
     for e in results:
-        key = (e.entity_type, e.entity_value.lower())
+        key = (e.entity_type, fold_entity_value(e.entity_value))
         if key not in seen:
             seen.add(key)
             unique.append(e)

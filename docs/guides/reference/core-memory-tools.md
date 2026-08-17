@@ -227,7 +227,7 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > (reciprocal-rank fusion), `"bm25"` / `"dense"` (unfused single-retriever
 > scores when only one retriever is enabled), or `"none"` (filter-only
 > enumeration — no relevance scale; the filter is the selector). Optional
-> modifier stages (time decay, access/importance boosts; all off by default)
+> modifier stages (time decay, access/importance/entity boosts; all off by default)
 > multiply on top of the base scale when enabled. Pick score thresholds per
 > scale — or skip score gating for a scale you don't recognize — instead of
 > inferring the scale from the value range. Both keys are omitted when there

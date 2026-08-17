@@ -45,7 +45,7 @@ __all__ = ["MemtomemBaseStore", "MemtomemStore"]
 
 if TYPE_CHECKING:
     from memtomem.integrations.langgraph_store import MemtomemBaseStore
-    from memtomem.server.component_factory import Components
+    from memtomem.runtime.components import Components
 
 
 def __getattr__(name: str) -> Any:
@@ -89,7 +89,7 @@ class MemtomemStore:
                 load_config_d,
                 load_config_overrides,
             )
-            from memtomem.server.component_factory import create_components
+            from memtomem.runtime.components import create_components
 
             config = Mem2MemConfig()
             load_config_d(config)
@@ -134,7 +134,7 @@ class MemtomemStore:
     async def close(self) -> None:
         """Close all components and release resources."""
         if self._components:
-            from memtomem.server.component_factory import close_components
+            from memtomem.runtime.components import close_components
 
             await close_components(self._components)
             self._components = None
@@ -185,7 +185,7 @@ class MemtomemStore:
         # ADR-0011 PR-D round 9: thread project context — LangGraph
         # agents running inside a registered project should still see
         # the project's tier rows under the always-on scope filter.
-        from memtomem.server.tools.search import _resolve_project_context_root
+        from memtomem.runtime.project_context import _resolve_project_context_root
 
         project_context_root = _resolve_project_context_root(comp)
 
