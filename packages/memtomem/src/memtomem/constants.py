@@ -283,3 +283,26 @@ def default_system_prefixes() -> list[str]:
     """
 
     return list(_DEFAULT_SYSTEM_PREFIXES)
+
+
+# How a persisted session summary was chosen. Written on the session row so a
+# consumer can tell an exactly-recorded summary from an inferred one without
+# re-deriving it. Absence means unknown/unrecorded — a legacy row, a producer
+# not yet instrumented, or a session that ended with no summary — and carries
+# no claim either way.
+#
+# ``EXACT``    the summary text came from the write-provenance chunk set,
+#              selected by recorded id.
+# ``FALLBACK`` the write-provenance path was unavailable (marker absent or
+#              incomplete, ids malformed, or a count/hydration shortfall) and
+#              the summary came from the namespace/time-window scan instead.
+# ``MANUAL``   the summary text was supplied by the caller, not derived here.
+#
+# These live here rather than beside the writer in
+# ``server/tools/_provenance.py`` because non-server writers record them too:
+# the CLI's ``mm session end`` and the in-process LangGraph adapter both stamp
+# ``MANUAL``. ``_provenance`` re-exports all three, so its import path stays
+# valid.
+SUMMARY_PROVENANCE_EXACT: Final[str] = "exact"
+SUMMARY_PROVENANCE_FALLBACK: Final[str] = "fallback"
+SUMMARY_PROVENANCE_MANUAL: Final[str] = "manual"
