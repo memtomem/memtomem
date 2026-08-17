@@ -268,9 +268,11 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
       - name: Every distribution an extra installs has a probe
-        # --with packaging: the coverage check parses PEP 508 requirements
-        # (markers, extras, specifiers) rather than approximating them. It is
-        # a memtomem base dependency, so the [all] venv below already has it.
+        # --with packaging: only the coverage check parses PEP 508, and it
+        # only ever runs here, from the checkout. packaging is a workspace
+        # dev dependency, NOT a memtomem runtime one, so the probe run in
+        # the isolated [all] venv below must not need it — see the lazy
+        # import in the helper.
         run: uv run --no-project --python 3.12 --with packaging python
           tools/extras_import_smoke.py --check-coverage --repo-root .
       - name: Build wheel
