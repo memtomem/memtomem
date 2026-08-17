@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import re
 import sys
 import tomllib
+from importlib.metadata import distribution
 from pathlib import Path
 
 # Top-level modules each extra is expected to make importable. Keys must
@@ -45,24 +47,61 @@ EXTRA_MODULES: dict[str, tuple[str, ...]] = {
 # ``all`` installs the extras above rather than distributions of its own.
 META_EXTRAS = frozenset({"all"})
 
+# The extra whose job is to pull in every other extra. ``--check-coverage``
+# verifies it actually does, because an extra missing from it would never be
+# installed by the smoke and its probe would silently never run.
+UMBRELLA_EXTRA = "all"
 
-def _declared_extras(repo_root: Path) -> set[str]:
+# Probe prefix for a distribution that installs no importable top-level
+# module. Use ``"dist:name"`` rather than an empty probe tuple, which is
+# rejected: "nothing to import" and "nobody wrote the probe" must not look
+# alike to the guard.
+DIST_PREFIX = "dist:"
+
+
+def _optional_dependencies(repo_root: Path) -> dict[str, list[str]]:
     pyproject = repo_root / "packages" / "memtomem" / "pyproject.toml"
     with pyproject.open("rb") as handle:
-        return set(tomllib.load(handle)["project"]["optional-dependencies"])
+        return tomllib.load(handle)["project"]["optional-dependencies"]
+
+
+def _umbrella_members(requirements: list[str]) -> set[str]:
+    """Extras named inside a ``memtomem[a,b,c]`` self-reference."""
+    members: set[str] = set()
+    for requirement in requirements:
+        if match := re.search(r"\[([^\]]+)\]", requirement):
+            members |= {part.strip() for part in match.group(1).split(",") if part.strip()}
+    return members
 
 
 def check_coverage(repo_root: Path) -> int:
-    """Fail when an extra exists with no import probe (or vice versa)."""
-    declared = _declared_extras(repo_root) - META_EXTRAS
+    """Fail when an extra is unprobed, probed emptily, or outside ``all``."""
+    optional = _optional_dependencies(repo_root)
+    declared = set(optional) - META_EXTRAS
     probed = set(EXTRA_MODULES)
-    if declared == probed:
+    errors: list[str] = []
+
+    if missing := sorted(declared - probed):
+        errors.append(f"extras declared with no import probe: {missing}")
+    if unknown := sorted(probed - declared):
+        errors.append(f"import probes for undeclared extras: {unknown}")
+    if empty := sorted(name for name, modules in EXTRA_MODULES.items() if not modules):
+        errors.append(
+            f"extras with an empty probe: {empty} — an extra that installs no "
+            f"importable module must be probed as '{DIST_PREFIX}<distribution>'"
+        )
+    if UMBRELLA_EXTRA in optional:
+        if outside := sorted(declared - _umbrella_members(optional[UMBRELLA_EXTRA])):
+            errors.append(
+                f"extras missing from '{UMBRELLA_EXTRA}': {outside} — the smoke "
+                f"installs '{UMBRELLA_EXTRA}', so their probes would never run"
+            )
+
+    if not errors:
         print(f"extras import coverage OK ({len(probed)} extras probed)")
         return 0
-    if missing := sorted(declared - probed):
-        print(f"ERROR: extras declared with no import probe: {missing}", file=sys.stderr)
-    if unknown := sorted(probed - declared):
-        print(f"ERROR: import probes for undeclared extras: {unknown}", file=sys.stderr)
+    for error in errors:
+        print(f"ERROR: {error}", file=sys.stderr)
     print(f"Add or remove entries in {Path(__file__).name}:EXTRA_MODULES.", file=sys.stderr)
     return 1
 
@@ -73,9 +112,12 @@ def run_imports() -> int:
     for extra, modules in sorted(EXTRA_MODULES.items()):
         for module in modules:
             try:
-                importlib.import_module(module)
+                if module.startswith(DIST_PREFIX):
+                    distribution(module[len(DIST_PREFIX) :])
+                else:
+                    importlib.import_module(module)
             except Exception as exc:  # noqa: BLE001 - report every failure, not the first
-                failures.append(f"{extra}: import {module} failed: {exc!r}")
+                failures.append(f"{extra}: probe {module} failed: {exc!r}")
     if failures:
         for failure in failures:
             print(f"ERROR: {failure}", file=sys.stderr)
