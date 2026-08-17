@@ -65,13 +65,45 @@ def _optional_dependencies(repo_root: Path) -> dict[str, list[str]]:
         return tomllib.load(handle)["project"]["optional-dependencies"]
 
 
+PROJECT_NAME = "memtomem"
+
+# Only a bare, unconditional self-reference counts as umbrella coverage:
+# ``memtomem[a,b]`` and nothing else on the line. A requirement carrying an
+# environment marker installs nothing on the interpreters the marker excludes,
+# and a bracket belonging to some *other* distribution says nothing about our
+# extras — both used to be read as coverage. Anything this does not match
+# fails closed rather than being interpreted.
+_SELF_REFERENCE = re.compile(rf"^{PROJECT_NAME}\[([^\]\[;]+)\]$")
+
+# PEP 503 name normalization, so ``tree-sitter``/``tree_sitter.python`` and
+# friends compare equal to whatever spelling a ``dist:`` probe uses.
+_NAME_SEPARATORS = re.compile(r"[-_.]+")
+
+# Leading distribution name of a PEP 508 requirement, before any extras,
+# version specifier, marker, or URL.
+_REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _normalize(name: str) -> str:
+    return _NAME_SEPARATORS.sub("-", name).lower()
+
+
 def _umbrella_members(requirements: list[str]) -> set[str]:
-    """Extras named inside a ``memtomem[a,b,c]`` self-reference."""
+    """Extras named in an unconditional ``memtomem[a,b,c]`` self-reference."""
     members: set[str] = set()
     for requirement in requirements:
-        if match := re.search(r"\[([^\]]+)\]", requirement):
+        if match := _SELF_REFERENCE.match(requirement.strip()):
             members |= {part.strip() for part in match.group(1).split(",") if part.strip()}
     return members
+
+
+def _requirement_names(requirements: list[str]) -> set[str]:
+    """Normalized distribution names an extra declares directly."""
+    names: set[str] = set()
+    for requirement in requirements:
+        if match := _REQUIREMENT_NAME.match(requirement):
+            names.add(_normalize(match.group(1)))
+    return names
 
 
 def check_coverage(repo_root: Path) -> int:
@@ -90,12 +122,34 @@ def check_coverage(repo_root: Path) -> int:
             f"extras with an empty probe: {empty} — an extra that installs no "
             f"importable module must be probed as '{DIST_PREFIX}<distribution>'"
         )
-    if UMBRELLA_EXTRA in optional:
-        if outside := sorted(declared - _umbrella_members(optional[UMBRELLA_EXTRA])):
-            errors.append(
-                f"extras missing from '{UMBRELLA_EXTRA}': {outside} — the smoke "
-                f"installs '{UMBRELLA_EXTRA}', so their probes would never run"
-            )
+    if UMBRELLA_EXTRA not in optional:
+        errors.append(
+            f"no '{UMBRELLA_EXTRA}' extra declared — the smoke installs it, so "
+            f"without it nothing would be probed at all"
+        )
+    elif outside := sorted(declared - _umbrella_members(optional[UMBRELLA_EXTRA])):
+        errors.append(
+            f"extras missing from '{UMBRELLA_EXTRA}': {outside} — the smoke "
+            f"installs '{UMBRELLA_EXTRA}', so their probes would never run "
+            f"(coverage counts only a bare '{PROJECT_NAME}[...]' self-reference)"
+        )
+
+    # A ``dist:`` probe that names a distribution the extra does not declare
+    # proves nothing: base and transitive packages resolve in the all-extras
+    # environment whether or not the extra installed anything.
+    for extra in sorted(probed & declared):
+        declared_names = _requirement_names(optional[extra])
+        for module in EXTRA_MODULES[extra]:
+            if not module.startswith(DIST_PREFIX):
+                continue
+            target = _normalize(module[len(DIST_PREFIX) :])
+            if target not in declared_names:
+                errors.append(
+                    f"extra '{extra}' probes '{module}', which it does not "
+                    f"declare (declares: {sorted(declared_names)}) — a "
+                    f"'{DIST_PREFIX}' probe must name one of the extra's own "
+                    f"distributions"
+                )
 
     if not errors:
         print(f"extras import coverage OK ({len(probed)} extras probed)")
