@@ -104,7 +104,7 @@ async def degraded_components(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
     monkeypatch.setattr(_cfg, "load_config_d", lambda c: None)
     monkeypatch.setattr(
-        "memtomem.server.component_factory.create_embedder",
+        "memtomem.runtime.components.create_embedder",
         lambda embedding_config: _FakeEmbedder(),
     )
 

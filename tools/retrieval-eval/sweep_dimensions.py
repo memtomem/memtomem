@@ -151,7 +151,7 @@ def _install_embedder_patch() -> Callable[[], None]:
 
     Returns a restore callable; install once per sweep under ``try/finally``.
     """
-    import memtomem.server.component_factory as factory
+    import memtomem.runtime.components as factory
     from memtomem.embedding.aliases import resolve_embedder_id
 
     original = factory.create_embedder
