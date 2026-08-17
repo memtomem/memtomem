@@ -5510,7 +5510,22 @@ async function _deleteSourceFile(path) {
   });
   if (!ok) return;
   try {
-    await api('DELETE', `/api/sources?path=${encodeURIComponent(path)}`);
+    const q = `path=${encodeURIComponent(path)}`;
+    let resp = await api('DELETE', `/api/sources?${q}`);
+    // ADR-0011 Gate-B: a source holding project_shared chunks comes back as a
+    // needs_confirmation envelope with no write performed. Disclose what the
+    // second leg would take, then re-issue carrying the flag the server named.
+    if (resp && resp.status === 'needs_confirmation'
+        && resp.confirm === 'confirm_project_shared') {
+      const agreed = await showConfirm({
+        title: t('confirm.source_delete_shared_title'),
+        message: t('confirm.source_delete_shared_msg', { path }),
+        confirmText: t('common.delete'),
+        danger: true,
+      });
+      if (!agreed) return;
+      resp = await api('DELETE', `/api/sources?${q}&confirm_project_shared=true`);
+    }
     showToast(t('toast.source_deleted'), 'success');
     STATE.allSources = (STATE.allSources || []).filter(s => s.path !== path);
     STATE.lastResults = (STATE.lastResults || []).filter(r => r.chunk?.source_file !== path);

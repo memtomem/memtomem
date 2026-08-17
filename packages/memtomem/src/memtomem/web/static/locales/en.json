@@ -1553,6 +1553,8 @@
   "confirm.bulk_delete_msg": "{count} chunks will be permanently removed from source files and deleted from the index. This cannot be undone.",
   "confirm.source_delete_title": "Delete Source",
   "confirm.source_delete_msg": "Delete all chunks for:\n{path}",
+  "confirm.source_delete_shared_title": "Delete Shared Source",
+  "confirm.source_delete_shared_msg": "This file holds project_shared chunks committed to the repository. Deleting removes them for everyone using this project, and the delete is all-or-nothing:\n{path}",
   "confirm.merge_dupe_title": "Merge Duplicate",
   "confirm.merge_dupe_keep_a_msg": "Keep A and delete B.",
   "confirm.merge_dupe_keep_b_msg": "Keep B and delete A.",

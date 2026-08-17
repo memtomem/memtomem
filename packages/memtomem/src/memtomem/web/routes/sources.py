@@ -12,7 +12,13 @@ from memtomem.config import MemoryDirKind, TargetScope, classify_scope, memory_d
 from memtomem.indexing.engine import norm_dir_prefix
 from memtomem.indexing.summarizer import regenerate_for_paths
 from memtomem.storage.sqlite_helpers import norm_path
-from memtomem.web.deps import get_config, get_storage, require_indexed_source
+from memtomem.web.deps import (
+    get_config,
+    get_search_pipeline,
+    get_storage,
+    require_indexed_source,
+)
+from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.schemas.core import DeleteResponse
 from memtomem.web.schemas.sources import (
     ChunkSizeBucket,
@@ -312,16 +318,54 @@ async def source_content_matches(
     return SourceContentMatchesResponse(query=query, paths=[str(p) for p in paths])
 
 
-@router.delete("", response_model=DeleteResponse)
+@router.delete("")
 async def delete_source(
     path: str = Query(..., description="Absolute path of the source file to remove"),
+    confirm_project_shared: bool = Query(
+        False,
+        description=(
+            "ADR-0011 opt-in for sources holding project_shared chunks. Query "
+            "parameter (not a body field) because DELETE bodies are "
+            "client-hostile; the needs_confirmation envelope names the same "
+            "flag. Source deletes are all-or-nothing, matching mem_delete."
+        ),
+    ),
     storage=Depends(get_storage),
-) -> DeleteResponse:
+    search_pipeline=Depends(get_search_pipeline),
+) -> dict:
+    """Remove every indexed chunk for ``path``. The file itself is not deleted.
+
+    Mirrors ``mem_delete(source_file=...)``: the same ADR-0011 Gate-B scope
+    confirmation, and the same cache invalidation afterwards. Without the
+    latter, a search served from the pipeline's cache keeps returning the
+    chunks this call just deleted until the entry ages out.
+    """
     indexed_sources = await storage.get_all_source_files()
     request_path = require_indexed_source(path, indexed_sources)
 
+    # Gate-B: a bulk source delete that would take project_shared chunks with
+    # it needs consent first. The probe is re-read below rather than trusted
+    # from a caller-supplied hint — the flag says the user consented, it does
+    # not say what they consented to.
+    scopes = await storage.list_scopes_by_source(request_path)
+    if "project_shared" in scopes and not confirm_project_shared:
+        logger.info(
+            "delete_source rejected project_shared source without confirmation",
+            extra={"scopes": sorted(scopes)},
+        )
+        return needs_confirmation_envelope(
+            (
+                "This source holds project_shared chunks that are shared with the "
+                "repository. Deleting it removes them for everyone using this "
+                "project. Source deletes are all-or-nothing."
+            ),
+            confirm="confirm_project_shared",
+            scopes=sorted(scopes),
+        )
+
     deleted = await storage.delete_by_source(request_path)
-    return DeleteResponse(deleted=deleted)
+    search_pipeline.invalidate_cache()
+    return DeleteResponse(deleted=deleted).model_dump()
 
 
 @router.get("/content")

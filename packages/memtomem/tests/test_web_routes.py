@@ -5646,3 +5646,107 @@ class TestConfigErrorHandler:
         assert "indexing.memory_dirs is empty" in resp.json()["detail"]
         appender.assert_not_called()
         app.state.storage.scratch_promote.assert_not_called()
+
+
+class TestDeleteSourceParity:
+    """#2081: ``DELETE /api/sources`` is the web twin of
+    ``mem_delete(source_file=...)`` and had drifted from it on two points —
+    it never invalidated the search cache (deleted chunks stayed served from
+    a cached page until the entry aged out) and it applied no ADR-0011 Gate-B
+    confirmation before taking ``project_shared`` chunks with it.
+    """
+
+    SOURCE = Path("/tmp/memories/shared-note.md")
+
+    def _indexed(self, app) -> None:
+        app.state.storage.get_all_source_files.return_value = [self.SOURCE]
+
+    async def test_delete_invalidates_search_cache(self, app, client: AsyncClient):
+        """Assert on the pipeline itself: an empty result set would also be
+        produced by a cache that is merely stale, so absence proves nothing.
+        """
+        self._indexed(app)
+        app.state.storage.list_scopes_by_source = AsyncMock(return_value={"user"})
+        app.state.search_pipeline.invalidate_cache = MagicMock()
+
+        resp = await client.delete("/api/sources", params={"path": str(self.SOURCE)})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"deleted": 1}
+        app.state.search_pipeline.invalidate_cache.assert_called_once_with()
+
+    async def test_user_scope_source_deletes_without_confirmation(self, app, client: AsyncClient):
+        """The common path must not grow a confirmation round-trip."""
+        self._indexed(app)
+        app.state.storage.list_scopes_by_source = AsyncMock(return_value={"user"})
+
+        resp = await client.delete("/api/sources", params={"path": str(self.SOURCE)})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"deleted": 1}
+        app.state.storage.delete_by_source.assert_awaited_once()
+
+    async def test_project_shared_without_flag_performs_no_write(self, app, client: AsyncClient):
+        """Gate-B refusal is an application state (200 + envelope), and the
+        refusal must be proven by the absent delete, not by the body alone.
+        """
+        self._indexed(app)
+        app.state.storage.list_scopes_by_source = AsyncMock(return_value={"user", "project_shared"})
+        app.state.search_pipeline.invalidate_cache = MagicMock()
+
+        resp = await client.delete("/api/sources", params={"path": str(self.SOURCE)})
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "needs_confirmation"
+        # The client must learn the flag name from the envelope, never by
+        # parsing the prose.
+        assert body["confirm"] == "confirm_project_shared"
+        assert body["scopes"] == ["project_shared", "user"]
+        app.state.storage.delete_by_source.assert_not_awaited()
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
+
+    async def test_project_shared_with_flag_deletes(self, app, client: AsyncClient):
+        self._indexed(app)
+        app.state.storage.list_scopes_by_source = AsyncMock(return_value={"project_shared"})
+        app.state.search_pipeline.invalidate_cache = MagicMock()
+
+        resp = await client.delete(
+            "/api/sources",
+            params={"path": str(self.SOURCE), "confirm_project_shared": "true"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"deleted": 1}
+        app.state.storage.delete_by_source.assert_awaited_once()
+        app.state.search_pipeline.invalidate_cache.assert_called_once_with()
+
+    @pytest.mark.parametrize("flag", ["false", "0", ""])
+    async def test_project_shared_falsy_flag_still_gated(self, app, client: AsyncClient, flag):
+        """Presence of the parameter is not consent — only a truthy value is."""
+        self._indexed(app)
+        app.state.storage.list_scopes_by_source = AsyncMock(return_value={"project_shared"})
+
+        resp = await client.delete(
+            "/api/sources",
+            params={"path": str(self.SOURCE), "confirm_project_shared": flag},
+        )
+
+        assert resp.status_code in (200, 422), resp.text
+        if resp.status_code == 200:
+            assert resp.json()["status"] == "needs_confirmation"
+        app.state.storage.delete_by_source.assert_not_awaited()
+
+    async def test_scope_probe_runs_before_the_delete(self, app, client: AsyncClient):
+        """The gate must consult storage, not a caller-supplied hint: a flag
+        alone must never be able to skip the probe."""
+        self._indexed(app)
+        probe = AsyncMock(return_value={"project_shared"})
+        app.state.storage.list_scopes_by_source = probe
+
+        await client.delete(
+            "/api/sources",
+            params={"path": str(self.SOURCE), "confirm_project_shared": "true"},
+        )
+
+        probe.assert_awaited_once()
