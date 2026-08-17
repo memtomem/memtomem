@@ -185,7 +185,7 @@ class MemtomemStore:
         # ADR-0011 PR-D round 9: thread project context — LangGraph
         # agents running inside a registered project should still see
         # the project's tier rows under the always-on scope filter.
-        from memtomem.server.tools.search import _resolve_project_context_root
+        from memtomem.runtime.project_context import _resolve_project_context_root
 
         project_context_root = _resolve_project_context_root(comp)
 

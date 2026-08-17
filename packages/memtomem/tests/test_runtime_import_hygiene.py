@@ -86,22 +86,24 @@ asyncio.run(main())
     )
 
 
-def test_memtomem_store_init_and_close_stay_off_the_transport_stack(tmp_path) -> None:
+def test_memtomem_store_read_write_cycle_stays_off_the_transport_stack(tmp_path) -> None:
     """The named consumer, not just the layer it is supposed to use.
 
     The checks above import ``memtomem.runtime`` directly, so they would stay
     green if ``MemtomemStore`` quietly went back to
     ``memtomem.server.component_factory`` — the regression this whole move
-    exists to prevent. Drive the adapter itself instead.
+    exists to prevent. Drive the adapter itself instead, across the calls a
+    LangGraph or deepagents node actually makes.
 
-    Scope note: only the lazy-init and close path is asserted. ``search`` is
-    not clean yet — it lazy-imports ``_resolve_project_context_root`` from
-    ``memtomem.server.tools.search``, the last core→server edge in this
-    adapter. Extend this case to cover ``search``/``add`` in the change that
-    relocates that helper.
+    Scope note: ``end_session`` is deliberately absent. It still lazy-imports
+    ``SUMMARY_PROVENANCE_MANUAL`` from ``memtomem.server.tools._provenance``,
+    the last core→server edge in this adapter; add it here in the change that
+    relocates that constant.
     """
     home = tmp_path / "home"
     home.mkdir()
+    memory_dir = tmp_path / "memories"
+    memory_dir.mkdir()
     db_path = tmp_path / "store.db"
     _run(
         f"""
@@ -113,12 +115,18 @@ store = MemtomemStore(
     config_overrides={{
         "storage": {{"sqlite_path": {str(db_path)!r}}},
         "embedding": {{"provider": "none", "dimension": 0}},
+        "indexing": {{"memory_dirs": [{str(memory_dir)!r}]}},
     }}
 )
 
 async def main():
     comp = await store._ensure_init()
     assert comp.search_pipeline is not None
+    # search resolves the ADR-0011 project-context anchor, the helper this
+    # change relocated; add exercises the write path's own resolution.
+    await store.add("cache strategy is write-through", tags=["arch"])
+    hits = await store.search("cache strategy")
+    assert isinstance(hits, list)
     await store.close()
     assert store._components is None
 
