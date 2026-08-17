@@ -60,7 +60,7 @@ class TestCheckCoverage:
     def test_declared_extra_without_probe_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("fastapi",)})
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}})
         root = _fixture(
             tmp_path,
             {
@@ -74,24 +74,38 @@ class TestCheckCoverage:
     def test_probe_for_undeclared_extra_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("fastapi",), "removed": ("gone",)})
+        monkeypatch.setattr(
+            smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}, "removed": {"gone": "gone"}}
+        )
         root = _fixture(tmp_path, {"web": ["fastapi>=0.115"], "all": ["memtomem[web]"]})
         assert smoke.check_coverage(root) == 1
 
-    def test_empty_probe_tuple_fails(
+    def test_empty_probe_string_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """An empty probe must not be a way to satisfy the name check."""
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ()})
+        """A blank probe must not be a way to satisfy the table."""
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": ""}})
         root = _fixture(tmp_path, {"web": ["fastapi>=0.115"], "all": ["memtomem[web]"]})
         assert smoke.check_coverage(root) == 1
-        assert "empty probe" in capsys.readouterr().err
+        assert "empty probes" in capsys.readouterr().err
+
+    def test_extra_with_no_probes_at_all_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {}})
+        root = _fixture(tmp_path, {"web": ["fastapi>=0.115"], "all": ["memtomem[web]"]})
+        assert smoke.check_coverage(root) == 1
+        assert "no probe" in capsys.readouterr().err
 
     def test_extra_missing_from_all_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """``all`` omitting an extra means its probe would never run."""
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("fastapi",), "korean": ("kiwipiepy",)})
+        monkeypatch.setattr(
+            smoke,
+            "EXTRA_PROBES",
+            {"web": {"fastapi": "fastapi"}, "korean": {"kiwipiepy": "kiwipiepy"}},
+        )
         root = _fixture(
             tmp_path,
             {
@@ -107,7 +121,11 @@ class TestCheckCoverage:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The positive control: same shape, nothing missing."""
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("fastapi",), "korean": ("kiwipiepy",)})
+        monkeypatch.setattr(
+            smoke,
+            "EXTRA_PROBES",
+            {"web": {"fastapi": "fastapi"}, "korean": {"kiwipiepy": "kiwipiepy"}},
+        )
         root = _fixture(
             tmp_path,
             {
@@ -121,7 +139,9 @@ class TestCheckCoverage:
 
 class TestRunImports:
     def test_missing_module_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("definitely_not_installed_xyz",)})
+        monkeypatch.setattr(
+            smoke, "EXTRA_PROBES", {"web": {"fastapi": "definitely_not_installed_xyz"}}
+        )
         assert smoke.run_imports() == 1
 
     def test_reports_every_failure_not_just_the_first(
@@ -129,8 +149,8 @@ class TestRunImports:
     ) -> None:
         monkeypatch.setattr(
             smoke,
-            "EXTRA_MODULES",
-            {"a": ("no_such_module_one",), "b": ("no_such_module_two",)},
+            "EXTRA_PROBES",
+            {"a": {"x": "no_such_module_one"}, "b": {"y": "no_such_module_two"}},
         )
         assert smoke.run_imports() == 1
         err = capsys.readouterr().err
@@ -146,12 +166,16 @@ class TestRunImports:
         target here; whether an extra may legitimately probe it is the
         coverage check's business, pinned in ``TestDistProbeBinding``.
         """
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"meta": (f"{smoke.DIST_PREFIX}pytest",)})
+        monkeypatch.setattr(
+            smoke, "EXTRA_PROBES", {"meta": {"pytest": f"{smoke.DIST_PREFIX}pytest"}}
+        )
         assert smoke.run_imports() == 0
 
     def test_missing_distribution_probe_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            smoke, "EXTRA_MODULES", {"meta": (f"{smoke.DIST_PREFIX}no-such-distribution-xyz",)}
+            smoke,
+            "EXTRA_PROBES",
+            {"meta": {"nope": f"{smoke.DIST_PREFIX}no-such-distribution-xyz"}},
         )
         assert smoke.run_imports() == 1
 
@@ -162,7 +186,7 @@ class TestUmbrellaParsing:
     def test_foreign_bracket_is_not_coverage(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("fastapi",)})
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}})
         root = _fixture(
             tmp_path,
             {"web": ["fastapi>=0.115"], "all": ["unrelated[web]"]},
@@ -174,7 +198,7 @@ class TestUmbrellaParsing:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A marker means the extra installs nothing on excluded interpreters."""
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("fastapi",)})
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}})
         root = _fixture(
             tmp_path,
             {"web": ["fastapi>=0.115"], "all": ['memtomem[web]; python_version < "3.12"']},
@@ -185,7 +209,7 @@ class TestUmbrellaParsing:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Deleting ``all`` must not skip the membership check."""
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": ("fastapi",)})
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}})
         root = _fixture(tmp_path, {"web": ["fastapi>=0.115"]})
         assert smoke.check_coverage(root) == 1
         assert "all" in capsys.readouterr().err
@@ -197,7 +221,7 @@ class TestDistProbeBinding:
     def test_unrelated_installed_distribution_is_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": (f"{smoke.DIST_PREFIX}httpx",)})
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"httpx": f"{smoke.DIST_PREFIX}httpx"}})
         root = _fixture(tmp_path, {"web": ["fastapi>=0.115"], "all": ["memtomem[web]"]})
         assert smoke.check_coverage(root) == 1
         assert "does not" in capsys.readouterr().err
@@ -205,7 +229,9 @@ class TestDistProbeBinding:
     def test_own_distribution_is_accepted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(smoke, "EXTRA_MODULES", {"web": (f"{smoke.DIST_PREFIX}fastapi",)})
+        monkeypatch.setattr(
+            smoke, "EXTRA_PROBES", {"web": {"fastapi": f"{smoke.DIST_PREFIX}fastapi"}}
+        )
         root = _fixture(tmp_path, {"web": ["fastapi>=0.115"], "all": ["memtomem[web]"]})
         assert smoke.check_coverage(root) == 0
 
@@ -214,7 +240,113 @@ class TestDistProbeBinding:
     ) -> None:
         """``tree_sitter_python`` and ``tree-sitter-python`` are one name."""
         monkeypatch.setattr(
-            smoke, "EXTRA_MODULES", {"code": (f"{smoke.DIST_PREFIX}tree_sitter_python",)}
+            smoke,
+            "EXTRA_PROBES",
+            {"code": {"tree_sitter_python": f"{smoke.DIST_PREFIX}tree_sitter_python"}},
         )
         root = _fixture(tmp_path, {"code": ["tree-sitter-python>=0.23"], "all": ["memtomem[code]"]})
+        assert smoke.check_coverage(root) == 0
+
+
+class TestDistributionLevelCoverage:
+    """Probes are per-distribution: an extra that gains a dep gains a probe."""
+
+    def test_added_dependency_without_probe_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The extra name is still covered; the new distribution is not."""
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}})
+        root = _fixture(
+            tmp_path,
+            {"web": ["fastapi>=0.115", "uvicorn>=0.49"], "all": ["memtomem[web]"]},
+        )
+        assert smoke.check_coverage(root) == 1
+        assert "uvicorn" in capsys.readouterr().err
+
+    def test_probe_supplied_by_another_extra_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """`web` may not lean on a distribution only `korean` declares.
+
+        In the combined `[all]` environment the import would succeed either
+        way, which is exactly the masking this check exists to prevent.
+        """
+        monkeypatch.setattr(
+            smoke,
+            "EXTRA_PROBES",
+            {
+                "web": {"fastapi": "fastapi", "kiwipiepy": "kiwipiepy"},
+                "korean": {"kiwipiepy": "kiwipiepy"},
+            },
+        )
+        root = _fixture(
+            tmp_path,
+            {
+                "web": ["fastapi>=0.115"],
+                "korean": ["kiwipiepy>=0.18"],
+                "all": ["memtomem[web,korean]"],
+            },
+        )
+        assert smoke.check_coverage(root) == 1
+        assert "does not" in capsys.readouterr().err
+
+    def test_marker_excluded_distribution_cannot_be_probed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A marker that excludes this interpreter installs nothing here.
+
+        Two extras sharing the distribution is what makes it dangerous: the
+        probe would pass on the other extra's copy.
+        """
+        monkeypatch.setattr(
+            smoke,
+            "EXTRA_PROBES",
+            {
+                "web": {"fastapi": "fastapi", "kiwipiepy": "kiwipiepy"},
+                "korean": {"kiwipiepy": "kiwipiepy"},
+            },
+        )
+        root = _fixture(
+            tmp_path,
+            {
+                "web": ["fastapi>=0.115", 'kiwipiepy>=0.18; python_version < "3.12"'],
+                "korean": ["kiwipiepy>=0.18"],
+                "all": ["memtomem[web,korean]"],
+            },
+        )
+        assert smoke.check_coverage(root) == 1
+        assert "excludes" in capsys.readouterr().err
+
+    def test_marker_included_distribution_is_probeable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Positive control: a marker that *includes* this interpreter."""
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}})
+        root = _fixture(
+            tmp_path,
+            {"web": ['fastapi>=0.115; python_version >= "3.12"'], "all": ["memtomem[web]"]},
+        )
+        assert smoke.check_coverage(root) == 0
+
+    def test_self_reference_with_specifier_is_coverage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`memtomem[web]>=0.4` is a legal unconditional self-reference."""
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}})
+        root = _fixture(tmp_path, {"web": ["fastapi>=0.115"], "all": ["memtomem[web]>=0.4"]})
+        assert smoke.check_coverage(root) == 0
+
+    def test_self_reference_is_not_probed_as_a_distribution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An extra referencing a sibling extra needs no probe for memtomem."""
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}, "bundle": {}})
+        root = _fixture(
+            tmp_path,
+            {
+                "web": ["fastapi>=0.115"],
+                "bundle": ["memtomem[web]"],
+                "all": ["memtomem[web,bundle]"],
+            },
+        )
         assert smoke.check_coverage(root) == 0

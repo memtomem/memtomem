@@ -267,9 +267,12 @@ jobs:
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
         with:
           version: ${{ env.UV_VERSION }}
-      - name: Every declared extra has an import probe
-        run: uv run --no-project --python 3.12 python tools/extras_import_smoke.py
-          --check-coverage --repo-root .
+      - name: Every distribution an extra installs has a probe
+        # --with packaging: the coverage check parses PEP 508 requirements
+        # (markers, extras, specifiers) rather than approximating them. It is
+        # a memtomem base dependency, so the [all] venv below already has it.
+        run: uv run --no-project --python 3.12 --with packaging python
+          tools/extras_import_smoke.py --check-coverage --repo-root .
       - name: Build wheel
         run: uv build packages/memtomem --out-dir ci-dist
       - name: Base install imports and runs
