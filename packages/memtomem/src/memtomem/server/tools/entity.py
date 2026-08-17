@@ -34,7 +34,20 @@ async def mem_entity_scan(
         overwrite: Replace existing entities for scanned chunks (default: false, skip already-scanned)
         dry_run: Preview extraction without saving (default: false)
     """
-    from memtomem.tools.entity_extraction import extract_entities_with_llm
+    from memtomem.tools.entity_extraction import _VALID_ENTITY_TYPES, extract_entities_with_llm
+
+    # Validate before anything can write. An unknown type is silently ignored by
+    # the extractor, so a typo makes every chunk look entity-less — and under
+    # ``overwrite`` that is indistinguishable from "this content no longer has
+    # entities", which clears the rows. A misspelling must not be able to erase
+    # an extraction pass.
+    if entity_types is not None:
+        invalid = sorted(set(entity_types) - set(_VALID_ENTITY_TYPES))
+        if invalid:
+            return (
+                f"Error: unknown entity type(s): {', '.join(invalid)}. "
+                f"Valid types: {', '.join(sorted(_VALID_ENTITY_TYPES))}."
+            )
 
     app = await _get_app_initialized(ctx)
     storage = app.storage

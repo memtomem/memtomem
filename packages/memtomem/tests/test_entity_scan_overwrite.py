@@ -124,3 +124,55 @@ class TestScanInvalidatesSearchCache:
         assert calls["n"] > 1
         assert "extractor died" in out.lower() or "error" in out.lower()
         assert comp.search_pipeline._cache_version > before
+
+
+class TestEntityTypeValidation:
+    """An unknown type must never reach the clear path.
+
+    The extractor ignores types it does not know, so a typo yields zero
+    entities for every chunk — which under ``overwrite`` is indistinguishable
+    from "this content has no entities any more" and would delete the lot.
+    """
+
+    @pytest.mark.asyncio
+    async def test_typo_is_rejected_before_any_write(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        chunk = await _seed(comp)
+
+        ctx = StubCtx(AppContext.from_components(comp))
+        before = comp.search_pipeline._cache_version
+        out = await mem_entity_scan(  # type: ignore[arg-type]
+            entity_types=["technlogy"], overwrite=True, ctx=ctx
+        )
+
+        assert "unknown entity type" in out.lower()
+        assert await comp.storage.get_entities_for_chunk(str(chunk.id))  # nothing deleted
+        assert comp.search_pipeline._cache_version == before  # nothing invalidated
+
+    @pytest.mark.asyncio
+    async def test_error_names_the_valid_vocabulary(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        out = await mem_entity_scan(entity_types=["nope"], ctx=ctx)  # type: ignore[arg-type]
+        for valid in ("person", "date", "technology", "concept"):
+            assert valid in out
+
+    @pytest.mark.asyncio
+    async def test_one_bad_type_among_good_ones_still_rejects(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        chunk = await _seed(comp)
+        ctx = StubCtx(AppContext.from_components(comp))
+        out = await mem_entity_scan(  # type: ignore[arg-type]
+            entity_types=["person", "technlogy"], overwrite=True, ctx=ctx
+        )
+        assert "technlogy" in out
+        assert await comp.storage.get_entities_for_chunk(str(chunk.id))
+
+    @pytest.mark.asyncio
+    async def test_valid_types_still_run(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        await comp.storage.upsert_chunks([make_chunk("sqlite migration notes")])
+        ctx = StubCtx(AppContext.from_components(comp))
+        out = await mem_entity_scan(entity_types=["technology"], ctx=ctx)  # type: ignore[arg-type]
+        assert "unknown entity type" not in out.lower()
+        assert "complete" in out.lower()

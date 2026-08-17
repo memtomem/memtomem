@@ -319,9 +319,15 @@ def index_fingerprint(
         # case-insensitively with ``SELECT DISTINCT``, so "SQLite" vs "sqlite"
         # and the duplicate rows a namespace merge can leave behind are
         # indistinguishable to ranking. Hashing them raw would report drift on
-        # indexes that rank identically. Confidence is dropped for the same
-        # reason — it gates via ``min_confidence`` before this point (see
-        # ``quality/state.py``), and past that gate its value is inert.
+        # indexes that rank identically.
+        #
+        # Confidence is kept. Past a candidate's ``min_confidence`` gate its
+        # exact value is inert, but that is the *caller's* fact to apply, and
+        # ``quality/state.py`` does apply it (filter + normalize). The
+        # profile-independent snapshot in ``quality/experiment.py`` passes raw
+        # rows precisely so a concurrent writer nudging a confidence across
+        # some candidate's threshold still registers — dropping it here would
+        # blind that snapshot to a real mid-run mutation.
         #
         # ``fold_entity_value`` and not ``str.lower()``: the fold has to be the
         # one SQLite performs, or the reverse error appears — Python folds
@@ -333,9 +339,13 @@ def index_fingerprint(
             {
                 tuple(
                     _chunk_identity(content_hash, namespace, source, start_line)
-                    + [str(entity_type), _sha256_text(fold_entity_value(entity_value or ""))]
+                    + [
+                        str(entity_type),
+                        _sha256_text(fold_entity_value(entity_value or "")),
+                        str(conf),
+                    ]
                 )
-                for content_hash, namespace, source, start_line, entity_type, entity_value, _conf in entity_rows  # noqa: E501
+                for content_hash, namespace, source, start_line, entity_type, entity_value, conf in entity_rows  # noqa: E501
             }
         )
     return _sha256_json(payload)

@@ -270,3 +270,28 @@ class TestBoostConfigGuards:
         a.entity_boost = EntityBoostConfig(enabled=True, query_entity_types=["person", "date"])
         b.entity_boost = EntityBoostConfig(enabled=True, query_entity_types=["person"])
         assert profile_fingerprint(a)[0] != profile_fingerprint(b)[0]
+
+
+class TestDedupeUsesTheStorageFold:
+    """Extraction dedupe must fold exactly as the storage comparison does.
+
+    A Unicode ``str.lower()`` dedupe collapses values SQLite keeps distinct, so
+    one of a query's real entities silently vanishes from the key set — and on
+    the index side a storable row is dropped.
+    """
+
+    def test_accented_variants_survive_as_distinct_keys(self):
+        keys = extract_query_entities('"Éclair" and "éclair" both', ["concept"])
+        values = [v for _, v in keys]
+        assert "Éclair" in values and "éclair" in values
+
+    def test_ascii_variants_still_collapse(self):
+        # SQLite matches these, so keeping both would double-count coverage.
+        keys = extract_query_entities('"Recipe" and "recipe" both', ["concept"])
+        assert keys == [("concept", "recipe")]
+
+    def test_extractor_keeps_both_for_the_index_side(self):
+        from memtomem.tools.entity_extraction import extract_entities
+
+        values = {e.entity_value for e in extract_entities('"Éclair" x "éclair"', ["concept"])}
+        assert values == {"Éclair", "éclair"}

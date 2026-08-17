@@ -423,17 +423,19 @@ class TestEntityRowsFingerprint:
         b = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "rust", 0.9)])
         assert a != b
 
-    def test_confidence_is_not_folded(self):
-        # min_confidence gates rows out before they reach here (quality/state.py);
-        # past that gate the stored value is inert, so it must not manufacture
-        # drift between indexes that rank identically.
+    def test_confidence_change_drifts(self):
+        # The hasher keeps confidence: a raw change can cross some candidate
+        # profile's min_confidence floor. Normalizing it past that gate is
+        # quality/state.py's job (see TestGatedConfidenceNormalization), so the
+        # profile-independent snapshot in experiment.py stays able to see a
+        # concurrent writer nudging a value.
         a = self._base(
             entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.9)]
         )
         b = self._base(
             entity_rows=[("hash-1", "default", "/n/a.md", 0, "technology", "sqlite", 0.5)]
         )
-        assert a == b
+        assert a != b
 
     def test_case_only_difference_is_not_drift(self):
         # Matching is case-insensitive, so these two indexes rank identically.
@@ -526,4 +528,73 @@ class TestEntityFoldingParity:
         # str.lower() fold would have collapsed them into one fingerprint.
         a = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "Éclair", 0.9)])
         b = self._base(entity_rows=[("hash-1", "default", "/n/a.md", 0, "concept", "éclair", 0.9)])
+        assert a != b
+
+
+class TestGatedConfidenceNormalization:
+    """Which layer applies min_confidence, and what each one may forget.
+
+    quality/state.py filters by the *candidate config's* floor and then
+    normalizes the surviving values away — presence-only ranking cannot tell
+    0.7 from 0.9. quality/experiment.py's shared snapshot must NOT do that: it
+    exists to catch a concurrent writer, and a confidence nudge can cross some
+    other profile's floor.
+    """
+
+    def _rows(self, conf, etype="technology"):
+        return [("hash-1", "default", "/n/a.md", 0, etype, "sqlite", conf)]
+
+    def _fp(self, storage_rows, config):
+        from unittest.mock import MagicMock
+
+        from memtomem.quality.state import current_fingerprints
+
+        storage = MagicMock()
+        storage.read_corpus_fingerprint_rows.return_value = _BASE_CORPUS
+        storage.read_vector_fingerprint_rows.return_value = _VECTORS
+        storage.read_fts_fingerprint_rows.return_value = _FTS
+        storage.stored_embedding_info = _EMB
+        storage.read_link_topology_rows.return_value = []
+        storage.read_access_counts.return_value = []
+        storage.read_entity_rows.return_value = storage_rows
+        return current_fingerprints(storage, config)[0]["index"]
+
+    def _config(self, *, min_confidence=0.0, types=None):
+        from memtomem.config import EntityBoostConfig, Mem2MemConfig
+
+        cfg = Mem2MemConfig()
+        cfg.entity_boost = EntityBoostConfig(
+            enabled=True,
+            min_confidence=min_confidence,
+            query_entity_types=types or ["technology", "person", "date"],
+        )
+        return cfg
+
+    def test_above_floor_values_are_equivalent(self):
+        cfg = self._config(min_confidence=0.6)
+        assert self._fp(self._rows(0.7), cfg) == self._fp(self._rows(0.9), cfg)
+
+    def test_crossing_the_floor_is_drift(self):
+        cfg = self._config(min_confidence=0.6)
+        assert self._fp(self._rows(0.5), cfg) != self._fp(self._rows(0.7), cfg)
+
+    def test_inactive_type_is_excluded(self):
+        cfg = self._config(types=["person"])
+        # A technology row cannot be matched by a person-only config.
+        assert self._fp(self._rows(0.9), cfg) == self._fp([], cfg)
+
+    def test_disabled_boost_folds_no_entity_rows(self):
+        from memtomem.config import Mem2MemConfig
+
+        off = Mem2MemConfig()
+        assert off.entity_boost.enabled is False
+        assert self._fp(self._rows(0.9), off) == self._fp([], off)
+
+    def test_shared_snapshot_keeps_raw_confidence(self):
+        # experiment.py passes ungated rows straight through, so the hasher
+        # itself must retain confidence.
+        from memtomem.quality.fingerprints import index_fingerprint
+
+        a = index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, entity_rows=self._rows(0.5))
+        b = index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, entity_rows=self._rows(0.9))
         assert a != b

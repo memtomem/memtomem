@@ -201,11 +201,14 @@ def extract_entities(
     if "concept" in types:
         results.extend(_extract_concepts(text))
 
-    # Deduplicate by (type, value)
+    # Deduplicate by (type, value), folding exactly as the storage comparison
+    # does. ``str.lower()`` here would collapse two values SQLite keeps
+    # distinct — dropping one of them from a query's key set costs a real
+    # match, and on the index side it would drop a storable row.
     seen: set[tuple[str, str]] = set()
     unique: list[ExtractedEntity] = []
     for e in results:
-        key = (e.entity_type, e.entity_value.lower())
+        key = (e.entity_type, fold_entity_value(e.entity_value))
         if key not in seen:
             seen.add(key)
             unique.append(e)

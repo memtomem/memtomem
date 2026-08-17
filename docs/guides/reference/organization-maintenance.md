@@ -209,6 +209,11 @@ summary. That matters once [entity boost](../configuration.md#entity-match-boost
 is enabled: entities left over from a previous version of the content would keep
 boosting the chunk for a query it no longer matches.
 
+`entity_types` is validated against the six valid types before the scan starts,
+and an unknown value is rejected outright. Silently ignoring a typo would make
+every chunk look entity-less, which under `overwrite=True` reads as "clear
+them all".
+
 > **LLM enhancement**: When LLM is enabled, `mem_entity_scan` uses LLM-based structured extraction for higher accuracy (especially person names and decisions). Falls back to regex/pattern matching when LLM is disabled or fails.
 
 ### Decay and expiration
