@@ -37,6 +37,7 @@ from uuid import UUID, uuid4
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
+    SUMMARY_PROVENANCE_MANUAL,
     normalize_bound_agent_id,
     validate_namespace,
 )
@@ -520,8 +521,6 @@ class MemtomemStore:
         # write-provenance selection — recorded as ``manual``. Ending with no
         # summary leaves the origin absent (unknown), never a bare marker.
         if summary:
-            from memtomem.server.tools._provenance import SUMMARY_PROVENANCE_MANUAL
-
             end_metadata["summary_provenance"] = SUMMARY_PROVENANCE_MANUAL
         await comp.storage.end_session(
             self._current_session_id,
