@@ -6,7 +6,6 @@ import asyncio
 import logging
 from uuid import UUID
 
-from memtomem.chunking.markdown import _parse_validity_bound
 from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
@@ -28,6 +27,11 @@ from memtomem.server.formatters import (
 )
 from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
+from memtomem.services.search_service import (
+    InvalidTemporalBoundError,
+    parse_as_of_bound,
+    run_search,
+)
 from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
 from memtomem.server.validation import MAX_QUERY_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
@@ -110,55 +114,37 @@ async def mem_search(
     if effective_format not in _VALID_OUTPUT_FORMATS:
         return f"Error: {INVALID_OUTPUT_FORMAT_PREFIX} '{output_format}'."
 
-    as_of_unix: int | None = None
-    if as_of is not None:
-        as_of_unix = _parse_validity_bound(as_of, upper=False)
-        if as_of_unix is None:
-            return (
-                f"Error: invalid as_of value '{as_of}'. "
-                "Accepted formats: 'YYYY-MM-DD' (date) or 'YYYY-QN' (quarter, N in 1-4)."
-            )
+    # Reject a malformed bound before touching the app: argument validation
+    # here runs without an initialized server. The core parses it again from
+    # the raw value, which keeps one definition of the accepted formats.
+    try:
+        parse_as_of_bound(as_of)
+    except InvalidTemporalBoundError as e:
+        return f"Error: {e}"
 
     app = await _get_app_initialized(ctx)
-    effective_ns = namespace or app.current_namespace
-
-    rrf_weights = None
-    if bm25_weight is not None or dense_weight is not None:
-        rrf_weights = [bm25_weight or 1.0, dense_weight or 1.0]
 
     project_context_root = _resolve_project_context_root(app)
-    results, stats = await app.search_pipeline.search(
+    results, stats, hints = await run_search(
+        app.search_pipeline,
         query=query,
         top_k=top_k,
         source_filter=source_filter,
         tag_filter=tag_filter,
-        namespace=effective_ns,
-        rrf_weights=rrf_weights,
-        context_window=context_window if context_window > 0 else None,
-        as_of_unix=as_of_unix,
+        namespace=namespace,
+        current_namespace=app.current_namespace,
+        as_of=as_of,
+        bm25_weight=bm25_weight,
+        dense_weight=dense_weight,
+        context_window=context_window,
         scope=scope,
-        project_context_root=project_context_root,
         rerank=rerank,
+        project_context_root=project_context_root,
         origin="mcp",
     )
 
-    # Build trust-UX hints shared across formats: archive filter count and a
-    # one-shot embedding mismatch notice. Emitted for users who did NOT pin a
-    # namespace (otherwise the archive filter never engaged).
-    hints: list[str] = []
-    # stats.rerank_applied is the per-call effective decision, not the live
-    # config — accurate even when a hot reload flips rerank.enabled while
-    # this call is in flight.
-    if rerank is True and not stats.rerank_applied:
-        hints.append(
-            "rerank=true requested but server reranking is disabled "
-            "(rerank.enabled=false); results are un-reranked."
-        )
-    if effective_ns is None and stats.hidden_system_ns > 0:
-        hints.append(
-            f"{stats.hidden_system_ns} result(s) hidden in system namespaces "
-            f'(pass namespace="archive:..." to include them).'
-        )
+    # The dimension-mismatch notice is per-process announcement state, not a
+    # property of this query, so it is appended here rather than in the core.
     dim_notice = await _announce_dim_mismatch_once(app)
     if dim_notice:
         hints.append(dim_notice)
