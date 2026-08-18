@@ -16,13 +16,131 @@ of flake (indexing timing, embedding model presence, port collisions).
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Coroutine, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, TypeVar
 
 import pytest
+import pytest_asyncio
+
+_T = TypeVar("_T")
+_WEB_TESTS = Path(__file__).resolve().parent
+
+
+def _drives_a_main_thread_loop(item: pytest.Item) -> bool:
+    """Whether running ``item`` would spin an event loop on the calling thread.
+
+    Two ways in, because each misses what the other catches:
+
+    * ``pytest_asyncio.is_async_test`` — the library's own classification, which
+      covers async ``staticmethod``s and Hypothesis-wrapped coroutines that a
+      bare ``iscoroutinefunction`` reads as sync.
+    * a coroutine ``item.obj`` pytest-asyncio did *not* claim, e.g. a
+      ``unittest.IsolatedAsyncioTestCase`` method, which runs its own
+      ``asyncio.run``.
+
+    Async *fixtures* drive the same runner and are caught in
+    ``pytest_fixture_setup`` instead: which definition wins an override, and
+    whether a fixture is requested at all (``request.getfixturevalue``), is only
+    known once pytest resolves it.
+    """
+
+    if pytest_asyncio.is_async_test(item):
+        return True
+    return inspect.iscoroutinefunction(getattr(item, "obj", None))
+
+
+def is_main_thread_async_item(item: pytest.Item) -> bool:
+    """Whether ``item`` drives an event loop *and* is collected from here.
+
+    Collection position, not the source file, is the risk axis: coroutines
+    defined in a ``__test__ = False`` module here (``test_upload_quarantine.py``)
+    are collected through ``tests/test_web_routes.py``, ahead of every browser
+    spec, and their item path says so.
+    """
+
+    if _WEB_TESTS not in Path(str(item.path)).resolve().parents:
+        return False
+    return _drives_a_main_thread_loop(item)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Refuse to run a coroutine test collected from ``tests/web`` (#2099).
+
+    Playwright's sync API parks a dispatcher greenlet inside
+    ``loop.run_until_complete`` for the whole session. Greenlets share the
+    thread, so asyncio can still see that loop as *running* on MainThread when a
+    later test starts, and pytest-asyncio then fails the test before its body
+    runs with ``RuntimeError: Runner.run() cannot be called from a running event
+    loop``. Whether a given test trips it depends on where the dispatcher
+    parked, which made #2099 look like order-dependent pollution — and it never
+    reproduced on CI, where the browser specs auto-skip without Chromium.
+
+    Coroutine work here goes through the ``run_async`` fixture below instead.
+
+    A hook rather than a guard test, so enforcement never depends on selection:
+    ``-m``/``-k`` deselect tests, and the Windows file shards would put a guard
+    test in one shard only. ``tryfirst`` puts this ahead of the mark plugin's
+    own ``pytest_collection_modifyitems``, which is where deselection happens —
+    without it a deselected offender is invisible here. Collection has already
+    finished at this point, so reporting does not mask later collection errors,
+    and every offender is named at once.
+    """
+
+    offenders = [item.nodeid for item in items if is_main_thread_async_item(item)]
+    if offenders:
+        raise pytest.UsageError(
+            "async test functions collected from tests/web race Playwright's "
+            f"parked event loop (#2099): {offenders}. Make the test sync and "
+            "drive the coroutine with the ``run_async`` fixture in "
+            "tests/web/conftest.py."
+        )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_fixture_setup(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest) -> None:
+    """Reject an async fixture resolved for a test in this directory (#2099).
+
+    Same hazard as an ``async def`` test — pytest-asyncio drives async fixtures
+    through the same ``Runner`` on MainThread, so a sync test body is no proof
+    of safety. Enforced here rather than by walking ``_fixtureinfo`` at
+    collection because only pytest knows which definition survives an override
+    and which fixtures a ``request.getfixturevalue`` call will ask for.
+    """
+
+    # ``request.node`` is the *scope* node — the session root for a
+    # session-scoped fixture, the package for a package-scoped one — so it says
+    # nothing about who asked. ``_pyfuncitem`` is the test that actually
+    # triggered the resolution, whatever the fixture's scope.
+    item = getattr(request, "_pyfuncitem", None) or getattr(request, "node", None)
+    item_path = getattr(item, "path", None)
+    if item_path is None or _WEB_TESTS not in Path(str(item_path)).resolve().parents:
+        return
+    func = getattr(fixturedef, "func", None)
+    if func is None:
+        return
+    # pytest-asyncio's own ``pytest_fixture_setup`` is a hookwrapper, so by the
+    # time this runs it has already swapped ``func`` for a sync synchronizer.
+    # ``functools.wraps`` leaves ``__wrapped__`` behind — unwrap to see what the
+    # author actually declared.
+    original = inspect.unwrap(func)
+    if any(
+        inspect.iscoroutinefunction(candidate) or inspect.isasyncgenfunction(candidate)
+        for candidate in (func, original)
+    ):
+        raise pytest.UsageError(
+            f"async fixture {fixturedef.argname!r} requested by {getattr(item, 'nodeid', item)} "
+            "races Playwright's parked event loop (#2099). Make the fixture sync and drive "
+            "the coroutine with the ``run_async`` fixture in tests/web/conftest.py."
+        )
 
 
 @pytest.fixture(scope="session")
@@ -178,3 +296,31 @@ def install_default_stubs(page) -> None:
             },
         ),
     )
+
+
+@pytest.fixture(scope="session")
+def run_async() -> Callable[[Coroutine[Any, Any, _T]], _T]:
+    """Run a coroutine on a private loop in a worker thread.
+
+    Playwright's sync API parks a dispatcher greenlet inside
+    ``loop.run_until_complete`` for the lifetime of the session
+    (``playwright/sync_api/_context_manager.py``). Greenlets share the thread,
+    so asyncio keeps that loop registered as *running* on MainThread, and
+    pytest-asyncio then refuses to start any coroutine test with
+    ``RuntimeError: Runner.run() cannot be called from a running event loop``
+    (issue #2099). Whether a given test sees the flag depends on where the
+    dispatcher happened to park, which is what made the failure look like
+    order-dependent pollution.
+
+    A worker thread has its own asyncio state, so a coroutine driven through
+    here is immune to whatever the browser specs leave on MainThread. Tests in
+    this directory must not be ``async def`` — ``pytest_collection_modifyitems``
+    above rejects one at collection time, and ``test_no_main_thread_async.py``
+    pins that the rejection is armed.
+    """
+
+    def _run(coro: Coroutine[Any, Any, _T]) -> _T:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mm-web-async") as pool:
+            return pool.submit(asyncio.run, coro).result()
+
+    return _run
