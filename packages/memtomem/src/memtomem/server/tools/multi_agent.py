@@ -212,7 +212,7 @@ async def mem_agent_search(
         namespace=ns_filter,
         current_namespace=None,
         project_context_root=project_context_root,
-        origin="internal",
+        origin="mcp",
     )
 
     dim_notice = await _announce_dim_mismatch_once(app)
@@ -221,7 +221,9 @@ async def mem_agent_search(
 
     if not results:
         if output_format == "structured":
-            return _format_structured_results([], hints=hints or None)
+            return _format_structured_results(
+                [], hints=hints or None, query_run_id=stats.query_run_id
+            )
         # Hints matter most on an empty result set — the caller may have
         # archived rows they don't know about. Rendered exactly as mem_search
         # renders its own empty-result hints.
@@ -234,6 +236,7 @@ async def mem_agent_search(
             hints=hints or None,
             score_scale=stats.score_scale,
             reranker=stats.reranker_model,
+            query_run_id=stats.query_run_id,
         )
     output = _format_results(results, verbose=output_format == "verbose")
     for hint in hints:
