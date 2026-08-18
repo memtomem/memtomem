@@ -89,22 +89,21 @@ def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> l
     """Build the RRF weight pair, or ``None`` to follow server config.
 
     Each side defaults on ``is None``, not on falsiness. ``0.0`` is a value a
-    caller can mean: fusion adds ``weight / (k + rank)`` per leg, so a zero
-    weight drops that retriever's votes out of the score. (Its candidates can
-    still occupy slots at score 0 when the other leg returns fewer than
-    ``top_k`` — zero silences a leg's ranking influence, it does not remove
-    its rows; see #2092.)
+    caller can mean: it disables that leg outright — the pipeline skips the
+    retrieval and fusion inserts none of its candidates (#2092). Both zero is
+    refused: a search with no weighted leg is meaningless.
 
     Negative and non-finite weights are refused. A negative weight does not
     gently de-emphasise a leg — it inverts it, because ``w / (k + rank)``
     rises toward zero as rank grows, so rank 50 outscores rank 1 and the
     worst matches are promoted. This guards the request boundary only —
-    ``search.rrf_weights`` in config takes the same values with no validation
-    of its own today (#2094), so a configured weight still reaches fusion
-    unchecked.
+    ``search.rrf_weights`` in config is not validated yet (#2094); a
+    configured non-positive weight is treated as "leg excluded" by the
+    pipeline gates and fusion rather than inverting anything.
 
     Raises:
-        InvalidRrfWeightError: a supplied weight is negative or non-finite.
+        InvalidRrfWeightError: a supplied weight is negative or non-finite,
+            or both weights are zero.
     """
     if bm25_weight is None and dense_weight is None:
         return None
@@ -117,6 +116,10 @@ def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> l
             raise InvalidRrfWeightError(f"{name} must be a finite number, got {weight}.")
         if weight < 0:
             raise InvalidRrfWeightError(f"{name} must be >= 0, got {weight}.")
+    if not any(weights):
+        raise InvalidRrfWeightError(
+            "bm25_weight and dense_weight cannot both be zero — at least one leg must carry weight."
+        )
     return weights
 
 
@@ -204,7 +207,8 @@ async def run_search(
 
     Raises:
         InvalidTemporalBoundError: ``as_of`` is not a recognized bound.
-        InvalidRrfWeightError: a weight is negative or non-finite.
+        InvalidRrfWeightError: a weight is negative or non-finite, or both
+            weights are zero.
     """
     as_of_unix = parse_as_of_bound(as_of)
 

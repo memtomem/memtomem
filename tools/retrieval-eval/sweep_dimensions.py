@@ -18,10 +18,10 @@ text is embedded exactly once for the whole sweep (the bge-m3 model still loads
 once per language track before its texts are cached); every later dimension is a
 pure truncate-and-renorm over the cache.
 
-Dense-only tracks use RRF weights ``(0.0, 1.0)`` — BM25 documents then score
-``0 / (k + rank) = 0`` in fusion, and with ``candidate_k >= top_k`` on this corpus
-the top-k is purely dense-ranked, isolating dense-quality loss that the fused
-(BM25 + RRF) pipeline may otherwise mask.
+Dense-only tracks use RRF weights ``(0.0, 1.0)`` — since #2092 a zero weight
+excludes the BM25 leg outright (retrieval skipped, no candidates enter fusion),
+so the top-k is purely dense-ranked, isolating dense-quality loss that the
+fused (BM25 + RRF) pipeline may otherwise mask.
 """
 
 from __future__ import annotations

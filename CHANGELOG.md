@@ -29,6 +29,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   torn rather than silently mis-parsed. The Claude skill's host-tool grant is
   scoped to `git rev-parse` / `git status` only.
 
+### Changed
+
+- **A zero RRF weight now disables its leg outright.** #2087 made
+  `bm25_weight=0.0` / `dense_weight=0.0` survive to fusion, but zero only
+  silenced the leg's score: its candidates still entered fusion at 0.0 and
+  could fill remaining slots when the other leg returned fewer than `top_k`,
+  the single-retriever passthrough ignored the weight entirely, and the
+  session-summary rescue leg could re-surface keyword-matched candidates
+  through its own positive weight. A zero-weighted leg is now excluded — the
+  retrieval is skipped, fusion inserts none of its candidates, the
+  passthrough branches honor it, and the rescue sub-retrievals inherit the
+  same gate. Consequently `bm25_weight=0.0, dense_weight=0.0` is refused
+  (`InvalidRrfWeightError`): a search with no weighted leg is meaningless.
+  Structured-output consumers note: a request like `bm25_weight=0` on a
+  hybrid server now reports `score_scale="dense"` (single-leg passthrough)
+  instead of `"rrf"`. An explicitly passed empty weight list now normalizes
+  to the `[1.0, 1.0]` defaults instead of silently re-reading server config.
+  (#2092)
+
 ### Fixed
 
 - **`mem_agent_search` labels its searches as MCP traffic and exposes
@@ -44,12 +63,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **`bm25_weight=0.0` / `dense_weight=0.0` are honored instead of silently
   becoming `1.0`.** The weight pair was assembled with `or`, which cannot tell
   "not supplied" from "supplied as zero", so asking for a zero-weighted leg
-  quietly produced an evenly weighted search. Fusion adds `weight / (k + rank)`
-  per leg, so zero drops that retriever's votes out of the score — note its
-  candidates can still occupy slots at score 0 when the other leg returns fewer
-  than `top_k`; zero silences a leg's ranking influence, it does not remove its
-  rows. `mem_search` and the in-process LangGraph adapter both carried the bug
-  and now share one helper.
+  quietly produced an evenly weighted search. (This entry originally only made
+  the zero survive forwarding — its candidates could still fill slots at score
+  0. The "zero disables the leg" entry above supersedes that caveat.)
+  `mem_search` and the in-process LangGraph adapter both carried the bug and
+  now share one helper.
 
   Negative and non-finite weights are now refused at the request boundary. A
   negative weight does not de-emphasise a leg: `weight / (k + rank)` rises

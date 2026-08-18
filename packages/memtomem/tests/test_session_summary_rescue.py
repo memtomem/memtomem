@@ -301,6 +301,73 @@ class TestPipelineEndToEndRescue:
         assert organic_result.via_session_summary is False
 
     @pytest.mark.asyncio
+    async def test_zero_bm25_weight_gates_the_rescue_keyword_leg(self):
+        """#2092: rescue's sub-retrievals inherit the caller's weight gate.
+
+        With ``bm25_weight=0`` on a hybrid stack the rescue leg must not
+        re-surface keyword-matched candidates through its own (positive)
+        fusion weight — the rescue retrieval runs with ``use_bm25=False``.
+        (With *every* leg weighted off the rescue block is skipped
+        entirely; see ``test_config_all_zero_skips_auxiliary_retrievals_too``
+        in ``test_pipeline.py``.)
+        """
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summary_chunk = _chunk("summary body", namespace="archive:session:abc")
+        rescued = _chunk("rescued chunk", source="src/old_session.md")
+
+        storage = _async_storage()
+
+        async def bm25_dispatch(
+            query: str,
+            top_k: int,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+        ):
+            if namespace_filter is not None and getattr(namespace_filter, "pattern", None) == (
+                "archive:session:*"
+            ):
+                return [_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
+            return [_sr(rescued, score=0.4, rank=1, source="bm25")]
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        storage.get_chunks_shared_from = AsyncMock(
+            return_value=[
+                ChunkLink(
+                    target_id=rescued.id,
+                    link_type="summarizes",
+                    namespace_target="default",
+                    created_at=datetime.now(timezone.utc),
+                    source_id=summary_chunk.id,
+                )
+            ]
+        )
+        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=True),
+            session_summary_config=cfg,
+        )
+        rescue_kwargs: dict = {}
+        real_rescue = pipeline._rescue_retrieval
+
+        async def capture_rescue(*args, **kwargs):
+            rescue_kwargs.update(kwargs)
+            return await real_rescue(*args, **kwargs)
+
+        pipeline._rescue_retrieval = capture_rescue
+
+        results, _stats = await pipeline.search("q", top_k=10, rrf_weights=[0.0, 1.0])
+
+        assert rescue_kwargs["use_bm25"] is False
+        assert rescue_kwargs["use_dense"] is True
+        assert rescued.id not in {r.chunk.id for r in results}
+
+    @pytest.mark.asyncio
     async def test_rescue_threads_project_context_into_all_storage_calls(self):
         """ADR-0011 PR-D review pin: every storage call on the rescue
         path (summary lookup + rescue BM25 leg + rescue dense leg) must

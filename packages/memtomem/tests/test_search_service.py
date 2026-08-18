@@ -394,10 +394,9 @@ class TestHiddenNamespaceHint:
 class TestRrfWeights:
     """#2087: 0.0 is a value, not an absence.
 
-    Fusion adds ``weight / (k + rank)`` per leg, so a zero weight removes
-    that leg's contribution to the fused score. Defaulting it to 1.0 gave the
-    caller the opposite of what they asked for, silently. (Zero does not stop
-    the leg from contributing candidates — see #2092.)
+    Defaulting a zero to 1.0 gave the caller the opposite of what they asked
+    for, silently. Since #2092 a zero weight disables its leg outright, so a
+    pair with no weighted leg is meaningless and refused.
     """
 
     def test_a_zero_keyword_weight_survives(self):
@@ -406,8 +405,9 @@ class TestRrfWeights:
     def test_a_zero_meaning_weight_survives(self):
         assert rrf_weights_from(None, 0.0) == [1.0, 0.0]
 
-    def test_both_zero_is_passed_through(self):
-        assert rrf_weights_from(0.0, 0.0) == [0.0, 0.0]
+    def test_both_zero_is_refused(self):
+        with pytest.raises(InvalidRrfWeightError, match="cannot both be zero"):
+            rrf_weights_from(0.0, 0.0)
 
     def test_absent_weights_defer_to_server_config(self):
         assert rrf_weights_from(None, None) is None
@@ -433,8 +433,8 @@ class TestRrfWeightValidation:
 
     ``w / (k + rank)`` rises toward zero as rank grows, so with ``w = -1``
     rank 50 scores ``-1/110`` and rank 1 scores ``-1/61`` — ``nlargest``
-    promotes the worst matches. ``search.rrf_weights`` is validated in
-    config; this is the same rule at the request boundary.
+    promotes the worst matches. This guards the request boundary;
+    ``search.rrf_weights`` from config is #2094's territory.
     """
 
     @pytest.mark.parametrize("weight", [-1.0, -0.001, float("nan"), float("inf")])
@@ -447,8 +447,9 @@ class TestRrfWeightValidation:
         with pytest.raises(InvalidRrfWeightError, match="dense_weight"):
             rrf_weights_from(None, weight)
 
-    def test_zero_is_not_refused(self):
-        assert rrf_weights_from(0.0, 0.0) == [0.0, 0.0]
+    def test_a_one_sided_zero_is_not_refused(self):
+        assert rrf_weights_from(0.0, None) == [0.0, 1.0]
+        assert rrf_weights_from(None, 0.0) == [1.0, 0.0]
 
     def test_the_inversion_the_guard_prevents(self):
         """Documents why negative is refused rather than merely discouraged."""

@@ -75,7 +75,7 @@ async def mem_search(
             wall clock.
         bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor)
         dense_weight: RRF weight for meaning matches (default 1.0). Both must be
-            finite and >= 0; 0 drops that leg's score, not its rows
+            finite and >= 0, not both zero; 0 disables that leg
         context_window: Expand each result with ±N adjacent chunks (0 = off)
         verbose: Deprecated — use output_format="verbose".
         output_format: "compact" (default), "verbose" (adds UUID / pipeline stats),

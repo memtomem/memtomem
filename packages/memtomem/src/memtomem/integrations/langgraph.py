@@ -158,12 +158,12 @@ class MemtomemStore:
 
         Returns list of dicts with keys: id, content, score, source, tags, namespace.
 
-        ``bm25_weight`` / ``dense_weight`` must be finite and non-negative;
-        anything else raises ``InvalidRrfWeightError`` (a ``ValueError``)
-        before initialization, in keeping with this class treating a
-        malformed request as a programming error rather than degrading it.
-        ``0.0`` removes that leg's contribution to the fused score, but its
-        candidates can still appear (see #2092).
+        ``bm25_weight`` / ``dense_weight`` must be finite and non-negative,
+        and not both zero; anything else raises ``InvalidRrfWeightError``
+        (a ``ValueError``) before initialization, in keeping with this class
+        treating a malformed request as a programming error rather than
+        degrading it. ``0.0`` disables that leg — its retrieval is skipped
+        and none of its candidates appear (#2092).
 
         ``include_shared`` is the multi-agent semantic toggle. State table:
 

@@ -174,6 +174,22 @@ class TestArgumentValidation:
 
         assert out == "Error: dense_weight must be a finite number, got inf."
 
+    async def test_an_all_zero_weight_pair_is_refused(self, monkeypatch):
+        from memtomem.server.tools import search as search_mod
+
+        monkeypatch.setattr(
+            search_mod, "_get_app_initialized", AsyncMock(side_effect=AssertionError("too late"))
+        )
+
+        out = await search_mod.mem_search(
+            query="hello", bm25_weight=0.0, dense_weight=0.0, ctx=SimpleNamespace()
+        )
+
+        assert out == (
+            "Error: bm25_weight and dense_weight cannot both be zero — "
+            "at least one leg must carry weight."
+        )
+
 
 class TestEmptyResults:
     async def test_filters_excluded_everything(self, monkeypatch):

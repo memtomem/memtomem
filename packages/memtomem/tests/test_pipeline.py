@@ -1028,6 +1028,163 @@ class TestScoreScale:
         assert second.reranker_model == "test-reranker-v1"
 
 
+class TestZeroWeightExcludesLeg:
+    """#2092: a zero RRF weight disables its leg — retrieval skipped, no
+    candidates, and the passthrough branch/`score_scale` follow the
+    surviving leg."""
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+    _make_pipeline = TestScoreScale._make_pipeline
+
+    @pytest.mark.asyncio
+    async def test_zero_bm25_weight_runs_dense_only(self):
+        bm25_in = [self._make_result(f"b{i}", rank=i + 1) for i in range(5)]
+        dense_in = [self._make_result(f"d{i}", rank=i + 1) for i in range(2)]
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+
+        results, stats = await pipeline.search("anything", top_k=5, rrf_weights=[0.0, 1.0])
+
+        pipeline._storage.bm25_search.assert_not_awaited()
+        assert stats.score_scale == "dense"
+        assert {r.chunk.content for r in results} == {"d0", "d1"}
+
+    @pytest.mark.asyncio
+    async def test_zero_dense_weight_runs_bm25_only(self):
+        bm25_in = [self._make_result(f"b{i}", rank=i + 1) for i in range(3)]
+        dense_in = [self._make_result(f"d{i}", rank=i + 1) for i in range(3)]
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+
+        results, stats = await pipeline.search("anything", top_k=5, rrf_weights=[1.0, 0.0])
+
+        pipeline._storage.dense_search.assert_not_awaited()
+        pipeline._embedder.embed_query.assert_not_awaited()
+        assert stats.score_scale == "bm25"
+        assert {r.chunk.content for r in results} == {"b0", "b1", "b2"}
+
+    @pytest.mark.asyncio
+    async def test_zero_weight_on_the_only_enabled_leg_yields_nothing(self):
+        """bm25-only config + zero bm25 weight: the passthrough branch must
+        not return raw BM25 rows the caller weighted to zero."""
+        bm25_in = [self._make_result(f"b{i}", rank=i + 1) for i in range(3)]
+        pipeline = self._make_pipeline(bm25_in)
+
+        results, stats = await pipeline.search("anything", top_k=5, rrf_weights=[0.0, 1.0])
+
+        pipeline._storage.bm25_search.assert_not_awaited()
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_empty_list_means_default_weights_not_config(self):
+        """``rrf_weights=[]`` normalizes to the 1.0 defaults instead of
+        silently re-reading server config (the old falsy-``or``), and the
+        persisted observation profile records the normalized pair that
+        actually ranked — not the raw ``[]``."""
+        bm25_in = [self._make_result("b0", rank=1)]
+        dense_in = [self._make_result("d0", rank=1)]
+        from unittest.mock import AsyncMock
+
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+        pipeline._config.rrf_weights = [0.0, 1.0]
+        # Instance-attached so the capability probe counts it as support.
+        pipeline._storage.save_search_observation = AsyncMock(return_value="run-1")
+        pipeline._embedder.dimension = 8
+        pipeline._embedder.model_name = "test-model"
+
+        _, stats = await pipeline.search("anything", top_k=5, rrf_weights=[])
+
+        pipeline._storage.bm25_search.assert_awaited_once()
+        assert stats.score_scale == "rrf"
+        observation = pipeline._storage.save_search_observation.call_args.kwargs["observation"]
+        assert observation["profile"]["rrf_weights"] == [1.0, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_config_sourced_all_zero_pair_yields_empty_results(self):
+        """Interim #2092 behavior until #2094 validates config: an all-zero
+        configured pair gates both legs off — no retrievals run and the
+        search returns empty rather than an arbitrarily ordered set."""
+        bm25_in = [self._make_result("b0", rank=1)]
+        dense_in = [self._make_result("d0", rank=1)]
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+        pipeline._config.rrf_weights = [0.0, 0.0]
+
+        results, stats = await pipeline.search("anything", top_k=5)
+
+        pipeline._storage.bm25_search.assert_not_awaited()
+        pipeline._storage.dense_search.assert_not_awaited()
+        assert results == []
+        assert stats.fused_total == 0
+
+    @pytest.mark.asyncio
+    async def test_config_all_zero_skips_auxiliary_retrievals_too(self):
+        """Production-like wiring: with expansion and session-summary rescue
+        configured, an all-zero pair must not run their side lookups either
+        (the rescue boost-source lookup is BM25-backed, heading expansion
+        can dense-retrieve)."""
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import QueryExpansionConfig, SearchConfig, SessionSummaryConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        storage = AsyncMock()
+        storage.bm25_search = AsyncMock(return_value=[])
+        storage.dense_search = AsyncMock(return_value=[])
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_embeddings_for_chunks = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+        storage.get_chunks_shared_from = AsyncMock(return_value=[])
+        storage.get_chunks_batch = AsyncMock(return_value={})
+        storage.get_all_tags = AsyncMock(return_value={})
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=True, rrf_weights=[0.0, 0.0]),
+            expansion_config=QueryExpansionConfig(enabled=True, strategy="both"),
+            session_summary_config=SessionSummaryConfig(
+                expansion_lookup_top_k=3, expansion_score_threshold=0.3
+            ),
+        )
+
+        results, stats = await pipeline.search("anything", top_k=5)
+
+        storage.bm25_search.assert_not_awaited()
+        storage.dense_search.assert_not_awaited()
+        embedder.embed_query.assert_not_awaited()
+        assert results == []
+        assert stats.fused_total == 0
+
+    @pytest.mark.asyncio
+    async def test_zero_dense_weight_is_not_reported_as_mismatch_suppression(self):
+        """A caller who weighted dense to zero got the search they asked
+        for; pairing that with a stored-embedding mismatch must not mark
+        the run degraded (quality replay would exclude a healthy case)."""
+        bm25_in = [self._make_result("b0", rank=1)]
+        pipeline = self._make_pipeline(bm25_in, [], enable_dense=True)
+        pipeline._storage.embedding_mismatch = {"policy_mismatch": True}
+
+        _, stats = await pipeline.search("anything", top_k=5, rrf_weights=[1.0, 0.0])
+        assert stats.dense_suppressed_mismatch is False
+
+        _, stats = await pipeline.search("another", top_k=5, rrf_weights=[1.0, 1.0])
+        assert stats.dense_suppressed_mismatch is True
+
+    @pytest.mark.asyncio
+    async def test_config_weights_gate_legs_when_no_request_weights(self):
+        bm25_in = [self._make_result("b0", rank=1)]
+        dense_in = [self._make_result("d0", rank=1)]
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+        pipeline._config.rrf_weights = [0.0, 1.0]
+
+        results, stats = await pipeline.search("anything", top_k=5)
+
+        pipeline._storage.bm25_search.assert_not_awaited()
+        assert stats.score_scale == "dense"
+        assert {r.chunk.content for r in results} == {"d0"}
+
+
 class CloseAwareFakeReranker:
     """Counts rerank/close calls and refuses to rerank after close (#1777).
 
