@@ -212,6 +212,113 @@ class TestEmptyResults:
 
         assert out == "No results found.\n\n(hint one)\n(hint two)"
 
+    async def test_the_filter_message_still_carries_the_hints(self, monkeypatch):
+        """#2085 (sibling): the special empty branches used to return early.
+
+        Returning before the hint tail throws away the one-shot dimension
+        notice this call already consumed, so the warning is not deferred —
+        it is gone for the life of the process.
+        """
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(fused_total=5),
+            hints=["hint one"],
+            dim_notice="embedding dim changed",
+            tag_filter="redis",
+        )
+
+        assert out == (
+            "No results match your filters (5 results found before filtering). "
+            "Try broader filters or remove source_filter/tag_filter."
+            "\n\n(hint one)\n(embedding dim changed)"
+        )
+
+    async def test_the_both_failed_message_still_carries_the_hints(self, monkeypatch):
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(bm25_error="fts down", dense_error="no embedder"),
+            hints=["hint one"],
+        )
+
+        assert out == (
+            "Search unavailable: both keyword and semantic search failed.\n"
+            "- BM25: fts down\n"
+            "- Dense: no embedder"
+            "\n\n(hint one)"
+        )
+
+    async def test_the_keyword_failure_message_still_carries_the_hints(self, monkeypatch):
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(bm25_error="fts down"),
+            hints=["hint one"],
+        )
+
+        assert out == (
+            "No results found. (Note: keyword search unavailable: fts down)\n\n(hint one)"
+        )
+
+    async def test_the_semantic_failure_message_still_carries_the_hints(self, monkeypatch):
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(dense_error="no embedder"),
+            hints=["hint one"],
+        )
+
+        assert out == (
+            "No results found. (Note: semantic search unavailable: no embedder)\n\n(hint one)"
+        )
+
+    async def test_a_filter_message_wins_over_a_retriever_error(self, monkeypatch):
+        """Message precedence, pinned because the branch chain can reorder it.
+
+        The old code expressed this as return-order; the current code is an
+        if/elif chain. Both must pick the filter message when a filter
+        excluded everything *and* a retriever failed.
+        """
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(fused_total=5, bm25_error="fts down"),
+            tag_filter="redis",
+        )
+
+        assert out == (
+            "No results match your filters (5 results found before filtering). "
+            "Try broader filters or remove source_filter/tag_filter."
+        )
+
+    async def test_a_retriever_failure_still_carries_the_one_shot_notice(self, monkeypatch):
+        """The combination this fix exists for.
+
+        Two independent degradations that coexist on a store people
+        actually run: a BM25 exception sets ``bm25_error``, while an
+        embedding-dimension mismatch (which suppresses the *dense* leg)
+        raises the one-shot notice. The branch reporting the first used to
+        return before the hint tail and swallow the second, permanently.
+        """
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(bm25_error="fts down"),
+            dim_notice="embedding dim changed",
+        )
+
+        assert out == (
+            "No results found. (Note: keyword search unavailable: fts down)"
+            "\n\n(embedding dim changed)"
+        )
+
     async def test_structured_empty_carries_core_hints_before_filter_hints(self, monkeypatch):
         out = await _call(
             monkeypatch,
