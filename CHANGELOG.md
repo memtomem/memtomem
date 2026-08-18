@@ -29,6 +29,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   torn rather than silently mis-parsed. The Claude skill's host-tool grant is
   scoped to `git rev-parse` / `git status` only.
 
+### Fixed
+
+- **Search hints no longer disappear on text output.** `mem_search` built its
+  trust-UX hints and then returned without them on four empty-result branches
+  (filter excluded everything, both retrievers failed, keyword-only failure,
+  semantic-only failure); `mem_agent_search` dropped them on every
+  non-`structured` path, so a caller in the default `compact` format never saw
+  one. The embedding-dimension notice made this worse than a missing line:
+  it is announced once per process, so a call that consumed it and printed
+  nothing destroyed the only warning the server would ever emit — including
+  for later `mem_search` calls. Both tools now append hints to every text
+  response.
+
+  Callers who parse `compact`/`verbose` output as exact text may see a
+  trailing blank line and one or more `(hint)` lines where previously there
+  were none. Machine consumers should read `output_format="structured"` and
+  its optional `hints` array instead, which was already the supported contract
+  and is unchanged.
+
 ## [0.4.0] — 2026-08-10
 
 ### Breaking — read before upgrading

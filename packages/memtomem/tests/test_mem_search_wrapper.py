@@ -277,6 +277,46 @@ class TestEmptyResults:
             "No results found. (Note: semantic search unavailable: no embedder)\n\n(hint one)"
         )
 
+    async def test_a_filter_message_wins_over_a_retriever_error(self, monkeypatch):
+        """Message precedence, pinned because the branch chain can reorder it.
+
+        The old code expressed this as return-order; the current code is an
+        if/elif chain. Both must pick the filter message when a filter
+        excluded everything *and* a retriever failed.
+        """
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(fused_total=5, bm25_error="fts down"),
+            tag_filter="redis",
+        )
+
+        assert out == (
+            "No results match your filters (5 results found before filtering). "
+            "Try broader filters or remove source_filter/tag_filter."
+        )
+
+    async def test_a_retriever_failure_still_carries_the_one_shot_notice(self, monkeypatch):
+        """The combination this fix exists for.
+
+        A degraded index is exactly what sets ``bm25_error`` and also what
+        raises the dimension mismatch. The branch that reports the first
+        used to swallow the second, permanently.
+        """
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(bm25_error="fts down"),
+            dim_notice="embedding dim changed",
+        )
+
+        assert out == (
+            "No results found. (Note: keyword search unavailable: fts down)"
+            "\n\n(embedding dim changed)"
+        )
+
     async def test_structured_empty_carries_core_hints_before_filter_hints(self, monkeypatch):
         out = await _call(
             monkeypatch,
