@@ -42,8 +42,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   for later `mem_search` calls. Both tools now append hints to every text
   response.
 
-  Callers who parse `compact`/`verbose` output as exact text may see a
-  trailing blank line and one or more `(hint)` lines where previously there
+  Callers who parse `compact`/`verbose` output as exact text may now receive
+  a blank-line-separated tail carrying one or more `(hint)` lines where there
   were none. Machine consumers should read `output_format="structured"` and
   its optional `hints` array instead, which was already the supported contract
   and is unchanged.

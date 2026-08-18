@@ -300,9 +300,11 @@ class TestEmptyResults:
     async def test_a_retriever_failure_still_carries_the_one_shot_notice(self, monkeypatch):
         """The combination this fix exists for.
 
-        A degraded index is exactly what sets ``bm25_error`` and also what
-        raises the dimension mismatch. The branch that reports the first
-        used to swallow the second, permanently.
+        Two independent degradations that coexist on a store people
+        actually run: a BM25 exception sets ``bm25_error``, while an
+        embedding-dimension mismatch (which suppresses the *dense* leg)
+        raises the one-shot notice. The branch reporting the first used to
+        return before the hint tail and swallow the second, permanently.
         """
         out = await _call(
             monkeypatch,
