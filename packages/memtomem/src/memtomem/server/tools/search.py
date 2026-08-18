@@ -176,26 +176,34 @@ async def mem_search(
                 [], hints=all_hints or None, query_run_id=stats.query_run_id
             )
 
+        # Pick the message, then append hints once. The hint tail has to be
+        # the last thing every branch does: ``hints`` can carry the one-shot
+        # dimension notice, which this call already consumed, so a branch
+        # that returns without it doesn't just skip a line — it destroys the
+        # only announcement the process was ever going to make.
         if (source_filter or tag_filter) and stats.fused_total > 0:
-            return (
+            message = (
                 f"No results match your filters "
                 f"({stats.fused_total} results found before filtering). "
                 f"Try broader filters or remove source_filter/tag_filter."
             )
-        if stats.bm25_error and stats.dense_error:
-            return (
+        elif stats.bm25_error and stats.dense_error:
+            message = (
                 "Search unavailable: both keyword and semantic search failed.\n"
                 f"- BM25: {stats.bm25_error}\n"
                 f"- Dense: {stats.dense_error}"
             )
-        if stats.bm25_error:
-            return f"No results found. (Note: keyword search unavailable: {stats.bm25_error})"
-        if stats.dense_error:
-            return f"No results found. (Note: semantic search unavailable: {stats.dense_error})"
+        elif stats.bm25_error:
+            message = f"No results found. (Note: keyword search unavailable: {stats.bm25_error})"
+        elif stats.dense_error:
+            message = f"No results found. (Note: semantic search unavailable: {stats.dense_error})"
+        else:
+            message = "No results found."
+
         # Even when the result set is empty, surface hints — the caller may
         # have archived results they're unaware of.
         tail = "\n\n" + "\n".join(f"({h})" for h in hints) if hints else ""
-        return "No results found." + tail
+        return message + tail
 
     if effective_format == "structured":
         output = _format_structured_results(

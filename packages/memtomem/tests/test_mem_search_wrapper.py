@@ -212,6 +212,71 @@ class TestEmptyResults:
 
         assert out == "No results found.\n\n(hint one)\n(hint two)"
 
+    async def test_the_filter_message_still_carries_the_hints(self, monkeypatch):
+        """#2085 (sibling): the special empty branches used to return early.
+
+        Returning before the hint tail throws away the one-shot dimension
+        notice this call already consumed, so the warning is not deferred —
+        it is gone for the life of the process.
+        """
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(fused_total=5),
+            hints=["hint one"],
+            dim_notice="embedding dim changed",
+            tag_filter="redis",
+        )
+
+        assert out == (
+            "No results match your filters (5 results found before filtering). "
+            "Try broader filters or remove source_filter/tag_filter."
+            "\n\n(hint one)\n(embedding dim changed)"
+        )
+
+    async def test_the_both_failed_message_still_carries_the_hints(self, monkeypatch):
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(bm25_error="fts down", dense_error="no embedder"),
+            hints=["hint one"],
+        )
+
+        assert out == (
+            "Search unavailable: both keyword and semantic search failed.\n"
+            "- BM25: fts down\n"
+            "- Dense: no embedder"
+            "\n\n(hint one)"
+        )
+
+    async def test_the_keyword_failure_message_still_carries_the_hints(self, monkeypatch):
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(bm25_error="fts down"),
+            hints=["hint one"],
+        )
+
+        assert out == (
+            "No results found. (Note: keyword search unavailable: fts down)\n\n(hint one)"
+        )
+
+    async def test_the_semantic_failure_message_still_carries_the_hints(self, monkeypatch):
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(dense_error="no embedder"),
+            hints=["hint one"],
+        )
+
+        assert out == (
+            "No results found. (Note: semantic search unavailable: no embedder)\n\n(hint one)"
+        )
+
     async def test_structured_empty_carries_core_hints_before_filter_hints(self, monkeypatch):
         out = await _call(
             monkeypatch,
