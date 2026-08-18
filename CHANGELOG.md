@@ -37,11 +37,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   then told the caller to `pass namespace="archive:..."`. For an unbound agent
   search that advice returns none of the rows just reported, and the count made
   it look like the user had typed the wrong archive name. Operators who
-  configured their own prefix were told the same wrong thing. The hint now
-  reports the split (`3 in archive:*, 2 in agent-runtime:*`) and points at a
-  prefix that actually matched, falling back to unqualified wording when the
-  count is unavailable. `mem_search`, `mem_agent_search`, and `mem_recall` all
-  render it from one helper rather than three copies.
+  configured their own prefix were told the same wrong thing.
+
+  The quoted query did not work either: namespace values are treated as globs
+  only when they contain `*`, so `archive:...` asked for a namespace of that
+  literal name and matched nothing. The hint now reports the split
+  (`3 in archive:*, 2 in agent-runtime:*`) and quotes a runnable query per
+  matched prefix (`pass namespace="archive:*" or namespace="agent-runtime:*"`)
+  — one per group, since a comma list cannot carry a glob. When the count is
+  unavailable it falls back to unqualified wording rather than naming a
+  namespace nobody checked. `mem_search`, `mem_agent_search`, and `mem_recall`
+  all render it from one helper rather than three copies.
 
 - **Search hints no longer disappear on text output.** `mem_search` built its
   trust-UX hints and then returned without them on four empty-result branches

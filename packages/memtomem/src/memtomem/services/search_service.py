@@ -63,25 +63,37 @@ def parse_as_of_bound(as_of: str | None) -> int | None:
 
 
 def hidden_namespace_hint(total: int, by_prefix: dict[str, int], *, noun: str = "result(s)") -> str:
-    """Describe hidden rows in terms of the namespaces that actually hid them.
+    """Describe hidden rows, and hand back a query that actually finds them.
 
-    ``system_namespace_prefixes`` holds more than ``archive:`` — the default
-    set also hides ``agent-runtime:`` — so naming a fixed prefix sends the
-    user to a namespace that may contain none of the rows being reported.
-    Name the prefixes that actually matched instead, and fall back to the
-    unqualified wording when the breakdown is unavailable (an older stats
-    object, or a failed count).
+    Two things the previous wording got wrong. ``system_namespace_prefixes``
+    holds more than ``archive:`` — the default set also hides
+    ``agent-runtime:`` — so naming a fixed prefix pointed at a namespace that
+    may hold none of the rows just counted. And ``namespace="archive:..."``
+    was never a working query: ``NamespaceFilter.parse`` treats a value as a
+    glob only when it contains ``*`` and otherwise matches exactly, so the
+    ellipsis asked for a namespace literally named ``archive:...``.
+
+    So: name the prefixes that matched, and quote each as its own glob. One
+    query per group, because a comma list cannot be combined with a glob —
+    ``parse`` checks for ``*`` first and would read the whole string as a
+    single pattern.
+
+    With no breakdown, say nothing about which namespace to search rather
+    than inventing one. That happens when the count raised: the pipeline
+    reports the total it already had and an empty mapping. (It is not a
+    stats-version concern — the field has a default, so a stats object
+    always carries the key.)
     """
     if not by_prefix:
         return (
             f"{total} {noun} hidden in system namespaces "
             "(pass an explicit namespace to include them)."
         )
-    breakdown = ", ".join(f"{count} in {prefix}*" for prefix, count in sorted(by_prefix.items()))
-    return (
-        f"{total} {noun} hidden in system namespaces: {breakdown} "
-        f'(pass namespace="{sorted(by_prefix)[0]}..." to include them).'
-    )
+    prefixes = sorted(by_prefix)
+    breakdown = ", ".join(f"{by_prefix[prefix]} in {prefix}*" for prefix in prefixes)
+    queries = " or ".join(f'namespace="{prefix}*"' for prefix in prefixes)
+    suffix = "to include them" if len(prefixes) == 1 else "to include each group"
+    return f"{total} {noun} hidden in system namespaces: {breakdown} (pass {queries} {suffix})."
 
 
 async def run_search(

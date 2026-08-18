@@ -171,6 +171,27 @@ class TestArchiveHint:
         _, stats = await comp.search_pipeline.search("pipeline", top_k=5)
         assert stats.hidden_system_ns == 1
 
+    async def test_a_cache_hit_does_not_share_the_breakdown_dict(self, trust_components):
+        """``dataclass_replace`` is shallow, and the TTL cache hands the same
+        stats out repeatedly — so a caller that mutates the mapping must not
+        be able to rewrite what every later hit reports."""
+        comp, _ = trust_components
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk("visible note about pipelines", namespace="default"),
+                make_chunk("archived pipeline notes", namespace="archive:old"),
+            ]
+        )
+
+        _, first = await comp.search_pipeline.search("pipeline", top_k=5)
+        first.hidden_by_prefix["archive:"] = 999
+        first.hidden_by_prefix["injected:"] = 1
+
+        _, second = await comp.search_pipeline.search("pipeline", top_k=5)
+
+        assert second.hidden_by_prefix == {"archive:": 1}
+
     async def test_pipeline_hidden_count_zero_when_namespace_pinned(self, trust_components):
         """Pinning an explicit namespace bypasses the system-ns filter."""
         comp, _ = trust_components
@@ -198,8 +219,8 @@ class TestArchiveHint:
         ctx = _recall_ctx(comp)
         out = await mem_recall(limit=10, ctx=ctx)
 
-        assert "2 memories hidden in system namespaces" in out
-        assert 'pass namespace="archive:..." to include them' in out
+        assert "2 memories hidden in system namespaces: 2 in archive:*" in out
+        assert 'pass namespace="archive:*" to include them' in out
 
     async def test_recall_no_hint_when_namespace_pinned(self, trust_components):
         """When the caller pins a namespace, no archive hint is emitted —
@@ -281,7 +302,7 @@ class TestArchiveHint:
         }
         assert parsed["hints"] == [
             "2 memories hidden in system namespaces: 2 in archive:* "
-            '(pass namespace="archive:..." to include them).'
+            '(pass namespace="archive:*" to include them).'
         ]
 
     async def test_recall_structured_omits_hints_when_empty(self, trust_components):

@@ -235,7 +235,7 @@ async def test_hidden_system_namespaces_yield_a_hint_when_no_namespace_is_pinned
 
     assert hints == [
         "3 result(s) hidden in system namespaces: 3 in archive:* "
-        '(pass namespace="archive:..." to include them).'
+        '(pass namespace="archive:*" to include them).'
     ]
 
 
@@ -253,7 +253,7 @@ async def test_both_hints_are_emitted_rerank_first():
         "rerank=true requested but server reranking is disabled "
         "(rerank.enabled=false); results are un-reranked.",
         "2 result(s) hidden in system namespaces: 2 in archive:* "
-        '(pass namespace="archive:..." to include them).',
+        '(pass namespace="archive:*" to include them).',
     ]
 
 
@@ -289,15 +289,29 @@ class TestHiddenNamespaceHint:
     def test_a_single_prefix_is_named_with_its_count(self):
         assert hidden_namespace_hint(3, {"archive:": 3}) == (
             "3 result(s) hidden in system namespaces: 3 in archive:* "
-            '(pass namespace="archive:..." to include them).'
+            '(pass namespace="archive:*" to include them).'
         )
 
-    def test_every_matching_prefix_is_named(self):
+    def test_the_suggested_query_is_one_a_user_can_actually_run(self):
+        """``NamespaceFilter.parse`` globs only on ``*`` and otherwise matches
+        exactly, so the old ``archive:...`` spelling asked for a namespace of
+        that literal name and returned nothing."""
+        from memtomem.models import NamespaceFilter
+
+        hint = hidden_namespace_hint(3, {"archive:": 3})
+        quoted = hint.split('namespace="', 1)[1].split('"', 1)[0]
+
+        assert NamespaceFilter.parse(quoted).pattern == "archive:*"
+
+    def test_every_matching_prefix_gets_its_own_query(self):
+        """A comma list cannot carry globs — ``parse`` sees the ``*`` first and
+        reads the whole string as one pattern — so each group is offered as a
+        separate query rather than a single combined one."""
         hint = hidden_namespace_hint(5, {"agent-runtime:": 2, "archive:": 3})
 
         assert hint == (
             "5 result(s) hidden in system namespaces: 2 in agent-runtime:*, 3 in archive:* "
-            '(pass namespace="agent-runtime:..." to include them).'
+            '(pass namespace="agent-runtime:*" or namespace="archive:*" to include each group).'
         )
 
     def test_prefixes_are_named_in_a_stable_order(self):

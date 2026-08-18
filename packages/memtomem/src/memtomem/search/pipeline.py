@@ -1198,6 +1198,7 @@ class SearchPipeline:
                         query_run_id=None,
                         cache_hit=True,
                         latency_ms=round((time.perf_counter() - started_at) * 1000, 3),
+                        hidden_by_prefix=dict(cached_stats.hidden_by_prefix),
                     )
                     run_stats.query_run_id = await self._record_ranked_search(
                         query=original_query,
@@ -1729,8 +1730,16 @@ class SearchPipeline:
             # (next default caller would otherwise be served a past-snapshot
             # filtering of the same query).
             if record and as_of_unix is None and self._cache_version == version_at_start:
+                # ``dataclass_replace`` is shallow: without the copy the cached
+                # entry and the stats just handed to the caller would share one
+                # ``hidden_by_prefix`` dict, and a caller mutating it would edit
+                # every later cache hit's hint.
                 cache_stats = dataclass_replace(
-                    stats, query_run_id=None, cache_hit=False, latency_ms=None
+                    stats,
+                    query_run_id=None,
+                    cache_hit=False,
+                    latency_ms=None,
+                    hidden_by_prefix=dict(stats.hidden_by_prefix),
                 )
                 self._search_cache[cache_key] = (
                     time.time(),
