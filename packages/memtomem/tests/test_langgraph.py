@@ -797,6 +797,7 @@ class TestSearchDelegation:
         assert kwargs["top_k"] == 3
         assert kwargs["rrf_weights"] is None
         assert kwargs["namespace"] is None
+        assert kwargs["origin"] == "langgraph"
 
     @pytest.mark.asyncio
     async def test_partial_weights_agent_namespace_and_project_root_threaded(self, monkeypatch):

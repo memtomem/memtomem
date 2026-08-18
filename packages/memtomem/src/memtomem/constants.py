@@ -11,7 +11,7 @@ re-declaring the string.
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, Literal, cast, get_args
 
 from memtomem.context._names import InvalidNameError as InvalidNameError
 from memtomem.context._names import validate_name
@@ -306,3 +306,28 @@ def default_system_prefixes() -> list[str]:
 SUMMARY_PROVENANCE_EXACT: Final[str] = "exact"
 SUMMARY_PROVENANCE_FALLBACK: Final[str] = "fallback"
 SUMMARY_PROVENANCE_MANUAL: Final[str] = "manual"
+
+
+# Where a search request entered the system, as recorded on query-run
+# observations for per-surface analytics. ``"internal"`` means "not a user
+# request" — machinery like replay, pinned-refresh, or temporal tools — and
+# is also the fallback :func:`normalize_search_origin` coerces unknown values
+# to, so typed surfaces must pass their own literal (mypy enforces it via
+# ``SearchOrigin``; see #2089).
+SearchOrigin = Literal["web", "cli", "mcp", "shell", "langgraph", "internal"]
+
+SEARCH_ORIGINS: Final[frozenset[str]] = frozenset(get_args(SearchOrigin))
+
+
+def normalize_search_origin(value: str) -> SearchOrigin:
+    """Coerce *value* to a known origin, defaulting to ``"internal"``.
+
+    Runtime backstop for values that arrive from outside the type system
+    (``mem_do`` raw params, persisted rows). In-tree callers should pass a
+    ``SearchOrigin`` literal and let mypy catch typos instead of relying on
+    this silent fallback.
+    """
+
+    if value in SEARCH_ORIGINS:
+        return cast("SearchOrigin", value)
+    return "internal"

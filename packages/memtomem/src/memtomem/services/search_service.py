@@ -29,6 +29,7 @@ from memtomem.chunking.markdown import _parse_validity_bound
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from memtomem.constants import SearchOrigin
     from memtomem.models import SearchResult
     from memtomem.search.pipeline import RetrievalStats, SearchPipeline
 
@@ -184,7 +185,7 @@ async def run_search(
     scope: str | None = None,
     rerank: bool | None = None,
     project_context_root: Path | None = None,
-    origin: str,
+    origin: SearchOrigin,
 ) -> tuple[list[SearchResult], RetrievalStats, list[str]]:
     """Run a hybrid search and assemble the result-derived hints.
 

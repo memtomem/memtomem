@@ -65,6 +65,7 @@ from memtomem.config import (
     SearchConfig,
     SessionSummaryConfig,
 )
+from memtomem.constants import SearchOrigin, normalize_search_origin
 from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.reranker.base import close_reranker_safely
@@ -414,7 +415,7 @@ class SearchPipeline:
         results: list[SearchResult],
         stats: RetrievalStats,
         top_k: int,
-        origin: str,
+        origin: SearchOrigin,
         namespace: str | list[str] | None,
         scope: str | list[str] | None,
         source_filter: str | None,
@@ -459,11 +460,7 @@ class SearchPipeline:
             task.add_done_callback(self._bg_tasks.discard)
             return None
 
-        normalized_origin = (
-            origin
-            if origin in {"web", "cli", "mcp", "shell", "langgraph", "internal"}
-            else "internal"
-        )
+        normalized_origin = normalize_search_origin(origin)
         if any("\uac00" <= char <= "\ud7a3" for char in query):
             query_language = "ko"
         elif any(char.isascii() and char.isalpha() for char in query):
@@ -1090,7 +1087,7 @@ class SearchPipeline:
         created_before: datetime | None = None,
         exclude_source_roots: tuple[Path, ...] | None = None,
         rerank: bool | None = None,
-        origin: str = "internal",
+        origin: SearchOrigin = "internal",
         record: bool = True,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # ``record`` (#1802): the default (True) is today's behavior. False is

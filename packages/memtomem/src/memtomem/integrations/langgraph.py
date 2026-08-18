@@ -206,6 +206,7 @@ class MemtomemStore:
             tag_filter=tag_filter,
             rrf_weights=rrf_weights,
             project_context_root=project_context_root,
+            origin="langgraph",
         )
         return [
             {
