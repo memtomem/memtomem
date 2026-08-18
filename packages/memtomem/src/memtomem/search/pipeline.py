@@ -50,7 +50,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dataclasses import replace as dataclass_replace
 from uuid import UUID, uuid4
@@ -296,6 +296,12 @@ class RetrievalStats:
     # explicit namespace — surfaces as a hint in mem_search's output so
     # users know their archived memories still exist.
     hidden_system_ns: int = 0
+    # Same hidden rows, split by the prefix that hid them, so a hint can name
+    # the namespace worth searching instead of guessing one. Omits prefixes
+    # with no matches; a namespace matching two prefixes counts under both, so
+    # the values can sum past ``hidden_system_ns``. Empty when nothing was
+    # hidden or the count failed.
+    hidden_by_prefix: dict[str, int] = field(default_factory=dict)
     # Whether Stage 3b cross-encoder reranking actually ran for this call —
     # the per-call effective decision (#1766), not the live server config,
     # so hint builders stay accurate across concurrent hot reloads.
@@ -1192,6 +1198,7 @@ class SearchPipeline:
                         query_run_id=None,
                         cache_hit=True,
                         latency_ms=round((time.perf_counter() - started_at) * 1000, 3),
+                        hidden_by_prefix=dict(cached_stats.hidden_by_prefix),
                     )
                     run_stats.query_run_id = await self._record_ranked_search(
                         query=original_query,
@@ -1222,13 +1229,19 @@ class SearchPipeline:
             # behind a system-namespace prefix (e.g. archive:*) so the tool layer
             # can hint "N hidden — pass namespace=... to include them".
             hidden_system_ns = 0
+            hidden_by_prefix: dict[str, int] = {}
             if namespace is None and self._config.system_namespace_prefixes:
                 try:
-                    hidden_system_ns = await self._storage.count_chunks_by_ns_prefix(
+                    (
+                        hidden_system_ns,
+                        hidden_by_prefix,
+                    ) = await self._storage.count_chunks_by_ns_prefix_detail(
                         list(self._config.system_namespace_prefixes)
                     )
                 except Exception:
                     logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
+                    hidden_by_prefix = {}
+                    hidden_system_ns = 0
 
             use_bm25 = self._config.enable_bm25
             # Never compare a query vector generated under the current policy
@@ -1361,6 +1374,7 @@ class SearchPipeline:
                 bm25_error=bm25_error,
                 dense_error=dense_error,
                 hidden_system_ns=hidden_system_ns,
+                hidden_by_prefix=hidden_by_prefix,
                 rerank_applied=apply_rerank,
                 expansion_failed=expansion_failed,
                 dense_suppressed_mismatch=dense_suppressed_mismatch,
@@ -1716,8 +1730,16 @@ class SearchPipeline:
             # (next default caller would otherwise be served a past-snapshot
             # filtering of the same query).
             if record and as_of_unix is None and self._cache_version == version_at_start:
+                # ``dataclass_replace`` is shallow: without the copy the cached
+                # entry and the stats just handed to the caller would share one
+                # ``hidden_by_prefix`` dict, and a caller mutating it would edit
+                # every later cache hit's hint.
                 cache_stats = dataclass_replace(
-                    stats, query_run_id=None, cache_hit=False, latency_ms=None
+                    stats,
+                    query_run_id=None,
+                    cache_hit=False,
+                    latency_ms=None,
+                    hidden_by_prefix=dict(stats.hidden_by_prefix),
                 )
                 self._search_cache[cache_key] = (
                     time.time(),

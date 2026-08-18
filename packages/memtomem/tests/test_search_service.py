@@ -14,6 +14,7 @@ import pytest
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.services.search_service import (
     InvalidTemporalBoundError,
+    hidden_namespace_hint,
     parse_as_of_bound,
     run_search,
 )
@@ -226,19 +227,24 @@ async def test_applied_rerank_yields_no_hint():
 
 @pytest.mark.asyncio
 async def test_hidden_system_namespaces_yield_a_hint_when_no_namespace_is_pinned():
-    pipeline = StubPipeline(stats=RetrievalStats(hidden_system_ns=3))
+    pipeline = StubPipeline(
+        stats=RetrievalStats(hidden_system_ns=3, hidden_by_prefix={"archive:": 3})
+    )
 
     _, _, hints = await _run(pipeline, namespace=None, current_namespace=None)
 
     assert hints == [
-        '3 result(s) hidden in system namespaces (pass namespace="archive:..." to include them).'
+        "3 result(s) hidden in system namespaces: 3 in archive:* "
+        '(pass namespace="archive:*" to include them).'
     ]
 
 
 @pytest.mark.asyncio
 async def test_both_hints_are_emitted_rerank_first():
     pipeline = StubPipeline(
-        stats=RetrievalStats(rerank_applied=False, hidden_system_ns=2),
+        stats=RetrievalStats(
+            rerank_applied=False, hidden_system_ns=2, hidden_by_prefix={"archive:": 2}
+        ),
     )
 
     _, _, hints = await _run(pipeline, rerank=True, namespace=None, current_namespace=None)
@@ -246,7 +252,8 @@ async def test_both_hints_are_emitted_rerank_first():
     assert hints == [
         "rerank=true requested but server reranking is disabled "
         "(rerank.enabled=false); results are un-reranked.",
-        '2 result(s) hidden in system namespaces (pass namespace="archive:..." to include them).',
+        "2 result(s) hidden in system namespaces: 2 in archive:* "
+        '(pass namespace="archive:*" to include them).',
     ]
 
 
@@ -269,3 +276,114 @@ async def test_results_and_stats_pass_through_untouched():
 
     assert results is sentinel
     assert returned_stats is stats
+
+
+class TestHiddenNamespaceHint:
+    """#2088: the hint used to name ``archive:`` whatever actually hid the rows.
+
+    ``system_namespace_prefixes`` defaults to two entries, so telling an
+    unbound agent search to look in ``archive:`` sends it somewhere that
+    holds none of the rows just counted.
+    """
+
+    def test_a_single_prefix_is_named_with_its_count(self):
+        assert hidden_namespace_hint(3, {"archive:": 3}) == (
+            "3 result(s) hidden in system namespaces: 3 in archive:* "
+            '(pass namespace="archive:*" to include them).'
+        )
+
+    def test_the_suggested_query_is_one_a_user_can_actually_run(self):
+        """``NamespaceFilter.parse`` globs only on ``*`` and otherwise matches
+        exactly, so the old ``archive:...`` spelling asked for a namespace of
+        that literal name and returned nothing."""
+        from memtomem.models import NamespaceFilter
+
+        hint = hidden_namespace_hint(3, {"archive:": 3})
+        quoted = hint.split('namespace="', 1)[1].split('"', 1)[0]
+
+        assert NamespaceFilter.parse(quoted).pattern == "archive:*"
+
+    def test_every_matching_prefix_gets_its_own_query(self):
+        """A comma list cannot carry globs — ``parse`` sees the ``*`` first and
+        reads the whole string as one pattern — so each group is offered as a
+        separate query rather than a single combined one."""
+        hint = hidden_namespace_hint(5, {"agent-runtime:": 2, "archive:": 3})
+
+        assert hint == (
+            "5 result(s) hidden in system namespaces: 2 in agent-runtime:*, 3 in archive:* "
+            '(pass namespace="agent-runtime:*" or namespace="archive:*" to include each group).'
+        )
+
+    def test_prefixes_are_named_in_a_stable_order(self):
+        one = hidden_namespace_hint(5, {"archive:": 3, "agent-runtime:": 2})
+        other = hidden_namespace_hint(5, {"agent-runtime:": 2, "archive:": 3})
+
+        assert one == other
+
+    def test_a_prefix_that_cannot_be_quoted_gets_no_query(self):
+        """The count escapes ``%``; the glob syntax has no way to.
+
+        ``storage/sqlite_helpers`` maps ``*`` to ``%`` and escapes ``_``, but
+        leaves an existing ``%`` as a wildcard — so quoting ``team%*`` back at
+        the user would select a different set than the one just counted.
+        """
+        hint = hidden_namespace_hint(2, {"team%": 2})
+
+        assert hint == (
+            "2 result(s) hidden in system namespaces: 2 in team%* "
+            "(pass an explicit namespace to include them)."
+        )
+
+    def test_quotable_prefixes_are_still_offered_alongside_an_unquotable_one(self):
+        hint = hidden_namespace_hint(5, {"archive:": 3, "team%": 2})
+
+        assert hint == (
+            "5 result(s) hidden in system namespaces: 3 in archive:*, 2 in team%* "
+            '(pass namespace="archive:*" to include the groups it names).'
+        )
+
+    @pytest.mark.parametrize(
+        ("prefix", "quotable"),
+        [
+            ("archive:", True),
+            ("no-colon", True),
+            ("under_score", True),  # the SQL step escapes _, so it stays literal
+            ("dot.ted", True),
+            ("team%", False),
+            ("a*b", False),
+            ("back\\slash", False),
+            ('quo"te', False),
+        ],
+    )
+    def test_only_renderable_prefixes_are_quoted(self, prefix, quotable):
+        """Both directions matter: skipping a safe prefix is also a regression.
+
+        An assertion that only fires when a query is present would pass a
+        renderer that quoted nothing at all.
+        """
+        hint = hidden_namespace_hint(1, {prefix: 1})
+
+        assert ('namespace="' in hint) is quotable
+        if quotable:
+            assert f'namespace="{prefix}*"' in hint
+
+    def test_a_prefix_without_a_trailing_colon_is_quoted_normally(self):
+        hint = hidden_namespace_hint(1, {"legacy": 1})
+
+        assert 'namespace="legacy*"' in hint
+
+    def test_an_empty_breakdown_falls_back_to_unqualified_advice(self):
+        """Defensive branch: the helper never names a namespace it wasn't given.
+
+        Reached through the tool path only when nothing was quotable — a
+        failed count zeroes the total and suppresses the hint entirely, so an
+        empty mapping with a non-zero total does not arrive that way.
+        """
+        assert hidden_namespace_hint(3, {}) == (
+            "3 result(s) hidden in system namespaces (pass an explicit namespace to include them)."
+        )
+
+    def test_the_noun_is_caller_supplied(self):
+        hint = hidden_namespace_hint(1, {"archive:": 1}, noun="memory")
+
+        assert hint.startswith("1 memory hidden in system namespaces:")

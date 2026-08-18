@@ -62,6 +62,69 @@ def parse_as_of_bound(as_of: str | None) -> int | None:
     return as_of_unix
 
 
+# Characters this renderer cannot put through ``prefix + "*"`` safely.
+#
+# ``%`` is the sharp one: the glob-to-SQL step escapes ``_`` and maps ``*`` to
+# ``%``, but leaves an existing ``%`` alone (``storage/sqlite_helpers.py``), so
+# rendering it raw would *count* the prefix literally and *query* it as a
+# wildcard — two different sets. A literal ``%`` is expressible by hand (the
+# clause runs under ``ESCAPE '\\'``, so ``\\%`` matches one), and so is a
+# literal backslash; this renderer just doesn't emit those escapes, and adding
+# them would mean owning their edge cases for a shape no default configuration
+# produces. Literal ``*`` is genuinely unrepresentable — every ``*`` becomes a
+# wildcard. ``"`` is not a SQL problem at all: it breaks the quoted query as
+# printed.
+#
+# So this is a rendering limit, not a parser limit: skip the suggestion rather
+# than print one that selects a different set than the count reported.
+_UNQUOTABLE_IN_GLOB = frozenset('%*\\"')
+
+
+def hidden_namespace_hint(total: int, by_prefix: dict[str, int], *, noun: str = "result(s)") -> str:
+    """Describe hidden rows, and hand back a query that actually finds them.
+
+    Two things the previous wording got wrong. ``system_namespace_prefixes``
+    holds more than ``archive:`` — the default set also hides
+    ``agent-runtime:`` — so naming a fixed prefix pointed at a namespace that
+    may hold none of the rows just counted. And ``namespace="archive:..."``
+    was never a working query: ``NamespaceFilter.parse`` treats a value as a
+    glob only when it contains ``*`` and otherwise matches exactly, so the
+    ellipsis asked for a namespace literally named ``archive:...``.
+
+    So: name the prefixes that matched, and quote each as its own glob. One
+    query per group, because a comma list cannot carry a glob — ``parse``
+    checks for ``*`` first and would read the whole string as a single
+    pattern.
+
+    A prefix this renderer cannot quote as a glob meaning exactly itself is
+    counted but not quoted (see ``_UNQUOTABLE_IN_GLOB``): suggesting a query
+    that selects a different set than the one just reported is worse than
+    suggesting none. When that leaves nothing quotable, fall back to
+    unqualified advice.
+    """
+    if not by_prefix:
+        return (
+            f"{total} {noun} hidden in system namespaces "
+            "(pass an explicit namespace to include them)."
+        )
+    prefixes = sorted(by_prefix)
+    breakdown = ", ".join(f"{by_prefix[prefix]} in {prefix}*" for prefix in prefixes)
+    quotable = [p for p in prefixes if not (_UNQUOTABLE_IN_GLOB & set(p))]
+    if not quotable:
+        return (
+            f"{total} {noun} hidden in system namespaces: {breakdown} "
+            "(pass an explicit namespace to include them)."
+        )
+    queries = " or ".join(f'namespace="{prefix}*"' for prefix in quotable)
+    if len(quotable) < len(prefixes):
+        suffix = "to include the groups it names"
+    elif len(quotable) == 1:
+        suffix = "to include them"
+    else:
+        suffix = "to include each group"
+    return f"{total} {noun} hidden in system namespaces: {breakdown} (pass {queries} {suffix})."
+
+
 async def run_search(
     pipeline: SearchPipeline,
     *,
@@ -138,9 +201,6 @@ async def run_search(
             "(rerank.enabled=false); results are un-reranked."
         )
     if effective_ns is None and stats.hidden_system_ns > 0:
-        hints.append(
-            f"{stats.hidden_system_ns} result(s) hidden in system namespaces "
-            f'(pass namespace="archive:..." to include them).'
-        )
+        hints.append(hidden_namespace_hint(stats.hidden_system_ns, stats.hidden_by_prefix))
 
     return results, stats, hints
