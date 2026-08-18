@@ -32,14 +32,31 @@ def _fake_app(*, agent_id=None, current_namespace=None) -> MagicMock:
     return app
 
 
-async def _call(monkeypatch, *, app=None, results=None, stats=None, hints=None, **kwargs):
+async def _call(
+    monkeypatch,
+    *,
+    app=None,
+    results=None,
+    stats=None,
+    hints=None,
+    dim_notice=None,
+    formatted="FORMATTED",
+    **kwargs,
+):
     """Invoke ``mem_agent_search`` with the search service stubbed."""
     from memtomem.server.tools import multi_agent as agent_mod
 
     monkeypatch.setattr(
         agent_mod, "_get_app_initialized", AsyncMock(return_value=app or _fake_app())
     )
-    monkeypatch.setattr(agent_mod, "_announce_dim_mismatch_once", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        agent_mod, "_announce_dim_mismatch_once", AsyncMock(return_value=dim_notice)
+    )
+    # The tool imports the text formatter at call time, so the patch has to
+    # land on the defining module rather than on ``multi_agent``.
+    monkeypatch.setattr(
+        "memtomem.server.formatters._format_results", MagicMock(return_value=formatted)
+    )
     monkeypatch.setattr(
         "memtomem.server.tools.search._resolve_project_context_root",
         lambda _app: Path("/tmp/project"),
@@ -120,3 +137,45 @@ class TestHints:
         out, _ = await _call(monkeypatch, agent_id="alpha")
 
         assert out == "No results found for agent 'alpha'."
+
+
+class TestHintsReachTextFormats:
+    """#2085: compact/verbose used to drop every hint on the floor."""
+
+    async def test_the_empty_compact_message_carries_the_hints(self, monkeypatch):
+        out, _ = await _call(monkeypatch, agent_id="alpha", hints=["hint one", "hint two"])
+
+        assert out == "No results found for agent 'alpha'.\n\n(hint one)\n(hint two)"
+
+    async def test_compact_results_carry_the_hints(self, monkeypatch):
+        out, _ = await _call(monkeypatch, results=["result"], hints=["hint one"])
+
+        assert out == "FORMATTED\n\n(hint one)"
+
+    async def test_verbose_results_carry_the_hints(self, monkeypatch):
+        out, _ = await _call(
+            monkeypatch, results=["result"], hints=["hint one"], output_format="verbose"
+        )
+
+        assert out == "FORMATTED\n\n(hint one)"
+
+    async def test_the_one_shot_dimension_notice_reaches_the_default_format(self, monkeypatch):
+        """The notice is consumed per process, so dropping it here loses it.
+
+        ``_announce_dim_mismatch_once`` hands out its warning exactly once;
+        a caller in the default format used to consume it and print nothing,
+        which also robbed every later ``mem_search`` of the same warning.
+        """
+        out, _ = await _call(monkeypatch, results=["result"], dim_notice="embedding dim changed")
+
+        assert out == "FORMATTED\n\n(embedding dim changed)"
+
+    async def test_the_dimension_notice_reaches_the_empty_message(self, monkeypatch):
+        out, _ = await _call(monkeypatch, dim_notice="embedding dim changed")
+
+        assert out == "No results found for agent 'current'.\n\n(embedding dim changed)"
+
+    async def test_no_hints_leaves_the_text_output_untouched(self, monkeypatch):
+        out, _ = await _call(monkeypatch, results=["result"])
+
+        assert out == "FORMATTED"

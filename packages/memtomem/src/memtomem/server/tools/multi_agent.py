@@ -222,7 +222,11 @@ async def mem_agent_search(
     if not results:
         if output_format == "structured":
             return _format_structured_results([], hints=hints or None)
-        return f"No results found for agent '{agent_id or 'current'}'."
+        # Hints matter most on an empty result set — the caller may have
+        # archived rows they don't know about. Rendered exactly as mem_search
+        # renders its own empty-result hints.
+        tail = "\n\n" + "\n".join(f"({h})" for h in hints) if hints else ""
+        return f"No results found for agent '{agent_id or 'current'}'." + tail
 
     if output_format == "structured":
         return _format_structured_results(
@@ -231,7 +235,10 @@ async def mem_agent_search(
             score_scale=stats.score_scale,
             reranker=stats.reranker_model,
         )
-    return _format_results(results, verbose=output_format == "verbose")
+    output = _format_results(results, verbose=output_format == "verbose")
+    for hint in hints:
+        output += f"\n\n({hint})"
+    return output
 
 
 _SHARED_FROM_TAG_PREFIX = "shared-from="
