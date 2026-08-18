@@ -80,6 +80,22 @@ def parse_as_of_bound(as_of: str | None) -> int | None:
 _UNQUOTABLE_IN_GLOB = frozenset('%*\\"')
 
 
+def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> list[float] | None:
+    """Build the RRF weight pair, or ``None`` to follow server config.
+
+    Each side defaults on ``is None``, not on falsiness. ``0.0`` is a value a
+    caller can mean: fusion adds ``weight / (k + rank)`` per leg, so a zero
+    weight asks for "rank as if this retriever had not voted" — the opposite
+    of the ``1.0`` that ``or`` would have substituted.
+    """
+    if bm25_weight is None and dense_weight is None:
+        return None
+    return [
+        1.0 if bm25_weight is None else bm25_weight,
+        1.0 if dense_weight is None else dense_weight,
+    ]
+
+
 def hidden_namespace_hint(total: int, by_prefix: dict[str, int], *, noun: str = "result(s)") -> str:
     """Describe hidden rows, and hand back a query that actually finds them.
 
@@ -169,9 +185,7 @@ async def run_search(
 
     effective_ns = namespace or current_namespace
 
-    rrf_weights = None
-    if bm25_weight is not None or dense_weight is not None:
-        rrf_weights = [bm25_weight or 1.0, dense_weight or 1.0]
+    rrf_weights = rrf_weights_from(bm25_weight, dense_weight)
 
     results, stats = await pipeline.search(
         query=query,

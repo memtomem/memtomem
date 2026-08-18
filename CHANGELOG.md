@@ -31,6 +31,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`bm25_weight=0.0` / `dense_weight=0.0` are honored instead of silently
+  becoming `1.0`.** The weight pair was assembled with `or`, which cannot tell
+  "not supplied" from "supplied as zero", so the documented way to ask for a
+  meaning-only or keyword-only ranking quietly produced an evenly weighted one.
+  Fusion adds `weight / (k + rank)` per leg, so zero is a value with a meaning:
+  rank as if that retriever had not voted. `mem_search` and the in-process
+  LangGraph adapter both carried the bug and now share one helper.
+
 - **The hidden-namespace hint now names the namespaces that actually hid
   results.** `search.system_namespace_prefixes` defaults to two entries —
   `archive:` and `agent-runtime:` — but the hint counted rows behind both and

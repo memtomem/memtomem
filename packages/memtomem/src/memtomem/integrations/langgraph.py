@@ -41,6 +41,7 @@ from memtomem.constants import (
     normalize_bound_agent_id,
     validate_namespace,
 )
+from memtomem.services.search_service import rrf_weights_from
 
 __all__ = ["MemtomemBaseStore", "MemtomemStore"]
 
@@ -177,9 +178,7 @@ class MemtomemStore:
         un-pinned search.
         """
         comp = await self._ensure_init()
-        rrf_weights = None
-        if bm25_weight is not None or dense_weight is not None:
-            rrf_weights = [bm25_weight or 1.0, dense_weight or 1.0]
+        rrf_weights = rrf_weights_from(bm25_weight, dense_weight)
 
         effective_namespace = self._resolve_search_namespace(namespace, include_shared)
 

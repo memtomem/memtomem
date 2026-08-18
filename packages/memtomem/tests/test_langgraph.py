@@ -710,6 +710,35 @@ class TestSearchDelegation:
         return store, pipeline
 
     @pytest.mark.asyncio
+    async def test_a_zero_weight_reaches_the_pipeline_unchanged(self, monkeypatch):
+        """#2087: the adapter carried the same ``or 1.0`` truthiness bug.
+
+        A caller asking for meaning-only ranking with ``bm25_weight=0.0`` got
+        ``1.0`` — the opposite — and no error to notice it by.
+        """
+        import memtomem.runtime.project_context as project_context
+
+        monkeypatch.setattr(project_context, "_resolve_project_context_root", lambda comp: None)
+
+        store, pipeline = self._store_with_pipeline([])
+
+        await store.search("hello", bm25_weight=0.0)
+
+        assert pipeline.search.await_args.kwargs["rrf_weights"] == [0.0, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_absent_weights_defer_to_server_config(self, monkeypatch):
+        import memtomem.runtime.project_context as project_context
+
+        monkeypatch.setattr(project_context, "_resolve_project_context_root", lambda comp: None)
+
+        store, pipeline = self._store_with_pipeline([])
+
+        await store.search("hello")
+
+        assert pipeline.search.await_args.kwargs["rrf_weights"] is None
+
+    @pytest.mark.asyncio
     async def test_maps_pipeline_results_to_dicts(self, monkeypatch):
         import memtomem.runtime.project_context as project_context
 

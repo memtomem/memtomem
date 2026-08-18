@@ -16,6 +16,7 @@ from memtomem.services.search_service import (
     InvalidTemporalBoundError,
     hidden_namespace_hint,
     parse_as_of_bound,
+    rrf_weights_from,
     run_search,
 )
 
@@ -387,3 +388,39 @@ class TestHiddenNamespaceHint:
         hint = hidden_namespace_hint(1, {"archive:": 1}, noun="memory")
 
         assert hint.startswith("1 memory hidden in system namespaces:")
+
+
+class TestRrfWeights:
+    """#2087: 0.0 is a value, not an absence.
+
+    Fusion adds ``weight / (k + rank)`` per leg, so a zero weight asks for
+    "rank as if this retriever had not voted". Defaulting it to 1.0 gave the
+    caller the opposite of what they asked for, silently.
+    """
+
+    def test_a_zero_keyword_weight_survives(self):
+        assert rrf_weights_from(0.0, None) == [0.0, 1.0]
+
+    def test_a_zero_meaning_weight_survives(self):
+        assert rrf_weights_from(None, 0.0) == [1.0, 0.0]
+
+    def test_both_zero_is_passed_through(self):
+        assert rrf_weights_from(0.0, 0.0) == [0.0, 0.0]
+
+    def test_absent_weights_defer_to_server_config(self):
+        assert rrf_weights_from(None, None) is None
+
+    def test_one_sided_weight_defaults_its_partner(self):
+        assert rrf_weights_from(3.0, None) == [3.0, 1.0]
+
+    def test_both_weights_are_forwarded_verbatim(self):
+        assert rrf_weights_from(2.0, 3.0) == [2.0, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_a_zero_weight_reaches_the_pipeline_unchanged():
+    pipeline = StubPipeline()
+
+    await _run(pipeline, bm25_weight=0.0)
+
+    assert pipeline.calls[0]["rrf_weights"] == [0.0, 1.0]
