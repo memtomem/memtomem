@@ -26,6 +26,7 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_recall_structured
 from memtomem.server.helpers import _announce_dim_mismatch_once, _parse_recall_date
+from memtomem.services.search_service import hidden_namespace_hint
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +116,9 @@ async def mem_recall(
     # archived/auto-consolidated memories are visible to the caller.
     hints: list[str] = []
     if effective_ns is None:
+        hidden_by_prefix: dict[str, int] = {}
         try:
-            hidden_count = await app.storage.count_chunks_by_ns_prefix(
+            hidden_count, hidden_by_prefix = await app.storage.count_chunks_by_ns_prefix_detail(
                 tuple(app.config.search.system_namespace_prefixes)
             )
         except Exception:
@@ -124,10 +126,7 @@ async def mem_recall(
             hidden_count = 0
         if hidden_count > 0:
             noun = "memory" if hidden_count == 1 else "memories"
-            hints.append(
-                f"{hidden_count} {noun} hidden in system namespaces "
-                f'(pass namespace="archive:..." to include them).'
-            )
+            hints.append(hidden_namespace_hint(hidden_count, hidden_by_prefix, noun=noun))
     dim_notice = await _announce_dim_mismatch_once(app)
     if dim_notice:
         hints.append(dim_notice)

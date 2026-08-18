@@ -62,6 +62,28 @@ def parse_as_of_bound(as_of: str | None) -> int | None:
     return as_of_unix
 
 
+def hidden_namespace_hint(total: int, by_prefix: dict[str, int], *, noun: str = "result(s)") -> str:
+    """Describe hidden rows in terms of the namespaces that actually hid them.
+
+    ``system_namespace_prefixes`` holds more than ``archive:`` — the default
+    set also hides ``agent-runtime:`` — so naming a fixed prefix sends the
+    user to a namespace that may contain none of the rows being reported.
+    Name the prefixes that actually matched instead, and fall back to the
+    unqualified wording when the breakdown is unavailable (an older stats
+    object, or a failed count).
+    """
+    if not by_prefix:
+        return (
+            f"{total} {noun} hidden in system namespaces "
+            "(pass an explicit namespace to include them)."
+        )
+    breakdown = ", ".join(f"{count} in {prefix}*" for prefix, count in sorted(by_prefix.items()))
+    return (
+        f"{total} {noun} hidden in system namespaces: {breakdown} "
+        f'(pass namespace="{sorted(by_prefix)[0]}..." to include them).'
+    )
+
+
 async def run_search(
     pipeline: SearchPipeline,
     *,
@@ -138,9 +160,6 @@ async def run_search(
             "(rerank.enabled=false); results are un-reranked."
         )
     if effective_ns is None and stats.hidden_system_ns > 0:
-        hints.append(
-            f"{stats.hidden_system_ns} result(s) hidden in system namespaces "
-            f'(pass namespace="archive:..." to include them).'
-        )
+        hints.append(hidden_namespace_hint(stats.hidden_system_ns, stats.hidden_by_prefix))
 
     return results, stats, hints

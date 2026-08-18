@@ -100,6 +100,67 @@ class TestArchiveHint:
         count = await comp.storage.count_chunks_by_ns_prefix(["archive:"])
         assert count == 1
 
+    async def test_the_breakdown_splits_the_count_across_prefixes(self, trust_components):
+        """#2088: the hint needs to know *which* namespace hid the rows.
+
+        The default prefix set hides ``agent-runtime:`` as well as
+        ``archive:``, so a single total cannot tell the user where to look.
+        """
+        comp, _ = trust_components
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk("visible note", namespace="default"),
+                make_chunk("archived note", namespace="archive:old"),
+                make_chunk("agent note", namespace="agent-runtime:alpha"),
+                make_chunk("another agent note", namespace="agent-runtime:beta"),
+            ]
+        )
+
+        total, by_prefix = await comp.storage.count_chunks_by_ns_prefix_detail(
+            ["archive:", "agent-runtime:"]
+        )
+
+        assert total == 3
+        assert by_prefix == {"archive:": 1, "agent-runtime:": 2}
+
+    async def test_the_breakdown_omits_prefixes_that_hid_nothing(self, trust_components):
+        comp, _ = trust_components
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk("visible note", namespace="default"),
+                make_chunk("archived note", namespace="archive:old"),
+            ]
+        )
+
+        _, by_prefix = await comp.storage.count_chunks_by_ns_prefix_detail(
+            ["archive:", "agent-runtime:"]
+        )
+
+        assert by_prefix == {"archive:": 1}
+
+    async def test_the_breakdown_is_empty_without_prefixes(self, trust_components):
+        comp, _ = trust_components
+
+        await comp.storage.upsert_chunks([make_chunk("archived", namespace="archive:old")])
+
+        assert await comp.storage.count_chunks_by_ns_prefix_detail([]) == (0, {})
+
+    async def test_the_pipeline_carries_the_breakdown_onto_its_stats(self, trust_components):
+        comp, _ = trust_components
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk("visible note about pipelines", namespace="default"),
+                make_chunk("archived pipeline notes", namespace="archive:old"),
+            ]
+        )
+
+        _, stats = await comp.search_pipeline.search("pipeline", top_k=5)
+
+        assert stats.hidden_by_prefix == {"archive:": 1}
+
     async def test_pipeline_surfaces_hidden_count_for_global_search(self, trust_components):
         comp, _ = trust_components
 
@@ -219,7 +280,8 @@ class TestArchiveHint:
             "tags",
         }
         assert parsed["hints"] == [
-            '2 memories hidden in system namespaces (pass namespace="archive:..." to include them).'
+            "2 memories hidden in system namespaces: 2 in archive:* "
+            '(pass namespace="archive:..." to include them).'
         ]
 
     async def test_recall_structured_omits_hints_when_empty(self, trust_components):

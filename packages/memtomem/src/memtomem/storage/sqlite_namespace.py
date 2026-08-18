@@ -155,6 +155,44 @@ class NamespaceOps:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    async def count_chunks_by_ns_prefix_detail(
+        self, prefixes: Sequence[str]
+    ) -> tuple[int, dict[str, int]]:
+        """Count hidden chunks, total and per prefix, in one pass.
+
+        ``count_chunks_by_ns_prefix`` answers "how many are hidden"; a caller
+        that wants to tell the user *which* namespace to search needs the
+        split too. One ``CASE`` column per prefix keeps both answers on the
+        same single scan rather than a query per prefix
+        (``system_namespace_prefixes`` is capped at 10 by config validation).
+
+        The first element is the distinct row count and matches
+        ``count_chunks_by_ns_prefix``. A namespace matching two prefixes is
+        counted under both in the mapping, so its values can sum higher than
+        that total. Prefixes with no matches are omitted rather than reported
+        as zero, so callers can render the mapping without filtering.
+        """
+        if not prefixes:
+            return 0, {}
+        db = self._get_db()
+        patterns = [f"{escape_like(p)}%" for p in prefixes]
+        columns = ", ".join(
+            "SUM(CASE WHEN namespace LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)" for _ in prefixes
+        )
+        clauses = " OR ".join("namespace LIKE ? ESCAPE '\\'" for _ in prefixes)
+        row = db.execute(
+            f"SELECT COUNT(*), {columns} FROM chunks WHERE {clauses}",
+            patterns + patterns,
+        ).fetchone()
+        if not row:
+            return 0, {}
+        by_prefix = {
+            prefix: int(value)
+            for prefix, value in zip(prefixes, row[1:])
+            if value is not None and int(value) > 0
+        }
+        return int(row[0]), by_prefix
+
     async def list_namespace_chunk_candidates(
         self,
         *,

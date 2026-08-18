@@ -31,6 +31,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The hidden-namespace hint now names the namespaces that actually hid
+  results.** `search.system_namespace_prefixes` defaults to two entries —
+  `archive:` and `agent-runtime:` — but the hint counted rows behind both and
+  then told the caller to `pass namespace="archive:..."`. For an unbound agent
+  search that advice returns none of the rows just reported, and the count made
+  it look like the user had typed the wrong archive name. Operators who
+  configured their own prefix were told the same wrong thing. The hint now
+  reports the split (`3 in archive:*, 2 in agent-runtime:*`) and points at a
+  prefix that actually matched, falling back to unqualified wording when the
+  count is unavailable. `mem_search`, `mem_agent_search`, and `mem_recall` all
+  render it from one helper rather than three copies.
+
 - **Search hints no longer disappear on text output.** `mem_search` built its
   trust-UX hints and then returned without them on four empty-result branches
   (filter excluded everything, both retrievers failed, keyword-only failure,
