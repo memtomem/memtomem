@@ -43,6 +43,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -135,6 +136,38 @@ class _RerankerEntry:
         self.reranker = reranker
         self.config = config
         self.leases = 0
+
+
+def _coerce_weight_pair(raw: object) -> tuple[float, float] | None:
+    """Coerce a caller/config weight value into a usable ``(bm25, dense)`` pair.
+
+    Returns ``None`` for anything fusion cannot honor — wrong container,
+    boolean or non-numeric items, non-finite or negative values, or an
+    all-zero pair — so the caller can fall back to the neutral pair with a
+    warning instead of crashing mid-search (#2094). Missing positions
+    default to 1.0; extra positions are ignored (only two legs exist).
+    Fully defensive by design: this sees values that bypassed every
+    validated surface.
+    """
+
+    if not isinstance(raw, (list, tuple)):
+        return None
+    items = list(raw)
+    pair: list[float] = []
+    for idx in range(2):
+        item: object = items[idx] if idx < len(items) else 1.0
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        try:
+            value = float(item)
+        except (OverflowError, ValueError):
+            return None
+        if not math.isfinite(value) or value < 0:
+            return None
+        pair.append(value)
+    if not any(pair):
+        return None
+    return (pair[0], pair[1])
 
 
 def match_source_filter(filter_str: str, source_path: str) -> bool:
@@ -397,6 +430,7 @@ class SearchPipeline:
         self._context_window_config = context_window_config
         self._llm_provider = llm_provider
         self._session_summary_config = session_summary_config
+        self._warned_invalid_rrf_weights = False
 
         # Search result TTL cache (per-instance) with version counter
         self._search_cache: dict[str, tuple[float, int, list[SearchResult], RetrievalStats]] = {}
@@ -1157,8 +1191,22 @@ class SearchPipeline:
         # fusion must all see the pair that actually ranked, not the raw
         # (possibly short) input.
         raw_weights = self._config.rrf_weights if rrf_weights is None else rrf_weights
-        bm25_weight = raw_weights[0] if len(raw_weights) > 0 else 1.0
-        dense_weight = raw_weights[1] if len(raw_weights) > 1 else 1.0
+        weights_pair = _coerce_weight_pair(raw_weights)
+        if weights_pair is None:
+            # Backstop for weights that bypassed the validated surfaces
+            # (in-memory config mutation, LangGraph config_overrides, direct
+            # pipeline callers): never raise mid-search — the caller cannot
+            # fix a config-sourced value from here — warn once per pipeline
+            # instance and rank with the neutral pair (#2094).
+            if not self._warned_invalid_rrf_weights:
+                self._warned_invalid_rrf_weights = True
+                logger.warning(
+                    "Ignoring invalid rrf_weights %r (weights must be finite, >= 0, "
+                    "and not all zero); using [1.0, 1.0]. Fix search.rrf_weights in config.",
+                    raw_weights,
+                )
+            weights_pair = (1.0, 1.0)
+        bm25_weight, dense_weight = weights_pair
         effective_weights = [bm25_weight, dense_weight]
         started_at = time.perf_counter()
 
@@ -1275,9 +1323,9 @@ class SearchPipeline:
 
             # ``use_bm25 or use_dense`` guards the auxiliary retrieval
             # stages below (expansion, session-summary rescue): with every
-            # leg gated off — reachable until #2094 validates a
-            # config-sourced all-zero pair — their BM25/dense side lookups
-            # must not run either (#2092 re-review).
+            # leg gated off (both retrievers config-disabled; #2094's
+            # backstop keeps weights from producing this state) their
+            # BM25/dense side lookups must not run either (#2092 re-review).
             any_leg_active = use_bm25 or use_dense
 
             # Stage 0: Query expansion

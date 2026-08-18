@@ -307,9 +307,8 @@ class TestPipelineEndToEndRescue:
         With ``bm25_weight=0`` on a hybrid stack the rescue leg must not
         re-surface keyword-matched candidates through its own (positive)
         fusion weight — the rescue retrieval runs with ``use_bm25=False``.
-        (With *every* leg weighted off the rescue block is skipped
-        entirely; see ``test_config_all_zero_skips_auxiliary_retrievals_too``
-        in ``test_pipeline.py``.)
+        (With *every* leg gated off the rescue block is skipped
+        entirely.)
         """
         cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
         summary_chunk = _chunk("summary body", namespace="archive:session:abc")

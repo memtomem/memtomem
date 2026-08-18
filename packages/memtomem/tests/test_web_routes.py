@@ -717,6 +717,25 @@ class TestConfig:
             await asyncio.gather(*pipeline._bg_tasks)
         assert reranker.close_calls == 1
 
+    async def test_patch_search_rejects_rrf_weights_fusion_cannot_honor(
+        self, app, client: AsyncClient
+    ):
+        """#2094: negative / non-finite / all-zero pairs land in ``rejected``
+        and the running config keeps its value; a valid pair applies."""
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            for bad in ([-1.0, 1.0], [0.0, 0.0]):
+                resp = await client.patch("/api/config", json={"search": {"rrf_weights": bad}})
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["applied"] == []
+                assert any("rrf_weights" in r for r in data["rejected"])
+                assert app.state.config.search.rrf_weights == [1.0, 1.0]
+
+            resp = await client.patch("/api/config", json={"search": {"rrf_weights": [0.0, 1.0]}})
+            assert resp.status_code == 200
+            assert resp.json()["rejected"] == []
+            assert app.state.config.search.rrf_weights == [0.0, 1.0]
+
     async def test_patch_rerank_rejects_invalid_pool_bounds(self, app, client: AsyncClient):
         with patch("memtomem.web.routes.system.save_config_overrides"):
             resp = await client.patch(

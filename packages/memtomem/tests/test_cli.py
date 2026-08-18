@@ -425,6 +425,30 @@ class TestCoerceAndValidate:
         """search.rrf_weights must be registered in FIELD_CONSTRAINTS."""
         assert "search.rrf_weights" in FIELD_CONSTRAINTS
 
+    def test_rrf_weights_rejects_values_fusion_cannot_honor(self) -> None:
+        """#2094: negative / non-finite / all-zero pairs are refused at
+        every mutation surface (they all funnel through this constraint),
+        with the field named in the error."""
+        constraint = FIELD_CONSTRAINTS["search.rrf_weights"]
+        for raw in ("-1,1", "nan,1", "inf,1", "0,0"):
+            with pytest.raises(ValueError, match="rrf_weights"):
+                coerce_and_validate(raw, constraint)
+        # An int too large for float overflows inside coercion; it must
+        # surface as the same ValueError shape (callers prefix the field
+        # name), never OverflowError (#2094 review).
+        with pytest.raises(ValueError, match="cannot convert"):
+            coerce_and_validate([10**400, 1.0], constraint)
+        # Booleans must not coerce to 1.0/0.0 ahead of the validator
+        # (#2094 review) — JSON true/false in a numeric pair is a type
+        # error on every surface that funnels through this coercer.
+        with pytest.raises(ValueError, match="cannot convert"):
+            coerce_and_validate([True, False], constraint)
+
+    def test_rrf_weights_accepts_valid_pairs(self) -> None:
+        constraint = FIELD_CONSTRAINTS["search.rrf_weights"]
+        assert coerce_and_validate("0,1", constraint) == [0.0, 1.0]
+        assert coerce_and_validate("2,3", constraint) == [2.0, 3.0]
+
     def test_list_str_from_json_array(self) -> None:
         """A JSON array is parsed, not stored as one literal item (#1993)."""
         constraint = FIELD_CONSTRAINTS["indexing.exclude_patterns"]

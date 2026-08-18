@@ -1098,10 +1098,56 @@ class TestZeroWeightExcludesLeg:
         assert observation["profile"]["rrf_weights"] == [1.0, 1.0]
 
     @pytest.mark.asyncio
-    async def test_config_sourced_all_zero_pair_yields_empty_results(self):
-        """Interim #2092 behavior until #2094 validates config: an all-zero
-        configured pair gates both legs off — no retrievals run and the
-        search returns empty rather than an arbitrarily ordered set."""
+    async def test_invalid_config_weights_fall_back_to_neutral_with_one_warning(self, caplog):
+        """#2094 backstop: config values that bypassed the validated
+        surfaces (direct attribute mutation, ``model_construct``) never
+        break search — the pipeline warns once per instance and ranks
+        with ``[1.0, 1.0]``."""
+        import logging
+
+        bm25_in = [self._make_result("b0", rank=1)]
+        dense_in = [self._make_result("d0", rank=1)]
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+        # No validate_assignment on SearchConfig — this bypasses the
+        # field validator, exactly the hole the backstop covers.
+        pipeline._config.rrf_weights = [float("nan"), 1.0]
+
+        with caplog.at_level(logging.WARNING):
+            results, stats = await pipeline.search("anything", top_k=5)
+            _, _ = await pipeline.search("another", top_k=5)
+
+        assert stats.score_scale == "rrf"
+        assert {r.chunk.content for r in results} == {"b0", "d0"}
+        warnings = [r for r in caplog.records if "rrf_weights" in r.getMessage()]
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            ["bad", 1.0],
+            [True, False],
+            None,
+            "1.0,1.0",
+            [10**400, 1.0],
+        ],
+    )
+    async def test_malformed_config_weights_never_crash_search(self, malformed):
+        """The backstop is fully defensive: wrong container, non-numeric or
+        boolean items, and ints too large for float must degrade to the
+        neutral pair, not raise mid-search."""
+        bm25_in = [self._make_result("b0", rank=1)]
+        dense_in = [self._make_result("d0", rank=1)]
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+        pipeline._config.rrf_weights = malformed
+
+        results, stats = await pipeline.search("anything", top_k=5)
+
+        assert stats.score_scale == "rrf"
+        assert {r.chunk.content for r in results} == {"b0", "d0"}
+
+    @pytest.mark.asyncio
+    async def test_all_zero_config_weights_fall_back_to_neutral(self):
         bm25_in = [self._make_result("b0", rank=1)]
         dense_in = [self._make_result("d0", rank=1)]
         pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
@@ -1109,52 +1155,10 @@ class TestZeroWeightExcludesLeg:
 
         results, stats = await pipeline.search("anything", top_k=5)
 
-        pipeline._storage.bm25_search.assert_not_awaited()
-        pipeline._storage.dense_search.assert_not_awaited()
-        assert results == []
-        assert stats.fused_total == 0
-
-    @pytest.mark.asyncio
-    async def test_config_all_zero_skips_auxiliary_retrievals_too(self):
-        """Production-like wiring: with expansion and session-summary rescue
-        configured, an all-zero pair must not run their side lookups either
-        (the rescue boost-source lookup is BM25-backed, heading expansion
-        can dense-retrieve)."""
-        from unittest.mock import AsyncMock
-
-        from memtomem.config import QueryExpansionConfig, SearchConfig, SessionSummaryConfig
-        from memtomem.search.pipeline import SearchPipeline
-
-        storage = AsyncMock()
-        storage.bm25_search = AsyncMock(return_value=[])
-        storage.dense_search = AsyncMock(return_value=[])
-        storage.get_access_counts = AsyncMock(return_value={})
-        storage.get_embeddings_for_chunks = AsyncMock(return_value={})
-        storage.get_importance_scores = AsyncMock(return_value={})
-        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
-        storage.get_chunks_shared_from = AsyncMock(return_value=[])
-        storage.get_chunks_batch = AsyncMock(return_value={})
-        storage.get_all_tags = AsyncMock(return_value={})
-        embedder = AsyncMock()
-        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
-
-        pipeline = SearchPipeline(
-            storage=storage,
-            embedder=embedder,
-            config=SearchConfig(enable_bm25=True, enable_dense=True, rrf_weights=[0.0, 0.0]),
-            expansion_config=QueryExpansionConfig(enabled=True, strategy="both"),
-            session_summary_config=SessionSummaryConfig(
-                expansion_lookup_top_k=3, expansion_score_threshold=0.3
-            ),
-        )
-
-        results, stats = await pipeline.search("anything", top_k=5)
-
-        storage.bm25_search.assert_not_awaited()
-        storage.dense_search.assert_not_awaited()
-        embedder.embed_query.assert_not_awaited()
-        assert results == []
-        assert stats.fused_total == 0
+        pipeline._storage.bm25_search.assert_awaited_once()
+        pipeline._storage.dense_search.assert_awaited_once()
+        assert stats.score_scale == "rrf"
+        assert {r.chunk.content for r in results} == {"b0", "d0"}
 
     @pytest.mark.asyncio
     async def test_zero_dense_weight_is_not_reported_as_mismatch_suppression(self):

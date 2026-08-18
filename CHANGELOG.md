@@ -50,6 +50,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`search.rrf_weights` from config no longer reaches fusion unvalidated.**
+  Request-level validation (#2093) did not cover configuration: a persisted
+  negative weight inverted its leg (`weight / (k + rank)` rises toward zero as
+  rank grows, so the worst matches were promoted) and `nan` poisoned every
+  comparison. The pair is now validated at every mutation surface
+  (`mm config set`, the web config PATCH, the MCP config tool — each weight
+  finite and `>= 0`, not both zero) and at `SearchConfig` construction, so an
+  invalid env var (`MEMTOMEM_SEARCH__RRF_WEIGHTS`) or programmatic value fails
+  at the source. Loading an existing `config.json` with an invalid pair stays
+  non-fatal: the value is skipped with a warning and the default kept, as for
+  any other invalid override. As a backstop, the pipeline warns once and
+  ranks with `[1.0, 1.0]` if an invalid pair reaches a search anyway (direct
+  mutation, adapter overrides) — search availability outranks weight fidelity
+  for a value the caller cannot fix mid-request. Quality-profile validation
+  gains the matching all-zero rejection. (#2094)
 - **`mem_agent_search` labels its searches as MCP traffic and exposes
   `query_run_id`.** Its query runs were persisted as `origin="internal"` — the
   label meaning "not a user request" — so per-surface analytics counted agent
@@ -82,8 +97,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Negative and non-finite weights are now refused at the request boundary. A
   negative weight does not de-emphasise a leg: `weight / (k + rank)` rises
   toward zero as rank grows, so rank 50 outscores rank 1 and the worst matches
-  get promoted. This covers request arguments only — `search.rrf_weights` set
-  in config is still accepted unvalidated and reaches fusion unchecked (#2094).
+  get promoted. (This originally covered request arguments only; the
+  `search.rrf_weights` config entry above extends the same rules to
+  configuration, #2094.)
 
 - **The hidden-namespace hint now names the namespaces that actually hid
   results.** `search.system_namespace_prefixes` defaults to two entries —

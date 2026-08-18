@@ -194,6 +194,18 @@ class SearchConfig(ConfigModel):
     rrf_weights: Annotated[list[float], REPLACE] = Field(
         default_factory=lambda: [1.0, 1.0]
     )  # [BM25, Dense]
+
+    @field_validator("rrf_weights", mode="before")
+    @classmethod
+    def _rrf_weights_fusion_can_honor(cls, v: object) -> object:
+        # ``mode="before"`` so the raw value is checked ahead of pydantic's
+        # coercion — otherwise ``[True, False]`` arrives as ``[1.0, 0.0]``
+        # and a boolean sneaks past the numeric-type rule. The helper is
+        # defined below at module level (shared with FIELD_CONSTRAINTS);
+        # forward reference is fine — validation runs at instantiation.
+        _validate_rrf_weights(v)
+        return v
+
     cache_ttl: float = 30.0  # search result cache TTL in seconds
     # Namespaces starting with any of these prefixes are excluded from
     # *default* search (``namespace=None``) but remain retrievable with an
@@ -1062,6 +1074,37 @@ def _validate_exclude_patterns(value: object) -> None:
             raise ValueError(f"exclude_patterns[{idx}]: {exc}") from exc
 
 
+def _validate_rrf_weights(value: object) -> None:
+    """Reject an RRF weight pair fusion cannot honor (#2094).
+
+    Shared by the mutation surfaces (``mm config set``, the web PATCH, the
+    MCP config tool — all funnel through ``coerce_and_validate``), the disk
+    load path (invalid → warn + keep default), and ``SearchConfig``'s own
+    field validator. The rules mirror the request boundary
+    (``services.search_service.rrf_weights_from``): each weight finite and
+    ``>= 0``, and at least one leg positive — an all-zero pair disables
+    every leg (#2092) and is meaningless as a standing configuration.
+    """
+
+    if not isinstance(value, list):
+        raise ValueError("rrf_weights must be a list")
+    if len(value) != 2:
+        raise ValueError(f"rrf_weights must have exactly 2 entries, got {len(value)}")
+    for idx, item in enumerate(value):
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            raise ValueError(f"rrf_weights[{idx}]: must be a number")
+        try:
+            finite = math.isfinite(item)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise ValueError(f"rrf_weights[{idx}]: must be a finite number, got {item}")
+        if item < 0:
+            raise ValueError(f"rrf_weights[{idx}]: must be >= 0, got {item}")
+    if not any(value):
+        raise ValueError("rrf_weights cannot both be zero — at least one leg must carry weight")
+
+
 MUTABLE_FIELDS: dict[str, set[str]] = {
     "search": {
         "default_top_k",
@@ -1145,7 +1188,12 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "decay.half_life_days": {"type": float, "min": 0.1},
     "mmr.enabled": {"type": bool},
     "mmr.lambda_param": {"type": float, "min": 0.0, "max": 1.0},
-    "search.rrf_weights": {"type": list, "item_type": float, "length": 2},
+    "search.rrf_weights": {
+        "type": list,
+        "item_type": float,
+        "length": 2,
+        "validator": _validate_rrf_weights,
+    },
     "namespace.default_namespace": {"type": str},
     "namespace.enable_auto_ns": {"type": bool},
     "namespace.rules": {"type": list, "item_type": NamespacePolicyRule},
@@ -1240,14 +1288,14 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
             raise ValueError(f"cannot convert '{value}' to int")
         try:
             coerced = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError(f"cannot convert '{value}' to int")
     elif expected_type is float:
         if not isinstance(value, (str, int, float)):
             raise ValueError(f"cannot convert '{value}' to float")
         try:
             coerced = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError(f"cannot convert '{value}' to float")
     elif expected_type is str:
         coerced = str(value)
@@ -1297,9 +1345,14 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
                 parts = list(value)
             else:
                 raise ValueError(f"cannot convert {type(value).__name__} to list")
+            if item_type in (int, float) and any(isinstance(p, bool) for p in parts):
+                # ``float(True)`` happily yields 1.0, which would let a
+                # boolean ride into numeric list fields ahead of any
+                # validator (#2094 review) — reject it as a type error.
+                raise ValueError(f"cannot convert list items to {item_type.__name__}")
             try:
                 coerced = [item_type(p) for p in parts]
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise ValueError(f"cannot convert list items to {item_type.__name__}")
             if expected_len is not None and len(coerced) != expected_len:
                 raise ValueError(f"expected length {expected_len}, got {len(coerced)}")
@@ -1665,6 +1718,17 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
                         )
                 else:
                     try:
+                        # Plain ``setattr`` skips pydantic validation (no
+                        # ``validate_assignment``), so fields with a canonical
+                        # constraint validator (#2094) must be checked here —
+                        # otherwise a fragment smuggles in what ``mm config
+                        # set`` and the web PATCH reject.
+                        fragment_constraint = FIELD_CONSTRAINTS.get(f"{section_name}.{key}")
+                        fragment_validator = (
+                            fragment_constraint.get("validator") if fragment_constraint else None
+                        )
+                        if callable(fragment_validator):
+                            fragment_validator(value)
                         setattr(section_obj, key, value)
                     except (TypeError, ValueError) as exc:
                         _warn(
