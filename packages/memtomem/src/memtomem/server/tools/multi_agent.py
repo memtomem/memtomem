@@ -17,6 +17,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import OutputFormat, _VALID_OUTPUT_FORMATS
 from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
+from memtomem.services.search_service import run_search
 
 logger = logging.getLogger(__name__)
 
@@ -199,25 +200,21 @@ async def mem_agent_search(
 
     project_context_root = _resolve_project_context_root(app)
 
-    results, stats = await app.search_pipeline.search(
+    # Share mem_search's retrieval half so the trust-UX hints have parity in
+    # semantic content by construction, not by a copy kept in step by hand.
+    # ``current_namespace`` stays None deliberately: an unresolved agent means
+    # "search everything", not "fall back to the ambient namespace", and it is
+    # also what arms the archive hint inside the service.
+    results, stats, hints = await run_search(
+        app.search_pipeline,
         query=query,
         top_k=top_k,
         namespace=ns_filter,
+        current_namespace=None,
         project_context_root=project_context_root,
+        origin="internal",
     )
 
-    # Mirror mem_search trust-UX hints so structured payloads from the two
-    # tools have parity in semantic content, not just shape. The archive
-    # hint engages only when no namespace was pinned (the pipeline's
-    # system_namespace_prefixes filter is gated on that) — for
-    # mem_agent_search this means agent_id was None AND no session/legacy
-    # binding resolved.
-    hints: list[str] = []
-    if ns_filter is None and stats.hidden_system_ns > 0:
-        hints.append(
-            f"{stats.hidden_system_ns} result(s) hidden in system namespaces "
-            f'(pass namespace="archive:..." to include them).'
-        )
     dim_notice = await _announce_dim_mismatch_once(app)
     if dim_notice:
         hints.append(dim_notice)
