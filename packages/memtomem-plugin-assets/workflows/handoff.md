@@ -2,7 +2,9 @@ This workflow is explicit and sequential. It records a compact project handoff; 
 capture the whole conversation, coordinate concurrent agents, or claim a task.
 
 Accept exactly one operation: `save` or `resume`. If the operation is ambiguous, ask before
-calling a tool. Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`,
+calling a tool; in a non-interactive context (a subagent or scripted run with nobody to
+ask), do not stall and do not guess — stop and report `insufficient_input: operation`.
+Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`,
 `opencode`, and `any`. Infer the current runtime when possible; use `any` as the default target.
 
 ## Common checks
@@ -23,6 +25,12 @@ calling a tool. Supported runtime labels are `claude-code`, `codex-cli`, `kimi-c
    Never fall back to `scope="user"`.
 
 ## Save
+
+Save records work that actually happened, so it is only valid where that work is known. Context
+inherited from a caller or supplied in the request counts — the test is whether `completed` and
+`validation` can be filled from something observed, not whether the run is interactive. Where
+they cannot, do not save: a fabricated checkpoint is worse than none — stop and report
+`insufficient_input: work context`. Resume has no such requirement.
 
 1. Read `git rev-parse HEAD` and `git status --porcelain=v1 --branch`. Summarize the work from
    the live repository and the current conversation. Do not include credentials, patch bodies,

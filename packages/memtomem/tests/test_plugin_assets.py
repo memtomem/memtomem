@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -26,6 +27,19 @@ def _contract() -> dict:
 
 def _skill_files(root: Path) -> list[Path]:
     return sorted(root.glob("*/SKILL.md"))
+
+
+def _renderer() -> object:
+    spec = importlib.util.spec_from_file_location("_render_plugin_assets", _RENDERER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _opencode_commands(generated: str) -> dict:
+    payload = generated.split("OPENCODE_COMMANDS = ", 1)[1].split("} as const;", 1)[0] + "}"
+    return json.loads(payload)
 
 
 def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
@@ -141,6 +155,54 @@ def test_generated_plugin_assets_are_in_sync() -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> None:
+    """Each rendered surface that reads user input must also refuse without it.
+
+    The scope comes from the renderer's own registry rather than a list kept
+    here: a surface added to ``expected_files`` is covered the moment it
+    exists, which is how the OpenCode *command* templates were found missing
+    the fallback while the four SKILL.md surfaces had it.
+    """
+    module = _renderer()
+    rendered = module.expected_files()  # type: ignore[attr-defined]
+    contract = _contract()
+    by_name = {row["id"]: row for row in contract["workflows"]}
+    by_name.update({row["codex_name"]: row for row in contract["workflows"]})
+
+    surfaces: list[tuple[str, str, str]] = []
+    for path, content in rendered.items():
+        if path.name != "SKILL.md":
+            continue
+        workflow = by_name[path.parent.name]
+        if workflow["id"] == "status":
+            continue
+        surfaces.append((str(path.relative_to(_ROOT)), workflow["input_kind"], content))
+
+    generated = rendered[_ROOT / "packages/opencode-memtomem/src/generated.ts"]
+    for name, command in _opencode_commands(generated).items():
+        workflow = by_name[name]
+        if workflow["id"] == "status":
+            continue
+        surfaces.append((f"OPENCODE_COMMANDS[{name}]", workflow["input_kind"], command["template"]))
+
+    # Every non-status workflow renders to four SKILL.md surfaces except the
+    # OpenCode skills, which carry only the implicit read workflows.
+    non_status = [row for row in contract["workflows"] if row["id"] != "status"]
+    opencode_skills = [row for row in non_status if row["implicit"] and row["effect"] == "read"]
+    assert len(surfaces) == len(non_status) * 4 + len(opencode_skills)
+
+    for label, input_kind, content in surfaces:
+        flat = " ".join(content.split())
+        assert f"If the request does not clearly specify the {input_kind}" in flat, label
+        assert "ask before calling a tool" in flat, label
+        assert "do not stall and do not guess" in flat, label
+        assert f"report `insufficient_input` naming the missing {input_kind}" in flat, label
+        # The refusal hangs off the same condition as the ask. Split into its
+        # own sentence it reads as unconditional, and a subagent that *was*
+        # given the input stops anyway.
+        assert f"A request that does specify the {input_kind} proceeds normally" in flat, label
+
+
 def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     contract = _contract()
     handoff = next(row for row in contract["workflows"] if row["id"] == "handoff")
@@ -203,6 +265,13 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "at most 10 paths",
         "does not capture the whole conversation",
         "coordinate concurrent agents",
+        # Save refuses on missing evidence, not on execution mode: a subagent
+        # handed the work context is a legitimate saver, and gating on
+        # "non-interactive" instead would refuse it.
+        "Context inherited from a caller or supplied in the request counts",
+        "a fabricated checkpoint is worse than none",
+        "insufficient_input: work context",
+        "insufficient_input: operation",
     )
     for marker in required:
         assert marker in flat

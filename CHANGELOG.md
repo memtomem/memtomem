@@ -90,6 +90,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Skills now refuse instead of stalling when nobody can answer.** Every
+  input-taking skill told the model to ask when the request was ambiguous, but
+  a subagent or a scripted run has nobody to ask — leaving only a stall on a
+  question that will never be answered or a guessed argument acted on, neither
+  of them reported back. The ask is now paired with a machine-readable refusal:
+  a non-interactive context stops and reports `insufficient_input` naming the
+  missing input. Both outcomes stay conditional on the input actually being
+  missing, so a request that supplies it proceeds normally either way. The
+  fallback reaches all four harnesses, including the OpenCode command
+  templates. The handoff workflow carries a second, narrower guard: `save`
+  records work that happened, so it refuses when `completed` and `validation`
+  cannot be filled from something observed — evidence, not execution mode, is
+  the test, and context inherited from a caller counts. Shipped asset content
+  changed, so the Claude (`0.4.2`), Codex and OpenCode (`0.2.2`), and Kimi
+  (`0.1.1`) delivery versions move with it; the core version does not.
+
 - **`chunk_entities` now has a uniqueness constraint.** The table shipped with
   three non-unique indexes, so one chunk could hold the same mention twice —
   a namespace merge remapped `chunk_id` with `UPDATE OR IGNORE` and had no key
