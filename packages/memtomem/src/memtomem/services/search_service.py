@@ -93,7 +93,7 @@ def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> l
     weight drops that retriever's votes out of the score. (Its candidates can
     still occupy slots at score 0 when the other leg returns fewer than
     ``top_k`` — zero silences a leg's ranking influence, it does not remove
-    its rows.)
+    its rows; see #2092.)
 
     Negative and non-finite weights are refused. A negative weight does not
     gently de-emphasise a leg — it inverts it, because ``w / (k + rank)``
