@@ -21,6 +21,7 @@ map to HTTP status codes).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from memtomem.chunking.markdown import _parse_validity_bound
@@ -80,20 +81,41 @@ def parse_as_of_bound(as_of: str | None) -> int | None:
 _UNQUOTABLE_IN_GLOB = frozenset('%*\\"')
 
 
+class InvalidRrfWeightError(ValueError):
+    """A caller-supplied RRF weight is outside the range fusion can honor."""
+
+
 def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> list[float] | None:
     """Build the RRF weight pair, or ``None`` to follow server config.
 
     Each side defaults on ``is None``, not on falsiness. ``0.0`` is a value a
     caller can mean: fusion adds ``weight / (k + rank)`` per leg, so a zero
-    weight asks for "rank as if this retriever had not voted" — the opposite
-    of the ``1.0`` that ``or`` would have substituted.
+    weight drops that retriever's votes out of the score. (Its candidates can
+    still occupy slots at score 0 when the other leg returns fewer than
+    ``top_k`` — zero silences a leg's ranking influence, it does not remove
+    its rows.)
+
+    Negative and non-finite weights are refused. A negative weight does not
+    gently de-emphasise a leg — it inverts it, because ``w / (k + rank)``
+    rises toward zero as rank grows, so rank 50 outscores rank 1 and the
+    worst matches are promoted. ``search.rrf_weights`` in config is already
+    validated; this is the same rule at the request boundary.
+
+    Raises:
+        InvalidRrfWeightError: a supplied weight is negative or non-finite.
     """
     if bm25_weight is None and dense_weight is None:
         return None
-    return [
+    weights = [
         1.0 if bm25_weight is None else bm25_weight,
         1.0 if dense_weight is None else dense_weight,
     ]
+    for name, weight in zip(("bm25_weight", "dense_weight"), weights):
+        if not math.isfinite(weight):
+            raise InvalidRrfWeightError(f"{name} must be a finite number, got {weight}.")
+        if weight < 0:
+            raise InvalidRrfWeightError(f"{name} must be >= 0, got {weight}.")
+    return weights
 
 
 def hidden_namespace_hint(total: int, by_prefix: dict[str, int], *, noun: str = "result(s)") -> str:

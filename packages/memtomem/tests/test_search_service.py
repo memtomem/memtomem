@@ -13,6 +13,7 @@ import pytest
 
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.services.search_service import (
+    InvalidRrfWeightError,
     InvalidTemporalBoundError,
     hidden_namespace_hint,
     parse_as_of_bound,
@@ -424,3 +425,31 @@ async def test_a_zero_weight_reaches_the_pipeline_unchanged():
     await _run(pipeline, bm25_weight=0.0)
 
     assert pipeline.calls[0]["rrf_weights"] == [0.0, 1.0]
+
+
+class TestRrfWeightValidation:
+    """A negative weight inverts a leg rather than de-emphasising it.
+
+    ``w / (k + rank)`` rises toward zero as rank grows, so with ``w = -1``
+    rank 50 scores ``-1/110`` and rank 1 scores ``-1/61`` — ``nlargest``
+    promotes the worst matches. ``search.rrf_weights`` is validated in
+    config; this is the same rule at the request boundary.
+    """
+
+    @pytest.mark.parametrize("weight", [-1.0, -0.001, float("nan"), float("inf")])
+    def test_a_refused_keyword_weight_names_itself(self, weight):
+        with pytest.raises(InvalidRrfWeightError, match="bm25_weight"):
+            rrf_weights_from(weight, None)
+
+    @pytest.mark.parametrize("weight", [-1.0, float("-inf")])
+    def test_a_refused_meaning_weight_names_itself(self, weight):
+        with pytest.raises(InvalidRrfWeightError, match="dense_weight"):
+            rrf_weights_from(None, weight)
+
+    def test_zero_is_not_refused(self):
+        assert rrf_weights_from(0.0, 0.0) == [0.0, 0.0]
+
+    def test_the_inversion_the_guard_prevents(self):
+        """Documents why negative is refused rather than merely discouraged."""
+        k = 60
+        assert (-1.0 / (k + 50)) > (-1.0 / (k + 1))

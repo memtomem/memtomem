@@ -147,6 +147,34 @@ class TestCoreDelegation:
         assert "output_format" not in awaited.kwargs
 
 
+class TestArgumentValidation:
+    """Refusals happen before the app is touched, and read as tool errors."""
+
+    async def test_a_negative_weight_is_refused_by_name(self, monkeypatch):
+        from memtomem.server.tools import search as search_mod
+
+        monkeypatch.setattr(
+            search_mod, "_get_app_initialized", AsyncMock(side_effect=AssertionError("too late"))
+        )
+
+        out = await search_mod.mem_search(query="hello", bm25_weight=-1.0, ctx=SimpleNamespace())
+
+        assert out == "Error: bm25_weight must be >= 0, got -1.0."
+
+    async def test_a_non_finite_weight_is_refused(self, monkeypatch):
+        from memtomem.server.tools import search as search_mod
+
+        monkeypatch.setattr(
+            search_mod, "_get_app_initialized", AsyncMock(side_effect=AssertionError("too late"))
+        )
+
+        out = await search_mod.mem_search(
+            query="hello", dense_weight=float("inf"), ctx=SimpleNamespace()
+        )
+
+        assert out == "Error: dense_weight must be a finite number, got inf."
+
+
 class TestEmptyResults:
     async def test_filters_excluded_everything(self, monkeypatch):
         out = await _call(
