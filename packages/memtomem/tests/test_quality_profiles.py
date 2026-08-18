@@ -190,6 +190,7 @@ _SECRET = "ghp_" + "a" * 36  # a shape the privacy scanner flags, charset-valid
         (_doc({"search": {"rrf_k": None}}), None),
         (_doc({"search": {"rrf_weights": [1, 2, 3]}}), None),
         (_doc({"search": {"rrf_weights": [1.0, -1.0]}}), None),
+        (_doc({"search": {"rrf_weights": [0.0, 0.0]}}), None),
         (_doc({"mmr": {"lambda_param": float("nan")}}), None),
         (_doc({"mmr": {"lambda_param": 2.0}}), None),
         (_doc({"query_expansion": {"max_terms": 0}}), None),

@@ -447,6 +447,14 @@ class TestRrfWeightValidation:
         with pytest.raises(InvalidRrfWeightError, match="dense_weight"):
             rrf_weights_from(None, weight)
 
+    @pytest.mark.parametrize("weight", [True, 10**400, "1.0"])
+    def test_untyped_garbage_is_refused_not_crashed(self, weight):
+        """``mem_do`` raw params are not type-checked: booleans, huge ints
+        (where ``math.isfinite`` overflows), and strings must all raise the
+        tool-shaped error, never TypeError/OverflowError."""
+        with pytest.raises(InvalidRrfWeightError, match="bm25_weight"):
+            rrf_weights_from(weight, None)
+
     def test_a_one_sided_zero_is_not_refused(self):
         assert rrf_weights_from(0.0, None) == [0.0, 1.0]
         assert rrf_weights_from(None, 0.0) == [1.0, 0.0]

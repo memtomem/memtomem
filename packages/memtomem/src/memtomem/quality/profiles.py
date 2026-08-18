@@ -270,7 +270,12 @@ class SearchKnobs(_Knobs):
     @field_validator("rrf_weights", mode="before")
     @classmethod
     def _weights(cls, v: Any) -> Any:
-        return _guard_float_list(v, "rrf_weights", length=2)
+        guarded = _guard_float_list(v, "rrf_weights", length=2)
+        # Parity with config/request validation (#2092/#2094): an all-zero
+        # pair disables every leg and is meaningless as a profile knob.
+        if not any(guarded):
+            raise ValueError("rrf_weights entries cannot both be zero")
+        return guarded
 
 
 class DecayKnobs(_Knobs):

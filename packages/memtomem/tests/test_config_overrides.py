@@ -10,6 +10,7 @@ Regression anchor for issue #248.
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from pathlib import Path
 
@@ -174,6 +175,21 @@ def test_config_json_valid_override_still_applies(
     load_config_overrides(cfg, migrate=False)
     assert cfg.context_window.enabled is True
     assert str(cfg.storage.sqlite_path) == "/from/config.db"
+
+
+def test_config_json_invalid_rrf_weights_warns_and_keeps_default(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2094: a persisted pair fusion cannot honor is skipped with a warning
+    and the default survives — an existing config file must not become a
+    startup failure."""
+    _clear_all_memtomem_env(monkeypatch)
+    override_path.write_text(json.dumps({"search": {"rrf_weights": [-1.0, 1.0]}}), encoding="utf-8")
+    cfg = Mem2MemConfig()
+    with caplog.at_level(logging.WARNING):
+        load_config_overrides(cfg, migrate=False)
+    assert cfg.search.rrf_weights == [1.0, 1.0]
+    assert any("rrf_weights" in r.getMessage() for r in caplog.records)
 
 
 def test_config_json_revalidation_does_not_re_emit_field_warnings(
@@ -374,6 +390,23 @@ def test_config_d_replace_overwrites(config_d_dir: Path, monkeypatch: pytest.Mon
     cfg = Mem2MemConfig()
     load_config_d(cfg)
     assert cfg.search.rrf_weights == [0.3, 0.7]
+
+
+def test_config_d_invalid_rrf_weights_fragment_warned_and_skipped(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2094 review: plain ``setattr`` skips pydantic validation, so the
+    fragment path must run the canonical constraint validator — a pair
+    ``mm config set`` rejects cannot ride in through config.d."""
+    _clear_all_memtomem_env(monkeypatch)
+    (config_d_dir / "01-bad.json").write_text(
+        json.dumps({"search": {"rrf_weights": [-1.0, 1.0]}}), encoding="utf-8"
+    )
+    cfg = Mem2MemConfig()
+    with caplog.at_level(logging.WARNING):
+        load_config_d(cfg)
+    assert cfg.search.rrf_weights == [1.0, 1.0]
+    assert any("rrf_weights" in r.getMessage() for r in caplog.records)
 
 
 def test_config_d_scalar_last_wins(config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1003,3 +1036,34 @@ def test_namespace_rules_survive_config_json_roundtrip(
         r.path_glob == "**/notes/**" and r.namespace == "claude:notes"
         for r in fresh.namespace.rules
     )
+
+
+class TestSearchConfigRrfWeightsValidation:
+    """#2094: the issue's repro values must fail at construction."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            [-1.0, 1.0],
+            [float("nan"), 1.0],
+            [float("inf"), 1.0],
+            [0.0, 0.0],
+            [1.0],
+            [1.0, 1.0, 1.0],
+            [True, False],
+            [10**400, 1.0],
+        ],
+    )
+    def test_invalid_pairs_raise(self, bad: list[float]) -> None:
+        import pydantic
+
+        from memtomem.config import SearchConfig
+
+        with pytest.raises(pydantic.ValidationError):
+            SearchConfig(rrf_weights=bad)
+
+    def test_valid_pairs_construct(self) -> None:
+        from memtomem.config import SearchConfig
+
+        assert SearchConfig(rrf_weights=[0.0, 1.0]).rrf_weights == [0.0, 1.0]
+        assert SearchConfig(rrf_weights=[2.0, 3.0]).rrf_weights == [2.0, 3.0]

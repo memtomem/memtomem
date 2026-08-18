@@ -97,10 +97,10 @@ def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> l
     Negative and non-finite weights are refused. A negative weight does not
     gently de-emphasise a leg — it inverts it, because ``w / (k + rank)``
     rises toward zero as rank grows, so rank 50 outscores rank 1 and the
-    worst matches are promoted. This guards the request boundary only —
-    ``search.rrf_weights`` in config is not validated yet (#2094); a
-    configured non-positive weight is treated as "leg excluded" by the
-    pipeline gates and fusion rather than inverting anything.
+    worst matches are promoted. This guards the request boundary;
+    ``search.rrf_weights`` from config is validated at its own mutation
+    surfaces, and the pipeline falls back to ``[1.0, 1.0]`` (with a
+    warning) on a pair that bypassed them (#2094).
 
     Raises:
         InvalidRrfWeightError: a supplied weight is negative or non-finite,
@@ -113,7 +113,16 @@ def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> l
         1.0 if dense_weight is None else dense_weight,
     ]
     for name, weight in zip(("bm25_weight", "dense_weight"), weights):
-        if not math.isfinite(weight):
+        # ``mem_do`` raw params are not type-checked, so a boolean or an
+        # arbitrary-precision int (where ``math.isfinite`` overflows) can
+        # arrive here — both are refusals, never crashes (#2094 review).
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise InvalidRrfWeightError(f"{name} must be a finite number, got {weight!r}.")
+        try:
+            finite = math.isfinite(weight)
+        except OverflowError:
+            finite = False
+        if not finite:
             raise InvalidRrfWeightError(f"{name} must be a finite number, got {weight}.")
         if weight < 0:
             raise InvalidRrfWeightError(f"{name} must be >= 0, got {weight}.")
