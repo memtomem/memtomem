@@ -45,9 +45,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (`3 in archive:*, 2 in agent-runtime:*`) and quotes a runnable query per
   matched prefix (`pass namespace="archive:*" or namespace="agent-runtime:*"`)
   — one per group, since a comma list cannot carry a glob. A configured prefix
-  that cannot be written as a glob meaning exactly itself (one containing `%`,
-  `*`, `\`, or `"`) is still counted but no longer quoted back, because the
-  query would select a different set than the one just reported. `mem_search`,
+  the hint cannot render safely as `prefix*` (one containing `%`, `*`, `\`, or
+  `"`) is still counted but no longer quoted back, because the printed query
+  would select a different set than the one just reported. `mem_search`,
   `mem_agent_search`, and `mem_recall` all render the hint from one helper
   rather than three copies.
 

@@ -62,13 +62,21 @@ def parse_as_of_bound(as_of: str | None) -> int | None:
     return as_of_unix
 
 
-# Characters that make a prefix impossible to quote back as a namespace glob.
+# Characters this renderer cannot put through ``prefix + "*"`` safely.
+#
 # ``%`` is the sharp one: the glob-to-SQL step escapes ``_`` and maps ``*`` to
 # ``%``, but leaves an existing ``%`` alone (``storage/sqlite_helpers.py``), so
-# a prefix carrying one would be *counted* literally and *queried* as a
-# wildcard — two different sets. The user-facing glob syntax has no escape, so
-# there is no spelling that means "literally this prefix"; ``\\`` and ``"``
-# likewise change the meaning or break the quoted query.
+# rendering it raw would *count* the prefix literally and *query* it as a
+# wildcard — two different sets. A literal ``%`` is expressible by hand (the
+# clause runs under ``ESCAPE '\\'``, so ``\\%`` matches one), and so is a
+# literal backslash; this renderer just doesn't emit those escapes, and adding
+# them would mean owning their edge cases for a shape no default configuration
+# produces. Literal ``*`` is genuinely unrepresentable — every ``*`` becomes a
+# wildcard. ``"`` is not a SQL problem at all: it breaks the quoted query as
+# printed.
+#
+# So this is a rendering limit, not a parser limit: skip the suggestion rather
+# than print one that selects a different set than the count reported.
 _UNQUOTABLE_IN_GLOB = frozenset('%*\\"')
 
 
@@ -88,10 +96,11 @@ def hidden_namespace_hint(total: int, by_prefix: dict[str, int], *, noun: str = 
     checks for ``*`` first and would read the whole string as a single
     pattern.
 
-    A prefix that cannot be expressed as a glob meaning exactly itself is
-    counted but not quoted: suggesting a query that selects a different set
-    than the one just reported is worse than suggesting none. When that
-    leaves nothing quotable, fall back to unqualified advice.
+    A prefix this renderer cannot quote as a glob meaning exactly itself is
+    counted but not quoted (see ``_UNQUOTABLE_IN_GLOB``): suggesting a query
+    that selects a different set than the one just reported is worse than
+    suggesting none. When that leaves nothing quotable, fall back to
+    unqualified advice.
     """
     if not by_prefix:
         return (

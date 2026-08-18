@@ -342,23 +342,43 @@ class TestHiddenNamespaceHint:
             '(pass namespace="archive:*" to include the groups it names).'
         )
 
-    def test_a_quoted_prefix_never_carries_a_glob_metacharacter(self):
-        """Property check over the shapes an operator can configure."""
-        for prefix in ("team%", "a*b", "back\\slash", 'quo"te', "archive:", "no-colon"):
-            hint = hidden_namespace_hint(1, {prefix: 1})
-            if 'namespace="' not in hint:
-                continue
-            quoted = hint.split('namespace="', 1)[1].split('"', 1)[0]
-            assert quoted == f"{prefix}*"
-            assert not (set(prefix) & set('%*\\"'))
+    @pytest.mark.parametrize(
+        ("prefix", "quotable"),
+        [
+            ("archive:", True),
+            ("no-colon", True),
+            ("under_score", True),  # the SQL step escapes _, so it stays literal
+            ("dot.ted", True),
+            ("team%", False),
+            ("a*b", False),
+            ("back\\slash", False),
+            ('quo"te', False),
+        ],
+    )
+    def test_only_renderable_prefixes_are_quoted(self, prefix, quotable):
+        """Both directions matter: skipping a safe prefix is also a regression.
+
+        An assertion that only fires when a query is present would pass a
+        renderer that quoted nothing at all.
+        """
+        hint = hidden_namespace_hint(1, {prefix: 1})
+
+        assert ('namespace="' in hint) is quotable
+        if quotable:
+            assert f'namespace="{prefix}*"' in hint
 
     def test_a_prefix_without_a_trailing_colon_is_quoted_normally(self):
         hint = hidden_namespace_hint(1, {"legacy": 1})
 
         assert 'namespace="legacy*"' in hint
 
-    def test_an_unavailable_breakdown_falls_back_to_unqualified_advice(self):
-        """A failed count must not put a namespace name in the user's hands."""
+    def test_an_empty_breakdown_falls_back_to_unqualified_advice(self):
+        """Defensive branch: the helper never names a namespace it wasn't given.
+
+        Reached through the tool path only when nothing was quotable — a
+        failed count zeroes the total and suppresses the hint entirely, so an
+        empty mapping with a non-zero total does not arrive that way.
+        """
         assert hidden_namespace_hint(3, {}) == (
             "3 result(s) hidden in system namespaces (pass an explicit namespace to include them)."
         )
