@@ -158,6 +158,13 @@ class MemtomemStore:
 
         Returns list of dicts with keys: id, content, score, source, tags, namespace.
 
+        ``bm25_weight`` / ``dense_weight`` must be finite and non-negative;
+        anything else raises ``InvalidRrfWeightError`` (a ``ValueError``)
+        before initialization, in keeping with this class treating a
+        malformed request as a programming error rather than degrading it.
+        ``0.0`` removes that leg's contribution to the fused score, but its
+        candidates can still appear (see #2092).
+
         ``include_shared`` is the multi-agent semantic toggle. State table:
 
         ============== ===================== =======================================
@@ -177,8 +184,10 @@ class MemtomemStore:
         surfaces immediately rather than degrading to a silent
         un-pinned search.
         """
-        comp = await self._ensure_init()
+        # Refuse an unusable weight before paying for initialization, so a
+        # startup failure cannot mask the actionable error.
         rrf_weights = rrf_weights_from(bm25_weight, dense_weight)
+        comp = await self._ensure_init()
 
         effective_namespace = self._resolve_search_namespace(namespace, include_shared)
 

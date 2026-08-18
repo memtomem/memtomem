@@ -394,9 +394,10 @@ class TestHiddenNamespaceHint:
 class TestRrfWeights:
     """#2087: 0.0 is a value, not an absence.
 
-    Fusion adds ``weight / (k + rank)`` per leg, so a zero weight asks for
-    "rank as if this retriever had not voted". Defaulting it to 1.0 gave the
-    caller the opposite of what they asked for, silently.
+    Fusion adds ``weight / (k + rank)`` per leg, so a zero weight removes
+    that leg's contribution to the fused score. Defaulting it to 1.0 gave the
+    caller the opposite of what they asked for, silently. (Zero does not stop
+    the leg from contributing candidates — see #2092.)
     """
 
     def test_a_zero_keyword_weight_survives(self):

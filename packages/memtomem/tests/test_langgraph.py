@@ -710,11 +710,29 @@ class TestSearchDelegation:
         return store, pipeline
 
     @pytest.mark.asyncio
+    async def test_a_negative_weight_is_refused_before_initialization(self):
+        """The refusal must not sit behind ``_ensure_init``.
+
+        Initialization can fail for its own reasons; if it ran first, the
+        actionable "your weight is invalid" error would be replaced by
+        whatever that failure raised.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+        from memtomem.services.search_service import InvalidRrfWeightError
+
+        store = MemtomemStore()
+        store._ensure_init = AsyncMock(side_effect=AssertionError("initialized too early"))
+
+        with pytest.raises(InvalidRrfWeightError, match="bm25_weight"):
+            await store.search("hello", bm25_weight=-1.0)
+
+    @pytest.mark.asyncio
     async def test_a_zero_weight_reaches_the_pipeline_unchanged(self, monkeypatch):
         """#2087: the adapter carried the same ``or 1.0`` truthiness bug.
 
-        A caller asking for meaning-only ranking with ``bm25_weight=0.0`` got
-        ``1.0`` — the opposite — and no error to notice it by.
+        A caller asking to drop the keyword leg's score contribution with
+        ``bm25_weight=0.0`` got ``1.0`` — the opposite — and no error to
+        notice it by.
         """
         import memtomem.runtime.project_context as project_context
 

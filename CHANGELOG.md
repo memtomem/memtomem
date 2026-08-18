@@ -41,10 +41,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   rows. `mem_search` and the in-process LangGraph adapter both carried the bug
   and now share one helper.
 
-  Negative and non-finite weights are now refused at the request boundary
-  (`search.rrf_weights` in config was already validated). A negative weight
-  does not de-emphasise a leg: `weight / (k + rank)` rises toward zero as rank
-  grows, so rank 50 outscores rank 1 and the worst matches get promoted.
+  Negative and non-finite weights are now refused at the request boundary. A
+  negative weight does not de-emphasise a leg: `weight / (k + rank)` rises
+  toward zero as rank grows, so rank 50 outscores rank 1 and the worst matches
+  get promoted. This covers request arguments only — `search.rrf_weights` set
+  in config is still accepted unvalidated and reaches fusion unchecked (#2094).
 
 - **The hidden-namespace hint now names the namespaces that actually hid
   results.** `search.system_namespace_prefixes` defaults to two entries —

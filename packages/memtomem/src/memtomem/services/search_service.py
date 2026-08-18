@@ -98,8 +98,10 @@ def rrf_weights_from(bm25_weight: float | None, dense_weight: float | None) -> l
     Negative and non-finite weights are refused. A negative weight does not
     gently de-emphasise a leg — it inverts it, because ``w / (k + rank)``
     rises toward zero as rank grows, so rank 50 outscores rank 1 and the
-    worst matches are promoted. ``search.rrf_weights`` in config is already
-    validated; this is the same rule at the request boundary.
+    worst matches are promoted. This guards the request boundary only —
+    ``search.rrf_weights`` in config takes the same values with no validation
+    of its own today (#2094), so a configured weight still reaches fusion
+    unchecked.
 
     Raises:
         InvalidRrfWeightError: a supplied weight is negative or non-finite.
@@ -202,6 +204,7 @@ async def run_search(
 
     Raises:
         InvalidTemporalBoundError: ``as_of`` is not a recognized bound.
+        InvalidRrfWeightError: a weight is negative or non-finite.
     """
     as_of_unix = parse_as_of_bound(as_of)
 
