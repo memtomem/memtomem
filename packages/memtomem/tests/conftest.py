@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio.events
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -12,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import httpx
 import pytest
+import pytest_asyncio
 
 from memtomem.config import Mem2MemConfig
 from memtomem.server.component_factory import Components, create_components, close_components
@@ -225,6 +228,41 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_symlink)
         if not _PLAYWRIGHT_OK and "browser" in item.keywords:
             item.add_marker(skip_browser)
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Explain a leftover MainThread event loop before pytest-asyncio trips on it.
+
+    Playwright's sync API parks a dispatcher greenlet inside
+    ``loop.run_until_complete`` for the whole session, and greenlets share the
+    thread — so after a browser spec runs, asyncio can still see that loop as
+    *running* on MainThread. pytest-asyncio then fails the next coroutine test
+    with a bare ``RuntimeError: Runner.run() cannot be called from a running
+    event loop``, which reads as a bug in the test that happens to be next
+    (#2099 cost a full investigation before the real cause was found).
+
+    ``tests/web/conftest.py`` keeps that directory free of coroutine tests and
+    async fixtures, which covers every CI invocation and the default full-suite
+    order — ``tests/web`` collects last, so nothing outside it runs afterwards.
+    Hand-ordered paths (``pytest tests/web tests/test_web_routes.py``) can still
+    reach it, so this says what happened instead of leaving the cryptic error.
+    Diagnosis only: it never passes a test that would otherwise fail.
+    """
+
+    if asyncio.events._get_running_loop() is None:
+        return
+    if not pytest_asyncio.is_async_test(item) and not inspect.iscoroutinefunction(
+        getattr(item, "obj", None)
+    ):
+        return
+    pytest.fail(
+        f"{item.nodeid} is a coroutine test, but a browser spec earlier in this "
+        "session left a running event loop on MainThread, so pytest-asyncio cannot "
+        "start it (#2099). Run this test in a session without Playwright browser "
+        "specs, or drive the coroutine on a worker thread the way "
+        "tests/web/conftest.py's ``run_async`` fixture does.",
+        pytrace=False,
+    )
 
 
 @pytest.fixture(autouse=True)
