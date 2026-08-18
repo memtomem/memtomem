@@ -232,12 +232,13 @@ def pytest_collection_modifyitems(config, items):
 
 _LEFTOVER_LOOP_HINT = (
     "an event loop is already registered as running on MainThread, so "
-    "pytest-asyncio cannot start its runner. The usual source is Playwright's "
-    "sync API: its dispatcher greenlet parks inside ``loop.run_until_complete`` "
-    "for the whole session, and greenlets share the thread, so a browser spec "
-    "earlier in this session leaves the loop behind (#2099). Run this without "
-    "Playwright browser specs in the same session, or drive the coroutine on a "
-    "worker thread the way tests/web/conftest.py's ``run_async`` fixture does."
+    "pytest-asyncio cannot start its runner. All this hook knows is that some "
+    "loop is registered; the usual source is Playwright's sync API, whose "
+    "dispatcher greenlet parks inside ``loop.run_until_complete`` for the whole "
+    "session — greenlets share the thread, so a browser spec earlier in the "
+    "session leaves it behind (#2099). Check for one, and either run without "
+    "browser specs in the same session or drive the coroutine on a worker "
+    "thread the way tests/web/conftest.py's ``run_async`` fixture does."
 )
 
 
@@ -283,24 +284,30 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     pytest.fail(f"{item.nodeid} is a coroutine test and {_LEFTOVER_LOOP_HINT}", pytrace=False)
 
 
-@pytest.hookimpl(tryfirst=True)
+@pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_fixture_setup(fixturedef, request):
     """Same diagnosis for the async-fixture path.
 
     A sync test body is no proof of safety: pytest-asyncio drives async fixtures
-    through the same runner, and sync tests do request them here (the ``components``
-    fixture below is async). Covers dynamic ``request.getfixturevalue`` requests
-    too, since this runs whenever pytest actually resolves the fixture.
+    through the same runner, and sync tests do request them here (``components``
+    below is an async generator fixture). Covers dynamic
+    ``request.getfixturevalue`` requests too, since this runs whenever pytest
+    actually resolves the fixture.
+
+    An outer wrapper rather than a plain hook so the diagnosis lands *before*
+    pytest-asyncio's own wrapper allocates its scoped runner: cleaning that
+    runner up under the parked loop adds a second, misleading RuntimeWarning
+    that pytest-asyncio says will become an error.
     """
 
-    if asyncio.events._get_running_loop() is None:
-        return None
-    if not _drives_a_loop(getattr(fixturedef, "func", None)):
-        return None
-    pytest.fail(
-        f"fixture {fixturedef.argname!r} is async and {_LEFTOVER_LOOP_HINT}",
-        pytrace=False,
-    )
+    if asyncio.events._get_running_loop() is not None and _drives_a_loop(
+        getattr(fixturedef, "func", None)
+    ):
+        pytest.fail(
+            f"fixture {fixturedef.argname!r} is async and {_LEFTOVER_LOOP_HINT}",
+            pytrace=False,
+        )
+    return (yield)
 
 
 @pytest.fixture(autouse=True)

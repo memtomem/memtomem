@@ -72,6 +72,21 @@ def test_sync() -> None:
     assert True
 """
 
+_ASYNC_GEN_FIXTURE_CONSUMER = """
+import pytest
+
+
+@pytest.fixture
+async def an_async_gen_fixture():
+    # The shape the motivating real fixture has (``components`` yields), which
+    # reaches ``isasyncgenfunction`` rather than ``iscoroutinefunction``.
+    yield 1
+
+
+def test_sync_body_async_gen_fixture(an_async_gen_fixture: int) -> None:
+    assert an_async_gen_fixture == 1
+"""
+
 _ASYNC_FIXTURE_CONSUMER = """
 import pytest
 
@@ -100,7 +115,11 @@ def rooted(pytester: pytest.Pytester) -> pytest.Pytester:
 
 @pytest.mark.parametrize(
     ("name", "source"),
-    [("coroutine", _COROUTINE_TEST), ("async_fixture", _ASYNC_FIXTURE_CONSUMER)],
+    [
+        ("coroutine", _COROUTINE_TEST),
+        ("async_fixture", _ASYNC_FIXTURE_CONSUMER),
+        ("async_gen_fixture", _ASYNC_GEN_FIXTURE_CONSUMER),
+    ],
 )
 def test_a_leftover_loop_is_explained(rooted: pytest.Pytester, name: str, source: str) -> None:
     rooted.makeconftest(_lifted_hook_source() + _PARK_A_LOOP)
@@ -110,11 +129,19 @@ def test_a_leftover_loop_is_explained(rooted: pytest.Pytester, name: str, source
 
     assert "#2099" in result.stdout.str()
     assert result.parseoutcomes().get("passed", 0) == (1 if name == "coroutine" else 0)
+    # The diagnosis is the whole message: a second RuntimeWarning from tearing
+    # pytest-asyncio's runner down under the parked loop would bury it, which is
+    # why the fixture hook is an outer wrapper.
+    assert "asyncio.Runner" not in result.stdout.str()
 
 
 @pytest.mark.parametrize(
     ("name", "source", "expected_passed"),
-    [("coroutine", _COROUTINE_TEST, 2), ("async_fixture", _ASYNC_FIXTURE_CONSUMER, 1)],
+    [
+        ("coroutine", _COROUTINE_TEST, 2),
+        ("async_fixture", _ASYNC_FIXTURE_CONSUMER, 1),
+        ("async_gen_fixture", _ASYNC_GEN_FIXTURE_CONSUMER, 1),
+    ],
 )
 def test_without_a_leftover_loop_the_hooks_are_silent(
     rooted: pytest.Pytester, name: str, source: str, expected_passed: int
