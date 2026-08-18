@@ -73,8 +73,9 @@ async def mem_search(
             filtered out; chunks without those keys are always valid. Time-
             decay scoring is also anchored to this instant instead of the
             wall clock.
-        bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor them)
-        dense_weight: RRF weight for meaning matches (default 1.0; raise to favor them)
+        bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor)
+        dense_weight: RRF weight for meaning matches (default 1.0). Both must be
+            finite and >= 0; 0 drops that leg's score, not its rows
         context_window: Expand each result with ±N adjacent chunks (0 = off)
         verbose: Deprecated — use output_format="verbose".
         output_format: "compact" (default), "verbose" (adds UUID / pipeline stats),
