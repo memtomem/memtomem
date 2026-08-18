@@ -88,6 +88,39 @@ class TestReciprocalRankFusion:
         fused = reciprocal_rank_fusion([[doc_a], [doc_b]], k=60, top_k=2, weights=[1.0, 10.0])
         assert fused[0].chunk.content == "from_list2"
 
+    def test_a_zero_weight_leg_contributes_no_candidates(self):
+        """#2092: zero excludes the leg, even when the other leg under-fills.
+
+        The issue's repro: weights ``[0.0, 1.0]``, dense returns 2, bm25
+        returns 5 — pre-fix the three extra bm25 rows filled the remaining
+        slots at score 0.0.
+        """
+        bm25 = [_sr(f"b{i}", rank=i + 1) for i in range(5)]
+        dense = [_sr(f"d{i}", rank=i + 1) for i in range(2)]
+
+        fused = reciprocal_rank_fusion([bm25, dense], k=60, top_k=5, weights=[0.0, 1.0])
+
+        assert [r.chunk.content for r in fused] == ["d0", "d1"]
+
+        fused = reciprocal_rank_fusion([dense, bm25], k=60, top_k=5, weights=[1.0, 0.0])
+        assert [r.chunk.content for r in fused] == ["d0", "d1"]
+
+    def test_a_zero_weight_rescue_leg_is_excluded(self):
+        """The third (rescue) list obeys the same rule as bm25/dense."""
+        bm25 = [_sr("b0", rank=1)]
+        dense = [_sr("d0", rank=1)]
+        rescue = [_sr("r0", rank=1)]
+
+        fused = reciprocal_rank_fusion(
+            [bm25, dense, rescue],
+            k=60,
+            top_k=5,
+            weights=[1.0, 1.0, 0.0],
+            list_labels=["bm25", "dense", "session_rescue"],
+        )
+
+        assert {r.chunk.content for r in fused} == {"b0", "d0"}
+
     def test_empty_lists(self):
         """Empty result lists should produce an empty output."""
         assert reciprocal_rank_fusion([], k=60, top_k=10) == []

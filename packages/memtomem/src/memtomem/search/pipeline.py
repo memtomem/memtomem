@@ -1152,7 +1152,17 @@ class SearchPipeline:
 
         original_query = query
         top_k = self._config.default_top_k if top_k is None else top_k
-        effective_weights = rrf_weights or self._config.rrf_weights
+        # ``is None`` — not falsy-or — so an explicitly passed ``[]`` means
+        # "no weights supplied here" is false: it normalizes to the 1.0
+        # defaults instead of silently re-reading config (#2092).
+        # ``effective_weights`` is the normalized two-element pair the rest
+        # of the body uses — cache key, persisted observation profile, and
+        # fusion must all see the pair that actually ranked, not the raw
+        # (possibly short) input.
+        raw_weights = self._config.rrf_weights if rrf_weights is None else rrf_weights
+        bm25_weight = raw_weights[0] if len(raw_weights) > 0 else 1.0
+        dense_weight = raw_weights[1] if len(raw_weights) > 1 else 1.0
+        effective_weights = [bm25_weight, dense_weight]
         started_at = time.perf_counter()
 
         # Lease the reranker generation for the whole ranked-search body
@@ -1248,15 +1258,38 @@ class SearchPipeline:
             # with stored vectors from another policy/model/dimension. BM25
             # remains available as the safe degraded path.
             mismatch = getattr(self._storage, "embedding_mismatch", None)
-            dense_suppressed_mismatch = self._config.enable_dense and isinstance(mismatch, dict)
+            # A zero RRF weight excludes the leg outright (#2092): the
+            # retrieval is skipped, the passthrough branches below cannot
+            # return its raw results, and the rescue sub-retrievals inherit
+            # the same gate. ``dense_suppressed_mismatch`` requires a
+            # positive dense weight too: a caller who weighted dense to
+            # zero got exactly the search they asked for, and reporting it
+            # as mismatch-degraded would make quality replay exclude a
+            # healthy case.
+            dense_suppressed_mismatch = (
+                self._config.enable_dense and dense_weight > 0 and isinstance(mismatch, dict)
+            )
             use_dense = self._config.enable_dense and not isinstance(mismatch, dict)
+            use_bm25 = use_bm25 and bm25_weight > 0
+            use_dense = use_dense and dense_weight > 0
             metadata_kwargs = (
                 {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
             )
 
+            # ``use_bm25 or use_dense`` guards the auxiliary retrieval
+            # stages below (expansion, session-summary rescue): with every
+            # leg gated off — reachable until #2094 validates a
+            # config-sourced all-zero pair — their BM25/dense side lookups
+            # must not run either (#2092 re-review).
+            any_leg_active = use_bm25 or use_dense
+
             # Stage 0: Query expansion
             expansion_failed = False
-            if self._expansion_config and getattr(self._expansion_config, "enabled", False):
+            if (
+                any_leg_active
+                and self._expansion_config
+                and getattr(self._expansion_config, "enabled", False)
+            ):
                 from memtomem.search.expansion import (
                     expand_query_headings,
                     expand_query_llm,
@@ -1394,7 +1427,8 @@ class SearchPipeline:
             rescue_results: list[SearchResult] = []
             rescue_chunk_ids: set[UUID] = set()
             if (
-                namespace is None
+                any_leg_active
+                and namespace is None
                 and self._session_summary_config is not None
                 and self._session_summary_config.expansion_lookup_top_k > 0
             ):
@@ -1465,7 +1499,7 @@ class SearchPipeline:
 
             if use_bm25 and use_dense:
                 fusion_lists = [bm25_results, dense_results]
-                fusion_weights = list(effective_weights)
+                fusion_weights = [bm25_weight, dense_weight]
                 fusion_labels = ["bm25", "dense"]
                 if rescue_results:
                     fusion_lists.append(rescue_results)
@@ -1485,7 +1519,7 @@ class SearchPipeline:
                         [bm25_results, rescue_results],
                         k=self._config.rrf_k,
                         top_k=rerank_pool,
-                        weights=[effective_weights[0], rescue_w],
+                        weights=[bm25_weight, rescue_w],
                         list_labels=["bm25", "session_rescue"],
                     )
                     stats.score_scale = "rrf"
@@ -1501,10 +1535,7 @@ class SearchPipeline:
                         [dense_results, rescue_results],
                         k=self._config.rrf_k,
                         top_k=rerank_pool,
-                        weights=[
-                            effective_weights[1] if len(effective_weights) > 1 else 1.0,
-                            rescue_w,
-                        ],
+                        weights=[dense_weight, rescue_w],
                         list_labels=["dense", "session_rescue"],
                     )
                     stats.score_scale = "rrf"
@@ -1576,12 +1607,16 @@ class SearchPipeline:
                 )
 
             # Stage 5: MMR diversity re-ranking
-            if self._mmr_config.enabled and not use_dense:
+            if self._mmr_config.enabled and not self._config.enable_dense:
                 # #1619: without dense retrieval there are no vectors to
                 # diversify over, so an explicitly enabled MMR silently did
                 # nothing. Say so once per process (INFO — it's a config
                 # mismatch, not a runtime failure); mem_status carries the
                 # same fact as a persistent `mmr_disabled_no_dense` warning.
+                # Gated on the *config*, not ``use_dense``: a per-call zero
+                # dense weight (#2092) or a mismatch suppression also skips
+                # MMR below, but the message's claims (enable_dense=False,
+                # matching mem_status warning) are only true config-side.
                 _log_mmr_no_dense_once()
             if self._mmr_config.enabled and fused and use_dense:
                 from memtomem.search.mmr import apply_mmr

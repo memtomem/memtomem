@@ -727,6 +727,17 @@ class TestSearchDelegation:
             await store.search("hello", bm25_weight=-1.0)
 
     @pytest.mark.asyncio
+    async def test_an_all_zero_weight_pair_is_refused_before_initialization(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+        from memtomem.services.search_service import InvalidRrfWeightError
+
+        store = MemtomemStore()
+        store._ensure_init = AsyncMock(side_effect=AssertionError("initialized too early"))
+
+        with pytest.raises(InvalidRrfWeightError, match="cannot both be zero"):
+            await store.search("hello", bm25_weight=0.0, dense_weight=0.0)
+
+    @pytest.mark.asyncio
     async def test_a_zero_weight_reaches_the_pipeline_unchanged(self, monkeypatch):
         """#2087: the adapter carried the same ``or 1.0`` truthiness bug.
 

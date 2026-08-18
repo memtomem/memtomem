@@ -19,7 +19,12 @@ def reciprocal_rank_fusion(
 
     score(d) = sum over all lists: weight[i] / (k + rank(d))
 
-    When weights is None or all equal, behaves like standard RRF.
+    When weights is None or all equal, behaves like standard RRF. A list
+    whose weight is zero (or negative) is excluded entirely — it contributes
+    no candidates, not just a zero score — so a zero-weighted leg cannot
+    fill remaining slots when the other legs return fewer than ``top_k``
+    (#2092). Callers gate retrieval on the same rule; this is the
+    defense-in-depth for direct callers and extra legs (e.g. rescue).
     ``list_labels`` lets the caller name each input list (defaults to
     ``["bm25", "dense", ...]``). A fused result's ``source`` reports
     the originating list when the chunk hit only one input, or
@@ -48,6 +53,8 @@ def reciprocal_rank_fusion(
 
     for list_idx, result_list in enumerate(result_lists):
         w = weights[list_idx]
+        if w <= 0:
+            continue
         for rank_0, result in enumerate(result_list):
             rank = rank_0 + 1  # 1-based
             cid = result.chunk.id
