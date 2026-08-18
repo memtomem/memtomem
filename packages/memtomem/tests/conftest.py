@@ -230,37 +230,75 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_browser)
 
 
+_LEFTOVER_LOOP_HINT = (
+    "an event loop is already registered as running on MainThread, so "
+    "pytest-asyncio cannot start its runner. The usual source is Playwright's "
+    "sync API: its dispatcher greenlet parks inside ``loop.run_until_complete`` "
+    "for the whole session, and greenlets share the thread, so a browser spec "
+    "earlier in this session leaves the loop behind (#2099). Run this without "
+    "Playwright browser specs in the same session, or drive the coroutine on a "
+    "worker thread the way tests/web/conftest.py's ``run_async`` fixture does."
+)
+
+
+def _drives_a_loop(func: object) -> bool:
+    """Whether calling ``func`` needs an event loop on the calling thread.
+
+    ``inspect.unwrap`` because pytest-asyncio's own ``pytest_fixture_setup`` is a
+    hookwrapper: by the time a plain hook body runs it has already swapped an
+    async fixture's ``func`` for a sync synchronizer, and only ``__wrapped__``
+    still shows what the author declared.
+    """
+
+    original = inspect.unwrap(func) if func is not None else None
+    return any(
+        inspect.iscoroutinefunction(candidate) or inspect.isasyncgenfunction(candidate)
+        for candidate in (func, original)
+        if candidate is not None
+    )
+
+
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Explain a leftover MainThread event loop before pytest-asyncio trips on it.
 
-    Playwright's sync API parks a dispatcher greenlet inside
-    ``loop.run_until_complete`` for the whole session, and greenlets share the
-    thread — so after a browser spec runs, asyncio can still see that loop as
-    *running* on MainThread. pytest-asyncio then fails the next coroutine test
-    with a bare ``RuntimeError: Runner.run() cannot be called from a running
-    event loop``, which reads as a bug in the test that happens to be next
-    (#2099 cost a full investigation before the real cause was found).
+    Without this, the failure is a bare ``RuntimeError: Runner.run() cannot be
+    called from a running event loop`` naming whichever test happens to run
+    next, which reads as a bug in that test — #2099 cost a full investigation
+    before the real cause was found.
 
     ``tests/web/conftest.py`` keeps that directory free of coroutine tests and
     async fixtures, which covers every CI invocation and the default full-suite
-    order — ``tests/web`` collects last, so nothing outside it runs afterwards.
-    Hand-ordered paths (``pytest tests/web tests/test_web_routes.py``) can still
-    reach it, so this says what happened instead of leaving the cryptic error.
-    Diagnosis only: it never passes a test that would otherwise fail.
+    order (``tests/web`` collects last, so nothing outside it runs afterwards).
+    Hand-ordered paths can still reach the condition, so this says what happened
+    rather than leaving the cryptic error.
+
+    Diagnosis only: it fires solely on the condition that already breaks the
+    test, so it never passes something that would otherwise fail.
     """
 
     if asyncio.events._get_running_loop() is None:
         return
-    if not pytest_asyncio.is_async_test(item) and not inspect.iscoroutinefunction(
-        getattr(item, "obj", None)
-    ):
+    if not pytest_asyncio.is_async_test(item) and not _drives_a_loop(getattr(item, "obj", None)):
         return
+    pytest.fail(f"{item.nodeid} is a coroutine test and {_LEFTOVER_LOOP_HINT}", pytrace=False)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_fixture_setup(fixturedef, request):
+    """Same diagnosis for the async-fixture path.
+
+    A sync test body is no proof of safety: pytest-asyncio drives async fixtures
+    through the same runner, and sync tests do request them here (the ``components``
+    fixture below is async). Covers dynamic ``request.getfixturevalue`` requests
+    too, since this runs whenever pytest actually resolves the fixture.
+    """
+
+    if asyncio.events._get_running_loop() is None:
+        return None
+    if not _drives_a_loop(getattr(fixturedef, "func", None)):
+        return None
     pytest.fail(
-        f"{item.nodeid} is a coroutine test, but a browser spec earlier in this "
-        "session left a running event loop on MainThread, so pytest-asyncio cannot "
-        "start it (#2099). Run this test in a session without Playwright browser "
-        "specs, or drive the coroutine on a worker thread the way "
-        "tests/web/conftest.py's ``run_async`` fixture does.",
+        f"fixture {fixturedef.argname!r} is async and {_LEFTOVER_LOOP_HINT}",
         pytrace=False,
     )
 

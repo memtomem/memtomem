@@ -1,47 +1,69 @@
-"""The leftover-MainThread-loop message in ``conftest.pytest_runtest_setup`` (#2099).
+"""The leftover-MainThread-loop diagnosis in ``conftest.py`` (#2099).
 
 `tests/web/conftest.py` bans coroutine tests and async fixtures in that
 directory, which covers every CI invocation and the default full-suite order.
-Hand-ordered paths can still put a browser spec ahead of a coroutine test
-elsewhere, and what that produced before was a bare ``RuntimeError`` pointing
-at whichever test came next. The root hook replaces it with an explanation, so
-what needs pinning is that the hook fires on the real condition and stays
-silent otherwise.
+Hand-ordered paths can still put a browser spec ahead of a coroutine test — or
+an async fixture — elsewhere, and what that produced was a bare ``RuntimeError``
+naming whichever test came next. The root hooks replace it with an explanation,
+so what needs pinning is that they fire on the real condition and stay silent
+otherwise.
+
+Every probe runs via ``runpytest_subprocess``. These cases have to *stage* a
+running loop on MainThread, and an in-process pytester session would leave that
+registration on the thread this suite is running on — the exact hazard under
+test, self-inflicted.
 """
 
 from __future__ import annotations
 
-import asyncio.events
+import ast
+from pathlib import Path
 
 import pytest
 
-
-def _root_hook_source() -> str:
-    """The shipped ``pytest_runtest_setup`` source, lifted verbatim.
-
-    Reading it out of the real conftest instead of restating it means this
-    cannot pin a stale copy of the hook.
-    """
-
-    import ast
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
-    node = next(
-        n for n in ast.parse(source).body if getattr(n, "name", None) == "pytest_runtest_setup"
-    )
-    return (
-        "import asyncio.events\nimport inspect\n\nimport pytest\nimport pytest_asyncio\n\n"
-        + ast.get_source_segment(source, node)
-        + "\n\n"
-    )
-
-
 pytest_plugins = ["pytester"]
 
-_ROOT_HOOK = _root_hook_source()
+_CONFTEST = Path(__file__).resolve().parent / "conftest.py"
+_LIFTED = ("_LEFTOVER_LOOP_HINT", "_drives_a_loop", "pytest_runtest_setup", "pytest_fixture_setup")
 
-_PROBE = """
+
+def _lifted_hook_source() -> str:
+    """The shipped hooks' source, decorators included, lifted verbatim.
+
+    Reading them out of the real conftest instead of restating them means this
+    cannot pin a stale copy. Decorators are part of the span deliberately:
+    ``pytest_fixture_setup``'s ``tryfirst`` is load-bearing, and a
+    ``get_source_segment`` starting at the ``def`` would silently drop it.
+    """
+
+    source = _CONFTEST.read_text(encoding="utf-8")
+    lines = source.splitlines(keepends=True)
+    chunks = []
+    for node in ast.parse(source).body:
+        name = getattr(node, "name", None) or (
+            node.targets[0].id
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+            else None
+        )
+        if name not in _LIFTED:
+            continue
+        start = min([node.lineno, *(d.lineno for d in getattr(node, "decorator_list", []))])
+        chunks.append("".join(lines[start - 1 : node.end_lineno]))
+    assert len(chunks) == len(_LIFTED), f"lifted {len(chunks)} of {len(_LIFTED)} hook objects"
+    header = "import asyncio.events\nimport inspect\n\nimport pytest\nimport pytest_asyncio\n\n"
+    return header + "\n\n".join(chunks) + "\n\n"
+
+
+_PARK_A_LOOP = """
+
+# Stand in for Playwright's parked dispatcher greenlet: a loop registered as
+# running on MainThread that nothing is going to clear.
+def pytest_configure(config):
+    config._probe_loop = asyncio.new_event_loop()
+    asyncio.events._set_running_loop(config._probe_loop)
+"""
+
+_COROUTINE_TEST = """
 async def test_coroutine() -> None:
     assert True
 
@@ -50,11 +72,22 @@ def test_sync() -> None:
     assert True
 """
 
+_ASYNC_FIXTURE_CONSUMER = """
+import pytest
+
+
+@pytest.fixture
+async def an_async_fixture() -> int:
+    return 1
+
+
+def test_sync_body_async_fixture(an_async_fixture: int) -> None:
+    assert an_async_fixture == 1
+"""
+
 
 @pytest.fixture
 def rooted(pytester: pytest.Pytester) -> pytest.Pytester:
-    """A session running this repo's root conftest hook against real items."""
-
     pytester.makeini(
         """
         [pytest]
@@ -65,45 +98,33 @@ def rooted(pytester: pytest.Pytester) -> pytest.Pytester:
     return pytester
 
 
-_PARK_A_LOOP = """
-import asyncio.events
+@pytest.mark.parametrize(
+    ("name", "source"),
+    [("coroutine", _COROUTINE_TEST), ("async_fixture", _ASYNC_FIXTURE_CONSUMER)],
+)
+def test_a_leftover_loop_is_explained(rooted: pytest.Pytester, name: str, source: str) -> None:
+    rooted.makeconftest(_lifted_hook_source() + _PARK_A_LOOP)
+    rooted.makepyfile(**{f"test_{name}": source})
 
-import pytest
+    result = rooted.runpytest_subprocess()
 
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(config, items):
-    # Stand in for Playwright's parked dispatcher greenlet: a loop registered as
-    # running on MainThread that nothing is going to clear.
-    config._probe_loop = asyncio.new_event_loop()
-    asyncio.events._set_running_loop(config._probe_loop)
-
-
-def pytest_sessionfinish(session, exitstatus):
-    asyncio.events._set_running_loop(None)
-    session.config._probe_loop.close()
-"""
+    assert "#2099" in result.stdout.str()
+    assert result.parseoutcomes().get("passed", 0) == (1 if name == "coroutine" else 0)
 
 
-def test_a_coroutine_test_under_a_parked_loop_says_why(rooted: pytest.Pytester) -> None:
-    rooted.makeconftest(_ROOT_HOOK + _PARK_A_LOOP)
-    rooted.makepyfile(test_probe=_PROBE)
+@pytest.mark.parametrize(
+    ("name", "source", "expected_passed"),
+    [("coroutine", _COROUTINE_TEST, 2), ("async_fixture", _ASYNC_FIXTURE_CONSUMER, 1)],
+)
+def test_without_a_leftover_loop_the_hooks_are_silent(
+    rooted: pytest.Pytester, name: str, source: str, expected_passed: int
+) -> None:
+    """The mirror that keeps the diagnosis from becoming a ban."""
 
-    result = rooted.runpytest()
+    rooted.makeconftest(_lifted_hook_source())
+    rooted.makepyfile(**{f"test_{name}": source})
 
-    # Setup-phase failure, so it lands as an error; the sync neighbour still runs.
-    result.assert_outcomes(errors=1, passed=1)
-    result.stdout.fnmatch_lines(["*#2099*"])
+    result = rooted.runpytest_subprocess()
 
-
-def test_without_a_parked_loop_the_hook_is_silent(rooted: pytest.Pytester) -> None:
-    rooted.makeconftest(_ROOT_HOOK)
-    rooted.makepyfile(test_probe=_PROBE)
-
-    rooted.runpytest().assert_outcomes(passed=2)
-
-
-def test_the_real_session_has_no_leftover_loop() -> None:
-    """This suite's own state — the condition the hook watches for must be absent."""
-
-    assert asyncio.events._get_running_loop() is None
+    result.assert_outcomes(passed=expected_passed)
+    assert "#2099" not in result.stdout.str()
