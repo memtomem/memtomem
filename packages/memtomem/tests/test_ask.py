@@ -157,6 +157,24 @@ class TestShellCommands:
             assert cmd == expected_cmd, f"Failed for: {line}"
             assert args == expected_args, f"Failed for: {line}"
 
+    async def test_search_and_ask_label_origin_shell(self, monkeypatch):
+        """Interactive shell searches must record their own surface (#2089)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import memtomem.server.tools.search as search_tools
+        from memtomem.cli.shell import _cmd_ask, _cmd_search
+
+        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+        comp = MagicMock()
+        comp.search_pipeline.search = AsyncMock(return_value=([], MagicMock()))
+
+        await _cmd_search(comp, ["telemetry"])
+        assert comp.search_pipeline.search.call_args.kwargs["origin"] == "shell"
+
+        comp.search_pipeline.search.reset_mock()
+        await _cmd_ask(comp, ["what", "is", "telemetry?"])
+        assert comp.search_pipeline.search.call_args.kwargs["origin"] == "shell"
+
     def test_implicit_search(self):
         """Unrecognized commands should trigger search."""
         import shlex

@@ -54,6 +54,28 @@ async def test_ranked_search_persists_durable_secret_free_observation(
     assert "content" not in row["result_snapshot"][0]
 
 
+async def test_unknown_origin_is_recorded_as_internal(bm25_only_components):
+    """Runtime backstop for untyped surfaces (#2089).
+
+    ``mem_do`` raw params and persisted rows bypass the ``SearchOrigin``
+    type, so an out-of-set value must degrade to ``"internal"`` rather
+    than being recorded verbatim.
+    """
+
+    components, memory_dir = bm25_only_components
+    await _index_quality_note(components, memory_dir)
+
+    results, stats = await components.search_pipeline.search(
+        "telemetry",
+        top_k=5,
+        origin="not-a-surface",  # type: ignore[arg-type]
+    )
+
+    assert results
+    row = (await components.storage.get_query_history(limit=1))[0]
+    assert row["observation"]["origin"] == "internal"
+
+
 async def test_snapshot_source_name_is_a_basename_never_a_path(bm25_only_components):
     """Value-level pin for the snapshot writer's projection (#1815).
 

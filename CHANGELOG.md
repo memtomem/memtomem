@@ -60,6 +60,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   This release is the cut-over point: agent-search runs recorded by earlier
   versions keep the `"internal"` label — no data migration. (#2086)
 
+- **Interactive shell and LangGraph searches are labeled with their own
+  origin.** `mm shell`'s `search`/`ask` commands and the LangGraph adapter's
+  `MemtomemStore.search` never passed `origin`, so their query runs were
+  recorded as `origin="internal"` — the label meaning "not a user request" —
+  even though `"shell"` and `"langgraph"` exist in the accepted set precisely
+  for these surfaces. Both now label themselves; runs recorded before this
+  version keep the old `"internal"` label. The accepted origin set is also
+  promoted to a shared `SearchOrigin` literal type so an in-tree typo is a
+  type error instead of being silently coerced to `"internal"`. (#2089)
+
 - **`bm25_weight=0.0` / `dense_weight=0.0` are honored instead of silently
   becoming `1.0`.** The weight pair was assembled with `or`, which cannot tell
   "not supplied" from "supplied as zero", so asking for a zero-weighted leg

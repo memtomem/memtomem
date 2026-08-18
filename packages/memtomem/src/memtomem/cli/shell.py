@@ -108,7 +108,7 @@ async def _cmd_search(comp, args: list[str]) -> None:
 
     project_context_root = _resolve_project_context_root(comp)
     results, stats = await comp.search_pipeline.search(
-        query, top_k=10, project_context_root=project_context_root
+        query, top_k=10, project_context_root=project_context_root, origin="shell"
     )
 
     if not results:
@@ -150,7 +150,7 @@ async def _cmd_ask(comp, args: list[str]) -> None:
 
     project_context_root = _resolve_project_context_root(comp)
     results, _ = await comp.search_pipeline.search(
-        question, top_k=5, project_context_root=project_context_root
+        question, top_k=5, project_context_root=project_context_root, origin="shell"
     )
 
     if not results:
