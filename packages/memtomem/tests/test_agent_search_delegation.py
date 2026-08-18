@@ -86,7 +86,7 @@ class TestDelegation:
             namespace="agent-runtime:alpha,shared",
             current_namespace=None,
             project_context_root=Path("/tmp/project"),
-            origin="internal",
+            origin="mcp",
         )
 
     async def test_include_shared_false_narrows_to_the_private_bucket(self, monkeypatch):
@@ -137,6 +137,43 @@ class TestHints:
         out, _ = await _call(monkeypatch, agent_id="alpha")
 
         assert out == "No results found for agent 'alpha'."
+
+
+class TestQueryRunId:
+    """#2086: both structured branches must forward the feedback handle."""
+
+    def _stats(self):
+        return RetrievalStats(query_run_id="123e4567-e89b-12d3-a456-426614174000")
+
+    def _result(self):
+        from uuid import uuid4
+
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+
+        chunk = Chunk(
+            content="hello",
+            metadata=ChunkMetadata(source_file=Path("notes/a.md")),
+            id=uuid4(),
+            embedding=[],
+        )
+        return SearchResult(chunk=chunk, score=0.9, rank=1, source="fused")
+
+    async def test_empty_structured_payload_carries_query_run_id(self, monkeypatch):
+        out, _ = await _call(monkeypatch, stats=self._stats(), output_format="structured")
+
+        assert json.loads(out)["query_run_id"] == "123e4567-e89b-12d3-a456-426614174000"
+
+    async def test_nonempty_structured_payload_carries_query_run_id(self, monkeypatch):
+        out, _ = await _call(
+            monkeypatch,
+            results=[self._result()],
+            stats=self._stats(),
+            output_format="structured",
+        )
+
+        payload = json.loads(out)
+        assert payload["results"]
+        assert payload["query_run_id"] == "123e4567-e89b-12d3-a456-426614174000"
 
 
 class TestHintsReachTextFormats:

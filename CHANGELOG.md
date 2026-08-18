@@ -31,6 +31,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_agent_search` labels its searches as MCP traffic and exposes
+  `query_run_id`.** Its query runs were persisted as `origin="internal"` — the
+  label meaning "not a user request" — so per-surface analytics counted agent
+  searches as internal machinery, and neither structured branch forwarded
+  `stats.query_run_id`, leaving callers with no handle to attach Quality Lab
+  feedback to. It now passes `origin="mcp"` and includes `query_run_id` in
+  both the empty and non-empty structured payloads, matching `mem_search`.
+  This release is the cut-over point: agent-search runs recorded by earlier
+  versions keep the `"internal"` label — no data migration. (#2086)
+
 - **`bm25_weight=0.0` / `dense_weight=0.0` are honored instead of silently
   becoming `1.0`.** The weight pair was assembled with `or`, which cannot tell
   "not supplied" from "supplied as zero", so asking for a zero-weighted leg
