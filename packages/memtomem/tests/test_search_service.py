@@ -13,9 +13,11 @@ import pytest
 
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.services.search_service import (
+    InvalidRrfWeightError,
     InvalidTemporalBoundError,
     hidden_namespace_hint,
     parse_as_of_bound,
+    rrf_weights_from,
     run_search,
 )
 
@@ -387,3 +389,68 @@ class TestHiddenNamespaceHint:
         hint = hidden_namespace_hint(1, {"archive:": 1}, noun="memory")
 
         assert hint.startswith("1 memory hidden in system namespaces:")
+
+
+class TestRrfWeights:
+    """#2087: 0.0 is a value, not an absence.
+
+    Fusion adds ``weight / (k + rank)`` per leg, so a zero weight removes
+    that leg's contribution to the fused score. Defaulting it to 1.0 gave the
+    caller the opposite of what they asked for, silently. (Zero does not stop
+    the leg from contributing candidates — see #2092.)
+    """
+
+    def test_a_zero_keyword_weight_survives(self):
+        assert rrf_weights_from(0.0, None) == [0.0, 1.0]
+
+    def test_a_zero_meaning_weight_survives(self):
+        assert rrf_weights_from(None, 0.0) == [1.0, 0.0]
+
+    def test_both_zero_is_passed_through(self):
+        assert rrf_weights_from(0.0, 0.0) == [0.0, 0.0]
+
+    def test_absent_weights_defer_to_server_config(self):
+        assert rrf_weights_from(None, None) is None
+
+    def test_one_sided_weight_defaults_its_partner(self):
+        assert rrf_weights_from(3.0, None) == [3.0, 1.0]
+
+    def test_both_weights_are_forwarded_verbatim(self):
+        assert rrf_weights_from(2.0, 3.0) == [2.0, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_a_zero_weight_reaches_the_pipeline_unchanged():
+    pipeline = StubPipeline()
+
+    await _run(pipeline, bm25_weight=0.0)
+
+    assert pipeline.calls[0]["rrf_weights"] == [0.0, 1.0]
+
+
+class TestRrfWeightValidation:
+    """A negative weight inverts a leg rather than de-emphasising it.
+
+    ``w / (k + rank)`` rises toward zero as rank grows, so with ``w = -1``
+    rank 50 scores ``-1/110`` and rank 1 scores ``-1/61`` — ``nlargest``
+    promotes the worst matches. ``search.rrf_weights`` is validated in
+    config; this is the same rule at the request boundary.
+    """
+
+    @pytest.mark.parametrize("weight", [-1.0, -0.001, float("nan"), float("inf")])
+    def test_a_refused_keyword_weight_names_itself(self, weight):
+        with pytest.raises(InvalidRrfWeightError, match="bm25_weight"):
+            rrf_weights_from(weight, None)
+
+    @pytest.mark.parametrize("weight", [-1.0, float("-inf")])
+    def test_a_refused_meaning_weight_names_itself(self, weight):
+        with pytest.raises(InvalidRrfWeightError, match="dense_weight"):
+            rrf_weights_from(None, weight)
+
+    def test_zero_is_not_refused(self):
+        assert rrf_weights_from(0.0, 0.0) == [0.0, 0.0]
+
+    def test_the_inversion_the_guard_prevents(self):
+        """Documents why negative is refused rather than merely discouraged."""
+        k = 60
+        assert (-1.0 / (k + 50)) > (-1.0 / (k + 1))

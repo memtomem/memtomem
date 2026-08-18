@@ -28,8 +28,10 @@ from memtomem.server.formatters import (
 from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
 from memtomem.services.search_service import (
+    InvalidRrfWeightError,
     InvalidTemporalBoundError,
     parse_as_of_bound,
+    rrf_weights_from,
     run_search,
 )
 from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
@@ -71,8 +73,9 @@ async def mem_search(
             filtered out; chunks without those keys are always valid. Time-
             decay scoring is also anchored to this instant instead of the
             wall clock.
-        bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor them)
-        dense_weight: RRF weight for meaning matches (default 1.0; raise to favor them)
+        bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor)
+        dense_weight: RRF weight for meaning matches (default 1.0). Both must be
+            finite and >= 0; 0 drops that leg's score, not its rows
         context_window: Expand each result with ±N adjacent chunks (0 = off)
         verbose: Deprecated — use output_format="verbose".
         output_format: "compact" (default), "verbose" (adds UUID / pipeline stats),
@@ -114,12 +117,13 @@ async def mem_search(
     if effective_format not in _VALID_OUTPUT_FORMATS:
         return f"Error: {INVALID_OUTPUT_FORMAT_PREFIX} '{output_format}'."
 
-    # Reject a malformed bound before touching the app: argument validation
-    # here runs without an initialized server. The core parses it again from
-    # the raw value, which keeps one definition of the accepted formats.
+    # Reject malformed arguments before touching the app: validation here runs
+    # without an initialized server. The core re-derives both from the raw
+    # values, which keeps one definition of what is accepted.
     try:
         parse_as_of_bound(as_of)
-    except InvalidTemporalBoundError as e:
+        rrf_weights_from(bm25_weight, dense_weight)
+    except (InvalidTemporalBoundError, InvalidRrfWeightError) as e:
         return f"Error: {e}"
 
     app = await _get_app_initialized(ctx)

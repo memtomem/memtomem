@@ -31,6 +31,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`bm25_weight=0.0` / `dense_weight=0.0` are honored instead of silently
+  becoming `1.0`.** The weight pair was assembled with `or`, which cannot tell
+  "not supplied" from "supplied as zero", so asking for a zero-weighted leg
+  quietly produced an evenly weighted search. Fusion adds `weight / (k + rank)`
+  per leg, so zero drops that retriever's votes out of the score — note its
+  candidates can still occupy slots at score 0 when the other leg returns fewer
+  than `top_k`; zero silences a leg's ranking influence, it does not remove its
+  rows. `mem_search` and the in-process LangGraph adapter both carried the bug
+  and now share one helper.
+
+  Negative and non-finite weights are now refused at the request boundary. A
+  negative weight does not de-emphasise a leg: `weight / (k + rank)` rises
+  toward zero as rank grows, so rank 50 outscores rank 1 and the worst matches
+  get promoted. This covers request arguments only — `search.rrf_weights` set
+  in config is still accepted unvalidated and reaches fusion unchecked (#2094).
+
 - **The hidden-namespace hint now names the namespaces that actually hid
   results.** `search.system_namespace_prefixes` defaults to two entries —
   `archive:` and `agent-runtime:` — but the hint counted rows behind both and
