@@ -44,10 +44,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   literal name and matched nothing. The hint now reports the split
   (`3 in archive:*, 2 in agent-runtime:*`) and quotes a runnable query per
   matched prefix (`pass namespace="archive:*" or namespace="agent-runtime:*"`)
-  — one per group, since a comma list cannot carry a glob. When the count is
-  unavailable it falls back to unqualified wording rather than naming a
-  namespace nobody checked. `mem_search`, `mem_agent_search`, and `mem_recall`
-  all render it from one helper rather than three copies.
+  — one per group, since a comma list cannot carry a glob. A configured prefix
+  that cannot be written as a glob meaning exactly itself (one containing `%`,
+  `*`, `\`, or `"`) is still counted but no longer quoted back, because the
+  query would select a different set than the one just reported. `mem_search`,
+  `mem_agent_search`, and `mem_recall` all render the hint from one helper
+  rather than three copies.
 
 - **Search hints no longer disappear on text output.** `mem_search` built its
   trust-UX hints and then returned without them on four empty-result branches

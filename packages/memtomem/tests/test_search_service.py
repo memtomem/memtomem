@@ -320,6 +320,43 @@ class TestHiddenNamespaceHint:
 
         assert one == other
 
+    def test_a_prefix_that_cannot_be_quoted_gets_no_query(self):
+        """The count escapes ``%``; the glob syntax has no way to.
+
+        ``storage/sqlite_helpers`` maps ``*`` to ``%`` and escapes ``_``, but
+        leaves an existing ``%`` as a wildcard — so quoting ``team%*`` back at
+        the user would select a different set than the one just counted.
+        """
+        hint = hidden_namespace_hint(2, {"team%": 2})
+
+        assert hint == (
+            "2 result(s) hidden in system namespaces: 2 in team%* "
+            "(pass an explicit namespace to include them)."
+        )
+
+    def test_quotable_prefixes_are_still_offered_alongside_an_unquotable_one(self):
+        hint = hidden_namespace_hint(5, {"archive:": 3, "team%": 2})
+
+        assert hint == (
+            "5 result(s) hidden in system namespaces: 3 in archive:*, 2 in team%* "
+            '(pass namespace="archive:*" to include the groups it names).'
+        )
+
+    def test_a_quoted_prefix_never_carries_a_glob_metacharacter(self):
+        """Property check over the shapes an operator can configure."""
+        for prefix in ("team%", "a*b", "back\\slash", 'quo"te', "archive:", "no-colon"):
+            hint = hidden_namespace_hint(1, {prefix: 1})
+            if 'namespace="' not in hint:
+                continue
+            quoted = hint.split('namespace="', 1)[1].split('"', 1)[0]
+            assert quoted == f"{prefix}*"
+            assert not (set(prefix) & set('%*\\"'))
+
+    def test_a_prefix_without_a_trailing_colon_is_quoted_normally(self):
+        hint = hidden_namespace_hint(1, {"legacy": 1})
+
+        assert 'namespace="legacy*"' in hint
+
     def test_an_unavailable_breakdown_falls_back_to_unqualified_advice(self):
         """A failed count must not put a namespace name in the user's hands."""
         assert hidden_namespace_hint(3, {}) == (

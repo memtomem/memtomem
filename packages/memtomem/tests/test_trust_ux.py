@@ -184,13 +184,22 @@ class TestArchiveHint:
             ]
         )
 
+        # Store side: mutating the miss must not reach the cached entry.
         _, first = await comp.search_pipeline.search("pipeline", top_k=5)
         first.hidden_by_prefix["archive:"] = 999
         first.hidden_by_prefix["injected:"] = 1
 
         _, second = await comp.search_pipeline.search("pipeline", top_k=5)
-
+        assert second.cache_hit  # otherwise this proves nothing about the cache
         assert second.hidden_by_prefix == {"archive:": 1}
+
+        # Read side: mutating a hit must not reach it either, or the next
+        # caller inherits the edit.
+        second.hidden_by_prefix["archive:"] = 999
+
+        _, third = await comp.search_pipeline.search("pipeline", top_k=5)
+        assert third.cache_hit
+        assert third.hidden_by_prefix == {"archive:": 1}
 
     async def test_pipeline_hidden_count_zero_when_namespace_pinned(self, trust_components):
         """Pinning an explicit namespace bypasses the system-ns filter."""
