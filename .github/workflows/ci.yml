@@ -24,6 +24,7 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
@@ -41,6 +42,7 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
@@ -96,6 +98,7 @@ jobs:
     if: ${{ always() }}
     needs: [test-windows-shard]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions: {}
     steps:
       - name: Require every Windows shard to succeed
@@ -106,6 +109,7 @@ jobs:
   test-browser:
     name: browser (Playwright + Chromium)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
@@ -121,6 +125,7 @@ jobs:
   test-golden-path:
     name: golden-path (ONNX bge-m3)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     steps:
@@ -151,6 +156,7 @@ jobs:
   quality-gate:
     name: quality-gate (BM25 replay)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
@@ -196,6 +202,7 @@ jobs:
     name: llm-nightly (optional)
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -207,6 +214,7 @@ jobs:
 
   notebooks:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
@@ -218,6 +226,7 @@ jobs:
   test-js:
     name: js-unit (vitest + jsdom)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/memtomem/tests-js
@@ -241,6 +250,7 @@ jobs:
   test-opencode-plugin:
     name: OpenCode plugin (build + unit + pack)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/opencode-memtomem
@@ -297,6 +307,7 @@ jobs:
   vendored-assets:
     name: vendored-assets (OSV blocking)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
@@ -313,6 +324,7 @@ jobs:
   python-deps:
     name: python-deps (OSV blocking — Python + JavaScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     # Both shipped Python resolution metadata and the JavaScript lockfiles are
@@ -364,6 +376,7 @@ jobs:
   bandit:
     name: bandit (security lint — blocking)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -386,6 +399,7 @@ jobs:
     if: ${{ always() }}
     needs: [test-js, test-opencode-plugin, vendored-assets, python-deps, bandit]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions: {}
     steps:
       - name: Require every security dependency to succeed
