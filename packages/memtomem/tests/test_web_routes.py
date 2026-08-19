@@ -2110,9 +2110,12 @@ class TestDeleteChunk:
     async def test_delete_passes_the_files_namespace_to_the_forced_reindex(
         self, app, client: AsyncClient, tmp_path: Path
     ):
-        """Issue #2005: the re-index uses ``force=True`` for the re-embed,
-        and force re-resolves namespaces — so without an explicit namespace
-        the survivors of a delete move to whatever the rules say today."""
+        """Issue #2005: the re-index uses ``force=True`` for the re-embed.
+        Back when force also re-resolved namespaces, the survivors of a delete
+        moved to whatever the rules said that day; the route passes the file's
+        namespace explicitly. Kept as the route's contract after #2061 made
+        the engine preserve under force as well — the route must still send
+        what it resolved, not rely on the layer beneath it."""
         self._real_source_chunk(app, tmp_path)
         app.state.index_engine.effective_namespace_for = AsyncMock(return_value="aaa")
 

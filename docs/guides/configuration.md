@@ -267,8 +267,10 @@ Resolving it is a two-step process — pick **one** of:
   MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
   `mem_index(path="...", force=true)`.
 
-  `--force` re-embeds; it does not re-resolve namespaces, so every file keeps
-  the namespace its chunks are stored under.
+  `mm index --force` re-embeds; it does not re-resolve namespaces, so every
+  file keeps the namespace its chunks are stored under. That holds for any
+  caller that passes no namespace — an explicit namespace still wins, which is
+  what the caveat below is about.
 
   > **Run the recovery from the CLI when the store holds agent-scoped notes.**
   > `mem_index` called inside an agent session inherits that session's

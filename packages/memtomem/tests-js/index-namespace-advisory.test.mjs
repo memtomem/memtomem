@@ -94,3 +94,47 @@ describe('Index result namespace advisory', () => {
     expect(toasts).toEqual([]);
   });
 });
+
+describe('Sources panel advisory consumers', () => {
+  let window;
+  let toasts;
+
+  beforeEach(async () => {
+    const dom = await bootApp({
+      scripts: ['i18n.js', 'app.js', 'sources-memory-dirs.js'],
+    });
+    window = dom.window;
+    await window.I18N.init();
+    toasts = [];
+    window.showToast = (message, type) => toasts.push({ message, type });
+    window.loadStats = () => {};
+    window._markDataStale = () => {};
+    window.btnLoading = () => {};
+  });
+
+  it('reports the advisory from the per-root reindex-all response', async () => {
+    window.api = async () => ({
+      errors: [],
+      results: [
+        { indexed_chunks: 1, namespaces_preserved_against_rules: 2, namespaces_reassigned: 0 },
+        { indexed_chunks: 1, namespaces_preserved_against_rules: 3, namespaces_reassigned: 0 },
+      ],
+    });
+
+    await window.mdReindexAll(null);
+
+    // 2 + 3: the per-root counters have to be summed, not read off the first.
+    expect(toasts.some((toast) => toast.message.includes('5'))).toBe(true);
+  });
+
+  it('sums nothing into a toast when no root preserved against its rules', async () => {
+    window.api = async () => ({
+      errors: [],
+      results: [{ indexed_chunks: 1, namespaces_preserved_against_rules: 0 }],
+    });
+
+    await window.mdReindexAll(null);
+
+    expect(toasts.every((toast) => !toast.message.includes('--reassign-namespaces'))).toBe(true);
+  });
+});

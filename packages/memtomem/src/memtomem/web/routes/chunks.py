@@ -321,12 +321,17 @@ async def delete_chunk(
                     ),
                 )
 
-            # Issue #2005: ``force=True`` re-applies namespace resolution to
-            # every chunk, including the ones this delete leaves alone — so
-            # deleting one chunk from an ``aaa`` file would move its survivors
-            # to whatever the rules say today. Pass the namespace the file
-            # already has, so force keeps meaning "re-embed everything"
-            # without also meaning "re-namespace everything".
+            # Issue #2005: ``force=True`` used to re-apply namespace
+            # resolution to every chunk, including the ones this delete leaves
+            # alone — so deleting one chunk from an ``aaa`` file moved its
+            # survivors to whatever the rules said that day. Passing the
+            # file's existing namespace was the fix.
+            #
+            # Since #2061 / ADR-0033 the engine preserves a unanimously stored
+            # namespace under ``force`` on its own, so this pin is redundant
+            # for that case — kept deliberately: it is also what turns the
+            # untagged carve-out into the stored spelling (see below), and an
+            # explicit namespace is the one input whose meaning cannot drift.
             #
             # Outside the try below on purpose. That handler's fallback is an
             # index-only delete, which is the right answer when the *file*

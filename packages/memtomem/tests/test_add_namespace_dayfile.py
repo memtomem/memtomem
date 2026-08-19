@@ -143,9 +143,11 @@ class TestEarlierEntryKeepsItsNamespace:
         self, bm25_only_components
     ):
         """The web chunk-delete path re-indexes with ``force=True`` for the
-        re-embed, and force re-resolves namespaces — so removing one chunk
-        from an ``aaa`` file used to move every survivor to whatever the
-        rules say today. It must pass the file's namespace explicitly."""
+        re-embed. When force also re-resolved namespaces, removing one chunk
+        from an ``aaa`` file moved every survivor to whatever the rules said
+        that day; it passes the file's namespace explicitly instead. Since
+        #2061 the engine preserves under force too, so this now pins both
+        defences at once — the explicit pin and the preservation behind it."""
         from memtomem.tools.memory_writer import append_entry, remove_lines
 
         comp, mem_dir = bm25_only_components

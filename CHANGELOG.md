@@ -298,7 +298,11 @@ to keep the previous apply-immediately behavior.
   stored under one, instead of restamping the changed ones through the
   rules/default fallback. `mm index --force` still applies freshly resolved
   namespaces, which is what makes it the way to apply changed namespace
-  rules. Deleting a chunk in the web UI used to inherit that re-resolution by
+  rules. **(Superseded within this same Unreleased section by the `--force`
+  entry above — #2061 moved rule re-application to `--reassign-namespaces`
+  and made `--force` preserve. Kept here because the rest of this entry still
+  describes what shipped.)** Deleting a chunk in the web UI used to inherit
+  that re-resolution by
   accident — it re-indexes with `force=True` for the re-embed, so removing
   one chunk from an `aaa` file moved every survivor to whatever the rules say
   today; it now passes the file's existing namespace explicitly.

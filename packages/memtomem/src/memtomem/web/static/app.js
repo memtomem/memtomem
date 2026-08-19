@@ -6868,6 +6868,24 @@ function namespaceAdvisoryToast(result) {
   return preserved > 0 || reassigned > 0;
 }
 
+// The ``/api/reindex`` shape is per-root, so its consumers have to add the
+// counters up before they mean anything. One helper rather than a reduce in
+// each caller — there are three, and a missed one reads as "nothing to
+// report" rather than as a bug.
+function namespaceAdvisoryToastForRoots(results) {
+  const roots = Array.isArray(results) ? results : [];
+  return namespaceAdvisoryToast({
+    namespaces_preserved_against_rules: roots.reduce(
+      (sum, r) => sum + (Number(r.namespaces_preserved_against_rules) || 0),
+      0,
+    ),
+    namespaces_reassigned: roots.reduce(
+      (sum, r) => sum + (Number(r.namespaces_reassigned) || 0),
+      0,
+    ),
+  });
+}
+
 // ADR-0006 PR-B: render an index result. The shape is identical whether it
 // arrives via the SSE ``complete`` event (folder stream) or the force_unsafe
 // ``POST /api/index`` response (IndexingStats either way), so both call this:
