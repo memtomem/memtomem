@@ -46,6 +46,8 @@ from typing import Any, Literal
 
 import click
 
+from memtomem.constants import default_system_prefixes
+
 #: Matches the redaction-block message ``IndexEngine`` synthesizes for a file
 #: the privacy gate refused — ``f"{path.name}: redaction_blocked (hits=N,
 #: scope=S, decision=D)"`` (``indexing/engine.py``, both the gather and the
@@ -97,6 +99,7 @@ async def run_with_progress(
     namespace: str | None = None,
     force_unsafe: bool = False,
     path_scope: Literal["configured", "explicit"] = "explicit",
+    reassign_namespaces: bool = False,
 ) -> dict[str, Any]:
     """Stream ``index_path_stream`` across ``paths`` with a click.progressbar.
 
@@ -152,6 +155,22 @@ async def run_with_progress(
         "blocked": 0,
         "blocked_paths": [],
         "blocked_project_shared": 0,
+        # #2061 namespace advisory, aggregated from each stream's ``complete``
+        # event so the CLI reports the same numbers the non-stream
+        # ``IndexingStats`` carries.
+        "namespaces_preserved_against_rules": 0,
+        "namespaces_reassigned": 0,
+        "namespace_moves": [],
+        # Captured from the bootstrapped config below. The engine deliberately
+        # does not know about ``search.system_namespace_prefixes`` — it has no
+        # search config, and threading one in would touch every construction
+        # seam — so classifying a move as "this moved agent-scoped rows" is
+        # the reporting layer's job. A components object that carries no
+        # config falls back to the shipped defaults below rather than to an
+        # empty list: setting the config to ``[]`` is an operator opting out
+        # of system scoping, while carrying no config says nothing at all,
+        # and silence must not read as "there is nothing to warn about".
+        "system_namespace_prefixes": [],
     }
 
     # Throttle clock for ``chunk_progress`` label refreshes. Mirrors the web
@@ -211,6 +230,12 @@ async def run_with_progress(
         from memtomem.cli._bootstrap import cli_components
 
         async with cli_components() as comp:
+            config = getattr(comp, "config", None)
+            agg["system_namespace_prefixes"] = (
+                list(config.search.system_namespace_prefixes)
+                if config is not None
+                else default_system_prefixes()
+            )
             for p in paths:
                 async for evt in comp.index_engine.index_path_stream(
                     p,
@@ -219,6 +244,7 @@ async def run_with_progress(
                     namespace=namespace,
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
+                    reassign_namespaces=reassign_namespaces,
                 ):
                     if evt["type"] == "discovery":
                         # Authoritative bar-length source. Engine emits this
@@ -277,6 +303,11 @@ async def run_with_progress(
                         retryable_errs = evt.get("retryable_errors") or []
                         if retryable_errs:
                             agg["retryable_errors"].extend(retryable_errs)
+                        agg["namespaces_preserved_against_rules"] += evt.get(
+                            "namespaces_preserved_against_rules", 0
+                        )
+                        agg["namespaces_reassigned"] += evt.get("namespaces_reassigned", 0)
+                        agg["namespace_moves"].extend(evt.get("namespace_moves") or [])
     finally:
         _close_bar()
 
@@ -317,6 +348,58 @@ def print_blocked_summary(
         )
 
 
+def print_namespace_advisory(
+    *,
+    preserved_against_rules: int,
+    reassigned: int,
+    moves: Sequence[str],
+    reassign_hint: str,
+    system_namespace_prefixes: Sequence[str] = (),
+) -> None:
+    """Report what a run did to stored namespaces (#2061).
+
+    Two halves, and a run triggers at most one of them in practice:
+
+    * ``preserved_against_rules`` — files that kept their stored namespace
+      while the current path rules would have assigned a different one. This
+      is what a user who edited their rules and re-ran ``--force`` used to get
+      silently applied; now it is named, with the command that applies it.
+    * ``reassigned`` / ``moves`` — what a ``--reassign-namespaces`` run
+      actually moved, per ``old → new`` pair. Moves out of a system-scoped
+      namespace (``agent-runtime:`` and friends) are called out separately:
+      they are the deliberate form of the damage #2061 was filed about, so
+      "you asked for this" still deserves to be legible after the fact.
+
+    No-op when a run neither preserved against the rules nor moved anything.
+    """
+    if preserved_against_rules:
+        click.secho(
+            f"  {preserved_against_rules} file(s) kept their stored namespace; "
+            "current rules would assign differently.",
+            fg="yellow",
+        )
+        click.secho(f"  → To apply the rules: {reassign_hint}", fg="yellow")
+    if not reassigned:
+        return
+    click.secho(f"  {reassigned} file(s) reassigned to a rule-resolved namespace:", fg="yellow")
+    for move in moves:
+        click.secho(f"    {move}", fg="yellow")
+    # Each move line starts with the namespace moved *out of*, so a prefix
+    # test on the line is a prefix test on that namespace.
+    system_moves = [
+        move
+        for move in moves
+        if any(move.startswith(prefix) for prefix in system_namespace_prefixes)
+    ]
+    if system_moves:
+        click.secho(
+            f"  → {len(system_moves)} of these moved rows out of a system-scoped "
+            "namespace (agent session or archive scope). Those chunks are now "
+            "visible to a default search.",
+            fg="red",
+        )
+
+
 def print_index_errors(
     errors: Sequence[str],
     *,
@@ -354,6 +437,7 @@ def print_index_errors(
 __all__ = [
     "print_blocked_summary",
     "print_index_errors",
+    "print_namespace_advisory",
     "run_with_progress",
     "_collect_seed_scale",
 ]

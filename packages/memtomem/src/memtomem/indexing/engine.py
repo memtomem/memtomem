@@ -414,6 +414,116 @@ class PrivacyRejection(Exception):
         super().__init__(f"redaction_blocked: {path.name} (hits={hit_count}, decision={decision})")
 
 
+class NamespaceMixedUnderForceError(Exception):
+    """A forced re-index would collapse a multi-namespace file into one namespace.
+
+    ``force=True`` promotes every unchanged chunk into ``to_upsert``, and the
+    whole upsert carries one namespace — so a file whose rows are split across
+    several namespaces would have all of them rewritten to the rule-resolved
+    one, moving agent-scoped content into a searchable namespace with no way
+    back (the day-file name encoding is one-way, so nothing on disk can
+    restore it). Permanent, not retryable: re-running changes nothing. The
+    caller picks an out — an explicit namespace, ``reassign_namespaces=True``,
+    or splitting the file.
+
+    The message carries ``file_path.name`` only. Bulk error strings are echoed
+    verbatim through the web complete event and API responses, which redact
+    host paths.
+    """
+
+    retryable = False
+
+
+#: Why a file's chunks got the namespace they got (#2061). ``preserved`` and
+#: ``preserved_against_rules`` both mean "the stored namespace won"; the
+#: latter additionally means current rules would have chosen differently, and
+#: is what the CLI advisory counts so a user whose rule edit did not take
+#: effect is told which command applies it.
+NamespaceDecisionReason = Literal[
+    "explicit",
+    "preserved",
+    "preserved_against_rules",
+    "resolved",
+    "reassigned",
+    "mixed_force_refused",
+]
+
+
+@dataclasses.dataclass(frozen=True)
+class NamespaceDecision:
+    """The namespace a file's chunks get, the rows it had, and why.
+
+    One structured answer instead of a bare ``str | None`` so the reporting
+    surfaces (advisory counters, move summary, the system-namespace warning)
+    read the *authoritative in-lock* resolution rather than re-deriving it
+    from a pre-write preview that a concurrent writer may have invalidated.
+    """
+
+    target: str | None
+    stored: tuple[str, ...] = ()
+    reason: NamespaceDecisionReason = "resolved"
+
+
+def _reject_reassign_with_explicit_ns(namespace: str | None, reassign: bool) -> None:
+    """Refuse the one flag pair that cannot mean anything coherent.
+
+    An explicit namespace short-circuits rule resolution, so pairing it with
+    ``reassign_namespaces=True`` asks for two different targets at once. The
+    CLI rejects the combination too, but the check belongs here as well: the
+    engine entrypoints are public API, and silently letting the explicit
+    namespace win would drop the reassignment — and with it the stored lookup
+    that reporting depends on — without a word.
+    """
+    if reassign and namespace is not None:
+        raise ValueError(
+            "reassign_namespaces=True cannot be combined with an explicit namespace: "
+            "an explicit namespace short-circuits the rules that reassignment exists "
+            "to apply. Pass one or the other."
+        )
+
+
+@dataclasses.dataclass
+class _NamespaceTally:
+    """Run-level roll-up of per-file :class:`NamespaceDecision` records.
+
+    Shared by both bulk paths so the stream and non-stream surfaces cannot
+    report different numbers for the same run.
+    """
+
+    preserved_against_rules: int = 0
+    reassigned: int = 0
+    moves: dict[tuple[str, str], int] = dataclasses.field(default_factory=dict)
+
+    def record(
+        self,
+        decision: NamespaceDecision,
+        *,
+        written: bool,
+        canonical: Callable[[str | None], str],
+    ) -> None:
+        if decision.reason == "preserved_against_rules":
+            # Counted whether or not a write followed: an unchanged file that
+            # kept a namespace the current rules disagree with is exactly the
+            # case the advisory exists to name.
+            self.preserved_against_rules += 1
+            return
+        if decision.reason != "reassigned" or not written:
+            # A move is only real once its namespace-bearing upsert committed.
+            return
+        self.reassigned += 1
+        target = canonical(decision.target)
+        for old in decision.stored:
+            old_canonical = canonical(old)
+            if old_canonical == target:
+                continue
+            self.moves[(old_canonical, target)] = self.moves.get((old_canonical, target), 0) + 1
+
+    def summary(self) -> tuple[str, ...]:
+        return tuple(
+            f"{old} → {new}: {count} file(s)" for (old, new), count in sorted(self.moves.items())
+        )
+
+
 class _IndexFileBase(TypedDict):
     total: int
     indexed: int
@@ -432,6 +542,13 @@ class IndexFileResult(_IndexFileBase, total=False):
     # value comes from the authoritative namespace resolution inside the
     # per-file critical section; ``None`` is the valid untagged carve-out.
     resolved_namespace: str | None
+    # The authoritative in-lock namespace resolution and its reason (#2061).
+    # Present once resolution ran, whether or not a write followed — the
+    # "rules would have chosen differently" advisory is true for an unchanged
+    # file too. ``namespace_written`` says whether a namespace-bearing upsert
+    # actually committed, which is what the move counters require.
+    namespace_decision: NamespaceDecision
+    namespace_written: bool
     # Set to 1 by the stream path when a file is skipped by the ADR-0006
     # redaction gate; aggregated into ``IndexingStats.blocked_files``. The
     # non-stream path tracks blocks via the raised ``PrivacyRejection`` instead.
@@ -519,7 +636,10 @@ class IndexEngine:
         *,
         force_unsafe: bool = False,
         path_scope: PathScope = "configured",
+        reassign_namespaces: bool = False,
     ) -> IndexingStats:
+        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces)
+        force = force or reassign_namespaces
         self._active_runs += 1
         try:
             async with self._index_lock:
@@ -530,6 +650,7 @@ class IndexEngine:
                     namespace,
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
+                    reassign_namespaces=reassign_namespaces,
                 )
         finally:
             self._active_runs -= 1
@@ -543,6 +664,7 @@ class IndexEngine:
         *,
         force_unsafe: bool = False,
         path_scope: PathScope = "configured",
+        reassign_namespaces: bool = False,
     ) -> IndexingStats:
         start = time.monotonic()
         path = path.resolve()
@@ -579,7 +701,9 @@ class IndexEngine:
         # critical section — a concurrent writer may have moved a file since
         # this prepass — and a lookup failure there fails that file closed,
         # keeping its type in ``retryable_errors`` below.
-        prepass_namespaces = await self._resolve_namespaces_per_file(files, namespace, force=force)
+        prepass_namespaces = await self._resolve_namespaces_per_file(
+            files, namespace, force=force, reassign=reassign_namespaces
+        )
 
         async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
@@ -590,6 +714,7 @@ class IndexEngine:
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
                     embed_semaphore=embed_sem,
+                    reassign_namespaces=reassign_namespaces,
                 )
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
@@ -603,11 +728,19 @@ class IndexEngine:
         # successful upsert replaces its entry below with the authoritative
         # in-lock answer; no-write and failed outcomes retain this preview.
         echo_namespaces = list(prepass_namespaces)
+        tally = _NamespaceTally()
         for i, r in enumerate(raw_results):
             if isinstance(r, dict):
                 file_results.append(r)
                 all_errors.extend(r.get("errors", []))
                 retryable_errors.extend(r.get("retryable_errors", []))
+                decision = r.get("namespace_decision")
+                if decision is not None:
+                    tally.record(
+                        decision,
+                        written=r.get("namespace_written", False),
+                        canonical=self._canonical_namespace,
+                    )
                 if "resolved_namespace" in r:
                     # ``None`` is a real applied value, so key presence — not
                     # truthiness — decides whether to replace the prepass.
@@ -661,10 +794,18 @@ class IndexEngine:
             blocked_files=len(blocked_paths),
             blocked_paths=tuple(blocked_paths),
             blocked_project_shared_files=blocked_project_shared,
+            namespaces_preserved_against_rules=tally.preserved_against_rules,
+            namespaces_reassigned=tally.reassigned,
+            namespace_moves=tally.summary(),
         )
 
     async def resolve_namespaces_for(
-        self, files: list[Path], explicit_ns: str | None = None, *, force: bool = False
+        self,
+        files: list[Path],
+        explicit_ns: str | None = None,
+        *,
+        force: bool = False,
+        reassign: bool = False,
     ) -> list[str | None]:
         """Resolve namespaces for ``files`` in stable (sort) order, distinct.
 
@@ -680,11 +821,18 @@ class IndexEngine:
         for a different operation than the one being previewed.
         """
         return _distinct_sorted(
-            await self._resolve_namespaces_per_file(files, explicit_ns, force=force)
+            await self._resolve_namespaces_per_file(
+                files, explicit_ns, force=force, reassign=reassign
+            )
         )
 
     async def _resolve_namespaces_per_file(
-        self, files: list[Path], explicit_ns: str | None = None, *, force: bool = False
+        self,
+        files: list[Path],
+        explicit_ns: str | None = None,
+        *,
+        force: bool = False,
+        reassign: bool = False,
     ) -> list[str | None]:
         """Each file's effective namespace, positionally aligned with ``files``.
 
@@ -694,8 +842,17 @@ class IndexEngine:
         critical section — that answer stays authoritative for successful
         upserts. These entries are the fallback echo for files that perform
         no namespace-bearing write or fail before returning a result.
+
+        Only lookup failures abort the run from here. A file whose stored
+        namespaces are mixed under ``force`` is refused by the *write*, not by
+        this prepass (#2061) — raising here would abort the whole run before
+        per-file error handling, so one unsplittable legacy file would block
+        indexing every other file in the tree.
         """
-        return [await self.effective_namespace_for(f, explicit_ns, force=force) for f in files]
+        return [
+            await self.effective_namespace_for(f, explicit_ns, force=force, reassign=reassign)
+            for f in files
+        ]
 
     def discover_indexable_files(
         self,
@@ -732,6 +889,7 @@ class IndexEngine:
         already_scanned: bool = False,
         lock_held: bool = False,
         path_scope: PathScope = "configured",
+        reassign_namespaces: bool = False,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -779,6 +937,7 @@ class IndexEngine:
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
                     path_scope=path_scope,
+                    reassign_namespaces=reassign_namespaces,
                 )
                 return result, (time.monotonic() - start) * 1000
         async with async_file_lock(
@@ -795,6 +954,7 @@ class IndexEngine:
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
                     path_scope=path_scope,
+                    reassign_namespaces=reassign_namespaces,
                 )
                 return result, (time.monotonic() - start) * 1000
 
@@ -808,6 +968,7 @@ class IndexEngine:
         already_scanned: bool = False,
         lock_held: bool = False,
         path_scope: PathScope = "configured",
+        reassign_namespaces: bool = False,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -839,7 +1000,15 @@ class IndexEngine:
         deleted. See ``docs/adr/0005-force-reindex-metadata-contract.md``
         for the contract and rationale. Callers that go through
         ``mem_edit`` / ``mem_delete`` / CLI ``mm index --force`` / web
-        ``POST /reindex`` all use this path.
+        ``POST /reindex`` all use this path. It re-embeds only: a file's
+        stored namespace is preserved, never re-resolved through the rules
+        (#2061).
+
+        ``reassign_namespaces=True`` is the opt-in that *does* re-resolve,
+        overwriting stored namespaces with what the current rules say. It
+        implies ``force`` — applying rules only to files that happen to have
+        changed would be a silently partial migration — and cannot be
+        combined with an explicit ``namespace``.
 
         If ``file_path`` no longer exists on disk (deleted, renamed away, or
         replaced by a directory), this removes that source's stale chunks via
@@ -859,6 +1028,8 @@ class IndexEngine:
         # missing-source branch in ``_index_file``). ``is_file`` (not
         # ``exists``) is the right predicate — a same-named directory ``exists``
         # but is not indexable, and its old chunks must still be cleaned. (#1566)
+        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces)
+        force = force or reassign_namespaces
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
         if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec) and (
             file_path.is_file()
@@ -883,9 +1054,18 @@ class IndexEngine:
                 already_scanned=already_scanned,
                 lock_held=lock_held,
                 path_scope=path_scope,
+                reassign_namespaces=reassign_namespaces,
             )
         finally:
             self._active_runs -= 1
+        tally = _NamespaceTally()
+        decision = result.get("namespace_decision")
+        if decision is not None:
+            tally.record(
+                decision,
+                written=result.get("namespace_written", False),
+                canonical=self._canonical_namespace,
+            )
         return IndexingStats(
             total_files=1,
             total_chunks=result["total"],
@@ -902,6 +1082,9 @@ class IndexEngine:
             applied_namespaces=(
                 (result["resolved_namespace"],) if "resolved_namespace" in result else ()
             ),
+            namespaces_preserved_against_rules=tally.preserved_against_rules,
+            namespaces_reassigned=tally.reassigned,
+            namespace_moves=tally.summary(),
         )
 
     async def is_duplicate(
@@ -936,8 +1119,110 @@ class IndexEngine:
             logger.warning("is_duplicate failed; treating as non-duplicate", exc_info=True)
             return False
 
+    def _canonical_namespace(self, namespace: str | None) -> str:
+        """The spelling a namespace has once stored.
+
+        ``None`` is the untagged carve-out, which the chunk model persists as
+        the configured default. Comparing a resolver answer against a stored
+        value without this would read a file that never moved as a move
+        (``None`` vs ``"default"`` are the same state by two names).
+        """
+        return namespace if namespace is not None else self._ns_config.default_namespace
+
+    async def _namespace_decision(
+        self,
+        file_path: Path,
+        explicit_ns: str | None = None,
+        *,
+        force: bool = False,
+        reassign: bool = False,
+    ) -> NamespaceDecision:
+        """Resolve ``file_path``'s namespace and record why (issue #2061).
+
+        | caller | stored rows | outcome |
+        |---|---|---|
+        | explicit namespace | any | that namespace |
+        | plain or ``force`` | one, unanimous | preserved |
+        | plain or ``force`` | none | rules → auto_ns → default |
+        | plain (no force) | several | rules — only the *changed* chunks move, which is the pre-existing ADR-0032 ambiguity |
+        | ``force`` | several | refused (:class:`NamespaceMixedUnderForceError`) — force rewrites *every* row, so one namespace would swallow the rest |
+        | ``reassign`` | any | rules, deliberately overwriting what is stored |
+
+        The stored lookup runs on every path, ``reassign`` included: the old
+        namespace is what the move summary and the system-namespace warning
+        report, so reassigning without reading it first would move rows and
+        be unable to say from where.
+
+        Raises:
+            NamespaceResolutionError: the stored lookup could not answer.
+                Failing is deliberate: falling back to rule resolution on a
+                transient read error performs exactly the silent namespace
+                move preservation exists to prevent. Retryable — the watcher
+                re-queues rather than dropping.
+        """
+        if explicit_ns is not None:
+            return NamespaceDecision(target=explicit_ns, reason="explicit")
+        try:
+            stored = tuple(await self._storage.namespaces_for_source(file_path))
+        except Exception as exc:
+            raise NamespaceResolutionError(
+                f"could not read the stored namespace for {file_path}: {exc}"
+            ) from exc
+        ruled, rule_directed = self._resolve_namespace_directed(file_path, None)
+
+        if reassign:
+            moved = bool(stored) and any(
+                self._canonical_namespace(s) != self._canonical_namespace(ruled) for s in stored
+            )
+            return NamespaceDecision(
+                target=ruled, stored=stored, reason="reassigned" if moved else "resolved"
+            )
+
+        if len(stored) == 1:
+            # A re-index carrying no caller intent must not move a file out
+            # of the namespace it is already stored under — ``force`` no
+            # longer exempts itself from that (#2061): it means "re-embed
+            # everything", never "re-namespace everything". Only a
+            # *unanimous* stored namespace is preserved; a file holding
+            # several is the ambiguity #2005 is about, and there is no
+            # per-line provenance to split it by.
+            #
+            # Normalise the untagged carve-out back to ``None``: with the
+            # configured default at "default", ``_resolve_namespace`` answers
+            # ``None`` and the chunk model's own default stores the literal
+            # "default" — the same state by two names. Returning the stored
+            # spelling would make this resolver answer ``None`` before a file
+            # is written and "default" after, so the preview and the
+            # ``/api/index`` echo would disagree about a file that never moved.
+            target = (
+                None
+                if (stored[0] == "default" and self._ns_config.default_namespace == "default")
+                else stored[0]
+            )
+            # "Against the rules" requires a rule to have spoken. Without
+            # ``rule_directed`` a stock config — no rules, no auto_ns — would
+            # report every non-default file as one the rules disagree with,
+            # and hand its owner a command that reassigns it (#2061).
+            overruled = rule_directed and self._canonical_namespace(
+                target
+            ) != self._canonical_namespace(ruled)
+            reason: NamespaceDecisionReason = (
+                "preserved_against_rules" if overruled else "preserved"
+            )
+            return NamespaceDecision(target=target, stored=stored, reason=reason)
+
+        if len(stored) > 1 and force:
+            return NamespaceDecision(target=ruled, stored=stored, reason="mixed_force_refused")
+
+        return NamespaceDecision(target=ruled, stored=stored, reason="resolved")
+
     async def effective_namespace_for(
-        self, file_path: Path, explicit_ns: str | None = None, *, force: bool = False
+        self,
+        file_path: Path,
+        explicit_ns: str | None = None,
+        *,
+        force: bool = False,
+        reassign: bool = False,
     ) -> str | None:
         """The namespace ``index_file`` will stamp on ``file_path``'s chunks.
 
@@ -949,42 +1234,19 @@ class IndexEngine:
         namespace the write did not use.
 
         ``None`` is the untagged carve-out (see ``_resolve_namespace``), not
-        "unknown".
+        "unknown". See :meth:`_namespace_decision` for the full table and for
+        the structured form the reporting surfaces read. This method answers
+        the value only — including for the ``force`` + multi-namespace file
+        the write refuses, so previews stay non-raising.
 
         Raises:
-            NamespaceResolutionError: the preservation lookup could not
-                answer. Failing is deliberate: falling back to rule
-                resolution on a transient read error would perform exactly
-                the silent namespace move this rule exists to prevent.
-                Retryable — the watcher re-queues rather than dropping.
+            NamespaceResolutionError: the stored lookup could not answer
+                (retryable).
         """
-        if explicit_ns is not None:
-            return explicit_ns
-        if not force:
-            # A re-index carrying no caller intent must not move a file out
-            # of the namespace it is already stored under. Only a
-            # *unanimous* stored namespace is preserved: a file holding
-            # several is the ambiguity #2005 is about, and there is no
-            # per-line provenance to split it by.
-            try:
-                stored = await self._storage.namespaces_for_source(file_path)
-            except Exception as exc:
-                raise NamespaceResolutionError(
-                    f"could not read the stored namespace for {file_path}: {exc}"
-                ) from exc
-            if len(stored) == 1:
-                # Normalise the untagged carve-out back to ``None``. With the
-                # configured default at "default", ``_resolve_namespace``
-                # answers ``None`` and the chunk model's own default stores
-                # the literal "default" — the same state by two names.
-                # Returning the stored spelling would make this resolver
-                # answer ``None`` before a file is written and "default"
-                # after, so the preview and the ``/api/index`` echo would
-                # disagree about a file that never moved.
-                if stored[0] == "default" and self._ns_config.default_namespace == "default":
-                    return None
-                return stored[0]
-        return self._resolve_namespace(file_path, None)
+        decision = await self._namespace_decision(
+            file_path, explicit_ns, force=force, reassign=reassign
+        )
+        return decision.target
 
     def _resolve_namespace(self, file_path: Path, explicit_ns: str | None) -> str | None:
         """Determine the namespace for a file.
@@ -994,8 +1256,24 @@ class IndexEngine:
         default_namespace is "default" and nothing else matched (preserves
         backward compat — chunks without namespace stay untagged).
         """
+        return self._resolve_namespace_directed(file_path, explicit_ns)[0]
+
+    def _resolve_namespace_directed(
+        self, file_path: Path, explicit_ns: str | None
+    ) -> tuple[str | None, bool]:
+        """:meth:`_resolve_namespace`, plus whether anything *chose* the answer.
+
+        The flag is false when resolution fell through to the configured
+        default because no rule matched and no folder derivation applied.
+        That distinction is what keeps the "#2061" preservation advisory
+        honest: a file sitting in a namespace the config never mentions has
+        not had a rule overruled by preservation, so telling its owner that
+        "current rules would assign differently" would be false — and, for an
+        ``agent-runtime:`` file under stock config, it would be advice to run
+        the very reassignment that #2061 was filed about.
+        """
         if explicit_ns is not None:
-            return explicit_ns
+            return explicit_ns, True
 
         if self._ns_rule_specs:
             candidate = file_path.as_posix().lower().lstrip("/")
@@ -1004,7 +1282,7 @@ class IndexEngine:
                     continue
                 ns = self._format_namespace(rule.namespace, file_path, rule_index=i)
                 if ns is not None:
-                    return ns
+                    return ns, True
 
         if self._ns_config.enable_auto_ns:
             # Derive namespace from the immediate parent folder name,
@@ -1018,13 +1296,13 @@ class IndexEngine:
             if parent not in memory_roots:
                 name = parent.name
                 if name and name not in (".", ""):
-                    return name
+                    return name, True
 
         default = self._ns_config.default_namespace
         if default and default != "default":
-            return default
+            return default, False
 
-        return None
+        return None, False
 
     def _format_namespace(self, template: str, file_path: Path, *, rule_index: int) -> str | None:
         """Substitute ``{parent}`` and ``{ancestor:N}`` in a namespace template.
@@ -1152,6 +1430,7 @@ class IndexEngine:
         already_scanned: bool = False,
         path_scope: PathScope = "configured",
         embed_semaphore: asyncio.Semaphore | None = None,
+        reassign_namespaces: bool = False,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
@@ -1302,18 +1581,19 @@ class IndexEngine:
             new_chunks = _add_overlap(new_chunks, self._config.chunk_overlap_tokens)
 
         # Resolve namespace: explicit > preserved > rules > auto_ns > default.
-        # ``force`` skips preservation on purpose — it is the documented way
-        # to apply changed namespace rules to an already-indexed file, so
-        # internal mutation callers that must not re-resolve pass the
-        # preserved namespace explicitly instead (issue #2005). This lookup
-        # runs inside the per-file critical section on purpose: a bulk run's
-        # pre-write prepass (issue #2018) answers for the run's *start*, and
-        # a concurrent writer may have moved the file since — deciding the
+        # ``force`` no longer skips preservation (#2061): it re-embeds, and
+        # only ``reassign_namespaces`` re-resolves through the rules. This
+        # lookup runs inside the per-file critical section on purpose: a bulk
+        # run's pre-write prepass (issue #2018) answers for the run's *start*,
+        # and a concurrent writer may have moved the file since — deciding the
         # stamp from a pre-lock answer would silently undo that write. A
         # failure here fails this file closed; the bulk flatten branches
         # keep the retryable type in ``stats.retryable_errors``.
-        resolved_ns = await self.effective_namespace_for(file_path, namespace, force=force)
-        if resolved_ns is not None:
+        ns_decision = await self._namespace_decision(
+            file_path, namespace, force=force, reassign=reassign_namespaces
+        )
+        resolved_ns = ns_decision.target
+        if resolved_ns is not None and ns_decision.reason != "mixed_force_refused":
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
 
         # ADR-0011: tag every chunk with its resolved scope. Default
@@ -1342,9 +1622,32 @@ class IndexEngine:
             new_chunks = self._apply_scope(new_chunks, scope_val, project_root)
 
         if not new_chunks:
-            # File exists but is empty / unparseable — delete stale chunks
+            # File exists but is empty / unparseable — delete stale chunks.
+            # Ahead of the mixed-namespace refusal below on purpose: an
+            # emptied source writes no namespace, so there is nothing to
+            # collapse, and refusing here would strand its rows as
+            # permanently searchable content for a file with no content.
             deleted = await self._storage.delete_by_source(file_path)
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": deleted, "errors": []}
+
+        if ns_decision.reason == "mixed_force_refused":
+            # Reached only when a namespace-bearing upsert would follow. The
+            # absolute path goes to the log; the raised message carries the
+            # bare name because bulk error strings are echoed verbatim through
+            # the web complete event, which redacts host paths.
+            logger.error(
+                "Refusing forced re-index of %s: chunks span namespaces %s",
+                file_path,
+                ", ".join(sorted(ns_decision.stored)),
+            )
+            raise NamespaceMixedUnderForceError(
+                f"{file_path.name}: chunks span several namespaces "
+                f"({', '.join(sorted(ns_decision.stored))}) and a forced re-index "
+                "rewrites every one of them, so all rows would collapse into one "
+                "namespace. Re-run without --force, pass an explicit namespace to "
+                "choose the target, use --reassign-namespaces to apply the current "
+                "rules on purpose, or split the file per namespace."
+            )
 
         # Always run hash-aware diff: ``compute_diff`` reuses existing chunk
         # IDs for hash-matched chunks (see ``differ.py:compute_diff``). For
@@ -1481,19 +1784,9 @@ class IndexEngine:
             if diff_result.to_upsert:
                 await self._storage.upsert_chunks(diff_result.to_upsert)
 
-        # Per-source AI summary refresh — runs *after* the transaction so a
-        # slow LLM call never holds the chunk write lock. The signature
-        # check inside ``maybe_update_ai_summary`` skips files whose chunk
-        # set didn't change, so steady-state reindex pays nothing.
-        # ``new_chunks`` is the full current chunk set for the file (not
-        # just ``diff_result.to_upsert``); the signature must hash all
-        # current chunks to remain stable when only some changed.
-        from memtomem.indexing.summarizer import maybe_update_ai_summary
-
-        await maybe_update_ai_summary(
-            cast("SqliteBackend", self._storage), self._llm, file_path, new_chunks, self._config
-        )
-
+        # The namespace write is committed as of here. Capture the decision
+        # now, before the auxiliary work below, so a failure in something that
+        # is not the write cannot erase a move that actually happened.
         result: IndexFileResult = {
             "total": len(new_chunks),
             "indexed": len(diff_result.to_upsert),
@@ -1501,9 +1794,36 @@ class IndexEngine:
             "deleted": len(diff_result.to_delete),
             "errors": [],
             "new_chunk_ids": truly_new_chunk_ids,
+            "namespace_decision": ns_decision,
+            "namespace_written": bool(diff_result.to_upsert),
         }
         if diff_result.to_upsert:
             result["resolved_namespace"] = resolved_ns
+
+        # Per-source AI summary refresh — runs *after* the transaction so a
+        # slow LLM call never holds the chunk write lock. The signature
+        # check inside ``maybe_update_ai_summary`` skips files whose chunk
+        # set didn't change, so steady-state reindex pays nothing.
+        # ``new_chunks`` is the full current chunk set for the file (not
+        # just ``diff_result.to_upsert``); the signature must hash all
+        # current chunks to remain stable when only some changed.
+        #
+        # Fail-soft: the chunks are already durable, so letting a summary
+        # failure propagate would report a committed write — including a
+        # committed namespace move — as a failed file. Record it as a
+        # per-file error instead and keep the write's outcome.
+        from memtomem.indexing.summarizer import maybe_update_ai_summary
+
+        try:
+            await maybe_update_ai_summary(
+                cast("SqliteBackend", self._storage), self._llm, file_path, new_chunks, self._config
+            )
+        except Exception as exc:
+            logger.error("AI summary refresh failed for %s: %s", file_path, exc)
+            message = f"AI summary refresh failed: {exc}"
+            result["errors"] = [message]
+            if isinstance(exc, RetryableError):
+                result["retryable_errors"] = [message]
         return result
 
     async def index_path_stream(
@@ -1515,6 +1835,7 @@ class IndexEngine:
         *,
         force_unsafe: bool = False,
         path_scope: PathScope = "configured",
+        reassign_namespaces: bool = False,
     ):
         """Like index_path(), but yields progress dicts as each file is processed.
 
@@ -1545,7 +1866,10 @@ class IndexEngine:
           verbatim. ``retryable_errors`` is its same-string retryable subset.
           ``applied_namespaces`` is the authoritative subset of the hybrid
           ``resolved_namespaces`` echo. Error lists are empty when the run had
-          no errors.
+          no errors. Also carries the namespace advisory counters
+          ``namespaces_preserved_against_rules``, ``namespaces_reassigned``,
+          and ``namespace_moves`` (#2061) — same values the non-stream
+          ``IndexingStats`` reports, so the two surfaces cannot diverge.
 
         Locking: each file is indexed under the same L2 sidecar →
         L3 ``_index_lock`` pair as ``index_file`` (via
@@ -1556,6 +1880,8 @@ class IndexEngine:
         so ``GET /api/indexing/active`` covers discovery and the gaps
         between files, where no lock is held.
         """
+        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces)
+        force = force or reassign_namespaces
         self._active_runs += 1
         try:
             start = time.monotonic()
@@ -1577,6 +1903,9 @@ class IndexEngine:
                     "blocked_files": 0,
                     "blocked_paths": [],
                     "blocked_project_shared_files": 0,
+                    "namespaces_preserved_against_rules": 0,
+                    "namespaces_reassigned": 0,
+                    "namespace_moves": [],
                 }
                 return
 
@@ -1600,6 +1929,9 @@ class IndexEngine:
                     "blocked_files": 0,
                     "blocked_paths": [],
                     "blocked_project_shared_files": 0,
+                    "namespaces_preserved_against_rules": 0,
+                    "namespaces_reassigned": 0,
+                    "namespace_moves": [],
                 }
                 return
 
@@ -1622,9 +1954,10 @@ class IndexEngine:
             # its type kept in ``retryable_errors``.
             resolved_files = [fp.resolve() for fp in files]
             prepass_namespaces = await self._resolve_namespaces_per_file(
-                resolved_files, namespace, force=force
+                resolved_files, namespace, force=force, reassign=reassign_namespaces
             )
             echo_namespaces = list(prepass_namespaces)
+            tally = _NamespaceTally()
             agg = {
                 "total_chunks": 0,
                 "indexed": 0,
@@ -1680,6 +2013,7 @@ class IndexEngine:
                             on_chunk_progress=cb,
                             force_unsafe=force_unsafe,
                             path_scope=path_scope,
+                            reassign_namespaces=reassign_namespaces,
                         )
                         return result
                     finally:
@@ -1750,6 +2084,13 @@ class IndexEngine:
                 agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
                 all_errors.extend(result.get("errors", []))
                 retryable_errors.extend(result.get("retryable_errors", []))
+                stream_decision = result.get("namespace_decision")
+                if stream_decision is not None:
+                    tally.record(
+                        stream_decision,
+                        written=result.get("namespace_written", False),
+                        canonical=self._canonical_namespace,
+                    )
                 if "resolved_namespace" in result:
                     # ``None`` is a real applied value, so key presence — not
                     # truthiness — decides whether to replace the prepass.
@@ -1780,6 +2121,9 @@ class IndexEngine:
                 "blocked_files": agg["blocked"],
                 "blocked_paths": blocked_paths,
                 "blocked_project_shared_files": agg["blocked_project_shared"],
+                "namespaces_preserved_against_rules": tally.preserved_against_rules,
+                "namespaces_reassigned": tally.reassigned,
+                "namespace_moves": list(tally.summary()),
             }
         finally:
             self._active_runs -= 1

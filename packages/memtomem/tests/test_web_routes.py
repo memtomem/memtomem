@@ -3616,6 +3616,49 @@ class TestReindexAll:
         assert body["errors"] == [shared, first_permanent, shared, second_retryable]
         assert body["retryable_errors"] == [shared, shared, second_retryable]
 
+    async def test_reindex_all_reports_the_namespace_advisory_per_root(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """#2061: each root entry is hand-built, so the advisory reaches the
+        client only by being listed there. Unconditional, like
+        ``retryable_errors`` — a zero must be distinguishable from a server
+        that predates the field."""
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        app.state.config.indexing.memory_dirs = [first, second]
+        app.state.config.indexing.project_memory_dirs = []
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=[
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=1,
+                    indexed_chunks=1,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                    namespaces_preserved_against_rules=2,
+                ),
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=1,
+                    indexed_chunks=1,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                ),
+            ]
+        )
+
+        response = await client.post("/api/reindex")
+
+        assert response.status_code == 200, response.text
+        results = response.json()["results"]
+        assert results[0]["namespaces_preserved_against_rules"] == 2
+        assert results[1]["namespaces_preserved_against_rules"] == 0
+        assert results[0]["namespaces_reassigned"] == 0
+        assert results[0]["namespace_moves"] == []
+
 
 # ---------------------------------------------------------------------------
 # GET /api/indexing/active  (#582 item 4.11 follow-up — server-bound indicator)

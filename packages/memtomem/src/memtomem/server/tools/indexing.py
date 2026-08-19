@@ -73,6 +73,15 @@ async def mem_index(
         # provenance under different sessions.
         provenance_session_id, effective_ns = await capture_session_and_namespace(app, namespace)
 
+        # ``force`` re-embeds; it does not re-resolve namespaces (#2061), so
+        # a file keeps the namespace its chunks are stored under unless
+        # ``effective_ns`` names one. Applying changed namespace rules to
+        # already-indexed files is ``mm index --reassign-namespaces``, which
+        # stays CLI-only — the core tool descriptions are at their character
+        # budget (``test_core_tool_descriptions``), so a parameter here would
+        # cost more than the rare operation is worth. The preservation
+        # advisory below tells a caller when that command is the one they
+        # want.
         stats = await app.index_engine.index_path(
             target,
             recursive=recursive,
@@ -120,6 +129,15 @@ async def mem_index(
     )
     if not app.index_engine._is_within_memory_dirs(target):
         result += "\n- Root registration: unchanged (one-shot index)"
+    if stats.namespaces_preserved_against_rules:
+        # The advisory has to be built by hand here: this result is a string,
+        # not a serialized ``IndexingStats``, so a new field reaches this
+        # surface only if it is rendered (#2061).
+        result += (
+            f"\n- Namespaces preserved: {stats.namespaces_preserved_against_rules} file(s) "
+            "kept their stored namespace; current path rules would assign differently. "
+            "Apply the rules with `mm index --reassign-namespaces <path>`."
+        )
     if errors:
         result += "\n- Errors:\n" + "\n".join(f"    {error}" for error in errors)
     if retryable_errors:

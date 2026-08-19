@@ -4,7 +4,8 @@
     "/app.js": {
       "versions": {
         "159": "1c14eca3a752e38455010d4b047be31bfb86e7a6b810be8073ed2533c790259f",
-        "160": "f20b7aa7a13e724ab2b319d27685430b89cded4f1939f1ff04c4ee18cdb2e8b2"
+        "160": "f20b7aa7a13e724ab2b319d27685430b89cded4f1939f1ff04c4ee18cdb2e8b2",
+        "161": "1f0b6b499ccc39efdcf1f2cf0483b88c33a2942a50418e36169932b9549506cf"
       }
     },
     "/chunk-progress.js": {

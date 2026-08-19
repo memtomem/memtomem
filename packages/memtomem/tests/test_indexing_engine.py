@@ -2060,10 +2060,14 @@ class TestBulkNamespacePrepass:
         assert await components.storage.namespaces_for_source(fp) == ["personal"]
         assert stats.resolved_namespaces == ("personal",)
 
-    async def test_bulk_force_applies_rules_not_preservation(self, components, memory_dir):
-        """``force=True`` skips preservation on purpose (the documented way
-        to apply changed rules) — the in-lock resolution applies the rule
-        namespace, not the stored one."""
+    async def test_bulk_force_preserves_stored_namespace(self, components, memory_dir):
+        """``force=True`` means re-embed, never re-namespace (#2061).
+
+        It used to skip preservation so it could double as "apply changed
+        rules", which silently collapsed agent-scoped chunks whenever the
+        documented embedding-reset recovery was run. Rule application is now
+        ``reassign_namespaces``; force keeps the stored namespace and reports
+        that the rules disagree."""
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
@@ -2075,8 +2079,307 @@ class TestBulkNamespacePrepass:
 
         stats = await engine.index_path(memory_dir, recursive=True, force=True)
 
+        assert await components.storage.namespaces_for_source(fp) == ["personal"]
+        assert stats.resolved_namespaces == ("personal",)
+        assert stats.namespaces_preserved_against_rules == 1
+        assert stats.namespaces_reassigned == 0
+
+    async def test_bulk_force_preserves_agent_runtime_namespace(self, components, memory_dir):
+        """#2061 as reported: the documented recovery step
+        (``mm embedding-reset`` then ``mm index --force``) must not move an
+        agent session's chunks into a namespace a default search reads."""
+        engine = components.index_engine
+        fp = memory_dir / "2026-08-19--agent-runtime-planner-abcdef0123456789.md"
+        fp.write_text("# D\n\ndecision: use Envoy instead of Kong", encoding="utf-8")
+        await engine.index_file(fp, namespace="agent-runtime:planner", already_scanned=True)
+
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["agent-runtime:planner"]
+        assert stats.applied_namespaces == ("agent-runtime:planner",)
+
+    async def test_bulk_reassign_applies_rules(self, components, memory_dir):
+        """``reassign_namespaces=True`` is the opt-in that *does* re-resolve,
+        and it reports every move it made."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True, reassign_namespaces=True)
+
         assert await components.storage.namespaces_for_source(fp) == ["ruled"]
         assert stats.resolved_namespaces == ("ruled",)
+        assert stats.namespaces_reassigned == 1
+        assert stats.namespace_moves == ("personal → ruled: 1 file(s)",)
+        assert stats.namespaces_preserved_against_rules == 0
+
+    async def test_reassign_implies_force_so_unchanged_files_move(self, components, memory_dir):
+        """An unchanged file skips the upsert, so rule application without
+        force would migrate only the files that happened to change."""
+        engine = components.index_engine
+        fp = memory_dir / "untouched.md"
+        fp.write_text("# U\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True, reassign_namespaces=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["ruled"]
+        assert stats.indexed_chunks >= 1
+        assert stats.namespaces_reassigned == 1
+
+    async def test_reassign_rejects_an_explicit_namespace(self, components, memory_dir):
+        """The two ask for different targets; the engine refuses rather than
+        letting the explicit namespace silently win."""
+        engine = components.index_engine
+        (memory_dir / "n.md").write_text("# N\n\nentry", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.index_path(
+                memory_dir, recursive=True, namespace="pinned", reassign_namespaces=True
+            )
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.index_file(
+                memory_dir / "n.md", namespace="pinned", reassign_namespaces=True
+            )
+
+    async def test_no_advisory_when_rules_agree_with_the_stored_namespace(
+        self, components, memory_dir
+    ):
+        """A file the rules would assign exactly where it already sits has
+        not been "preserved against" anything — no advisory."""
+        engine = components.index_engine
+        fp = memory_dir / "agrees.md"
+        fp.write_text("# A\n\nentry", encoding="utf-8")
+        await engine.index_file(fp, namespace="ruled", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert stats.namespaces_preserved_against_rules == 0
+
+    async def test_force_refuses_a_mixed_namespace_file_and_keeps_going(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Force rewrites *every* row, so a file whose chunks span namespaces
+        would collapse into one — refuse that file, permanently, and index
+        the rest of the tree anyway."""
+        engine = components.index_engine
+        mixed = memory_dir / "mixed.md"
+        mixed.write_text("# M\n\nfirst entry", encoding="utf-8")
+        clean = memory_dir / "clean.md"
+        clean.write_text("# C\n\nclean entry", encoding="utf-8")
+
+        async def _stored(path):
+            return ["aaa", "bbb"] if Path(path).name == "mixed.md" else []
+
+        monkeypatch.setattr(components.storage, "namespaces_for_source", _stored)
+
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert any("mixed.md" in err for err in stats.errors)
+        # Permanent: re-running changes nothing, so it must not be queued for
+        # retry alongside genuine store outages.
+        assert stats.retryable_errors == ()
+        # The absolute path stays in the log — bulk error strings are echoed
+        # verbatim through the web complete event, which redacts host paths.
+        assert not any(str(memory_dir) in err for err in stats.errors)
+        # The clean file in the same run was still indexed.
+        assert stats.indexed_chunks >= 1
+
+    async def test_stream_force_refuses_a_mixed_namespace_file_and_keeps_going(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Stream parity: the refusal is a per-file error there too, not an
+        aborted run."""
+        engine = components.index_engine
+        (memory_dir / "mixed.md").write_text("# M\n\nfirst entry", encoding="utf-8")
+        (memory_dir / "clean.md").write_text("# C\n\nclean entry", encoding="utf-8")
+
+        async def _stored(path):
+            return ["aaa", "bbb"] if Path(path).name == "mixed.md" else []
+
+        monkeypatch.setattr(components.storage, "namespaces_for_source", _stored)
+
+        events = [
+            ev async for ev in engine.index_path_stream(memory_dir, recursive=True, force=True)
+        ]
+
+        complete = next(ev for ev in events if ev["type"] == "complete")
+        assert any("mixed.md" in err for err in complete["errors"])
+        assert complete["retryable_errors"] == []
+        assert complete["indexed_chunks"] >= 1
+
+    async def test_force_still_cleans_up_an_emptied_mixed_file(
+        self, components, memory_dir, monkeypatch
+    ):
+        """An emptied source writes no namespace, so there is nothing to
+        collapse — the stale-row cleanup must run ahead of the refusal rather
+        than leaving a deleted file's chunks searchable forever."""
+        engine = components.index_engine
+        fp = memory_dir / "emptied.md"
+        fp.write_text("# E\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="aaa", already_scanned=True)
+        fp.write_text("", encoding="utf-8")
+
+        async def _stored(path):
+            return ["aaa", "bbb"]
+
+        monkeypatch.setattr(components.storage, "namespaces_for_source", _stored)
+
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert stats.errors == ()
+        assert stats.deleted_chunks >= 1
+
+    async def test_reassign_fails_closed_when_the_stored_lookup_fails(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Reassignment reads the stored namespace to report the move it is
+        about to make; a store that cannot answer must stop the run, not
+        reassign blind."""
+        engine = components.index_engine
+        (memory_dir / "a.md").write_text("# A\n\nalpha", encoding="utf-8")
+        monkeypatch.setattr(
+            components.storage,
+            "namespaces_for_source",
+            AsyncMock(side_effect=RuntimeError("store down")),
+        )
+
+        from memtomem.errors import NamespaceResolutionError
+
+        with pytest.raises(NamespaceResolutionError):
+            await engine.index_path(memory_dir, recursive=True, reassign_namespaces=True)
+
+    async def test_a_committed_move_survives_a_failing_summary_hook(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The summary refresh runs after the chunk transaction commits, so a
+        failure there must not erase a move that already happened."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+        monkeypatch.setattr(
+            "memtomem.indexing.summarizer.maybe_update_ai_summary",
+            AsyncMock(side_effect=RuntimeError("summary boom")),
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True, reassign_namespaces=True)
+
+        assert stats.namespaces_reassigned == 1
+        assert await components.storage.namespaces_for_source(fp) == ["ruled"]
+        assert any("summary" in err for err in stats.errors)
+
+    async def test_stream_reports_the_same_namespace_counters(self, components, memory_dir):
+        """Stream and non-stream must not disagree about what a run did to
+        namespaces — the CLI reads the stream, the API reads the stats."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+
+        events = [
+            ev async for ev in engine.index_path_stream(memory_dir, recursive=True, force=True)
+        ]
+        complete = next(ev for ev in events if ev["type"] == "complete")
+
+        assert complete["namespaces_preserved_against_rules"] == 1
+        assert complete["namespaces_reassigned"] == 0
+        assert complete["namespace_moves"] == []
+
+    async def test_stream_reports_reassignment_moves(self, components, memory_dir):
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+
+        events = [
+            ev
+            async for ev in engine.index_path_stream(
+                memory_dir, recursive=True, reassign_namespaces=True
+            )
+        ]
+        complete = next(ev for ev in events if ev["type"] == "complete")
+
+        assert complete["namespaces_reassigned"] == 1
+        assert complete["namespace_moves"] == ["personal → ruled: 1 file(s)"]
+
+    async def test_a_failed_upsert_is_not_counted_as_a_move(
+        self, components, memory_dir, monkeypatch
+    ):
+        """A move is only real once its write commits."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+        monkeypatch.setattr(
+            components.storage,
+            "upsert_chunks",
+            AsyncMock(side_effect=RuntimeError("disk full")),
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True, reassign_namespaces=True)
+
+        assert stats.errors != ()
+        assert stats.namespaces_reassigned == 0
+        assert stats.namespace_moves == ()
+
+    async def test_no_advisory_when_no_rule_covers_the_file(self, components, memory_dir):
+        """Under a stock config — no rules, no auto_ns — nothing has chosen a
+        namespace for an agent-scoped file, so preservation has not overruled
+        anything. Reporting one here would hand the user a command that
+        performs exactly the #2061 damage."""
+        engine = components.index_engine
+        fp = memory_dir / "2026-08-19--agent-runtime-planner-abcdef0123456789.md"
+        fp.write_text("# D\n\ndecision: use Envoy", encoding="utf-8")
+        await engine.index_file(fp, namespace="agent-runtime:planner", already_scanned=True)
+
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["agent-runtime:planner"]
+        assert stats.namespaces_preserved_against_rules == 0
+
+    async def test_untagged_default_is_not_reported_as_a_move(self, components, memory_dir):
+        """``None`` and ``"default"`` are the same state by two names, so a
+        file that never moved must not be counted as one."""
+        engine = components.index_engine
+        fp = memory_dir / "untagged.md"
+        fp.write_text("# U\n\nplain note", encoding="utf-8")
+        await engine.index_path(memory_dir, recursive=True)
+
+        stats = await engine.index_path(memory_dir, recursive=True, reassign_namespaces=True)
+
+        assert stats.namespaces_preserved_against_rules == 0
+        assert stats.namespaces_reassigned == 0
+        assert stats.namespace_moves == ()
 
 
 # ===========================================================================

@@ -267,6 +267,15 @@ Resolving it is a two-step process — pick **one** of:
   MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
   `mem_index(path="...", force=true)`.
 
+  `--force` / `force=true` re-embeds; it does not re-resolve namespaces, so
+  every file keeps the namespace its chunks are stored under. To apply
+  changed [namespace rules](#namespace-rules-path-based-auto-tagging) to
+  already-indexed files, run
+  `mm index --reassign-namespaces <memory_dir>` — it overwrites stored
+  namespaces (agent session namespaces included) and implies `--force`. A
+  plain `--force` run reports how many files kept a namespace the current
+  rules would assign differently.
+
 - **Revert the runtime to the stored model (non-destructive, useful if the
   config drift was accidental):**
 

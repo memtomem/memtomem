@@ -19,8 +19,19 @@ from memtomem.cli._errors import raise_cli_error
     "--force",
     is_flag=True,
     help=(
-        "Re-embed every chunk (use for embedding changes, index recovery, "
-        "or scope/namespace re-resolution)"
+        "Re-embed every chunk (use for embedding changes, index recovery, or "
+        "scope re-resolution). Stored namespaces are preserved — use "
+        "--reassign-namespaces to apply changed namespace rules."
+    ),
+)
+@click.option(
+    "--reassign-namespaces",
+    "reassign_namespaces",
+    is_flag=True,
+    help=(
+        "Re-resolve every file's namespace through the current path rules, "
+        "overwriting the namespace its chunks are stored under (agent session "
+        "namespaces included). Implies --force, so every chunk is re-embedded."
     ),
 )
 @click.option("--namespace", "-n", default=None, help="Target namespace")
@@ -76,6 +87,7 @@ def index(
     path: str,
     recursive: bool,
     force: bool,
+    reassign_namespaces: bool,
     namespace: str | None,
     debounce_window: float | None,
     do_flush: bool,
@@ -100,6 +112,19 @@ def index(
             "--force-unsafe only applies to direct indexing, not "
             "--debounce-window / --flush / --status."
         )
+    if reassign_namespaces and namespace is not None:
+        raise click.UsageError(
+            "--reassign-namespaces cannot be combined with --namespace: an explicit "
+            "namespace short-circuits the rules that reassignment exists to apply."
+        )
+    if reassign_namespaces and any(modes):
+        # Same queue-shape limit as --force-unsafe, with a worse failure: the
+        # entry would drain as a plain forced index, which now *preserves*
+        # namespaces — the exact opposite of what was asked for.
+        raise click.UsageError(
+            "--reassign-namespaces only applies to direct indexing, not "
+            "--debounce-window / --flush / --status."
+        )
 
     if do_status:
         _print_status(as_json=as_json)
@@ -120,7 +145,16 @@ def index(
         return
 
     try:
-        asyncio.run(_index(path, recursive, force, namespace, force_unsafe))
+        asyncio.run(
+            _index(
+                path,
+                recursive,
+                force,
+                namespace,
+                force_unsafe,
+                reassign_namespaces=reassign_namespaces,
+            )
+        )
     except click.ClickException:
         raise
     except Exception as e:
@@ -133,6 +167,8 @@ async def _index(
     force: bool,
     namespace: str | None,
     force_unsafe: bool = False,
+    *,
+    reassign_namespaces: bool = False,
 ) -> None:
     """Stream-index ``path`` with a live progress bar (issue #656).
 
@@ -157,10 +193,17 @@ async def _index(
     from memtomem.cli._index_progress import (
         print_blocked_summary,
         print_index_errors,
+        print_namespace_advisory,
         run_with_progress,
     )
 
     resolved = Path(path).expanduser().resolve()
+
+    if reassign_namespaces:
+        click.secho(
+            "  --reassign-namespaces implies --force: every chunk will be re-embedded.",
+            fg="yellow",
+        )
 
     try:
         agg = await run_with_progress(
@@ -170,6 +213,7 @@ async def _index(
             force=force,
             namespace=namespace,
             force_unsafe=force_unsafe,
+            reassign_namespaces=reassign_namespaces,
         )
     except KeyboardInterrupt:
         click.echo()
@@ -203,6 +247,13 @@ async def _index(
             "re-run with --force-unsafe to index the non-project_shared "
             "files anyway (audit-logged)."
         ),
+    )
+    print_namespace_advisory(
+        preserved_against_rules=agg["namespaces_preserved_against_rules"],
+        reassigned=agg["namespaces_reassigned"],
+        moves=agg["namespace_moves"],
+        reassign_hint=f"mm index --reassign-namespaces {resolved}",
+        system_namespace_prefixes=agg["system_namespace_prefixes"],
     )
     print_index_errors(
         agg["errors"],

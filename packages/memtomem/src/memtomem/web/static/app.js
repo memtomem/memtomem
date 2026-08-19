@@ -6878,6 +6878,25 @@ function _renderIndexResult(result, { registerAsSource, path }) {
   }
   _blockedIndexToast(result.blocked_files, result.blocked_project_shared_files);
 
+  // #2061: force re-embeds without re-resolving namespaces, so a rule change
+  // that has not been applied is otherwise invisible here. Same row also
+  // reports what an explicit reassignment moved.
+  const nsAdvisoryRow = qs('r-namespace-advisory-row');
+  if (nsAdvisoryRow) {
+    const preserved = Number(result.namespaces_preserved_against_rules) || 0;
+    const reassigned = Number(result.namespaces_reassigned) || 0;
+    const moves = Array.isArray(result.namespace_moves) ? result.namespace_moves : [];
+    const lines = [];
+    if (preserved > 0) {
+      lines.push(t('index.result.namespace_preserved', { count: preserved }));
+    }
+    if (reassigned > 0) {
+      lines.push(t('index.result.namespace_reassigned', { count: reassigned }), ...moves);
+    }
+    qs('r-namespace-advisory').textContent = lines.join('\n');
+    nsAdvisoryRow.hidden = lines.length === 0;
+  }
+
   // #354 / #590: ``errors`` may ride along even on an HTTP-200 result — red
   // toast + a capped error row.
   const errList = Array.isArray(result.errors) ? result.errors : [];

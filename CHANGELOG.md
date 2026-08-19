@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Breaking
+
+- **`--force` no longer re-resolves namespaces; use `--reassign-namespaces`.**
+  A forced re-index used to re-run every file's namespace through the current
+  path rules, so the documented embedding-reset recovery
+  (`mm embedding-reset --mode apply-current` then
+  `mm index --force <memory_dir>`) silently moved every agent-session chunk to
+  `default`, collapsing the isolation sessions exist to provide — and nothing
+  on disk could restore it, since the day-file name encodes the namespace
+  one way and the overwritten rows were the only record. `--force` now means
+  re-embed only: each file keeps the namespace its chunks are stored under.
+  Applying changed namespace rules to already-indexed files moved to the new
+  `mm index --reassign-namespaces <path>` (implies `--force`; rejected
+  alongside `--namespace` and the debounce modes). A plain `--force` run now
+  reports how many files kept a namespace the rules disagree with and names
+  that command, so the old workflow tells you what to run instead of failing
+  silently. Affects every force surface — `mm index --force`,
+  `mem_index(force=true)`, and the web bulk force paths; reassignment is CLI
+  only for now. A forced re-index of a file whose chunks span several
+  namespaces is now refused per-file (the run continues) rather than
+  flattening them into one. Python API: `IndexEngine.effective_namespace_for`
+  keeps `force` with the new meaning and gains `reassign`, and the index
+  entrypoints gain `reassign_namespaces`; no compatibility alias.
+  See [ADR-0033](docs/adr/0033-force-reembed-vs-namespace-reassignment.md).
+  (#2061)
+
 ### Added
 
 - **User-controlled cross-runtime handoff workflow.** A new explicit

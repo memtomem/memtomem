@@ -147,6 +147,15 @@ class IndexResponse(BaseModel):
     blocked_paths: list[str] = []
     # Subset that is project_shared — hard-refused even with force_unsafe.
     blocked_project_shared_files: int = 0
+    # #2061: files that kept their stored namespace while the current path
+    # rules would have assigned a different one. ``force`` re-embeds without
+    # re-resolving namespaces, so this is how a client learns a rule change
+    # has not been applied (and that `mm index --reassign-namespaces` applies
+    # it). ``namespace_moves`` renders any reassignment as "old → new: N
+    # file(s)"; both stay zero/empty on the common path.
+    namespaces_preserved_against_rules: int = 0
+    namespaces_reassigned: int = 0
+    namespace_moves: list[str] = []
 
 
 class PreviewNamespaceResponse(BaseModel):

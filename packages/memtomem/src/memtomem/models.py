@@ -271,3 +271,14 @@ class IndexingStats:
     # remains the valid untagged carve-out. Appended last for positional
     # construction compatibility.
     applied_namespaces: tuple[str | None, ...] = ()
+    # #2061 namespace advisory. ``namespaces_preserved_against_rules`` counts
+    # files that kept their stored namespace while the current path rules
+    # would have assigned a different one — the signal that a rule edit has
+    # not taken effect, and the prompt for ``mm index --reassign-namespaces``.
+    # ``namespaces_reassigned`` counts files a reassignment run actually moved
+    # (committed writes only), and ``namespace_moves`` renders those moves as
+    # ``"old → new: N file(s)"`` lines, sorted. Appended last for positional
+    # construction compatibility.
+    namespaces_preserved_against_rules: int = 0
+    namespaces_reassigned: int = 0
+    namespace_moves: tuple[str, ...] = ()
