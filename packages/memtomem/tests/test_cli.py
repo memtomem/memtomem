@@ -585,15 +585,6 @@ class TestConfigCLI:
         assert "sk-from-env" not in result.output
         assert "sk-from-cli" not in result.output
 
-    def test_env_var_lookup_is_case_insensitive(self, monkeypatch) -> None:
-        """pydantic-settings matches env names case-insensitively; so must we."""
-        from memtomem.config import env_var_owning
-
-        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
-        assert env_var_owning("search", "default_top_k") is None
-        monkeypatch.setenv("memtomem_search__default_top_k", "7")
-        assert env_var_owning("search", "default_top_k") == "memtomem_search__default_top_k"
-
     def test_command_path_guard_rejects_fake_paths(self) -> None:
         """The guard is only worth running if it fails on a fake path."""
         assert _resolves_to_command(("init",))

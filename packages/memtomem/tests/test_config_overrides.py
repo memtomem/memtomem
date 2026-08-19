@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import warnings
 from pathlib import Path
 
@@ -1136,7 +1137,14 @@ class TestWriteEffectHelpers:
 
         monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K")
         monkeypatch.setenv("memtomem_search__default_top_k", "7")
-        assert env_var_owning("search", "default_top_k") == "memtomem_search__default_top_k"
+        found = env_var_owning("search", "default_top_k")
+        # Windows uppercases environment keys on write, so the exact spelling
+        # is the platform's, not ours: assert the contract (a name that is
+        # really in os.environ, matching case-insensitively) rather than a
+        # POSIX-only literal.
+        assert found is not None
+        assert found in os.environ
+        assert found.upper() == "MEMTOMEM_SEARCH__DEFAULT_TOP_K"
 
     def test_env_var_owning_does_not_match_a_different_key(
         self, monkeypatch: pytest.MonkeyPatch
