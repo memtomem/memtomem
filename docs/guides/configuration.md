@@ -803,9 +803,10 @@ Example `~/.memtomem/config.d/10-namespace-rules.json`:
 # Show effective config including merged rules:
 mm config show | grep -A 20 namespace
 
-# After editing rules, force re-index so existing chunks pick up the
-# new namespace:
-mm index ~/.claude/projects --force
+# After editing rules, reassign so existing chunks pick up the new
+# namespace. (`--force` re-embeds but keeps each file's stored namespace;
+# `--reassign-namespaces` is what applies edited rules, and implies --force.)
+mm index ~/.claude/projects --reassign-namespaces
 
 # Inspect namespace distribution — open the Web UI Sources view:
 #   http://localhost:8080/#sources    (colon prefixes group into collapsible

@@ -325,22 +325,22 @@ async def delete_chunk(
             # resolution to every chunk, including the ones this delete leaves
             # alone — so deleting one chunk from an ``aaa`` file moved its
             # survivors to whatever the rules said that day. Passing the
-            # file's existing namespace was the fix.
+            # file's existing namespace was the fix at the time.
             #
             # Since #2061 / ADR-0033 the engine preserves a unanimously stored
-            # namespace under ``force`` on its own, so this pin is redundant
-            # for that case — kept deliberately: it is also what turns the
-            # untagged carve-out into the stored spelling (see below), and an
-            # explicit namespace is the one input whose meaning cannot drift.
+            # namespace under ``force`` itself, and refuses outright when the
+            # file's rows span several. So the re-index below deliberately
+            # passes **no** namespace: this pre-flight is a gate, not the
+            # write's authority. Pinning what it resolved would re-introduce
+            # the bug twice over — an explicit namespace wins over the
+            # refusal, and it would freeze a value read outside the write's
+            # own critical section, so a concurrent writer that moved the file
+            # in between would be silently undone. The engine re-resolves
+            # in-lock; that answer is the authoritative one.
             #
-            # But pinning is exactly what makes an explicit namespace *win*,
-            # including over the multi-namespace refusal. On a legacy source
-            # whose rows span several namespaces, the resolver answers with the
-            # rule-resolved target and pinning it would rewrite every survivor
-            # into that one namespace — the #2061 collapse, reached through an
-            # ordinary delete. So this asks for the decision, not just the
-            # value, and refuses when the file is one the forced re-index would
-            # not have accepted on its own.
+            # What the pre-flight is still for: refusing *before* the file is
+            # edited. Letting the engine refuse would leave the entry already
+            # removed from disk with its chunks still indexed.
             #
             # Outside the try below on purpose. That handler's fallback is an
             # index-only delete, which is the right answer when the *file*
@@ -353,12 +353,6 @@ async def delete_chunk(
                 # ``force=True`` matches the re-index below, so the decision
                 # reports what that call would decide on its own.
                 decision = await index_engine.namespace_decision_for(source, force=True)
-                # ``or default_namespace``: the resolver returns ``None`` for
-                # the untagged carve-out, and passing that back through would
-                # read as "no caller namespace" and re-enter rule resolution —
-                # the very thing being avoided. The explicit default stores
-                # the same value the carve-out does.
-                preserved_ns = decision.target or config.namespace.default_namespace
             except NamespaceResolutionError as exc:
                 # Only this one: it is the resolver's declared "the store did
                 # not answer" signal and is genuinely retryable. Catching
@@ -419,10 +413,12 @@ async def delete_chunk(
                 ) from exc
 
             try:
+                # No ``namespace=``: see the pre-flight above. The engine
+                # preserves the file's stored namespace in-lock, which is both
+                # the correct value and a fresher one than anything read here.
                 stats = await index_engine.index_file(
                     source,
                     force=True,
-                    namespace=preserved_ns,
                     already_scanned=True,
                     lock_held=True,
                 )

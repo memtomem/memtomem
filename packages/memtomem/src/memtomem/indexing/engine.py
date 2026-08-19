@@ -829,6 +829,7 @@ class IndexEngine:
         Pass the same ``force`` the write will use, or the preview answers
         for a different operation than the one being previewed.
         """
+        _reject_reassign_with_explicit_ns(explicit_ns, reassign)
         return _distinct_sorted(
             await self._resolve_namespaces_per_file(
                 files, explicit_ns, force=force, reassign=reassign
@@ -1017,7 +1018,9 @@ class IndexEngine:
         overwriting stored namespaces with what the current rules say. It
         implies ``force`` — applying rules only to files that happen to have
         changed would be a silently partial migration — and cannot be
-        combined with an explicit ``namespace``.
+        combined with an explicit ``namespace`` (the preview helpers refuse
+        the same pair, so a preview cannot describe an operation the write
+        would reject).
 
         If ``file_path`` no longer exists on disk (deleted, renamed away, or
         replaced by a directory), this removes that source's stale chunks via
@@ -1242,6 +1245,7 @@ class IndexEngine:
         just the value, or it silently reintroduces the collapse the refusal
         exists to prevent (#2061).
         """
+        _reject_reassign_with_explicit_ns(explicit_ns, reassign)
         return await self._namespace_decision(
             file_path, explicit_ns, force=force, reassign=reassign
         )
@@ -1273,6 +1277,7 @@ class IndexEngine:
             NamespaceResolutionError: the stored lookup could not answer
                 (retryable).
         """
+        _reject_reassign_with_explicit_ns(explicit_ns, reassign)
         decision = await self._namespace_decision(
             file_path, explicit_ns, force=force, reassign=reassign
         )

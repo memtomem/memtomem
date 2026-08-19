@@ -2107,18 +2107,19 @@ class TestDeleteChunk:
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, None])
         return source, chunk
 
-    async def test_delete_passes_the_files_namespace_to_the_forced_reindex(
+    async def test_delete_preflights_the_namespace_without_pinning_it(
         self, app, client: AsyncClient, tmp_path: Path
     ):
         """Issue #2005: the re-index uses ``force=True`` for the re-embed.
         Back when force also re-resolved namespaces, the survivors of a delete
-        moved to whatever the rules said that day; the route passes the file's
-        namespace explicitly. Kept as the route's contract after #2061 made
-        the engine preserve under force as well — the route must still send
-        what it resolved, not rely on the layer beneath it."""
+        moved to whatever the rules said that day, and the route pinned the
+        file's namespace to stop it. Since #2061 the engine preserves in-lock,
+        so the route pre-flights (to refuse a mixed source before editing the
+        file) but sends no namespace — a pin would freeze a value read outside
+        the write's critical section, and would override the refusal."""
         from memtomem.indexing.engine import NamespaceDecision
 
-        self._real_source_chunk(app, tmp_path)
+        source, _chunk = self._real_source_chunk(app, tmp_path)
         app.state.index_engine.namespace_decision_for = AsyncMock(
             return_value=NamespaceDecision(target="aaa", stored=("aaa",), reason="preserved")
         )
@@ -2126,9 +2127,13 @@ class TestDeleteChunk:
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
         assert resp.status_code == 200, resp.text
+        app.state.index_engine.namespace_decision_for.assert_awaited_once_with(source, force=True)
         kwargs = app.state.index_engine.index_file.await_args.kwargs
         assert kwargs["force"] is True
-        assert kwargs["namespace"] == "aaa"
+        # No pin: the engine preserves in-lock, which is both correct and
+        # fresher than anything the pre-flight read (#2061 review 5). Pinning
+        # would also override the multi-namespace refusal.
+        assert "namespace" not in kwargs
 
     async def test_delete_refuses_on_a_mixed_namespace_source(
         self, app, client: AsyncClient, tmp_path: Path
@@ -2152,9 +2157,13 @@ class TestDeleteChunk:
 
         assert resp.status_code == 409, resp.text
         assert "span several namespaces" in resp.json()["detail"]
-        # Nothing touched: not the file, not the index.
+        # The pre-flight must ask the same question the write would, or its
+        # answer describes a different operation.
+        app.state.index_engine.namespace_decision_for.assert_awaited_once_with(source, force=True)
+        # Nothing touched: not the file, not the index, not the chunk rows.
         assert source.read_text(encoding="utf-8") == before
         app.state.index_engine.index_file.assert_not_awaited()
+        app.state.storage.delete_chunks.assert_not_awaited()
 
     async def test_delete_refuses_when_the_namespace_lookup_fails(
         self, app, client: AsyncClient, tmp_path: Path

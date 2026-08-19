@@ -2369,6 +2369,49 @@ class TestBulkNamespacePrepass:
         assert await components.storage.namespaces_for_source(fp) == ["agent-runtime:planner"]
         assert stats.namespaces_preserved_against_rules == 0
 
+    async def test_the_dimension_gate_also_keeps_the_decision(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The other post-resolution no-write return. Parameterising by hand
+        rather than by fixture: the two branches fail for different reasons
+        and a shared assertion would hide which one regressed."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+        # dimension 0 with a real model name is the "embedder failed to
+        # initialise" refusal, not the BM25-only opt-in.
+        monkeypatch.setattr(type(components.embedder), "dimension", property(lambda _self: 0))
+        monkeypatch.setattr(
+            type(components.embedder), "model_name", property(lambda _self: "bge-m3")
+        )
+
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
+
+        assert any("dimension=0" in err for err in stats.errors), stats.errors
+        assert stats.namespaces_preserved_against_rules == 1
+        assert stats.namespaces_reassigned == 0
+
+    async def test_preview_helpers_refuse_the_same_flag_pair_as_the_write(
+        self, components, memory_dir
+    ):
+        """A preview that answered for reassign+explicit would describe an
+        operation ``index_path`` rejects."""
+        engine = components.index_engine
+        fp = memory_dir / "n.md"
+        fp.write_text("# N\n\nentry", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.effective_namespace_for(fp, "pinned", reassign=True)
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.namespace_decision_for(fp, "pinned", reassign=True)
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.resolve_namespaces_for([fp], "pinned", reassign=True)
+
     async def test_namespace_decision_for_exposes_the_refusal_to_pinning_callers(
         self, components, memory_dir, monkeypatch
     ):
