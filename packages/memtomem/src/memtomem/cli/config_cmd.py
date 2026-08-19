@@ -161,6 +161,72 @@ def _suggest_key(key: str, canonical: set[str]) -> str | None:
     return match[0] if match else None
 
 
+# Non-mutable keys whose value a command actually *asks the user for*. That is
+# a narrower bar than "the wizard writes this key": ``mm init`` also emits
+# ``embedding.base_url``, ``storage.backend`` and ``rerank.provider``, but
+# hardcodes them — telling someone to re-run the wizard to reach a value it
+# will never prompt for is a wasted trip, and pointing at it for a key it
+# never touches at all (``llm.api_key``) is worse. Everything else recognized
+# but non-mutable gets the file-edit remedy instead of a slogan.
+_DEDICATED_REMEDIES: dict[str, str] = {
+    "embedding.provider": "re-run 'mm init'",
+    "embedding.model": "re-run 'mm init'",
+    "embedding.api_key": "re-run 'mm init'",
+    "storage.sqlite_path": "re-run 'mm init'",
+    "indexing.project_memory_dirs": "run 'mm mem init' in the project",
+    "rerank.model": "re-run 'mm init'",
+}
+
+# Changing these after content is indexed strands the stored vectors, so the
+# remedy is two steps, not one (docs/guides/embeddings.md). The membership is
+# the union of every input the mismatch check reads: the stored
+# dimension/provider/model metadata compared in the storage layer, plus
+# ``embedding_policy_fingerprint`` (config.py:172), which is what puts
+# ``max_sequence_tokens`` here even though no command writes it — so this set
+# is not a subset of ``_DEDICATED_REMEDIES``.
+_RESET_AFTER_CHANGE = {
+    "embedding.provider",
+    "embedding.model",
+    "embedding.dimension",
+    "embedding.max_sequence_tokens",
+}
+
+# A hand edit that moves only one of these lands a half-configured embedder
+# (``provider=onnx`` with ``model=""``/``dimension=0``) that no gate calls a
+# mismatch — ``mm embedding-reset`` compares DB against config and reports
+# "in sync" because both are the broken tuple. The wizard sets all three from
+# one model choice, which is why it stays the first remedy.
+_COUPLED_EMBEDDING_FIELDS = {
+    "embedding.provider",
+    "embedding.model",
+    "embedding.dimension",
+}
+
+# Non-mutable keys that a live, settable key has replaced. Sending someone to
+# the config file for one of these is a dead end: the override loader only
+# warns about the deprecated spelling, it does not carry the value over to the
+# successor (measured — ``rerank.top_k: 42`` in config.json leaves
+# ``min_pool`` at its default). Name the successor instead.
+_DEPRECATED_REPLACEMENTS: dict[str, str] = {"rerank.top_k": "rerank.min_pool"}
+
+
+def _is_config_model_field(section_name: str, field_name: str) -> bool:
+    """True when SECTION.FIELD is a real config field that just isn't mutable.
+
+    Distinguishes a restart-required field (``embedding.provider``) from a typo
+    (``embedding.provdier``) so the caller can name the right remedy instead
+    of a fuzzy guess.
+    """
+    from memtomem.config import Mem2MemConfig
+
+    section_field = Mem2MemConfig.model_fields.get(section_name)
+    if section_field is None:
+        return False
+    section_model = section_field.annotation
+    model_fields = getattr(section_model, "model_fields", None)
+    return isinstance(model_fields, dict) and field_name in model_fields
+
+
 def _rejection_lines(key: str, section_name: str, field_name: str, allowed: set[str]) -> list[str]:
     """Build the ``config set`` rejection message for a non-mutable KEY.
 
@@ -168,6 +234,12 @@ def _rejection_lines(key: str, section_name: str, field_name: str, allowed: set[
     ``--top-k`` on ``mm init``, ``Top-K`` in ``mm status``, and
     ``search.default_top_k`` here (issue #1993). Name the near miss, the
     section's settable fields, and where to read current values.
+
+    A field that exists on the model but is restart-required
+    (``embedding.provider``, ``llm.api_key``) needs the opposite of a near
+    miss: the key is spelled correctly and the user needs the path that *does*
+    change it — a dedicated command where one exists, the config file
+    otherwise (issue #2062).
     """
     lines = []
     if field_name in _EXTRA_MUTATION_FIELDS.get(section_name, set()):
@@ -179,6 +251,38 @@ def _rejection_lines(key: str, section_name: str, field_name: str, allowed: set[
                 fg="red",
             )
         )
+        return lines
+
+    replacement = _DEPRECATED_REPLACEMENTS.get(key)
+    if replacement is not None:
+        lines.append(
+            click.style(
+                f"{key}: deprecated and not settable — use "
+                f"'mm config set {replacement} <value>' instead.",
+                fg="red",
+            )
+        )
+        return lines
+
+    if _is_config_model_field(section_name, field_name):
+        from memtomem.config import _override_path
+
+        remedy = _DEDICATED_REMEDIES.get(key)
+        edit = f"edit {_override_path()}"
+        if key in _COUPLED_EMBEDDING_FIELDS:
+            edit += " (provider, model and dimension must be set together)"
+        detail = edit if remedy is None else f"{remedy}, or {edit}"
+        detail += " and restart"
+        if key in _RESET_AFTER_CHANGE:
+            # Bare ``embedding-reset`` is ``--mode status`` — non-destructive
+            # with respect to stored vectors (it does open the DB) — and
+            # prints the destructive follow-up itself when there is a
+            # mismatch — the safe entry point, so name it and stop there.
+            detail += "; 'mm embedding-reset' then reports whether indexed content needs a reset"
+        lines.append(click.style(f"{key}: not settable at runtime — {detail}.", fg="red"))
+        if allowed:
+            lines.append(f"Mutable fields in [{section_name}]: {', '.join(sorted(allowed))}")
+        lines.append("Run 'mm config show' to see current values.")
         return lines
 
     settable = {f"{sec}.{f}" for sec, fs in MUTABLE_FIELDS.items() for f in fs}
