@@ -178,15 +178,28 @@ _DEDICATED_REMEDIES: dict[str, str] = {
 }
 
 # Changing these after content is indexed strands the stored vectors, so the
-# remedy is two steps, not one (docs/guides/embeddings.md). Membership follows
-# ``embedding_policy_fingerprint`` (config.py:172) — ``max_sequence_tokens``
-# flips the ONNX policy even though no command writes it, so this set is not a
-# subset of ``_DEDICATED_REMEDIES``.
+# remedy is two steps, not one (docs/guides/embeddings.md). The membership is
+# the union of every input the mismatch check reads: the stored
+# dimension/provider/model metadata compared in the storage layer, plus
+# ``embedding_policy_fingerprint`` (config.py:172), which is what puts
+# ``max_sequence_tokens`` here even though no command writes it — so this set
+# is not a subset of ``_DEDICATED_REMEDIES``.
 _RESET_AFTER_CHANGE = {
     "embedding.provider",
     "embedding.model",
     "embedding.dimension",
     "embedding.max_sequence_tokens",
+}
+
+# A hand edit that moves only one of these lands a half-configured embedder
+# (``provider=onnx`` with ``model=""``/``dimension=0``) that no gate calls a
+# mismatch — ``mm embedding-reset`` compares DB against config and reports
+# "in sync" because both are the broken tuple. The wizard sets all three from
+# one model choice, which is why it stays the first remedy.
+_COUPLED_EMBEDDING_FIELDS = {
+    "embedding.provider",
+    "embedding.model",
+    "embedding.dimension",
 }
 
 # Non-mutable keys that a live, settable key has replaced. Sending someone to
@@ -255,10 +268,11 @@ def _rejection_lines(key: str, section_name: str, field_name: str, allowed: set[
         from memtomem.config import _override_path
 
         remedy = _DEDICATED_REMEDIES.get(key)
-        if remedy is None:
-            detail = f"edit {_override_path()} and restart"
-        else:
-            detail = f"{remedy}, or edit {_override_path()} and restart"
+        edit = f"edit {_override_path()}"
+        if key in _COUPLED_EMBEDDING_FIELDS:
+            edit += " (provider, model and dimension must be set together)"
+        detail = edit if remedy is None else f"{remedy}, or {edit}"
+        detail += " and restart"
         if key in _RESET_AFTER_CHANGE:
             # Bare ``embedding-reset`` is ``--mode status`` — non-destructive
             # with respect to stored vectors (it does open the DB) — and

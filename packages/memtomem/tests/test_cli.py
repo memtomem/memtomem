@@ -341,6 +341,27 @@ class TestConfigCLI:
         assert "did you mean" not in result.output
         assert not config_file.exists()
 
+    def test_config_set_rejection_couples_the_embedding_triple(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Editing only `provider` lands provider=onnx/model=""/dimension=0 (#2062).
+
+        `mm embedding-reset` calls that tuple "in sync" because DB and config
+        are equally broken, so the file-edit remedy has to say all three move
+        together.
+        """
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        coupling = "provider, model and dimension must be set together"
+        for key in ("embedding.provider", "embedding.model", "embedding.dimension"):
+            result = runner.invoke(cli, ["config", "set", key, "x"])
+            assert coupling in result.output, key
+
+        # A field that moves on its own must not carry the coupling warning.
+        result = runner.invoke(cli, ["config", "set", "embedding.max_sequence_tokens", "512"])
+        assert coupling not in result.output
+
     def test_config_set_rejection_exact_key_beats_fuzzy_suggestion(self, runner: CliRunner) -> None:
         """embedding.api_key used to be answered with 'did you mean batch_size' (#2062)."""
         result = runner.invoke(cli, ["config", "set", "embedding.api_key", "sk-x"])
