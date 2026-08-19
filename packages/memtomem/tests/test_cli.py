@@ -27,6 +27,33 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+def _mm_commands_named(text: str) -> list[tuple[str, ...]]:
+    """Every ``'mm <cmd> [sub]`` path quoted in TEXT, as token tuples."""
+    import re
+
+    return [tuple(m.split()) for m in re.findall(r"'mm ((?:[a-z][a-z-]*)(?: [a-z][a-z-]*)*)", text)]
+
+
+def _resolves_to_command(path: tuple[str, ...]) -> bool:
+    """True when PATH walks to a real command, subcommands included.
+
+    Checking only the first token would let 'mm mem nonexistent' pass because
+    the ``mem`` group exists — the point of the guard is that the *whole*
+    invocation we print is runnable.
+    """
+    import click
+
+    node: click.Command = cli
+    for token in path:
+        if not isinstance(node, click.Group):
+            return False
+        child = node.commands.get(token)
+        if child is None:
+            return False
+        node = child
+    return True
+
+
 # ── Top-level CLI ───────────────────────────────────────────────────────
 
 
@@ -296,6 +323,152 @@ class TestConfigCLI:
         named = set(re.findall(r"'mm ([a-z][a-z-]*)", result.output))
         assert named, result.output
         assert named <= set(cli.commands), sorted(named - set(cli.commands))
+
+    def test_config_set_rejection_restart_required_names_remedy(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """A real-but-restart-required key gets the path that changes it (#2062)."""
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        result = runner.invoke(cli, ["config", "set", "embedding.provider", "onnx"])
+        assert result.exit_code != 0
+        assert "embedding.provider: not settable at runtime" in result.output
+        assert "re-run 'mm init'" in result.output
+        assert "mm embedding-reset" in result.output
+        assert str(config_file) in result.output
+        # The key is spelled correctly — a near-miss guess would be wrong.
+        assert "did you mean" not in result.output
+        assert not config_file.exists()
+
+    def test_config_set_rejection_exact_key_beats_fuzzy_suggestion(self, runner: CliRunner) -> None:
+        """embedding.api_key used to be answered with 'did you mean batch_size' (#2062)."""
+        result = runner.invoke(cli, ["config", "set", "embedding.api_key", "sk-x"])
+        assert result.exit_code != 0
+        assert "embedding.api_key: not settable at runtime" in result.output
+        assert "did you mean" not in result.output
+
+    def test_config_set_rejection_no_wizard_key_names_no_command(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """`mm init` never writes llm.api_key, so the remedy must not name it (#2062)."""
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        result = runner.invoke(cli, ["config", "set", "llm.api_key", "sk-x"])
+        assert result.exit_code != 0
+        assert "llm.api_key: not settable at runtime" in result.output
+        assert f"edit {config_file} and restart" in result.output
+        assert "mm init" not in result.output
+
+    def test_config_set_rejection_project_memory_dirs_names_mem_init(
+        self, runner: CliRunner
+    ) -> None:
+        """project_memory_dirs is written by `mm mem init`, not `mm init` (#2062)."""
+        result = runner.invoke(cli, ["config", "set", "indexing.project_memory_dirs", "/tmp/x"])
+        assert result.exit_code != 0
+        assert "run 'mm mem init' in the project" in result.output
+
+    def test_config_set_rejection_unknown_field_keeps_generic_message(
+        self, runner: CliRunner
+    ) -> None:
+        """A typo is not a real field; it keeps the generic rejection (#2062)."""
+        result = runner.invoke(cli, ["config", "set", "embedding.provdier", "onnx"])
+        assert result.exit_code != 0
+        assert "not a mutable field" in result.output
+        assert "not settable at runtime" not in result.output
+
+    def test_config_set_rejection_restart_required_names_real_commands(
+        self, runner: CliRunner
+    ) -> None:
+        """Same real-command guard as #1993, on the restart-required branch."""
+        for key in ("embedding.provider", "indexing.project_memory_dirs"):
+            result = runner.invoke(cli, ["config", "set", key, "x"])
+            named = _mm_commands_named(result.output)
+            assert named, result.output
+            for path in named:
+                assert _resolves_to_command(path), path
+
+    def test_config_set_rejection_deprecated_field_names_successor(self, runner: CliRunner) -> None:
+        """rerank.top_k lives on the model but min_pool is the live knob (#2062)."""
+        result = runner.invoke(cli, ["config", "set", "rerank.top_k", "50"])
+        assert result.exit_code != 0
+        assert "rerank.top_k: deprecated and not settable" in result.output
+        assert "mm config set rerank.min_pool" in result.output
+        # The file-edit remedy would pin the user to the deprecated spelling.
+        assert "not settable at runtime" not in result.output
+
+    def test_deprecated_replacements_point_at_settable_keys(self) -> None:
+        """A successor that `mm config set` also rejects is a dead end."""
+        from memtomem.cli.config_cmd import _DEPRECATED_REPLACEMENTS
+        from memtomem.config import MUTABLE_FIELDS, Mem2MemConfig
+
+        for key, replacement in _DEPRECATED_REPLACEMENTS.items():
+            section, _, field = key.partition(".")
+            assert field in getattr(
+                Mem2MemConfig.model_fields[section].annotation, "model_fields", {}
+            ), key
+            new_section, _, new_field = replacement.partition(".")
+            assert new_field in MUTABLE_FIELDS.get(new_section, set()), replacement
+
+    def test_command_path_guard_rejects_fake_paths(self) -> None:
+        """The guard is only worth running if it fails on a fake path."""
+        assert _resolves_to_command(("init",))
+        assert _resolves_to_command(("mem", "init"))
+        assert not _resolves_to_command(("nope",))
+        assert not _resolves_to_command(("mem", "nonexistent"))
+        assert not _resolves_to_command(("embedding-reset", "bogus"))
+
+    def test_dedicated_remedies_name_real_fields_and_commands(self, runner: CliRunner) -> None:
+        """The remedy table is hand-maintained; pin it to the model and the CLI."""
+        from memtomem.cli.config_cmd import _DEDICATED_REMEDIES, _RESET_AFTER_CHANGE
+        from memtomem.config import MUTABLE_FIELDS, Mem2MemConfig
+
+        # Exact pin, not a superset check: only keys whose value `mm init`
+        # actually prompts for belong here. base_url / storage.backend /
+        # rerank.provider are hardcoded by the wizard and dimension is derived
+        # from the model choice, so re-running it cannot apply a user's value.
+        assert set(_DEDICATED_REMEDIES) == {
+            "embedding.provider",
+            "embedding.model",
+            "embedding.api_key",
+            "storage.sqlite_path",
+            "indexing.project_memory_dirs",
+            "rerank.model",
+        }
+
+        for key, remedy in _DEDICATED_REMEDIES.items():
+            section, _, field = key.partition(".")
+            section_field = Mem2MemConfig.model_fields.get(section)
+            assert section_field is not None, key
+            assert field in getattr(section_field.annotation, "model_fields", {}), key
+            # A mutable key never reaches this branch — a stale entry here is dead code.
+            assert field not in MUTABLE_FIELDS.get(section, set()), key
+            for path in _mm_commands_named(remedy):
+                assert _resolves_to_command(path), path
+
+        # Not a subset of _DEDICATED_REMEDIES: embedding.max_sequence_tokens
+        # flips the ONNX policy fingerprint but no command writes it.
+        for key in _RESET_AFTER_CHANGE:
+            section, _, field = key.partition(".")
+            section_field = Mem2MemConfig.model_fields.get(section)
+            assert section_field is not None, key
+            assert field in getattr(section_field.annotation, "model_fields", {}), key
+            assert field not in MUTABLE_FIELDS.get(section, set()), key
+
+    def test_config_set_rejection_policy_field_names_reset(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """max_sequence_tokens has no wizard command but still strands vectors (#2062)."""
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        result = runner.invoke(cli, ["config", "set", "embedding.max_sequence_tokens", "512"])
+        assert result.exit_code != 0
+        assert "embedding.max_sequence_tokens: not settable at runtime" in result.output
+        assert str(config_file) in result.output
+        assert "mm embedding-reset" in result.output
+        assert "mm init" not in result.output
 
     def test_config_set_exclude_patterns_json_array_persists(
         self, tmp_path, monkeypatch, runner: CliRunner
