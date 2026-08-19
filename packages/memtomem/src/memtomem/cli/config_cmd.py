@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import click
@@ -9,6 +10,7 @@ import click
 from memtomem.config import (
     FIELD_CONSTRAINTS,
     MUTABLE_FIELDS,
+    Mem2MemConfig,
     SaveReceipt,
     _EXTRA_MUTATION_FIELDS,
     coerce_and_validate,
@@ -129,22 +131,105 @@ def config_set(key: str, value: str) -> None:
             return "***" if value else ""
         return value
 
+    # One measurement, shared by the report and the FTS rebuild below: two
+    # separate loads could disagree if another process writes in between, and
+    # then the index would be built for a tokenizer the user was never told
+    # about.
+    effective = _effective_value(section_name, field_name)
+
     click.echo(f"{key}: {_show(old_val)} -> {_show(coerced)}")
-    for line in _effect_lines(key, section_name, field_name, coerced, receipt):
+    for line in _effect_lines(key, section_name, field_name, coerced, receipt, effective):
         click.echo(line)
 
-    # Rebuild FTS index when tokenizer changes (matches Web UI / MCP behaviour)
+    # Rebuild the FTS index on every ``search.tokenizer`` set — including one
+    # that changes nothing, which is what makes re-running the command a
+    # working retry after a failed rebuild (see ``_rebuild_fts``).
     if key == "search.tokenizer":
-        from memtomem.storage.fts_tokenizer import set_tokenizer
-
         assert isinstance(coerced, str)
-        set_tokenizer(coerced)
+        _rebuild_fts(cfg, requested=coerced, effective=str(effective))
 
-        from memtomem.storage.factory import create_storage
 
-        storage = create_storage(cfg)
-        count = storage.rebuild_fts()
-        click.echo(f"FTS index rebuilt ({count} chunks).")
+def _rebuild_fts(cfg: Mem2MemConfig, *, requested: str, effective: str) -> None:
+    """Rebuild the FTS index so stored terms match the tokenizer queries use.
+
+    Two things this has to get right, both of which the previous version got
+    wrong (issue #2112):
+
+    * ``SqliteBackend.rebuild_fts`` is ``async``, and the backend needs
+      ``initialize()`` before it has a connection. Calling it bare discarded a
+      coroutine and printed its ``repr`` as the row count — the user was told
+      the index had been rebuilt when nothing had run at all.
+    * The index has to agree with *search*, and search tokenizes with the
+      effective value, not the one that was just written. ``config.json`` is
+      outranked by ``MEMTOMEM_SEARCH__TOKENIZER`` (#2108/#2111), so building
+      the index for the requested value would guarantee the mismatch this
+      rebuild exists to prevent. We always rebuild — the effective tokenizer
+      is what the index must match either way, and an unconditional rebuild is
+      what makes re-running the command a working retry after a failure.
+    """
+    from memtomem.storage.factory import create_storage
+    from memtomem.storage.fts_tokenizer import get_tokenizer, set_tokenizer
+
+    set_tokenizer(effective)
+    storage = create_storage(cfg)
+
+    async def _run() -> int:
+        # ``initialize`` is inside the try: it opens the connection partway
+        # through its own work, so a failure there still leaves a handle for
+        # ``close`` (which is written to tolerate a half-open backend) to
+        # release.
+        try:
+            await storage.initialize()
+            return await storage.rebuild_fts()
+        finally:
+            await storage.close()
+
+    try:
+        count = asyncio.run(_run())
+    except Exception as e:  # noqa: BLE001 — the value is saved; report, don't traceback
+        click.echo(
+            click.style(
+                f"error: search.tokenizer was saved, but the FTS index rebuild failed: {e}",
+                fg="red",
+            )
+        )
+        click.echo(
+            click.style(
+                f"Searches tokenize with {effective} against an index built the old way "
+                f"until a rebuild succeeds. Re-run 'mm config set search.tokenizer "
+                f"{requested}' to retry.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1) from None
+
+    # ``set_tokenizer`` is not the last word: tokenizing with kiwipiepy when it
+    # is not installed silently reverts to unicode61 mid-rebuild, so the name
+    # we asked for is not necessarily the name the rows were built under. Read
+    # back what actually ran, and name *that* in the success line — announcing
+    # the requested name and then retracting it two lines later is the same
+    # class of false claim this whole fix is about.
+    built = get_tokenizer()
+    if built != effective:
+        click.echo(
+            click.style(
+                f"warning: FTS index rebuilt with {built} ({count} chunks) — {effective} "
+                f"is unavailable (not installed), so the rebuild and every query in this "
+                f"process fall back to {built}. Install it and re-run this command for a "
+                f"{effective} index.",
+                fg="yellow",
+            )
+        )
+    elif effective != requested:
+        click.echo(
+            click.style(
+                f"FTS index rebuilt with {effective} ({count} chunks) — the effective "
+                f"tokenizer, not the requested {requested}.",
+                fg="yellow",
+            )
+        )
+    else:
+        click.echo(f"FTS index rebuilt with {effective} ({count} chunks).")
 
 
 def _section_invariant_error(section_obj: object, field_name: str) -> str | None:
@@ -207,6 +292,7 @@ def _effect_lines(
     field_name: str,
     coerced: object,
     receipt: SaveReceipt,
+    effective: object,
 ) -> list[str]:
     """Report what the write actually achieved (issue #2108).
 
@@ -217,12 +303,13 @@ def _effect_lines(
     claim the command cannot back up. Say which one happened instead.
 
     Facts only: the before/after pins come from the save receipt (captured
-    under the write lock), and the effective value is measured by a fresh
-    load rather than inferred from which layer we think supplied it.
+    under the write lock), and ``effective`` is measured by a fresh load
+    (``_effective_value``) rather than inferred from which layer we think
+    supplied it. It is passed in rather than measured here so the caller's FTS
+    rebuild acts on the same reading this report describes.
     """
     from memtomem.config import MISSING, env_var_owning
 
-    effective = _effective_value(section_name, field_name)
     env_var = env_var_owning(section_name, field_name)
     pruned = receipt.pruned(section_name, field_name)
     pinned_before = receipt.pinned_before(section_name, field_name)
