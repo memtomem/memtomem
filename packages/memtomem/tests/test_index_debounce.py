@@ -9,9 +9,10 @@ contracts:
 2. **Drain semantics** — ``drain_ready`` indexes only entries that have been
    silent at least ``window_seconds``; ``drain_all`` indexes everything;
    retryable errors stay queued while permanent errors are dropped immediately.
-3. **Concurrency + persistence** — the queue persists across calls, the
-   ``flock`` serializes parallel mutations, and ``status_snapshot`` reads
-   without a lock (race-prone by design).
+3. **Concurrency + persistence** — the queue persists across calls,
+   ``_Lock``'s two layers (in-process ``threading.Lock`` + sidecar flock)
+   serialize parallel mutations, and ``status_snapshot`` reads without a
+   lock (race-prone by design).
 """
 
 from __future__ import annotations
@@ -520,9 +521,10 @@ class TestPersistenceAndConcurrency:
         assert snap.depth == 2
 
     def test_concurrent_enqueue_does_not_lose_entries(self, queue_file: Path) -> None:
-        """Two threads enqueue distinct paths in parallel. The flock guarantees
-        both writes land. Without the lock, the second writer's load+save
-        would clobber the first writer's entry."""
+        """Threads enqueue distinct paths in parallel. ``_Lock`` guarantees
+        every write lands — for same-process threads that is the
+        in-process ``threading.Lock`` layer. Without it, the second
+        writer's load+save would clobber the first writer's entry."""
         threads: list[threading.Thread] = []
         for i in range(20):
             t = threading.Thread(
@@ -544,13 +546,14 @@ class TestPersistenceAndConcurrency:
         """Pin the in-process ``threading.Lock`` independently of the
         cross-process file lock.
 
-        On Windows, ``LockFileEx`` is unreliable between two handles in
-        the *same* process — if the file lock is the only barrier,
-        same-process threads race the read-modify-write and lose
-        entries (#759 failure 2). By stubbing ``portalocker.lock`` /
-        ``unlock`` to no-ops, this test simulates that regression on
-        every platform: the test passes only because the intra-process
-        ``threading.Lock`` is the actual serializer. Removing the
+        On Windows a contended blocking acquire raises ``AlreadyLocked``
+        instead of waiting, so with the file lock as the only barrier the
+        losing threads died mid-enqueue and their entries never landed
+        (#759 failure 2: 11 of 20). Stubbing ``portalocker.lock`` /
+        ``unlock`` to no-ops does not reproduce that failure mode; it
+        removes the file-lock layer entirely, so the test passes on every
+        platform only if the intra-process ``threading.Lock`` serializes
+        on its own. Removing the
         threading.Lock layer from ``_Lock`` flips this to a flaky
         ``len(entries) < 20`` failure.
         """

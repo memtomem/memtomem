@@ -12,8 +12,8 @@ the per-test isolated runtime dir (conftest ``_isolated_instance_registry``).
 release assertions never lean on fixture teardown (which sweeps leaked
 barriers and would mask a bug): each one proves the barrier is free by
 having a **spawned process** take it exclusively before the test ends.
-Same-process re-acquisition would be weaker — Windows can grant a second
-handle to the owning process, so a dropped ``release()`` could pass there.
+Same-process re-acquisition would be weaker — it does not exercise the
+cross-process contract the barrier exists for.
 """
 
 from __future__ import annotations
@@ -441,10 +441,10 @@ class TestLifecycleBarrierOwnership:
         """Prove the barrier is free right now, from another *process*.
 
         Same-process re-acquisition would be a weaker check than it looks:
-        Windows can grant a second handle in the owning process (the
-        reason ``test_lifecycle_barrier.py`` is spawn-based throughout),
-        so a dropped ``release()`` could pass there and then be hidden by
-        the autouse sweep at teardown.
+        it does not exercise the cross-process contract (the reason
+        ``test_lifecycle_barrier.py`` is spawn-based throughout), and a
+        dropped ``release()`` could then be hidden by the autouse sweep at
+        teardown.
         """
         _assert_barrier_free(reg.lifecycle_barrier_path().parent)
 

@@ -358,9 +358,12 @@ _active_barriers: set["HeldBarrier"] = set()
 _procid: str | None = None
 _atexit_installed = False
 
-# Intra-process half of the mutation lock (see module docstring — Windows
-# ``LockFileEx`` does not reliably block a second handle from the same
-# process, so portalocker alone cannot serialize threads).
+# Intra-process half of the mutation lock (see module docstring). This is
+# load-bearing and unconditional: it serializes this process's mutation spans
+# whatever the file backend does with same-process acquisitions, leaving the
+# file lock responsible for cross-process serialization only. It also keeps
+# the file lock's bounded non-blocking poll budget reserved for genuine
+# cross-process contention instead of this process's own threads.
 _mutation_thread_lock = threading.Lock()
 
 
@@ -840,9 +843,8 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
                     # mutation lock: the on-disk sentinel must never be
                     # visible to a same-process enumeration before the
                     # in-memory record exists, or the self-probe skip fails
-                    # and Windows (where a second same-process handle can
-                    # acquire the flock) would misread the fresh
-                    # registration as stale. ``_state_guard`` nests inside
+                    # and enumeration falls through to probing our own
+                    # freshly registered entry. ``_state_guard`` nests inside
                     # the mutation lock here; no path nests them in the
                     # opposite order, so there is no inversion.
                     with _state_guard:
@@ -1154,10 +1156,10 @@ def _enumerate_live_instances_at(
 def enumerate_live_instances(store_digest: str) -> EnumerationResult:
     """Enumerate live registrations for one store across all known roots.
 
-    This process's own active registrations are included directly
-    without probing — a second same-process handle can *acquire* the
-    lock on Windows (see ``indexing/debounce.py``), so a self-probe
-    would misclassify self as stale. Every other entry, same-pid ones
+    This process's own active registrations are included directly from
+    ``_active`` without probing — the in-memory record is authoritative
+    for locks this process already holds, so enumeration never depends on
+    how a self-directed probe behaves. Every other entry, same-pid ones
     included, is probed. Stale entries older than the grace period are
     opportunistically removed; unparseable names follow the same
     unlocked+grace rule. Fails open: any uncertainty yields

@@ -4,9 +4,9 @@ The MCP tools (``server/tools/memory_crud``) hold the per-file in-process lock
 (L1, ``AppContext.get_memory_file_lock``) plus the cross-process sidecar (L2).
 The web routes and CLI reach the same markdown files but have no ``AppContext``,
 so they take only L2 — and that is sufficient: ``async_file_lock``'s in-process
-guard serializes same-process web handlers (Windows ``LockFileEx`` alone would
-not) while the flock serializes across processes. See the lock-ordering
-invariant in :mod:`memtomem.context._atomic`.
+guard serializes same-process web handlers (so they queue in memory instead of
+spending the flock's timeout budget on each other) while the flock serializes
+across processes. See the lock-ordering invariant in :mod:`memtomem.context._atomic`.
 
 These helpers give the web/CLI edit paths the same fresh-re-fetch-under-lock and
 rollback contract the MCP tools already have, without threading an ``AppContext``

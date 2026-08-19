@@ -306,8 +306,8 @@ async def test_stream_sidecar_timeout_folds_into_errors_and_continues(
 async def test_mem_edit_times_out_when_sidecar_held(bm25_only_components, monkeypatch):
     """A held sidecar makes ``mem_edit`` return a friendly retryable error
     instead of blocking. Holding the lock on THIS loop also exercises the
-    in-process (layer-1) guard that keeps same-process handlers serialized on
-    Windows, where the flock alone would not (Codex #1587 review)."""
+    in-process (layer-1) guard, which serializes same-process handlers
+    independently of what the file lock does (Codex #1587 review)."""
     comp, mem_dir = bm25_only_components
     app = AppContext.from_components(comp)
     ctx = StubCtx(app)
