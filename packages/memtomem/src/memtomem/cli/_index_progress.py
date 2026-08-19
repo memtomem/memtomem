@@ -393,18 +393,19 @@ def print_namespace_advisory(
 
     # Only a system → non-system transition exposes anything: a move from one
     # system scope to another (``agent-runtime:a`` → ``archive:x``) stays
-    # hidden from a default search. Files are summed, not lines — one line can
-    # stand for many files.
-    exposed = sum(
-        int(move["files"])
-        for move in moves
-        if _is_system(move["from"]) and not _is_system(move["to"])
-    )
+    # hidden from a default search.
+    #
+    # Counted in moves, not files. A record is per ``(from, to)`` pair, and a
+    # file whose chunks span two system namespaces contributes one record to
+    # each — so summing ``files`` across records would report that single file
+    # twice. The per-move counts are printed above; this line points at which
+    # of them exposed data, and the file total is ``reassigned``.
+    exposed = [move for move in moves if _is_system(move["from"]) and not _is_system(move["to"])]
     if exposed:
         click.secho(
-            f"  → {exposed} file(s) moved out of a system-scoped namespace "
-            "(agent session or archive scope). Those chunks are now visible "
-            "to a default search.",
+            f"  → {len(exposed)} of these moves take rows out of a system-scoped "
+            "namespace (agent session or archive scope). Those chunks are now "
+            "visible to a default search.",
             fg="red",
         )
 

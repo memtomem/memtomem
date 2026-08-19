@@ -97,8 +97,10 @@ meaning "re-namespace everything".
 > `mm embedding-reset --mode apply-current` followed by `mm index --force
 > <memory_dir>` moved every agent-scoped chunk to `default`. Patching callers
 > one at a time to pass the namespace explicitly never reaches the two
-> surfaces a *user* drives. `force` now preserves for every caller, and rule
-> re-application moved to an explicit `--reassign-namespaces`. The rest of
+> surfaces a *user* drives. `force` now preserves for every caller that
+> passes no namespace — an explicit one still wins, which includes the
+> session namespace `mem_index` inherits — and rule re-application moved to an
+> explicit `--reassign-namespaces`. The rest of
 > this section — the unanimity rule, the single resolver, and raising rather
 > than falling back on a lookup failure — stands unchanged.
 

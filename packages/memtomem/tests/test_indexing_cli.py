@@ -535,9 +535,7 @@ class TestReassignNamespacesFlag:
         lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
         assert "1 file(s) reassigned to a rule-resolved namespace:" in lines
         assert "agent-runtime:planner → default: 1 file(s)" in lines
-        assert "→ 1 file(s) moved out of a system-scoped namespace (agent session or" in " ".join(
-            lines
-        )
+        assert "→ 1 of these moves take rows out of a system-scoped namespace" in " ".join(lines)
 
     def test_a_move_between_system_namespaces_is_not_called_out(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -570,11 +568,13 @@ class TestReassignNamespacesFlag:
         assert "agent-runtime:planner → archive:old: 1 file(s)" in out
         assert "now visible" not in out
 
-    def test_the_warning_counts_files_not_summary_lines(
+    def test_the_warning_counts_moves_not_summed_files(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """One ``old → new`` line can stand for many files; reporting the
-        number of lines would understate the exposure."""
+        """A file whose chunks span two system namespaces yields one record
+        per source namespace, so summing ``files`` across records would report
+        that single file twice. The line counts moves and prints each move's
+        own file count."""
         target = tmp_path / "memories"
         target.mkdir()
         (target / "a.md").write_text("# memo\n", encoding="utf-8")
@@ -597,7 +597,13 @@ class TestReassignNamespacesFlag:
             )
         )
 
-        assert "7 file(s) moved out of a system-scoped namespace" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        # Counted in moves, not summed files: one file whose chunks span two
+        # system namespaces contributes a record to each, so a file sum would
+        # double-count it. The per-move file counts are printed above.
+        assert "→ 2 of these moves take rows out of a system-scoped namespace" in out
+        assert "agent-runtime:planner → default: 5 file(s)" in out
+        assert "archive:old → default: 2 file(s)" in out
 
 
 class TestIndexBarLengthFromDiscovery:

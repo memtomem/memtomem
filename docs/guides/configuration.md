@@ -267,8 +267,17 @@ Resolving it is a two-step process — pick **one** of:
   MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
   `mem_index(path="...", force=true)`.
 
-  `--force` / `force=true` re-embeds; it does not re-resolve namespaces, so
-  every file keeps the namespace its chunks are stored under. To apply
+  `--force` re-embeds; it does not re-resolve namespaces, so every file keeps
+  the namespace its chunks are stored under.
+
+  > **Run the recovery from the CLI when the store holds agent-scoped notes.**
+  > `mem_index` called inside an agent session inherits that session's
+  > namespace and passes it as an *explicit* one, and an explicit namespace
+  > overrides preservation — so `mem_index(force=true)` under a session
+  > restamps everything it indexes with `agent-runtime:<id>`. End the session
+  > first, or run `mm index --force <memory_dir>`, which passes no namespace.
+
+  To apply
   changed [namespace rules](#namespace-rules-path-based-auto-tagging) to
   already-indexed files, run
   `mm index --reassign-namespaces <memory_dir>` — it overwrites stored

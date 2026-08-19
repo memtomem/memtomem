@@ -78,7 +78,8 @@
     "/settings-config.js": {
       "versions": {
         "20": "ab4c95253582558da40802a7ecf0714ae82be41a7d847c7bb231c9ac63719276",
-        "21": "5b8910bab8a8856ce0b01f886bde0939f93d640075003ff89512d72b3d68d118"
+        "21": "5b8910bab8a8856ce0b01f886bde0939f93d640075003ff89512d72b3d68d118",
+        "22": "3294f5c853169cf7090c373dfff05cedb904586884b516d9a8fa8645400dc8fa"
       }
     },
     "/settings-harness.js": {
