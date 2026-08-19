@@ -119,7 +119,7 @@ it indexes with `agent-runtime:<id>`. That behavior predates this ADR and is
 not what #2061 reported — the reported path is the CLI recovery command, which
 passes no namespace — but it is the reason this ADR says preservation holds
 "for callers that pass no namespace" rather than "always". Narrowing session
-inheritance to sources with no stored rows is tracked separately.
+inheritance to sources with no stored rows is tracked in #2104.
 
 ## Alternatives considered
 
