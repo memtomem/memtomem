@@ -104,10 +104,10 @@ def config_set(key: str, value: str) -> None:
     invalid = _section_invariant_error(section_obj, field_name)
     if invalid is not None:
         click.echo(click.style(f"{key}: {invalid}", fg="red"))
-        # Not "config.json is unchanged": loading it above may have run the
+        # Not "nothing written": loading the file above may have run the
         # legacy auto_discover migration, which writes. Only the requested
         # value is guaranteed absent.
-        click.echo(f"Nothing written — {key} was not saved.")
+        click.echo(f"{key} was not saved.")
         raise SystemExit(1)
 
     try:

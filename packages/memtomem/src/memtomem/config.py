@@ -1449,7 +1449,6 @@ def env_var_owning(section_name: str, field_name: str) -> str | None:
     """
     wanted = f"MEMTOMEM_{section_name.upper()}__{field_name.upper()}"
     return wanted if wanted in os.environ else None
-    return None
 
 
 def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:

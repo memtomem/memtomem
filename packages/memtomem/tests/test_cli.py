@@ -478,7 +478,8 @@ class TestConfigCLI:
         result = runner.invoke(cli, ["config", "set", "indexing.max_chunk_tokens", "64"])
         assert result.exit_code == 1
         assert "must be <= max_chunk_tokens" in result.output
-        assert "indexing.max_chunk_tokens was not saved" in result.output
+        assert "indexing.max_chunk_tokens was not saved." in result.output
+        assert "Nothing written" not in result.output
         assert not config_file.exists()
 
     def test_refusal_claims_only_that_the_value_was_not_saved(
@@ -497,7 +498,10 @@ class TestConfigCLI:
 
         result = runner.invoke(cli, ["config", "set", "indexing.max_chunk_tokens", "64"])
         assert result.exit_code == 1
+        # The migration may have rewritten the file; the message must not
+        # speak for anything but the requested value.
         assert "config.json is unchanged" not in result.output
+        assert "Nothing written" not in result.output
         assert "max_chunk_tokens" not in json.loads(config_file.read_text())["indexing"]
 
     def test_config_set_survives_warnings_as_errors(

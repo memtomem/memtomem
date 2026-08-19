@@ -160,8 +160,8 @@ instant.)
 Relatedly, `mm config set` now re-checks the whole section's
 cross-field invariants before writing. A combination the section
 validator rejects (say `indexing.max_chunk_tokens` below
-`min_chunk_tokens`) is refused with `Nothing written — <key> was not
-saved.` rather than persisted and then silently dropped by every
+`min_chunk_tokens`) is refused with `<key> was not saved.` rather than
+persisted and then silently dropped by every
 subsequent load. The message speaks only for the requested value:
 reading a legacy config on the way in can still run the `auto_discover`
 migration, which writes.
