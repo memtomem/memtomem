@@ -1067,3 +1067,148 @@ class TestSearchConfigRrfWeightsValidation:
 
         assert SearchConfig(rrf_weights=[0.0, 1.0]).rrf_weights == [0.0, 1.0]
         assert SearchConfig(rrf_weights=[2.0, 3.0]).rrf_weights == [2.0, 3.0]
+
+
+class TestWriteEffectHelpers:
+    """#2108: a write that lands in config.json is not the same as a write that takes effect."""
+
+    def test_receipt_reads_the_file_snapshots_not_the_model(self) -> None:
+        from memtomem.config import MISSING, SaveReceipt
+
+        receipt = SaveReceipt(
+            before={"search": {"default_top_k": 33}},
+            after={"search": {"default_top_k": 44}},
+        )
+        assert receipt.pinned_before("search", "default_top_k") == 33
+        assert receipt.pinned_after("search", "default_top_k") == 44
+        # Absent key in a present section, and an absent section.
+        assert receipt.pinned_after("search", "rrf_k") is MISSING
+        assert receipt.pinned_after("decay", "enabled") is MISSING
+        assert not receipt.pruned("search", "default_top_k")
+
+    def test_receipt_reports_a_pruned_pin(self) -> None:
+        from memtomem.config import SaveReceipt
+
+        receipt = SaveReceipt(before={"search": {"default_top_k": 33}}, after={})
+        assert receipt.pruned("search", "default_top_k")
+        # A key that was never pinned is not "pruned" — it was simply absent.
+        assert not receipt.pruned("search", "rrf_k")
+
+    def test_receipt_distinguishes_pinned_null(self) -> None:
+        """A pinned ``null`` is a value the file carries — not an absent key."""
+        from memtomem.config import MISSING, SaveReceipt
+
+        receipt = SaveReceipt(before={}, after={"search": {"default_top_k": None}})
+        assert receipt.pinned_after("search", "default_top_k") is None
+        assert receipt.pinned_after("search", "default_top_k") is not MISSING
+
+    def test_save_returns_a_receipt_matching_the_file(self, override_path: Path) -> None:
+        """End-to-end: the receipt is the file's real before/after, not a guess."""
+        from memtomem.config import MISSING, Mem2MemConfig, save_config_overrides
+
+        override_path.write_text(json.dumps({"search": {"default_top_k": 33}}))
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+        cfg.search.default_top_k = 44
+
+        receipt = save_config_overrides(cfg)
+        assert receipt.pinned_before("search", "default_top_k") == 33
+        assert receipt.pinned_after("search", "default_top_k") == 44
+        assert json.loads(override_path.read_text())["search"]["default_top_k"] == 44
+
+        # Setting the default prunes the entry — the receipt says so.
+        cfg.search.default_top_k = Mem2MemConfig().search.default_top_k
+        receipt = save_config_overrides(cfg)
+        assert receipt.pruned("search", "default_top_k")
+        assert receipt.pinned_after("search", "default_top_k") is MISSING
+
+    def test_env_var_owning_matches_case_insensitively(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """pydantic-settings matches env names case-insensitively; so must this."""
+        from memtomem.config import env_var_owning
+
+        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
+        assert env_var_owning("search", "default_top_k") is None
+
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
+        assert env_var_owning("search", "default_top_k") == "MEMTOMEM_SEARCH__DEFAULT_TOP_K"
+
+        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K")
+        monkeypatch.setenv("memtomem_search__default_top_k", "7")
+        assert env_var_owning("search", "default_top_k") == "memtomem_search__default_top_k"
+
+    def test_env_var_owning_does_not_match_a_different_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.config import env_var_owning
+
+        monkeypatch.setenv("MEMTOMEM_SEARCH__RRF_K", "60")
+        assert env_var_owning("search", "default_top_k") is None
+
+
+class TestMcpPersistenceSuffix:
+    """#2108: `mem_config(persist=True)` must not claim a write the file lacks."""
+
+    def test_claims_persistence_only_when_the_key_landed(self) -> None:
+        from memtomem.config import SaveReceipt
+        from memtomem.server.tools.status_config import _persistence_suffix
+
+        receipt = SaveReceipt(before={}, after={"search": {"default_top_k": 44}})
+        assert _persistence_suffix("search.default_top_k", receipt) == " (persisted to config.json)"
+
+    def test_says_runtime_only_without_a_receipt(self) -> None:
+        """persist=False never writes, so there is nothing to report on."""
+        from memtomem.server.tools.status_config import _persistence_suffix
+
+        assert _persistence_suffix("search.default_top_k", None) == (
+            " (runtime only — not persisted)"
+        )
+
+    def test_flags_the_env_mask_even_when_the_key_landed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """persist=True promises the value survives a restart; env breaks that half."""
+        from memtomem.config import SaveReceipt
+        from memtomem.server.tools.status_config import _persistence_suffix
+
+        receipt = SaveReceipt(before={}, after={"search": {"default_top_k": 44}})
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
+
+        suffix = _persistence_suffix("search.default_top_k", receipt)
+        assert "persisted to config.json" in suffix
+        assert "MEMTOMEM_SEARCH__DEFAULT_TOP_K takes precedence" in suffix
+        assert "a restart reads that variable" in suffix
+
+    def test_names_the_env_var_when_the_delta_was_pruned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.config import SaveReceipt
+        from memtomem.server.tools.status_config import _persistence_suffix
+
+        receipt = SaveReceipt(
+            before={"search": {"default_top_k": 33}}, after={"search": {"rrf_k": 60}}
+        )
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
+
+        suffix = _persistence_suffix("search.default_top_k", receipt)
+        assert "not written to config.json" in suffix
+        assert "MEMTOMEM_SEARCH__DEFAULT_TOP_K takes precedence" in suffix
+
+    def test_blames_a_lower_layer_when_no_env_var_is_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No env var to name — say "a lower layer", not "the default".
+
+        A config.d fragment supplying the value prunes the delta too, so
+        naming the default would be a guess (#2108 review).
+        """
+        from memtomem.config import SaveReceipt
+        from memtomem.server.tools.status_config import _persistence_suffix
+
+        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
+
+        suffix = _persistence_suffix("search.default_top_k", SaveReceipt(before={}, after={}))
+        assert "not written to config.json" in suffix
+        assert "a lower layer (default or config.d)" in suffix
+        assert "MEMTOMEM_" not in suffix

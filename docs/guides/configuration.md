@@ -130,6 +130,40 @@ only the delta. Three kinds of silent leftovers this prevents:
 On-disk leftovers from older versions are cleaned up automatically on
 the next save, provided the stale value now matches the comparand.
 
+Two consequences are visible from `mm config set`, which reports them
+rather than leaving you to discover the divergence later (issue #2108):
+
+- **The env var still wins.** With `MEMTOMEM_SEARCH__DEFAULT_TOP_K`
+  exported, `mm config set search.default_top_k 44` writes `44` to
+  `config.json` and warns that the variable "is set and takes
+  precedence", naming the effective value that remains in force. The
+  write is not wasted — it applies the moment the variable is unset.
+- **Setting the value the comparand already supplies removes the pin.**
+  If `config.json` pinned `33` and you set the value an env var, a
+  fragment, or the default already provides, the delta is empty, so the
+  entry is pruned; the command says `config.json no longer pins
+  search.default_top_k`, shows what it held, and names the env var when
+  one is responsible. Use `mm config unset` when removal is the goal.
+
+The MCP `mem_config(persist=true)` path reports the same distinction:
+its trailing note reads `(persisted to config.json)` only when the key
+is actually in the file, and otherwise names why it was pruned — and
+when an env var owns the key it says so even then, because `persist`
+promises the value survives a restart and the variable is what the
+next start reads. What the file holds comes from the save's own
+before/after receipt, captured inside the write lock, so a concurrent
+write cannot be mistaken for this one. (The *effective* value quoted
+by `mm config set` is a fresh read taken after the lock is released,
+so on a busy machine it reflects whatever the stack says at that
+instant.)
+
+Relatedly, `mm config set` now re-checks the whole section's
+cross-field invariants before writing. A combination the section
+validator rejects (say `indexing.max_chunk_tokens` below
+`min_chunk_tokens`) is refused with `Nothing written — config.json is
+unchanged.` rather than persisted and then silently dropped by every
+subsequent load.
+
 ### Moving `config.json` between machines
 
 Path-typed fields (`storage.sqlite_path`, `indexing.memory_dirs`)
