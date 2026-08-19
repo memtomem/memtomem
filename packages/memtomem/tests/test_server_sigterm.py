@@ -465,10 +465,10 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
         # reliably capturable after teardown on Windows).
         assert pid1.exists() and pid2.exists()
         if os.name != "nt":
-            # Windows ``LockFileEx`` blocks reads from other handles while
-            # the server holds its lock (#819), so the content check is
-            # POSIX-only; the two distinct files above are the
-            # cross-platform half.
+            # The Windows mandatory range lock (``msvcrt.locking``) blocks
+            # reads from other handles while the server holds its lock
+            # (#819), so the content check is POSIX-only; the two distinct
+            # files above are the cross-platform half.
             assert pid2.read_text().splitlines()[0] == str(proc2.pid), (
                 "the second server must own its own pid file, not fall "
                 "through to the first one's contention branch"
@@ -594,10 +594,10 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
                 f"exited rc={proc.returncode}"
             )
             # Read THROUGH the lock-owning handle, not via a separate
-            # ``Path.read_text()`` (#819): on Windows ``LockFileEx``
-            # blocks reads from other handles, so opening a fresh handle
-            # would raise ``PermissionError`` (ERROR_LOCK_VIOLATION) even
-            # though the file content is intact. POSIX ``flock`` is
+            # ``Path.read_text()`` (#819): on Windows the mandatory range
+            # lock (``msvcrt.locking``) blocks reads from other handles, so
+            # opening a fresh handle would raise ``PermissionError``
+            # (ERROR_LOCK_VIOLATION) even though the file content is intact. POSIX ``flock`` is
             # advisory and lets ``read_text`` through, so this works on
             # both — the holder-handle read is the cross-platform form.
             holder.seek(0)
@@ -700,9 +700,9 @@ def test_server_main_acquires_portalocker_pid_lock(
         server_mod.main([])
 
         assert pid_file.exists(), "main() must create the pid file"
-        # Cross-platform: pid file must be non-empty. ``LockFileEx`` blocks
-        # *content* reads from other handles on Windows (#819), but file
-        # metadata via ``stat`` is unaffected — so a regression where
+        # Cross-platform: pid file must be non-empty. The Windows mandatory
+        # range lock (``msvcrt.locking``) blocks *content* reads from other
+        # handles (#819), but file metadata via ``stat`` is unaffected — so a regression where
         # ``main()`` creates and locks an empty pid file would still trip
         # this assertion on Windows. ``probe_pid_file`` (and uninstall /
         # status diagnostics) call ``read_text().strip()`` on the file when
@@ -714,7 +714,7 @@ def test_server_main_acquires_portalocker_pid_lock(
             "returning, on every platform"
         )
         # POSIX-only: read pid-file content via a fresh handle. Windows
-        # ``LockFileEx`` blocks reads from other handles, so this would
+        # ``msvcrt.locking`` blocks reads from other handles, so this would
         # raise ``PermissionError`` (#819). The lock-owning handle lives
         # in ``main()``'s closure (``_lock_fp``) and isn't reachable from
         # here. The cross-platform ``stat().st_size`` check above pins the

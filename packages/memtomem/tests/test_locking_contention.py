@@ -207,8 +207,9 @@ class TestLivenessProbeContention:
 
         The pid value is best-effort: POSIX flock is advisory and the
         probe can read the pid alongside the holder, but on Windows
-        ``LockFileEx``'s mandatory exclusive lock blocks reads of the
-        locked byte range. The production code degrades gracefully to
+        ``msvcrt.locking``'s mandatory exclusive lock blocks reads of the
+        locked byte range (the first 64 KiB, which spans these small pid
+        files). The production code degrades gracefully to
         ``pid=None`` in that case (the user-facing message just says
         "server alive" without a pid). The assertion here therefore
         accepts both — the contract is ``alive=True``, not a specific
@@ -391,8 +392,8 @@ class TestCheckServerLivenessStoreScope:
     names, and must NOT report a *foreign* store's live server (#1990).
 
     In-process ``portalocker`` holders are sufficient here: ``flock`` /
-    ``LockFileEx`` contention is per open handle, and the uninstall suite
-    already relies on the same pattern (``_hold_pid_lock``).
+    ``msvcrt.locking`` contention is per open handle, and the uninstall
+    suite already relies on the same pattern (``_hold_pid_lock``).
     """
 
     @pytest.fixture()

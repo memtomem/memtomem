@@ -1,9 +1,10 @@
 """Instance registry (#1935): registration, probing, GC, and fail-closed probes.
 
 Lock behavior is validated **cross-process** (spawn) per the repo
-convention (see ``test_locking_contention.py``): portalocker delegates to
-``fcntl.flock`` / ``LockFileEx``, both process-level, and Windows can even
-grant a second same-process handle — so in-process contention proves
+convention (see ``test_locking_contention.py``): in-process contention rides
+on backend details — ``fcntl.flock`` attaches per open file description, and
+Windows uses a different backend entirely (``msvcrt.locking``, portalocker's
+default for exclusive locks since 3.2) — so in-process contention proves
 nothing. In-process tests here cover only pure parsing, state, and
 fail-open/fail-closed decision logic.
 """
@@ -426,8 +427,8 @@ class TestEnumerationInProcess:
         assert result.complete and result.instances == ()
 
     def test_own_registration_included_without_probing(self, rt, db):
-        """Windows same-process handles can acquire the flock
-        (``indexing/debounce.py``) — self must never be probed stale."""
+        """Own registrations come from ``_active``, not from a probe —
+        self must never be probed stale."""
         inst = reg.register_instance(db)
         assert inst is not None
         try:

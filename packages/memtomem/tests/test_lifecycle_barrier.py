@@ -8,9 +8,11 @@ process lifetime, uninstall takes it *exclusive* across its final
 re-probe and the whole staging phase.
 
 Contention is validated **cross-process** (spawn) per the repo convention
-(``test_locking_contention.py``): flock/``LockFileEx`` are process-level,
-and Windows may even grant a second same-process handle, so in-process
-contention proves nothing.
+(``test_locking_contention.py``): the guarantee under test is cross-process,
+and in-process contention rides on backend details — on Windows the barrier
+even mixes backends (``LockFileEx`` via pywin32 for the server's ``LOCK_SH``
+side, ``msvcrt.locking`` for uninstall's ``LOCK_EX`` side) — so only a spawned
+holder exercises the real contract.
 
 One rule shapes every release test here: the autouse
 ``_isolated_instance_registry`` fixture sweeps leaked barriers at
@@ -365,7 +367,11 @@ class _FakePywinError(Exception):
     """Stand-in for ``pywintypes.error``: derives from ``Exception`` (not
     ``OSError``), carries ``.winerror`` and *no* ``.errno`` — exactly the
     real Win32 exception's shape (#1957) — so the classifier can be
-    exercised on non-Windows CI. Defaults to the lock-violation code."""
+    exercised on non-Windows CI. Defaults to the lock-violation code.
+
+    The fake funcname stays ``"LockFileEx"`` and is accurate: a real
+    ``pywintypes.error`` can only arise from the Win32 backend, the sole
+    one that calls that API — on this barrier, the ``LOCK_SH`` side."""
 
     def __init__(
         self, winerror: int = reg._WINERROR_LOCK_VIOLATION, strerror: str = "lock violation"

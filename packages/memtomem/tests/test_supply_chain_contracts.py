@@ -251,10 +251,11 @@ def test_windows_shared_locks_declare_pywin32() -> None:
     ``_instance_registry.acquire_server_lifecycle_barrier`` takes the barrier
     with ``LOCK_SH`` on every OS, Windows included. portalocker 3.x listed
     ``pywin32; platform_system == "Windows"`` unconditionally, so that worked
-    for free. 4.0.0 moved it behind a ``win32`` extra and made
-    ``MsvcrtLocker`` the default Windows locker; msvcrt has no shared lock, so
-    that locker raises ``ImportError`` when ``LockFlags.SHARED`` is requested
-    without pywin32. ``ImportError`` is in neither ``_LOCK_CONTENDED`` nor
+    for free; 4.0.0 moved it behind a ``win32`` extra. ``MsvcrtLocker`` has
+    been the default Windows locker since 3.2.0 (a separate change, often
+    conflated with this one) and msvcrt has no shared lock, so it delegates
+    ``LockFlags.SHARED`` to ``Win32Locker`` and raises ``ImportError`` when
+    pywin32 is absent. ``ImportError`` is in neither ``_LOCK_CONTENDED`` nor
     ``_BARRIER_LOCK_ERRORS``, so it escapes the barrier unhandled — a crash,
     not a degraded lock.
 

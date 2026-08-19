@@ -103,12 +103,18 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
     lockfile itself is never renamed, so its inode is stable.
 
     Cross-platform via ``portalocker`` (POSIX ``fcntl.flock`` / Windows
-    ``LockFileEx``). Locks are per-open-file-description, so two acquisitions
-    in the *same* process (separate ``os.open`` fds) still contend — which is
-    what makes the in-process contention tests meaningful.
+    ``msvcrt.locking``, portalocker's default exclusive-lock backend since
+    3.2). Locks attach per open file description (POSIX) / per open handle
+    (Windows), so two acquisitions in the *same* process (separate
+    ``os.open`` fds) still contend — which is what makes the in-process
+    contention tests meaningful — including on Windows, where those
+    timeout tests run unskipped in CI.
 
-    ``timeout`` (seconds): ``None`` (default) blocks indefinitely on
-    ``LOCK_EX``, matching POSIX semantics — correct for the narrow
+    ``timeout`` (seconds): ``None`` (default) hands ``LOCK_EX`` to the
+    backend's own blocking mode — an unbounded wait on POSIX; on Windows
+    ``msvcrt.locking`` detects contention and can raise ``AlreadyLocked``
+    instead of waiting (#759), so callers that must not fail on contention
+    pass a bound and retry. Correct as-is for the narrow
     ``load → mutate → atomic_write_bytes`` windows in
     :mod:`memtomem.context.lockfile` / :mod:`memtomem.context.projects`. Pass a
     bound when the lock is acquired from a context that must not block forever
@@ -180,12 +186,13 @@ def _lock_path_for(data_path: Path) -> Path:
 #       while the current holder is a *suspended task on the same loop*
 #       (portalocker/flock contends between fds within one process) = permanent
 #       deadlock. ``async_file_lock`` is itself two-layered — an in-process
-#       asyncio guard THEN the cross-process flock — because Windows
-#       ``LockFileEx`` does not reliably block a second handle from one process
-#       (same reason ``debounce._Lock`` #759 pairs a threading.Lock with the
-#       flock). #1566: if the parent dir is gone, the sidecar is SKIPPED (never
-#       mkdir-resurrect it); that decision is made once by the outermost
-#       acquirer and flows down as ``index_file(lock_held=True)``.
+#       asyncio guard THEN the cross-process flock — so same-process callers
+#       queue in memory instead of burning the flock's bounded poll budget
+#       against each other (``debounce._Lock`` pairs a threading.Lock with
+#       the flock for the same reason). #1566: if the parent dir is gone,
+#       the sidecar is SKIPPED (never mkdir-resurrect it); that decision
+#       is made once by the outermost acquirer and flows down as
+#       ``index_file(lock_held=True)``.
 #   L3  IndexEngine._index_lock. ``index_file(lock_held=True)`` asserts the
 #       caller already holds (or #1566-skipped) this file's L2 sidecar and
 #       enters at L3 directly; the sidecar is HOISTED above ``_index_lock`` so
@@ -258,10 +265,11 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
     Two layers, released in reverse order:
 
     1. **In-process** per-path ``asyncio.Lock`` (``_intra_async_lock_for``).
-       Acquired first with the shared deadline. Required because Windows
-       ``LockFileEx`` does not reliably block a second handle from the same
-       process, so the flock alone would let two concurrent in-process handlers
-       (e.g. two ``mm web`` chunk-edit requests) race. This is also what gives
+       Acquired first with the shared deadline. Required so same-process
+       callers queue in memory rather than spending the shared timeout
+       budget polling the flock against each other — two concurrent
+       in-process handlers (e.g. two ``mm web`` chunk-edit requests) would
+       otherwise race for it. This is also what gives
        web/CLI callers — which hold no L1 ``AppContext`` lock — in-process
        serialization.
     2. **Cross-process** ``portalocker.LOCK_EX`` on the sidecar. Acquired

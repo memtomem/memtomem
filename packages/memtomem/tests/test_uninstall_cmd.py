@@ -33,7 +33,8 @@ def _hold_pid_lock(pid_file: Path) -> Iterator[None]:
     Mirrors what ``server/__init__.py:main`` does at runtime so the
     portalocker-based liveness probe (#387, #817) sees a live writer.
     Cross-platform via ``portalocker``; on Windows ``"rb+"`` open is
-    required by the ``MsvcrtLocker`` backend (see ``cli/_liveness.py:54``).
+    required by the ``MsvcrtLocker`` backend (see the writable-handle
+    comment in ``cli/_liveness.py:probe_pid_file``).
     """
     import portalocker
 
@@ -657,8 +658,9 @@ class TestServerAliveRefuses:
         ``_hold_pid_lock`` takes ``LOCK_EX``, i.e. exactly the pre-0.1.25
         posture.
 
-        Cross-platform via portalocker (#817/#819). On Windows
-        ``LockFileEx`` blocks ``read`` from other handles too, so
+        Cross-platform via portalocker (#817/#819). On Windows the
+        mandatory range lock (``msvcrt.locking``) blocks ``read`` from
+        other handles too, so
         ``probe_pid_file`` cannot read the pid number out of the locked
         file and the message takes the unknown-pid branch with a
         Sysinternals/Resource Monitor hint instead of the POSIX
@@ -677,7 +679,8 @@ class TestServerAliveRefuses:
         assert result.exit_code == 2
         assert "Server still running" in result.output
         if sys.platform == "win32":
-            # Windows: pid is None (read blocked by LockFileEx), so the
+            # Windows: pid is None (read blocked by the mandatory range
+            # lock), so the
             # message points at handle.exe / Resource Monitor, not lsof.
             assert "handle.exe" in result.output or "Resource Monitor" in result.output, (
                 f"Windows refusal must point at a holder-finder; got: {result.output!r}"
@@ -727,8 +730,8 @@ class TestServerAliveRefuses:
         during the transition window and uninstall must still refuse.
 
         Same Windows caveat as ``test_refuses_when_server_alive_at_legacy_path``:
-        the recorded pid is unreachable behind ``LockFileEx``, so the
-        message routes through the unknown-pid branch with a
+        the recorded pid is unreachable behind the Windows mandatory range
+        lock, so the message routes through the unknown-pid branch with a
         Sysinternals hint.
         """
         from memtomem._runtime_paths import ensure_runtime_dir
@@ -2990,9 +2993,9 @@ class TestUninstallAlwaysReleasesTheBarrier:
     def _assert_free(reg) -> None:
         """Prove the barrier is free from another *process*.
 
-        Same-process re-acquisition is the weaker check: Windows can grant
-        a second handle in the owning process, so a dropped ``release()``
-        could pass there and then be hidden by the autouse sweep.
+        Same-process re-acquisition is the weaker check: it does not
+        exercise the cross-process contract, and a dropped ``release()``
+        could then be hidden by the autouse sweep.
         """
         import multiprocessing as mp
 

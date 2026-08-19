@@ -7,10 +7,14 @@ and whichever ``os.replace``\\s second silently discards the other's delta.
 ``_config_write_lock`` (a ``portalocker`` sidecar lock, ``.config.json.lock``)
 serializes that window.
 
-Uses ``multiprocessing`` (not threads) because portalocker delegates to
-``fcntl.flock`` / ``LockFileEx``, both process-level — a single process holding
-two refs would not contend. No ``skipif(win32)``: the guarantee is meant to
-hold on every supported OS. Mirrors ``test_locking_contention.py``.
+Uses ``multiprocessing`` (not threads) per the repo locking-test convention
+(``test_locking_contention.py``): only a spawn child proves the cross-process
+guarantee this lock exists for. In-process contention rides on backend details
+— ``fcntl.flock`` attaches per open file description, and Windows uses a
+different backend entirely (``msvcrt.locking``, portalocker's default for
+exclusive locks since 3.2), so an in-process holder does not model a foreign
+writer. No
+``skipif(win32)``: the guarantee is meant to hold on every supported OS.
 """
 
 from __future__ import annotations

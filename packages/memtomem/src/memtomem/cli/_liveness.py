@@ -8,8 +8,11 @@ leftover or fresh and unowned). If we cannot, a writer is alive, regardless
 of whether the recorded PID is still valid or has been recycled.
 
 Cross-platform via ``portalocker`` (POSIX ``fcntl.flock`` / Windows
-``LockFileEx``); both surface the same non-blocking-acquire contract, so
-the probe is real on every supported OS.
+``msvcrt.locking``, portalocker's default exclusive-lock backend since 3.2;
+the only shared-lock site in this module is the POSIX-only legacy classifier
+below, so Windows never reaches the ``LockFileEx`` shared backend). Every
+backend surfaces the same non-blocking-acquire contract, so the probe is
+real on every supported OS.
 
 The legacy ``~/.memtomem/.server.pid`` path is the exception to the pure
 exclusive probe: on POSIX it is classified shared-vs-exclusive first, and
@@ -334,8 +337,11 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     is still valid (kernel may have recycled it; see #387).
 
     Real probe on every OS; portalocker dispatches to ``fcntl.flock`` on
-    POSIX and ``LockFileEx`` on Windows. Replaces the prior conservative
-    "pid file exists → assume alive" Windows fallback (see #448, #625).
+    POSIX and ``msvcrt.locking`` on Windows (portalocker's default
+    exclusive-lock backend since 3.2; only shared locks reach
+    ``LockFileEx``). Replaces the prior
+    conservative "pid file exists → assume alive" Windows fallback (see
+    #448, #625).
     """
     try:
         opened = _open_verified_regular(pid_file, writable=True)

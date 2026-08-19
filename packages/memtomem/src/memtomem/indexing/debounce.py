@@ -8,7 +8,9 @@ in a burst can record the path cheaply and the *last* hook in the burst, or
 a later flush, drains the entries that have been silent for at least the
 debounce window.
 
-The queue is a single JSON file under ``~/.memtomem/`` guarded by ``flock``.
+The queue is a single JSON file under ``~/.memtomem/``, guarded by a
+threading.Lock plus a ``portalocker`` lock on a *sidecar* file (see
+:class:`_Lock` for why the queue file itself is the wrong thing to lock).
 Each entry tracks ``first_seen``, ``last_seen``, plus the ``namespace`` and
 ``force`` flags that should apply to the eventual indexing call. When the
 same path is enqueued again with different flags, last-write wins (the most
@@ -16,9 +18,10 @@ recent caller's intent).
 
 Synchronization model:
 
-- Every queue mutation (enqueue, drain) takes ``LOCK_EX`` on the queue file.
-  Concurrent ``mm index --debounce-window`` calls serialize cleanly without
-  losing entries.
+- Every queue mutation (enqueue, drain) goes through :class:`_Lock`: an
+  in-process ``threading.Lock`` keyed by the sidecar path, then ``LOCK_EX``
+  on the sidecar. Concurrent threads and concurrent ``mm index
+  --debounce-window`` processes both serialize without losing entries.
 - ``--status`` deliberately skips the lock and reads a snapshot. The
   docstring on :func:`status_snapshot` flags the race so callers don't try
   to use status as a decision input — the only correct flush primitive is
@@ -161,12 +164,15 @@ def _save(path: Path, entries: dict[str, QueueEntry]) -> None:
 
 
 # Per-lockfile ``threading.Lock`` for intra-process serialization. The
-# file lock (``portalocker.lock``) is the cross-process barrier, but on
-# Windows ``LockFileEx`` does not reliably block a *second handle* from
-# the *same* process holding the file open through ``open(..., "a+b")`` —
-# two threads in one Python process each opening the sidecar lockfile
-# can both pass ``portalocker.lock(LOCK_EX)`` and race the read-modify-
-# write of the queue, losing entries (#759 failure 2). Holding a
+# file lock (``portalocker.lock``) is the cross-process barrier, but a
+# *blocking* acquire does not reliably block on Windows: with 20 threads in
+# one Python process contending on this sidecar, 9 of their blocking
+# ``portalocker.lock(LOCK_EX)`` calls raised ``AlreadyLocked``
+# (``EDEADLK``) instead of waiting, killing those threads and losing their
+# entries — 11 of 20 landed (#759 failure 2). The backend is
+# ``msvcrt.locking`` (portalocker's Windows exclusive default then, 3.2.0,
+# and now): contention is detected, but the caller gets an exception rather
+# than a queue slot. Holding a
 # threading.Lock keyed to the lockfile path before acquiring the file
 # lock collapses same-process contention to a single waiter, so
 # portalocker only ever sees one handle per process competing.
@@ -206,10 +212,11 @@ class _Lock:
     - **Intra-process** ``threading.Lock`` keyed by the lockfile path
       (``_intra_process_lock_for``). Acquired first; serializes threads
       inside a single Python process before any file-handle work.
-      Required because Windows ``LockFileEx`` does not reliably block a
-      second handle from the same process — without this layer, a
-      multi-threaded plugin host (e.g. Claude Code's bursty ``Write``
-      hook fanout) loses queue entries on Windows.
+      Required because a blocking file-lock acquire raises rather than
+      waits under Windows contention (#759 failure 2; see the module
+      comment above) — without this layer, a multi-threaded plugin host
+      (e.g. Claude Code's bursty ``Write`` hook fanout) loses queue
+      entries on Windows.
     - **Cross-process** ``portalocker.lock(LOCK_EX)`` on the sidecar
       lockfile. Acquired second; serializes parallel ``mm index
       --debounce-window`` invocations that don't share Python state.

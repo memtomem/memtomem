@@ -14,9 +14,9 @@ gate ordering, not the wipe itself (``reset_all`` is covered in
   write boundaries — ``initialize()`` and backup + ``reset_all()`` — is
   never ``--force``-overridable, and is released after a confirmed (or
   never-opened) storage close but *retained* on an unconfirmed one
-  (proven from a separate process: the autouse
-  ``_isolated_instance_registry`` sweep and Windows same-process
-  reacquire both make in-process checks false evidence);
+  (proven from a separate process: an in-process re-acquire does not
+  exercise the cross-process contract, and the autouse
+  ``_isolated_instance_registry`` sweep would mask a leak anyway);
 * the store identity counted in Phase A is revalidated under the Phase B
   barrier, so a database removed or swapped during the prompt is refused
   rather than wiped or resurrected on stale consent;
@@ -556,10 +556,10 @@ def reg():
 def _assert_barrier_free(reg) -> None:
     """Prove the barrier is free from another *process*.
 
-    Same-process re-acquisition is the weaker check (Windows can grant a
-    second handle in the owning process), and the autouse fixture sweeps
-    leaked holds at teardown — so this must run inside the test, via a
-    spawned child.
+    Same-process re-acquisition is the weaker check (it does not exercise
+    the cross-process contract), and the autouse fixture sweeps leaked
+    holds at teardown — so this must run inside the test, via a spawned
+    child.
     """
     ctx = mp.get_context("spawn")
     q = ctx.Queue()

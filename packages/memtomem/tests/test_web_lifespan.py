@@ -598,9 +598,12 @@ async def test_lifespan_releases_barrier_when_pre_yield_step_fails():
 
 
 # --- cross-process contention infra (spawn) ---------------------------------
-# flock / LockFileEx are process-level and Windows may grant a second
-# same-process handle, so an in-process contender proves nothing — the barrier
-# suite validates contention cross-process (see ``test_lifecycle_barrier.py``).
+# The guarantee under test is cross-process, and in-process contention rides
+# on backend details (on Windows the barrier's ``LOCK_SH`` side uses
+# ``LockFileEx`` via pywin32, the ``LOCK_EX`` side ``msvcrt.locking``), so an
+# in-process contender proves nothing
+# — the barrier suite validates contention cross-process (see
+# ``test_lifecycle_barrier.py``).
 # The two wiring tests below reuse that spawn pattern: a child holds one lock
 # mode while the web lifespan takes the other in this process.
 
@@ -688,8 +691,8 @@ async def test_exclusive_holder_blocks_web_lifespan(rt, monkeypatch):
     is refused and never opens storage.
 
     Cross-process by construction (the exclusive holder is a spawned child) —
-    an in-process contender proves nothing on Windows, where the same-process
-    handle may be granted. The parent's acquire budget is shortened so the
+    an in-process contender would not exercise the cross-process contract this
+    barrier exists for. The parent's acquire budget is shortened so the
     refusal resolves fast."""
     import memtomem._instance_registry as reg
 
