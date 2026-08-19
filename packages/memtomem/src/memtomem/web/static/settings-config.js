@@ -1580,6 +1580,19 @@ function _showReindexWarning(applied) {
         } else {
           const total = (res.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
           showToast(t('toast.reindex_complete', { count: total }), 'success');
+          // #2061: this is a forced reindex, which preserves stored
+          // namespaces — aggregate the per-root advisory so a rule change
+          // that did not take effect is not silently reported as done.
+          namespaceAdvisoryToast({
+            namespaces_preserved_against_rules: (res.results || []).reduce(
+              (s, r) => s + (Number(r.namespaces_preserved_against_rules) || 0),
+              0,
+            ),
+            namespaces_reassigned: (res.results || []).reduce(
+              (s, r) => s + (Number(r.namespaces_reassigned) || 0),
+              0,
+            ),
+          });
           completed = true;
           btn.textContent = t('common.done');
         }

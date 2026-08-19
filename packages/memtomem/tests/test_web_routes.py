@@ -3658,6 +3658,7 @@ class TestReindexAll:
         assert results[1]["namespaces_preserved_against_rules"] == 0
         assert results[0]["namespaces_reassigned"] == 0
         assert results[0]["namespace_moves"] == []
+        assert results[1]["namespace_moves"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,8 @@
       "versions": {
         "159": "1c14eca3a752e38455010d4b047be31bfb86e7a6b810be8073ed2533c790259f",
         "160": "f20b7aa7a13e724ab2b319d27685430b89cded4f1939f1ff04c4ee18cdb2e8b2",
-        "161": "1f0b6b499ccc39efdcf1f2cf0483b88c33a2942a50418e36169932b9549506cf"
+        "161": "1f0b6b499ccc39efdcf1f2cf0483b88c33a2942a50418e36169932b9549506cf",
+        "162": "b401d1600175cc0932870822ea4bb49a8619eceda29c0da9eae8b72ecf6b875e"
       }
     },
     "/chunk-progress.js": {
@@ -76,7 +77,8 @@
     },
     "/settings-config.js": {
       "versions": {
-        "20": "ab4c95253582558da40802a7ecf0714ae82be41a7d847c7bb231c9ac63719276"
+        "20": "ab4c95253582558da40802a7ecf0714ae82be41a7d847c7bb231c9ac63719276",
+        "21": "5b8910bab8a8856ce0b01f886bde0939f93d640075003ff89512d72b3d68d118"
       }
     },
     "/settings-harness.js": {

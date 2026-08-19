@@ -21,9 +21,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   alongside `--namespace` and the debounce modes). A plain `--force` run now
   reports how many files kept a namespace the rules disagree with and names
   that command, so the old workflow tells you what to run instead of failing
-  silently. Affects every force surface — `mm index --force`,
-  `mem_index(force=true)`, and the web bulk force paths; reassignment is CLI
-  only for now. A forced re-index of a file whose chunks span several
+  silently. Affects every force surface that passes no namespace —
+  `mm index --force`, `mem_index(force=true)`, and the web bulk force paths;
+  reassignment is CLI only for now. (Unchanged and pre-existing: inside an
+  agent session `mem_index` passes that session's namespace explicitly, and an
+  explicit namespace still wins.) A forced re-index of a file whose chunks span several
   namespaces is now refused per-file (the run continues) rather than
   flattening them into one. Python API: `IndexEngine.effective_namespace_for`
   keeps `force` with the new meaning and gains `reassign`, and the index

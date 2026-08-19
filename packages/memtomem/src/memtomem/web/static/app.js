@@ -5490,6 +5490,7 @@ async function _reindexSourceFile(path, btn) {
     } else {
       showToast(t('toast.source_reindexed', { count }), 'success');
     }
+    namespaceAdvisoryToast(resp);
     _markDataStale();
     loadStats();
     await loadSources();
@@ -6842,6 +6843,31 @@ function _blockedIndexToast(blockedFiles, blockedProjectSharedFiles) {
   return true;
 }
 
+// #2061: ``namespace_moves`` travels as {from, to, files} records so callers
+// can reason about the endpoints; only rendering turns them into lines.
+function formatNamespaceMoves(moves) {
+  return (Array.isArray(moves) ? moves : []).map(
+    (m) => `${m.from} → ${m.to}: ${m.files} file(s)`,
+  );
+}
+
+// #2061: a forced reindex preserves stored namespaces, so a rule change that
+// did not take effect is otherwise invisible. Every force workflow — the
+// Index tab's result table, the per-source Reindex button, and the settings
+// "reindex needed" banner — reports it through here rather than each growing
+// its own copy. Returns true when something was surfaced.
+function namespaceAdvisoryToast(result) {
+  const preserved = Number(result && result.namespaces_preserved_against_rules) || 0;
+  const reassigned = Number(result && result.namespaces_reassigned) || 0;
+  if (preserved > 0) {
+    showToast(t('index.result.namespace_preserved', { count: preserved }), 'warning');
+  }
+  if (reassigned > 0) {
+    showToast(t('index.result.namespace_reassigned', { count: reassigned }), 'warning');
+  }
+  return preserved > 0 || reassigned > 0;
+}
+
 // ADR-0006 PR-B: render an index result. The shape is identical whether it
 // arrives via the SSE ``complete`` event (folder stream) or the force_unsafe
 // ``POST /api/index`` response (IndexingStats either way), so both call this:
@@ -6885,13 +6911,15 @@ function _renderIndexResult(result, { registerAsSource, path }) {
   if (nsAdvisoryRow) {
     const preserved = Number(result.namespaces_preserved_against_rules) || 0;
     const reassigned = Number(result.namespaces_reassigned) || 0;
-    const moves = Array.isArray(result.namespace_moves) ? result.namespace_moves : [];
     const lines = [];
     if (preserved > 0) {
       lines.push(t('index.result.namespace_preserved', { count: preserved }));
     }
     if (reassigned > 0) {
-      lines.push(t('index.result.namespace_reassigned', { count: reassigned }), ...moves);
+      lines.push(
+        t('index.result.namespace_reassigned', { count: reassigned }),
+        ...formatNamespaceMoves(result.namespace_moves),
+      );
     }
     qs('r-namespace-advisory').textContent = lines.join('\n');
     nsAdvisoryRow.hidden = lines.length === 0;

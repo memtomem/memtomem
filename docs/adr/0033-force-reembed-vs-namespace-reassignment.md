@@ -111,6 +111,16 @@ migration does not earn budget that every call pays for. MCP and web callers
 keep `force` with its now-honest meaning and receive the preservation
 advisory, which names the CLI command.
 
+One pre-existing exception bounds the "every caller" claim: inside an agent
+session, `mem_index` resolves the session's namespace and passes it as an
+*explicit* one (#2004), which short-circuits preservation the way any explicit
+namespace does. So `mem_index(force=true)` under a session still stamps what
+it indexes with `agent-runtime:<id>`. That behavior predates this ADR and is
+not what #2061 reported — the reported path is the CLI recovery command, which
+passes no namespace — but it is the reason this ADR says preservation holds
+"for callers that pass no namespace" rather than "always". Narrowing session
+inheritance to sources with no stored rows is tracked separately.
+
 ## Alternatives considered
 
 **Preserve only system-scoped namespaces (`agent-runtime:`, `archive:`) under

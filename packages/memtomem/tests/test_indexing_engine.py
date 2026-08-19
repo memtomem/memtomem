@@ -2115,7 +2115,7 @@ class TestBulkNamespacePrepass:
         assert await components.storage.namespaces_for_source(fp) == ["ruled"]
         assert stats.resolved_namespaces == ("ruled",)
         assert stats.namespaces_reassigned == 1
-        assert stats.namespace_moves == ("personal → ruled: 1 file(s)",)
+        assert stats.namespace_moves == ({"from": "personal", "to": "ruled", "files": 1},)
         assert stats.namespaces_preserved_against_rules == 0
 
     async def test_reassign_implies_force_so_unchanged_files_move(self, components, memory_dir):
@@ -2188,7 +2188,9 @@ class TestBulkNamespacePrepass:
 
         stats = await engine.index_path(memory_dir, recursive=True, force=True)
 
-        assert any("mixed.md" in err for err in stats.errors)
+        # Named exactly once: the exception carries no filename because the
+        # bulk wrapper prefixes the basename when it flattens per-file errors.
+        assert [err for err in stats.errors if err.count("mixed.md") == 1]
         # Permanent: re-running changes nothing, so it must not be queued for
         # retry alongside genuine store outages.
         assert stats.retryable_errors == ()
@@ -2326,7 +2328,7 @@ class TestBulkNamespacePrepass:
         complete = next(ev for ev in events if ev["type"] == "complete")
 
         assert complete["namespaces_reassigned"] == 1
-        assert complete["namespace_moves"] == ["personal → ruled: 1 file(s)"]
+        assert complete["namespace_moves"] == [{"from": "personal", "to": "ruled", "files": 1}]
 
     async def test_a_failed_upsert_is_not_counted_as_a_move(
         self, components, memory_dir, monkeypatch

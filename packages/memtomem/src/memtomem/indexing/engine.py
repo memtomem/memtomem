@@ -518,9 +518,18 @@ class _NamespaceTally:
                 continue
             self.moves[(old_canonical, target)] = self.moves.get((old_canonical, target), 0) + 1
 
-    def summary(self) -> tuple[str, ...]:
+    def summary(self) -> tuple[dict[str, object], ...]:
+        """Moves as structured records, not rendered lines.
+
+        Rendering here would force every consumer to parse the string back
+        apart. The CLI's system-scope warning needs both endpoints (a move
+        from one system namespace to another exposes nothing) and the file
+        count (one line can stand for many files), so the numbers travel as
+        numbers.
+        """
         return tuple(
-            f"{old} → {new}: {count} file(s)" for (old, new), count in sorted(self.moves.items())
+            {"from": old, "to": new, "files": count}
+            for (old, new), count in sorted(self.moves.items())
         )
 
 
@@ -1640,8 +1649,12 @@ class IndexEngine:
                 file_path,
                 ", ".join(sorted(ns_decision.stored)),
             )
+            # No filename here: both bulk paths prefix the basename when they
+            # flatten a per-file exception, and prefixing in two layers renders
+            # ``mixed.md: mixed.md: …``. The single-file callers surface the
+            # exception type itself, which names the file in the log above.
             raise NamespaceMixedUnderForceError(
-                f"{file_path.name}: chunks span several namespaces "
+                f"chunks span several namespaces "
                 f"({', '.join(sorted(ns_decision.stored))}) and a forced re-index "
                 "rewrites every one of them, so all rows would collapse into one "
                 "namespace. Re-run without --force, pass an explicit namespace to "

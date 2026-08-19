@@ -276,9 +276,12 @@ class IndexingStats:
     # would have assigned a different one — the signal that a rule edit has
     # not taken effect, and the prompt for ``mm index --reassign-namespaces``.
     # ``namespaces_reassigned`` counts files a reassignment run actually moved
-    # (committed writes only), and ``namespace_moves`` renders those moves as
-    # ``"old → new: N file(s)"`` lines, sorted. Appended last for positional
+    # (committed writes only), and ``namespace_moves`` records those moves as
+    # ``{"from": str, "to": str, "files": int}`` entries, sorted — structured
+    # rather than rendered so a consumer can tell a move *between* system
+    # namespaces from one that makes chunks newly visible, and can sum files
+    # instead of counting summary lines. Appended last for positional
     # construction compatibility.
     namespaces_preserved_against_rules: int = 0
     namespaces_reassigned: int = 0
-    namespace_moves: tuple[str, ...] = ()
+    namespace_moves: tuple[dict[str, object], ...] = ()

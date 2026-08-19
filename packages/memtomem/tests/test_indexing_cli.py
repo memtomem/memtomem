@@ -519,7 +519,7 @@ class TestReassignNamespacesFlag:
 
         event = _make_complete_event(total_files=1, indexed=1)
         event["namespaces_reassigned"] = 1
-        event["namespace_moves"] = ["agent-runtime:planner → default: 1 file(s)"]
+        event["namespace_moves"] = [{"from": "agent-runtime:planner", "to": "default", "files": 1}]
         _install_fake_engine(monkeypatch, events=[event])
 
         asyncio.run(
@@ -535,7 +535,69 @@ class TestReassignNamespacesFlag:
         lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
         assert "1 file(s) reassigned to a rule-resolved namespace:" in lines
         assert "agent-runtime:planner → default: 1 file(s)" in lines
-        assert any("moved rows out of a system-scoped" in line for line in lines)
+        assert "→ 1 file(s) moved out of a system-scoped namespace (agent session or" in " ".join(
+            lines
+        )
+
+    def test_a_move_between_system_namespaces_is_not_called_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The warning is about *exposure*. Rows that land in another
+        system-scoped namespace stay hidden from a default search, so saying
+        they are "now visible" would be false."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=1, indexed=1)
+        event["namespaces_reassigned"] = 1
+        event["namespace_moves"] = [
+            {"from": "agent-runtime:planner", "to": "archive:old", "files": 1}
+        ]
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(
+            _index(
+                str(target),
+                recursive=True,
+                force=False,
+                namespace=None,
+                reassign_namespaces=True,
+            )
+        )
+
+        out = capsys.readouterr().out
+        assert "agent-runtime:planner → archive:old: 1 file(s)" in out
+        assert "now visible" not in out
+
+    def test_the_warning_counts_files_not_summary_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """One ``old → new`` line can stand for many files; reporting the
+        number of lines would understate the exposure."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=7, indexed=7)
+        event["namespaces_reassigned"] = 7
+        event["namespace_moves"] = [
+            {"from": "agent-runtime:planner", "to": "default", "files": 5},
+            {"from": "archive:old", "to": "default", "files": 2},
+        ]
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(
+            _index(
+                str(target),
+                recursive=True,
+                force=False,
+                namespace=None,
+                reassign_namespaces=True,
+            )
+        )
+
+        assert "7 file(s) moved out of a system-scoped namespace" in capsys.readouterr().out
 
 
 class TestIndexBarLengthFromDiscovery:

@@ -151,11 +151,13 @@ class IndexResponse(BaseModel):
     # rules would have assigned a different one. ``force`` re-embeds without
     # re-resolving namespaces, so this is how a client learns a rule change
     # has not been applied (and that `mm index --reassign-namespaces` applies
-    # it). ``namespace_moves`` renders any reassignment as "old → new: N
-    # file(s)"; both stay zero/empty on the common path.
+    # it). ``namespace_moves`` records any reassignment as
+    # ``{"from", "to", "files"}`` entries — structured so a client can tell a
+    # move between system namespaces from one that makes chunks newly visible
+    # — and both stay zero/empty on the common path.
     namespaces_preserved_against_rules: int = 0
     namespaces_reassigned: int = 0
-    namespace_moves: list[str] = []
+    namespace_moves: list[dict[str, object]] = []
 
 
 class PreviewNamespaceResponse(BaseModel):

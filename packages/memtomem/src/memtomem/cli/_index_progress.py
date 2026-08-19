@@ -352,7 +352,7 @@ def print_namespace_advisory(
     *,
     preserved_against_rules: int,
     reassigned: int,
-    moves: Sequence[str],
+    moves: Sequence[dict],
     reassign_hint: str,
     system_namespace_prefixes: Sequence[str] = (),
 ) -> None:
@@ -383,19 +383,28 @@ def print_namespace_advisory(
         return
     click.secho(f"  {reassigned} file(s) reassigned to a rule-resolved namespace:", fg="yellow")
     for move in moves:
-        click.secho(f"    {move}", fg="yellow")
-    # Each move line starts with the namespace moved *out of*, so a prefix
-    # test on the line is a prefix test on that namespace.
-    system_moves = [
-        move
-        for move in moves
-        if any(move.startswith(prefix) for prefix in system_namespace_prefixes)
-    ]
-    if system_moves:
         click.secho(
-            f"  → {len(system_moves)} of these moved rows out of a system-scoped "
-            "namespace (agent session or archive scope). Those chunks are now "
-            "visible to a default search.",
+            f"    {move['from']} → {move['to']}: {move['files']} file(s)",
+            fg="yellow",
+        )
+
+    def _is_system(namespace: object) -> bool:
+        return any(str(namespace).startswith(prefix) for prefix in system_namespace_prefixes)
+
+    # Only a system → non-system transition exposes anything: a move from one
+    # system scope to another (``agent-runtime:a`` → ``archive:x``) stays
+    # hidden from a default search. Files are summed, not lines — one line can
+    # stand for many files.
+    exposed = sum(
+        int(move["files"])
+        for move in moves
+        if _is_system(move["from"]) and not _is_system(move["to"])
+    )
+    if exposed:
+        click.secho(
+            f"  → {exposed} file(s) moved out of a system-scoped namespace "
+            "(agent session or archive scope). Those chunks are now visible "
+            "to a default search.",
             fg="red",
         )
 
