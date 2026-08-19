@@ -2107,21 +2107,63 @@ class TestDeleteChunk:
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, None])
         return source, chunk
 
-    async def test_delete_passes_the_files_namespace_to_the_forced_reindex(
+    async def test_delete_preflights_the_namespace_without_pinning_it(
         self, app, client: AsyncClient, tmp_path: Path
     ):
-        """Issue #2005: the re-index uses ``force=True`` for the re-embed,
-        and force re-resolves namespaces — so without an explicit namespace
-        the survivors of a delete move to whatever the rules say today."""
-        self._real_source_chunk(app, tmp_path)
-        app.state.index_engine.effective_namespace_for = AsyncMock(return_value="aaa")
+        """Issue #2005: the re-index uses ``force=True`` for the re-embed.
+        Back when force also re-resolved namespaces, the survivors of a delete
+        moved to whatever the rules said that day, and the route pinned the
+        file's namespace to stop it. Since #2061 the engine preserves in-lock,
+        so the route pre-flights (to refuse a mixed source before editing the
+        file) but sends no namespace — a pin would freeze a value read outside
+        the write's critical section, and would override the refusal."""
+        from memtomem.indexing.engine import NamespaceDecision
+
+        source, _chunk = self._real_source_chunk(app, tmp_path)
+        app.state.index_engine.namespace_decision_for = AsyncMock(
+            return_value=NamespaceDecision(target="aaa", stored=("aaa",), reason="preserved")
+        )
 
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
         assert resp.status_code == 200, resp.text
+        app.state.index_engine.namespace_decision_for.assert_awaited_once_with(source, force=True)
         kwargs = app.state.index_engine.index_file.await_args.kwargs
         assert kwargs["force"] is True
-        assert kwargs["namespace"] == "aaa"
+        # No pin: the engine preserves in-lock, which is both correct and
+        # fresher than anything the pre-flight read (#2061 review 5). Pinning
+        # would also override the multi-namespace refusal.
+        assert "namespace" not in kwargs
+
+    async def test_delete_refuses_on_a_mixed_namespace_source(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """#2061: pinning the namespace is what lets a delete bypass the
+        forced re-index's multi-namespace refusal. On a legacy source whose
+        rows span several namespaces the pin would be the rule-resolved
+        target, rewriting every survivor into it — so the delete is refused
+        before the file is touched."""
+        from memtomem.indexing.engine import NamespaceDecision
+
+        source, _ = self._real_source_chunk(app, tmp_path)
+        before = source.read_text(encoding="utf-8")
+        app.state.index_engine.namespace_decision_for = AsyncMock(
+            return_value=NamespaceDecision(
+                target=None, stored=("aaa", "agent-runtime:planner"), reason="mixed_force_refused"
+            )
+        )
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 409, resp.text
+        assert "span several namespaces" in resp.json()["detail"]
+        # The pre-flight must ask the same question the write would, or its
+        # answer describes a different operation.
+        app.state.index_engine.namespace_decision_for.assert_awaited_once_with(source, force=True)
+        # Nothing touched: not the file, not the index, not the chunk rows.
+        assert source.read_text(encoding="utf-8") == before
+        app.state.index_engine.index_file.assert_not_awaited()
+        app.state.storage.delete_chunks.assert_not_awaited()
 
     async def test_delete_refuses_when_the_namespace_lookup_fails(
         self, app, client: AsyncClient, tmp_path: Path
@@ -2134,7 +2176,7 @@ class TestDeleteChunk:
 
         source, _chunk = self._real_source_chunk(app, tmp_path)
         before = source.read_text(encoding="utf-8")
-        app.state.index_engine.effective_namespace_for = AsyncMock(
+        app.state.index_engine.namespace_decision_for = AsyncMock(
             side_effect=NamespaceResolutionError("store down")
         )
 
@@ -3615,6 +3657,50 @@ class TestReindexAll:
         assert body["results"][1]["retryable_errors"] == [shared, second_retryable]
         assert body["errors"] == [shared, first_permanent, shared, second_retryable]
         assert body["retryable_errors"] == [shared, shared, second_retryable]
+
+    async def test_reindex_all_reports_the_namespace_advisory_per_root(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """#2061: each root entry is hand-built, so the advisory reaches the
+        client only by being listed there. Unconditional, like
+        ``retryable_errors`` — a zero must be distinguishable from a server
+        that predates the field."""
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        app.state.config.indexing.memory_dirs = [first, second]
+        app.state.config.indexing.project_memory_dirs = []
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=[
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=1,
+                    indexed_chunks=1,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                    namespaces_preserved_against_rules=2,
+                ),
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=1,
+                    indexed_chunks=1,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                ),
+            ]
+        )
+
+        response = await client.post("/api/reindex")
+
+        assert response.status_code == 200, response.text
+        results = response.json()["results"]
+        assert results[0]["namespaces_preserved_against_rules"] == 2
+        assert results[1]["namespaces_preserved_against_rules"] == 0
+        assert results[0]["namespaces_reassigned"] == 0
+        assert results[0]["namespace_moves"] == []
+        assert results[1]["namespace_moves"] == []
 
 
 # ---------------------------------------------------------------------------

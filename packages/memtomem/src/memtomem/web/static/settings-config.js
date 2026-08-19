@@ -1583,6 +1583,11 @@ function _showReindexWarning(applied) {
           completed = true;
           btn.textContent = t('common.done');
         }
+        // #2061: this is a forced reindex, which preserves stored namespaces.
+        // Outside the branches above on purpose — a partial run can preserve
+        // namespaces on the roots that succeeded while another root errors,
+        // and the advisory must not vanish because of the unrelated failure.
+        namespaceAdvisoryToastForRoots(res.results);
         _markDataStale();
         loadStats();
       } catch (err) {

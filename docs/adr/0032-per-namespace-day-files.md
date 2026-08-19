@@ -91,6 +91,19 @@ callers now read the file's namespace with `effective_namespace_for` and pass
 it explicitly, so `force` keeps meaning "re-embed everything" without also
 meaning "re-namespace everything".
 
+> **This paragraph is superseded (2026-08-19, #2061) by
+> [ADR-0033](0033-force-reembed-vs-namespace-reassignment.md).** The trap it
+> predicts was sprung by this project's own documented recovery procedure:
+> `mm embedding-reset --mode apply-current` followed by `mm index --force
+> <memory_dir>` moved every agent-scoped chunk to `default`. Patching callers
+> one at a time to pass the namespace explicitly never reaches the two
+> surfaces a *user* drives. `force` now preserves for every caller that
+> passes no namespace — an explicit one still wins, which includes the
+> session namespace `mem_index` inherits — and rule re-application moved to an
+> explicit `--reassign-namespaces`. The rest of
+> this section — the unanimity rule, the single resolver, and raising rather
+> than falling back on a lookup failure — stands unchanged.
+
 One resolver answers "what namespace will this file's chunks get":
 `IndexingEngine.effective_namespace_for`. `_index_file` uses it, the add
 surfaces' guard uses it — a guard resolving through the rules alone would

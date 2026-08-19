@@ -1184,6 +1184,13 @@ async def reindex_all(
             # standalone classification the client branches on.
             "errors": list(stats.errors),
             "retryable_errors": list(stats.retryable_errors),
+            # #2061: this entry is hand-built, so a new ``IndexingStats``
+            # field reaches the client only by being listed here. Kept
+            # unconditional for the same reason as ``retryable_errors`` — a
+            # zero must be distinguishable from a server that predates it.
+            "namespaces_preserved_against_rules": stats.namespaces_preserved_against_rules,
+            "namespaces_reassigned": stats.namespaces_reassigned,
+            "namespace_moves": list(stats.namespace_moves),
         }
         if stats.blocked_files:
             entry["blocked_paths"] = list(stats.blocked_paths)
@@ -1649,6 +1656,9 @@ async def trigger_index(
         blocked_files=stats.blocked_files,
         blocked_paths=list(stats.blocked_paths),
         blocked_project_shared_files=stats.blocked_project_shared_files,
+        namespaces_preserved_against_rules=stats.namespaces_preserved_against_rules,
+        namespaces_reassigned=stats.namespaces_reassigned,
+        namespace_moves=list(stats.namespace_moves),
     )
 
 

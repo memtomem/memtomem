@@ -90,3 +90,48 @@ class TestMemIndexRetryableErrors:
         assert output.startswith(f"Error (retryable): {retryable}")
         assert output.count(retryable) == 1
         assert "Call mem_index again once the chunk store is reachable." in output
+
+
+class TestMemIndexNamespaceAdvisory:
+    """#2061: ``mem_index`` renders its result by hand, so a new
+    ``IndexingStats`` field reaches this surface only if it is rendered."""
+
+    async def test_preserved_against_rules_is_reported_with_the_remedy(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=2,
+                total_chunks=4,
+                indexed_chunks=4,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                namespaces_preserved_against_rules=2,
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "- Namespaces preserved: 2 file(s)" in output
+        assert "mm index --reassign-namespaces" in output
+
+    async def test_quiet_when_nothing_was_preserved_against_the_rules(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=1,
+                total_chunks=1,
+                indexed_chunks=1,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "Namespaces preserved" not in output

@@ -353,6 +353,9 @@ function _buildMemoryDirsPanel(initialDirs) {
       );
       const count = (resp && resp.indexed_chunks) || 0;
       const errors = Array.isArray(resp && resp.errors) ? resp.errors : [];
+      // #2061: a re-index preserves each file's stored namespace, so a
+      // namespace rule that has not taken effect is invisible without this.
+      if (typeof namespaceAdvisoryToast === 'function') namespaceAdvisoryToast(resp);
       if (errors.length) {
         const presentation = indexingErrorToast(
           t('toast.memory_dir.reindex_partial', {
@@ -407,6 +410,11 @@ function _buildMemoryDirsPanel(initialDirs) {
       } else {
         const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
         showToast(t('toast.reindex_complete', { count: total }), 'success');
+      }
+      // #2061: outside the branches above — a partial run can preserve
+      // namespaces on the roots that succeeded while another root errors.
+      if (typeof namespaceAdvisoryToastForRoots === 'function') {
+        namespaceAdvisoryToastForRoots(resp.results);
       }
       if (typeof _markDataStale === 'function') _markDataStale();
       if (typeof loadStats === 'function') loadStats();
@@ -1232,6 +1240,9 @@ async function mdReindexOne(path, btn) {
       } else {
         showToast(t('toast.memory_dir.reindex_done', { path, count: indexed }), 'success');
       }
+      // #2061: a re-index preserves each file's stored namespace, so a rule
+      // that has not taken effect would otherwise be reported as a clean run.
+      if (typeof namespaceAdvisoryToast === 'function') namespaceAdvisoryToast(event);
       // ADR-0006 PR-B: surface files skipped by the redaction gate (no toggle
       // on per-dir reindex — surfacing only).
       if (typeof _blockedIndexToast === 'function') {
@@ -1276,6 +1287,11 @@ async function mdReindexAll(btn) {
     } else {
       const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
       showToast(t('toast.reindex_complete', { count: total }), 'success');
+    }
+    // #2061: same placement rationale as the redaction summary below — a
+    // partial run still has an advisory worth showing.
+    if (typeof namespaceAdvisoryToastForRoots === 'function') {
+      namespaceAdvisoryToastForRoots(resp.results);
     }
     // ADR-0006 PR-B: surface files skipped by the redaction gate across all
     // dirs (aggregate ``blocked_files`` on the /api/reindex response).

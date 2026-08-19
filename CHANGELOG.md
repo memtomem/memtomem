@@ -5,6 +5,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Breaking
+
+- **`--force` no longer re-resolves namespaces; use `--reassign-namespaces`.**
+  A forced re-index used to re-run every file's namespace through the current
+  path rules, so the documented embedding-reset recovery
+  (`mm embedding-reset --mode apply-current` then
+  `mm index --force <memory_dir>`) silently moved every agent-session chunk to
+  `default`, collapsing the isolation sessions exist to provide — and nothing
+  on disk could restore it, since the day-file name encodes the namespace
+  one way and the overwritten rows were the only record. `--force` now
+  re-embeds without re-resolving namespaces: each file keeps the namespace its
+  chunks are stored under (scope re-resolution is unchanged).
+  Applying changed namespace rules to already-indexed files moved to the new
+  `mm index --reassign-namespaces <path>` (implies `--force`; rejected
+  alongside `--namespace` and the debounce modes). A plain `--force` run now
+  reports how many files kept a namespace the rules disagree with and names
+  that command, so the old workflow tells you what to run instead of failing
+  silently. Affects every force surface that passes no namespace —
+  `mm index --force`, `mem_index(force=true)`, and the web bulk force paths;
+  reassignment is CLI only for now. (Unchanged and pre-existing: inside an
+  agent session `mem_index` passes that session's namespace explicitly, and an
+  explicit namespace still wins.) A forced re-index of a file whose chunks span several
+  namespaces is now refused per-file (the run continues) rather than
+  flattening them into one. Python API: `IndexEngine.effective_namespace_for`
+  keeps `force` with the new meaning and gains `reassign`, and the index
+  entrypoints gain `reassign_namespaces`; no compatibility alias.
+  See [ADR-0033](docs/adr/0033-force-reembed-vs-namespace-reassignment.md).
+  (#2061)
+
 ### Added
 
 - **User-controlled cross-runtime handoff workflow.** A new explicit
@@ -270,7 +299,11 @@ to keep the previous apply-immediately behavior.
   stored under one, instead of restamping the changed ones through the
   rules/default fallback. `mm index --force` still applies freshly resolved
   namespaces, which is what makes it the way to apply changed namespace
-  rules. Deleting a chunk in the web UI used to inherit that re-resolution by
+  rules. **(Superseded within this same Unreleased section by the `--force`
+  entry above — #2061 moved rule re-application to `--reassign-namespaces`
+  and made `--force` preserve. Kept here because the rest of this entry still
+  describes what shipped.)** Deleting a chunk in the web UI used to inherit
+  that re-resolution by
   accident — it re-indexes with `force=True` for the re-embed, so removing
   one chunk from an `aaa` file moved every survivor to whatever the rules say
   today; it now passes the file's existing namespace explicitly.

@@ -321,12 +321,26 @@ async def delete_chunk(
                     ),
                 )
 
-            # Issue #2005: ``force=True`` re-applies namespace resolution to
-            # every chunk, including the ones this delete leaves alone — so
-            # deleting one chunk from an ``aaa`` file would move its survivors
-            # to whatever the rules say today. Pass the namespace the file
-            # already has, so force keeps meaning "re-embed everything"
-            # without also meaning "re-namespace everything".
+            # Issue #2005: ``force=True`` used to re-apply namespace
+            # resolution to every chunk, including the ones this delete leaves
+            # alone — so deleting one chunk from an ``aaa`` file moved its
+            # survivors to whatever the rules said that day. Passing the
+            # file's existing namespace was the fix at the time.
+            #
+            # Since #2061 / ADR-0033 the engine preserves a unanimously stored
+            # namespace under ``force`` itself, and refuses outright when the
+            # file's rows span several. So the re-index below deliberately
+            # passes **no** namespace: this pre-flight is a gate, not the
+            # write's authority. Pinning what it resolved would re-introduce
+            # the bug twice over — an explicit namespace wins over the
+            # refusal, and it would freeze a value read outside the write's
+            # own critical section, so a concurrent writer that moved the file
+            # in between would be silently undone. The engine re-resolves
+            # in-lock; that answer is the authoritative one.
+            #
+            # What the pre-flight is still for: refusing *before* the file is
+            # edited. Letting the engine refuse would leave the entry already
+            # removed from disk with its chunks still indexed.
             #
             # Outside the try below on purpose. That handler's fallback is an
             # index-only delete, which is the right answer when the *file*
@@ -336,14 +350,9 @@ async def delete_chunk(
             # namespace lookup that cannot answer is retryable, and nothing
             # has been mutated yet.
             try:
-                # ``or default_namespace``: the resolver returns ``None`` for
-                # the untagged carve-out, and passing that back through would
-                # read as "no caller namespace" and re-enter rule resolution —
-                # the very thing being avoided. The explicit default stores
-                # the same value the carve-out does.
-                preserved_ns = (
-                    await index_engine.effective_namespace_for(source)
-                ) or config.namespace.default_namespace
+                # ``force=True`` matches the re-index below, so the decision
+                # reports what that call would decide on its own.
+                decision = await index_engine.namespace_decision_for(source, force=True)
             except NamespaceResolutionError as exc:
                 # Only this one: it is the resolver's declared "the store did
                 # not answer" signal and is genuinely retryable. Catching
@@ -357,6 +366,25 @@ async def delete_chunk(
                         "deleted. Retry once the chunk store is reachable."
                     ),
                 ) from exc
+            if decision.reason == "mixed_force_refused":
+                # Before the file edit below: refusing after it would leave the
+                # entry gone from disk with its chunks still indexed. Permanent
+                # (409, not 503) — retrying changes nothing; splitting the file
+                # per namespace does.
+                logger.warning(
+                    "Refusing chunk delete for %s: source spans namespaces %s",
+                    source,
+                    ", ".join(sorted(decision.stored)),
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This source file's chunks span several namespaces, and the "
+                        "re-index a delete performs would rewrite every remaining chunk "
+                        "into one of them. Nothing was deleted. Split the file so each "
+                        "namespace has its own, then retry."
+                    ),
+                )
             try:
                 await asyncio.to_thread(remove_lines, source, meta.start_line, meta.end_line)
             except ValueError as exc:
@@ -385,10 +413,12 @@ async def delete_chunk(
                 ) from exc
 
             try:
+                # No ``namespace=``: see the pre-flight above. The engine
+                # preserves the file's stored namespace in-lock, which is both
+                # the correct value and a fresher one than anything read here.
                 stats = await index_engine.index_file(
                     source,
                     force=True,
-                    namespace=preserved_ns,
                     already_scanned=True,
                     lock_held=True,
                 )

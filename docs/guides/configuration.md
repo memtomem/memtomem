@@ -267,6 +267,26 @@ Resolving it is a two-step process — pick **one** of:
   MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
   `mem_index(path="...", force=true)`.
 
+  `mm index --force` re-embeds; it does not re-resolve namespaces, so every
+  file keeps the namespace its chunks are stored under. That holds for any
+  caller that passes no namespace — an explicit namespace still wins, which is
+  what the caveat below is about.
+
+  > **Run the recovery from the CLI when the store holds agent-scoped notes.**
+  > `mem_index` called inside an agent session inherits that session's
+  > namespace and passes it as an *explicit* one, and an explicit namespace
+  > overrides preservation — so `mem_index(force=true)` under a session
+  > restamps everything it indexes with `agent-runtime:<id>`. End the session
+  > first, or run `mm index --force <memory_dir>`, which passes no namespace.
+
+  To apply
+  changed [namespace rules](#namespace-rules-path-based-auto-tagging) to
+  already-indexed files, run
+  `mm index --reassign-namespaces <memory_dir>` — it overwrites stored
+  namespaces (agent session namespaces included) and implies `--force`. A
+  plain `--force` run reports how many files kept a namespace the current
+  rules would assign differently.
+
 - **Revert the runtime to the stored model (non-destructive, useful if the
   config drift was accidental):**
 
@@ -783,9 +803,10 @@ Example `~/.memtomem/config.d/10-namespace-rules.json`:
 # Show effective config including merged rules:
 mm config show | grep -A 20 namespace
 
-# After editing rules, force re-index so existing chunks pick up the
-# new namespace:
-mm index ~/.claude/projects --force
+# After editing rules, reassign so existing chunks pick up the new
+# namespace. (`--force` re-embeds but keeps each file's stored namespace;
+# `--reassign-namespaces` is what applies edited rules, and implies --force.)
+mm index ~/.claude/projects --reassign-namespaces
 
 # Inspect namespace distribution — open the Web UI Sources view:
 #   http://localhost:8080/#sources    (colon prefixes group into collapsible

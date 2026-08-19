@@ -5453,6 +5453,7 @@ class TestInitialSeedThreshold:
                 namespace=None,
                 force_unsafe=False,
                 path_scope="configured",
+                reassign_namespaces=False,
             ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
@@ -5517,6 +5518,7 @@ class TestInitialSeedThreshold:
                 namespace=None,
                 force_unsafe=False,
                 path_scope="configured",
+                reassign_namespaces=False,
             ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
@@ -5582,6 +5584,7 @@ class TestInitialSeedThreshold:
                 namespace=None,
                 force_unsafe=False,
                 path_scope="configured",
+                reassign_namespaces=False,
             ):
                 yield {"type": "discovery", "files_total": 2}
                 yield {
@@ -5738,6 +5741,7 @@ class TestInitialSeedThreshold:
                 namespace=None,
                 force_unsafe=False,
                 path_scope="configured",
+                reassign_namespaces=False,
             ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
@@ -5945,6 +5949,7 @@ class TestInitialSeedThreshold:
                 namespace=None,
                 force_unsafe=False,
                 path_scope="configured",
+                reassign_namespaces=False,
             ):
                 key = str(path)
                 counts = path_counts[key]
@@ -6052,6 +6057,7 @@ class TestInitialSeedThreshold:
                 namespace=None,
                 force_unsafe=False,
                 path_scope="configured",
+                reassign_namespaces=False,
             ):
                 yield {"type": "discovery", "files_total": 1}
                 file = str(memory_dir / "big.md")
@@ -6142,6 +6148,7 @@ class TestInitialSeedThreshold:
                 namespace=None,
                 force_unsafe=False,
                 path_scope="configured",
+                reassign_namespaces=False,
             ):
                 yield {"type": "discovery", "files_total": 2}
                 for name in ("a.md", "b.md"):

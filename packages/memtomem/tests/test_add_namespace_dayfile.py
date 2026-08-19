@@ -143,9 +143,11 @@ class TestEarlierEntryKeepsItsNamespace:
         self, bm25_only_components
     ):
         """The web chunk-delete path re-indexes with ``force=True`` for the
-        re-embed, and force re-resolves namespaces — so removing one chunk
-        from an ``aaa`` file used to move every survivor to whatever the
-        rules say today. It must pass the file's namespace explicitly."""
+        re-embed. When force also re-resolved namespaces, removing one chunk
+        from an ``aaa`` file moved every survivor to whatever the rules said
+        that day; it passes the file's namespace explicitly instead. Since
+        #2061 the engine preserves under force too, so this now pins both
+        defences at once — the explicit pin and the preservation behind it."""
         from memtomem.tools.memory_writer import append_entry, remove_lines
 
         comp, mem_dir = bm25_only_components
@@ -213,8 +215,8 @@ class TestEarlierEntryKeepsItsNamespace:
 
     @pytest.mark.asyncio
     async def test_force_reindex_still_applies_the_resolved_namespace(self, bm25_only_components):
-        """``--force`` is the documented way to apply changed namespace
-        rules, so preservation must not swallow it."""
+        """An explicit namespace is caller intent and always wins — including
+        over preservation, and including under ``force``."""
         from memtomem.tools.memory_writer import append_entry
 
         comp, mem_dir = bm25_only_components
@@ -227,6 +229,25 @@ class TestEarlierEntryKeepsItsNamespace:
         )
 
         assert await comp.storage.namespaces_for_source(target) == ["ccc"]
+
+    @pytest.mark.asyncio
+    async def test_force_reindex_preserves_an_agent_day_files_namespace(self, bm25_only_components):
+        """#2061: the day-file name encodes the namespace one-way, so the
+        stored rows are the only record of it. A forced re-index carrying no
+        caller intent — the documented embedding-reset recovery — must leave
+        them alone."""
+        from memtomem.memory_scope import day_file_name
+        from memtomem.tools.memory_writer import append_entry
+
+        comp, mem_dir = bm25_only_components
+        agent_ns = "agent-runtime:planner"
+        target = mem_dir / day_file_name(agent_ns, "default", date_str=_DATE)
+        append_entry(target, _ALPHA, title=None, tags=[])
+        await comp.index_engine.index_file(target, namespace=agent_ns, already_scanned=True)
+
+        await comp.index_engine.index_file(target, force=True, already_scanned=True)
+
+        assert await comp.storage.namespaces_for_source(target) == [agent_ns]
 
 
 # ---------------------------------------------------------------------------

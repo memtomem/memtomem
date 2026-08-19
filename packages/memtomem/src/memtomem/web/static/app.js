@@ -5490,6 +5490,7 @@ async function _reindexSourceFile(path, btn) {
     } else {
       showToast(t('toast.source_reindexed', { count }), 'success');
     }
+    namespaceAdvisoryToast(resp);
     _markDataStale();
     loadStats();
     await loadSources();
@@ -6842,6 +6843,49 @@ function _blockedIndexToast(blockedFiles, blockedProjectSharedFiles) {
   return true;
 }
 
+// #2061: ``namespace_moves`` travels as {from, to, files} records so callers
+// can reason about the endpoints; only rendering turns them into lines.
+function formatNamespaceMoves(moves) {
+  return (Array.isArray(moves) ? moves : []).map(
+    (m) => `${m.from} → ${m.to}: ${m.files} file(s)`,
+  );
+}
+
+// #2061: a forced reindex preserves stored namespaces, so a rule change that
+// did not take effect is otherwise invisible. Every force workflow — the
+// Index tab's result table, the per-source Reindex button, and the settings
+// "reindex needed" banner — reports it through here rather than each growing
+// its own copy. Returns true when something was surfaced.
+function namespaceAdvisoryToast(result) {
+  const preserved = Number(result && result.namespaces_preserved_against_rules) || 0;
+  const reassigned = Number(result && result.namespaces_reassigned) || 0;
+  if (preserved > 0) {
+    showToast(t('index.result.namespace_preserved', { count: preserved }), 'warning');
+  }
+  if (reassigned > 0) {
+    showToast(t('index.result.namespace_reassigned', { count: reassigned }), 'warning');
+  }
+  return preserved > 0 || reassigned > 0;
+}
+
+// The ``/api/reindex`` shape is per-root, so its consumers have to add the
+// counters up before they mean anything. One helper rather than a reduce in
+// each caller — there are three, and a missed one reads as "nothing to
+// report" rather than as a bug.
+function namespaceAdvisoryToastForRoots(results) {
+  const roots = Array.isArray(results) ? results : [];
+  return namespaceAdvisoryToast({
+    namespaces_preserved_against_rules: roots.reduce(
+      (sum, r) => sum + (Number(r.namespaces_preserved_against_rules) || 0),
+      0,
+    ),
+    namespaces_reassigned: roots.reduce(
+      (sum, r) => sum + (Number(r.namespaces_reassigned) || 0),
+      0,
+    ),
+  });
+}
+
 // ADR-0006 PR-B: render an index result. The shape is identical whether it
 // arrives via the SSE ``complete`` event (folder stream) or the force_unsafe
 // ``POST /api/index`` response (IndexingStats either way), so both call this:
@@ -6877,6 +6921,27 @@ function _renderIndexResult(result, { registerAsSource, path }) {
     }
   }
   _blockedIndexToast(result.blocked_files, result.blocked_project_shared_files);
+
+  // #2061: force re-embeds without re-resolving namespaces, so a rule change
+  // that has not been applied is otherwise invisible here. Same row also
+  // reports what an explicit reassignment moved.
+  const nsAdvisoryRow = qs('r-namespace-advisory-row');
+  if (nsAdvisoryRow) {
+    const preserved = Number(result.namespaces_preserved_against_rules) || 0;
+    const reassigned = Number(result.namespaces_reassigned) || 0;
+    const lines = [];
+    if (preserved > 0) {
+      lines.push(t('index.result.namespace_preserved', { count: preserved }));
+    }
+    if (reassigned > 0) {
+      lines.push(
+        t('index.result.namespace_reassigned', { count: reassigned }),
+        ...formatNamespaceMoves(result.namespace_moves),
+      );
+    }
+    qs('r-namespace-advisory').textContent = lines.join('\n');
+    nsAdvisoryRow.hidden = lines.length === 0;
+  }
 
   // #354 / #590: ``errors`` may ride along even on an HTTP-200 result — red
   // toast + a capped error row.

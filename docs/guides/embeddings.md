@@ -129,7 +129,12 @@ If you switch the embedding model after indexing, run `mm embedding-reset` to de
 - **Embedding model or ONNX sequence-policy mismatch** — dense search safely
   falls back to BM25 and indexing is blocked. Use
   `mm embedding-reset --mode apply-current`, then
-  `mm index --force <memory_dir>`.
+  `mm index --force <memory_dir>`. `--force` re-embeds only — each file keeps
+  the namespace its chunks are stored under, agent session namespaces
+  included. Prefer the CLI over `mem_index(force=true)` here: called inside an
+  agent session, the MCP tool passes that session's namespace explicitly, and
+  an explicit namespace overrides preservation (see
+  [`configuration.md#reset-flow`](configuration.md#reset-flow)).
 
 ## Tuning Throughput
 

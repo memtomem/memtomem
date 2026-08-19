@@ -399,6 +399,213 @@ class TestIndexFlagPassthrough:
         assert kwargs.get("namespace") is None
 
 
+class TestReassignNamespacesFlag:
+    """#2061: ``--force`` re-embeds, ``--reassign-namespaces`` re-namespaces."""
+
+    def test_flag_reaches_index_path_stream(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        record: dict = {}
+        _install_fake_engine(
+            monkeypatch, events=[_make_complete_event(total_files=1, indexed=1)], record=record
+        )
+
+        asyncio.run(
+            _index(
+                str(target),
+                recursive=True,
+                force=False,
+                namespace=None,
+                reassign_namespaces=True,
+            )
+        )
+
+        assert record["kwargs"].get("reassign_namespaces") is True
+
+    def test_default_is_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        record: dict = {}
+        _install_fake_engine(
+            monkeypatch, events=[_make_complete_event(total_files=1, indexed=1)], record=record
+        )
+
+        asyncio.run(_index(str(target), recursive=True, force=True, namespace=None))
+
+        assert record["kwargs"].get("reassign_namespaces") is False
+
+    def test_rejects_an_explicit_namespace(self, tmp_path: Path) -> None:
+        """The two ask for different targets — an explicit namespace
+        short-circuits the very rules reassignment applies."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.indexing import index
+
+        result = CliRunner().invoke(
+            index, [str(tmp_path), "--reassign-namespaces", "--namespace", "work"]
+        )
+
+        assert result.exit_code == 2
+        assert "cannot be combined with --namespace" in result.output
+
+    @pytest.mark.parametrize(
+        "mode_args",
+        [["--debounce-window", "1"], ["--flush"], ["--status"]],
+    )
+    def test_rejects_the_debounce_modes(self, tmp_path: Path, mode_args: list[str]) -> None:
+        """The queue entry carries only (path, namespace, force), so a
+        reassignment would drain as a plain forced index — which now
+        *preserves* namespaces, the opposite of what was asked."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.indexing import index
+
+        result = CliRunner().invoke(index, [str(tmp_path), "--reassign-namespaces", *mode_args])
+
+        assert result.exit_code == 2
+        assert "only applies to direct indexing" in result.output
+
+    def test_preserved_advisory_names_the_reassign_command(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A forced run that kept namespaces the rules disagree with must say
+        so, and name the command that applies them — this is the whole
+        migration bridge for the old ``--force`` workflow."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=1, indexed=1)
+        event["namespaces_preserved_against_rules"] = 3
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(_index(str(target), recursive=True, force=True, namespace=None))
+
+        lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+        assert (
+            "3 file(s) kept their stored namespace; current rules would assign differently."
+            in lines
+        )
+        assert f"→ To apply the rules: mm index --reassign-namespaces {target.resolve()}" in lines
+
+    def test_no_advisory_when_nothing_was_preserved_or_moved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+        _install_fake_engine(monkeypatch, events=[_make_complete_event(total_files=1, indexed=1)])
+
+        asyncio.run(_index(str(target), recursive=True, force=True, namespace=None))
+
+        out = capsys.readouterr().out
+        assert "kept their stored namespace" not in out
+        assert "reassigned" not in out
+
+    def test_moves_out_of_a_system_namespace_are_called_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Reassignment out of an agent scope is the deliberate form of the
+        #2061 damage — asked for, but still worth saying out loud."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=1, indexed=1)
+        event["namespaces_reassigned"] = 1
+        event["namespace_moves"] = [{"from": "agent-runtime:planner", "to": "default", "files": 1}]
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(
+            _index(
+                str(target),
+                recursive=True,
+                force=False,
+                namespace=None,
+                reassign_namespaces=True,
+            )
+        )
+
+        lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+        assert "1 file(s) reassigned to a rule-resolved namespace:" in lines
+        assert "agent-runtime:planner → default: 1 file(s)" in lines
+        assert "→ 1 of these moves take rows out of a system-scoped namespace" in " ".join(lines)
+
+    def test_a_move_between_system_namespaces_is_not_called_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The warning is about *exposure*. Rows that land in another
+        system-scoped namespace stay hidden from a default search, so saying
+        they are "now visible" would be false."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=1, indexed=1)
+        event["namespaces_reassigned"] = 1
+        event["namespace_moves"] = [
+            {"from": "agent-runtime:planner", "to": "archive:old", "files": 1}
+        ]
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(
+            _index(
+                str(target),
+                recursive=True,
+                force=False,
+                namespace=None,
+                reassign_namespaces=True,
+            )
+        )
+
+        out = capsys.readouterr().out
+        assert "agent-runtime:planner → archive:old: 1 file(s)" in out
+        assert "now visible" not in out
+
+    def test_the_warning_counts_moves_not_summed_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A file whose chunks span two system namespaces yields one record
+        per source namespace, so summing ``files`` across records would report
+        that single file twice. The line counts moves and prints each move's
+        own file count."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=7, indexed=7)
+        event["namespaces_reassigned"] = 7
+        event["namespace_moves"] = [
+            {"from": "agent-runtime:planner", "to": "default", "files": 5},
+            {"from": "archive:old", "to": "default", "files": 2},
+        ]
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(
+            _index(
+                str(target),
+                recursive=True,
+                force=False,
+                namespace=None,
+                reassign_namespaces=True,
+            )
+        )
+
+        out = capsys.readouterr().out
+        # Counted in moves, not summed files: one file whose chunks span two
+        # system namespaces contributes a record to each, so a file sum would
+        # double-count it. The per-move file counts are printed above.
+        assert "→ 2 of these moves take rows out of a system-scoped namespace" in out
+        assert "agent-runtime:planner → default: 5 file(s)" in out
+        assert "archive:old → default: 2 file(s)" in out
+
+
 class TestIndexBarLengthFromDiscovery:
     """Issue #743: progress-bar length comes from the engine's ``discovery``
     event, not from a pre-computed ``.md``-only ``rglob`` walk.
