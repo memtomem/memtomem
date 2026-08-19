@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import warnings
 from pathlib import Path
 
@@ -1123,10 +1122,15 @@ class TestWriteEffectHelpers:
         assert receipt.pruned("search", "default_top_k")
         assert receipt.pinned_after("search", "default_top_k") is MISSING
 
-    def test_env_var_owning_matches_case_insensitively(
+    def test_env_var_owning_reports_only_what_the_loaders_honour(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """pydantic-settings matches env names case-insensitively; so must this."""
+        """The helper answers "does env win?", not "did pydantic read it?".
+
+        The loaders test exact-case membership when deciding to yield to env,
+        so a lowercase variable is read at construction and then loses to
+        config.json (#2109). Claiming it "takes precedence" would be wrong.
+        """
         from memtomem.config import env_var_owning
 
         monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
@@ -1135,16 +1139,21 @@ class TestWriteEffectHelpers:
         monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
         assert env_var_owning("search", "default_top_k") == "MEMTOMEM_SEARCH__DEFAULT_TOP_K"
 
-        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K")
+    def test_env_var_owning_agrees_with_the_loader_on_a_lowercase_name(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whatever the helper says must match who actually wins, end to end."""
+        from memtomem.config import env_var_owning
+
+        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
         monkeypatch.setenv("memtomem_search__default_top_k", "7")
-        found = env_var_owning("search", "default_top_k")
-        # Windows uppercases environment keys on write, so the exact spelling
-        # is the platform's, not ours: assert the contract (a name that is
-        # really in os.environ, matching case-insensitively) rather than a
-        # POSIX-only literal.
-        assert found is not None
-        assert found in os.environ
-        assert found.upper() == "MEMTOMEM_SEARCH__DEFAULT_TOP_K"
+        override_path.write_text(json.dumps({"search": {"default_top_k": 33}}))
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+        env_wins = cfg.search.default_top_k == 7
+
+        assert (env_var_owning("search", "default_top_k") is not None) == env_wins
 
     def test_env_var_owning_does_not_match_a_different_key(
         self, monkeypatch: pytest.MonkeyPatch

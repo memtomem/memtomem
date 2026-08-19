@@ -101,10 +101,13 @@ def config_set(key: str, value: str) -> None:
     # below min_chunk_tokens) is written to config.json and then silently
     # reverted by every subsequent load — a pin that never takes effect and
     # never explains itself (#2108).
-    invalid = _section_invariant_error(section_obj)
+    invalid = _section_invariant_error(section_obj, field_name)
     if invalid is not None:
         click.echo(click.style(f"{key}: {invalid}", fg="red"))
-        click.echo("Nothing written — config.json is unchanged.")
+        # Not "config.json is unchanged": loading it above may have run the
+        # legacy auto_discover migration, which writes. Only the requested
+        # value is guaranteed absent.
+        click.echo(f"Nothing written — {key} was not saved.")
         raise SystemExit(1)
 
     try:
@@ -144,17 +147,34 @@ def config_set(key: str, value: str) -> None:
         click.echo(f"FTS index rebuilt ({count} chunks).")
 
 
-def _section_invariant_error(section_obj: object) -> str | None:
+def _section_invariant_error(section_obj: object, field_name: str) -> str | None:
     """Cross-field validation error for the mutated section, if any.
 
-    Mirrors the re-validation ``load_config_overrides`` runs (config.py) —
-    ``model_validate`` on a dump, as a check only, so no coerced model is
-    assigned back.
+    Mirrors the re-validation ``load_config_overrides`` runs (config.py),
+    including its two subtleties:
+
+    * ``exclude_defaults`` keeps untouched defaulted legacy fields (e.g.
+      ``rerank.top_k``) out of the payload so they don't re-fire their
+      ``mode="before"`` deprecation; the mutated key is overlaid back so it is
+      checked even when its value equals the default.
+    * ``catch_warnings(record=True)`` forces ``simplefilter("always")`` so an
+      ambient ``-W error`` / ``PYTHONWARNINGS=error`` cannot turn an internal
+      validation pass into a traceback.
+
+    A check only — no coerced model is assigned back.
     """
+    import warnings
+
     from pydantic import ValidationError
 
+    dumped = section_obj.model_dump()
+    payload = section_obj.model_dump(exclude_defaults=True)
+    if field_name in dumped:
+        payload[field_name] = dumped[field_name]
     try:
-        type(section_obj).model_validate(section_obj.model_dump())
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            type(section_obj).model_validate(payload)
     except ValidationError as exc:
         msgs = []
         for error in exc.errors():

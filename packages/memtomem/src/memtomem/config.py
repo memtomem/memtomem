@@ -1433,16 +1433,22 @@ def _section_value(data: dict, section_name: str, field_name: str) -> object:
 
 
 def env_var_owning(section_name: str, field_name: str) -> str | None:
-    """The ``MEMTOMEM_<SECTION>__<FIELD>`` variable set for this key, if any.
+    """The env var that actually *wins* this key, or ``None``.
 
-    Returns the name as the environment spells it, so a message can quote
-    something the user can actually unset. pydantic-settings matches env names
-    case-insensitively, so the lookup does too.
+    "Wins" is the operative word, so this uses the same exact-case membership
+    test the override loaders use to decide whether to yield
+    (``load_config_overrides`` / ``load_config_d``). pydantic-settings itself
+    matches env names case-insensitively, so a lowercase variable is read at
+    construction and then quietly loses to ``config.json`` — a divergence
+    tracked in #2109. Reporting only what the loaders honour keeps callers
+    from promising a precedence that would not hold (issue #2108).
+
+    Returned as the canonical uppercase spelling, which is what the caller
+    needs to unset. On Windows, where ``os.environ`` is case-insensitive and
+    normalises keys to uppercase, every spelling lands here anyway.
     """
-    wanted = f"MEMTOMEM_{section_name}__{field_name}".upper()
-    for name in os.environ:
-        if name.upper() == wanted:
-            return name
+    wanted = f"MEMTOMEM_{section_name.upper()}__{field_name.upper()}"
+    return wanted if wanted in os.environ else None
     return None
 
 

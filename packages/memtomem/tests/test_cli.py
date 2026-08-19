@@ -478,8 +478,48 @@ class TestConfigCLI:
         result = runner.invoke(cli, ["config", "set", "indexing.max_chunk_tokens", "64"])
         assert result.exit_code == 1
         assert "must be <= max_chunk_tokens" in result.output
-        assert "Nothing written" in result.output
+        assert "indexing.max_chunk_tokens was not saved" in result.output
         assert not config_file.exists()
+
+    def test_refusal_claims_only_that_the_value_was_not_saved(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Loading a legacy config migrates it, so "unchanged" was a false promise.
+
+        The rejected command still leaves the auto_discover migration's write
+        behind — the message may only speak for the requested value (#2108 review).
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"indexing": {"auto_discover": True}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        result = runner.invoke(cli, ["config", "set", "indexing.max_chunk_tokens", "64"])
+        assert result.exit_code == 1
+        assert "config.json is unchanged" not in result.output
+        assert "max_chunk_tokens" not in json.loads(config_file.read_text())["indexing"]
+
+    def test_config_set_survives_warnings_as_errors(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """The pre-save check must not re-fire a legacy field's deprecation (#2108 review).
+
+        `rerank.top_k` is defaulted and deprecated; validating a full dump
+        re-triggers its `mode="before"` migration, which is a traceback under
+        `PYTHONWARNINGS=error`.
+        """
+        import warnings
+
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = runner.invoke(
+                cli, ["config", "set", "rerank.min_pool", "30"], catch_exceptions=False
+            )
+        assert result.exit_code == 0, result.output
+        assert "rerank.min_pool" in result.output
 
     def test_effect_check_does_not_write_to_config_json(self, tmp_path, monkeypatch) -> None:
         """The effect check reloads config, and a migrating reload rewrites the file (#2108).
