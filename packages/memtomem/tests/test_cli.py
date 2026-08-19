@@ -247,16 +247,11 @@ class TestConfigCLI:
         result = runner.invoke(cli, ["config", "set", "noperiod", "10"])
         assert result.exit_code != 0
 
-    @patch("memtomem.config.save_config_overrides")
-    @patch("memtomem.config.load_config_overrides")
-    @patch("memtomem.config.Mem2MemConfig")
     def test_config_set_tokenizer_triggers_fts_rebuild(
-        self, mock_cfg_cls, mock_load, mock_save, runner: CliRunner
+        self, tmp_path, monkeypatch, runner: CliRunner
     ) -> None:
         """Changing search.tokenizer via CLI must trigger set_tokenizer + FTS rebuild."""
-        mock_cfg = MagicMock()
-        mock_cfg.search.tokenizer = "unicode61"
-        mock_cfg_cls.return_value = mock_cfg
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
 
         mock_storage = MagicMock()
         mock_storage.rebuild_fts = MagicMock(return_value=42)
@@ -266,25 +261,20 @@ class TestConfigCLI:
             patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
         ):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
-            assert result.exit_code == 0
+            assert result.exit_code == 0, result.output
 
             mock_set_tok.assert_called_once_with("kiwipiepy")
             mock_storage.rebuild_fts.assert_called_once()
 
-    @patch("memtomem.config.save_config_overrides")
-    @patch("memtomem.config.load_config_overrides")
-    @patch("memtomem.config.Mem2MemConfig")
     def test_config_set_non_tokenizer_no_fts_rebuild(
-        self, mock_cfg_cls, mock_load, mock_save, runner: CliRunner
+        self, tmp_path, monkeypatch, runner: CliRunner
     ) -> None:
         """Non-tokenizer config changes must NOT trigger FTS rebuild."""
-        mock_cfg = MagicMock()
-        mock_cfg.search.default_top_k = 10
-        mock_cfg_cls.return_value = mock_cfg
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
 
         with patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok:
             result = runner.invoke(cli, ["config", "set", "search.default_top_k", "20"])
-            assert result.exit_code == 0
+            assert result.exit_code == 0, result.output
             mock_set_tok.assert_not_called()
 
     def test_config_set_immutable_field(self, runner: CliRunner) -> None:
@@ -431,6 +421,213 @@ class TestConfigCLI:
             ), key
             new_section, _, new_field = replacement.partition(".")
             assert new_field in MUTABLE_FIELDS.get(new_section, set()), replacement
+
+    def test_config_set_warns_when_env_var_owns_the_key(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """The write lands in config.json but env still wins (#2108)."""
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"search": {"default_top_k": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
+
+        result = runner.invoke(cli, ["config", "set", "search.default_top_k", "44"])
+        assert result.exit_code == 0, result.output
+        assert "MEMTOMEM_SEARCH__DEFAULT_TOP_K is set and takes precedence" in result.output
+        assert "the effective value is still 7" in result.output
+        # The write itself is legitimate — it applies once the variable is gone.
+        assert json.loads(config_file.read_text())["search"]["default_top_k"] == 44
+
+    def test_config_set_reports_pin_it_pruned(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Setting the value env already supplies drops the pin (#2108).
+
+        The delta-only write is deliberate (PR #256 — env values must not
+        drag-pin into config.json), but it removes an entry the user did not
+        ask to remove, and `33 -> 33` alone would hide that.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"search": {"default_top_k": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
+
+        result = runner.invoke(cli, ["config", "set", "search.default_top_k", "7"])
+        assert result.exit_code == 0, result.output
+        assert "config.json does not pin search.default_top_k" in result.output
+        assert "it held 33" in result.output
+        assert "mm config unset search.default_top_k" in result.output
+        assert "default_top_k" not in json.loads(config_file.read_text()).get("search", {})
+
+    def test_config_set_refuses_a_cross_field_invalid_write(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """An invalid combination used to persist and be reverted on every load (#2108).
+
+        `setattr` skips the section's `model_validator(mode="after")`, so
+        `max_chunk_tokens` below `min_chunk_tokens` reached config.json and was
+        then dropped by each load — a pin that never applied and never said why.
+        """
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        result = runner.invoke(cli, ["config", "set", "indexing.max_chunk_tokens", "64"])
+        assert result.exit_code == 1
+        assert "must be <= max_chunk_tokens" in result.output
+        assert "indexing.max_chunk_tokens was not saved." in result.output
+        assert "Nothing written" not in result.output
+        assert not config_file.exists()
+
+    def test_refusal_claims_only_that_the_value_was_not_saved(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Loading a legacy config migrates it, so "unchanged" was a false promise.
+
+        The rejected command still leaves the auto_discover migration's write
+        behind — the message may only speak for the requested value (#2108 review).
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"indexing": {"auto_discover": True}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+
+        result = runner.invoke(cli, ["config", "set", "indexing.max_chunk_tokens", "64"])
+        assert result.exit_code == 1
+        # The migration may have rewritten the file; the message must not
+        # speak for anything but the requested value.
+        assert "config.json is unchanged" not in result.output
+        assert "Nothing written" not in result.output
+        assert "max_chunk_tokens" not in json.loads(config_file.read_text())["indexing"]
+
+    def test_config_set_survives_warnings_as_errors(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """The pre-save check must not re-fire a legacy field's deprecation (#2108 review).
+
+        `rerank.top_k` is defaulted and deprecated; validating a full dump
+        re-triggers its `mode="before"` migration, which is a traceback under
+        `PYTHONWARNINGS=error`.
+        """
+        import warnings
+
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = runner.invoke(
+                cli, ["config", "set", "rerank.min_pool", "30"], catch_exceptions=False
+            )
+        assert result.exit_code == 0, result.output
+        assert "rerank.min_pool" in result.output
+
+    def test_effect_check_does_not_write_to_config_json(self, tmp_path, monkeypatch) -> None:
+        """The effect check reloads config, and a migrating reload rewrites the file (#2108).
+
+        `auto_discover` is the migrating key: a reporting pass that let the
+        legacy migration run would rewrite the very file it is reporting on.
+        """
+        import json
+
+        from memtomem.cli.config_cmd import _effective_value
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"indexing": {"auto_discover": True}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        before = config_file.read_bytes()
+
+        _effective_value("indexing", "auto_discover")
+        assert config_file.read_bytes() == before
+
+    def test_config_set_pruned_note_does_not_claim_the_value_is_unchanged(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Pruning to the default *does* change the effective value (#2108 review)."""
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"search": {"default_top_k": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
+
+        result = runner.invoke(cli, ["config", "set", "search.default_top_k", "10"])
+        assert result.exit_code == 0, result.output
+        assert "search.default_top_k: 33 -> 10" in result.output
+        assert "effective value is unchanged" not in result.output
+
+    def test_config_set_reports_nothing_stored_on_a_clean_file(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """No prior pin to displace, but still nothing stored (#2108 review).
+
+        With the env var supplying the same value, the write has no delta.
+        Unsetting the variable later drops to the default, not to the value
+        the caller just asked for — so the report cannot stay silent.
+        """
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
+
+        result = runner.invoke(cli, ["config", "set", "search.default_top_k", "7"])
+        assert result.exit_code == 0, result.output
+        assert "config.json does not pin search.default_top_k" in result.output
+        assert "it had no entry for it" in result.output
+        assert "MEMTOMEM_SEARCH__DEFAULT_TOP_K" in result.output
+
+    def test_config_set_reports_pin_pruned_by_default_match(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Same pruning with no env var in play: setting the default drops the pin."""
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"search": {"default_top_k": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
+
+        result = runner.invoke(cli, ["config", "set", "search.default_top_k", "10"])
+        assert result.exit_code == 0, result.output
+        assert "config.json does not pin search.default_top_k" in result.output
+        assert "it held 33" in result.output
+        # No env var to blame — the note must not invent one.
+        assert "MEMTOMEM_" not in result.output
+
+    def test_config_set_stays_quiet_without_a_higher_precedence_source(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """No env var, no fragment — the plain `old -> new` line stands (#2108)."""
+        import json
+
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
+
+        result = runner.invoke(cli, ["config", "set", "search.default_top_k", "21"])
+        assert result.exit_code == 0, result.output
+        assert "search.default_top_k: 10 -> 21" in result.output
+        assert "warning:" not in result.output
+        assert "note:" not in result.output
+        assert json.loads(config_file.read_text())["search"]["default_top_k"] == 21
+
+    def test_config_set_env_warning_masks_a_secret_value(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """The warning quotes the effective value — mask it for secrets (#2108)."""
+        config_file = tmp_path / "config.json"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_SESSION_TRACE__LANGFUSE_SECRET_KEY", "sk-from-env")
+
+        result = runner.invoke(
+            cli, ["config", "set", "session_trace.langfuse_secret_key", "sk-from-cli"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "MEMTOMEM_SESSION_TRACE__LANGFUSE_SECRET_KEY is set" in result.output
+        assert "sk-from-env" not in result.output
+        assert "sk-from-cli" not in result.output
 
     def test_command_path_guard_rejects_fake_paths(self) -> None:
         """The guard is only worth running if it fails on a fake path."""

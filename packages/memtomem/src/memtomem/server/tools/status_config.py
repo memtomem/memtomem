@@ -26,6 +26,7 @@ from memtomem.server.helpers import _set_config_key
 from memtomem.secret_masking import is_secret_key, mask_secrets
 
 if TYPE_CHECKING:
+    from memtomem.config import SaveReceipt
     from memtomem.server.context import AppContext
 
 logger = logging.getLogger(__name__)
@@ -615,11 +616,12 @@ async def mem_config(
             # the FTS index and tokenizer ahead of the reverted config, and the
             # "rolled back" message would be a lie. Mirrors the CLI
             # ``mm config set`` ordering (persist, then fanout).
+            receipt = None
             if persist:
                 from memtomem.config import save_config_overrides
 
                 try:
-                    save_config_overrides(app.config)
+                    receipt = save_config_overrides(app.config)
                 except (ValueError, TimeoutError) as e:
                     # Rollback the runtime mutation by reloading the configuration
                     # from disk. TimeoutError means another process holds the
@@ -650,13 +652,10 @@ async def mem_config(
                 count = await app.storage.rebuild_fts()
                 result += f"\nFTS index rebuilt ({count} chunks)."
 
-            result += (
-                " (persisted to config.json)" if persist else " (runtime only — not persisted)"
-            )
-        if is_secret_key(key.rsplit(".", 1)[-1]):
-            return f"Set {key} = '***'" + (
-                " (persisted to config.json)" if persist else " (runtime only — not persisted)"
-            )
+            suffix = _persistence_suffix(key, receipt)
+            result += suffix
+            if is_secret_key(key.rsplit(".", 1)[-1]):
+                return f"Set {key} = '***'{suffix}"
         return result
 
     config_dict = mask_secrets(app.config.model_dump())
@@ -681,6 +680,41 @@ async def mem_config(
         return obj
 
     return json.dumps(config_dict, indent=2, default=_serialize)
+
+
+def _persistence_suffix(key: str, receipt: "SaveReceipt | None") -> str:
+    """Say what ``persist=True`` actually left in config.json (issue #2108).
+
+    ``save_config_overrides`` writes a delta, so a value matching the lower
+    layers (an env var, a ``config.d`` fragment, or the default) is pruned
+    rather than stored — "(persisted to config.json)" would be a claim the
+    file does not back. The runtime mutation happened either way; only the
+    durability half of the message changes. The receipt is read instead of
+    the file so a concurrent writer cannot rewrite the answer underneath us.
+    """
+    from memtomem.config import MISSING, env_var_owning
+
+    if receipt is None:
+        return " (runtime only — not persisted)"
+
+    section_name, _, field_name = key.partition(".")
+    env_var = env_var_owning(section_name, field_name)
+    if receipt.pinned_after(section_name, field_name) is not MISSING:
+        if env_var is None:
+            return " (persisted to config.json)"
+        # "survives server restarts" is the documented promise of persist=True,
+        # and an env var breaks exactly that half: the next start reads the
+        # variable, not the file.
+        return (
+            f" (persisted to config.json, but {env_var} takes precedence — "
+            f"a restart reads that variable, not this value)"
+        )
+    reason = (
+        f"{env_var} takes precedence"
+        if env_var
+        else "the value already comes from a lower layer (default or config.d)"
+    )
+    return f" (runtime only — not written to config.json: {reason})"
 
 
 def _revert_to_stored(app: AppContext) -> str:

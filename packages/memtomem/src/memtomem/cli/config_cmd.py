@@ -9,6 +9,7 @@ import click
 from memtomem.config import (
     FIELD_CONSTRAINTS,
     MUTABLE_FIELDS,
+    SaveReceipt,
     _EXTRA_MUTATION_FIELDS,
     coerce_and_validate,
 )
@@ -60,7 +61,12 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
 @click.argument("value")
 def config_set(key: str, value: str) -> None:
     """Set a config field (e.g., 'search.default_top_k 20'). Persists to ~/.memtomem/config.json."""
-    from memtomem.config import Mem2MemConfig, load_config_overrides, save_config_overrides
+    from memtomem.config import (
+        Mem2MemConfig,
+        load_config_d,
+        load_config_overrides,
+        save_config_overrides,
+    )
 
     parts = key.split(".", 1)
     if len(parts) != 2:
@@ -82,13 +88,30 @@ def config_set(key: str, value: str) -> None:
         raise SystemExit(1)
 
     cfg = Mem2MemConfig()
+    load_config_d(cfg, quiet=True)
     load_config_overrides(cfg)
 
     section_obj = getattr(cfg, section_name)
     old_val = getattr(section_obj, field_name)
     setattr(section_obj, field_name, coerced)
+
+    # ``ConfigModel`` sub-configs don't set ``validate_assignment``, so the
+    # cross-field ``@model_validator(mode="after")`` never runs for the setattr
+    # above. Without this check an invalid combination (e.g. max_chunk_tokens
+    # below min_chunk_tokens) is written to config.json and then silently
+    # reverted by every subsequent load — a pin that never takes effect and
+    # never explains itself (#2108).
+    invalid = _section_invariant_error(section_obj, field_name)
+    if invalid is not None:
+        click.echo(click.style(f"{key}: {invalid}", fg="red"))
+        # Not "nothing written": loading the file above may have run the
+        # legacy auto_discover migration, which writes. Only the requested
+        # value is guaranteed absent.
+        click.echo(f"{key} was not saved.")
+        raise SystemExit(1)
+
     try:
-        save_config_overrides(cfg)
+        receipt = save_config_overrides(cfg)
     except ValueError as e:
         click.echo(click.style(f"{key}: {e}", fg="red"))
         raise SystemExit(1)
@@ -101,12 +124,14 @@ def config_set(key: str, value: str) -> None:
         )
         raise SystemExit(1) from None
 
-    old_show = old_val
-    new_show = coerced
-    if is_secret_key(field_name):
-        old_show = "***" if old_val else ""
-        new_show = "***" if coerced else ""
-    click.echo(f"{key}: {old_show} -> {new_show}")
+    def _show(value: object) -> object:
+        if is_secret_key(field_name):
+            return "***" if value else ""
+        return value
+
+    click.echo(f"{key}: {_show(old_val)} -> {_show(coerced)}")
+    for line in _effect_lines(key, section_name, field_name, coerced, receipt):
+        click.echo(line)
 
     # Rebuild FTS index when tokenizer changes (matches Web UI / MCP behaviour)
     if key == "search.tokenizer":
@@ -120,6 +145,137 @@ def config_set(key: str, value: str) -> None:
         storage = create_storage(cfg)
         count = storage.rebuild_fts()
         click.echo(f"FTS index rebuilt ({count} chunks).")
+
+
+def _section_invariant_error(section_obj: object, field_name: str) -> str | None:
+    """Cross-field validation error for the mutated section, if any.
+
+    Mirrors the re-validation ``load_config_overrides`` runs (config.py),
+    including its two subtleties:
+
+    * ``exclude_defaults`` keeps untouched defaulted legacy fields (e.g.
+      ``rerank.top_k``) out of the payload so they don't re-fire their
+      ``mode="before"`` deprecation; the mutated key is overlaid back so it is
+      checked even when its value equals the default.
+    * ``catch_warnings(record=True)`` forces ``simplefilter("always")`` so an
+      ambient ``-W error`` / ``PYTHONWARNINGS=error`` cannot turn an internal
+      validation pass into a traceback.
+
+    A check only — no coerced model is assigned back.
+    """
+    import warnings
+
+    from pydantic import ValidationError
+
+    dumped = section_obj.model_dump()
+    payload = section_obj.model_dump(exclude_defaults=True)
+    if field_name in dumped:
+        payload[field_name] = dumped[field_name]
+    try:
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            type(section_obj).model_validate(payload)
+    except ValidationError as exc:
+        msgs = []
+        for error in exc.errors():
+            msg = error.get("msg", "")
+            if msg.startswith("Value error, "):
+                msg = msg[len("Value error, ") :]
+            msgs.append(msg)
+        return "; ".join(msgs) if msgs else str(exc)
+    return None
+
+
+def _effective_value(section_name: str, field_name: str) -> object:
+    """The value a fresh load would put in effect for SECTION.FIELD.
+
+    ``migrate=False``: this is a read-only inspection pass, and the legacy
+    ``auto_discover`` migration writes to disk — a reporting call must not
+    mutate the file it is reporting on.
+    """
+    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+    cfg = Mem2MemConfig()
+    load_config_d(cfg, quiet=True)
+    load_config_overrides(cfg, migrate=False)
+    return getattr(getattr(cfg, section_name), field_name)
+
+
+def _effect_lines(
+    key: str,
+    section_name: str,
+    field_name: str,
+    coerced: object,
+    receipt: SaveReceipt,
+) -> list[str]:
+    """Report what the write actually achieved (issue #2108).
+
+    ``config set`` writes ``config.json``, which env vars outrank, and
+    ``save_config_overrides`` prunes any value matching the lower layers on
+    purpose (PR #256, so env-sourced values don't drag-pin into the file).
+    Both behaviours are correct and both make a bare ``old -> new`` line a
+    claim the command cannot back up. Say which one happened instead.
+
+    Facts only: the before/after pins come from the save receipt (captured
+    under the write lock), and the effective value is measured by a fresh
+    load rather than inferred from which layer we think supplied it.
+    """
+    from memtomem.config import MISSING, env_var_owning
+
+    effective = _effective_value(section_name, field_name)
+    env_var = env_var_owning(section_name, field_name)
+    pruned = receipt.pruned(section_name, field_name)
+    pinned_before = receipt.pinned_before(section_name, field_name)
+
+    lines: list[str] = []
+    if effective != coerced and env_var is not None:
+        # Name the variable, never read it: the actionable part is which knob
+        # to unset. Quoted values go through the same mask as `old -> new`.
+        lines.append(
+            click.style(
+                f"warning: {env_var} is set and takes precedence — the effective value is "
+                f"still {_masked(field_name, effective)}. config.json holds your value and "
+                f"it applies once that variable is unset.",
+                fg="yellow",
+            )
+        )
+    elif effective != coerced:
+        # No higher-precedence layer to blame: the value did not survive a
+        # reload. Report that, rather than inventing a source.
+        lines.append(
+            click.style(
+                f"warning: a fresh load does not put {key} at "
+                f"{_masked(field_name, coerced)} — the effective value is "
+                f"{_masked(field_name, effective)}. Run 'mm config show' and check the "
+                f"log for the reason.",
+                fg="yellow",
+            )
+        )
+
+    if receipt.pinned_after(section_name, field_name) is MISSING:
+        # Nothing was stored. Whether or not a pin was displaced, the caller's
+        # value now rests on a layer they did not set, and unsetting that layer
+        # takes it away — so say it even on a clean file.
+        where = f"{env_var} or a lower layer" if env_var else "a lower layer (default or config.d)"
+        displaced = (
+            f" (it held {_masked(field_name, pinned_before)})"
+            if pruned
+            else " (it had no entry for it)"
+        )
+        lines.append(
+            click.style(
+                f"note: config.json does not pin {key}{displaced} — "
+                f"{_masked(field_name, coerced)} already comes from {where}, so the "
+                f"delta-only write had nothing to store. Use 'mm config unset {key}' "
+                f"when removal is the goal.",
+                fg="yellow",
+            )
+        )
+    return lines
+
+
+def _masked(field_name: str, value: object) -> object:
+    return ("***" if value else "") if is_secret_key(field_name) else value
 
 
 def _canonical_unset_keys() -> set[str]:

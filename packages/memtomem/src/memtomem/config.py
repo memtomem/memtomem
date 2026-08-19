@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -1394,6 +1395,62 @@ def _override_path() -> Path:
     return _CONFIG_OVERRIDE_PATH.expanduser()
 
 
+#: Sentinel for "config.json holds no entry for this key" — distinct from a
+#: pinned ``null``, which is a value the file really carries.
+MISSING = object()
+
+
+@dataclass(frozen=True)
+class SaveReceipt:
+    """What ``config.json`` held before and after one delta-only write.
+
+    Both snapshots are taken inside the write lock, so a key's before/after
+    pair describes *this* save and not a concurrent writer's (issue #2108).
+    """
+
+    before: dict
+    after: dict
+
+    def pinned_before(self, section_name: str, field_name: str) -> object:
+        return _section_value(self.before, section_name, field_name)
+
+    def pinned_after(self, section_name: str, field_name: str) -> object:
+        return _section_value(self.after, section_name, field_name)
+
+    def pruned(self, section_name: str, field_name: str) -> bool:
+        """True when the write removed an entry the file previously pinned."""
+        return (
+            self.pinned_after(section_name, field_name) is MISSING
+            and self.pinned_before(section_name, field_name) is not MISSING
+        )
+
+
+def _section_value(data: dict, section_name: str, field_name: str) -> object:
+    section = data.get(section_name)
+    if not isinstance(section, dict) or field_name not in section:
+        return MISSING
+    return section[field_name]
+
+
+def env_var_owning(section_name: str, field_name: str) -> str | None:
+    """The env var that actually *wins* this key, or ``None``.
+
+    "Wins" is the operative word, so this uses the same exact-case membership
+    test the override loaders use to decide whether to yield
+    (``load_config_overrides`` / ``load_config_d``). pydantic-settings itself
+    matches env names case-insensitively, so a lowercase variable is read at
+    construction and then quietly loses to ``config.json`` — a divergence
+    tracked in #2109. Reporting only what the loaders honour keeps callers
+    from promising a precedence that would not hold (issue #2108).
+
+    Returned as the canonical uppercase spelling, which is what the caller
+    needs to unset. On Windows, where ``os.environ`` is case-insensitive and
+    normalises keys to uppercase, every spelling lands here anyway.
+    """
+    wanted = f"MEMTOMEM_{section_name.upper()}__{field_name.upper()}"
+    return wanted if wanted in os.environ else None
+
+
 def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:
     """Apply persisted overrides from ~/.memtomem/config.json (if exists).
 
@@ -2416,7 +2473,7 @@ def build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
 def save_config_overrides(
     config: Mem2MemConfig,
     mutable_fields: dict[str, set[str]] | None = None,
-) -> None:
+) -> "SaveReceipt":
     """Persist user-set overrides to ~/.memtomem/config.json.
 
     **Delta-only write**: compare *config* to a freshly built comparand
@@ -2436,6 +2493,12 @@ def save_config_overrides(
 
     Uses **read-merge-write** so non-mutable keys (init-only settings like
     ``embedding.provider``, ``storage.sqlite_path``) carry across saves.
+
+    Returns a :class:`SaveReceipt` describing what the file held before and
+    after, captured **inside** the write lock. Callers that want to report on
+    a specific key must use the receipt rather than re-reading the file: a
+    concurrent writer between the save and a follow-up read would make the
+    report describe someone else's write (issue #2108).
     """
     from pydantic import ValidationError
 
@@ -2474,6 +2537,8 @@ def save_config_overrides(
             except (OSError, _json.JSONDecodeError) as exc:
                 _log.warning("Cannot read existing config at %s: %s — overwriting", path, exc)
 
+        before = copy.deepcopy(existing)
+
         # Union with dedicated-endpoint fields (memory_dirs). No exemption —
         # env-dependent factory output is already part of the comparand, so
         # "current == factory" still drops cleanly.
@@ -2506,6 +2571,7 @@ def save_config_overrides(
 
         _relativize_config_paths_in_place(existing)
         _atomic_write_json(path, existing)
+        return SaveReceipt(before=before, after=copy.deepcopy(existing))
 
 
 def register_project_memory_dir(target_dir: Path, config_path: Path | None = None) -> bool:
