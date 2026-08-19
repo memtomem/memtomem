@@ -8,9 +8,13 @@ partition without a browser or a Git base.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import threading
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,9 +32,13 @@ def _fixture_manifest(asset_path: Path, *, version: str = "1") -> scm.StaticCach
     )
 
 
-async def test_real_static_tree_matches_the_content_aware_manifest() -> None:
+def test_real_static_tree_matches_the_content_aware_manifest(
+    run_async: Callable[[Coroutine[Any, Any, Any]], Any],
+) -> None:
     manifest = scm.load_manifest()
-    references = await scm.collect_runtime_references()
+    # ``run_async`` instead of an ``async def`` test: a browser spec earlier in
+    # the session can leave a running event loop on MainThread (#2099).
+    references = run_async(scm.collect_runtime_references())
 
     assert scm.MANIFEST_PATH.parent == scm.WEB_DIR
     assert scm.MANIFEST_PATH.parent != scm.STATIC_DIR
@@ -298,3 +306,40 @@ def test_canonical_manifest_error_rejects_noncanonical_json(tmp_path: Path) -> N
     assert scm.canonical_manifest_error(manifest, path=path) == (
         f"{path} is not canonical; run the cache manifest updater with --write"
     )
+
+
+def test_run_async_survives_a_running_loop_on_the_main_thread(
+    run_async: Callable[[Coroutine[Any, Any, Any]], Any],
+) -> None:
+    """Pin the property the thread hop exists for (#2099).
+
+    Without a parked loop this fixture is indistinguishable from ``asyncio.run``,
+    and the regression it guards only appears on a machine with Chromium — so
+    the state Playwright leaves behind is staged here directly: MainThread
+    registered as running a loop, exactly what
+    ``sync_api/_context_manager.py``'s dispatcher greenlet does for the whole
+    session.
+    """
+
+    # Restore whatever was there rather than clearing to ``None``: under a real
+    # browser run Playwright's dispatcher loop *is* the previous value, and
+    # clearing it breaks its teardown with "Browser.close: no running event loop".
+    previous = asyncio.events._get_running_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.events._set_running_loop(loop)
+    try:
+        blocked = _thread_name()
+        try:
+            with pytest.raises(RuntimeError, match="running event loop"):
+                asyncio.run(blocked)
+        finally:
+            blocked.close()  # never awaited — closing it keeps the warning filter honest
+
+        assert run_async(_thread_name()) != threading.main_thread().name
+    finally:
+        asyncio.events._set_running_loop(previous)
+        loop.close()
+
+
+async def _thread_name() -> str:
+    return threading.current_thread().name
