@@ -155,3 +155,19 @@ def test_without_a_leftover_loop_the_hooks_are_silent(
 
     result.assert_outcomes(passed=expected_passed)
     assert "#2099" not in result.stdout.str()
+
+
+def test_the_hint_stays_ascii() -> None:
+    """A non-ASCII character in the message breaks the Windows shard.
+
+    ``runpytest_subprocess`` reads the child's output as UTF-8, but on Windows
+    the child writes it in the console codepage, so an em dash in the message
+    arrives as 0x97 and every probe above dies with ``UnicodeDecodeError``
+    instead of asserting anything. Pinning it here fails on any platform, so
+    the next em dash is caught before CI has to say it.
+    """
+
+    from .conftest import _LEFTOVER_LOOP_HINT
+
+    offenders = sorted({c for c in _LEFTOVER_LOOP_HINT if ord(c) > 127})
+    assert not offenders, f"non-ASCII in the emitted hint: {offenders}"

@@ -235,7 +235,7 @@ _LEFTOVER_LOOP_HINT = (
     "pytest-asyncio cannot start its runner. All this hook knows is that some "
     "loop is registered; the usual source is Playwright's sync API, whose "
     "dispatcher greenlet parks inside ``loop.run_until_complete`` for the whole "
-    "session — greenlets share the thread, so a browser spec earlier in the "
+    "session, and greenlets share the thread, so a browser spec earlier in the "
     "session leaves it behind (#2099). Check for one, and either run without "
     "browser specs in the same session or drive the coroutine on a worker "
     "thread the way tests/web/conftest.py's ``run_async`` fixture does."
