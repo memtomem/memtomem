@@ -2116,8 +2116,12 @@ class TestDeleteChunk:
         namespace explicitly. Kept as the route's contract after #2061 made
         the engine preserve under force as well — the route must still send
         what it resolved, not rely on the layer beneath it."""
+        from memtomem.indexing.engine import NamespaceDecision
+
         self._real_source_chunk(app, tmp_path)
-        app.state.index_engine.effective_namespace_for = AsyncMock(return_value="aaa")
+        app.state.index_engine.namespace_decision_for = AsyncMock(
+            return_value=NamespaceDecision(target="aaa", stored=("aaa",), reason="preserved")
+        )
 
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
@@ -2125,6 +2129,32 @@ class TestDeleteChunk:
         kwargs = app.state.index_engine.index_file.await_args.kwargs
         assert kwargs["force"] is True
         assert kwargs["namespace"] == "aaa"
+
+    async def test_delete_refuses_on_a_mixed_namespace_source(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """#2061: pinning the namespace is what lets a delete bypass the
+        forced re-index's multi-namespace refusal. On a legacy source whose
+        rows span several namespaces the pin would be the rule-resolved
+        target, rewriting every survivor into it — so the delete is refused
+        before the file is touched."""
+        from memtomem.indexing.engine import NamespaceDecision
+
+        source, _ = self._real_source_chunk(app, tmp_path)
+        before = source.read_text(encoding="utf-8")
+        app.state.index_engine.namespace_decision_for = AsyncMock(
+            return_value=NamespaceDecision(
+                target=None, stored=("aaa", "agent-runtime:planner"), reason="mixed_force_refused"
+            )
+        )
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 409, resp.text
+        assert "span several namespaces" in resp.json()["detail"]
+        # Nothing touched: not the file, not the index.
+        assert source.read_text(encoding="utf-8") == before
+        app.state.index_engine.index_file.assert_not_awaited()
 
     async def test_delete_refuses_when_the_namespace_lookup_fails(
         self, app, client: AsyncClient, tmp_path: Path
@@ -2137,7 +2167,7 @@ class TestDeleteChunk:
 
         source, _chunk = self._real_source_chunk(app, tmp_path)
         before = source.read_text(encoding="utf-8")
-        app.state.index_engine.effective_namespace_for = AsyncMock(
+        app.state.index_engine.namespace_decision_for = AsyncMock(
             side_effect=NamespaceResolutionError("store down")
         )
 

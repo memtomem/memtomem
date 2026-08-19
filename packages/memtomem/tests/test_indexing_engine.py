@@ -2369,6 +2369,60 @@ class TestBulkNamespacePrepass:
         assert await components.storage.namespaces_for_source(fp) == ["agent-runtime:planner"]
         assert stats.namespaces_preserved_against_rules == 0
 
+    async def test_namespace_decision_for_exposes_the_refusal_to_pinning_callers(
+        self, components, memory_dir, monkeypatch
+    ):
+        """A caller that pins the namespace bypasses the refusal, so it needs
+        to see the reason, not just the value. This is what the web
+        chunk-delete path reads before it pins (#2061)."""
+        engine = components.index_engine
+        fp = memory_dir / "mixed.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+
+        async def _stored(path):
+            return ["aaa", "agent-runtime:planner"]
+
+        monkeypatch.setattr(components.storage, "namespaces_for_source", _stored)
+
+        decision = await engine.namespace_decision_for(fp, force=True)
+
+        assert decision.reason == "mixed_force_refused"
+        assert decision.stored == ("aaa", "agent-runtime:planner")
+        # The value on its own looks like an ordinary answer — which is
+        # precisely why pinning it silently collapses the file.
+        assert await engine.effective_namespace_for(fp, force=True) == decision.target
+
+    async def test_a_post_resolution_failure_still_reports_the_advisory(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Resolution ran, so "this file kept a namespace the rules disagree
+        with" is true even though the embed failed and nothing was written.
+        Dropping the decision here would under-report a partial run."""
+        engine = components.index_engine
+        fp = memory_dir / "moved.md"
+        fp.write_text("# M\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
+        )
+        monkeypatch.setattr(
+            components.embedder,
+            "embed_texts",
+            AsyncMock(side_effect=RuntimeError("embedder down")),
+        )
+        monkeypatch.setattr(type(components.embedder), "dimension", property(lambda _self: 8))
+
+        stats = await engine.index_path(memory_dir, recursive=True, force=True)
+
+        # Pin the branch, not just "something failed": a different early
+        # return (dimension gate, chunker) would satisfy a bare error check
+        # while never reaching the resolution this test is about.
+        assert any("Embedding failed" in err for err in stats.errors), stats.errors
+        assert stats.namespaces_preserved_against_rules == 1
+        # No write happened, so nothing counts as moved.
+        assert stats.namespaces_reassigned == 0
+
     async def test_untagged_default_is_not_reported_as_a_move(self, components, memory_dir):
         """``None`` and ``"default"`` are the same state by two names, so a
         file that never moved must not be counted as one."""

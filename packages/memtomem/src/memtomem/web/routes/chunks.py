@@ -333,6 +333,15 @@ async def delete_chunk(
             # untagged carve-out into the stored spelling (see below), and an
             # explicit namespace is the one input whose meaning cannot drift.
             #
+            # But pinning is exactly what makes an explicit namespace *win*,
+            # including over the multi-namespace refusal. On a legacy source
+            # whose rows span several namespaces, the resolver answers with the
+            # rule-resolved target and pinning it would rewrite every survivor
+            # into that one namespace — the #2061 collapse, reached through an
+            # ordinary delete. So this asks for the decision, not just the
+            # value, and refuses when the file is one the forced re-index would
+            # not have accepted on its own.
+            #
             # Outside the try below on purpose. That handler's fallback is an
             # index-only delete, which is the right answer when the *file*
             # edit fails but a wrong one here: the row would go while the
@@ -341,14 +350,15 @@ async def delete_chunk(
             # namespace lookup that cannot answer is retryable, and nothing
             # has been mutated yet.
             try:
+                # ``force=True`` matches the re-index below, so the decision
+                # reports what that call would decide on its own.
+                decision = await index_engine.namespace_decision_for(source, force=True)
                 # ``or default_namespace``: the resolver returns ``None`` for
                 # the untagged carve-out, and passing that back through would
                 # read as "no caller namespace" and re-enter rule resolution —
                 # the very thing being avoided. The explicit default stores
                 # the same value the carve-out does.
-                preserved_ns = (
-                    await index_engine.effective_namespace_for(source)
-                ) or config.namespace.default_namespace
+                preserved_ns = decision.target or config.namespace.default_namespace
             except NamespaceResolutionError as exc:
                 # Only this one: it is the resolver's declared "the store did
                 # not answer" signal and is genuinely retryable. Catching
@@ -362,6 +372,25 @@ async def delete_chunk(
                         "deleted. Retry once the chunk store is reachable."
                     ),
                 ) from exc
+            if decision.reason == "mixed_force_refused":
+                # Before the file edit below: refusing after it would leave the
+                # entry gone from disk with its chunks still indexed. Permanent
+                # (409, not 503) — retrying changes nothing; splitting the file
+                # per namespace does.
+                logger.warning(
+                    "Refusing chunk delete for %s: source spans namespaces %s",
+                    source,
+                    ", ".join(sorted(decision.stored)),
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This source file's chunks span several namespaces, and the "
+                        "re-index a delete performs would rewrite every remaining chunk "
+                        "into one of them. Nothing was deleted. Split the file so each "
+                        "namespace has its own, then retry."
+                    ),
+                )
             try:
                 await asyncio.to_thread(remove_lines, source, meta.start_line, meta.end_line)
             except ValueError as exc:

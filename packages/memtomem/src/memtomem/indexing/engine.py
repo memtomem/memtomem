@@ -1225,6 +1225,27 @@ class IndexEngine:
 
         return NamespaceDecision(target=ruled, stored=stored, reason="resolved")
 
+    async def namespace_decision_for(
+        self,
+        file_path: Path,
+        explicit_ns: str | None = None,
+        *,
+        force: bool = False,
+        reassign: bool = False,
+    ) -> NamespaceDecision:
+        """Public form of :meth:`_namespace_decision`.
+
+        For callers that pin the namespace explicitly on a forced re-index
+        (the web chunk-delete path). Pinning is what makes the pin *bypass*
+        the multi-namespace refusal — an explicit namespace is caller intent
+        and always wins — so a caller that pins has to ask for the reason, not
+        just the value, or it silently reintroduces the collapse the refusal
+        exists to prevent (#2061).
+        """
+        return await self._namespace_decision(
+            file_path, explicit_ns, force=force, reassign=reassign
+        )
+
     async def effective_namespace_for(
         self,
         file_path: Path,
@@ -1712,6 +1733,8 @@ class IndexEngine:
                     "skipped": len(new_chunks),
                     "deleted": 0,
                     "errors": [msg],
+                    "namespace_decision": ns_decision,
+                    "namespace_written": False,
                 }
         if diff_result.to_upsert and self._embedder.dimension > 0:
             texts = [c.retrieval_content for c in diff_result.to_upsert]
@@ -1783,6 +1806,13 @@ class IndexEngine:
                     "deleted": 0,
                     "errors": [message],
                     "retryable_errors": [message] if isinstance(exc, RetryableError) else [],
+                    # Resolution already ran, so the decision holds even though
+                    # nothing was written. ``namespace_written`` stays false —
+                    # no move happened — but "this file kept a namespace the
+                    # rules disagree with" is still true, and dropping it here
+                    # would under-report the advisory on a partial run.
+                    "namespace_decision": ns_decision,
+                    "namespace_written": False,
                 }
 
         # Now safe to mutate DB — embedding succeeded.

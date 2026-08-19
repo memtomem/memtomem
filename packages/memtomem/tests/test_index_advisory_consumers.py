@@ -6,9 +6,13 @@ so. The counters travel on every index response, but each JS surface renders
 by hand — the first cut of the fix wired three of seven consumers and the
 other four reported a clean run.
 
-This guard derives its own scope: it finds the call sites rather than checking
-a list someone has to remember to extend, so a consumer added later is covered
-the day it lands.
+**What this guard is and is not.** It is a structural check: it derives its own
+scope, so a consumer added later is covered the day it lands rather than the
+day someone remembers to extend a list. It cannot prove the reporter is reached
+at runtime — a call on a dead branch would satisfy it. That half is Vitest's
+(``tests-js/index-namespace-advisory.test.mjs`` drives ``mdReindexAll`` and
+``_renderIndexResult`` for real and asserts the toast). Structure here,
+behavior there; neither alone is enough.
 """
 
 from __future__ import annotations
@@ -21,23 +25,43 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "src" / "memtomem" / "web
 #: A call that returns an indexing result the user is shown.
 _INDEX_CALL_RE = re.compile(r"""['"]/api/(index|reindex)(\?[^'"]*)?['"]""")
 
-#: The shared reporters. ``ForRoots`` aggregates the per-root ``/api/reindex``
-#: shape; the bare one takes a single result or SSE ``complete`` event.
-_ADVISORY_RE = re.compile(r"namespaceAdvisoryToast(ForRoots)?\s*\(")
+#: A *call* to one of the shared reporters. ``(?<!function )`` keeps the
+#: definition in ``app.js`` from counting as its own consumer — without it the
+#: file that declares the helper would satisfy this guard by existing.
+_ADVISORY_CALL_RE = re.compile(r"(?<!function )\bnamespaceAdvisoryToast(ForRoots)?\s*\(")
+
+#: Reporter definitions, so the declaring file can be told apart from consumers.
+_ADVISORY_DEF_RE = re.compile(r"function\s+namespaceAdvisoryToast(ForRoots)?\s*\(")
+
+#: Renders an indexing ``complete`` event: the SSE terminal branch that shows
+#: counts to the user. Requiring a *count* field keeps this from matching a
+#: transport-level "is this the terminal event" check that renders nothing.
+_COMPLETE_RENDER_RE = re.compile(r"===\s*['\"]complete['\"]")
 
 
-def _js_sources() -> dict[str, str]:
-    return {p.name: p.read_text(encoding="utf-8") for p in sorted(_STATIC_DIR.glob("*.js"))}
+def _web_sources() -> dict[str, str]:
+    """Every file that can hold a consumer: JS modules and the page itself.
+
+    ``index.html`` is included because an inline handler there would be just as
+    much a consumer as one in a module, and scanning only ``static/*.js`` would
+    quietly exclude it.
+    """
+    paths = sorted(_STATIC_DIR.glob("*.js")) + sorted(_STATIC_DIR.glob("*.html"))
+    return {p.name: p.read_text(encoding="utf-8") for p in paths}
+
+
+def _reports(text: str) -> bool:
+    return bool(_ADVISORY_CALL_RE.search(text))
 
 
 def test_every_index_call_site_file_reports_the_namespace_advisory() -> None:
-    sources = _js_sources()
+    sources = _web_sources()
     callers = {name for name, text in sources.items() if _INDEX_CALL_RE.search(text)}
     # If this trips, the regex stopped matching the real call shape — a guard
     # that silently scopes itself to nothing is worse than no guard.
     assert callers, "found no /api/index or /api/reindex call sites to check"
 
-    missing = sorted(name for name in callers if not _ADVISORY_RE.search(sources[name]))
+    missing = sorted(name for name in callers if not _reports(sources[name]))
     assert not missing, (
         f"{missing} call /api/index or /api/reindex but never call "
         "namespaceAdvisoryToast — a forced reindex there reports success while "
@@ -47,15 +71,29 @@ def test_every_index_call_site_file_reports_the_namespace_advisory() -> None:
 
 def test_sse_complete_handlers_report_the_namespace_advisory() -> None:
     """The stream path carries the same counters on its ``complete`` event."""
-    sources = _js_sources()
+    sources = _web_sources()
     handlers = {
         name
         for name, text in sources.items()
-        if re.search(r"===\s*['\"]complete['\"]", text) and "indexed_chunks" in text
+        if _COMPLETE_RENDER_RE.search(text) and "indexed_chunks" in text
     }
     assert handlers, "found no SSE complete handlers to check"
 
-    missing = sorted(name for name in handlers if not _ADVISORY_RE.search(sources[name]))
+    missing = sorted(name for name in handlers if not _reports(sources[name]))
     assert not missing, (
         f"{missing} render an indexing 'complete' event without the namespace advisory (#2061)."
     )
+
+
+def test_the_reporter_definition_does_not_satisfy_the_guard_by_itself() -> None:
+    """Pins the ``(?<!function )`` lookbehind.
+
+    Without it, the file declaring ``namespaceAdvisoryToast`` passes both checks
+    on the strength of its own ``function`` line, so the surface that renders
+    the main index result — the one most likely to regress — would be exempt
+    from the guard that exists to cover it.
+    """
+    definition_only = "function namespaceAdvisoryToast(result) {\n  return false;\n}\n"
+    assert _ADVISORY_DEF_RE.search(definition_only)
+    assert not _reports(definition_only)
+    assert _reports(definition_only + "namespaceAdvisoryToast(resp);\n")

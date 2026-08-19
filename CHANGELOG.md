@@ -14,8 +14,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mm index --force <memory_dir>`) silently moved every agent-session chunk to
   `default`, collapsing the isolation sessions exist to provide — and nothing
   on disk could restore it, since the day-file name encodes the namespace
-  one way and the overwritten rows were the only record. `--force` now means
-  re-embed only: each file keeps the namespace its chunks are stored under.
+  one way and the overwritten rows were the only record. `--force` now
+  re-embeds without re-resolving namespaces: each file keeps the namespace its
+  chunks are stored under (scope re-resolution is unchanged).
   Applying changed namespace rules to already-indexed files moved to the new
   `mm index --reassign-namespaces <path>` (implies `--force`; rejected
   alongside `--namespace` and the debounce modes). A plain `--force` run now

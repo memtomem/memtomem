@@ -27,10 +27,11 @@ overwrites in place are the only record there ever was.
 
 ### 1. The two meanings split
 
-`force` re-embeds and nothing more. A file whose chunks are stored under one
-unanimous namespace keeps it, for every caller, explicit-namespace callers
-aside. A new `reassign_namespaces` flag (`mm index --reassign-namespaces`) is
-the opt-in that re-resolves through the current path rules.
+`force` re-embeds without re-resolving namespaces. (It still re-resolves
+ADR-0011 *scope* — a separate axis, unchanged here.) A file whose chunks are
+stored under one unanimous namespace keeps it, for every caller that passes no
+namespace. A new `reassign_namespaces` flag (`mm index --reassign-namespaces`)
+is the opt-in that re-resolves through the current path rules.
 
 The direction of the split follows from which mistake is recoverable:
 
@@ -77,6 +78,17 @@ Placement matters twice:
 The message carries the file's bare name. Bulk error strings are echoed
 verbatim through the web complete event and API responses, which redact host
 paths; the absolute path goes to the server log.
+
+A caller that pins the namespace explicitly *bypasses* this refusal — an
+explicit namespace is caller intent and always wins. That is a hazard for the
+one internal caller that pins on a forced re-index: web chunk deletion, whose
+pin exists for the §3 reason above. On a legacy multi-namespace source the
+resolver hands it the rule-resolved target, and pinning that would rewrite
+every survivor into it — the collapse, reached through an ordinary delete. So
+that caller asks for the *decision* rather than the value
+(`namespace_decision_for`) and refuses the delete (409, before touching the
+file) when the re-index would have refused on its own. Any future caller that
+pins under `force` inherits the same obligation.
 
 ### 4. What a run did to namespaces is reported, not inferred
 
