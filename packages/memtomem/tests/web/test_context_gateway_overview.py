@@ -1367,6 +1367,7 @@ def test_empty_tiles_show_teaching_pointer(page, mm_web_url: str) -> None:
         f"MCP tile must not advertise an Import step that doesn't exist, got {mcp_text!r}"
     )
 
+
 # ---------------------------------------------------------------------------
 # Issue: gateway Push-All total failure must render "Push failed", not the
 # shared "Sync failed" copy still owned by Hooks Sync (settings-hooks-
@@ -1398,15 +1399,16 @@ def test_sync_all_total_failure_shows_push_failed_not_sync_failed(page, mm_web_u
     )
     page.goto(mm_web_url)
     _open_context_gateway(page)
+    page.evaluate("() => { _ctxTargetScope = 'project_shared'; }")
 
     page.locator("#ctx-sync-all-btn").click()
-    # Confirm dialog appears first (the preview is best-effort and the POST
-    # only fires after confirm) — accept it via the confirm button.
-    page.locator(".modal-confirm-btn, .confirm-btn, button:has-text('Push')").first.click()
+    page.wait_for_selector("#confirm-modal:not([hidden])", timeout=2_000)
+    page.locator("#confirm-ok-btn").click()
 
-    toast = page.locator(".toast, .toast-message").filter(has_text="failed")
-    toast.first.wait_for(timeout=5_000)
-    text = (toast.first.text_content() or "")
+    page.wait_for_selector("#toast-container .toast", timeout=3_000)
+    toast = page.locator("#toast-container .toast").filter(has_text="failed")
+    toast.first.wait_for(timeout=3_000)
+    text = toast.first.text_content() or ""
     assert "Push failed" in text, f"gateway total failure must say 'Push failed', got: {text!r}"
     assert "Sync failed" not in text, (
         f"gateway total failure must NOT reuse the Hooks-Sync 'Sync failed' copy, got: {text!r}"
