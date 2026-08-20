@@ -904,7 +904,7 @@ async function _ctxSyncProjectScope(scopeId, btn) {
         // Only a transport failure (above) aborts the run. ``failed`` keeps the
         // FIRST failure (drives the toast reason + gates the settings phase).
         // The fallback is localized (#1646): it gets interpolated into the
-        // localized ``toast.sync_failed``, so an English literal here would
+        // localized ``toast.push_failed``, so an English literal here would
         // leak into Korean toasts whenever the response has no structured
         // detail. Structured-path passthrough above stays verbatim — the
         // backend reason (e.g. the parse-error filename) is remediation-
@@ -1645,7 +1645,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
         // abort the whole fan-out (only a transport failure, above, aborts). The
         // FIRST failure drives the toast reason + gates settings; the failed
         // list comes from ``phaseStates`` (#1396). Localized fallback — it is
-        // interpolated into ``toast.sync_failed`` (#1646).
+        // interpolated into ``toast.push_failed`` (#1646).
         const reason = await _ctxErrorMessageFromResponse(
           resp, t('settings.ctx.sync_phase_failed_fallback', { type: _ctxTypeName(typ) }));
         if (!failed) failed = { phase: typ, reason };
