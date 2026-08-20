@@ -88,6 +88,14 @@ __all__ = ["SqliteBackend"]
 # candidates a smaller earlier attempt already retrieved (#2119).
 VEC_MAX_KNN_K = 4096
 
+# Substring identifying sqlite-vec's own refusal of an oversized KNN ``k``
+# (full text: ``k value in knn query too large, provided <k> and the limit is
+# <cap>``). The clamp above should make it unreachable; it stays as the ONLY
+# error we are willing to absorb by degrading to a smaller attempt's rows.
+# Everything else out of SQLite — corruption, I/O, interrupt, schema — must
+# propagate, or a failing store silently serves partial results forever.
+_VEC_K_TOO_LARGE = "k value in knn query too large"
+
 
 # Batch size for streaming rebuild_fts — bounds peak memory regardless of
 # corpus size (issue #278). 1000 rows × typical chunk width stays well under
@@ -1845,9 +1853,16 @@ class SqliteBackend(
         # the rare cold-cache path.
         total_vec_rows = db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0
 
+        # Nothing to search. Returning early also keeps the schedule below
+        # monotonic — with a zero row count the clamp would otherwise produce
+        # ``[100, 1000, 1]`` and spend three round-trips proving the table is
+        # empty (Codex review, #2120).
+        if not total_vec_rows:
+            return []
+
         # The largest inner K this engine will actually accept: never more
         # embeddings than exist, and never more than sqlite-vec's cap (#2119).
-        knn_ceiling = min(total_vec_rows, VEC_MAX_KNN_K) if total_vec_rows else VEC_MAX_KNN_K
+        knn_ceiling = min(total_vec_rows, VEC_MAX_KNN_K)
 
         # ``exhaustive`` (deterministic evaluation mode, #1802): sqlite-vec
         # 0.1.9 prunes to the inner ``LIMIT`` with an unstable distance-only
@@ -1912,11 +1927,14 @@ class SqliteBackend(
                         f"Check MEMTOMEM_EMBEDDING__MODEL / "
                         f"MEMTOMEM_EMBEDDING__DIMENSION."
                     ) from exc
-                # An escalation attempt that fails must not throw away what a
-                # smaller attempt already returned: the caller treats ANY
-                # exception here as "dense search unavailable" and drops the
-                # whole leg (#2119). Degrade to the best candidates in hand.
-                if rows:
+                # An escalation attempt that hits the engine's k cap must not
+                # throw away what a smaller attempt already returned: the caller
+                # treats ANY exception here as "dense search unavailable" and
+                # drops the whole leg (#2119). Degrade to the candidates in hand
+                # — but ONLY for that one recognized error. A corrupt page or a
+                # failed read is not a recall problem, and answering it with
+                # stale partial rows would hide a broken store (Codex review).
+                if rows and _VEC_K_TOO_LARGE in str(exc):
                     logger.warning(
                         "Dense KNN escalation to k=%d failed (%s); keeping the %d "
                         "candidate(s) from the previous attempt",

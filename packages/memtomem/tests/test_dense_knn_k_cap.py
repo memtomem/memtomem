@@ -24,34 +24,49 @@ NEAR = [0.9] * 1024
 FAR = [-0.9] * 1024
 
 
+# Literal, not the module constant: these injections must keep working against
+# a build that has no constant at all, so the pins below fail on BEHAVIOR rather
+# than on a missing symbol.
+CAP_ERROR = "k value in knn query too large, provided {k} and the limit is 4096"
+UNRELATED_ERROR = "database disk image is malformed"
+
+
 class _RecordingDB:
     """Delegating wrapper that records every KNN ``k`` and can inject a failure."""
 
-    def __init__(self, inner, ks: list[int], fail_on_call: int | None = None):
+    def __init__(
+        self,
+        inner,
+        ks: list[int],
+        fail_on_call: int | None = None,
+        message: str = CAP_ERROR,
+    ):
         self._inner = inner
         self._ks = ks
         self._fail_on_call = fail_on_call
+        self._message = message
 
     def execute(self, sql, params=None):
         if params is not None and "embedding MATCH" in sql:
             self._ks.append(params[1])
             if self._fail_on_call is not None and len(self._ks) == self._fail_on_call:
-                # Literal 4096, not the module constant: this injection must
-                # keep working against a build that has no constant at all, so
-                # the degrade pin below fails on BEHAVIOR rather than on a
-                # missing symbol.
-                raise sqlite3.OperationalError(
-                    f"k value in knn query too large, provided {params[1]} and the limit is 4096"
-                )
+                raise sqlite3.OperationalError(self._message.format(k=params[1]))
         return self._inner.execute(sql) if params is None else self._inner.execute(sql, params)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
 
-def _record(storage, ks: list[int], fail_on_call: int | None = None) -> None:
+def _record(
+    storage,
+    ks: list[int],
+    fail_on_call: int | None = None,
+    message: str = CAP_ERROR,
+) -> None:
     inner = storage._get_read_db()
-    storage._get_read_db = lambda: _RecordingDB(inner, ks, fail_on_call)  # type: ignore[method-assign]
+    storage._get_read_db = lambda: _RecordingDB(  # type: ignore[method-assign]
+        inner, ks, fail_on_call, message
+    )
 
 
 async def _seed_escalating_store(storage, *, matching_near: int) -> None:
@@ -138,6 +153,23 @@ class TestEscalationFailureDegrades:
         assert all(r.chunk.metadata.namespace == "wanted" for r in results)
 
     @pytest.mark.asyncio
+    async def test_unrelated_sqlite_failure_is_not_absorbed(self, storage):
+        """Only the k-cap error may be answered with stale candidates.
+
+        A corrupt page or a failed read is not a recall problem. Degrading on it
+        would hand back a partial result set and let a broken store look healthy
+        for as long as the first attempt keeps succeeding.
+        """
+        await _seed_escalating_store(storage, matching_near=2)
+
+        ks: list[int] = []
+        _record(storage, ks, fail_on_call=2, message=UNRELATED_ERROR)
+        with pytest.raises(sqlite3.OperationalError, match="malformed"):
+            await storage.dense_search(
+                NEAR, top_k=5, namespace_filter=NamespaceFilter(namespaces=("wanted",))
+            )
+
+    @pytest.mark.asyncio
     async def test_first_attempt_failure_still_raises(self, storage):
         """With nothing in hand there is nothing to degrade to — surface it."""
         await _seed_escalating_store(storage, matching_near=0)
@@ -186,3 +218,15 @@ class TestExhaustiveAboveCap:
 
         assert ks == [120], f"exhaustive must scan every embedding once, got {ks}"
         assert [r.chunk.id for r in results] == sorted((c.id for c in chunks), key=str)[:5]
+
+
+class TestEmptyVectorTable:
+    @pytest.mark.asyncio
+    async def test_no_query_is_issued_when_there_is_nothing_to_search(self, storage):
+        """An empty ``chunks_vec`` must cost zero KNN round-trips, not three."""
+        ks: list[int] = []
+        _record(storage, ks)
+        results = await storage.dense_search(NEAR, top_k=5)
+
+        assert results == []
+        assert ks == [], f"empty table must not be probed at all, got {ks}"
