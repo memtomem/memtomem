@@ -456,6 +456,10 @@ runtime" reminder), and a `Warnings` block with stable schema keys
 dimension mismatch is detected. Run `mm status` from a terminal to see
 the exact output your install produces.
 
+You do not have to go looking for it: while a mismatch stands, every
+`mem_search` whose dense leg was dropped says so in its own reply — on
+every call, not just the first one in the session.
+
 ### From a terminal — `mm status`
 
 If the editor isn't reachable yet (or you want to verify the install

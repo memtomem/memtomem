@@ -49,7 +49,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from dataclasses import dataclass, field
 
@@ -387,6 +387,13 @@ class RetrievalStats:
     # embeddings were written under a different policy/model/dimension
     # (``storage.embedding_mismatch``). The ranking silently dropped to BM25-only.
     dense_suppressed_mismatch: bool = False
+    # ``mismatch_detail``: the ``storage.embedding_mismatch`` payload as it
+    # stood when this call decided to suppress dense retrieval. Snapshotted
+    # rather than re-read by the caller: an ``mm embedding-reset`` landing
+    # between the search and the hint render would otherwise describe a
+    # mismatch this query never saw (or none at all). ``None`` whenever
+    # ``dense_suppressed_mismatch`` is False.
+    mismatch_detail: dict[str, Any] | None = None
 
 
 if TYPE_CHECKING:
@@ -1314,6 +1321,12 @@ class SearchPipeline:
             dense_suppressed_mismatch = (
                 self._config.enable_dense and dense_weight > 0 and isinstance(mismatch, dict)
             )
+            # Copy rather than alias: the caller renders this after the search
+            # returns, by which point a concurrent reset may have cleared or
+            # replaced the backend's live mismatch.
+            mismatch_detail = (
+                dict(mismatch) if dense_suppressed_mismatch and isinstance(mismatch, dict) else None
+            )
             use_dense = self._config.enable_dense and not isinstance(mismatch, dict)
             use_bm25 = use_bm25 and bm25_weight > 0
             use_dense = use_dense and dense_weight > 0
@@ -1456,6 +1469,7 @@ class SearchPipeline:
                 rerank_applied=apply_rerank,
                 expansion_failed=expansion_failed,
                 dense_suppressed_mismatch=dense_suppressed_mismatch,
+                mismatch_detail=mismatch_detail,
             )
 
             # Stage 1 enrichment (RFC P1 Phase C): session-summary rescue.

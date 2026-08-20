@@ -362,6 +362,24 @@ Policy-only drift uses `kind: "embedding_policy_mismatch"`. The `kind` field
 is an open enum — new warning kinds may be added in future releases without
 changing the envelope shape.
 
+While the mismatch stands, every affected search also says so in-band, on
+each call rather than once per server process:
+
+```
+(dense retrieval did not contribute to this query — the stored embeddings do
+not match the configured embedding policy: DB stored none (0d), config uses
+onnx/bge-small-en-v1.5 (384d). Fix: run `mm embedding-reset` ...)
+```
+
+`mm search` prints it to stderr for every `--format`, so stdout payloads keep
+their shape — `--format json` remains a bare list. The one stdout change is in
+`--format table`, whose footer marks the leg that dropped out
+(`1 BM25 + 0 dense (suppressed: embedding mismatch) → 1 results`).
+`mem_search` and
+`mem_agent_search` append it to the text formats and to the `hints` array of
+`output_format="structured"`. A search that weighted dense to zero is not
+reported — it got the retrieval it asked for.
+
 ## Search
 
 Search fuses two retrievers: **BM25** (keyword/lexical matching, via SQLite FTS5)

@@ -1201,3 +1201,92 @@ class TestCaseHCliSessionWriteRouting:
 
         found, _stats = await comp.search_pipeline.search("quarterly planning", top_k=10)
         assert any("quarterly planning" in r.chunk.content for r in found)
+
+
+@pytest.fixture
+async def dense_enabled_components(tmp_path, monkeypatch):
+    """``bm25_only_components`` with dense retrieval switched on.
+
+    ``dense_suppressed_mismatch`` only sets when ``enable_dense`` is true, and
+    a mismatched store never reaches the embedder (the pipeline drops the leg
+    first), so the default ``none`` provider suffices — no model download.
+    """
+    from memtomem.config import Mem2MemConfig
+    from memtomem.server.component_factory import close_components, create_components
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir(exist_ok=True)
+
+    isolate_memtomem_env(monkeypatch)
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "dense.db"
+    config.indexing.memory_dirs = [mem_dir]
+    config.embedding.dimension = 1024
+    config.search.enable_dense = True
+
+    comp = await create_components(config)
+    try:
+        yield comp, mem_dir
+    finally:
+        await close_components(comp)
+
+
+class TestAgentSearchDenseSuppression:
+    """#2063: mem_agent_search must report a dropped dense leg like mem_search.
+
+    The sibling tool routes through the same ``run_search`` and carries the
+    same one-shot gate, so the pair is audited together (the two have drifted
+    apart before — #2085).
+    """
+
+    @pytest.mark.asyncio
+    async def test_structured_repeats_the_hint_and_drops_the_long_form(
+        self, dense_enabled_components
+    ):
+        import json
+
+        comp, _ = dense_enabled_components
+        comp.storage._dim_mismatch = (384, 1024)
+        comp.storage._model_mismatch = ("onnx", "bge-small-en-v1.5", "onnx", "bge-m3")
+
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+        await comp.storage.upsert_chunks(
+            [make_chunk("alpha probe", namespace=f"{AGENT_NAMESPACE_PREFIX}alpha")]
+        )
+
+        for _ in range(2):
+            payload = json.loads(
+                await mem_agent_search(  # type: ignore[arg-type]
+                    query="probe",
+                    agent_id="alpha",
+                    output_format="structured",
+                    ctx=ctx,
+                )
+            )
+            hints = payload.get("hints") or []
+            assert any("dense retrieval did not contribute" in h for h in hints)
+            assert any("DB stored onnx/bge-small-en-v1.5 (384d)" in h for h in hints)
+            # Same dims, same fix — the long-form would only repeat itself.
+            assert not any("Note: embedding dimension mismatch" in h for h in hints)
+
+        # Unconsumed, so mem_add / mem_recall still owe the operator one.
+        assert app._dim_mismatch_announced is False
+
+    @pytest.mark.asyncio
+    async def test_compact_text_carries_the_hint_on_every_call(self, dense_enabled_components):
+        comp, _ = dense_enabled_components
+        comp.storage._dim_mismatch = (384, 1024)
+
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+        await comp.storage.upsert_chunks(
+            [make_chunk("alpha probe", namespace=f"{AGENT_NAMESPACE_PREFIX}alpha")]
+        )
+
+        first = await mem_agent_search(query="probe", agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
+        second = await mem_agent_search(query="probe", agent_id="alpha", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "dense retrieval did not contribute" in first
+        assert "dense retrieval did not contribute" in second

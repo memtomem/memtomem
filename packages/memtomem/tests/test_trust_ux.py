@@ -634,3 +634,112 @@ def _search_ctx(components):
         ensure_initialized=AsyncMock(),
     )
     return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+
+
+# ---------------------------------------------------------------------------
+# #2063 — the dense-suppression notice must outlive the one-shot announcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def dense_enabled_components(tmp_path, monkeypatch):
+    """Like ``trust_components`` but with dense retrieval switched on.
+
+    ``dense_suppressed_mismatch`` only sets when ``enable_dense`` is true, and
+    a store carrying a mismatch never reaches the embedder (the pipeline drops
+    the leg first), so the default ``none`` provider is enough — no model
+    download.
+    """
+    for var in (
+        "MEMTOMEM_EMBEDDING__PROVIDER",
+        "MEMTOMEM_EMBEDDING__MODEL",
+        "MEMTOMEM_EMBEDDING__DIMENSION",
+        "MEMTOMEM_STORAGE__SQLITE_PATH",
+        "MEMTOMEM_INDEXING__MEMORY_DIRS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "dense.db"
+    config.indexing.memory_dirs = [mem_dir]
+    config.embedding.dimension = 1024
+    config.search.enable_dense = True
+
+    import memtomem.config as _cfg
+
+    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+
+    comp = await create_components(config)
+    try:
+        yield comp, mem_dir
+    finally:
+        await close_components(comp)
+
+
+class TestDenseSuppressedHint:
+    """#2063: a degraded store must say so on *every* search, not just one."""
+
+    async def test_hint_repeats_and_replaces_the_one_shot_notice(self, dense_enabled_components):
+        from memtomem.server.tools.search import mem_search
+
+        comp, _ = dense_enabled_components
+        _install_mismatch(comp.storage)
+        await comp.storage.upsert_chunks([make_chunk("notes about pipelines")])
+
+        ctx = _search_ctx(comp)
+        first = json.loads(await mem_search(query="pipelines", output_format="structured", ctx=ctx))
+        second = json.loads(
+            await mem_search(query="pipelines", output_format="structured", ctx=ctx)
+        )
+
+        for payload in (first, second):
+            assert any("dense retrieval did not contribute" in h for h in payload["hints"]), (
+                "per-search degradation hint missing"
+            )
+            # The dimensions come from the snapshot the pipeline took while
+            # deciding to suppress the leg — dropping it degrades the hint to
+            # its detail-free fallback.
+            assert any(
+                "DB stored onnx/bge-small-en-v1.5 (384d)" in h
+                and "config uses onnx/bge-m3 (1024d)" in h
+                for h in payload["hints"]
+            ), "hint lost the mismatch detail the pipeline captured"
+            # The one-shot long-form names the same dims and the same fix.
+            assert not any("Note: embedding dimension mismatch" in h for h in payload["hints"])
+
+        # Not consumed: the write side still owes the operator its one notice.
+        assert ctx.request_context.lifespan_context._dim_mismatch_announced is False
+
+    async def test_healthy_store_stays_quiet(self, dense_enabled_components):
+        from memtomem.server.tools.search import mem_search
+
+        comp, _ = dense_enabled_components
+        await comp.storage.upsert_chunks([make_chunk("notes about pipelines")])
+
+        ctx = _search_ctx(comp)
+        payload = json.loads(
+            await mem_search(query="pipelines", output_format="structured", ctx=ctx)
+        )
+
+        assert not any(
+            "dense retrieval did not contribute" in h for h in payload.get("hints") or []
+        )
+
+    async def test_compact_text_carries_the_hint_on_every_call(self, dense_enabled_components):
+        """The default format is text — #2085 showed hints can be built and
+        then dropped on exactly that path."""
+        from memtomem.server.tools.search import mem_search
+
+        comp, _ = dense_enabled_components
+        _install_mismatch(comp.storage)
+        await comp.storage.upsert_chunks([make_chunk("notes about pipelines")])
+
+        ctx = _search_ctx(comp)
+        first = await mem_search(query="pipelines", ctx=ctx)
+        second = await mem_search(query="pipelines", ctx=ctx)
+
+        assert "dense retrieval did not contribute" in first
+        assert "dense retrieval did not contribute" in second
