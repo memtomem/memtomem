@@ -1538,6 +1538,7 @@
   "toast.request_failed": "Request failed",
   "toast.unexpected_response": "Unexpected response",
   "toast.sync_failed": "Sync failed: {error}",
+  "toast.push_failed": "Push failed: {error}",
   "toast.sync_scope_changed": "Sync target changed during confirmation — sync cancelled. Re-run sync for the current target.",
   "toast.sync_targets_unavailable": "Sync cancelled — the server did not disclose which files the write would touch.",
   "toast.create_failed": "Create failed: {error}",
