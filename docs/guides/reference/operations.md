@@ -123,7 +123,10 @@ intentionally have no automatic `--fix` mode.
 1. Ollama: `ollama list` to verify model is pulled
 2. OpenAI: check `mem_config(key="embedding.api_key")`
 3. Check mismatch: `mm embedding-reset` (CLI) or `mem_embedding_reset()` (MCP)
-4. Reset to current model: `mm embedding-reset --mode apply-current` then `mm index ~/notes`
+4. Reset to current model: `mm embedding-reset --mode apply-current` then
+   `mm index --force ~/notes` — `--force` is load-bearing. A plain `mm index`
+   matches the surviving chunks by content hash, reports them `unchanged`,
+   and writes no vectors, leaving every search on BM25 alone.
 
 ### MCP tools not visible
 

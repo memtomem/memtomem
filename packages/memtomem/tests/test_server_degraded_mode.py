@@ -189,6 +189,14 @@ async def test_mem_embedding_reset_apply_current_repairs_mismatch(degraded_compo
     assert "onnx/bge-m3" in reset_out
     assert "1024d" in reset_out
 
+    # The receipt must not send an agent to ``mem_index(force=true)``: inside a
+    # session that call passes the session namespace explicitly, which
+    # overrides preservation and restamps every row it re-embeds (ADR-0033,
+    # #2104). The CLI command passes no namespace. #2115.
+    assert "mm index --force" in reset_out
+    assert "mem_index(force=true) to re-index" not in reset_out
+    assert "dense search finds nothing" in reset_out
+
     # Live storage view: mismatch cleared.
     assert app.storage.embedding_mismatch is None
 

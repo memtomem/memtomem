@@ -853,8 +853,13 @@ Your database was created with a different embedding model than your current con
 ```bash
 mm embedding-reset                          # check status
 mm embedding-reset --mode apply-current     # reset to current model
-mm index ~/notes                            # re-index
+mm index --force ~/notes                    # re-embed (--force is required)
 ```
+
+`--force` is not optional here. The reset drops the vectors but leaves the
+chunk rows and their content hashes, so a plain `mm index` matches every one
+of them, reports `unchanged`, and writes nothing — a store that answers on
+BM25 alone with no error to show for it.
 
 ### Two servers writing the same store
 
