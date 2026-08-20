@@ -7,7 +7,7 @@ basic config operations with mocked components.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -250,11 +250,55 @@ class TestConfigCLI:
     def test_config_set_tokenizer_triggers_fts_rebuild(
         self, tmp_path, monkeypatch, runner: CliRunner
     ) -> None:
-        """Changing search.tokenizer via CLI must trigger set_tokenizer + FTS rebuild."""
+        """Changing search.tokenizer via CLI must trigger set_tokenizer + FTS rebuild.
+
+        ``rebuild_fts`` and ``initialize`` are ``AsyncMock``, not ``MagicMock``:
+        the bug in #2112 was a bare call to an ``async def``, and a plain
+        ``MagicMock`` returns a value for that shape, so it certified the
+        broken code. ``assert_awaited`` is the part that cannot regress.
+        """
         monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
 
         mock_storage = MagicMock()
-        mock_storage.rebuild_fts = MagicMock(return_value=42)
+        mock_storage.initialize = AsyncMock()
+        mock_storage.rebuild_fts = AsyncMock(return_value=42)
+        mock_storage.close = AsyncMock()
+
+        with (
+            patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok,
+            # ``set_tokenizer`` is mocked, so the module global never moves —
+            # pin the read-back too, or the command correctly reports a
+            # fallback that only the mock created.
+            patch("memtomem.storage.fts_tokenizer.get_tokenizer", return_value="kiwipiepy"),
+            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
+        ):
+            result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
+            assert result.exit_code == 0, result.output
+
+            mock_set_tok.assert_called_once_with("kiwipiepy")
+            mock_storage.rebuild_fts.assert_awaited_once()
+            mock_storage.close.assert_awaited_once()
+
+        # The printed count is the awaited return value, not a coroutine repr.
+        assert "FTS index rebuilt with kiwipiepy (42 chunks)." in result.output
+        assert "coroutine" not in result.output
+
+    def test_config_set_tokenizer_rebuild_uses_effective_tokenizer(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """When an env var outranks config.json, the index is built for the env value.
+
+        Building it for the requested value would leave every subsequent search
+        in the process tokenizing one way against an index built the other —
+        the exact mismatch the rebuild exists to prevent (#2112).
+        """
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
+        monkeypatch.setenv("MEMTOMEM_SEARCH__TOKENIZER", "unicode61")
+
+        mock_storage = MagicMock()
+        mock_storage.initialize = AsyncMock()
+        mock_storage.rebuild_fts = AsyncMock(return_value=7)
+        mock_storage.close = AsyncMock()
 
         with (
             patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok,
@@ -263,8 +307,115 @@ class TestConfigCLI:
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
             assert result.exit_code == 0, result.output
 
-            mock_set_tok.assert_called_once_with("kiwipiepy")
-            mock_storage.rebuild_fts.assert_called_once()
+            mock_set_tok.assert_called_once_with("unicode61")
+            mock_storage.rebuild_fts.assert_awaited_once()
+
+        assert "MEMTOMEM_SEARCH__TOKENIZER is set and takes precedence" in result.output
+        assert "rebuilt with unicode61 (7 chunks)" in result.output
+        assert "not the requested kiwipiepy" in result.output
+
+    def test_config_set_tokenizer_reports_the_tokenizer_actually_built(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """kiwipiepy missing: the success line names the fallback, not the request.
+
+        ``_get_kiwi`` reverts the module-global to unicode61 mid-rebuild when
+        the package is absent, so announcing the requested name would be a
+        second false claim on top of the one #2112 fixed.
+        """
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
+
+        mock_storage = MagicMock()
+        mock_storage.initialize = AsyncMock()
+        mock_storage.rebuild_fts = AsyncMock(return_value=5)
+        mock_storage.close = AsyncMock()
+
+        with (
+            patch("memtomem.storage.fts_tokenizer.set_tokenizer"),
+            patch("memtomem.storage.fts_tokenizer.get_tokenizer", return_value="unicode61"),
+            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
+        ):
+            result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
+            assert result.exit_code == 0, result.output
+
+        assert "FTS index rebuilt with unicode61 (5 chunks)" in result.output
+        assert "kiwipiepy is unavailable" in result.output
+        assert "rebuilt with kiwipiepy" not in result.output
+
+    def test_config_set_tokenizer_rebuild_failure_is_reported(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """A failed rebuild must not exit 0 — the value is saved but search is stale."""
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
+
+        mock_storage = MagicMock()
+        mock_storage.initialize = AsyncMock(side_effect=RuntimeError("db is locked"))
+        mock_storage.rebuild_fts = AsyncMock(return_value=1)
+        mock_storage.close = AsyncMock()
+
+        with (
+            patch("memtomem.storage.fts_tokenizer.set_tokenizer"),
+            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
+        ):
+            result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
+
+        assert result.exit_code != 0
+        assert "FTS index rebuild failed: db is locked" in result.output
+        assert "mm config set search.tokenizer kiwipiepy" in result.output
+        # The write is not rolled back — say so rather than implying it was.
+        assert "search.tokenizer was saved" in result.output
+
+    def test_config_set_tokenizer_rebuilds_a_real_index(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """End-to-end against a real backend: the count is real and search still works.
+
+        The mocked tests above pin the call shape; this one pins that the shape
+        drives an actual rebuild — a `MagicMock`-only suite is what let #2112
+        ship.
+        """
+        import asyncio
+
+        from helpers import make_chunk
+        from memtomem.config import StorageConfig
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        db_path = tmp_path / "memtomem.db"
+        monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
+        monkeypatch.setenv("MEMTOMEM_STORAGE__SQLITE_PATH", str(db_path))
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
+
+        async def _seed() -> None:
+            backend = SqliteBackend(StorageConfig(sqlite_path=db_path), dimension=1024)
+            await backend.initialize()
+            try:
+                await backend.upsert_chunks(
+                    [
+                        make_chunk(content=f"unique giraffe content {i}", source=f"g{i}.md")
+                        for i in range(3)
+                    ]
+                )
+            finally:
+                await backend.close()
+
+        asyncio.run(_seed())
+
+        # unicode61 is the default, so this is a no-change set — the rebuild is
+        # unconditional on purpose (it is also the retry path after a failure),
+        # and it keeps the test off the optional kiwipiepy dependency.
+        result = runner.invoke(cli, ["config", "set", "search.tokenizer", "unicode61"])
+        assert result.exit_code == 0, result.output
+        assert "FTS index rebuilt with unicode61 (3 chunks)." in result.output
+
+        async def _search() -> list:
+            backend = SqliteBackend(StorageConfig(sqlite_path=db_path), dimension=1024)
+            await backend.initialize()
+            try:
+                return await backend.bm25_search("giraffe", top_k=5)
+            finally:
+                await backend.close()
+
+        assert len(asyncio.run(_search())) == 3
 
     def test_config_set_non_tokenizer_no_fts_rebuild(
         self, tmp_path, monkeypatch, runner: CliRunner
