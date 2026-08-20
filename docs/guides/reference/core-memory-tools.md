@@ -243,9 +243,24 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > The local snapshot stores ranks, scores, chunk IDs, content hashes, heading
 > hierarchy, namespaces, languages, and source **basenames**—not result content
 > or absolute paths. Existing query history still records the query text and is
-> pruned by the existing 90-day history policy. `mm search --format json` keeps
-> its current per-result schema; use MCP structured output or the Web API when
-> the run ID is needed.
+> pruned by the existing 90-day history policy. `mm search --format json` does
+> not carry the run ID; use MCP structured output or the Web API when it is
+> needed. (The per-result `chunk_id` *is* in the CLI JSON payload — see below.)
+
+> **Capturing a `chunk_id` from the CLI**: every item of `mm search --format
+> json` carries `chunk_id`, the same key and canonical UUID string the MCP
+> structured payload uses, so the promote-to-shared flow is scriptable without
+> reading SQLite:
+>
+> ```bash
+> # jq -e exits non-zero on an empty result set, so a query that hit
+> # nothing stops here instead of running `mm agent share null`.
+> id=$(mm search "deployment" --format json | jq -er '.[0].chunk_id') \
+>   && mm agent share "$id" --target shared
+> ```
+>
+> The other CLI formats (`table`, `plain`, `context`, `smart`) stay
+> id-free — `json` is the machine-readable surface.
 
 > **Relevance feedback**: a committed run ID accepts explicit judgments for
 > chunks that appear in that run's snapshot, via

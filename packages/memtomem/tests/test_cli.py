@@ -172,6 +172,45 @@ class TestSearchCLI:
         assert items[0]["score_scale"] == "rerank"
         assert items[0]["reranker"] == "test-reranker-v1"
 
+    def test_search_json_carries_chunk_id(self, runner: CliRunner, monkeypatch) -> None:
+        """#2064: the JSON payload must carry the chunk UUID under the same
+        key the MCP structured payload uses, as the canonical string form
+        ``mm agent share`` parses back with ``UUID(...)``."""
+        import json
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock
+        from uuid import UUID, uuid4
+
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.search.pipeline import RetrievalStats
+
+        chunk_id = uuid4()
+        chunk = Chunk(
+            content="shareable hit",
+            metadata=ChunkMetadata(source_file=Path("/tmp/hit.md")),
+            id=chunk_id,
+            embedding=[],
+        )
+        results = [SearchResult(chunk=chunk, score=1.0, rank=1, source="bm25")]
+        stats = RetrievalStats(final_total=1)
+
+        comp = MagicMock()
+        comp.search_pipeline.search = AsyncMock(return_value=(results, stats))
+
+        @asynccontextmanager
+        async def fake_components():
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", lambda: fake_components())
+
+        result = runner.invoke(cli, ["search", "--format", "json", "anything"])
+        assert result.exit_code == 0, result.output
+        items = json.loads(result.output)
+        assert items[0]["chunk_id"] == str(chunk_id)
+        # ``mm agent share`` parses the value with ``UUID(...)`` — pin the
+        # round trip, not just the presence of a key.
+        assert UUID(items[0]["chunk_id"]) == chunk_id
+
 
 # ── Config commands ─────────────────────────────────────────────────────
 

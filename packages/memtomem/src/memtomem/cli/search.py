@@ -234,6 +234,9 @@ async def _search(
         # (#1767): keys omitted when the pipeline produced no ranked scale.
         # ``reranker`` accompanies the "rerank" scale because rerank score
         # ranges are model-dependent — mirroring the MCP structured payload.
+        # ``chunk_id`` uses the same key name and canonical UUID string as
+        # the MCP structured payload (``server/formatters.py``) so a shell
+        # pipeline can feed it straight to ``mm agent share`` (#2064).
         out = [
             {
                 "rank": r.rank,
@@ -241,6 +244,7 @@ async def _search(
                 **({"score_scale": stats.score_scale} if stats.score_scale is not None else {}),
                 **({"reranker": stats.reranker_model} if stats.reranker_model is not None else {}),
                 "source": str(r.chunk.metadata.source_file),
+                "chunk_id": str(r.chunk.id),
                 "content": r.chunk.content[:200],
             }
             for r in results
