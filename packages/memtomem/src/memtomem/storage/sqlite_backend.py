@@ -91,6 +91,12 @@ _REBUILD_FTS_BATCH_SIZE = 1000
 # the embedding-meta keys that share the same table.
 _AI_SUMMARY_KEY_PREFIX = "ai_summary:"
 
+# Ids per ``… IN (?, ?, …)`` when counting vector-less chunks. SQLite's
+# host-parameter limit is 999 on builds older than 3.32, and one index run can
+# skip far more chunks than that. Mirrors ``_DELETE_BATCH`` in
+# ``sqlite_namespace.py``.
+_MISSING_VECTOR_BATCH = 500
+
 
 #: Identifier quoting for interpolated table/column names. Defined in
 #: ``sqlite_helpers`` so the ops modules can share it; the module-local name
@@ -1974,6 +1980,41 @@ class SqliteBackend(
                 "SELECT COUNT(*) FROM chunks c INNER JOIN chunks_vec v ON v.rowid = c.rowid"
             ).fetchone()[0]
         return {"total": total, "with_dense": with_dense}
+
+    async def count_chunks_missing_vectors(self, chunk_ids: Sequence[str]) -> int:
+        """Count how many of ``chunk_ids`` currently have no dense vector.
+
+        Scoped by id rather than by source path or store-wide: the caller is
+        an index run reporting on the chunks *it* left untouched, and its
+        remedy re-embeds exactly those. A store-wide count would blame this
+        run for holes in a directory it never looked at, and a path-prefix
+        count would include rows for files discovery excludes — either way the
+        number and the suggested fix would describe different sets.
+
+        ``chunks_vec`` absent means every chunk is missing one: that is the
+        state right after ``reset_embedding_meta`` drops and recreates it.
+
+        Counts rows that still exist — an id deleted concurrently is not a
+        missing vector, it is a missing chunk.
+        """
+        ids = list(chunk_ids)
+        if not ids:
+            return 0
+        db = self._get_read_db()
+        missing = 0
+        for start in range(0, len(ids), _MISSING_VECTOR_BATCH):
+            batch = ids[start : start + _MISSING_VECTOR_BATCH]
+            placeholders = ",".join("?" * len(batch))
+            if self._has_vec_table:
+                sql = (
+                    "SELECT COUNT(*) FROM chunks c "
+                    "LEFT JOIN chunks_vec v ON v.rowid = c.rowid "
+                    f"WHERE c.id IN ({placeholders}) AND v.rowid IS NULL"
+                )
+            else:
+                sql = f"SELECT COUNT(*) FROM chunks c WHERE c.id IN ({placeholders})"
+            missing += db.execute(sql, batch).fetchone()[0]
+        return missing
 
     async def get_chunk_size_distribution(
         self,

@@ -365,6 +365,66 @@ class TestStorageExtended:
         assert cov["total"] == 1
         assert cov["with_dense"] == 0
 
+    # ---- count_chunks_missing_vectors ----------------------------------------
+
+    async def test_missing_vectors_is_zero_for_an_empty_id_list(self, components):
+        assert await components.storage.count_chunks_missing_vectors([]) == 0
+
+    async def test_missing_vectors_is_zero_when_every_chunk_has_one(self, components):
+        storage = components.storage
+        chunks = [
+            make_chunk(content="one", embedding=_varied_embedding(0.1), source="a.md"),
+            make_chunk(content="two", embedding=_varied_embedding(0.2), source="b.md"),
+        ]
+        await storage.upsert_chunks(chunks)
+
+        ids = [str(c.id) for c in chunks]
+        assert await storage.count_chunks_missing_vectors(ids) == 0
+
+    async def test_missing_vectors_counts_every_chunk_after_a_reset(self, components):
+        """The #2115 shape: ``reset_embedding_meta`` recreates ``chunks_vec``
+        empty while the chunk rows and their content hashes survive, so a
+        plain re-index skips them all and none is retrievable."""
+        storage = components.storage
+        chunks = [
+            make_chunk(content="one", embedding=_varied_embedding(0.1), source="a.md"),
+            make_chunk(content="two", embedding=_varied_embedding(0.2), source="b.md"),
+        ]
+        await storage.upsert_chunks(chunks)
+        ids = [str(c.id) for c in chunks]
+
+        await storage.reset_embedding_meta(dimension=1024, provider="onnx", model="bge-m3")
+
+        assert await storage.count_chunks_missing_vectors(ids) == 2
+
+    async def test_missing_vectors_ignores_ids_that_no_longer_exist(self, components):
+        """A deleted chunk is a missing chunk, not a missing vector — counting
+        it would make the advisory demand a re-embed that cannot help."""
+        storage = components.storage
+        chunk = make_chunk(content="one", embedding=_varied_embedding(0.1), source="a.md")
+        await storage.upsert_chunks([chunk])
+
+        missing = await storage.count_chunks_missing_vectors(
+            [str(chunk.id), "00000000-0000-0000-0000-000000000000"]
+        )
+
+        assert missing == 0
+
+    async def test_missing_vectors_counts_past_the_sqlite_parameter_limit(self, components):
+        """More ids than SQLite's 999-host-parameter limit must not raise, and
+        must not silently count only the first batch."""
+        storage = components.storage
+        chunks = [
+            make_chunk(content=f"c{i}", embedding=_varied_embedding(0.1), source=f"f{i}.md")
+            for i in range(1200)
+        ]
+        await storage.upsert_chunks(chunks)
+        ids = [str(c.id) for c in chunks]
+
+        await storage.reset_embedding_meta(dimension=1024, provider="onnx", model="bge-m3")
+
+        assert await storage.count_chunks_missing_vectors(ids) == 1200
+
     # ---- reset_embedding_meta ------------------------------------------------
 
     async def test_reset_embedding_meta_changes_dimension(self, components):

@@ -138,6 +138,17 @@ async def mem_index(
             "kept their stored namespace; current path rules would assign differently. "
             "Apply the rules with `mm index --reassign-namespaces <path>`."
         )
+    if stats.chunks_missing_vectors:
+        # Hand-built for the same reason as the advisory above. The remedy
+        # names the CLI: with an agent or current namespace active,
+        # ``mem_index(force=true)`` passes it explicitly, which overrides
+        # namespace preservation and restamps every row it re-embeds
+        # (ADR-0033, #2104) — a repair should not move an agent's memories.
+        result += (
+            f"\n- No embedding: {stats.chunks_missing_vectors} unchanged chunk(s) "
+            "have no vector, so dense search will not find them. Re-embed with "
+            "`mm index --force <path>` (CLI)."
+        )
     if errors:
         result += "\n- Errors:\n" + "\n".join(f"    {error}" for error in errors)
     if retryable_errors:

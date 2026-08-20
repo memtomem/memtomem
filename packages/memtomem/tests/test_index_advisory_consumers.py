@@ -1,10 +1,20 @@
-"""Every UI consumer of an index result must surface the #2061 advisory.
+"""Every UI consumer of an index result must surface its advisories.
 
-``--force`` / ``force=true`` re-embeds without re-resolving namespaces, so a
-namespace rule that has not been applied is invisible unless the result says
-so. The counters travel on every index response, but each JS surface renders
-by hand — the first cut of the fix wired three of seven consumers and the
-other four reported a clean run.
+Two of them ride the same reporter, because both say "this run left the store
+in a state you did not ask for":
+
+* **#2061** — ``--force`` / ``force=true`` re-embeds without re-resolving
+  namespaces, so a namespace rule that has not been applied is invisible
+  unless the result says so.
+* **#2115** — after an embedding reset, a plain re-index matches every
+  surviving content hash, reports the chunks ``unchanged``, and writes no
+  vectors, leaving dense search unable to find them.
+
+The counters travel on every index response, but each JS surface renders by
+hand — the first cut of the #2061 fix wired three of seven consumers and the
+other four reported a clean run. One reporter rather than one per advisory is
+the point: a consumer that calls it inherits the next advisory too, instead of
+each new signal reopening the same seven-file audit.
 
 **What this guard is and is not.** It is a structural check: it derives its own
 scope, so a consumer added later is covered the day it lands rather than the
@@ -28,17 +38,17 @@ _INDEX_CALL_RE = re.compile(r"""['"]/api/(index|reindex)(\?[^'"]*)?['"]""")
 #: A *call* to one of the shared reporters. ``(?<!function )`` keeps the
 #: definition in ``app.js`` from counting as its own consumer — without it the
 #: file that declares the helper would satisfy this guard by existing.
-_ADVISORY_CALL_RE = re.compile(r"(?<!function )\bnamespaceAdvisoryToast(ForRoots)?\s*\(")
+_ADVISORY_CALL_RE = re.compile(r"(?<!function )\bindexAdvisoryToast(ForRoots)?\s*\(")
 
 #: Reporter definitions, so the declaring file can be told apart from consumers.
-_ADVISORY_DEF_RE = re.compile(r"function\s+namespaceAdvisoryToast(ForRoots)?\s*\(")
+_ADVISORY_DEF_RE = re.compile(r"function\s+indexAdvisoryToast(ForRoots)?\s*\(")
 
 #: A reporter's own body, which may legitimately call the other reporter
 #: (``ForRoots`` delegates to the base one). Those calls are implementation,
 #: not consumption — counting them let ``app.js`` satisfy this guard through
 #: its own helper even with every real consumer call removed.
 _ADVISORY_BODY_RE = re.compile(
-    r"function\s+namespaceAdvisoryToast(ForRoots)?\s*\([^)]*\)\s*\{.*?\n\}",
+    r"function\s+indexAdvisoryToast(ForRoots)?\s*\([^)]*\)\s*\{.*?\n\}",
     re.DOTALL,
 )
 
@@ -74,7 +84,7 @@ def test_every_index_call_site_file_reports_the_namespace_advisory() -> None:
     missing = sorted(name for name in callers if not _reports(sources[name]))
     assert not missing, (
         f"{missing} call /api/index or /api/reindex but never call "
-        "namespaceAdvisoryToast — a forced reindex there reports success while "
+        "indexAdvisoryToast — a forced reindex there reports success while "
         "silently preserving namespaces the current rules disagree with (#2061)."
     )
 
@@ -98,29 +108,29 @@ def test_sse_complete_handlers_report_the_namespace_advisory() -> None:
 def test_the_reporter_definition_does_not_satisfy_the_guard_by_itself() -> None:
     """Pins the ``(?<!function )`` lookbehind.
 
-    Without it, the file declaring ``namespaceAdvisoryToast`` passes both checks
+    Without it, the file declaring ``indexAdvisoryToast`` passes both checks
     on the strength of its own ``function`` line, so the surface that renders
     the main index result — the one most likely to regress — would be exempt
     from the guard that exists to cover it.
     """
-    definition_only = "function namespaceAdvisoryToast(result) {\n  return false;\n}\n"
+    definition_only = "function indexAdvisoryToast(result) {\n  return false;\n}\n"
     assert _ADVISORY_DEF_RE.search(definition_only)
     assert not _reports(definition_only)
-    assert _reports(definition_only + "namespaceAdvisoryToast(resp);\n")
+    assert _reports(definition_only + "indexAdvisoryToast(resp);\n")
 
 
 def test_a_reporter_calling_another_reporter_is_not_consumption() -> None:
-    """``namespaceAdvisoryToastForRoots`` delegates to the base reporter.
+    """``indexAdvisoryToastForRoots`` delegates to the base reporter.
 
     Counting that delegation as a consumer call let the declaring file pass
     both checks on its own implementation — every real call site could be
     deleted and the guard would stay green.
     """
     reporters_only = (
-        "function namespaceAdvisoryToastForRoots(results) {\n"
-        "  return namespaceAdvisoryToast({ namespaces_reassigned: 0 });\n"
+        "function indexAdvisoryToastForRoots(results) {\n"
+        "  return indexAdvisoryToast({ namespaces_reassigned: 0 });\n"
         "}\n"
-        "function namespaceAdvisoryToast(result) {\n  return false;\n}\n"
+        "function indexAdvisoryToast(result) {\n  return false;\n}\n"
     )
     assert not _reports(reporters_only)
-    assert _reports(reporters_only + "namespaceAdvisoryToastForRoots(res.results);\n")
+    assert _reports(reporters_only + "indexAdvisoryToastForRoots(res.results);\n")

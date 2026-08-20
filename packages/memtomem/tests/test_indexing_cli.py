@@ -687,3 +687,84 @@ class TestIndexBarLengthFromDiscovery:
         asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
         assert "bar" in captured, "bar must be created from discovery event"
         assert captured["initial_length"] == 1
+
+
+class TestMissingVectorAdvisory:
+    """#2115: name the chunks a run skipped that carry no embedding.
+
+    The state arises from ``mm embedding-reset --mode apply-current`` followed
+    by a plain ``mm index``: every surviving content hash matches, the run
+    reports ``unchanged``, and no vector is written. Every counter on the
+    summary line reads like success.
+    """
+
+    def test_the_advisory_names_the_count_and_the_force_command(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=1, indexed=0, skipped=4)
+        event["chunks_missing_vectors"] = 4
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+
+        lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+        assert "4 unchanged chunk(s) have no embedding; dense search will not find them." in lines
+        assert f"→ To re-embed: mm index --force {target.resolve()}" in lines
+
+    def test_the_summary_line_is_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The advisory is an extra line after the summary, never an edit to
+        it — the summary format is pinned because scripts parse it."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=1, indexed=0, skipped=4, duration_ms=42.0)
+        event["chunks_missing_vectors"] = 4
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+
+        out = capsys.readouterr().out
+        assert "Indexed 1 file(s): 0 new, 4 unchanged, 0 deleted (42ms)" in out
+
+    def test_quiet_when_every_skipped_chunk_has_a_vector(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A no-op re-index of a healthy store skips everything — and must not
+        nag about it, or the advisory becomes noise on the common path."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+        _install_fake_engine(
+            monkeypatch, events=[_make_complete_event(total_files=1, indexed=0, skipped=9)]
+        )
+
+        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+
+        assert "no embedding" not in capsys.readouterr().out
+
+    def test_counts_are_summed_across_roots(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A multi-root run repairs with one ``--force``, so it reports one
+        total rather than a line per stream."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        first = _make_complete_event(total_files=1, indexed=0, skipped=2)
+        first["chunks_missing_vectors"] = 2
+        second = _make_complete_event(total_files=1, indexed=0, skipped=3)
+        second["chunks_missing_vectors"] = 3
+        _install_fake_engine(monkeypatch, events=[first, second])
+
+        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+
+        out = capsys.readouterr().out
+        assert "5 unchanged chunk(s) have no embedding" in out

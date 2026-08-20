@@ -5490,7 +5490,7 @@ async function _reindexSourceFile(path, btn) {
     } else {
       showToast(t('toast.source_reindexed', { count }), 'success');
     }
-    namespaceAdvisoryToast(resp);
+    indexAdvisoryToast(resp);
     _markDataStale();
     loadStats();
     await loadSources();
@@ -6856,31 +6856,42 @@ function formatNamespaceMoves(moves) {
 // Index tab's result table, the per-source Reindex button, and the settings
 // "reindex needed" banner — reports it through here rather than each growing
 // its own copy. Returns true when something was surfaced.
-function namespaceAdvisoryToast(result) {
+function indexAdvisoryToast(result) {
   const preserved = Number(result && result.namespaces_preserved_against_rules) || 0;
   const reassigned = Number(result && result.namespaces_reassigned) || 0;
+  const missingVectors = Number(result && result.chunks_missing_vectors) || 0;
   if (preserved > 0) {
     showToast(t('index.result.namespace_preserved', { count: preserved }), 'warning');
   }
   if (reassigned > 0) {
     showToast(t('index.result.namespace_reassigned', { count: reassigned }), 'warning');
   }
-  return preserved > 0 || reassigned > 0;
+  // #2115: chunks the run skipped as unchanged that carry no vector — an
+  // embedding reset followed by a plain re-index leaves the store answering
+  // on BM25 alone while every counter above reads like a clean run.
+  if (missingVectors > 0) {
+    showToast(t('index.result.missing_vectors', { count: missingVectors }), 'warning');
+  }
+  return preserved > 0 || reassigned > 0 || missingVectors > 0;
 }
 
 // The ``/api/reindex`` shape is per-root, so its consumers have to add the
 // counters up before they mean anything. One helper rather than a reduce in
 // each caller — there are three, and a missed one reads as "nothing to
 // report" rather than as a bug.
-function namespaceAdvisoryToastForRoots(results) {
+function indexAdvisoryToastForRoots(results) {
   const roots = Array.isArray(results) ? results : [];
-  return namespaceAdvisoryToast({
+  return indexAdvisoryToast({
     namespaces_preserved_against_rules: roots.reduce(
       (sum, r) => sum + (Number(r.namespaces_preserved_against_rules) || 0),
       0,
     ),
     namespaces_reassigned: roots.reduce(
       (sum, r) => sum + (Number(r.namespaces_reassigned) || 0),
+      0,
+    ),
+    chunks_missing_vectors: roots.reduce(
+      (sum, r) => sum + (Number(r.chunks_missing_vectors) || 0),
       0,
     ),
   });
@@ -6938,6 +6949,13 @@ function _renderIndexResult(result, { registerAsSource, path }) {
         t('index.result.namespace_reassigned', { count: reassigned }),
         ...formatNamespaceMoves(result.namespace_moves),
       );
+    }
+    // #2115: shares the advisory row rather than adding a second one — both
+    // say "this run left the store in a state you did not ask for", and a row
+    // that is usually hidden costs nothing to reuse.
+    const missingVectors = Number(result.chunks_missing_vectors) || 0;
+    if (missingVectors > 0) {
+      lines.push(t('index.result.missing_vectors', { count: missingVectors }));
     }
     qs('r-namespace-advisory').textContent = lines.join('\n');
     nsAdvisoryRow.hidden = lines.length === 0;

@@ -83,15 +83,37 @@ describe('Index result namespace advisory', () => {
   it('toasts the advisory even when the run also reported errors', () => {
     // A partial run can preserve namespaces on the files that succeeded while
     // another file fails; the advisory must not disappear with the failure.
-    window.namespaceAdvisoryToast(
+    window.indexAdvisoryToast(
       indexResult({ errors: ['broken.md: boom'], namespaces_preserved_against_rules: 2 }),
     );
     expect(toasts.some((toast) => toast.message.includes('2'))).toBe(true);
   });
 
   it('says nothing when there is nothing to advise', () => {
-    expect(window.namespaceAdvisoryToast(indexResult())).toBe(false);
+    expect(window.indexAdvisoryToast(indexResult())).toBe(false);
     expect(toasts).toEqual([]);
+  });
+
+  // #2115: chunks skipped as unchanged that carry no vector. Shares the
+  // reporter with the namespace advisory so a consumer of one gets both.
+  it('names the chunks left without an embedding', () => {
+    const { row, text } = render(indexResult({ chunks_missing_vectors: 7 }));
+    expect(row.hidden).toBe(false);
+    expect(text).toContain('7');
+    expect(text).toContain('--force');
+  });
+
+  it('toasts the missing-vector advisory through the shared reporter', () => {
+    expect(window.indexAdvisoryToast(indexResult({ chunks_missing_vectors: 4 }))).toBe(true);
+    expect(toasts.some((toast) => toast.message.includes('4'))).toBe(true);
+  });
+
+  it('reports both advisories when a run carries both', () => {
+    const { text } = render(
+      indexResult({ namespaces_preserved_against_rules: 2, chunks_missing_vectors: 9 }),
+    );
+    expect(text).toContain('--reassign-namespaces');
+    expect(text).toContain('--force');
   });
 });
 
@@ -136,5 +158,43 @@ describe('Sources panel advisory consumers', () => {
     await window.mdReindexAll(null);
 
     expect(toasts.every((toast) => !toast.message.includes('--reassign-namespaces'))).toBe(true);
+  });
+
+  // Auto-index on "add memory dir" is a real index run, and every status
+  // branch of its outcome renderer returns — so the advisory has to be
+  // reported before them or whichever branch fires drops it. #2115.
+  it('reports the advisory from the auto-index add outcome', () => {
+    window._showMemoryDirAddOutcome(
+      { index_status: 'success', indexed: { indexed_chunks: 0, total_files: 1, chunks_missing_vectors: 6 } },
+      '/tmp/memories',
+    );
+
+    expect(toasts.some((toast) => toast.message.includes('6'))).toBe(true);
+  });
+
+  it('reports it even when the add run finished partial', () => {
+    window._showMemoryDirAddOutcome(
+      {
+        index_status: 'partial',
+        indexed: {
+          indexed_chunks: 1,
+          total_files: 2,
+          errors: ['broken.md: boom'],
+          chunks_missing_vectors: 3,
+        },
+      },
+      '/tmp/memories',
+    );
+
+    expect(toasts.some((toast) => toast.message.includes('3'))).toBe(true);
+  });
+
+  it('stays quiet on an add run with nothing to advise', () => {
+    window._showMemoryDirAddOutcome(
+      { index_status: 'success', indexed: { indexed_chunks: 2, total_files: 1 } },
+      '/tmp/memories',
+    );
+
+    expect(toasts.every((toast) => !toast.message.includes('--force'))).toBe(true);
   });
 });

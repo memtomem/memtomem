@@ -79,6 +79,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An index run now reports the chunks it left without an embedding.** After
+  `mm embedding-reset --mode apply-current`, the chunk rows and their content
+  hashes survive while the vectors do not, so a plain `mm index` matches every
+  one of them, reports them `unchanged`, and writes nothing. The run printed
+  `Indexed N file(s): 0 new, M unchanged` and the store answered on BM25 alone,
+  with nothing anywhere to say so — a successful reset clears the embedding
+  mismatch, so `mm status` went quiet at the same moment (#2115). Every index
+  surface now names the gap and the `mm index --force` that closes it: the CLI
+  summary, `mem_index`, the web index result and its toast, per-source and
+  settings re-index, and auto-index on adding a memory directory. The count
+  comes from the chunks the run actually skipped by content hash, not from the
+  `skipped` counter — an embedding failure also reports every chunk of its file
+  as skipped, and those chunks were never written, so `--force` would not help
+  them. Silent on BM25-only stores (`provider="none"`), where having no vectors
+  is the configuration rather than a gap.
+
 - **A search whose dense leg was dropped now says so, on every call.** When
   stored embeddings do not match the configured embedding policy the pipeline
   suppresses dense retrieval and ranks on BM25 alone. The only in-band signal
