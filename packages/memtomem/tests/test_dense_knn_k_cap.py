@@ -230,3 +230,20 @@ class TestEmptyVectorTable:
 
         assert results == []
         assert ks == [], f"empty table must not be probed at all, got {ks}"
+
+    @pytest.mark.asyncio
+    async def test_wrong_width_still_raises_on_an_empty_table(self, storage):
+        """The early return must not swallow a dimension mismatch.
+
+        ``chunks_vec`` is empty-but-live after ``reset_embedding_meta`` while
+        the chunk rows wait for a re-index. Answering a wrong-width embedder
+        with ``[]`` there reads as "no similar chunks" to dedup scanning and the
+        similar-chunks endpoint, and leaves an ordinary search with no
+        ``dense_error`` to report.
+        """
+        ks: list[int] = []
+        _record(storage, ks)
+        with pytest.raises(ValueError, match="dimension mismatch"):
+            await storage.dense_search([0.1] * 512, top_k=5)
+
+        assert ks == [], "the mismatch must be caught before any KNN query"

@@ -1794,6 +1794,22 @@ class SqliteBackend(
             return []
         db = self._get_read_db()
 
+        # Validate the query width HERE, not by sniffing sqlite-vec's error on
+        # the first MATCH. ``chunks_vec`` is legitimately empty while chunks
+        # survive — ``reset_embedding_meta`` drops and recreates the vector
+        # table pending a re-index — and in that window an early ``return []``
+        # would turn a wrong-width embedder into "no similar chunks" for
+        # ``mem_dedup_scan`` and the similar-chunks endpoint, and into a search
+        # with no ``dense_error`` at all (Codex review, #2120). Kept below the
+        # BM25-only guard above: dimension-0 stores accept any width by design.
+        if len(embedding) != self._dimension:
+            raise ValueError(
+                f"Embedding dimension mismatch: query has {len(embedding)}d "
+                f"but DB expects {self._dimension}d. "
+                f"Check MEMTOMEM_EMBEDDING__MODEL / "
+                f"MEMTOMEM_EMBEDDING__DIMENSION."
+            )
+
         ns_clause = ""
         ns_params: list = []
         if namespace_filter:
