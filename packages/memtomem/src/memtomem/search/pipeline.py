@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from dataclasses import dataclass, field
 
 from dataclasses import replace as dataclass_replace
+from copy import deepcopy
 from uuid import UUID, uuid4
 
 from memtomem.config import (
@@ -1261,6 +1262,7 @@ class SearchPipeline:
                         cache_hit=True,
                         latency_ms=round((time.perf_counter() - started_at) * 1000, 3),
                         hidden_by_prefix=dict(cached_stats.hidden_by_prefix),
+                        mismatch_detail=deepcopy(cached_stats.mismatch_detail),
                     )
                     run_stats.query_run_id = await self._record_ranked_search(
                         query=original_query,
@@ -1323,9 +1325,17 @@ class SearchPipeline:
             )
             # Copy rather than alias: the caller renders this after the search
             # returns, by which point a concurrent reset may have cleared or
-            # replaced the backend's live mismatch.
+            # replaced the backend's live mismatch. Deep, because the payload
+            # nests ``stored`` / ``configured`` sub-dicts — the cache
+            # boundaries below copy it for the same reason ``hidden_by_prefix``
+            # is copied there. No test can catch a shallow copy *here* while
+            # ``embedding_mismatch`` builds a fresh dict on every access; the
+            # depth is what keeps that an implementation detail of the backend
+            # rather than something this line depends on.
             mismatch_detail = (
-                dict(mismatch) if dense_suppressed_mismatch and isinstance(mismatch, dict) else None
+                deepcopy(mismatch)
+                if dense_suppressed_mismatch and isinstance(mismatch, dict)
+                else None
             )
             use_dense = self._config.enable_dense and not isinstance(mismatch, dict)
             use_bm25 = use_bm25 and bm25_weight > 0
@@ -1827,13 +1837,16 @@ class SearchPipeline:
                 # ``dataclass_replace`` is shallow: without the copy the cached
                 # entry and the stats just handed to the caller would share one
                 # ``hidden_by_prefix`` dict, and a caller mutating it would edit
-                # every later cache hit's hint.
+                # every later cache hit's hint. ``mismatch_detail`` carries the
+                # same hazard through its nested ``stored`` / ``configured``
+                # dicts, so it is deep-copied rather than re-wrapped.
                 cache_stats = dataclass_replace(
                     stats,
                     query_run_id=None,
                     cache_hit=False,
                     latency_ms=None,
                     hidden_by_prefix=dict(stats.hidden_by_prefix),
+                    mismatch_detail=deepcopy(stats.mismatch_detail),
                 )
                 self._search_cache[cache_key] = (
                     time.time(),

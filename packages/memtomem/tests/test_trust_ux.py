@@ -713,6 +713,33 @@ class TestDenseSuppressedHint:
         # Not consumed: the write side still owes the operator its one notice.
         assert ctx.request_context.lifespan_context._dim_mismatch_announced is False
 
+    async def test_a_cache_hit_does_not_share_the_mismatch_payload(self, dense_enabled_components):
+        """Same hazard ``hidden_by_prefix`` is protected from, one level
+        deeper: the payload nests ``stored`` / ``configured``, so a shallow
+        copy would still let a caller rewrite the dimensions every later
+        cache hit renders into its hint."""
+        comp, _ = dense_enabled_components
+        _install_mismatch(comp.storage)
+        await comp.storage.upsert_chunks([make_chunk("notes about pipelines")])
+
+        # Store side: mutating the miss must not reach the cached entry.
+        _, first = await comp.search_pipeline.search("pipeline", top_k=5)
+        assert first.mismatch_detail["stored"]["dimension"] == 384
+        first.mismatch_detail["stored"]["dimension"] = 9999
+        first.mismatch_detail["injected"] = True
+
+        _, second = await comp.search_pipeline.search("pipeline", top_k=5)
+        assert second.cache_hit  # otherwise this proves nothing about the cache
+        assert second.mismatch_detail["stored"]["dimension"] == 384
+        assert "injected" not in second.mismatch_detail
+
+        # Read side: mutating a hit must not reach it either.
+        second.mismatch_detail["stored"]["dimension"] = 9999
+
+        _, third = await comp.search_pipeline.search("pipeline", top_k=5)
+        assert third.cache_hit
+        assert third.mismatch_detail["stored"]["dimension"] == 384
+
     async def test_healthy_store_stays_quiet(self, dense_enabled_components):
         from memtomem.server.tools.search import mem_search
 
