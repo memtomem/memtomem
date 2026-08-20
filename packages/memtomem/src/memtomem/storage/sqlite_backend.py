@@ -79,6 +79,16 @@ logger = logging.getLogger(__name__)
 __all__ = ["SqliteBackend"]
 
 
+# Hard ceiling on the ``k`` of a sqlite-vec KNN query (``embedding MATCH ?``
+# with an inner ``LIMIT``). sqlite-vec 0.1.9 rejects anything larger with
+# ``k value in knn query too large, provided <k> and the limit is 4096``; it is
+# a compile-time constant inside vec0, not a tunable. Every inner LIMIT handed
+# to a MATCH must be clamped to it — an unclamped "scan the whole table"
+# attempt raises, and the raise costs the ENTIRE dense leg, including the
+# candidates a smaller earlier attempt already retrieved (#2119).
+VEC_MAX_KNN_K = 4096
+
+
 # Batch size for streaming rebuild_fts — bounds peak memory regardless of
 # corpus size (issue #278). 1000 rows × typical chunk width stays well under
 # a megabyte while keeping round-trip overhead negligible.
@@ -1835,11 +1845,10 @@ class SqliteBackend(
         # the rare cold-cache path.
         total_vec_rows = db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0
 
-        # Schedule: start at the previous fixed factor for the
-        # common case, then jump to "essentially unbounded" before
-        # giving up. Stop early when an attempt either returned
-        # ``top_k`` rows OR already saw every embedding.
-        #
+        # The largest inner K this engine will actually accept: never more
+        # embeddings than exist, and never more than sqlite-vec's cap (#2119).
+        knn_ceiling = min(total_vec_rows, VEC_MAX_KNN_K) if total_vec_rows else VEC_MAX_KNN_K
+
         # ``exhaustive`` (deterministic evaluation mode, #1802): sqlite-vec
         # 0.1.9 prunes to the inner ``LIMIT`` with an unstable distance-only
         # sort, so equal-distance rows straddling an adaptive cutoff are
@@ -1848,7 +1857,30 @@ class SqliteBackend(
         # the outer stable ``ORDER BY sub.distance, ..., c.id`` fully
         # determines selection. Costs one full-table KNN pass; acceptable
         # because replay runs off the interactive hot path.
-        attempts = (
+        #
+        # That guarantee is simply not purchasable above ``VEC_MAX_KNN_K``:
+        # the cutoff cannot be removed, so a clamped "exhaustive" pass would
+        # be an ordinary truncated KNN wearing the determinism label, and a
+        # replay diff would compare against a silently partial scan. Refuse
+        # instead — fail-closed beats a result that lies about its own shape.
+        if exhaustive and total_vec_rows > VEC_MAX_KNN_K:
+            raise StorageError(
+                f"Exhaustive dense search needs to scan all {total_vec_rows} embeddings, "
+                f"but sqlite-vec caps a KNN query at {VEC_MAX_KNN_K}. Deterministic "
+                f"replay/evaluation is unavailable on a store this large — run it "
+                f"against a smaller evaluation store, or use ordinary "
+                f"(non-exhaustive) search, whose adaptive over-fetch is clamped and "
+                f"therefore still returns results here."
+            )
+
+        # Schedule: start at the previous fixed factor for the
+        # common case, then jump to "essentially unbounded" before
+        # giving up. Stop early when an attempt either returned
+        # ``top_k`` rows OR already reached the ceiling (no larger K is
+        # available, so retrying cannot find more). Clamped and de-duplicated
+        # so a large ``top_k`` cannot spend three identical round-trips.
+        attempts: list[int] = []
+        for raw_k in (
             [total_vec_rows or 1]
             if exhaustive
             else [
@@ -1856,10 +1888,13 @@ class SqliteBackend(
                 max(top_k * 50, 1000),
                 total_vec_rows,
             ]
-        )
+        ):
+            clamped = max(1, min(raw_k, knn_ceiling))
+            if clamped not in attempts:
+                attempts.append(clamped)
+
         rows: list = []
         for inner_k in attempts:
-            inner_k = max(1, min(inner_k, total_vec_rows or inner_k))
             try:
                 rows = db.execute(
                     sql,
@@ -1877,11 +1912,24 @@ class SqliteBackend(
                         f"Check MEMTOMEM_EMBEDDING__MODEL / "
                         f"MEMTOMEM_EMBEDDING__DIMENSION."
                     ) from exc
+                # An escalation attempt that fails must not throw away what a
+                # smaller attempt already returned: the caller treats ANY
+                # exception here as "dense search unavailable" and drops the
+                # whole leg (#2119). Degrade to the best candidates in hand.
+                if rows:
+                    logger.warning(
+                        "Dense KNN escalation to k=%d failed (%s); keeping the %d "
+                        "candidate(s) from the previous attempt",
+                        inner_k,
+                        exc,
+                        len(rows),
+                    )
+                    break
                 raise
-            # Done if we hit the requested top_k OR if this attempt
-            # already scanned every embedding (cannot do better by
+            # Done if we hit the requested top_k OR if this attempt already
+            # used the largest K the engine will accept (cannot do better by
             # retrying).
-            if len(rows) >= top_k or inner_k >= (total_vec_rows or 0):
+            if len(rows) >= top_k or inner_k >= knn_ceiling:
                 break
 
         return [
