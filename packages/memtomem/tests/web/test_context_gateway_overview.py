@@ -1366,3 +1366,48 @@ def test_empty_tiles_show_teaching_pointer(page, mm_web_url: str) -> None:
     assert "create one" in mcp_text and "import" not in mcp_text.lower(), (
         f"MCP tile must not advertise an Import step that doesn't exist, got {mcp_text!r}"
     )
+
+# ---------------------------------------------------------------------------
+# Issue: gateway Push-All total failure must render "Push failed", not the
+# shared "Sync failed" copy still owned by Hooks Sync (settings-hooks-
+# watchdog.js). #1854 follow-up.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_all_total_failure_shows_push_failed_not_sync_failed(page, mm_web_url: str) -> None:
+    """A total Sync-All failure (the batch ``/api/context/sync-all`` POST
+    itself returns non-OK) must surface the gateway-only ``toast.push_failed``
+    copy ("Push failed: …"), never the Hooks-Sync-shared ``toast.sync_failed``
+    ("Sync failed: …"). Stubs the overview as healthy-empty enough to enable
+    the Sync All button, then stubs the sync-all POST to fail.
+    """
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
+        ),
+    )
+    page.route(
+        "**/api/context/sync-all",
+        lambda r: r.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"detail": "boom"}),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    # Confirm dialog appears first (the preview is best-effort and the POST
+    # only fires after confirm) — accept it via the confirm button.
+    page.locator(".modal-confirm-btn, .confirm-btn, button:has-text('Push')").first.click()
+
+    toast = page.locator(".toast, .toast-message").filter(has_text="failed")
+    toast.first.wait_for(timeout=5_000)
+    text = (toast.first.text_content() or "")
+    assert "Push failed" in text, f"gateway total failure must say 'Push failed', got: {text!r}"
+    assert "Sync failed" not in text, (
+        f"gateway total failure must NOT reuse the Hooks-Sync 'Sync failed' copy, got: {text!r}"
+    )
