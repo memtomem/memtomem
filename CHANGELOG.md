@@ -36,6 +36,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm search --format json` exposes `chunk_id`.** Every item of the JSON
+  payload now carries the chunk's UUID under the same key, and in the same
+  canonical string form, as the MCP structured payload
+  (`mem_search`/`mem_agent_search` with `output_format="structured"`). Before
+  this, the only official capture path for a *ranked search hit's* UUID was
+  MCP (`mm recall --format json` already emitted one, under `id`, but that is
+  a recency listing, not a search), so promoting a hit with
+  `mm agent share <chunk_id> --target shared` from a plain shell meant
+  querying SQLite directly and coupling the script to the storage schema. The
+  whole flow is now `id=$(mm search q --format json | jq -er '.[0].chunk_id')
+  && mm agent share "$id"`. The top-level payload stays a bare list and the
+  existing keys are unchanged, so parsers that read `rank`/`score`/`source`/`content`
+  keep working; the other CLI formats stay id-free. The Quality Lab
+  `query_run_id` is still MCP/Web-only. (#2064)
+
 - **User-controlled cross-runtime handoff workflow.** A new explicit
   `handoff` workflow (Claude plugin skill, Codex/Kimi portable skills, and
   OpenCode command) saves and resumes a compact project checkpoint through
