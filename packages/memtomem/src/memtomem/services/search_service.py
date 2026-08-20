@@ -22,7 +22,7 @@ map to HTTP status codes).
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from memtomem.chunking.markdown import _parse_validity_bound
 
@@ -178,6 +178,50 @@ def hidden_namespace_hint(total: int, by_prefix: dict[str, int], *, noun: str = 
     return f"{total} {noun} hidden in system namespaces: {breakdown} (pass {queries} {suffix})."
 
 
+def _embedding_side(info: object) -> str:
+    """Render one side of an embedding mismatch as ``provider/model (Nd)``.
+
+    The ``none`` provider carries an empty model name (``EmbeddingConfig.model``
+    defaults to ``""``), so a naive join reads ``none/ (0d)``. Drop the slash
+    when there is no model to name.
+    """
+    if not isinstance(info, dict):
+        return "unknown"
+    provider = str(info.get("provider") or "unknown")
+    model = str(info.get("model") or "")
+    dimension = info.get("dimension")
+    name = f"{provider}/{model}" if model else provider
+    return f"{name} ({dimension}d)" if dimension is not None else name
+
+
+def dense_degraded_hint(mismatch: dict[str, Any] | None) -> str:
+    """Describe a query whose dense leg was suppressed by an embedding mismatch.
+
+    Emitted on *every* affected search, unlike the server's one-shot
+    announcement: the degradation persists until the operator resets, and a
+    caller who only ever sees one search has no other in-band signal (#2063).
+
+    The wording deliberately avoids claiming the results are keyword-only —
+    BM25 can be disabled or zero-weighted independently, in which case the
+    query had no retrieval leg at all. It points at bare ``mm embedding-reset``
+    (status mode, non-destructive), which prints both the destructive
+    ``apply-current`` path and the ``revert-to-stored`` alternative, rather
+    than naming the vector-deleting command directly.
+    """
+    detail = ""
+    if mismatch is not None:
+        detail = (
+            f": DB stored {_embedding_side(mismatch.get('stored'))}, "
+            f"config uses {_embedding_side(mismatch.get('configured'))}"
+        )
+    return (
+        f"dense retrieval did not contribute to this query — the stored embeddings "
+        f"do not match the configured embedding policy{detail}. Fix: run "
+        f'`mm embedding-reset` (CLI) or mem_embedding_reset(mode="status") (MCP) '
+        f"for the reset options (docs/guides/configuration.md#reset-flow)."
+    )
+
+
 async def run_search(
     pipeline: SearchPipeline,
     *,
@@ -253,6 +297,10 @@ async def run_search(
             "rerank=true requested but server reranking is disabled "
             "(rerank.enabled=false); results are un-reranked."
         )
+    # Degradation before discovery: a caller whose semantic leg silently
+    # dropped out needs that before a note about rows they could reach.
+    if stats.dense_suppressed_mismatch:
+        hints.append(dense_degraded_hint(stats.mismatch_detail))
     if effective_ns is None and stats.hidden_system_ns > 0:
         hints.append(hidden_namespace_hint(stats.hidden_system_ns, stats.hidden_by_prefix))
 

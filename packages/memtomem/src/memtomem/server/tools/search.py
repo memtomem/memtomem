@@ -149,9 +149,15 @@ async def mem_search(
 
     # The dimension-mismatch notice is per-process announcement state, not a
     # property of this query, so it is appended here rather than in the core.
-    dim_notice = await _announce_dim_mismatch_once(app)
-    if dim_notice:
-        hints.append(dim_notice)
+    # Skipped when this query already carries the per-search degradation hint
+    # (#2063): that hint names the same dimensions and the same fix, so
+    # emitting both duplicates one notice. The announce flag is deliberately
+    # left unconsumed in that branch, so mem_add / mem_recall still get their
+    # one-shot on the write side.
+    if not stats.dense_suppressed_mismatch:
+        dim_notice = await _announce_dim_mismatch_once(app)
+        if dim_notice:
+            hints.append(dim_notice)
 
     if not results:
         # Collect the filter/error context that compact/verbose embed in the

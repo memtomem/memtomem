@@ -15,6 +15,7 @@ from memtomem.search.pipeline import RetrievalStats
 from memtomem.services.search_service import (
     InvalidRrfWeightError,
     InvalidTemporalBoundError,
+    dense_degraded_hint,
     hidden_namespace_hint,
     parse_as_of_bound,
     rrf_weights_from,
@@ -463,3 +464,122 @@ class TestRrfWeightValidation:
         """Documents why negative is refused rather than merely discouraged."""
         k = 60
         assert (-1.0 / (k + 50)) > (-1.0 / (k + 1))
+
+
+class TestDenseDegradedHint:
+    """Per-search notice for a dense leg suppressed by an embedding mismatch.
+
+    The one-shot server announcement is deliberately not involved here: the
+    point of #2063 is that the notice must survive past the first call.
+    """
+
+    _MISMATCH = {
+        "dimension_mismatch": True,
+        "stored": {"provider": "none", "model": "", "dimension": 0},
+        "configured": {"provider": "onnx", "model": "bge-small-en-v1.5", "dimension": 384},
+    }
+
+    def test_renders_both_sides_and_omits_an_empty_model(self):
+        hint = dense_degraded_hint(self._MISMATCH)
+
+        # ``none`` has no model name — ``none/ (0d)`` would be the naive join.
+        assert "DB stored none (0d)" in hint
+        assert "config uses onnx/bge-small-en-v1.5 (384d)" in hint
+        assert "mm embedding-reset" in hint
+        assert "configuration.md#reset-flow" in hint
+
+    def test_never_claims_the_results_are_keyword_only(self):
+        """BM25 can be disabled or zero-weighted independently of the dense
+        leg, so a query can be suppressed *and* have no keyword leg either."""
+        assert "keyword-only" not in dense_degraded_hint(self._MISMATCH)
+
+    def test_names_no_destructive_command(self):
+        """``apply-current`` deletes every vector. Bare ``mm embedding-reset``
+        prints it alongside the non-destructive ``revert-to-stored``, so the
+        hint routes through that instead of naming the destructive mode."""
+        hint = dense_degraded_hint(self._MISMATCH)
+
+        assert "apply-current" not in hint
+        assert "index --force" not in hint
+
+    def test_falls_back_to_a_generic_sentence_without_detail(self):
+        hint = dense_degraded_hint(None)
+
+        assert "dense retrieval did not contribute to this query" in hint
+        assert "DB stored" not in hint
+        assert "mm embedding-reset" in hint
+
+    @pytest.mark.asyncio
+    async def test_suppressed_dense_yields_the_hint(self):
+        pipeline = StubPipeline(
+            stats=RetrievalStats(dense_suppressed_mismatch=True, mismatch_detail=self._MISMATCH)
+        )
+
+        _, _, hints = await _run(pipeline)
+
+        assert hints == [dense_degraded_hint(self._MISMATCH)]
+
+    @pytest.mark.asyncio
+    async def test_hint_repeats_on_every_degraded_search(self):
+        """The #2063 regression shape: the server's one-shot announcement went
+        quiet after the first call while the store stayed degraded."""
+        pipeline = StubPipeline(
+            stats=RetrievalStats(dense_suppressed_mismatch=True, mismatch_detail=self._MISMATCH)
+        )
+
+        _, _, first = await _run(pipeline)
+        _, _, second = await _run(pipeline)
+
+        assert first == second
+        assert any("embedding-reset" in h for h in second)
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_dense_was_not_suppressed(self):
+        """A caller who zero-weighted dense got the search they asked for —
+        the pipeline reports ``dense_suppressed_mismatch=False`` for it."""
+        pipeline = StubPipeline(stats=RetrievalStats(dense_suppressed_mismatch=False))
+
+        _, _, hints = await _run(pipeline)
+
+        assert hints == []
+
+    @pytest.mark.asyncio
+    async def test_degradation_precedes_the_discovery_hint(self):
+        pipeline = StubPipeline(
+            stats=RetrievalStats(
+                rerank_applied=False,
+                dense_suppressed_mismatch=True,
+                mismatch_detail=self._MISMATCH,
+                hidden_system_ns=2,
+                hidden_by_prefix={"archive:": 2},
+            )
+        )
+
+        _, _, hints = await _run(pipeline, rerank=True, namespace=None, current_namespace=None)
+
+        assert len(hints) == 3
+        assert hints[0].startswith("rerank=true requested")
+        assert hints[1] == dense_degraded_hint(self._MISMATCH)
+        assert "hidden in system namespaces" in hints[2]
+
+
+@pytest.mark.asyncio
+async def test_the_hint_reads_the_stats_snapshot_not_live_storage():
+    """A reset landing between the search and the render must not rewrite what
+    this query reports. ``run_search`` reads the detail the pipeline captured,
+    so a pipeline whose live storage disagrees still describes the real query.
+    """
+    captured = {
+        "stored": {"provider": "none", "model": "", "dimension": 0},
+        "configured": {"provider": "onnx", "model": "bge-small-en-v1.5", "dimension": 384},
+    }
+    pipeline = StubPipeline(
+        stats=RetrievalStats(dense_suppressed_mismatch=True, mismatch_detail=captured)
+    )
+    # What a caller reaching past the stats would find instead.
+    pipeline.storage = type("S", (), {"embedding_mismatch": None})()
+
+    _, _, hints = await _run(pipeline)
+
+    assert hints == [dense_degraded_hint(captured)]
+    assert "DB stored none (0d)" in hints[0]

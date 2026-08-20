@@ -12,6 +12,7 @@ import json
 import click
 
 from memtomem.cli._errors import raise_cli_error
+from memtomem.services.search_service import run_search
 
 # ADR-0011 §6: re-export the project-context resolver from the MCP tool so
 # CLI and MCP surfaces share one resolution rule. Both ``app`` (server) and
@@ -126,32 +127,46 @@ async def _search(
     fmt: str,
     rerank: bool | None = None,
 ) -> None:
-    from memtomem.chunking.markdown import _parse_validity_bound
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.services.search_service import (
+        InvalidTemporalBoundError,
+        parse_as_of_bound,
+    )
 
-    as_of_unix: int | None = None
-    if as_of is not None:
-        as_of_unix = _parse_validity_bound(as_of, upper=False)
-        if as_of_unix is None:
-            raise click.ClickException(
-                f"invalid --as-of value '{as_of}'. "
-                "Accepted formats: 'YYYY-MM-DD' (date) or 'YYYY-QN' (quarter, N in 1-4)."
-            )
+    # Validate before any component setup: a malformed bound must not pay for
+    # opening the DB. ``parse_as_of_bound`` is exposed for exactly this, but
+    # its message names the service argument, so re-word it with the CLI flag.
+    try:
+        parse_as_of_bound(as_of)
+    except InvalidTemporalBoundError:
+        raise click.ClickException(
+            f"invalid --as-of value '{as_of}'. "
+            "Accepted formats: 'YYYY-MM-DD' (date) or 'YYYY-QN' (quarter, N in 1-4)."
+        ) from None
 
     async with cli_components() as comp:
         project_context_root = _resolve_project_context_root_from_cwd(comp)
-        results, stats = await comp.search_pipeline.search(
-            query,
+        results, stats, hints = await run_search(
+            comp.search_pipeline,
+            query=query,
             top_k=top_k,
             source_filter=source_filter,
             tag_filter=tag_filter,
             namespace=namespace,
-            as_of_unix=as_of_unix,
+            current_namespace=None,
+            as_of=as_of,
             scope=scope,
             project_context_root=project_context_root,
             rerank=rerank,
             origin="cli",
         )
+
+    # Hints go to stderr for every format, and before any format-specific
+    # return: ``context``/``smart`` return early on an empty result set, which
+    # is exactly when a degradation notice matters most. stderr also keeps the
+    # ``--format json`` payload a bare list, byte-compatible for pipes.
+    for hint in hints:
+        click.secho(f"({hint})", fg="yellow", err=True)
 
     if not results and fmt in ("table", "plain"):
         click.secho(
@@ -246,6 +261,8 @@ async def _search(
                 src = "..." + src[-35:]
             snippet = r.chunk.content[:60].replace("\n", " ")
             click.echo(f"{r.rank:<6}{r.score:<10.4f}{src:<40}{snippet}")
+        dense_note = " (suppressed: embedding mismatch)" if stats.dense_suppressed_mismatch else ""
         click.echo(
-            f"\n{stats.bm25_candidates} BM25 + {stats.dense_candidates} dense → {stats.final_total} results"
+            f"\n{stats.bm25_candidates} BM25 + {stats.dense_candidates} dense{dense_note}"
+            f" → {stats.final_total} results"
         )

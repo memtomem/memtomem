@@ -79,6 +79,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A search whose dense leg was dropped now says so, on every call.** When
+  stored embeddings do not match the configured embedding policy the pipeline
+  suppresses dense retrieval and ranks on BM25 alone. The only in-band signal
+  was a one-shot-per-process MCP notice and a stderr `WARNING` that MCP clients
+  never show, so an operator could watch a BM25/dense/hybrid comparison return
+  identical results for minutes without a clue why (#2063). Every affected
+  search now carries the notice: `mem_search` / `mem_agent_search` append it to
+  the text formats and to the structured `hints` array, and `mm search` — which
+  previously bypassed the shared search service and so surfaced no hints at
+  all — prints it to stderr for every `--format`, with the table footer marking
+  the suppressed leg. A query that weighted dense to zero is not reported. The
+  long-form one-shot notice is skipped on a search that already carries the new
+  hint (it names the same dimensions and the same fix); `mem_add` / `mem_recall`
+  keep theirs. Two notes for anyone parsing `mm search`: hints go to stderr,
+  which is new output on that stream, and a degraded `--format table` run gains
+  the `(suppressed: embedding mismatch)` marker in its footer. Every other
+  stdout payload is untouched — `--format json` in particular is still a bare
+  list. `mm search` also inherits the hidden-namespace hint the MCP tools
+  already emitted.
+
 - **`search.rrf_weights` from config no longer reaches fusion unvalidated.**
   Request-level validation (#2093) did not cover configuration: a persisted
   negative weight inverted its leg (`weight / (k + rank)` rises toward zero as
