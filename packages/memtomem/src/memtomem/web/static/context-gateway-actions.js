@@ -173,7 +173,7 @@ async function _ctxRunSync(type, { btn, canonicalCount, noFanout, onComplete }) 
       }
       if (onComplete) onComplete(type);
     } catch (err) {
-      showToast(t('toast.sync_failed', { error: err.message }), 'error');
+      showToast(t('toast.push_failed', { error: err.message }), 'error');
     } finally { btnLoading(btn, false); }
 }
 
