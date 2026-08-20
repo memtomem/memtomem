@@ -302,7 +302,9 @@ path. See [Embeddings](embeddings.md#ollama-local-server).
 ### "Embedding dimension mismatch"
 
 Stop other memtomem processes, run `mm embedding-reset`, choose the intended
-model, and re-index. See [Switching models](embeddings.md#switching-models-on-an-existing-index).
+model, and re-index with `mm index --force <memory_dir>` — a plain `mm index`
+skips the surviving chunks as `unchanged` and writes no vectors. See
+[Switching models](embeddings.md#switching-models-on-an-existing-index).
 
 ### "No such command" when running `mm`
 

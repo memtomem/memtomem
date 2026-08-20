@@ -1635,3 +1635,73 @@ class TestNoPrivateRepoRefsInCliHelp:
             pass
 
         assert {"mm dep", "mm sd"} <= set(self._rendered_offenders(root))
+
+
+class TestEmbeddingResetRunbooks:
+    """Every documented ``apply-current`` must name ``--force`` nearby (#2115).
+
+    ``mm embedding-reset --mode apply-current`` drops the vectors but leaves
+    the chunk rows and their content hashes, so a plain ``mm index`` matches
+    all of them, reports ``unchanged``, and writes nothing. A runbook that
+    stops at the reset therefore reads as complete while leaving the store on
+    BM25 alone.
+
+    Positive form on purpose: hunting for *bad* re-index lines also flags
+    prose that merely names ``mm index`` (a process to stop, or an
+    explanation of this very trap). Requiring the remedy to appear near the
+    destructive command has no such ambiguity.
+
+    The scope is every tracked Markdown file rather than a hand-kept list:
+    the two files that carried this bug (``reference/operations.md`` and
+    ``mcp-clients.md``) would both have been missing from any list a narrower
+    guard enumerated.
+    """
+
+    #: Lines after an ``apply-current`` mention in which the remedy must appear.
+    _WINDOW = 12
+
+    def test_every_apply_current_mention_names_the_forced_reindex(self) -> None:
+        offenders: list[str] = []
+        # ``docs/guides`` is the instructional surface — the place a reader
+        # copies commands from. ``CHANGELOG.md`` and ``tools/**`` reports name
+        # the same command as a record of what happened, which is not a
+        # runbook and must not be rewritten to read like one.
+        guides = [p for p in _tracked_markdown() if _GUIDES in p.parents]
+        assert guides, "no tracked guide Markdown found — the scope query broke"
+        for path in guides:
+            lines = _read(path).splitlines()
+            for line_no, line in enumerate(lines, start=1):
+                if "apply-current" not in line and "apply_current" not in line:
+                    continue
+                # Documentation *of the warning schema's* ``fix`` field quotes
+                # the value the code emits; it is describing a payload, not
+                # instructing a recovery.
+                if '"fix":' in line or line.lstrip().startswith("| `fix`"):
+                    continue
+                window = "\n".join(lines[line_no - 1 : line_no - 1 + self._WINDOW])
+                # Token-exact: ``--force-unsafe`` is the redaction-bypass flag
+                # and does nothing for vectors, but contains ``--force`` as a
+                # substring and would otherwise satisfy the remedy.
+                if re.search(r"--force(?![\w-])", window) or "force=true" in window:
+                    continue
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{line_no}: {line.strip()}")
+        assert not offenders, (
+            "a documented `embedding-reset --mode apply-current` does not name the "
+            "forced re-index within "
+            f"{self._WINDOW} lines; a plain re-index after it writes no vectors:\n"
+            + "\n".join(offenders)
+        )
+
+    def test_force_unsafe_does_not_satisfy_the_remedy(self) -> None:
+        """``--force-unsafe`` is the redaction-bypass flag, unrelated to
+        vectors — but it contains ``--force``, so a substring test would let a
+        runbook that names only it pass as fixed."""
+        assert re.search(r"--force(?![\w-])", "mm index --force ~/notes")
+        assert not re.search(r"--force(?![\w-])", "mm index --force-unsafe ~/notes")
+
+    def test_the_wizard_receipt_names_the_forced_reindex(self) -> None:
+        """The only reset-then-reindex runbook that lives in code rather than
+        Markdown, so the sweep above cannot see it (#2115)."""
+        source = _read(_SRC / "cli" / "init_cmd.py")
+        assert "mm index --force <path>" in source
+        assert "Run 'mm index <path>' to re-embed" not in source

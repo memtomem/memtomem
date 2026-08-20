@@ -1526,7 +1526,9 @@ async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
             )
             click.secho(
                 f"  Vector index reset to {state['provider']}/{state['model']} "
-                f"({state['dimension']}d). Run 'mm index <path>' to re-embed.",
+                f"({state['dimension']}d). Run 'mm index --force <path>' to "
+                "re-embed — a plain 'mm index' matches the surviving chunks by "
+                "content hash and writes no vectors.",
                 fg="green",
             )
         else:

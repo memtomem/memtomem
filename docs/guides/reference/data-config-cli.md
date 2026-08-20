@@ -224,14 +224,14 @@ Key settings:
 **MCP:**
 ```
 mem_embedding_reset()                       # check status (default)
-mem_embedding_reset(mode="apply_current")   # reset DB to current model (requires re-index)
+mem_embedding_reset(mode="apply_current")   # reset DB to current model (needs `mm index --force`)
 mem_embedding_reset(mode="revert_to_stored") # switch runtime to match DB
 ```
 
 **CLI:**
 ```bash
 mm embedding-reset                          # check status (default)
-mm embedding-reset --mode apply-current     # reset DB to current model (requires re-index)
+mm embedding-reset --mode apply-current     # reset DB to current model (needs `mm index --force`)
 mm embedding-reset --mode revert-to-stored  # switch runtime to match DB
 ```
 

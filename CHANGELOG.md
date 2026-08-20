@@ -95,6 +95,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   them. Silent on BM25-only stores (`provider="none"`), where having no vectors
   is the configuration rather than a gap.
 
+- **Every reset-then-reindex runbook now names `--force`.** `mm
+  embedding-reset --mode apply-current` drops the vectors but leaves the chunk
+  rows and their content hashes, so a plain `mm index` matches all of them,
+  reports them `unchanged`, and writes nothing — a store that answers on BM25
+  alone with no error to show for it (#2115). Three places told users to do
+  exactly that: `docs/guides/reference/operations.md`,
+  `docs/guides/mcp-clients.md`, and the `mm init` wizard's own receipt after it
+  offers to reset. A docs guard now fails when a documented `apply-current` is
+  not followed by the forced re-index. `mem_embedding_reset` also stops
+  pointing agents at `mem_index(force=true)`: an agent session or a namespace
+  set with `mem_ns_set` makes that call pass the namespace explicitly, which
+  overrides preservation and restamps what it re-embeds (ADR-0033, #2104), so
+  the receipt now names the CLI command, which passes no namespace.
+
 - **A search whose dense leg was dropped now says so, on every call.** When
   stored embeddings do not match the configured embedding policy the pipeline
   suppresses dense retrieval and ranks on BM25 alone. The only in-band signal
