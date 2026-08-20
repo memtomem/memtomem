@@ -5072,6 +5072,13 @@ class TestReinstallEmbeddingReconciliation:
 
         out = capsys.readouterr().out
         assert "Vector index reset" in out
+        # #2115: the reset drops the vectors but leaves the chunk rows and
+        # their content hashes, so a plain ``mm index`` matches them all,
+        # reports ``unchanged``, and restores nothing. Asserted against the
+        # rendered receipt rather than the source string, so a dead literal or
+        # a comment cannot satisfy it.
+        assert "mm index --force <path>" in out
+        assert "Run 'mm index <path>' to re-embed" not in out
 
         from memtomem.config import StorageConfig
         from memtomem.storage.sqlite_backend import SqliteBackend

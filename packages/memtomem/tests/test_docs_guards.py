@@ -1651,14 +1651,33 @@ class TestEmbeddingResetRunbooks:
     explanation of this very trap). Requiring the remedy to appear near the
     destructive command has no such ambiguity.
 
-    The scope is every tracked Markdown file rather than a hand-kept list:
-    the two files that carried this bug (``reference/operations.md`` and
-    ``mcp-clients.md``) would both have been missing from any list a narrower
-    guard enumerated.
+    The scope is every tracked Markdown file **under ``docs/guides``**, swept
+    rather than listed: the two files that carried this bug
+    (``reference/operations.md`` and ``mcp-clients.md``) would both have been
+    missing from any hand-kept list, and a guide added tomorrow is covered the
+    day it lands. Files outside that tree are excluded on purpose —
+    ``CHANGELOG.md`` and ``tools/**`` reports name the same command as a
+    record of what happened, and rewriting those to read like instructions
+    would falsify the history they exist to keep.
     """
 
     #: Lines after an ``apply-current`` mention in which the remedy must appear.
     _WINDOW = 12
+
+    #: The remedy, matched as a *command* rather than as a loose flag.
+    #:
+    #: A bare ``--force`` search passes on anything in the window that happens
+    #: to carry the flag — ``mm gc --force`` is a different command doing a
+    #: different thing — and ``force=true`` as a substring passes on
+    #: ``force=trueish``. ``--force-unsafe`` is the redaction-bypass flag and
+    #: restores no vectors at all. ``--reassign-namespaces`` implies force and
+    #: does re-embed, so it counts.
+    _REMEDY_RE = re.compile(
+        r"mm index\b[^\n]*--force(?![\w-])"
+        r"|--force(?![\w-])[^\n]*\bmm index\b"
+        r"|mm index\b[^\n]*--reassign-namespaces\b"
+        r"|mem_index\([^\n]*force\s*=\s*true(?![\w])"
+    )
 
     def test_every_apply_current_mention_names_the_forced_reindex(self) -> None:
         offenders: list[str] = []
@@ -1679,10 +1698,7 @@ class TestEmbeddingResetRunbooks:
                 if '"fix":' in line or line.lstrip().startswith("| `fix`"):
                     continue
                 window = "\n".join(lines[line_no - 1 : line_no - 1 + self._WINDOW])
-                # Token-exact: ``--force-unsafe`` is the redaction-bypass flag
-                # and does nothing for vectors, but contains ``--force`` as a
-                # substring and would otherwise satisfy the remedy.
-                if re.search(r"--force(?![\w-])", window) or "force=true" in window:
+                if self._REMEDY_RE.search(window):
                     continue
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}:{line_no}: {line.strip()}")
         assert not offenders, (
@@ -1692,16 +1708,34 @@ class TestEmbeddingResetRunbooks:
             + "\n".join(offenders)
         )
 
-    def test_force_unsafe_does_not_satisfy_the_remedy(self) -> None:
-        """``--force-unsafe`` is the redaction-bypass flag, unrelated to
-        vectors — but it contains ``--force``, so a substring test would let a
-        runbook that names only it pass as fixed."""
-        assert re.search(r"--force(?![\w-])", "mm index --force ~/notes")
-        assert not re.search(r"--force(?![\w-])", "mm index --force-unsafe ~/notes")
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "mm index --force ~/notes",
+            "mm index ~/notes --force",
+            "uv run mm index --force <memory_dir>",
+            "mm index --reassign-namespaces <memory_dir>",
+            'mem_index(path="~/notes", force=true)',
+        ],
+    )
+    def test_a_real_remedy_satisfies_the_guard(self, line: str) -> None:
+        assert self._REMEDY_RE.search(line)
 
-    def test_the_wizard_receipt_names_the_forced_reindex(self) -> None:
-        """The only reset-then-reindex runbook that lives in code rather than
-        Markdown, so the sweep above cannot see it (#2115)."""
-        source = _read(_SRC / "cli" / "init_cmd.py")
-        assert "mm index --force <path>" in source
-        assert "Run 'mm index <path>' to re-embed" not in source
+    @pytest.mark.parametrize(
+        "line",
+        [
+            # The redaction-bypass flag. Restores no vectors, and contains
+            # ``--force`` as a substring.
+            "mm index --force-unsafe ~/notes",
+            # A different command that happens to take the same flag.
+            "mm gc orphan-sources --force",
+            # ``force=true`` as a substring of something else.
+            "mem_index(path='~/notes', force=trueish)",
+            # The flag with no command anywhere near it.
+            "pass --force to re-run",
+            # The bug this guard exists for.
+            "mm index ~/notes",
+        ],
+    )
+    def test_a_non_remedy_does_not_satisfy_the_guard(self, line: str) -> None:
+        assert not self._REMEDY_RE.search(line)

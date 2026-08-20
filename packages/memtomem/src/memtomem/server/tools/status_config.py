@@ -859,9 +859,10 @@ async def mem_embedding_reset(
             f"DB reset to {config.embedding.provider}/{config.embedding.model} "
             f"({config.embedding.dimension}d). All vectors deleted — re-embed "
             "with `mm index --force <memory_dir>` (CLI). Prefer it over "
-            "mem_index(force=true): with an agent or current namespace active, "
-            "that call stamps what it re-embeds with that namespace. Until the "
-            "re-embed runs, dense search finds nothing."
+            "mem_index(force=true): an agent session or a namespace set with "
+            "mem_ns_set makes that call stamp everything it re-embeds with "
+            "that namespace. Until the re-embed runs, dense search finds "
+            "nothing."
         )
 
     # mode == "revert_to_stored"
