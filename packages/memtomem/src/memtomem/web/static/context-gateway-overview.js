@@ -964,7 +964,7 @@ async function _ctxSyncProjectScope(scopeId, btn) {
     const phaseLabel = (p) => t(`settings.ctx.${String(p).replace(/-/g, '_')}_phase_title`);
     if (failed) {
       if (succeeded.length === 0) {
-        showToast(t('toast.sync_failed', { error: failed.reason }), 'error');
+        showToast(t('toast.push_failed', { error: failed.reason }), 'error');
       } else {
         // Name EVERY failed phase — the loop no longer aborts on the first
         // per-phase HTTP error (#1396); ``failed.reason`` stays the first one.
@@ -978,7 +978,7 @@ async function _ctxSyncProjectScope(scopeId, btn) {
         );
       }
     } else if (settingsSeverity === 'error') {
-      showToast(t('toast.sync_failed', { error: settingsReason }), 'error');
+      showToast(t('toast.push_failed', { error: settingsReason }), 'error');
     } else if (settingsSeverity === 'aborted') {
       showToast(t('settings.ctx.mtime_conflict'), 'warning');
     } else {
@@ -1537,7 +1537,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
         const reason = await _ctxErrorMessageFromResponse(
           response, t('settings.ctx.sync_settings_failed_fallback'));
         for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'failed');
-        showToast(t('toast.sync_failed', { error: reason }), 'error');
+        showToast(t('toast.push_failed', { error: reason }), 'error');
         return;
       }
       const report = await response.json();
@@ -1784,7 +1784,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     // the failure mode the issue calls out.
     if (failed) {
       if (succeeded.length === 0) {
-        showToast(t('toast.sync_failed', { error: failed.reason }), 'error');
+        showToast(t('toast.push_failed', { error: failed.reason }), 'error');
       } else {
         // The loop no longer aborts on the first per-phase HTTP error (#1396),
         // so name EVERY failed phase — derived from the authoritative per-phase
@@ -1803,7 +1803,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
         );
       }
     } else if (settingsSeverity === 'error') {
-      showToast(t('toast.sync_failed', { error: settingsReason }), 'error');
+      showToast(t('toast.push_failed', { error: settingsReason }), 'error');
     } else if (settingsSeverity === 'aborted') {
       showToast(t('settings.ctx.mtime_conflict'), 'warning');
     } else if (attentionSkips.length) {
