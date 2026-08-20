@@ -24,6 +24,35 @@ Checks (per configured ``memory_dir``):
 
 * **db_coverage** — files on disk the engine would index but that have zero
   chunks in the DB ("indexed N/M"). The headline signal.
+* **stale_index** — indexed files whose content on disk has moved past their
+  chunks, so ``mem_search`` answers with the older text and nothing says so
+  (#2078). The verdict is the indexer's own: the file is re-chunked through
+  ``IndexEngine.chunk_content`` and diffed by content hash, so a ``touch`` or
+  an identical re-save is not drift, and a real edit is drift no matter what
+  the timestamps say. Deliberately *not* mtime-vs-``updated_at``: that
+  comparison is wrong in both directions, since chunk ``updated_at`` advances
+  on metadata-only writes (a tag rename) yet stays put through a no-op
+  re-index.
+
+  Drift means content *or position*: a chunk whose bytes match but whose line
+  range moved is reported too, because a re-index rewrites that range and
+  retrieval depends on it (context-window expansion orders a source's chunks
+  by ``start_line``, so stale ranges return the wrong neighbours). Reordering
+  two sections is the pure case — same bytes, same hashes, different answer.
+  Two gaps remain, both inherited from ``mm index`` rather than introduced
+  here, and both left unreported because a re-index does not fix them either —
+  a finding whose remediation provably cannot work is worse than none.
+  Collapsing two byte-identical chunks into one is missed (the differ keys
+  deletion on the hash, not on the reused id), and editing a section's
+  ``> tags: [...]`` blockquote changes nothing the differ looks at, so the DB
+  keeps the old tags (measured: ``mm index`` reports the file unchanged) even
+  though ``mem_search(tag_filter=...)`` reads them.
+* **stale_index_blocked** — the same drift on a file whose new content matches
+  a redaction pattern. Split out because ``mm index`` *skips* such a file
+  rather than failing it (the case #2076 measured), so "run `mm index`" would
+  be advice that cannot work; the remediation names the audited bypass
+  (``--force-unsafe``, itself hard-refused for ``project_shared``) alongside
+  removing the matched text. Hit counts only; matched bytes are never shown.
 * **stale_source** — DB chunks whose ``source_file`` is gone from disk (the
   file was deleted but its chunks linger; there is no single-file delete CLI).
 * **convention_violation** — an index/meta file (``MEMORY.md`` / ``README.md``
@@ -56,8 +85,8 @@ Checks (per configured ``memory_dir``):
 
 Output: human glyphs by default, ``--json`` for a structured payload. Exit
 ``1`` when any *error*-severity finding exists (``stale_source``,
-``convention_violation``, ``broken_link``), else ``0``. Coverage gaps,
-orphans, dangling wikilinks, budget and cold candidates are advisory (a
+``convention_violation``, ``broken_link``), else ``0``. Coverage gaps, stale
+indexes, orphans, dangling wikilinks, budget and cold candidates are advisory (a
 partially-indexed dir is
 a legitimate steady state) so they warn without failing the exit code —
 mirrors ``mm sync-doctor`` (warns don't fail) while exposing a JSON + exit
@@ -72,8 +101,9 @@ in URI ``mode=ro`` — never the full ``SqliteBackend``, which on
 checkpoint the WAL on close. ``mode=ro`` still surfaces committed rows in a
 live writer's WAL (unlike ``immutable=1``); a missing or too-old DB degrades
 to disk/index-only checks instead of being created. Discovery reuses the
-engine's own ``discover_indexable_files`` (via a storage-less, model-less
-engine) so the "should be indexed" set can't drift from what the real indexer
+engine's own ``discover_indexable_files`` and ``chunk_content`` (via a
+storage-less, model-less engine) so neither the "should be indexed" set nor the
+"which chunks would this produce" verdict can drift from what the real indexer
 does.
 """
 
@@ -814,15 +844,16 @@ def _load_config_read_only() -> Mem2MemConfig:
 
 
 def _build_discovery_engine(config: Mem2MemConfig) -> object:
-    """Build an ``IndexEngine`` purely for its file-discovery method.
+    """Build an ``IndexEngine`` purely for its discovery and chunking methods.
 
-    ``discover_indexable_files`` reads only ``config`` (supported extensions,
-    index roots, exclude rules) — it never touches storage or the embedder —
-    so both are passed as inert stand-ins (``None`` storage, a model-less
-    ``NoopEmbedder``). Reusing the engine's own discovery is deliberate: the
-    doctor's "should be indexed" set is then guaranteed identical to what the
-    real indexer produces, so coverage / orphan counts can't drift from
-    reality.
+    ``discover_indexable_files`` and ``chunk_content`` read only ``config``
+    (supported extensions, index roots, exclude rules, chunk sizing) — neither
+    touches storage or the embedder — so both are passed as inert stand-ins
+    (``None`` storage, a model-less ``NoopEmbedder``). Reusing the engine's own
+    code is deliberate: the doctor's "should be indexed" set and its "would
+    this file produce different chunks" verdict are then guaranteed identical
+    to what the real indexer produces, so coverage / orphan / staleness counts
+    can't drift from reality.
     """
     from memtomem.embedding.noop import NoopEmbedder
     from memtomem.indexing.engine import IndexEngine
@@ -882,6 +913,216 @@ def _read_source_signals(
         if conn is not None:
             conn.close()
     return [(Path(r[0]), int(r[1]), r[2], int(r[3]), float(r[4]), float(r[5])) for r in rows]
+
+
+# ── Staleness: has a file changed since its chunks were written? ────
+
+
+def _open_readonly_db(db_path: Path) -> sqlite3.Connection | None:
+    """Open ``db_path`` read-only, or ``None`` if it can't be read.
+
+    Same contract as :func:`_read_source_signals` (``mode=ro`` + ``query_only``
+    so the doctor can never create, migrate, or checkpoint the DB); factored
+    out because the staleness check needs a second query.
+    """
+    db = db_path.expanduser()
+    if not db.is_absolute():
+        db = db.absolute()
+    if not db.exists():
+        return None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=5)
+        conn.execute("PRAGMA query_only=ON")
+    except sqlite3.DatabaseError:
+        if conn is not None:
+            conn.close()
+        return None
+    return conn
+
+
+def _read_chunk_states(
+    db_path: Path, dir_key: str
+) -> dict[str, dict[str, tuple[str, tuple[str, ...], int, int]]] | None:
+    """Per-source ``{chunk_id: (hash, hierarchy, start_line, end_line)}`` for a dir.
+
+    A batched, read-only superset of ``SqliteBackend.get_chunk_index_state``:
+    one prefix-scoped query per dir rather than one per file. The first two
+    fields are exactly what the indexer's differ consumes; the line range comes
+    along because a re-index refreshes it for hash-matched chunks, and it is
+    load-bearing for retrieval — context-window expansion orders a source's
+    chunks by ``start_line``. ``None`` means "couldn't read", which the caller
+    reports as no finding rather than as drift.
+    """
+    from memtomem.indexing.engine import norm_dir_prefix
+
+    conn = _open_readonly_db(db_path)
+    if conn is None:
+        return None
+    prefix = norm_dir_prefix(Path(dir_key))
+    try:
+        rows = conn.execute(
+            "SELECT source_file, id, content_hash, heading_hierarchy, start_line, end_line"
+            " FROM chunks WHERE substr(source_file, 1, ?) = ?",
+            (len(prefix), prefix),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+    states: dict[str, dict[str, tuple[str, tuple[str, ...], int, int]]] = {}
+    unreadable: set[str] = set()
+    for source_file, chunk_id, content_hash, heading_json, start_line, end_line in rows:
+        try:
+            hierarchy = tuple(json.loads(heading_json))
+        except (json.JSONDecodeError, TypeError):
+            hierarchy = ()
+        try:
+            span = (int(start_line or 0), int(end_line or 0))
+        except (TypeError, ValueError):
+            # A structurally valid row can still hold junk in a numeric column.
+            # Drop the whole source rather than half of it: a missing row reads
+            # as a deleted chunk and would invent drift. Reporting nothing for
+            # this file is the honest degradation, matching how an unreadable
+            # DB degrades store-wide.
+            unreadable.add(source_file)
+            continue
+        states.setdefault(source_file, {})[chunk_id] = (content_hash, hierarchy, *span)
+    for source_file in unreadable:
+        states.pop(source_file, None)
+    return states
+
+
+def _read_indexable_content(path: Path) -> str | None:
+    """Read ``path`` the way ``IndexEngine._index_file`` reads it, or ``None``.
+
+    Mirrors the indexer's guards (size ceiling, UTF-8 with a replace fallback,
+    null-byte binary sniff) so a file the indexer would decline is one the
+    doctor declines too — reporting a file as stale that ``mm index`` would
+    never rewrite is a remediation that cannot work.
+    """
+    from memtomem.indexing.engine import _MAX_INDEX_FILE_BYTES
+
+    try:
+        if path.stat().st_size > _MAX_INDEX_FILE_BYTES:
+            return None
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "\x00" in content[:8192]:
+        return None
+    return content
+
+
+def _read_source_state(
+    db_path: Path, source_file: str
+) -> dict[str, tuple[str, tuple[str, ...], int, int]] | None:
+    """Re-read one source's chunk state, fresh. See :func:`_confirm_stale`."""
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    conn = _open_readonly_db(db_path)
+    if conn is None:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT id, content_hash, heading_hierarchy, start_line, end_line FROM chunks"
+            " WHERE source_file = ?",
+            (norm_path(Path(source_file)),),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+    state: dict[str, tuple[str, tuple[str, ...], int, int]] = {}
+    for chunk_id, content_hash, heading_json, start_line, end_line in rows:
+        try:
+            hierarchy = tuple(json.loads(heading_json))
+        except (json.JSONDecodeError, TypeError):
+            hierarchy = ()
+        try:
+            span = (int(start_line or 0), int(end_line or 0))
+        except (TypeError, ValueError):
+            return None
+        state[chunk_id] = (content_hash, hierarchy, *span)
+    return state
+
+
+def _confirm_stale(
+    engine: object,
+    state: dict[str, tuple[str, tuple[str, ...], int, int]],
+    path: Path,
+) -> tuple[Literal["stale", "fresh", "skip"], bool]:
+    """Do this file's chunks still describe what is on disk?
+
+    Re-runs the indexer's own chunk pipeline (``IndexEngine.chunk_content``)
+    and diffs as ``index_file`` does — on content hash and heading hierarchy,
+    plus the line ranges a re-index refreshes for hash-matched chunks.
+    Deciding on the *diff* rather than on timestamps is what makes the finding
+    actionable in both directions: a file whose bytes moved but whose chunks
+    still match (a ``touch``, an identical re-save) is not reported, because
+    re-indexing it would be a no-op; and a genuinely changed file is reported
+    no matter what its timestamps say.
+
+    Returns the verdict and whether the content carries redaction hits. Only
+    that boolean crosses back out — the matched bytes never leave this frame.
+
+    The scan runs *before* any chunker sees the text, and hit-carrying content
+    is chunked with logging muted. The indexer gets this for free: it refuses a
+    blocked file before chunking it, so no chunker ever sees un-adjudicated
+    bytes. The doctor has to chunk in order to diff, and a chunker that fails
+    to parse malformed input logs the exception at DEBUG with ``exc_info=True``
+    (``chunking/structured.py``) — PyYAML quotes the offending source line in
+    the exception, so a secret sitting on a malformed line would land in the
+    log. Muting that one call is the narrowest way to keep the indexer's
+    property.
+    """
+    import logging as _logging
+
+    from memtomem import privacy
+    from memtomem.indexing.differ import compute_diff
+
+    content = _read_indexable_content(path)
+    if content is None:
+        return "skip", False
+    has_redaction_hits = bool(privacy.scan(content))
+    try:
+        if has_redaction_hits:
+            previously_disabled = _logging.root.manager.disable
+            _logging.disable(_logging.CRITICAL)
+            try:
+                new_chunks = engine.chunk_content(path, content)  # type: ignore[attr-defined]
+            finally:
+                _logging.disable(previously_disabled)
+        else:
+            new_chunks = engine.chunk_content(path, content)  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - defensive: a chunker crash is not a finding
+        return "skip", has_redaction_hits
+    try:
+        diff = compute_diff({cid: (st[0], st[1]) for cid, st in state.items()}, new_chunks)
+    except (ValueError, TypeError):
+        # A chunk id that isn't a UUID is corrupt storage state, which other
+        # tooling owns; a read-only diagnostic must not crash on it, and
+        # "can't tell" is the honest verdict rather than a false finding.
+        return "skip", has_redaction_hits
+    if diff.to_upsert or diff.to_delete:
+        return "stale", has_redaction_hits
+    # Hash-matched chunks whose *position* moved are drift too. ``compute_diff``
+    # calls them unchanged (it matches on content), but a re-index writes their
+    # refreshed ranges via ``update_chunk_line_ranges``, and retrieval reads
+    # them: a source's chunks are ordered by ``start_line`` when a search
+    # expands its context window, so stale ranges hand back the wrong
+    # neighbours. Reordering two sections is the pure case — same bytes, same
+    # hashes, different answer.
+    for chunk in diff.unchanged:
+        persisted = state.get(str(chunk.id))
+        if persisted is None:
+            continue
+        if (persisted[2], persisted[3]) != (chunk.metadata.start_line, chunk.metadata.end_line):
+            return "stale", has_redaction_hits
+    return "fresh", has_redaction_hits
 
 
 # ── Analysis ────────────────────────────────────────────────────────
@@ -944,8 +1185,103 @@ def _analyze_dir(
         db_covered=len(disk_norm.keys() & db_norm.keys()),
     )
 
-    # 1. db_coverage — on disk, no chunks.
-    uncovered = sorted(p for k, p in disk_norm.items() if k not in db_norm)
+    # 1. stale_index / stale_index_blocked — indexed, but the file on disk
+    # moved on. The verdict is the indexer's own: re-chunk each covered file
+    # and diff by content hash, reporting exactly the files `mm index` would
+    # rewrite. A timestamp comparison was the obvious cheaper design and is
+    # wrong in both directions — chunk ``updated_at`` advances on metadata
+    # writes (a tag rename) and *doesn't* advance on a no-op re-index, so it
+    # would both hide real drift and flag `touch`ed files forever. Re-chunking
+    # a whole memory dir costs ~0.5 ms/file, which a diagnostic that already
+    # walks the tree can afford (#2078).
+    covered = sorted((disk_norm[k], k) for k in disk_norm.keys() & db_norm.keys())
+    stale_ok: list[str] = []
+    stale_blocked: list[str] = []
+    # Sources the re-confirm found emptied while we ran: no longer stale, but
+    # no longer covered either, so the coverage check below has to hear about
+    # them. Reporting neither would leave the run silent about a file that lost
+    # every chunk mid-report.
+    emptied: set[str] = set()
+    if covered:
+        states = _read_chunk_states(Path(config.storage.sqlite_path), dir_key)
+        if states is not None:
+            for candidate_path, key in covered:
+                state = states.get(key)
+                if not state:
+                    continue
+                verdict, has_redaction_hits = _confirm_stale(engine, state, candidate_path)
+                if verdict != "stale":
+                    continue
+                # The per-dir snapshot above was taken before this file was
+                # read, and the fs watcher indexes in the background: a re-index
+                # landing in between would make a now-fresh file look stale.
+                # Re-read this one source and re-decide against it. Only stale
+                # files pay for this, and reporting drift that a running server
+                # already fixed is the one failure a report-only tool can't
+                # explain away.
+                fresh_state = _read_source_state(Path(config.storage.sqlite_path), key)
+                if fresh_state is not None and not fresh_state:
+                    # The source lost every chunk while we ran. It is not stale
+                    # any more, it is uncovered — hand it to ``db_coverage``.
+                    emptied.add(key)
+                    continue
+                if fresh_state is not None and fresh_state != state:
+                    verdict, has_redaction_hits = _confirm_stale(
+                        engine, fresh_state, candidate_path
+                    )
+                    if verdict != "stale":
+                        continue
+                # ``fresh_state is None`` means the re-read itself failed
+                # (transient lock, DB yanked). The confirmed verdict above
+                # stands: a failed second look is not evidence of freshness,
+                # and dropping the finding would hide real drift behind a blip.
+                # A file the redaction guard would refuse is stale *and*
+                # unfixable by `mm index` — it gets skipped again — so it
+                # needs its own remediation, not advice that cannot work.
+                # Name the file the way its remediation has to be typed: a
+                # bare basename is ambiguous under a recursive root holding
+                # ``a/note.md`` and ``b/note.md``, and both findings hand the
+                # reader a per-file command to run.
+                try:
+                    label = str(candidate_path.relative_to(resolved_dir))
+                except ValueError:  # pragma: no cover - ownership already checked
+                    label = candidate_path.name
+                if has_redaction_hits:
+                    stale_blocked.append(label)
+                else:
+                    stale_ok.append(label)
+    if stale_ok:
+        report.findings.append(
+            Finding(
+                check="stale_index",
+                severity="warn",
+                summary=(
+                    f"{len(stale_ok)} indexed file(s) changed on disk since their chunks "
+                    "were written — `mem_search` returns the older text "
+                    "(run `mm index <file>`)"
+                ),
+                items=stale_ok,
+            )
+        )
+    if stale_blocked:
+        report.findings.append(
+            Finding(
+                check="stale_index_blocked",
+                severity="warn",
+                summary=(
+                    f"{len(stale_blocked)} changed file(s) match a redaction pattern — "
+                    "`mm index` skips them, so their chunks stay stale (remove the "
+                    "matched text, or re-index with `mm index --force-unsafe <file>`, "
+                    "audit-logged and refused for project_shared files)"
+                ),
+                items=stale_blocked,
+            )
+        )
+
+    # 2. db_coverage — on disk, no chunks (including any the staleness
+    # re-confirm just found emptied).
+    uncovered = sorted(p for k, p in disk_norm.items() if k not in db_norm or k in emptied)
+    report.db_covered = len(disk_norm) - len(uncovered)
     if uncovered:
         report.findings.append(
             Finding(
@@ -959,7 +1295,7 @@ def _analyze_dir(
             )
         )
 
-    # 2/3. DB-only sources — split into stale (deleted), convention violation
+    # 3/4. DB-only sources — split into stale (deleted), convention violation
     # (meta file indexed), and an unexpected residue.
     stale: list[str] = []
     violations: list[str] = []
@@ -1012,7 +1348,7 @@ def _analyze_dir(
             )
         )
 
-    # 4. cold_candidate — covered files never accessed since indexing.
+    # 5. cold_candidate — covered files never accessed since indexing.
     cold = [
         (row[0], row[1])  # (path, chunk_count)
         for k, row in db_norm.items()
@@ -1233,9 +1569,11 @@ def _gather_reports(
 ) -> list[DirReport]:
     """Read DB signals read-only, bucket by owning dir, analyze each inspected dir.
 
-    Fully synchronous: the only DB access is the read-only aggregate in
-    :func:`_read_source_signals`, and discovery is a sync disk walk — no
-    embedder, no async storage backend, no writes.
+    Fully synchronous, and read-only throughout: the store-wide aggregate in
+    :func:`_read_source_signals` plus the per-dir chunk-state query the
+    staleness check runs (:func:`_read_chunk_states`), both over ``mode=ro``
+    connections. Discovery is a sync disk walk — no embedder, no async storage
+    backend, no writes.
     """
     from collections import defaultdict
 

@@ -36,6 +36,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm memory doctor` reports a stale index.** Two new warn-severity checks,
+  `stale_index` and `stale_index_blocked`, cover the case every existing check
+  missed: a file that *has* chunks, still exists on disk, and is listed in the
+  TOC, but was edited after its last successful index. `db_coverage` passes
+  (it has chunks), `stale_source` is the opposite case (the file is gone), and
+  `index_orphan` is about TOC membership — so `mem_search` kept returning the
+  pre-edit text with nothing to doubt. The verdict is the indexer's own: each
+  covered file is re-chunked through the indexing pipeline and diffed on
+  content hash, heading hierarchy and line range — position counts, because
+  context-window expansion orders a source's chunks by `start_line`, so
+  reordering two unchanged sections changes what search returns.
+  A `touch` or an identical re-save is not reported, and a real edit is
+  reported however its timestamps look — deliberately not a
+  mtime-vs-`updated_at` comparison, which is wrong in both directions, since
+  chunk `updated_at` advances on metadata-only writes (a tag rename) yet stays
+  put through a no-op re-index. Files whose new content trips the redaction
+  guard report as `stale_index_blocked` instead, because `mm index` skips them
+  rather than failing them; that finding names the audited `--force-unsafe`
+  bypass alongside removing the matched text — hit counts only, never the
+  matched text itself. Items are paths relative to the memory root each report
+  is headed by, so two same-named files under one root stay distinguishable.
+  Report-only: `--fix` is unchanged, and the doctor still never writes the DB.
+  Two gaps stay unreported, both inherited from `mm index` and both cases a
+  re-index does not clear either — flagging them would hand out a remediation
+  that provably cannot work: collapsing two byte-identical chunks into one
+  (the differ keys deletion on the hash, not on the reused id), and editing a
+  section's `> tags: [...]` blockquote (the chunk text is unchanged, so the DB
+  keeps the old tags that `mem_search(tag_filter=…)` reads).
+  New Python API: `IndexEngine.chunk_content(file_path, content)`, the
+  chunk-side companion to `discover_indexable_files`. (#2078)
 - **`mm search --format json` exposes `chunk_id`.** Every item of the JSON
   payload now carries the chunk's UUID under the same key, and in the same
   canonical string form, as the MCP structured payload

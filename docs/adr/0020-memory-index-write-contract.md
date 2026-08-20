@@ -166,6 +166,7 @@ deliberately left to the human / agent:
 | `ambiguous_index_line` | Something on the line could not be read (unresolved link syntax, a target carrying URI machinery, or a contested wikilink label — §1's strict-grammar failures). Reported at `warn` for manual repair; a splice must not act on a doubt. *(Row added by the 2026-07-15 amendment, #1757; contested labels added by the 2026-07-16 amendment, #1774.)* |
 | `budget` | Trimming an over-budget TOC means choosing *which entries to cut* — prose judgement, i.e. curation. |
 | `index_orphan` | *Adding* a missing pointer requires generating a title + hook and choosing insertion order. Generation, not deletion. |
+| `stale_index`, `stale_index_blocked` | DB-side, and a write with real cost. Re-indexing is `mm index <file>`'s job; for the redaction-blocked subset it would be a no-op anyway (#2078). |
 | `stale_source`, `convention_violation` | DB-side. Fixed by `mem_do(action="cleanup_orphans")` / `mm purge --matching-excluded`, not by editing the index file. |
 
 ### 4. Dry-run by default; `--apply` to write

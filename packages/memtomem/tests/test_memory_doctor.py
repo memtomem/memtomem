@@ -28,8 +28,10 @@ Layers:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -878,6 +880,9 @@ class TestBudget:
 # ── Integration: real DB + real disk ────────────────────────────────
 
 
+_FIXTURE_INDEXED_AT = "2026-06-01T00:00:00"
+
+
 def _insert_chunk(
     backend: SqliteBackend,
     *,
@@ -886,20 +891,36 @@ def _insert_chunk(
     access_count: int = 0,
     last_accessed_at: str | None = None,
     importance_score: float = 0.0,
+    updated_at: str | None = _FIXTURE_INDEXED_AT,
+    content: str | None = None,
+    content_hash: str | None = None,
+    heading_hierarchy: tuple[str, ...] | None = None,
+    start_line: int = 0,
+    end_line: int = 0,
 ) -> None:
-    """Insert one ``chunks`` row (read-only doctor never touches FTS)."""
+    """Insert one ``chunks`` row (read-only doctor never touches FTS).
+
+    ``content_hash`` / ``heading_hierarchy`` default to synthetic values, which
+    is fine for every check that only counts rows. The staleness checks diff
+    real hashes, so those tests pass the values a real index run would write
+    (see :func:`_insert_real_chunks`).
+    """
     db = backend._get_db()
     db.execute(
-        "INSERT INTO chunks (id, content, content_hash, source_file, "
-        "created_at, updated_at, access_count, last_accessed_at, importance_score) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO chunks (id, content, content_hash, source_file, heading_hierarchy, "
+        "start_line, end_line, created_at, updated_at, access_count, last_accessed_at, "
+        "importance_score) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             chunk_id,
-            f"content of {chunk_id}",
-            f"hash-{chunk_id}",
+            content if content is not None else f"content of {chunk_id}",
+            content_hash if content_hash is not None else f"hash-{chunk_id}",
             norm_path(source_file),
+            json.dumps(list(heading_hierarchy or ())),
+            start_line,
+            end_line,
             "2026-06-01T00:00:00",
-            "2026-06-01T00:00:00",
+            updated_at,
             access_count,
             last_accessed_at,
             importance_score,
@@ -1017,6 +1038,9 @@ async def test_analysis_detects_all_drift_classes(doctor_env):
     assert not any("example.com" in i for i in broken.items)
     assert by["index_orphan"].items == ["delta.md"]
     assert "budget" not in by  # small index file is under budget
+    # Baseline: every file is older than its chunks, so nothing is stale.
+    assert "stale_index" not in by
+    assert "stale_index_blocked" not in by
 
 
 @pytest.mark.asyncio
@@ -1522,6 +1546,627 @@ async def test_nested_roots_no_false_uncovered(tmp_path, monkeypatch):
 # ── CLI ─────────────────────────────────────────────────────────────
 
 
+# ── stale_index / stale_index_blocked (#2078) ───────────────────────
+
+
+def _doctor_engine(config):
+    """The same storage-less engine the doctor builds, for chunk parity."""
+    from memtomem.cli.memory_doctor_cmd import _build_discovery_engine
+
+    return _build_discovery_engine(config)
+
+
+def _insert_real_chunks(backend, config, path: Path, *, updated_at=_FIXTURE_INDEXED_AT) -> int:
+    """Index ``path`` the way a real run would, as far as the doctor can see.
+
+    Writes one row per chunk the indexer's own pipeline produces, carrying the
+    real ``content_hash``, ``heading_hierarchy`` and line range — the columns
+    the staleness check diffs. Synthetic values would make every file look
+    changed, which is exactly the false-PASS these tests exist to rule out.
+    """
+    chunks = _doctor_engine(config).chunk_content(path, path.read_text(encoding="utf-8"))
+    for i, c in enumerate(chunks):
+        _insert_chunk(
+            backend,
+            chunk_id=str(c.id),
+            source_file=path,
+            updated_at=updated_at,
+            content=c.content,
+            content_hash=c.content_hash,
+            heading_hierarchy=tuple(c.metadata.heading_hierarchy),
+            start_line=c.metadata.start_line,
+            end_line=c.metadata.end_line,
+        )
+    return len(chunks)
+
+
+@pytest.fixture
+def stale_env(tmp_path, monkeypatch):
+    """A one-file memory dir whose chunks are real and current.
+
+    Returns ``(config, mem_dir, note, reindex)`` where ``note`` is the indexed
+    file and ``reindex()`` re-reads it into the DB. The file is backdated, so
+    the baseline is clean and each test creates its own drift.
+    """
+    import asyncio
+
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-stale" / "memory"
+    mem_dir.mkdir(parents=True)
+    note = mem_dir / "note.md"
+    note.write_text("# note\n\noriginal body zqx1\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [Note](note.md) — n\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "stale.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    def reindex(updated_at=_FIXTURE_INDEXED_AT):
+        async def _go():
+            backend = SqliteBackend(
+                config.storage, dimension=0, embedding_provider="none", embedding_model=""
+            )
+            await backend.initialize()
+            try:
+                backend._get_db().execute("DELETE FROM chunks")
+                return _insert_real_chunks(backend, config, note, updated_at=updated_at)
+            finally:
+                await backend.close()
+
+        return asyncio.run(_go())
+
+    reindex()
+    return config, mem_dir, note, reindex
+
+
+def _stale_findings(config, mem_dir) -> dict:
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    # Drop the store-wide note reports ("(unowned)", "(database)").
+    dir_reports = [r for r in reports if not r.path.startswith("(")]
+    assert len(dir_reports) == 1
+    return _findings_by_check(dir_reports[0])
+
+
+def _set_mtime(path: Path, when: datetime) -> None:
+    os.utime(path, (when.timestamp(), when.timestamp()))
+
+
+class TestStaleIndex:
+    def test_baseline_is_clean(self, stale_env):
+        config, mem_dir, _note, _reindex = stale_env
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index" not in by
+        assert "stale_index_blocked" not in by
+
+    def test_appended_content_is_reported(self, stale_env):
+        config, mem_dir, note, _reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        by = _stale_findings(config, mem_dir)
+        finding = by["stale_index"]
+        assert finding.severity == "warn"
+        assert finding.items == ["note.md"]
+        # The remediation must name the command that actually clears it.
+        assert "run `mm index <file>`" in finding.summary
+        assert "stale_index_blocked" not in by
+
+    def test_reindexing_clears_the_finding(self, stale_env):
+        config, mem_dir, note, reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+        assert "stale_index" in _stale_findings(config, mem_dir)
+
+        # The finding clears because the chunks now match the file, which is
+        # the only thing the check looks at.
+        reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+    def test_touch_only_is_not_reported(self, stale_env):
+        """Half of why the verdict is a diff, not a timestamp (#2078).
+
+        A ``touch`` moves the mtime while the chunks stay correct, and a no-op
+        re-index writes nothing — so a mtime-based check would flag the file
+        forever and ``mm index`` could never clear it. A finding whose
+        remediation cannot work is worse than no finding.
+        """
+        config, mem_dir, note, _reindex = stale_env
+        _set_mtime(note, datetime(2026, 7, 1, tzinfo=timezone.utc))
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index" not in by
+        assert "stale_index_blocked" not in by
+
+    def test_identical_rewrite_is_not_reported(self, stale_env):
+        config, mem_dir, note, _reindex = stale_env
+        note.write_text(note.read_text(encoding="utf-8"), encoding="utf-8")
+        _set_mtime(note, datetime(2026, 7, 1, tzinfo=timezone.utc))
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+    def test_metadata_only_write_cannot_hide_drift(self, stale_env):
+        """The other half (#2078 review): ``updated_at`` is not a content mark.
+
+        A tag rename bumps ``updated_at`` on the chunk without touching indexed
+        content, so a mtime-vs-``MAX(updated_at)`` check would go quiet on a
+        genuinely stale file the moment any tag edit landed. Content is the
+        only honest signal, so this must still report.
+        """
+        import asyncio
+
+        config, mem_dir, note, _reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        async def _bump():
+            backend = SqliteBackend(
+                config.storage, dimension=0, embedding_provider="none", embedding_model=""
+            )
+            await backend.initialize()
+            try:
+                db = backend._get_db()
+                db.execute("UPDATE chunks SET updated_at = ?", ("2099-01-01T00:00:00+00:00",))
+                db.commit()
+            finally:
+                await backend.close()
+
+        asyncio.run(_bump())
+        # Chunks now claim to be newer than any possible file mtime.
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    def test_edit_immediately_after_indexing_is_reported(self, stale_env):
+        """No grace window: an edit seconds after a run is still drift.
+
+        An earlier revision skipped files whose mtime sat within a couple of
+        seconds of the index run, to absorb coarse filesystem timestamps. Since
+        the verdict is a content diff, that slack bought nothing and hid real
+        edits made right after indexing.
+        """
+        config, mem_dir, note, reindex = stale_env
+        reindex()
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended one second later zqx2\n")
+        _set_mtime(note, datetime(2026, 6, 1, 0, 0, 1, tzinfo=timezone.utc))
+
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    def test_backdated_edit_is_reported(self, stale_env):
+        """A change that keeps an older mtime (`cp -p`, `rsync -a`) is drift too."""
+        config, mem_dir, note, _reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+        _set_mtime(note, datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    def test_garbage_chunk_timestamps_change_nothing(self, stale_env):
+        """Timestamps are not an input: a corrupt one neither hides nor invents.
+
+        Legacy and corrupt ``updated_at`` text exists in the wild (the column
+        has carried two formats). Whatever it says, the verdict must come from
+        content — clean when the file matches, reported when it doesn't.
+        """
+        config, mem_dir, note, reindex = stale_env
+
+        reindex(updated_at="not-a-timestamp")
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    @pytest.mark.asyncio
+    async def test_reordered_sections_are_reported(self, tmp_path, monkeypatch):
+        """Same bytes, same hashes, different answer (review #2122).
+
+        Swapping two sections leaves every content hash intact, so the differ
+        calls them all unchanged — but a re-index rewrites their line ranges,
+        and retrieval reads those: `mem_search` with a context window orders a
+        source's chunks by ``start_line``, so an un-refreshed index hands back
+        the wrong neighbours. Position is part of what "indexed" means.
+        """
+        from helpers import isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+        mem_dir = tmp_path / "mem"
+        mem_dir.mkdir()
+        note = mem_dir / "note.md"
+        section_a = "## alpha\n\n" + ("alpha body sentence here. " * 150) + "\n"
+        section_b = "## beta\n\n" + ("beta body sentence here. " * 150) + "\n"
+        note.write_text(f"# title\n\n{section_a}\n{section_b}", encoding="utf-8")
+
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "reorder.db"
+        config.indexing.memory_dirs = [mem_dir]
+
+        backend = SqliteBackend(
+            config.storage, dimension=0, embedding_provider="none", embedding_model=""
+        )
+        await backend.initialize()
+        try:
+            assert _insert_real_chunks(backend, config, note) > 1
+        finally:
+            await backend.close()
+
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+        note.write_text(f"# title\n\n{section_b}\n{section_a}", encoding="utf-8")
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    def test_concurrent_reindex_does_not_produce_a_finding(self, stale_env, monkeypatch):
+        """A background re-index landing mid-run must not be reported (review #2122).
+
+        The per-dir chunk state is snapshotted before files are read, and the
+        fs watcher indexes while the doctor runs. Simulate the race: the
+        snapshot is stale, the live DB is already current. Reporting drift that
+        a running server has fixed is the one false positive a report-only tool
+        cannot explain away.
+        """
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir, note, reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        real_read = mod._read_chunk_states
+
+        def _snapshot_then_reindex(db_path, dir_key):
+            snapshot = real_read(db_path, dir_key)  # pre-edit state
+            reindex()  # the watcher catches up before we look at the file
+            return snapshot
+
+        monkeypatch.setattr(mod, "_read_chunk_states", _snapshot_then_reindex)
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index" not in by
+        assert "stale_index_blocked" not in by
+
+    def test_failed_recheck_keeps_the_confirmed_finding(self, stale_env, monkeypatch):
+        """A blip on the second look is not evidence of freshness (review #2122).
+
+        The re-confirm exists to drop findings a concurrent re-index already
+        fixed. It must not also drop findings because the re-read itself failed
+        — that turns a transient lock into a silent false negative.
+        """
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir, note, _reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        monkeypatch.setattr(mod, "_read_source_state", lambda *a, **kw: None)
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    def test_concurrently_emptied_source_defers_to_coverage(self, stale_env, monkeypatch):
+        """Losing every chunk mid-run is an uncovered file, not a stale one."""
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir, note, _reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        monkeypatch.setattr(mod, "_read_source_state", lambda *a, **kw: {})
+        reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+        report = next(r for r in reports if not r.path.startswith("("))
+        by = _findings_by_check(report)
+        assert "stale_index" not in by
+        # ...and the run must not go silent: the file is now uncovered, and
+        # the coverage count has to agree with the finding it just emitted.
+        assert by["db_coverage"].items == ["note.md"]
+        assert report.db_covered == 0
+
+    @pytest.mark.asyncio
+    async def test_items_name_the_file_its_remediation_needs(self, tmp_path, monkeypatch):
+        """Two same-named files under one root must be told apart."""
+        from helpers import isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+        mem_dir = tmp_path / "mem"
+        (mem_dir / "a").mkdir(parents=True)
+        (mem_dir / "b").mkdir(parents=True)
+        first, second = mem_dir / "a" / "note.md", mem_dir / "b" / "note.md"
+        for f in (first, second):
+            f.write_text("# note\n\noriginal body zqx1\n", encoding="utf-8")
+
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "names.db"
+        config.indexing.memory_dirs = [mem_dir]
+
+        backend = SqliteBackend(
+            config.storage, dimension=0, embedding_provider="none", embedding_model=""
+        )
+        await backend.initialize()
+        try:
+            for f in (first, second):
+                _insert_real_chunks(backend, config, f)
+        finally:
+            await backend.close()
+
+        with second.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        items = _stale_findings(config, mem_dir)["stale_index"].items
+        assert items == [str(Path("b") / "note.md")]
+
+    def test_malformed_line_range_degrades_instead_of_crashing(self, stale_env):
+        """Junk in a numeric column is a read failure, not a finding."""
+        import asyncio
+
+        config, mem_dir, note, _reindex = stale_env
+
+        async def _corrupt():
+            backend = SqliteBackend(
+                config.storage, dimension=0, embedding_provider="none", embedding_model=""
+            )
+            await backend.initialize()
+            try:
+                db = backend._get_db()
+                db.execute("UPDATE chunks SET start_line = ?", ("not-a-number",))
+                db.commit()
+            finally:
+                await backend.close()
+
+        asyncio.run(_corrupt())
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        by = _stale_findings(config, mem_dir)  # must not raise
+        assert "stale_index" not in by
+
+    def test_emptied_file_is_reported(self, stale_env):
+        """Chunks with nothing left to match are drift too (a pure to_delete)."""
+        config, mem_dir, note, _reindex = stale_env
+        note.write_text("", encoding="utf-8")
+        _set_mtime(note, datetime(2026, 7, 1, tzinfo=timezone.utc))
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    def test_binary_and_oversized_files_are_skipped(self, stale_env, monkeypatch):
+        """A file the indexer would decline is one the doctor declines too."""
+        import memtomem.indexing.engine as engine_mod
+
+        config, mem_dir, note, _reindex = stale_env
+        note.write_bytes(b"# note\n\n\x00\x00 binary now\n")
+        _set_mtime(note, datetime(2026, 7, 1, tzinfo=timezone.utc))
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+        note.write_text("# note\n\nplain but huge zqx2\n", encoding="utf-8")
+        _set_mtime(note, datetime(2026, 7, 1, tzinfo=timezone.utc))
+        monkeypatch.setattr(engine_mod, "_MAX_INDEX_FILE_BYTES", 4)
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+    def test_cli_reports_stale_index_without_failing_the_exit(self, stale_env, monkeypatch):
+        """Warn-severity: visible in both surfaces, but CI stays green."""
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir, note, _reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor"])
+        assert result.exit_code == 0
+        assert "note.md" in result.output
+        assert "mm index <file>" in result.output
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["status"] == "issues"
+        finding = next(
+            f for d in payload["dirs"] for f in d["findings"] if f["check"] == "stale_index"
+        )
+        assert finding == {
+            "check": "stale_index",
+            "severity": "warn",
+            "count": 1,
+            "summary": finding["summary"],
+            "items": ["note.md"],
+        }
+
+    def test_unreadable_db_yields_no_staleness_findings(self, stale_env):
+        """Degrade like every other DB-backed check rather than crashing."""
+        config, mem_dir, note, _reindex = stale_env
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+        Path(config.storage.sqlite_path).write_bytes(b"not a database")
+
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index" not in by
+        assert "stale_index_blocked" not in by
+
+
+class TestStaleIndexBlocked:
+    SECRET_LINE = "api_key = " + "z" * 24
+
+    def _make_blocked(self, note: Path) -> None:
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n{self.SECRET_LINE}\n")
+
+    def test_redaction_hit_routes_to_its_own_check(self, stale_env):
+        """`mm index` skips these, so they must not be told to run it."""
+        config, mem_dir, note, _reindex = stale_env
+        self._make_blocked(note)
+
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index" not in by
+        blocked = by["stale_index_blocked"]
+        assert blocked.severity == "warn"
+        assert blocked.items == ["note.md"]
+        assert "skips them" in blocked.summary
+        # Both real ways out are named: `mm index` alone is not one of them,
+        # but the audited bypass is (and is refused for project_shared).
+        assert "--force-unsafe" in blocked.summary
+        assert "project_shared" in blocked.summary
+
+    def test_matched_text_never_reaches_the_report(self, stale_env):
+        """#2076's discipline: counts, never the matched bytes."""
+        config, mem_dir, note, _reindex = stale_env
+        self._make_blocked(note)
+
+        blocked = _stale_findings(config, mem_dir)["stale_index_blocked"]
+        rendered = blocked.summary + " " + " ".join(blocked.items) + json.dumps(blocked.to_json())
+        assert "z" * 24 not in rendered
+        assert self.SECRET_LINE not in rendered
+
+    @pytest.mark.asyncio
+    async def test_matched_bytes_never_reach_the_logs(self, tmp_path, monkeypatch, caplog):
+        """A chunker must never see un-adjudicated bytes it can echo (review #2122).
+
+        The indexer gets this for free — it refuses a blocked file before
+        chunking. The doctor has to chunk to diff, and the structured chunker
+        logs parse failures with ``exc_info=True``; PyYAML quotes the offending
+        source line, so a secret on a malformed line lands in the DEBUG log.
+        Reproduced before the fix: 1 leaking record.
+        """
+        import logging
+
+        from helpers import isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+        mem_dir = tmp_path / "mem"
+        mem_dir.mkdir()
+        note = mem_dir / "conf.yaml"
+        secret = "sk_live_" + "q" * 25
+        note.write_text("ok: 1\n", encoding="utf-8")
+
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "leak.db"
+        config.indexing.memory_dirs = [mem_dir]
+
+        backend = SqliteBackend(
+            config.storage, dimension=0, embedding_provider="none", embedding_model=""
+        )
+        await backend.initialize()
+        try:
+            _insert_real_chunks(backend, config, note)
+        finally:
+            await backend.close()
+
+        # Drift + a redaction hit sitting on the line YAML will choke on.
+        note.write_text(f"ok: 1\nbroken: api_key: {secret}\n", encoding="utf-8")
+
+        with caplog.at_level(logging.DEBUG):
+            by = _stale_findings(config, mem_dir)
+
+        assert by["stale_index_blocked"].items == ["conf.yaml"]
+        assert secret not in caplog.text
+        assert "sk_live_" not in caplog.text
+
+    def test_blocked_file_that_did_not_change_is_not_reported(self, stale_env):
+        """Only *drift* is a finding — a blocked file matching its chunks isn't."""
+        config, mem_dir, note, reindex = stale_env
+        self._make_blocked(note)
+        reindex()  # chunks now match the blocked content
+        _set_mtime(note, datetime(2026, 7, 1, tzinfo=timezone.utc))
+
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index_blocked" not in by
+        assert "stale_index" not in by
+
+
+class TestStaleIndexScoping:
+    """The per-dir chunk-state query must select this dir's rows and no others."""
+
+    @pytest.mark.asyncio
+    async def test_nested_roots_attribute_drift_to_the_owning_dir(self, tmp_path, monkeypatch):
+        """A nested memory dir owns its own subtree, for staleness as for coverage.
+
+        Both roots hold a real, current index; only the child's file drifts.
+        An over-broad prefix (or one normalized differently from the persisted
+        ``source_file``) shows up here as the parent reporting the child's
+        file, or as neither report seeing it at all.
+        """
+        from helpers import isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+        parent = tmp_path / "root"
+        child = parent / "nested"
+        sibling = tmp_path / "root-adjacent"  # shares the parent's prefix sans separator
+        for d in (parent, child, sibling):
+            d.mkdir(parents=True, exist_ok=True)
+        p_note = parent / "p.md"
+        c_note = child / "c.md"
+        s_note = sibling / "s.md"
+        for f in (p_note, c_note, s_note):
+            f.write_text(f"# {f.stem}\n\noriginal body zqx1\n", encoding="utf-8")
+
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "nested.db"
+        config.indexing.memory_dirs = [parent, child, sibling]
+
+        backend = SqliteBackend(
+            config.storage, dimension=0, embedding_provider="none", embedding_model=""
+        )
+        await backend.initialize()
+        try:
+            for f in (p_note, c_note, s_note):
+                _insert_real_chunks(backend, config, f)
+        finally:
+            await backend.close()
+
+        # Only the child's file drifts.
+        with c_note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx2\n")
+
+        reports = {
+            r.path: _findings_by_check(r)
+            for r in _gather_reports(config=config, inspect_dirs=[parent, child, sibling])
+            if not r.path.startswith("(")
+        }
+        assert reports[str(child.resolve())]["stale_index"].items == ["c.md"]
+        assert "stale_index" not in reports[str(parent.resolve())]
+        assert "stale_index" not in reports[str(sibling.resolve())]
+
+
+class TestChunkContentParity:
+    """``IndexEngine.chunk_content`` is the doctor's whole basis for a verdict."""
+
+    @pytest.mark.asyncio
+    async def test_doctor_chunks_match_what_indexing_persists(self, tmp_path, monkeypatch):
+        from helpers import isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+        mem_dir = tmp_path / ".claude" / "projects" / "-parity" / "memory"
+        mem_dir.mkdir(parents=True)
+        note = mem_dir / "note.md"
+        note.write_text(
+            "# title\n\nintro paragraph with enough words to stand alone as prose.\n\n"
+            "## section one\n\n" + ("body sentence for section one. " * 40) + "\n\n"
+            "## section two\n\n" + ("body sentence for section two. " * 40) + "\n",
+            encoding="utf-8",
+        )
+
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "parity.db"
+        config.indexing.memory_dirs = [mem_dir]
+
+        from memtomem.embedding.noop import NoopEmbedder
+        from memtomem.indexing.engine import IndexEngine
+
+        backend = SqliteBackend(
+            config.storage, dimension=0, embedding_provider="none", embedding_model=""
+        )
+        await backend.initialize()
+        try:
+            real = IndexEngine(
+                storage=backend,
+                embedder=NoopEmbedder(),
+                config=config.indexing,
+                namespace_config=config.namespace,
+            )
+            await real.index_file(note)
+            persisted = await backend.get_chunk_index_state(note)
+        finally:
+            await backend.close()
+
+        doctor = _doctor_engine(config).chunk_content(note, note.read_text(encoding="utf-8"))
+        assert len(doctor) > 1, "fixture should produce several chunks"
+        assert {c.content_hash for c in doctor} == {h for h, _ in persisted.values()}
+        assert {tuple(c.metadata.heading_hierarchy) for c in doctor} == {
+            h for _, h in persisted.values()
+        }
+
+
 class TestCli:
     def _patch_loader(self, monkeypatch, config):
         import memtomem.cli.memory_doctor_cmd as mod
@@ -1730,6 +2375,30 @@ def _source_check_severities() -> dict[str, str]:
     return found
 
 
+def _summary_tail(check: str) -> str:
+    """Constant parts of ``check``'s summary f-string, straight from the AST."""
+    import ast
+
+    import memtomem.cli.memory_doctor_cmd as mod
+
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "Finding":
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        check_node = kw.get("check")
+        if not (isinstance(check_node, ast.Constant) and check_node.value == check):
+            continue
+        summary = kw.get("summary")
+        assert isinstance(summary, ast.JoinedStr), (
+            f"{check} summary is no longer a single f-string — update _summary_tail"
+        )
+        return "".join(p.value for p in summary.values if isinstance(p, ast.Constant))
+    raise AssertionError(f"no {check} Finding(...) call site found")
+
+
 def _stale_source_summary_tail() -> str:
     """Extract the constant suffix of the ``stale_source`` summary from the AST.
 
@@ -1795,6 +2464,42 @@ class TestDocsParity:
         # The remediation table row leads with the same command.
         row = next(line for line in ref.splitlines() if line.startswith("| `stale_source` |"))
         assert "`mm gc orphan-sources --apply`" in row
+
+    def test_stale_index_remediation_pinned_across_doc_surfaces(self):
+        """#2078: the two staleness checks must not drift from their guide rows.
+
+        ``stale_index`` is only useful if it names the command that clears it,
+        and ``stale_index_blocked`` is only honest if it says that command
+        *won't* — the whole reason the two are separate checks.
+        """
+        ref = (
+            Path(__file__).resolve().parents[3]
+            / "docs"
+            / "guides"
+            / "reference"
+            / "organization-maintenance.md"
+        ).read_text(encoding="utf-8")
+
+        assert "run `mm index <file>`" in _summary_tail("stale_index")
+        row = next(line for line in ref.splitlines() if line.startswith("| `stale_index` |"))
+        assert "`mm index <file>`" in row
+        # The guide must say the touch case is excluded — that exclusion is
+        # what makes the remediation work, not a footnote.
+        assert "touch" in row
+
+        blocked_tail = _summary_tail("stale_index_blocked")
+        assert "skips them" in blocked_tail
+        assert "`mm index <file>`" not in blocked_tail
+        blocked_row = next(
+            line for line in ref.splitlines() if line.startswith("| `stale_index_blocked` |")
+        )
+        assert "skips" in blocked_row
+
+    def test_staleness_checks_are_advisory(self):
+        """A partially-stale store is a legitimate steady state; never exit 1."""
+        source = _source_check_severities()
+        assert source["stale_index"] == "warn"
+        assert source["stale_index_blocked"] == "warn"
 
     def test_budget_caps_match_documented_numbers(self):
         import memtomem.cli.memory_doctor_cmd as mod
