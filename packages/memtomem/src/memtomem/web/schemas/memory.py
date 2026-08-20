@@ -158,6 +158,11 @@ class IndexResponse(BaseModel):
     namespaces_preserved_against_rules: int = 0
     namespaces_reassigned: int = 0
     namespace_moves: list[dict[str, object]] = []
+    # #2115: chunks the run skipped as unchanged that have no dense vector —
+    # the state a plain re-index leaves after an embedding reset, where every
+    # surviving content hash matches and nothing is re-embedded. Stays zero on
+    # the common path and on BM25-only stores.
+    chunks_missing_vectors: int = 0
 
 
 class PreviewNamespaceResponse(BaseModel):

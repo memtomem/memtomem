@@ -285,3 +285,10 @@ class IndexingStats:
     namespaces_preserved_against_rules: int = 0
     namespaces_reassigned: int = 0
     namespace_moves: tuple[dict[str, object], ...] = ()
+    # Chunks this run skipped as unchanged that have no dense vector — the
+    # state ``mm embedding-reset --mode apply-current`` leaves behind, where a
+    # plain re-index matches every surviving content hash, reports success, and
+    # restores nothing (#2115). Zero when the configured embedder produces no
+    # vectors at all (``provider="none"``), which is an opt-in, not a gap.
+    # Appended last for positional construction compatibility.
+    chunks_missing_vectors: int = 0

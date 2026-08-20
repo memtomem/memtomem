@@ -161,6 +161,10 @@ async def run_with_progress(
         "namespaces_preserved_against_rules": 0,
         "namespaces_reassigned": 0,
         "namespace_moves": [],
+        # #2115: chunks the run skipped as unchanged that carry no vector.
+        # Summed across streams like the counters above — a multi-root run
+        # reports one total, matching the single ``--force`` that repairs it.
+        "chunks_missing_vectors": 0,
         # Captured from the bootstrapped config below. The engine deliberately
         # does not know about ``search.system_namespace_prefixes`` — it has no
         # search config, and threading one in would touch every construction
@@ -308,6 +312,7 @@ async def run_with_progress(
                         )
                         agg["namespaces_reassigned"] += evt.get("namespaces_reassigned", 0)
                         agg["namespace_moves"].extend(evt.get("namespace_moves") or [])
+                        agg["chunks_missing_vectors"] += evt.get("chunks_missing_vectors", 0)
     finally:
         _close_bar()
 
@@ -346,6 +351,32 @@ def print_blocked_summary(
             "user/project_local or remove the secret.",
             fg="yellow",
         )
+
+
+def print_missing_vector_advisory(*, chunks_missing_vectors: int, force_hint: str) -> None:
+    """Report chunks the run skipped that have no dense vector (#2115).
+
+    ``mm embedding-reset --mode apply-current`` drops the vectors but leaves
+    the chunk rows and their content hashes, so the next plain ``mm index``
+    matches every one of them, reports them ``unchanged``, and writes nothing.
+    The run looks like a success and the store answers on BM25 alone.
+
+    Says what is true of the store, not what the user should have typed: the
+    same state arises from an interrupted run or an embedder that failed
+    mid-corpus. The remedy is the same either way.
+
+    No-op when the run left no such chunks — including every run under
+    ``provider="none"``, where having no vectors is the configuration, not a
+    gap.
+    """
+    if not chunks_missing_vectors:
+        return
+    click.secho(
+        f"  {chunks_missing_vectors} unchanged chunk(s) have no embedding; "
+        "dense search will not find them.",
+        fg="yellow",
+    )
+    click.secho(f"  → To re-embed: {force_hint}", fg="yellow")
 
 
 def print_namespace_advisory(

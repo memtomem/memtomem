@@ -10,7 +10,7 @@ import logging
 import os
 import stat as stat_module
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -566,6 +566,14 @@ class IndexFileResult(_IndexFileBase, total=False):
     # bypassable with force_unsafe) — aggregated into
     # ``IndexingStats.blocked_project_shared_files``.
     blocked_project_shared: int
+    # Ids of the chunks this file left untouched because their content hash
+    # already matched — the ``DiffResult.unchanged`` set, and the only chunks
+    # a run can leave without a vector while reporting success (#2115).
+    # Deliberately NOT derivable from ``skipped``: an embedding failure also
+    # reports every chunk of the file as skipped, and those chunks were never
+    # written at all. Collected only when the embedder is supposed to produce
+    # vectors, so a BM25-only store carries no id lists.
+    unchanged_chunk_ids: list[str]
 
 
 class IndexEngine:
@@ -663,6 +671,34 @@ class IndexEngine:
                 )
         finally:
             self._active_runs -= 1
+
+    async def _count_missing_vectors(self, chunk_ids: Sequence[str]) -> int:
+        """Count how many hash-matched chunks this run left without a vector.
+
+        Takes the ids the files reported rather than deriving a scope from
+        counters: ``skipped`` also covers files whose embedding failed, whose
+        chunks were never written and so cannot be missing anything. One
+        batched query per run, only on runs that actually skipped something
+        under a vector-producing embedder — a clean run pays nothing.
+
+        Failure is not a gap: if the count cannot be taken, report 0 rather
+        than telling the operator to re-embed on a guess.
+        """
+        if not chunk_ids:
+            return 0
+        try:
+            return await self._storage.count_chunks_missing_vectors(chunk_ids)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("missing-vector count unavailable: %s", exc)
+            return 0
+
+    @staticmethod
+    def _unchanged_ids(file_results: Iterable[IndexFileResult]) -> list[str]:
+        """Flatten the per-file hash-matched chunk ids of a run."""
+        ids: list[str] = []
+        for result in file_results:
+            ids.extend(result.get("unchanged_chunk_ids", ()))
+        return ids
 
     async def _index_path_inner(
         self,
@@ -788,6 +824,7 @@ class IndexEngine:
                 all_new_chunk_ids.extend(ids)
 
         duration = (time.monotonic() - start) * 1000
+        missing_vectors = await self._count_missing_vectors(self._unchanged_ids(file_results))
         return IndexingStats(
             total_files=len(files),
             total_chunks=sum(r["total"] for r in file_results),
@@ -806,6 +843,7 @@ class IndexEngine:
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
+            chunks_missing_vectors=missing_vectors,
         )
 
     async def resolve_namespaces_for(
@@ -1097,6 +1135,7 @@ class IndexEngine:
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
+            chunks_missing_vectors=await self._count_missing_vectors(self._unchanged_ids([result])),
         )
 
     async def is_duplicate(
@@ -1712,6 +1751,17 @@ class IndexEngine:
                 unchanged=[],
             )
 
+        # Captured here, not at the success return: a file can hold both an
+        # unchanged vector-less chunk and a new one whose embedding fails, and
+        # the failure path returns early. Those unchanged chunks are still in
+        # the store without vectors, so a run that reports the failure must
+        # report them too. Ids of the *failed* chunks are deliberately absent —
+        # they were never written, so counting them would demand a re-embed
+        # that cannot help.
+        unchanged_ids = (
+            [str(c.id) for c in diff_result.unchanged] if self._embedder.dimension > 0 else []
+        )
+
         # Embed BEFORE any deletion — if embedding fails, DB stays untouched.
         # Refuse to silently produce BM25-only chunks when the configured
         # embedder reports dimension=0. NoopEmbedder ("none" provider) is
@@ -1740,6 +1790,7 @@ class IndexEngine:
                     "errors": [msg],
                     "namespace_decision": ns_decision,
                     "namespace_written": False,
+                    "unchanged_chunk_ids": unchanged_ids,
                 }
         if diff_result.to_upsert and self._embedder.dimension > 0:
             texts = [c.retrieval_content for c in diff_result.to_upsert]
@@ -1818,6 +1869,7 @@ class IndexEngine:
                     # would under-report the advisory on a partial run.
                     "namespace_decision": ns_decision,
                     "namespace_written": False,
+                    "unchanged_chunk_ids": unchanged_ids,
                 }
 
         # Now safe to mutate DB — embedding succeeded.
@@ -1845,6 +1897,8 @@ class IndexEngine:
             "namespace_decision": ns_decision,
             "namespace_written": bool(diff_result.to_upsert),
         }
+        if unchanged_ids:
+            result["unchanged_chunk_ids"] = unchanged_ids
         if diff_result.to_upsert:
             result["resolved_namespace"] = resolved_ns
 
@@ -1954,6 +2008,7 @@ class IndexEngine:
                     "namespaces_preserved_against_rules": 0,
                     "namespaces_reassigned": 0,
                     "namespace_moves": [],
+                    "chunks_missing_vectors": 0,
                 }
                 return
 
@@ -1980,6 +2035,7 @@ class IndexEngine:
                     "namespaces_preserved_against_rules": 0,
                     "namespaces_reassigned": 0,
                     "namespace_moves": [],
+                    "chunks_missing_vectors": 0,
                 }
                 return
 
@@ -2006,6 +2062,11 @@ class IndexEngine:
             )
             echo_namespaces = list(prepass_namespaces)
             tally = _NamespaceTally()
+            # Ids of chunks left untouched by a hash match, for the one
+            # post-run missing-vector count (#2115). Carried as ids rather
+            # than a counter because ``skipped`` also covers files whose
+            # embedding failed, which wrote nothing at all.
+            unchanged_ids: list[str] = []
             agg = {
                 "total_chunks": 0,
                 "indexed": 0,
@@ -2130,6 +2191,7 @@ class IndexEngine:
                 agg["deleted"] += result["deleted"]
                 agg["blocked"] += result.get("blocked", 0)
                 agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
+                unchanged_ids.extend(result.get("unchanged_chunk_ids", ()))
                 all_errors.extend(result.get("errors", []))
                 retryable_errors.extend(result.get("retryable_errors", []))
                 stream_decision = result.get("namespace_decision")
@@ -2172,6 +2234,7 @@ class IndexEngine:
                 "namespaces_preserved_against_rules": tally.preserved_against_rules,
                 "namespaces_reassigned": tally.reassigned,
                 "namespace_moves": list(tally.summary()),
+                "chunks_missing_vectors": await self._count_missing_vectors(unchanged_ids),
             }
         finally:
             self._active_runs -= 1

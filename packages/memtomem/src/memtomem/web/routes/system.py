@@ -863,6 +863,13 @@ async def add_memory_dir(
                 "blocked_files": stats.blocked_files,
                 "blocked_paths": list(stats.blocked_paths),
                 "blocked_project_shared_files": stats.blocked_project_shared_files,
+                "chunks_missing_vectors": stats.chunks_missing_vectors,
+                # The advisory fields travel with every other index result;
+                # this hand-built payload omitted them, so the shared reporter
+                # had nothing to report here even once it was called.
+                "namespaces_preserved_against_rules": (stats.namespaces_preserved_against_rules),
+                "namespaces_reassigned": stats.namespaces_reassigned,
+                "namespace_moves": list(stats.namespace_moves),
             }
             has_issues = bool(stats.errors or stats.blocked_files)
             has_processed_chunks = (stats.indexed_chunks + stats.skipped_chunks) > 0
@@ -1189,6 +1196,7 @@ async def reindex_all(
             # unconditional for the same reason as ``retryable_errors`` — a
             # zero must be distinguishable from a server that predates it.
             "namespaces_preserved_against_rules": stats.namespaces_preserved_against_rules,
+            "chunks_missing_vectors": stats.chunks_missing_vectors,
             "namespaces_reassigned": stats.namespaces_reassigned,
             "namespace_moves": list(stats.namespace_moves),
         }
@@ -1657,6 +1665,7 @@ async def trigger_index(
         blocked_paths=list(stats.blocked_paths),
         blocked_project_shared_files=stats.blocked_project_shared_files,
         namespaces_preserved_against_rules=stats.namespaces_preserved_against_rules,
+        chunks_missing_vectors=stats.chunks_missing_vectors,
         namespaces_reassigned=stats.namespaces_reassigned,
         namespace_moves=list(stats.namespace_moves),
     )

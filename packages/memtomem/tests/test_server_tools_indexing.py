@@ -135,3 +135,52 @@ class TestMemIndexNamespaceAdvisory:
         output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
 
         assert "Namespaces preserved" not in output
+
+
+class TestMemIndexMissingVectorAdvisory:
+    """#2115: same hand-rendered surface, same rule — a field that is not
+    rendered here never reaches an MCP caller."""
+
+    async def test_missing_vectors_are_reported_with_the_cli_remedy(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=1,
+                total_chunks=6,
+                indexed_chunks=0,
+                skipped_chunks=6,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                chunks_missing_vectors=6,
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "- No embedding: 6 unchanged chunk(s) have no vector" in output
+        # The remedy names the CLI on purpose: with an agent or current
+        # namespace active, mem_index(force=true) passes it explicitly and
+        # restamps what it re-embeds (ADR-0033, #2104).
+        assert "mm index --force" in output
+        assert "mem_index(force=true)" not in output
+
+    async def test_quiet_when_every_skipped_chunk_has_a_vector(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=1,
+                total_chunks=9,
+                indexed_chunks=0,
+                skipped_chunks=9,
+                deleted_chunks=0,
+                duration_ms=1.0,
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "No embedding" not in output

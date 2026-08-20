@@ -193,6 +193,7 @@ async def _index(
     from memtomem.cli._index_progress import (
         print_blocked_summary,
         print_index_errors,
+        print_missing_vector_advisory,
         print_namespace_advisory,
         run_with_progress,
     )
@@ -254,6 +255,10 @@ async def _index(
         moves=agg["namespace_moves"],
         reassign_hint=f"mm index --reassign-namespaces {resolved}",
         system_namespace_prefixes=agg["system_namespace_prefixes"],
+    )
+    print_missing_vector_advisory(
+        chunks_missing_vectors=agg["chunks_missing_vectors"],
+        force_hint=f"mm index --force {resolved}",
     )
     print_index_errors(
         agg["errors"],

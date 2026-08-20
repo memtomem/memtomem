@@ -337,6 +337,7 @@
   "index.result.blocked": "Blocked (secrets)",
   "index.result.namespace_advisory": "Namespaces",
   "index.result.namespace_preserved": "{count} file(s) kept their stored namespace; current rules would assign differently. Run mm index --reassign-namespaces to apply the rules.",
+  "index.result.missing_vectors": "{count} unchanged chunk(s) have no embedding; dense search will not find them. Run mm index --force to re-embed.",
   "index.result.namespace_reassigned": "{count} file(s) reassigned:",
   "index.ns_suffix.auto": "auto-determined from path",
   "index.ns_suffix.config": "from config",

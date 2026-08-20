@@ -355,7 +355,7 @@ function _buildMemoryDirsPanel(initialDirs) {
       const errors = Array.isArray(resp && resp.errors) ? resp.errors : [];
       // #2061: a re-index preserves each file's stored namespace, so a
       // namespace rule that has not taken effect is invisible without this.
-      if (typeof namespaceAdvisoryToast === 'function') namespaceAdvisoryToast(resp);
+      if (typeof indexAdvisoryToast === 'function') indexAdvisoryToast(resp);
       if (errors.length) {
         const presentation = indexingErrorToast(
           t('toast.memory_dir.reindex_partial', {
@@ -413,8 +413,8 @@ function _buildMemoryDirsPanel(initialDirs) {
       }
       // #2061: outside the branches above — a partial run can preserve
       // namespaces on the roots that succeeded while another root errors.
-      if (typeof namespaceAdvisoryToastForRoots === 'function') {
-        namespaceAdvisoryToastForRoots(resp.results);
+      if (typeof indexAdvisoryToastForRoots === 'function') {
+        indexAdvisoryToastForRoots(resp.results);
       }
       if (typeof _markDataStale === 'function') _markDataStale();
       if (typeof loadStats === 'function') loadStats();
@@ -1017,6 +1017,12 @@ function _memoryDirRetryOptions(classification, path) {
 function _showMemoryDirAddOutcome(resp, path) {
   const stats = resp && resp.indexed;
   const status = resp && resp.index_status;
+  // Auto-index on add is a real index run, so it can leave the same
+  // advisories any other run can. Reported before the status branches below
+  // because every one of them returns — a per-branch call would be dropped by
+  // whichever branch someone forgets (#2061 wired three of seven consumers;
+  // this one was missed again for #2115).
+  if (stats && typeof indexAdvisoryToast === 'function') indexAdvisoryToast(stats);
   if (status === 'failed') {
     const presentation = indexingErrorToast(
       t('toast.memory_dir.added_index_failed', { path }),
@@ -1242,7 +1248,7 @@ async function mdReindexOne(path, btn) {
       }
       // #2061: a re-index preserves each file's stored namespace, so a rule
       // that has not taken effect would otherwise be reported as a clean run.
-      if (typeof namespaceAdvisoryToast === 'function') namespaceAdvisoryToast(event);
+      if (typeof indexAdvisoryToast === 'function') indexAdvisoryToast(event);
       // ADR-0006 PR-B: surface files skipped by the redaction gate (no toggle
       // on per-dir reindex — surfacing only).
       if (typeof _blockedIndexToast === 'function') {
@@ -1290,8 +1296,8 @@ async function mdReindexAll(btn) {
     }
     // #2061: same placement rationale as the redaction summary below — a
     // partial run still has an advisory worth showing.
-    if (typeof namespaceAdvisoryToastForRoots === 'function') {
-      namespaceAdvisoryToastForRoots(resp.results);
+    if (typeof indexAdvisoryToastForRoots === 'function') {
+      indexAdvisoryToastForRoots(resp.results);
     }
     // ADR-0006 PR-B: surface files skipped by the redaction gate across all
     // dirs (aggregate ``blocked_files`` on the /api/reindex response).

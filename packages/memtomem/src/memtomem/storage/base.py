@@ -157,6 +157,12 @@ class StorageBackend(Protocol):
 
     # Metadata
     async def get_chunk_hashes(self, source_file: Path) -> dict[str, str]: ...
+    # Count how many of these chunk ids have no dense vector. Declared on the
+    # protocol rather than probed with ``hasattr``: an index run relies on it
+    # to report the chunks it left unretrievable, and a backend that silently
+    # lacked it would report "no gap" for every run.
+    async def count_chunks_missing_vectors(self, chunk_ids: Sequence[str]) -> int: ...
+
     async def get_chunk_index_state(
         self, source_file: Path
     ) -> dict[str, tuple[str, tuple[str, ...]]]: ...

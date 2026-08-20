@@ -1587,7 +1587,7 @@ function _showReindexWarning(applied) {
         // Outside the branches above on purpose — a partial run can preserve
         // namespaces on the roots that succeeded while another root errors,
         // and the advisory must not vanish because of the unrelated failure.
-        namespaceAdvisoryToastForRoots(res.results);
+        indexAdvisoryToastForRoots(res.results);
         _markDataStale();
         loadStats();
       } catch (err) {

@@ -4638,3 +4638,161 @@ class TestResolveOwningMemoryDir:
         f.write_text("#")
         owner = resolve_owning_memory_dir(f, ["~/memories"])
         assert owner == (tmp_path / "memories")
+
+
+class TestMissingVectorReporting:
+    """#2115: a run must report the chunks it skipped that carry no vector.
+
+    The production shape is ``mm embedding-reset --mode apply-current``: it
+    drops ``chunks_vec`` while the chunk rows and their content hashes
+    survive, so the next plain ``mm index`` matches every one of them, reports
+    them ``unchanged``, and restores nothing.
+    """
+
+    @staticmethod
+    def _embedder(dimension: int = 1024) -> AsyncMock:
+        embedder = AsyncMock()
+        embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * dimension for _ in texts]
+        )
+        embedder.dimension = dimension
+        embedder.model_name = "stub"
+        return embedder
+
+    async def test_a_clean_run_reports_no_gap(self, components, memory_dir):
+        (memory_dir / "clean.md").write_text("# Clean\n\nBody.\n", encoding="utf-8")
+        components.index_engine._embedder = self._embedder()
+
+        stats = await components.index_engine.index_path(memory_dir)
+
+        assert stats.indexed_chunks > 0
+        assert stats.chunks_missing_vectors == 0
+
+    async def test_a_plain_reindex_after_a_reset_reports_every_skipped_chunk(
+        self, components, memory_dir
+    ):
+        (memory_dir / "reset.md").write_text("# Reset\n\nBody.\n", encoding="utf-8")
+        components.index_engine._embedder = self._embedder()
+        first = await components.index_engine.index_path(memory_dir)
+        assert first.indexed_chunks > 0
+
+        await components.storage.reset_embedding_meta(
+            dimension=1024, provider="onnx", model="bge-m3"
+        )
+
+        second = await components.index_engine.index_path(memory_dir)
+
+        # The run looks like a success — that is the whole problem.
+        assert second.indexed_chunks == 0
+        assert second.skipped_chunks == first.indexed_chunks
+        assert second.chunks_missing_vectors == second.skipped_chunks
+
+    async def test_a_forced_reindex_closes_the_gap(self, components, memory_dir):
+        (memory_dir / "forced.md").write_text("# Forced\n\nBody.\n", encoding="utf-8")
+        components.index_engine._embedder = self._embedder()
+        await components.index_engine.index_path(memory_dir)
+        await components.storage.reset_embedding_meta(
+            dimension=1024, provider="onnx", model="bge-m3"
+        )
+
+        repaired = await components.index_engine.index_path(memory_dir, force=True)
+
+        assert repaired.indexed_chunks > 0
+        assert repaired.skipped_chunks == 0
+        assert repaired.chunks_missing_vectors == 0
+
+    async def test_a_bm25_only_store_reports_no_gap(self, components, memory_dir):
+        """``provider="none"`` has dimension 0: having no vectors is the
+        configuration, not a gap, and must not nag on every re-index."""
+        (memory_dir / "bm25.md").write_text("# BM25\n\nBody.\n", encoding="utf-8")
+        noop = self._embedder(dimension=0)
+        noop.model_name = "none"
+        components.index_engine._embedder = noop
+
+        await components.index_engine.index_path(memory_dir)
+        second = await components.index_engine.index_path(memory_dir)
+
+        assert second.skipped_chunks > 0
+        assert second.chunks_missing_vectors == 0
+
+    async def test_an_embedding_failure_is_not_reported_as_a_missing_vector(
+        self, components, memory_dir
+    ):
+        """``skipped`` also counts a file whose embedding raised — those
+        chunks were never written, so they are not a vector gap and the
+        ``--force`` remedy would not help. Gating on the counter instead of
+        the ids would misreport this run.
+        """
+        (memory_dir / "boom.md").write_text("# Boom\n\nBody.\n", encoding="utf-8")
+        failing = self._embedder()
+        failing.embed_texts = AsyncMock(side_effect=RuntimeError("provider down"))
+        components.index_engine._embedder = failing
+
+        stats = await components.index_engine.index_path(memory_dir)
+
+        assert stats.skipped_chunks > 0
+        assert stats.errors
+        assert stats.chunks_missing_vectors == 0
+
+    async def test_a_failed_file_still_reports_its_unchanged_vectorless_chunks(
+        self, components, memory_dir
+    ):
+        """A file can hold both an unchanged vector-less chunk and a new one
+        whose embedding fails. The failure path returns early, so if it drops
+        the unchanged ids the run reports a clean 0 while the store is still
+        missing vectors — the exact silence #2115 is about.
+        """
+        md_path = memory_dir / "mixed.md"
+        md_path.write_text("# One\n\nFirst body.\n", encoding="utf-8")
+        components.index_engine._embedder = self._embedder()
+        seeded = await components.index_engine.index_path(memory_dir)
+        assert seeded.indexed_chunks > 0
+
+        await components.storage.reset_embedding_meta(
+            dimension=1024, provider="onnx", model="bge-m3"
+        )
+
+        # Append a section so the file carries a new chunk alongside the
+        # unchanged one, then make embedding fail for the new chunk.
+        md_path.write_text("# One\n\nFirst body.\n\n# Two\n\nSecond body.\n", encoding="utf-8")
+        failing = self._embedder()
+        failing.embed_texts = AsyncMock(side_effect=RuntimeError("provider down"))
+        components.index_engine._embedder = failing
+
+        stats = await components.index_engine.index_path(memory_dir)
+
+        assert stats.errors
+        # The pre-existing chunk survived the reset without a vector and is
+        # still unretrievable, whatever happened to the new one.
+        assert stats.chunks_missing_vectors >= 1
+
+    async def test_the_stream_path_reports_the_same_number(self, components, memory_dir):
+        (memory_dir / "stream.md").write_text("# Stream\n\nBody.\n", encoding="utf-8")
+        components.index_engine._embedder = self._embedder()
+        await components.index_engine.index_path(memory_dir)
+        await components.storage.reset_embedding_meta(
+            dimension=1024, provider="onnx", model="bge-m3"
+        )
+
+        complete = None
+        async for event in components.index_engine.index_path_stream(memory_dir):
+            if event["type"] == "complete":
+                complete = event
+
+        assert complete is not None
+        assert complete["skipped_chunks"] > 0
+        assert complete["chunks_missing_vectors"] == complete["skipped_chunks"]
+
+    async def test_index_file_reports_its_own_gap(self, components, memory_dir):
+        md_path = memory_dir / "single.md"
+        md_path.write_text("# Single\n\nBody.\n", encoding="utf-8")
+        components.index_engine._embedder = self._embedder()
+        await components.index_engine.index_file(md_path)
+        await components.storage.reset_embedding_meta(
+            dimension=1024, provider="onnx", model="bge-m3"
+        )
+
+        stats = await components.index_engine.index_file(md_path)
+
+        assert stats.skipped_chunks > 0
+        assert stats.chunks_missing_vectors == stats.skipped_chunks
