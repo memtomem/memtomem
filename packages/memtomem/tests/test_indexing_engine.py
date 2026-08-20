@@ -4766,6 +4766,33 @@ class TestMissingVectorReporting:
         # still unretrievable, whatever happened to the new one.
         assert stats.chunks_missing_vectors >= 1
 
+    async def test_a_failed_force_repair_still_reports_the_gap(self, components, memory_dir):
+        """The repair itself can fail. ``force`` promotes every unchanged chunk
+        into the upsert set, so by the time the embedding raises there is no
+        ``unchanged`` list left to read — but those chunks are still in the
+        store without vectors, and the operator needs to know the repair did
+        not take. Capturing the ids before promotion is what keeps this
+        honest; a *successful* force still reports zero, because the count is
+        taken from the store afterwards and the vectors are back.
+        """
+        md_path = memory_dir / "repair.md"
+        md_path.write_text("# Repair\n\nBody.\n", encoding="utf-8")
+        components.index_engine._embedder = self._embedder()
+        await components.index_engine.index_path(memory_dir)
+
+        await components.storage.reset_embedding_meta(
+            dimension=1024, provider="onnx", model="bge-m3"
+        )
+
+        failing = self._embedder()
+        failing.embed_texts = AsyncMock(side_effect=RuntimeError("provider down"))
+        components.index_engine._embedder = failing
+
+        stats = await components.index_engine.index_path(memory_dir, force=True)
+
+        assert stats.errors
+        assert stats.chunks_missing_vectors >= 1
+
     async def test_the_stream_path_reports_the_same_number(self, components, memory_dir):
         (memory_dir / "stream.md").write_text("# Stream\n\nBody.\n", encoding="utf-8")
         components.index_engine._embedder = self._embedder()

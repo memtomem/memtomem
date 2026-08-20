@@ -1744,23 +1744,36 @@ class IndexEngine:
         # this distinction. Capture before any force-promotion so the
         # field stays accurate even when force re-embeds unchanged chunks.
         truly_new_chunk_ids = [c.id for c in diff_result.to_upsert]
+
+        # Ids of the chunks already in the store that this file matched by
+        # content hash (#2115). Captured before force promotion empties the
+        # list, and before the early returns below, because both paths can
+        # leave those chunks vectorless:
+        #
+        # * a plain run skips them, and after an embedding reset they have no
+        #   vector to skip back to;
+        # * a *forced* run promotes them into the upsert set, so a repair whose
+        #   embedding then fails leaves them exactly as broken as it found
+        #   them — with no ``unchanged`` list left to read at the failure.
+        #
+        # Over-capturing is safe: the count is taken from the store after the
+        # run, so a force that succeeds reports zero because the vectors are
+        # back. Ids of chunks whose embedding failed are absent by
+        # construction — they were never written, and counting them would
+        # demand a re-embed that cannot help.
+        #
+        # Blocked files never reach here: the redaction gate raises above,
+        # before the diff, so a refused file is not handed ``--force`` advice.
+        unchanged_ids = (
+            [str(c.id) for c in diff_result.unchanged] if self._embedder.dimension > 0 else []
+        )
+
         if force and diff_result.unchanged:
             diff_result = DiffResult(
                 to_upsert=diff_result.to_upsert + diff_result.unchanged,
                 to_delete=diff_result.to_delete,
                 unchanged=[],
             )
-
-        # Captured here, not at the success return: a file can hold both an
-        # unchanged vector-less chunk and a new one whose embedding fails, and
-        # the failure path returns early. Those unchanged chunks are still in
-        # the store without vectors, so a run that reports the failure must
-        # report them too. Ids of the *failed* chunks are deliberately absent —
-        # they were never written, so counting them would demand a re-embed
-        # that cannot help.
-        unchanged_ids = (
-            [str(c.id) for c in diff_result.unchanged] if self._embedder.dimension > 0 else []
-        )
 
         # Embed BEFORE any deletion — if embedding fails, DB stays untouched.
         # Refuse to silently produce BM25-only chunks when the configured
