@@ -40,13 +40,14 @@ Checks (per configured ``memory_dir``):
   by ``start_line``, so stale ranges return the wrong neighbours). Reordering
   two sections is the pure case — same bytes, same hashes, different answer.
   Two gaps remain, both inherited from ``mm index`` rather than introduced
-  here, and both left unreported because a re-index does not fix them either —
-  a finding whose remediation provably cannot work is worse than none.
-  Collapsing two byte-identical chunks into one is missed (the differ keys
-  deletion on the hash, not on the reused id), and editing a section's
-  ``> tags: [...]`` blockquote changes nothing the differ looks at, so the DB
-  keeps the old tags (measured: ``mm index`` reports the file unchanged) even
-  though ``mem_search(tag_filter=...)`` reads them.
+  here: this check asks what a plain re-index would write, so where the
+  indexer's own diff is blind, so is the report. Collapsing two byte-identical
+  chunks into one is missed (the differ keys deletion on the hash, not on the
+  reused id) and the orphan rows survive even ``--force`` (#2123). Editing a
+  section's ``> tags: [...]`` blockquote changes nothing the differ looks at,
+  so the DB keeps the old tags that ``mem_search(tag_filter=...)`` reads —
+  ``mm index --force`` does clear that one, since it re-embeds every chunk
+  (#2124).
 * **stale_index_blocked** — the same drift on a file whose new content matches
   a redaction pattern. Split out because ``mm index`` *skips* such a file
   rather than failing it (the case #2076 measured), so "run `mm index`" would
