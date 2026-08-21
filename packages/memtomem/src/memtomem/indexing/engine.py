@@ -926,6 +926,33 @@ class IndexEngine:
             return self._discover_files(path, recursive)
         return []
 
+    def chunk_content(self, file_path: Path, content: str) -> list[Chunk]:
+        """Chunk ``content`` exactly as indexing would, post-processing included.
+
+        Single source of truth for "which chunks would this file produce" — the
+        companion to :meth:`discover_indexable_files`. ``_index_file`` calls it,
+        and so does ``mm memory doctor``'s ``stale_index`` check, which needs
+        the *same* chunk boundaries and content hashes the indexer would write
+        in order to tell a real content change from a bare ``touch`` (#2078).
+
+        Pure: no storage, no embedder, no privacy scan, no namespace/scope
+        resolution — those stay in ``_index_file``, and none of them affect
+        ``content_hash`` or ``heading_hierarchy``. Callers that only hold a
+        storage-less engine (the doctor's discovery engine) can use it safely.
+        Returns ``[]`` for a suffix no chunker is registered for.
+        """
+        chunks = self._registry.chunk_file(file_path, content)
+        # Post-processing: merge short chunks + add overlap
+        chunks = _merge_short_chunks(
+            chunks,
+            self._config.min_chunk_tokens,
+            self._config.max_chunk_tokens,
+            self._config.target_chunk_tokens,
+        )
+        if self._config.chunk_overlap_tokens > 0:
+            chunks = _add_overlap(chunks, self._config.chunk_overlap_tokens)
+        return chunks
+
     async def _index_file_locked(
         self,
         resolved_path: Path,
@@ -1642,17 +1669,7 @@ class IndexEngine:
             if guard.decision not in ("pass", "bypassed"):
                 raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
 
-        new_chunks = self._registry.chunk_file(file_path, content)
-
-        # Post-processing: merge short chunks + add overlap
-        new_chunks = _merge_short_chunks(
-            new_chunks,
-            self._config.min_chunk_tokens,
-            self._config.max_chunk_tokens,
-            self._config.target_chunk_tokens,
-        )
-        if self._config.chunk_overlap_tokens > 0:
-            new_chunks = _add_overlap(new_chunks, self._config.chunk_overlap_tokens)
+        new_chunks = self.chunk_content(file_path, content)
 
         # Resolve namespace: explicit > preserved > rules > auto_ns > default.
         # ``force`` no longer skips preservation (#2061): it re-embeds, and
