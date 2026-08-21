@@ -30,8 +30,6 @@ class TestRecognisedDeclarations:
         ("label", "content"),
         [
             ("bare", "---\nredaction: documents-patterns\n---\n# doc\n"),
-            ("crlf", "---\r\nredaction: documents-patterns\r\n---\r\n# doc\r\n"),
-            ("bom", "﻿---\nredaction: documents-patterns\n---\n# doc\n"),
             ("trailing_space", "---\nredaction: documents-patterns   \n---\n"),
             # A folded scalar ends at the dedent, so this ``redaction`` really
             # is a sibling top-level key.
@@ -100,6 +98,30 @@ class TestFailClosed:
             # grammar known only to this module would let a file declare an
             # exemption while every other reader sees no frontmatter at all.
             ("yaml_document_end_close", "---\nredaction: documents-patterns\n...\n"),
+            # Boundary parity with ``chunking/markdown.py``, which requires a
+            # bare ``---`` line at offset 0 and normalises nothing. In all
+            # three of these the chunker sees *no frontmatter at all*, so
+            # honouring a declaration would be honouring body text — the same
+            # defect as the mid-file boundary case, at the other end.
+            ("opening_with_trailing_spaces", "---   \nredaction: documents-patterns\n---\n"),
+            ("byte_order_mark", "\ufeff---\nredaction: documents-patterns\n---\n"),
+            ("crlf_line_endings", "---\r\nredaction: documents-patterns\r\n---\r\n"),
+            # A collection value is never the literal, but it is still a
+            # second ``redaction`` key: dropping it made the pair look
+            # unambiguous, and in this order YAML's effective value is ``{}``.
+            (
+                "duplicate_with_collection_first",
+                "---\nredaction: {}\nredaction: documents-patterns\n---\n",
+            ),
+            (
+                "duplicate_with_collection_second",
+                "---\nredaction: documents-patterns\nredaction: {}\n---\n",
+            ),
+            (
+                "duplicate_with_sequence_first",
+                "---\nredaction: [a]\nredaction: documents-patterns\n---\n",
+            ),
+            ("collection_value", "---\nredaction: {}\n---\n"),
         ],
     )
     def test_not_declared(self, label: str, content: str) -> None:
@@ -235,6 +257,33 @@ class TestFailClosed:
         # shapes real notes carry, and each puts something at depth 1 that the
         # key/value alternation has to step over correctly.
         assert declared_exemption(Path("note.md"), content) == _DECL
+
+    def test_boundary_parity_with_the_chunker_at_both_ends(self) -> None:
+        """Whatever this module reads as frontmatter, the chunker must too."""
+        from memtomem.chunking.markdown import _FRONT_MATTER_RE
+
+        divergent = [
+            "---   \nredaction: documents-patterns\n---\n",
+            "\ufeff---\nredaction: documents-patterns\n---\n",
+            "---\r\nredaction: documents-patterns\r\n---\r\n",
+        ]
+        for content in divergent:
+            # Pin the premise rather than trusting the comment: the chunker
+            # really does see no frontmatter in these.
+            assert _FRONT_MATTER_RE.match(content) is None
+            assert declared_exemption(Path("note.md"), content) is None
+
+    def test_composition_stack_overflow_fails_closed(self, monkeypatch) -> None:
+        # The validation half is the recursive one, so its guard gets its own
+        # pin — the event walker's handler below covers the other half.
+        from memtomem.indexing import redaction_exemption as mod
+
+        def _boom(*args, **kwargs):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(mod.yaml, "compose_all", _boom)
+        content = "---\nredaction: documents-patterns\n---\n"
+        assert declared_exemption(Path("note.md"), content) is None
 
     def test_a_parser_stack_overflow_fails_closed(self, monkeypatch, caplog) -> None:
         # The composing parser blew the stack past ~500 nesting levels. The

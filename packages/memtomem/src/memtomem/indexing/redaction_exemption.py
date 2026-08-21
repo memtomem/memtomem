@@ -57,7 +57,6 @@ it.
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 import yaml
@@ -69,11 +68,16 @@ logger = logging.getLogger(__name__)
 #: Suffixes whose chunker owns a frontmatter block.
 _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 
-#: Opening delimiter. The *closing* one is not a regex: see
-#: :func:`_frontmatter_block`.
-_OPEN_RE = re.compile(r"\A---[ \t]*\n")
+#: Opening delimiter — byte-for-byte what ``chunking/markdown.py`` requires:
+#: ``---`` and a newline, at offset 0, with nothing else on the line. The
+#: *closing* one is not a regex: see :func:`_frontmatter_block`.
+_OPEN = "---\n"
 
 _KEY = "redaction"
+
+#: Stand-in for a declaration whose value is a collection. Never the literal,
+#: but it must occupy a slot so duplicate keys stay countable.
+_COLLECTION_VALUE = object()
 
 
 def _frontmatter_block(text: str) -> str | None:
@@ -87,12 +91,16 @@ def _frontmatter_block(text: str) -> str | None:
     boundaries is body text as far as every other reader is concerned, which
     is precisely where a declaration must not be honoured.
 
+    The *opening* delimiter is the chunker's too, exactly: ``---`` plus a
+    newline at offset 0. Not ``---   `` with trailing spaces, and not after a
+    BOM — both are files the chunker reads as having no frontmatter at all.
+
     Where this parser is stricter: that first ``---``-prefixed line must be a
     complete delimiter. The chunker accepts ``---anything`` as a close because
     recovering what it can is right for chunking; here it would let a file
     with no real frontmatter declare, so a non-canonical close means no block.
     """
-    if _OPEN_RE.match(text) is None:
+    if not text.startswith(_OPEN):
         return None
     lines = text.split("\n")[1:]
     for i, line in enumerate(lines):
@@ -189,7 +197,13 @@ def _top_level_declaration_values(block: str) -> list[object] | None:
                 # position so the depth-1 alternation resumes correctly when
                 # it closes.
                 container_role = "key" if expect_key else "value"
-                if not expect_key:
+                if not expect_key and pending_is_declaration:
+                    # ``redaction: {}`` is a declaration key whose value this
+                    # module will never honour — but it is still a second
+                    # ``redaction`` key when one appears twice, and dropping
+                    # it here made the pair look unambiguous. Record the
+                    # occurrence; the sentinel fails the literal check later.
+                    values.append(_COLLECTION_VALUE)
                     pending_is_declaration = False
             continue
         if isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
@@ -249,10 +263,13 @@ def declared_exemption(path: Path, content: str) -> str | None:
     """
     if path.suffix.lower() not in _MARKDOWN_SUFFIXES:
         return None
-    # Normalise the two shapes that are encoding rather than content. Anything
-    # further is left alone: tolerating more here widens what can declare.
-    normalized = content.lstrip("\ufeff").replace("\r\n", "\n")
-    block = _frontmatter_block(normalized)
+    # Deliberately no normalisation. Stripping a BOM or folding CRLF would
+    # make this module find frontmatter where ``chunking/markdown.py`` finds
+    # none — and a declaration the rest of the codebase reads as body text is
+    # exactly what the boundary rule exists to prevent. Such a file has no
+    # frontmatter here either, so it declares nothing (and gets no frontmatter
+    # tags or validity window either, for the same reason).
+    block = _frontmatter_block(content)
     if block is None or not _is_single_valid_mapping_document(block):
         return None
 

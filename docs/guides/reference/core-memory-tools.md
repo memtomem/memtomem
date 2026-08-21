@@ -132,9 +132,13 @@ debounce drain) — because it travels with the content the gate already
 reads. In exchange it is deliberately narrow:
 
 - **Markdown only, exact literal, fails closed.** One *unindented* top-level
-  `redaction: documents-patterns` key in the leading frontmatter block.
-  Indented, quoted, commented, nested under another field, duplicated, or any
-  other value means no exemption.
+  `redaction: documents-patterns` key in the leading frontmatter block, written
+  literally. Indented, quoted, tagged, aliased, commented, nested under another
+  field, duplicated, or any other value means no exemption. The block itself
+  must be one memtomem already recognises — same rule as the frontmatter your
+  `tags:` and `valid_from:` keys live in, so a file whose frontmatter memtomem
+  does not read (CRLF line endings, a leading byte-order mark, a `---` opener
+  with trailing spaces) cannot declare either.
 - **Label hits only.** It waives only the two unquoted `api_key`/`password`
   label rules. A provider token, private-key header, AWS key, or a quoted-JSON
   credential (`"password": "…"`) re-blocks the file even with the declaration
