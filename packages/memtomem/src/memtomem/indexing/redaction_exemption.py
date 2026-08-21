@@ -69,23 +69,75 @@ logger = logging.getLogger(__name__)
 #: Suffixes whose chunker owns a frontmatter block.
 _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 
-#: The frontmatter block: an opening ``---`` line at the very start and a
-#: closing line that is exactly ``---``. Deliberately *not* the chunker's
-#: ``_FRONT_MATTER_RE``, which does not anchor its closing delimiter to
-#: end-of-line and so accepts ``---not-a-delimiter`` as a close — permissive
-#: is right for chunking (recover what you can) and wrong here (a file with no
-#: real frontmatter must not be able to declare). YAML's ``...`` document-end
-#: marker is *not* accepted either: this repository's frontmatter contract is
-#: ``---`` (``chunking/markdown.py``), and a second grammar known only to this
-#: module would let a file declare an exemption while the rest of the codebase
-#: reads it as having no frontmatter at all.
-_FRONT_MATTER_RE = re.compile(
-    r"\A---[ \t]*\n(?P<body>.*?)^---[ \t]*(?:\n|\Z)", re.DOTALL | re.MULTILINE
-)
+#: Opening delimiter. The *closing* one is not a regex: see
+#: :func:`_frontmatter_block`.
+_OPEN_RE = re.compile(r"\A---[ \t]*\n")
 
 _KEY = "redaction"
 
-_Event = "yaml.events.Event"
+
+def _frontmatter_block(text: str) -> str | None:
+    """Return the frontmatter body, or ``None`` if there isn't one.
+
+    The closing rule is the chunker's, deliberately: ``chunking/markdown.py``
+    ends the block at the **first** line beginning with ``---``, so
+    ``---body: value`` closes it there. A reader that instead scanned on to
+    the next *exact* ``---`` would disagree with the rest of the codebase
+    about where the file's frontmatter stops — and everything between the two
+    boundaries is body text as far as every other reader is concerned, which
+    is precisely where a declaration must not be honoured.
+
+    Where this parser is stricter: that first ``---``-prefixed line must be a
+    complete delimiter. The chunker accepts ``---anything`` as a close because
+    recovering what it can is right for chunking; here it would let a file
+    with no real frontmatter declare, so a non-canonical close means no block.
+    """
+    if _OPEN_RE.match(text) is None:
+        return None
+    lines = text.split("\n")[1:]
+    for i, line in enumerate(lines):
+        if line.startswith("---"):
+            if line.rstrip(" \t") != "---":
+                return None
+            return "\n".join(lines[:i])
+    return None
+
+
+def _is_bare_plain_scalar(event: object, value: str) -> bool:
+    """True when ``event`` is the literal ``value``, written plainly.
+
+    "Plainly" is four conditions, and dropping any one of them re-opens a
+    forgery this module has already shipped a fix for: a plain ``style`` (no
+    quoting or escapes), no explicit ``tag`` (``!!str redaction`` resolves to
+    the same string), no ``anchor`` (an anchored scalar can be aliased into
+    the declaration position from elsewhere in the block), and the exact
+    value.
+    """
+    return (
+        isinstance(event, yaml.ScalarEvent)
+        and event.style is None
+        and event.tag is None
+        and event.anchor is None
+        and event.value == value
+    )
+
+
+def _is_single_valid_mapping_document(block: str) -> bool:
+    """True when ``block`` is exactly one YAML document holding a mapping.
+
+    ``yaml.parse`` checks syntax only: an alias with no anchor
+    (``meta: *missing``), a merge key pointing at nothing, or a duplicated
+    anchor all yield a clean event stream and would leave the walker happily
+    reading a declaration out of a document no loader could construct. The
+    documented contract is that malformed frontmatter declares nothing, so
+    composition — which resolves anchors and would reject all three — is the
+    thing that decides whether the block counts as well-formed.
+    """
+    try:
+        documents = list(yaml.compose_all(block, Loader=yaml.SafeLoader))
+    except (yaml.YAMLError, RecursionError):
+        return False
+    return len(documents) == 1 and isinstance(documents[0], yaml.MappingNode)
 
 
 def _top_level_declaration_values(block: str) -> list[object] | None:
@@ -159,10 +211,7 @@ def _top_level_declaration_values(block: str) -> list[object] | None:
             continue
         if expect_key:
             pending_is_declaration = (
-                isinstance(event, yaml.ScalarEvent)
-                and event.style is None
-                and event.value == _KEY
-                and event.start_mark.column == 0
+                _is_bare_plain_scalar(event, _KEY) and event.start_mark.column == 0
             )
             expect_key = False
         else:
@@ -203,11 +252,11 @@ def declared_exemption(path: Path, content: str) -> str | None:
     # Normalise the two shapes that are encoding rather than content. Anything
     # further is left alone: tolerating more here widens what can declare.
     normalized = content.lstrip("\ufeff").replace("\r\n", "\n")
-    match = _FRONT_MATTER_RE.match(normalized)
-    if match is None:
+    block = _frontmatter_block(normalized)
+    if block is None or not _is_single_valid_mapping_document(block):
         return None
 
-    values = _top_level_declaration_values(match.group("body"))
+    values = _top_level_declaration_values(block)
     if not values:
         return None
     if len(values) > 1:
@@ -221,11 +270,7 @@ def declared_exemption(path: Path, content: str) -> str | None:
         return None
 
     event = values[0]
-    if (
-        isinstance(event, yaml.ScalarEvent)
-        and event.style is None
-        and event.value == privacy.DECLARED_EXEMPTION_DOCUMENTS_PATTERNS
-    ):
+    if _is_bare_plain_scalar(event, privacy.DECLARED_EXEMPTION_DOCUMENTS_PATTERNS):
         return privacy.DECLARED_EXEMPTION_DOCUMENTS_PATTERNS
 
     logger.warning(

@@ -167,13 +167,103 @@ class TestFailClosed:
     def test_only_the_written_literal_declares(self, label: str, content: str) -> None:
         assert declared_exemption(Path("note.md"), content) is None
 
-    def test_deeply_nested_frontmatter_does_not_crash_the_indexer(self) -> None:
-        # A gate must answer "no" (or, here, read the legitimate key it can
-        # see) rather than propagate a parser failure and fail the whole run
-        # for a file it merely could not read. The composing parser raised
-        # RecursionError past ~500 levels; the event parser is iterative.
-        content = "---\nredaction: documents-patterns\nx: " + "[" * 600 + "]" * 600 + "\n---\n"
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            # ``!!str redaction`` and friends resolve to the same string, and
+            # an anchored scalar can be aliased into the declaration position
+            # from elsewhere in the block. Plain style alone does not rule
+            # either out — the event carries ``tag`` and ``anchor`` separately.
+            ("tagged_key", "---\n!!str redaction: documents-patterns\n---\n"),
+            ("custom_tagged_key", "---\n!custom redaction: documents-patterns\n---\n"),
+            ("anchored_key", "---\n&a redaction: documents-patterns\n---\n"),
+            ("tagged_value", "---\nredaction: !!str documents-patterns\n---\n"),
+            ("anchored_value", "---\nredaction: &x documents-patterns\n---\n"),
+        ],
+    )
+    def test_tags_and_anchors_do_not_declare(self, label: str, content: str) -> None:
+        assert declared_exemption(Path("note.md"), content) is None
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            # ``yaml.parse`` checks syntax only, so each of these yields a
+            # clean event stream while no loader could construct the document.
+            # The contract says malformed frontmatter declares nothing.
+            ("alias_with_no_anchor", "---\nmeta: *missing\nredaction: documents-patterns\n---\n"),
+            ("merge_key_with_no_anchor", "---\n<<: *missing\nredaction: documents-patterns\n---\n"),
+            ("second_document", "---\nname: n\n---\nredaction: documents-patterns\n---\n"),
+        ],
+    )
+    def test_unloadable_frontmatter_declares_nothing(self, label: str, content: str) -> None:
+        assert declared_exemption(Path("note.md"), content) is None
+
+    def test_the_block_ends_where_the_chunker_says_it_ends(self) -> None:
+        """A declaration below the chunker's boundary is body text.
+
+        ``chunking/markdown.py`` closes the block at the first line beginning
+        with ``---``, so ``---body: value`` ends it there. Scanning on to the
+        next *exact* ``---`` would read the file's body as frontmatter and let
+        it declare — while every other reader in the codebase sees the
+        declaration as prose.
+        """
+        from memtomem.chunking.markdown import _FRONT_MATTER_RE
+
+        content = (
+            "---\nname: note\n---body: value\nredaction: documents-patterns\n"
+            "password: hunter2\n---\n\nreal body\n"
+        )
+        # Pin the premise: the chunker really does stop at the short line.
+        assert _FRONT_MATTER_RE.match(content).group(1) == "name: note"
+        assert declared_exemption(Path("note.md"), content) is None
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            ("comment_line", "---\n# a note about redaction\nredaction: documents-patterns\n---\n"),
+            (
+                "anchors_used_elsewhere",
+                "---\nbase: &b 1\nother: *b\nredaction: documents-patterns\n---\n",
+            ),
+            ("empty_sibling_mapping", "---\nmeta: {}\nredaction: documents-patterns\n---\n"),
+            ("empty_sibling_sequence", "---\ntags: []\nredaction: documents-patterns\n---\n"),
+            ("null_sibling_value", "---\nmeta:\nredaction: documents-patterns\n---\n"),
+        ],
+    )
+    def test_ordinary_frontmatter_around_it_still_declares(self, label: str, content: str) -> None:
+        # The refusals above must not have cost the common case: these are
+        # shapes real notes carry, and each puts something at depth 1 that the
+        # key/value alternation has to step over correctly.
         assert declared_exemption(Path("note.md"), content) == _DECL
+
+    def test_a_parser_stack_overflow_fails_closed(self, monkeypatch, caplog) -> None:
+        # The composing parser blew the stack past ~500 nesting levels. The
+        # event parser is iterative, so this is unreachable through input
+        # today — but a gate that propagates a parser failure fails the whole
+        # indexing run for a file it merely could not read, so the handler is
+        # pinned directly.
+        import yaml
+
+        from memtomem.indexing import redaction_exemption as mod
+
+        def _boom(*args, **kwargs):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(mod.yaml, "parse", _boom)
+        content = "---\nredaction: documents-patterns\n---\n"
+        with caplog.at_level(logging.WARNING):
+            assert declared_exemption(Path("note.md"), content) is None
+        assert "too deeply nested" in caplog.text
+        assert isinstance(yaml.YAMLError, type)  # import kept meaningful
+
+    def test_deeply_nested_frontmatter_does_not_crash_the_indexer(self) -> None:
+        # Composition is the recursive half (the event walk is iterative), and
+        # it gives up past a few hundred levels of nesting. A gate must answer
+        # "no" rather than propagate that and fail the whole indexing run for
+        # a file it merely could not read — so an unreadable block declares
+        # nothing, like any other malformed frontmatter.
+        content = "---\nredaction: documents-patterns\nx: " + "[" * 600 + "]" * 600 + "\n---\n"
+        assert declared_exemption(Path("note.md"), content) is None
 
     def test_duplicate_keys_are_ambiguous(self) -> None:
         # YAML's last-wins is not a rule worth guessing at when the answer
