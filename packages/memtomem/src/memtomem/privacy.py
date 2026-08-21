@@ -468,7 +468,9 @@ class RedactionHit:
 #: ``DEFAULT_PATTERNS``, so a sync that edits either rule fails loudly here
 #: rather than widening or emptying the allowlist.
 _LABEL_RULE_UNQUOTED_KEYS = r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]"
-_LABEL_RULE_UNQUOTED_PASSWORD = r"(?i)(password|passwd|pwd)\s*[:=]"
+# B105 (hardcoded password) keys off the *name*; this is the detection
+# pattern, not a credential. Suppressed inline below.
+_LABEL_RULE_UNQUOTED_PASSWORD = r"(?i)(password|passwd|pwd)\s*[:=]"  # nosec B105
 
 EXEMPTIBLE_DOC_PATTERNS: tuple[str, ...] = (
     _LABEL_RULE_UNQUOTED_KEYS,
