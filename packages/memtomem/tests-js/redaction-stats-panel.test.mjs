@@ -17,10 +17,10 @@ async function boot(stats) {
 }
 
 const FILLED = {
-  outcomes: { blocked: 3, pass: 10, bypassed: 2, blocked_project_shared: 1 },
+  outcomes: { blocked: 3, pass: 10, bypassed: 2, blocked_project_shared: 1, exempted: 4 },
   by_tool: {
-    index: { blocked: 3, pass: 5, bypassed: 2, blocked_project_shared: 1 },
-    mem_add: { blocked: 0, pass: 5, bypassed: 0, blocked_project_shared: 0 },
+    index: { blocked: 3, pass: 5, bypassed: 2, blocked_project_shared: 1, exempted: 4 },
+    mem_add: { blocked: 0, pass: 5, bypassed: 0, blocked_project_shared: 0, exempted: 0 },
   },
 };
 
@@ -47,9 +47,30 @@ describe('Settings → Redaction stats panel', () => {
     expect(txt).not.toContain(window.t('settings.redaction.empty'));
   });
 
+  // #2076: the file-declared exemption is a second bypass mechanism, and a
+  // standing one — a panel that only counted `bypassed` would report zero
+  // while every indexing run waived the guard.
+  it('renders the file-declared exemption as its own outcome', async () => {
+    const { window } = await boot(FILLED);
+    const document = window.document;
+
+    await window.loadRedactionStats();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const report = document.getElementById('redaction-stats-report');
+    const label = window.t('settings.redaction.outcome.exempted');
+    expect(label).not.toBe('settings.redaction.outcome.exempted'); // localized
+    expect(report.textContent).toContain(label);
+    // And it is a column of the per-surface table, not just a headline card.
+    const headers = [...report.querySelectorAll('.harness-table thead th')].map(
+      (th) => th.textContent,
+    );
+    expect(headers).toContain(label);
+  });
+
   it('shows the empty state when no surface has fired', async () => {
     const { window } = await boot({
-      outcomes: { blocked: 0, pass: 0, bypassed: 0, blocked_project_shared: 0 },
+      outcomes: { blocked: 0, pass: 0, bypassed: 0, blocked_project_shared: 0, exempted: 0 },
       by_tool: {},
     });
     const document = window.document;

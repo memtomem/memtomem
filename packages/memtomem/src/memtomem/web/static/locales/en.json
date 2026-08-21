@@ -1240,6 +1240,7 @@
   "settings.redaction.outcome.blocked_project_shared": "Blocked (project_shared)",
   "settings.redaction.outcome.bypassed": "Bypassed",
   "settings.redaction.outcome.pass": "Passed",
+  "settings.redaction.outcome.exempted": "Exempted (file-declared)",
   "settings.redaction.empty": "No writes have hit the redaction gate yet this session.",
   "settings.redaction.error": "Error: {error}",
   "settings.redaction.load_failed": "Redaction statistics could not be loaded.",

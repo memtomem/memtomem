@@ -75,7 +75,8 @@ class PrivacyStatsResponse(BaseModel):
     Axis E.1 audit surface).
 
     ``outcomes`` is the cumulative tally per outcome
-    (``blocked`` / ``pass`` / ``bypassed`` / ``blocked_project_shared``);
+    (``blocked`` / ``pass`` / ``bypassed`` / ``blocked_project_shared`` /
+    ``exempted``);
     ``by_tool`` breaks the same tally down per write surface (``mem_add``,
     ``index``, ``web_api_upload``, …). Both are process-lifetime and reset on
     restart — not persisted rows.

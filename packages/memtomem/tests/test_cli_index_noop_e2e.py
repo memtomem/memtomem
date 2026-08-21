@@ -279,6 +279,60 @@ def test_debounce_flush_drops_blocked_file_as_permanent(tmp_path, monkeypatch):
     assert payload["remaining"] == 0
 
 
+def test_debounce_flush_indexes_a_declared_exemption(tmp_path, monkeypatch):
+    """#2076: the debounce queue carries only ``(path, namespace, force)`` and
+    rejects ``--force-unsafe`` outright, so before the frontmatter declaration
+    a pattern-documenting note could never drain — it dropped as permanent on
+    every flush. The declaration reaches this path because it travels with the
+    content the gate already reads.
+    """
+    from memtomem.cli import _bootstrap
+
+    for var in [k for k in os.environ if k.startswith("MEMTOMEM_")]:
+        monkeypatch.delenv(var, raising=False)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+    monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(tmp_path / "debounce_queue.json"))
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+    note = mem_dir / "redaction-notes.md"
+    note.write_text(
+        "---\nredaction: documents-patterns\n---\n\n"
+        "# Notes\n\nThe guard matches `api_key=` on the keyword alone.\n"
+    )
+
+    runner = CliRunner()
+    r = runner.invoke(
+        cli,
+        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+    )
+    assert r.exit_code == 0, f"init failed: {r.output}"
+
+    r = runner.invoke(cli, ["index", "--debounce-window", "999999", str(note)])
+    assert r.exit_code == 0, f"enqueue failed: {r.output}"
+
+    r = runner.invoke(cli, ["index", "--flush"])
+    assert r.exit_code == 0, f"flush should succeed: {r.output}"
+    assert "Indexed: 1" in r.output
+    # The drop line prints only when something dropped, so its absence is the
+    # assertion: the file drained instead of being refused.
+    assert "Dropped (permanent)" not in r.output
+    assert "redaction_blocked" not in r.output
+
+    # Deliberately no assertion on the audit line's text here. It reaches this
+    # output through rich's console renderer, which hard-wraps to the terminal
+    # width — on the narrower Windows CI console the line breaks mid-phrase
+    # ("...declared in" / "file (surface=..."), so a substring match passes on
+    # one runner and fails on another. The audit line's content is pinned
+    # width-independently against the logger in
+    # ``test_privacy.py::TestExemptionAudit``; what this test owns is the drain
+    # behaviour above.
+
+
 def test_debounce_flush_drops_binary_error_immediately(tmp_path, monkeypatch):
     """A deterministic binary-file refusal is permanent and drops on the
     first drain rather than spending the retry budget."""

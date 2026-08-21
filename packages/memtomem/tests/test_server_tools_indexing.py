@@ -184,3 +184,53 @@ class TestMemIndexMissingVectorAdvisory:
         output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
 
         assert "No embedding" not in output
+
+
+class TestMemIndexDeclaredExemption:
+    """#2076: ``mem_index`` has no ``force_unsafe`` parameter, so a
+    frontmatter declaration is the only way a pattern-documenting note indexes
+    over MCP at all. Same hand-rendered-surface rule as the advisories above —
+    an unrendered field never reaches an agent."""
+
+    async def test_exempted_files_are_named(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        note = tmp_path / "redaction-notes.md"
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=1,
+                total_chunks=3,
+                indexed_chunks=3,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                exempted_files=1,
+                exempted_paths=(str(note),),
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "Declared redaction exemption: 1 file(s)" in output
+        assert "redaction: documents-patterns" in output
+        assert str(note) in output
+
+    async def test_quiet_when_nothing_was_exempted(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=1,
+                total_chunks=2,
+                indexed_chunks=2,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "exemption" not in output

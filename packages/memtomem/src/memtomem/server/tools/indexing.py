@@ -165,6 +165,18 @@ async def mem_index(
                 " (hard-refused; force_unsafe does not apply)."
             )
 
+    if stats.exempted_files:
+        # #2076: hand-built like the advisories above — this surface renders a
+        # string, so a new stat reaches an agent only by being written here.
+        # ``mem_index`` has no ``force_unsafe`` parameter, so a declared
+        # exemption is the only way a pattern-documenting note indexes over
+        # MCP at all; naming the files is what keeps that from being silent.
+        result += (
+            f"\n- Declared redaction exemption: {stats.exempted_files} file(s) admitted by "
+            "their own frontmatter `redaction: documents-patterns` (audit-logged):\n"
+            + "\n".join(f"    {p}" for p in stats.exempted_paths)
+        )
+
     if auto_tag and stats.indexed_chunks > 0:
         from memtomem.tools.auto_tag import auto_tag_storage
 

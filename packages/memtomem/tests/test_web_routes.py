@@ -919,9 +919,15 @@ class TestPrivacyStats:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert set(data.keys()) == {"outcomes", "by_tool"}
-        # All four outcome counters present and zero after reset; by_tool is a
+        # All five outcome counters present and zero after reset; by_tool is a
         # defaultdict populated only on record(), so it starts empty.
-        assert set(data["outcomes"]) == {"blocked", "pass", "bypassed", "blocked_project_shared"}
+        assert set(data["outcomes"]) == {
+            "blocked",
+            "pass",
+            "bypassed",
+            "blocked_project_shared",
+            "exempted",
+        }
         assert all(v == 0 for v in data["outcomes"].values())
         assert data["by_tool"] == {}
 
@@ -942,6 +948,7 @@ class TestPrivacyStats:
             "pass": 0,
             "bypassed": 1,
             "blocked_project_shared": 0,
+            "exempted": 0,
         }
         assert data["by_tool"]["mem_add"]["pass"] == 1
 

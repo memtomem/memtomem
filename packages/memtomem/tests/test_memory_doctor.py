@@ -2052,6 +2052,84 @@ class TestStaleIndexBlocked:
         assert secret not in caplog.text
         assert "sk_live_" not in caplog.text
 
+    def test_markdown_items_get_the_frontmatter_remedy(self, stale_env):
+        """#2076's third way out, named only where it can be typed."""
+        config, mem_dir, note, _reindex = stale_env
+        assert note.suffix == ".md"
+        self._make_blocked(note)
+
+        blocked = _stale_findings(config, mem_dir)["stale_index_blocked"]
+        assert "redaction: documents-patterns" in blocked.summary
+        assert "frontmatter" in blocked.summary
+
+    @pytest.mark.asyncio
+    async def test_non_markdown_items_do_not_get_the_frontmatter_remedy(
+        self, tmp_path, monkeypatch
+    ):
+        """A ``.yaml`` source has no frontmatter block to declare it in, so
+        naming the declaration there would be advice that cannot work."""
+        from helpers import isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+        mem_dir = tmp_path / "mem"
+        mem_dir.mkdir()
+        note = mem_dir / "conf.yaml"
+        note.write_text("ok: 1\n", encoding="utf-8")
+
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "yaml.db"
+        config.indexing.memory_dirs = [mem_dir]
+
+        backend = SqliteBackend(
+            config.storage, dimension=0, embedding_provider="none", embedding_model=""
+        )
+        await backend.initialize()
+        try:
+            _insert_real_chunks(backend, config, note)
+        finally:
+            await backend.close()
+
+        note.write_text(f"ok: 1\nsecret_key: {'y' * 24}\n", encoding="utf-8")
+
+        blocked = _stale_findings(config, mem_dir)["stale_index_blocked"]
+        assert blocked.items == ["conf.yaml"]
+        assert "redaction: documents-patterns" not in blocked.summary
+        assert "--force-unsafe" in blocked.summary
+
+    def test_declared_exemption_routes_to_plain_stale_index(self, stale_env):
+        """#2076: a file the guard would *honour* is not blocked at all.
+
+        `mm index <file>` clears it, so it belongs in ``stale_index`` — routing
+        it to ``stale_index_blocked`` would hand the reader a bypass they do
+        not need. This is why the routing asks the engine's judgement instead
+        of re-implementing it with a bare ``privacy.scan``.
+        """
+        config, mem_dir, note, _reindex = stale_env
+        note.write_text(
+            "---\nredaction: documents-patterns\n---\n\n"
+            "The guard matches `api_key=` on the keyword alone.\n",
+            encoding="utf-8",
+        )
+
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index_blocked" not in by
+        assert by["stale_index"].items == ["note.md"]
+        assert "mm index <file>" in by["stale_index"].summary
+
+    def test_declared_exemption_with_a_real_token_stays_blocked(self, stale_env):
+        """The declaration waives label rules only; a token re-blocks."""
+        config, mem_dir, note, _reindex = stale_env
+        note.write_text(
+            "---\nredaction: documents-patterns\n---\n\n"
+            "The guard matches `api_key=` on the keyword alone.\n"
+            f"token: sk-{'a' * 24}\n",
+            encoding="utf-8",
+        )
+
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index" not in by
+        assert by["stale_index_blocked"].items == ["note.md"]
+
     def test_blocked_file_that_did_not_change_is_not_reported(self, stale_env):
         """Only *drift* is a finding — a blocked file matching its chunks isn't."""
         config, mem_dir, note, reindex = stale_env

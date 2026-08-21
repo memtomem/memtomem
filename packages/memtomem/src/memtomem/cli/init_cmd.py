@@ -23,6 +23,7 @@ from memtomem.cli._index_progress import (
 )
 from memtomem.cli._index_progress import (
     print_blocked_summary,
+    print_exempted_summary,
     print_index_errors,
 )
 from memtomem.cli._index_progress import (
@@ -1894,6 +1895,10 @@ def _seed_with_progress(paths: list[Path]) -> bool:
         blocked_paths=agg["blocked_paths"],
         blocked_project_shared=agg["blocked_project_shared"],
         bypass_hint=bypass_hint,
+    )
+    print_exempted_summary(
+        exempted=agg["exempted"],
+        exempted_paths=agg["exempted_paths"],
     )
     print_index_errors(
         agg["errors"],

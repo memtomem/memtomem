@@ -214,6 +214,105 @@ semantics. E.4 (no override) breaks the "intentional debug note about an
 old, rotated key" workflow that ADR-0005's force-reindex contract revealed
 is real.
 
+### Axis E.5 — Per-file declared exemption (added 2026-08-21 amendment)
+
+> Axis E settled *who* can override the guard and how it is audited. This
+> amendment adds a second override mechanism with a different shape, prompted
+> by [#2076](https://github.com/memtomem/memtomem/issues/2076).
+
+**The gap E.1–E.4 left.** The guard's two broad label rules
+(`(api_key|secret_key|access_token)\s*[:=]`, `(password|passwd|pwd)\s*[:=]`)
+are keyword-anchored: they fire on any prose that writes the keyword followed
+by `=` or `:`, independent of what follows. A note *documenting the redaction
+system* therefore trips its own guard. Measured on a 436-file memory
+directory: 5 blocked files, every hit a placeholder or a description of the
+pattern, no credential in any of them.
+
+The damage is not the refusal — it is that the refusal **skips re-indexing
+rather than failing the file**. The chunks from the last successful run stay
+in the DB, so `mem_search` keeps answering from pre-trip content indefinitely,
+with nothing reporting the gap (one of the five was 16 days stale). The
+observability half shipped separately as `stale_index` / `stale_index_blocked`
+in `mm memory doctor` (#2078). What remained was the policy question: the
+system had a hard refusal and a global valve, and nothing in between.
+
+`--force-unsafe` does not close it. It is **invocation-scoped**, and three of
+the surfaces that index these files cannot pass it at all: MCP `mem_index` has
+no such parameter (the core tool description budget is full), the watcher
+calls `index_file` without one, and the debounce queue carries only
+`(path, namespace, force)` — `mm index --debounce-window --force-unsafe` is
+rejected as a usage error. So on those paths the file is *permanently*
+unindexable, which is exactly where the silent staleness accrued.
+
+**Decision: E.5 — a declaration the file itself carries.**
+
+```markdown
+---
+redaction: documents-patterns
+---
+```
+
+| hits | scope | `force_unsafe` | declaration | decision |
+|---|---|---|---|---|
+| none | * | * | * | `pass` |
+| yes | `project_shared` | true **or** declared | | `blocked_project_shared` |
+| yes | user / project_local | true | * | `bypassed` (the valve wins) |
+| yes | user / project_local | false | declared ∧ all hits exemptible | **`exempted`** |
+| yes | user / project_local | false | declared ∧ any other hit | `blocked` |
+| yes | * | false | absent / unrecognised | `blocked` |
+
+Three bounds make this narrower than it first looks:
+
+1. **Hit class.** The declaration waives only `EXEMPTIBLE_DOC_PATTERNS` — the
+   two broad *unquoted* label rules. All-or-nothing: one provider token, PEM
+   block, AWS key, or quoted-JSON credential re-blocks the whole file. The
+   quoted-JSON label rule is deliberately excluded; it exists for genuinely
+   serialized credentials (`docker inspect`, `kubectl get secret -o json`, DB
+   config), where an arbitrary password matches no other pattern, so nothing
+   would catch it. This is the bound that keeps a *standing* exemption from
+   becoming an ingest path for a secret pasted in months later.
+2. **Scope.** ADR-0011 §5 is untouched: `project_shared` is hard-refused, the
+   same ceiling `force_unsafe` has, for the same reason — git history cannot
+   be retracted from any clone or reflog.
+3. **Surface.** Only *un-adjudicated* indexing consults it — the gate in
+   `_index_file`. Ingress guards that scan request content (`mem_add`,
+   `mem_edit`, upload, chunk edit) do not, and keep refusing.
+
+The declaration is parsed strictly and fails closed: exactly one *unindented*
+top-level key in the leading frontmatter block, exact literal value,
+Markdown-only. An indented key, a key inside a block scalar or nested mapping,
+a quoted or commented value, or two `redaction:` keys all mean "no
+declaration" — otherwise arbitrary prose inside another field could forge one
+for the file containing it. An unrecognised value is logged as fixed text plus
+lengths only; the value could itself be a credential.
+
+**Why this is not E.3 (rejected as "too blunt").** E.3 was a config key
+(`privacy.bulk_force_unsafe`) that flips the default for every file the
+instance ever indexes, out of sight of the content it waives. E.5 is scoped to
+one file, declared *in* that file where any reader of the note sees it,
+restricted to the hit class that motivated it, and refused for the tier that
+reaches git.
+
+**The honest residual: it is persistent.** Unlike `force-unsafe`, nobody
+re-types it per run — a declaration written once keeps applying, including on
+unattended watcher and debounce-drain re-indexes. Bound (1) is what caps the
+damage: the file stays subject to every non-label pattern, so the realistic
+bad outcome is not "a secret walks in" but "a note keeps documenting patterns
+without re-consent". Against that, each honoured *and each refused*
+declaration emits a structured audit line naming the decision
+(`emit_exemption_audit` — the existing bypass helper hard-codes
+`force_unsafe=True` and would have reported a mechanism nobody used). An
+honoured one bumps a fifth counter `exempted`, visible in
+`mem_add_redaction_stats` and Settings → Redaction, and is named per run by
+`mm index`, the shell, and `mem_index`; a refused one keeps the ordinary
+`blocked` / `blocked_project_shared` counter and blocked listing, so the
+exemption's counter measures only what it actually waived.
+
+**Reopen trigger.** If the `exempted` counter shows the declaration being used
+outside pattern-documenting notes, or if a hit class beyond the two label
+rules is ever proposed for the allowlist, that is a new decision — not an
+extension of this one.
+
 ### Axis F — Bundle import (added 2026-06-11 amendment)
 
 > Folder-index and upload (axes A–E) were the original scope. This amendment

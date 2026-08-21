@@ -292,3 +292,16 @@ class IndexingStats:
     # vectors at all (``provider="none"``), which is an opt-in, not a gap.
     # Appended last for positional construction compatibility.
     chunks_missing_vectors: int = 0
+    # #2076 / ADR-0006 Axis E.5: files admitted by their own frontmatter
+    # ``redaction: documents-patterns`` declaration. Counted after the chunk
+    # transaction commits, so a file whose embedding or storage write failed
+    # is excluded — but a file whose chunks were all *unchanged* is counted:
+    # it was adjudicated and admitted under the declaration this run, and a
+    # standing bypass that went unreported on steady-state re-indexes would be
+    # invisible exactly when someone should notice it is still in force.
+    # ``exempted_paths`` are the absolute paths so surfaces can name them the
+    # way ``blocked_paths`` does. Refused declarations are NOT counted here —
+    # they land in ``blocked_files`` like any other refusal.
+    # Appended last for positional construction compatibility.
+    exempted_files: int = 0
+    exempted_paths: tuple[str, ...] = ()

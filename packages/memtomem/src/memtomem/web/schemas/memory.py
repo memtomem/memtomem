@@ -147,6 +147,12 @@ class IndexResponse(BaseModel):
     blocked_paths: list[str] = []
     # Subset that is project_shared — hard-refused even with force_unsafe.
     blocked_project_shared_files: int = 0
+    # #2076 / ADR-0006 Axis E.5: files indexed under a frontmatter-declared
+    # ``redaction: documents-patterns`` exemption (count + paths). The
+    # declaration is persistent, so surfacing it per run is what keeps a
+    # standing bypass from going unnoticed. Zero/empty on the common path.
+    exempted_files: int = 0
+    exempted_paths: list[str] = []
     # #2061: files that kept their stored namespace while the current path
     # rules would have assigned a different one. ``force`` re-embeds without
     # re-resolving namespaces, so this is how a client learns a rule change

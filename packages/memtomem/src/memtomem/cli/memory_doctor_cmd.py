@@ -48,12 +48,18 @@ Checks (per configured ``memory_dir``):
   so the DB keeps the old tags that ``mem_search(tag_filter=...)`` reads —
   ``mm index --force`` does clear that one, since it re-embeds every chunk
   (#2124).
-* **stale_index_blocked** — the same drift on a file whose new content matches
-  a redaction pattern. Split out because ``mm index`` *skips* such a file
-  rather than failing it (the case #2076 measured), so "run `mm index`" would
-  be advice that cannot work; the remediation names the audited bypass
+* **stale_index_blocked** — the same drift on a file the redaction guard
+  would refuse. Split out because ``mm index`` *skips* such a file rather than
+  failing it (the case #2076 measured), so "run `mm index`" would be advice
+  that cannot work; the remediation names the audited bypass
   (``--force-unsafe``, itself hard-refused for ``project_shared``) alongside
-  removing the matched text. Hit counts only; matched bytes are never shown.
+  removing the matched text, and — when at least one listed file is Markdown —
+  the per-file frontmatter declaration ``redaction: documents-patterns``
+  (#2076). Matching a pattern is no longer the same as being refused: a file
+  whose declaration the guard honours re-indexes normally and is reported as
+  ordinary ``stale_index`` instead, which is why the routing asks
+  ``IndexEngine.preview_redaction_decision`` rather than scanning here. Hit
+  counts only; matched bytes are never shown.
 * **stale_source** — DB chunks whose ``source_file`` is gone from disk (the
   file was deleted but its chunks linger; there is no single-file delete CLI).
 * **convention_violation** — an index/meta file (``MEMORY.md`` / ``README.md``
@@ -1055,7 +1061,7 @@ def _confirm_stale(
     engine: object,
     state: dict[str, tuple[str, tuple[str, ...], int, int]],
     path: Path,
-) -> tuple[Literal["stale", "fresh", "skip"], bool]:
+) -> tuple[Literal["stale", "fresh", "skip"], str]:
     """Do this file's chunks still describe what is on disk?
 
     Re-runs the indexer's own chunk pipeline (``IndexEngine.chunk_content``)
@@ -1067,8 +1073,17 @@ def _confirm_stale(
     re-indexing it would be a no-op; and a genuinely changed file is reported
     no matter what its timestamps say.
 
-    Returns the verdict and whether the content carries redaction hits. Only
-    that boolean crosses back out — the matched bytes never leave this frame.
+    Returns the verdict and the *guard's* decision for the content
+    (``"pass"`` / ``"blocked"`` / ``"blocked_project_shared"`` / ``"exempted"``).
+    Only that label crosses back out — the matched bytes never leave this frame.
+
+    The decision comes from ``IndexEngine.preview_redaction_decision`` rather
+    than a bare ``privacy.scan`` here (#2076): the question this report needs
+    answered is "would a re-index write anything", and since the guard grew a
+    per-file frontmatter exemption, matching a pattern and being refused are
+    no longer the same thing. Asking the engine keeps the report's routing and
+    the indexer's behaviour from drifting apart — a second copy of the
+    judgement would send an exempt file to a remedy it does not need.
 
     The scan runs *before* any chunker sees the text, and hit-carrying content
     is chunked with logging muted. The indexer gets this for free: it refuses a
@@ -1087,7 +1102,15 @@ def _confirm_stale(
 
     content = _read_indexable_content(path)
     if content is None:
-        return "skip", False
+        # Unreadable: there is no content to adjudicate. The ``skip`` verdict
+        # already short-circuits the caller before it looks at the decision,
+        # so pair it with the guard's no-hit answer rather than inventing a
+        # fifth label the routing would have to know about.
+        return "skip", "pass"
+    decision = engine.preview_redaction_decision(path, content)  # type: ignore[attr-defined]
+    # The mute below is keyed on the *scan*, not the decision: an exempted
+    # file still carries hit-shaped bytes, and a chunker that fails to parse
+    # it would quote the offending line into the log all the same.
     has_redaction_hits = bool(privacy.scan(content))
     try:
         if has_redaction_hits:
@@ -1100,16 +1123,16 @@ def _confirm_stale(
         else:
             new_chunks = engine.chunk_content(path, content)  # type: ignore[attr-defined]
     except Exception:  # pragma: no cover - defensive: a chunker crash is not a finding
-        return "skip", has_redaction_hits
+        return "skip", decision
     try:
         diff = compute_diff({cid: (st[0], st[1]) for cid, st in state.items()}, new_chunks)
     except (ValueError, TypeError):
         # A chunk id that isn't a UUID is corrupt storage state, which other
         # tooling owns; a read-only diagnostic must not crash on it, and
         # "can't tell" is the honest verdict rather than a false finding.
-        return "skip", has_redaction_hits
+        return "skip", decision
     if diff.to_upsert or diff.to_delete:
-        return "stale", has_redaction_hits
+        return "stale", decision
     # Hash-matched chunks whose *position* moved are drift too. ``compute_diff``
     # calls them unchanged (it matches on content), but a re-index writes their
     # refreshed ranges via ``update_chunk_line_ranges``, and retrieval reads
@@ -1122,8 +1145,8 @@ def _confirm_stale(
         if persisted is None:
             continue
         if (persisted[2], persisted[3]) != (chunk.metadata.start_line, chunk.metadata.end_line):
-            return "stale", has_redaction_hits
-    return "fresh", has_redaction_hits
+            return "stale", decision
+    return "fresh", decision
 
 
 # ── Analysis ────────────────────────────────────────────────────────
@@ -1210,7 +1233,7 @@ def _analyze_dir(
                 state = states.get(key)
                 if not state:
                     continue
-                verdict, has_redaction_hits = _confirm_stale(engine, state, candidate_path)
+                verdict, redaction_decision = _confirm_stale(engine, state, candidate_path)
                 if verdict != "stale":
                     continue
                 # The per-dir snapshot above was taken before this file was
@@ -1227,7 +1250,7 @@ def _analyze_dir(
                     emptied.add(key)
                     continue
                 if fresh_state is not None and fresh_state != state:
-                    verdict, has_redaction_hits = _confirm_stale(
+                    verdict, redaction_decision = _confirm_stale(
                         engine, fresh_state, candidate_path
                     )
                     if verdict != "stale":
@@ -1247,9 +1270,12 @@ def _analyze_dir(
                     label = str(candidate_path.relative_to(resolved_dir))
                 except ValueError:  # pragma: no cover - ownership already checked
                     label = candidate_path.name
-                if has_redaction_hits:
+                if redaction_decision in ("blocked", "blocked_project_shared"):
                     stale_blocked.append(label)
                 else:
+                    # ``exempted`` belongs with the ordinary stale files: the
+                    # file declares an exemption the guard honours, so a plain
+                    # ``mm index <file>`` does clear it.
                     stale_ok.append(label)
     if stale_ok:
         report.findings.append(
@@ -1265,6 +1291,18 @@ def _analyze_dir(
             )
         )
     if stale_blocked:
+        # #2076: the frontmatter declaration is a real third remedy, but only
+        # for Markdown — a ``.yaml`` / ``.json`` / ``.rst`` source has no
+        # frontmatter block to declare it in. Naming it unconditionally would
+        # put advice that cannot work in front of exactly the readers who
+        # cannot use it, so it is gated on the items actually listed.
+        declarable = any(label.lower().endswith((".md", ".markdown")) for label in stale_blocked)
+        declaration_hint = (
+            ", or, for a Markdown note that documents the patterns, declare "
+            "`redaction: documents-patterns` in its frontmatter"
+            if declarable
+            else ""
+        )
         report.findings.append(
             Finding(
                 check="stale_index_blocked",
@@ -1272,8 +1310,9 @@ def _analyze_dir(
                 summary=(
                     f"{len(stale_blocked)} changed file(s) match a redaction pattern — "
                     "`mm index` skips them, so their chunks stay stale (remove the "
-                    "matched text, or re-index with `mm index --force-unsafe <file>`, "
-                    "audit-logged and refused for project_shared files)"
+                    "matched text, or re-index with `mm index --force-unsafe <file>`"
+                    f"{declaration_hint}; both bypasses are audit-logged and refused "
+                    "for project_shared files)"
                 ),
                 items=stale_blocked,
             )

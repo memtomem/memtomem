@@ -192,6 +192,7 @@ async def _index(
     ``complete`` events so the format is preserved verbatim."""
     from memtomem.cli._index_progress import (
         print_blocked_summary,
+        print_exempted_summary,
         print_index_errors,
         print_missing_vector_advisory,
         print_namespace_advisory,
@@ -248,6 +249,10 @@ async def _index(
             "re-run with --force-unsafe to index the non-project_shared "
             "files anyway (audit-logged)."
         ),
+    )
+    print_exempted_summary(
+        exempted=agg["exempted"],
+        exempted_paths=agg["exempted_paths"],
     )
     print_namespace_advisory(
         preserved_against_rules=agg["namespaces_preserved_against_rules"],

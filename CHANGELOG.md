@@ -36,6 +36,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **A Markdown note can declare a per-file redaction exemption.** The guard's
+  two broad label rules match on the keyword plus `=`/`:` regardless of what
+  follows, so a note that *documents* the redaction patterns trips its own
+  guard — and because a blocked file is skipped rather than failed, its old
+  chunks stay in the DB and `mem_search` keeps answering from pre-trip content
+  indefinitely. `--force-unsafe` could not fix it on the paths where it
+  accrued: `mem_index`, the file watcher and the debounce drain have no such
+  flag. Such a file can now carry `redaction: documents-patterns` in its
+  frontmatter, which every indexing path honours because it travels with the
+  content the gate already reads. Deliberately narrow: Markdown only, one
+  unindented top-level key with that exact value (indented, quoted, nested,
+  duplicated or otherwise-valued keys are ignored); it waives only the two
+  unquoted `api_key`/`password` label rules, so a provider token, private-key
+  header, AWS key or quoted-JSON credential re-blocks the file even when
+  declared; and it is hard-refused for `project_shared` exactly like
+  `--force-unsafe` (ADR-0011 §5). Every honoured *and* refused declaration is
+  audit-logged with the decision it produced. Honoured ones count under a new
+  `exempted` outcome (`mem_add_redaction_stats`, Settings → Redaction) and are
+  named per run by `mm index`, the shell and `mem_index`; refused ones count
+  as `blocked` / `blocked_project_shared` and list as blocked. `mm memory doctor` now routes such a
+  file to `stale_index` rather than `stale_index_blocked`, since a plain
+  `mm index <file>` does clear it, and asks the indexer for that judgement
+  instead of scanning separately. Unchanged: ingress guards that scan request
+  content (`mem_add`, `mem_edit`, upload, chunk edit) do not consult the
+  declaration. `IndexingStats` gains `exempted_files` / `exempted_paths`, and
+  `privacy.enforce_write_guard` gains a `declared_exemption` keyword.
+  See [ADR-0006](docs/adr/0006-web-ui-folder-upload-redaction.md) Axis E.5.
+  (#2076)
 - **`mm memory doctor` reports a stale index.** Two new warn-severity checks,
   `stale_index` and `stale_index_blocked`, cover the case every existing check
   missed: a file that *has* chunks, still exists on disk, and is listed in the
