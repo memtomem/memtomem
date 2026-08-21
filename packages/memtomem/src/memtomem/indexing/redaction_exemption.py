@@ -57,6 +57,7 @@ it.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import yaml
@@ -74,6 +75,14 @@ _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 _OPEN = "---\n"
 
 _KEY = "redaction"
+
+#: Everything permitted between the key and its value: the colon and ordinary
+#: spacing, nothing else. YAML is happy with ``redaction : x``, a comment
+#: between the two, or the value on the next line, and those really are the
+#: same mapping — but the declaration's job is to be the one shape a reviewer
+#: recognises at a glance, and nobody writing it deliberately writes it any
+#: other way. Checking the source span rules out all of those at once.
+_SEPARATOR_RE = re.compile(r":[ \t]*")
 
 #: Stand-in for a declaration whose value is a collection. Never the literal,
 #: but it must occupy a slot so duplicate keys stay countable.
@@ -130,26 +139,45 @@ def _is_bare_plain_scalar(event: object, value: str) -> bool:
     )
 
 
-def _is_single_valid_mapping_document(block: str) -> bool:
-    """True when ``block`` is exactly one YAML document holding a mapping.
+def _semantic_declaration_count(root: object) -> int:
+    """How many top-level keys does the *document* call ``redaction``?
+
+    Composition resolves aliases and escapes, so this counts what a loader
+    would see — ``"redaction"``, ``!!str redaction`` and ``"\\x72edaction"``
+    included. None of those can *grant* the exemption (that stays lexical),
+    but each is still a second ``redaction`` key, and PyYAML's last-wins means
+    a canonical declaration followed by ``"redaction": {}`` describes a
+    document whose actual value is ``{}``. Honouring the earlier spelling
+    there would put this module at odds with what the file means — the same
+    class of defect as reading past the chunker's frontmatter boundary.
+    """
+    if not isinstance(root, yaml.MappingNode):
+        return 0
+    return sum(1 for key, _ in root.value if isinstance(key, yaml.ScalarNode) and key.value == _KEY)
+
+
+def _validated_root(block: str) -> object | None:
+    """The block's root node, or ``None`` if it is not one YAML mapping.
 
     ``yaml.parse`` checks syntax only: an alias with no anchor
     (``meta: *missing``), a merge key pointing at nothing, or a duplicated
     anchor all yield a clean event stream and would leave the walker happily
     reading a declaration out of a document no loader could construct. The
     documented contract is that malformed frontmatter declares nothing, so
-    composition — which resolves anchors and would reject all three — is the
-    thing that decides whether the block counts as well-formed.
+    composition — which resolves anchors and rejects all three — is the thing
+    that decides whether the block counts as well-formed.
     """
     try:
         documents = list(yaml.compose_all(block, Loader=yaml.SafeLoader))
     except (yaml.YAMLError, RecursionError):
-        return False
-    return len(documents) == 1 and isinstance(documents[0], yaml.MappingNode)
+        return None
+    if len(documents) != 1 or not isinstance(documents[0], yaml.MappingNode):
+        return None
+    return documents[0]
 
 
-def _top_level_declaration_values(block: str) -> list[object] | None:
-    """Return the value events of every top-level ``redaction`` key.
+def _top_level_declaration_values(block: str) -> list[tuple[object, int]] | None:
+    """Return ``(value event, key end offset)`` per top-level ``redaction`` key.
 
     ``None`` means the block is not a mapping this module will read at all
     (malformed YAML, a scalar or sequence document, or a parser that gave up).
@@ -183,11 +211,12 @@ def _top_level_declaration_values(block: str) -> list[object] | None:
     else:
         return None
 
-    values: list[object] = []
+    values: list[tuple[object, int]] = []
     depth = 1
     expect_key = True
     container_role: str | None = None
     pending_is_declaration = False
+    pending_key_end = -1
 
     for event in stream:
         if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
@@ -203,7 +232,7 @@ def _top_level_declaration_values(block: str) -> list[object] | None:
                     # ``redaction`` key when one appears twice, and dropping
                     # it here made the pair look unambiguous. Record the
                     # occurrence; the sentinel fails the literal check later.
-                    values.append(_COLLECTION_VALUE)
+                    values.append((_COLLECTION_VALUE, pending_key_end))
                     pending_is_declaration = False
             continue
         if isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
@@ -227,10 +256,11 @@ def _top_level_declaration_values(block: str) -> list[object] | None:
             pending_is_declaration = (
                 _is_bare_plain_scalar(event, _KEY) and event.start_mark.column == 0
             )
+            pending_key_end = event.end_mark.index
             expect_key = False
         else:
             if pending_is_declaration:
-                values.append(event)
+                values.append((event, pending_key_end))
             pending_is_declaration = False
             expect_key = True
     return values
@@ -270,24 +300,33 @@ def declared_exemption(path: Path, content: str) -> str | None:
     # frontmatter here either, so it declares nothing (and gets no frontmatter
     # tags or validity window either, for the same reason).
     block = _frontmatter_block(content)
-    if block is None or not _is_single_valid_mapping_document(block):
+    if block is None:
+        return None
+    root = _validated_root(block)
+    if root is None:
         return None
 
     values = _top_level_declaration_values(block)
     if not values:
         return None
-    if len(values) > 1:
+    # Two counts, because they answer different questions: the lexical walk
+    # decides what may *grant* the exemption, and composition decides how many
+    # keys the document actually has. A file may not declare twice under any
+    # spelling.
+    if len(values) > 1 or _semantic_declaration_count(root) > 1:
         # PyYAML's last-wins is not a rule worth inheriting when the answer
         # gates a secret scan.
         logger.warning(
             "redaction: %d top-level declarations in %s — ambiguous, ignored",
-            len(values),
+            max(len(values), _semantic_declaration_count(root)),
             privacy.sanitize_audit_value(str(path)),
         )
         return None
 
-    event = values[0]
-    if _is_bare_plain_scalar(event, privacy.DECLARED_EXEMPTION_DOCUMENTS_PATTERNS):
+    event, key_end = values[0]
+    if _is_bare_plain_scalar(
+        event, privacy.DECLARED_EXEMPTION_DOCUMENTS_PATTERNS
+    ) and _SEPARATOR_RE.fullmatch(block[key_end : event.start_mark.index]):
         return privacy.DECLARED_EXEMPTION_DOCUMENTS_PATTERNS
 
     logger.warning(

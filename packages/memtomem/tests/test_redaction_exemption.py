@@ -258,6 +258,66 @@ class TestFailClosed:
         # key/value alternation has to step over correctly.
         assert declared_exemption(Path("note.md"), content) == _DECL
 
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            # YAML reads each of these as {'redaction': 'documents-patterns'},
+            # and none is a forgery — only the file's own author can write
+            # them. They are refused because the declaration's job is to be
+            # the one shape a reviewer recognises at a glance, and nobody
+            # writing it deliberately writes it any other way.
+            ("space_before_the_colon", "---\nredaction : documents-patterns\n---\n"),
+            ("value_on_the_next_line", "---\nredaction:\n  documents-patterns\n---\n"),
+            ("comment_between_key_and_value", "---\nredaction: # why\n  documents-patterns\n---\n"),
+        ],
+    )
+    def test_only_the_canonical_one_line_spelling_declares(self, label: str, content: str) -> None:
+        assert declared_exemption(Path("note.md"), content) is None
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            # Each pairs a canonical declaration with a second ``redaction``
+            # key written some other way. None of those can *grant* the
+            # exemption, but PyYAML's last-wins means the document's actual
+            # value is ``{}`` — so honouring the canonical one would put this
+            # module at odds with what the file means.
+            (
+                "quoted_duplicate_after",
+                '---\nredaction: documents-patterns\n"redaction": {}\n---\n',
+            ),
+            (
+                "tagged_duplicate_after",
+                "---\nredaction: documents-patterns\n!!str redaction: {}\n---\n",
+            ),
+            (
+                "escaped_duplicate_after",
+                '---\nredaction: documents-patterns\n"\\x72edaction": {}\n---\n',
+            ),
+            (
+                "quoted_duplicate_before",
+                '---\n"redaction": {}\nredaction: documents-patterns\n---\n',
+            ),
+        ],
+    )
+    def test_a_duplicate_under_any_spelling_is_ambiguous(self, label: str, content: str) -> None:
+        assert declared_exemption(Path("note.md"), content) is None
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            ("extra_spaces_after_the_colon", "---\nredaction:   documents-patterns\n---\n"),
+            ("trailing_comment", "---\nredaction: documents-patterns # why this note\n---\n"),
+            ("trailing_whitespace", "---\nredaction: documents-patterns   \n---\n"),
+        ],
+    )
+    def test_ordinary_spacing_around_the_literal_still_declares(
+        self, label: str, content: str
+    ) -> None:
+        # The separator check must not have made the contract unwritable:
+        # these are how people actually type it.
+        assert declared_exemption(Path("note.md"), content) == _DECL
+
     def test_boundary_parity_with_the_chunker_at_both_ends(self) -> None:
         """Whatever this module reads as frontmatter, the chunker must too."""
         from memtomem.chunking.markdown import _FRONT_MATTER_RE
