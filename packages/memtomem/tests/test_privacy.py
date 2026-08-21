@@ -713,14 +713,32 @@ class TestDeclaredExemption:
         yield
         privacy.reset_for_tests()
 
-    def test_allowlist_is_a_subset_of_the_live_pattern_set(self):
-        # Keyed by literal regex string, not index: DEFAULT_PATTERNS is synced
-        # from memtomem-stm and a resync may reorder it. If an entry ever
-        # stops matching a live pattern, this fails rather than silently
-        # widening (or narrowing) what a declaration can waive.
+    def test_allowlist_is_pinned_by_value_and_lives_in_the_pattern_set(self):
+        # Two independent halves, because either alone is a false pass.
+        #
+        # (a) Exact equality against the literals. Membership + count would
+        # still pass if the allowlist were written as ``DEFAULT_PATTERNS[0:2]``
+        # and an STM resync moved a *token* rule into those slots — silently
+        # making it exemptible. The declaration's blast radius is defined by
+        # these two strings, so the test names them.
+        assert privacy.EXEMPTIBLE_DOC_PATTERNS == (
+            r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]",
+            r"(?i)(password|passwd|pwd)\s*[:=]",
+        )
+        # (b) Both are still live rules. If a resync edits either one, the
+        # allowlist would quietly stop matching anything and every declared
+        # file would block; failing here says which rule moved.
         for pattern in privacy.EXEMPTIBLE_DOC_PATTERNS:
             assert pattern in privacy.DEFAULT_PATTERNS
-        assert len(privacy.EXEMPTIBLE_DOC_PATTERNS) == 2
+
+    def test_covers_fails_closed_when_no_allowlist_entry_is_live(self, monkeypatch):
+        # The defensive arm of (b): if a sync ever leaves the allowlist with
+        # no live counterpart, an exemption must refuse, not sail through on
+        # an empty comparison set.
+        monkeypatch.setattr(privacy, "EXEMPTIBLE_DOC_PATTERNS", ("(?i)nothing-matches-this",))
+        hits = privacy.scan(self.LABEL_ONLY)
+        assert hits
+        assert privacy.exemption_covers(hits) is False
 
     def test_label_only_content_is_exempted(self):
         result = privacy.enforce_write_guard(

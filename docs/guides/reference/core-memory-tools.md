@@ -141,8 +141,11 @@ reads. In exchange it is deliberately narrow:
   — so a secret pasted into an exempt note later is still refused.
 - **Never for `project_shared`.** Hard-refused, exactly like `--force-unsafe`.
 - **Not silent.** Every honoured *and* refused declaration writes an audit
-  line, increments the `exempted` counter (`mem_add_redaction_stats`, Settings
-  → Redaction), and is named per run by `mm index`, the shell, and `mem_index`.
+  line naming which it was. An honoured one increments the `exempted` counter
+  (`mem_add_redaction_stats`, Settings → Redaction) and is named per run by
+  `mm index`, the shell, and `mem_index`; a refused one counts as `blocked`
+  (or `blocked_project_shared`) and appears in the blocked list, like any
+  other refusal.
 
 Note the asymmetry with `--force-unsafe`: a declaration is persistent, so it
 keeps applying on unattended re-indexes until someone removes it from the file.

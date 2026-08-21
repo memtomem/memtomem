@@ -301,9 +301,12 @@ bad outcome is not "a secret walks in" but "a note keeps documenting patterns
 without re-consent". Against that, each honoured *and each refused*
 declaration emits a structured audit line naming the decision
 (`emit_exemption_audit` — the existing bypass helper hard-codes
-`force_unsafe=True` and would have reported a mechanism nobody used), bumps a
-fifth counter `exempted` visible in `mem_add_redaction_stats` and Settings →
-Redaction, and is named per run by `mm index`, the shell, and `mem_index`.
+`force_unsafe=True` and would have reported a mechanism nobody used). An
+honoured one bumps a fifth counter `exempted`, visible in
+`mem_add_redaction_stats` and Settings → Redaction, and is named per run by
+`mm index`, the shell, and `mem_index`; a refused one keeps the ordinary
+`blocked` / `blocked_project_shared` counter and blocked listing, so the
+exemption's counter measures only what it actually waived.
 
 **Reopen trigger.** If the `exempted` counter shows the declaration being used
 outside pattern-documenting notes, or if a hit class beyond the two label

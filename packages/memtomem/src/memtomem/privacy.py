@@ -460,9 +460,19 @@ class RedactionHit:
 # (``docker inspect`` / ``kubectl get secret -o json`` / DB config), where an
 # arbitrary password matches no provider-token pattern, so nothing else in the
 # set would catch it.
+#: The two rules by value, so a reordering STM sync cannot re-point the
+#: allowlist at whatever moved into slots 0 and 1 — which is exactly what
+#: ``DEFAULT_PATTERNS[0], DEFAULT_PATTERNS[1]`` would have done, silently, and
+#: a membership-plus-count test would still have passed. ``test_privacy``
+#: asserts exact equality against these literals *and* their presence in
+#: ``DEFAULT_PATTERNS``, so a sync that edits either rule fails loudly here
+#: rather than widening or emptying the allowlist.
+_LABEL_RULE_UNQUOTED_KEYS = r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]"
+_LABEL_RULE_UNQUOTED_PASSWORD = r"(?i)(password|passwd|pwd)\s*[:=]"
+
 EXEMPTIBLE_DOC_PATTERNS: tuple[str, ...] = (
-    DEFAULT_PATTERNS[0],
-    DEFAULT_PATTERNS[1],
+    _LABEL_RULE_UNQUOTED_KEYS,
+    _LABEL_RULE_UNQUOTED_PASSWORD,
 )
 
 
@@ -480,7 +490,14 @@ def exemption_covers(hits: list[RedactionHit]) -> bool:
     """
     if not hits:
         return False
-    exemptible = {DEFAULT_PATTERNS.index(p) for p in EXEMPTIBLE_DOC_PATTERNS}
+    exemptible = {
+        DEFAULT_PATTERNS.index(p) for p in EXEMPTIBLE_DOC_PATTERNS if p in DEFAULT_PATTERNS
+    }
+    if not exemptible:
+        # An STM sync edited both rules out from under the allowlist. Fail
+        # closed rather than exempting on an empty match set; the pinned test
+        # names the real fix.
+        return False
     return all(h.pattern_index in exemptible for h in hits)
 
 

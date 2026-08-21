@@ -639,3 +639,36 @@ class TestDeclaredExemptionSymlinkParity:
         stats = await comp.index_engine.index_path(mem_dir, recursive=True)
 
         assert stats.exempted_files == 0
+
+
+class TestIndexingStatsFieldOrder:
+    """``IndexingStats`` is constructed positionally in the zero-result paths
+    (``IndexingStats(0, 0, 0, 0, 0, 0.0)``), and every optional field in it
+    carries an "appended last for positional construction compatibility"
+    comment. Inserting a new field mid-list would shift every later keyword's
+    neighbours for any caller that ever positions past the sixth — silent, and
+    invisible to a test that only reads the fields it set."""
+
+    def test_new_fields_are_appended_not_inserted(self):
+        from dataclasses import fields
+
+        from memtomem.models import IndexingStats
+
+        names = [f.name for f in fields(IndexingStats)]
+        assert names[-2:] == ["exempted_files", "exempted_paths"]
+        # The tail that existed before #2076 keeps its order.
+        assert names[-6:-2] == [
+            "namespaces_preserved_against_rules",
+            "namespaces_reassigned",
+            "namespace_moves",
+            "chunks_missing_vectors",
+        ]
+
+    def test_positional_prefix_still_means_what_it_did(self):
+        from memtomem.models import IndexingStats
+
+        stats = IndexingStats(1, 2, 3, 4, 5, 6.0)
+        assert (stats.total_files, stats.total_chunks, stats.indexed_chunks) == (1, 2, 3)
+        assert (stats.skipped_chunks, stats.deleted_chunks, stats.duration_ms) == (4, 5, 6.0)
+        assert stats.exempted_files == 0
+        assert stats.exempted_paths == ()

@@ -32,9 +32,17 @@ class TestRecognisedDeclarations:
             ("bare", "---\nredaction: documents-patterns\n---\n# doc\n"),
             ("crlf", "---\r\nredaction: documents-patterns\r\n---\r\n# doc\r\n"),
             ("bom", "﻿---\nredaction: documents-patterns\n---\n# doc\n"),
-            ("no_space", "---\nredaction:documents-patterns\n---\n"),
-            ("tab", "---\nredaction:\tdocuments-patterns\n---\n"),
             ("trailing_space", "---\nredaction: documents-patterns   \n---\n"),
+            # Uniform indentation still parses as the root mapping — the key
+            # belongs to the document, not to another field. YAML's answer,
+            # and the one that matters: what the threat model rules out is a
+            # key *nested under something else*, not one that is inset.
+            ("uniformly_indented", "---\n  redaction: documents-patterns\n---\n"),
+            # ``...`` is YAML's document-end marker, a legitimate close.
+            ("document_end_close", "---\nredaction: documents-patterns\n...\n"),
+            # A folded scalar ends at the dedent, so this ``redaction`` really
+            # is a sibling top-level key.
+            ("after_folded_scalar", "---\ndesc: >\n  x\nredaction: documents-patterns\n---\n"),
             (
                 "beside_other_keys",
                 "---\nname: note\ntags: [a, b]\nredaction: documents-patterns\n---\n",
@@ -58,7 +66,10 @@ class TestFailClosed:
             # belongs to *another field's value*, not to the document.
             ("block_scalar", "---\ndescription: |\n  redaction: documents-patterns\n---\n"),
             ("nested_map", "---\nmeta:\n  redaction: documents-patterns\n---\n"),
-            ("indented", "---\n  redaction: documents-patterns\n---\n"),
+            # No space after the colon: YAML reads the whole line as one plain
+            # scalar, so the document is not a mapping and declares nothing.
+            ("no_space_after_colon", "---\nredaction:documents-patterns\n---\n"),
+            ("tab_after_colon", "---\nredaction:\tdocuments-patterns\n---\n"),
             ("quoted", '---\nredaction: "documents-patterns"\n---\n'),
             ("single_quoted", "---\nredaction: 'documents-patterns'\n---\n"),
             ("commented", "---\n# redaction: documents-patterns\n---\n"),
@@ -70,9 +81,47 @@ class TestFailClosed:
             ("unterminated", "---\nredaction: documents-patterns\n\n# doc\n"),
             ("not_leading", "# doc\n\n---\nredaction: documents-patterns\n---\n"),
             ("other_keys_only", "---\ntags: [a]\n---\n"),
+            ("malformed_yaml", "---\nredaction: documents-patterns\n  bad: [\n---\n"),
+            ("sequence_root", "---\n- redaction: documents-patterns\n---\n"),
         ],
     )
     def test_not_declared(self, label: str, content: str) -> None:
+        assert declared_exemption(Path("note.md"), content) is None
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            # The regression that retired the line-matching parser: a
+            # multi-line **double**-quoted scalar carries its continuation
+            # lines at column zero, so "unindented" did not mean "top-level".
+            # There is no top-level ``redaction`` key here at all, and the
+            # `password:` line below it must stay blocked.
+            (
+                "double_quoted_continuation",
+                '---\ndescription: "first line\nredaction: documents-patterns\nlast"\n'
+                "password: hunter2\n---\n\nbody\n",
+            ),
+            (
+                "single_quoted_continuation",
+                "---\ndesc: 'a\nredaction: documents-patterns\nb'\n---\n",
+            ),
+            (
+                "flow_mapping_continuation",
+                "---\nmeta: {a: 1,\nredaction: documents-patterns}\n---\n",
+            ),
+            # The closing delimiter must be a complete line. The chunker's
+            # frontmatter regex accepts ``---suffix`` as a close (right for
+            # recovering what it can; wrong for a gate), so this parser
+            # anchors its own.
+            (
+                "suffixed_closing_delimiter",
+                "---\nredaction: documents-patterns\n---not-a-delimiter\n\napi_key=xyz\n",
+            ),
+        ],
+    )
+    def test_a_key_that_is_not_a_top_level_key_declares_nothing(
+        self, label: str, content: str
+    ) -> None:
         assert declared_exemption(Path("note.md"), content) is None
 
     def test_duplicate_keys_are_ambiguous(self) -> None:

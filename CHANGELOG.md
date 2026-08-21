@@ -52,9 +52,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   header, AWS key or quoted-JSON credential re-blocks the file even when
   declared; and it is hard-refused for `project_shared` exactly like
   `--force-unsafe` (ADR-0011 §5). Every honoured *and* refused declaration is
-  audit-logged, counted under a new `exempted` outcome
-  (`mem_add_redaction_stats`, Settings → Redaction), and named per run by
-  `mm index`, the shell and `mem_index`. `mm memory doctor` now routes such a
+  audit-logged with the decision it produced. Honoured ones count under a new
+  `exempted` outcome (`mem_add_redaction_stats`, Settings → Redaction) and are
+  named per run by `mm index`, the shell and `mem_index`; refused ones count
+  as `blocked` / `blocked_project_shared` and list as blocked. `mm memory doctor` now routes such a
   file to `stale_index` rather than `stale_index_blocked`, since a plain
   `mm index <file>` does clear it, and asks the indexer for that judgement
   instead of scanning separately. Unchanged: ingress guards that scan request
