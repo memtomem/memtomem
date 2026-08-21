@@ -150,6 +150,13 @@ def _semantic_declaration_count(root: object) -> int:
     document whose actual value is ``{}``. Honouring the earlier spelling
     there would put this module at odds with what the file means — the same
     class of defect as reading past the chunker's frontmatter boundary.
+
+    Counts the node's *text*, not its constructed value, so a key tagged into
+    another type (``!!null redaction: x``) is counted too — which costs a file
+    carrying both that and a real declaration its declaration. Deliberate: the
+    alternative is running YAML construction inside a security gate to be more
+    permissive about an input nobody writes, and trading loader surface for
+    permissiveness is the wrong direction. The failure is closed.
     """
     if not isinstance(root, yaml.MappingNode):
         return 0

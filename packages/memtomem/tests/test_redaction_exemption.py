@@ -318,6 +318,23 @@ class TestFailClosed:
         # these are how people actually type it.
         assert declared_exemption(Path("note.md"), content) == _DECL
 
+    def test_a_retagged_lookalike_key_costs_the_declaration(self) -> None:
+        """Deliberate over-strictness, pinned so it stays deliberate.
+
+        ``!!null redaction: x`` constructs to the key ``None``, so a loader
+        sees only one real ``redaction`` key here — but the duplicate count
+        reads node text, not constructed values, and refuses. Counting by
+        construction would mean running YAML construction inside a security
+        gate to be *more permissive* about an input nobody writes; the failure
+        is closed, and this is the cheaper side of the trade.
+        """
+        import yaml
+
+        block = "!!null redaction: x\nredaction: documents-patterns\n"
+        # Pin the premise: a loader really does see one ``redaction`` key.
+        assert yaml.safe_load(block) == {None: "x", "redaction": _DECL}
+        assert declared_exemption(Path("note.md"), f"---\n{block}---\n") is None
+
     def test_boundary_parity_with_the_chunker_at_both_ends(self) -> None:
         """Whatever this module reads as frontmatter, the chunker must too."""
         from memtomem.chunking.markdown import _FRONT_MATTER_RE
