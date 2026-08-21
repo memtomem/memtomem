@@ -31,6 +31,18 @@ The two questions, and where the answers are consumed:
    ``LockFileEx``) while uninstall/reset take ``LOCK_EX`` (``MsvcrtLocker`` /
    ``msvcrt.locking``) — different APIs over overlapping byte ranges.
 
+What was measured (``windows-latest``, one throwaway matrix run over the
+three portalocker versions this repo's ``>=3.0`` floor can resolve — 3.1.1,
+3.2.0, 4.1.0): **every** version contends. A second same-process handle asking
+for ``LOCK_EX | LOCK_NB`` is refused with ``AlreadyLocked``, so a self-probe
+answers ``live``; the registry's self-skip is an optimization, not correctness.
+The two backends also contend with each other in both directions. Only the
+*shape* of the refusal moves with the version: 3.2.0+ refuse the exclusive lock
+through ``msvcrt.locking`` (``OSError``, errno 13), while 3.0/3.1 route
+exclusive locks through ``LockFileEx`` too (``pywintypes.error``, winerror 33 —
+not an ``OSError``). The helpers below classify rather than pin that shape,
+which is exactly the drift a bare comment could not have caught.
+
 Handles are opened ``"a+b"`` throughout, matching ``_mutation_lock``:
 ``msvcrt.locking`` rejects a read-only handle and ``"w"`` would truncate.
 """
@@ -102,12 +114,24 @@ def _handle(path: Path) -> Iterator[IO[bytes]]:
         fp.close()
 
 
-def _assert_msvcrt_contention(exc: portalocker.AlreadyLocked) -> None:
-    """The exclusive path refused, and refused *for contention*."""
+def _assert_exclusive_contention(exc: portalocker.AlreadyLocked) -> None:
+    """The exclusive path refused, and refused *for contention*.
+
+    Which backend refused is version-dependent and deliberately not pinned:
+    ``portalocker>=3.0`` is the declared floor, and 3.0/3.1 route exclusive
+    locks through ``LockFileEx`` (a ``pywintypes.error``, which is **not** an
+    ``OSError``) while 3.2.0 onwards use ``msvcrt.locking`` (an ``OSError``
+    from the contention errno set). Measured on both — see the module
+    docstring. What is pinned is the classification: contention, either way.
+    """
     cause = exc.__cause__
-    assert isinstance(cause, OSError), f"expected an OSError cause, got {cause!r}"
-    assert cause.errno in _MSVCRT_CONTENTION_ERRNOS, f"unexpected errno {cause.errno}"
-    print(f"[#2102] msvcrt.locking refused with errno={cause.errno}")
+    if isinstance(cause, OSError):
+        assert cause.errno in _MSVCRT_CONTENTION_ERRNOS, f"unexpected errno {cause.errno}"
+        print(f"[#2102] msvcrt.locking refused with errno={cause.errno}")
+        return
+    winerror = getattr(cause, "winerror", None)
+    assert winerror == _ERROR_LOCK_VIOLATION, f"unexpected refusal cause {cause!r}"
+    print(f"[#2102] LockFileEx refused the exclusive lock with winerror={winerror}")
 
 
 def _assert_win32_contention(exc: portalocker.AlreadyLocked) -> None:
@@ -128,7 +152,7 @@ class TestSameProcessExclusive:
             try:
                 with pytest.raises(portalocker.AlreadyLocked) as excinfo:
                     portalocker.lock(contender, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                _assert_msvcrt_contention(excinfo.value)
+                _assert_exclusive_contention(excinfo.value)
             finally:
                 portalocker.unlock(holder)
 
@@ -172,7 +196,7 @@ class TestMixedBackendBarrier:
             try:
                 with pytest.raises(portalocker.AlreadyLocked) as excinfo:
                     portalocker.lock(uninstall, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                _assert_msvcrt_contention(excinfo.value)
+                _assert_exclusive_contention(excinfo.value)
             finally:
                 portalocker.unlock(server)
 

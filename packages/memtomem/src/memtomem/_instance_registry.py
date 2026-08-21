@@ -49,7 +49,13 @@ Layout (all under :func:`memtomem._runtime_paths.runtime_dir`):
     over each of its two write boundaries (``initialize`` and the wipe).
     Both sides fail closed — a barrier that cannot be acquired means a
     destructive operation may be in flight, and neither startup nor
-    deletion may proceed on a guess. Lock ordering is always **barrier →
+    deletion may proceed on a guess. The two sides use different Windows
+    APIs (shared goes through ``LockFileEx``, exclusive through
+    ``msvcrt.locking`` since portalocker 3.2.0), so that they contend with
+    each other at all is measured in both directions rather than assumed
+    (#2102, ``tests/test_windows_lock_semantics.py``) — as is the converse
+    the shared side needs, that two shared holders in one process still
+    coexist. Lock ordering is always **barrier →
     mutation sidecar**; no path acquires them the other way round.
 
     Scope, stated honestly: the barrier only closes the race between peers
@@ -360,8 +366,9 @@ _atexit_installed = False
 
 # Intra-process half of the mutation lock (see module docstring). This is
 # load-bearing and unconditional: it serializes this process's mutation spans
-# whatever the file backend does with same-process acquisitions, leaving the
-# file lock responsible for cross-process serialization only. It also keeps
+# whatever the file backend does with same-process acquisitions (measured to
+# contend, #2102), leaving the file lock responsible for cross-process
+# serialization only. It also keeps
 # the file lock's bounded non-blocking poll budget reserved for genuine
 # cross-process contention instead of this process's own threads.
 _mutation_thread_lock = threading.Lock()
@@ -840,13 +847,17 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
                         return None
                     inst = RegisteredInstance(path=path, pid=pid, _fp=fp)
                     # Publish into the active dict while STILL holding the
-                    # mutation lock: the on-disk sentinel must never be
-                    # visible to a same-process enumeration before the
-                    # in-memory record exists, or the self-probe skip fails
-                    # and enumeration falls through to probing our own
-                    # freshly registered entry. ``_state_guard`` nests inside
-                    # the mutation lock here; no path nests them in the
-                    # opposite order, so there is no inversion.
+                    # mutation lock, so the on-disk sentinel is never visible
+                    # to a same-process enumeration before the in-memory
+                    # record exists. What that buys is uniformity, not a
+                    # different answer: an enumeration racing in earlier
+                    # would fall through to probing our own fresh entry and
+                    # (measured, #2102) find it ``live`` anyway. Publishing
+                    # under the lock keeps every self-directed read on the
+                    # ``_active`` path and spares it that open+lock.
+                    # ``_state_guard`` nests inside the mutation lock here;
+                    # no path nests them in the opposite order, so there is
+                    # no inversion.
                     with _state_guard:
                         _active[path] = inst
                         global _atexit_installed
@@ -1158,9 +1169,17 @@ def enumerate_live_instances(store_digest: str) -> EnumerationResult:
 
     This process's own active registrations are included directly from
     ``_active`` without probing — the in-memory record is authoritative
-    for locks this process already holds, so enumeration never depends on
-    how a self-directed probe behaves. Every other entry, same-pid ones
-    included, is probed. Stale entries older than the grace period are
+    for locks this process already holds. The skip is an optimization, not
+    a correctness requirement: a self-directed probe was measured to
+    *contend* on Windows (#2102 — a second same-process handle asking for
+    ``LOCK_EX | LOCK_NB`` is refused with ``AlreadyLocked`` on every
+    portalocker version this package's floor resolves), as POSIX ``flock``
+    on a second open file description does, so probing ourselves would
+    answer ``live`` — the correct answer, at the cost of an open and a
+    lock call. Skipping also keeps enumeration independent of backend
+    drift; the measurement is pinned by
+    ``tests/test_windows_lock_semantics.py``. Every other entry, same-pid
+    ones included, is probed. Stale entries older than the grace period are
     opportunistically removed; unparseable names follow the same
     unlocked+grace rule. Fails open: any uncertainty yields
     ``complete=False`` and the caller must not warn.
