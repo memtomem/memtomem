@@ -31,17 +31,19 @@ The two questions, and where the answers are consumed:
    ``LockFileEx``) while uninstall/reset take ``LOCK_EX`` (``MsvcrtLocker`` /
    ``msvcrt.locking``) — different APIs over overlapping byte ranges.
 
-What was measured (``windows-latest``, one throwaway matrix run over the
-three portalocker versions this repo's ``>=3.0`` floor can resolve — 3.1.1,
-3.2.0, 4.1.0): **every** version contends. A second same-process handle asking
+What was measured (``windows-latest``, a throwaway matrix run over three
+portalocker versions the ``>=3.0`` floor admits — 3.1.1, 3.2.0, 4.1.0; 3.0.0
+was not run): **all three** contend. A second same-process handle asking
 for ``LOCK_EX | LOCK_NB`` is refused with ``AlreadyLocked``, so a self-probe
 answers ``live``; the registry's self-skip is an optimization, not correctness.
 The two backends also contend with each other in both directions. Only the
-*shape* of the refusal moves with the version: 3.2.0+ refuse the exclusive lock
-through ``msvcrt.locking`` (``OSError``, errno 13), while 3.0/3.1 route
-exclusive locks through ``LockFileEx`` too (``pywintypes.error``, winerror 33 —
-not an ``OSError``). The helpers below classify rather than pin that shape,
-which is exactly the drift a bare comment could not have caught.
+*shape* of the refusal moves with the version: 3.2.0 and 4.1.0 refuse the
+exclusive lock through ``msvcrt.locking`` (``OSError``, errno 13), while 3.1.1
+routes exclusive locks through ``LockFileEx`` too (``pywintypes.error``,
+winerror 33 — not an ``OSError``). The assertions below therefore rest on
+``AlreadyLocked``, portalocker's public contention signal; the cause behind it
+is reported, not required, so a future version that keeps the contract while
+re-chaining its causes does not turn this suite red for the wrong reason.
 
 Handles are opened ``"a+b"`` throughout, matching ``_mutation_lock``:
 ``msvcrt.locking`` rejects a read-only handle and ``"w"`` would truncate.
@@ -114,32 +116,30 @@ def _handle(path: Path) -> Iterator[IO[bytes]]:
         fp.close()
 
 
-def _assert_exclusive_contention(exc: portalocker.AlreadyLocked) -> None:
-    """The exclusive path refused, and refused *for contention*.
+def _report_cause(exc: portalocker.AlreadyLocked, label: str) -> None:
+    """Record which backend refused, without making it a requirement.
 
-    Which backend refused is version-dependent and deliberately not pinned:
-    ``portalocker>=3.0`` is the declared floor, and 3.0/3.1 route exclusive
-    locks through ``LockFileEx`` (a ``pywintypes.error``, which is **not** an
-    ``OSError``) while 3.2.0 onwards use ``msvcrt.locking`` (an ``OSError``
-    from the contention errno set). Measured on both — see the module
-    docstring. What is pinned is the classification: contention, either way.
+    ``AlreadyLocked`` is portalocker's public "this is contention" signal and
+    is what the tests assert. Which backend produced it, and how the original
+    error is chained, is version-dependent: 3.1.1 refuses an exclusive lock
+    through ``LockFileEx`` (``pywintypes.error``, winerror 33 — not an
+    ``OSError``), 3.2.0 and 4.1.0 through ``msvcrt.locking`` (``OSError``,
+    errno 13). Pinning that shape would fail a future release that keeps the
+    contract and re-chains its causes, so it is printed for the record (the
+    #2102 probe run captures it with ``-s``) and only sanity-checked when a
+    cause is present at all.
     """
     cause = exc.__cause__
-    if isinstance(cause, OSError):
+    if isinstance(cause, OSError) and cause.errno is not None:
         assert cause.errno in _MSVCRT_CONTENTION_ERRNOS, f"unexpected errno {cause.errno}"
-        print(f"[#2102] msvcrt.locking refused with errno={cause.errno}")
+        print(f"[#2102] {label}: msvcrt.locking, errno={cause.errno}")
         return
     winerror = getattr(cause, "winerror", None)
-    assert winerror == _ERROR_LOCK_VIOLATION, f"unexpected refusal cause {cause!r}"
-    print(f"[#2102] LockFileEx refused the exclusive lock with winerror={winerror}")
-
-
-def _assert_win32_contention(exc: portalocker.AlreadyLocked) -> None:
-    """The shared path refused with ``ERROR_LOCK_VIOLATION``."""
-    cause = exc.__cause__
-    winerror = getattr(cause, "winerror", None)
-    assert winerror == _ERROR_LOCK_VIOLATION, f"unexpected winerror {winerror!r} ({cause!r})"
-    print(f"[#2102] LockFileEx refused with winerror={winerror}")
+    if winerror is not None:
+        assert winerror == _ERROR_LOCK_VIOLATION, f"unexpected winerror {winerror!r}"
+        print(f"[#2102] {label}: LockFileEx, winerror={winerror}")
+        return
+    print(f"[#2102] {label}: AlreadyLocked with cause {cause!r}")
 
 
 class TestSameProcessExclusive:
@@ -152,7 +152,7 @@ class TestSameProcessExclusive:
             try:
                 with pytest.raises(portalocker.AlreadyLocked) as excinfo:
                     portalocker.lock(contender, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                _assert_exclusive_contention(excinfo.value)
+                _report_cause(excinfo.value, "second same-process handle")
             finally:
                 portalocker.unlock(holder)
 
@@ -167,21 +167,18 @@ class TestSameProcessExclusive:
         finally:
             inst.cleanup()
 
-    def test_failed_probe_does_not_release_the_holder(self, lock_path: Path) -> None:
+    def test_probing_live_does_not_release_the_lock(self, rt: Path, db: Path) -> None:
         """``_probe_entry`` closes its handle without unlocking on ``live``.
-        A refused attempt plus that close must leave the holder's lock
-        standing — otherwise probing would strip the lock it just detected."""
-        with _handle(lock_path) as holder:
-            portalocker.lock(holder, portalocker.LOCK_EX)
-            try:
-                with _handle(lock_path) as probe:
-                    with pytest.raises(portalocker.AlreadyLocked):
-                        portalocker.lock(probe, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                with _handle(lock_path) as after:
-                    with pytest.raises(portalocker.AlreadyLocked):
-                        portalocker.lock(after, portalocker.LOCK_EX | portalocker.LOCK_NB)
-            finally:
-                portalocker.unlock(holder)
+        Driving the real function twice proves the first probe left the
+        registration's lock standing — if it had released it, the second
+        call would report ``stale`` and the caller would GC a live entry."""
+        inst = reg.register_instance(db)
+        assert inst is not None
+        try:
+            assert reg._probe_entry(inst.path) == "live"
+            assert reg._probe_entry(inst.path) == "live"
+        finally:
+            inst.cleanup()
 
 
 class TestMixedBackendBarrier:
@@ -196,7 +193,7 @@ class TestMixedBackendBarrier:
             try:
                 with pytest.raises(portalocker.AlreadyLocked) as excinfo:
                     portalocker.lock(uninstall, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                _assert_exclusive_contention(excinfo.value)
+                _report_cause(excinfo.value, "exclusive vs shared holder")
             finally:
                 portalocker.unlock(server)
 
@@ -208,7 +205,7 @@ class TestMixedBackendBarrier:
             try:
                 with pytest.raises(portalocker.AlreadyLocked) as excinfo:
                     portalocker.lock(server, portalocker.LOCK_SH | portalocker.LOCK_NB)
-                _assert_win32_contention(excinfo.value)
+                _report_cause(excinfo.value, "shared vs exclusive holder")
             finally:
                 portalocker.unlock(uninstall)
 
@@ -222,3 +219,25 @@ class TestMixedBackendBarrier:
                 portalocker.unlock(second)
             finally:
                 portalocker.unlock(first)
+
+    @pytest.mark.parametrize("release_first", [True, False])
+    def test_releasing_one_shared_holder_leaves_the_other(
+        self, lock_path: Path, release_first: bool
+    ) -> None:
+        """Coexisting is not enough: each shared holder must fence the
+        barrier on its own, or one server shutting down would open a window
+        for uninstall while another server still holds the store. Released
+        in either order, the survivor still refuses an exclusive contender.
+        """
+        with _handle(lock_path) as first, _handle(lock_path) as second:
+            portalocker.lock(first, portalocker.LOCK_SH)
+            portalocker.lock(second, portalocker.LOCK_SH | portalocker.LOCK_NB)
+            leaving, staying = (first, second) if release_first else (second, first)
+            portalocker.unlock(leaving)
+            try:
+                with _handle(lock_path) as uninstall:
+                    with pytest.raises(portalocker.AlreadyLocked) as excinfo:
+                        portalocker.lock(uninstall, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                    _report_cause(excinfo.value, "exclusive vs surviving shared holder")
+            finally:
+                portalocker.unlock(staying)

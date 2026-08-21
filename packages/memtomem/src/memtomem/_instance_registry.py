@@ -367,7 +367,8 @@ _atexit_installed = False
 # Intra-process half of the mutation lock (see module docstring). This is
 # load-bearing and unconditional: it serializes this process's mutation spans
 # whatever the file backend does with same-process acquisitions (measured to
-# contend, #2102), leaving the file lock responsible for cross-process
+# contend on Windows for portalocker 3.1.1/3.2.0/4.1.0, #2102 — but this layer
+# does not depend on that), leaving the file lock responsible for cross-process
 # serialization only. It also keeps
 # the file lock's bounded non-blocking poll budget reserved for genuine
 # cross-process contention instead of this process's own threads.
@@ -1172,8 +1173,9 @@ def enumerate_live_instances(store_digest: str) -> EnumerationResult:
     for locks this process already holds. The skip is an optimization, not
     a correctness requirement: a self-directed probe was measured to
     *contend* on Windows (#2102 — a second same-process handle asking for
-    ``LOCK_EX | LOCK_NB`` is refused with ``AlreadyLocked`` on every
-    portalocker version this package's floor resolves), as POSIX ``flock``
+    ``LOCK_EX | LOCK_NB`` is refused with ``AlreadyLocked``; measured on
+    portalocker 3.1.1, 3.2.0 and 4.1.0, which is not every release the
+    ``>=3.0`` floor admits), as POSIX ``flock``
     on a second open file description does, so probing ourselves would
     answer ``live`` — the correct answer, at the cost of an open and a
     lock call. Skipping also keeps enumeration independent of backend
