@@ -33,16 +33,23 @@ class TestRecognisedDeclarations:
             ("crlf", "---\r\nredaction: documents-patterns\r\n---\r\n# doc\r\n"),
             ("bom", "﻿---\nredaction: documents-patterns\n---\n# doc\n"),
             ("trailing_space", "---\nredaction: documents-patterns   \n---\n"),
-            # Uniform indentation still parses as the root mapping — the key
-            # belongs to the document, not to another field. YAML's answer,
-            # and the one that matters: what the threat model rules out is a
-            # key *nested under something else*, not one that is inset.
-            ("uniformly_indented", "---\n  redaction: documents-patterns\n---\n"),
-            # ``...`` is YAML's document-end marker, a legitimate close.
-            ("document_end_close", "---\nredaction: documents-patterns\n...\n"),
             # A folded scalar ends at the dedent, so this ``redaction`` really
             # is a sibling top-level key.
             ("after_folded_scalar", "---\ndesc: >\n  x\nredaction: documents-patterns\n---\n"),
+            # Real notes carry other frontmatter. Each of these puts a
+            # collection at depth 1, which the depth-1 alternation has to
+            # resume from correctly — getting it backwards silently misreads
+            # every entry after the first ``tags: [...]``.
+            (
+                "after_flow_sequence",
+                "---\ntags: [a, b]\nvalid_from: 2026-01-01\nredaction: documents-patterns\n---\n",
+            ),
+            (
+                "after_block_sequence",
+                "---\ntags:\n  - a\n  - b\nredaction: documents-patterns\n---\n",
+            ),
+            ("after_nested_mapping", "---\nmeta:\n  a: 1\nredaction: documents-patterns\n---\n"),
+            ("before_block_sequence", "---\nredaction: documents-patterns\ntags:\n  - a\n---\n"),
             (
                 "beside_other_keys",
                 "---\nname: note\ntags: [a, b]\nredaction: documents-patterns\n---\n",
@@ -83,6 +90,16 @@ class TestFailClosed:
             ("other_keys_only", "---\ntags: [a]\n---\n"),
             ("malformed_yaml", "---\nredaction: documents-patterns\n  bad: [\n---\n"),
             ("sequence_root", "---\n- redaction: documents-patterns\n---\n"),
+            # Root-level to YAML, but not the shape this feature documents:
+            # the contract says top-level *and unindented*, and the column
+            # check is what keeps the two from drifting apart.
+            ("uniformly_indented", "---\n  redaction: documents-patterns\n---\n"),
+            ("flow_root_mapping", "---\n{redaction: documents-patterns}\n---\n"),
+            # ``...`` is a YAML document-end marker, but this repository's
+            # frontmatter contract is ``---`` (chunking/markdown.py). A second
+            # grammar known only to this module would let a file declare an
+            # exemption while every other reader sees no frontmatter at all.
+            ("yaml_document_end_close", "---\nredaction: documents-patterns\n...\n"),
         ],
     )
     def test_not_declared(self, label: str, content: str) -> None:
@@ -123,6 +140,40 @@ class TestFailClosed:
         self, label: str, content: str
     ) -> None:
         assert declared_exemption(Path("note.md"), content) is None
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            # ``compose`` resolves aliases and escapes before anything can
+            # look at them, so an earlier revision saw each of these as the
+            # literal. The declaration has to be the shape a reviewer opening
+            # the file can recognise, not any shape that evaluates to it.
+            (
+                "alias_as_the_key",
+                "---\nkeyname: &k redaction\n*k: documents-patterns\npassword: hunter2\n---\n",
+            ),
+            (
+                "alias_as_the_value",
+                "---\nkind: &v documents-patterns\nredaction: *v\npassword: hunter2\n---\n",
+            ),
+            ("escaped_key", '---\n"\\x72edaction": documents-patterns\npassword: hunter2\n---\n'),
+            ("quoted_key", '---\n"redaction": documents-patterns\n---\n'),
+            (
+                "declaration_inside_a_sequence",
+                "---\ntags:\n  - redaction: documents-patterns\n---\n",
+            ),
+        ],
+    )
+    def test_only_the_written_literal_declares(self, label: str, content: str) -> None:
+        assert declared_exemption(Path("note.md"), content) is None
+
+    def test_deeply_nested_frontmatter_does_not_crash_the_indexer(self) -> None:
+        # A gate must answer "no" (or, here, read the legitimate key it can
+        # see) rather than propagate a parser failure and fail the whole run
+        # for a file it merely could not read. The composing parser raised
+        # RecursionError past ~500 levels; the event parser is iterative.
+        content = "---\nredaction: documents-patterns\nx: " + "[" * 600 + "]" * 600 + "\n---\n"
+        assert declared_exemption(Path("note.md"), content) == _DECL
 
     def test_duplicate_keys_are_ambiguous(self) -> None:
         # YAML's last-wins is not a rule worth guessing at when the answer

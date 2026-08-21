@@ -494,9 +494,11 @@ def exemption_covers(hits: list[RedactionHit]) -> bool:
         DEFAULT_PATTERNS.index(p) for p in EXEMPTIBLE_DOC_PATTERNS if p in DEFAULT_PATTERNS
     }
     if not exemptible:
-        # An STM sync edited both rules out from under the allowlist. Fail
-        # closed rather than exempting on an empty match set; the pinned test
-        # names the real fix.
+        # Redundant by construction — ``hits`` is non-empty, so an empty
+        # comparison set already makes the ``all(...)`` below false. Kept
+        # explicit because "what happens if a sync empties the allowlist" is
+        # the first question a reader of a security gate asks, and an answer
+        # that depends on reading the next line is a worse answer.
         return False
     return all(h.pattern_index in exemptible for h in hits)
 
