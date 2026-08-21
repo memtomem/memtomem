@@ -102,14 +102,56 @@ opt-in: a blocked run shows a toast pointing at the "Index without privacy
 gate" checkbox, and re-running with it enabled indexes the file. Both are
 explicit request controls on human-facing surfaces, and the checkbox is
 one-shot: it clears itself when the run starts, so each bypass requires a
-fresh opt-in. The one hard guarantee is on the agent
-side: the `mem_index` MCP tool has no `force_unsafe` parameter, so an
-agent calling `mem_index` cannot bypass the gate. The bypass is
+fresh opt-in. The `mem_index` MCP tool has no `force_unsafe` parameter, so
+an agent calling `mem_index` cannot request this bypass. Both bypasses are
 hard-refused for files that resolve to the git-tracked `project_shared`
 scope regardless of caller.
 
-See [ADR-0006](../../adr/0006-web-ui-folder-upload-redaction.md) for the
-full trust-boundary design.
+### Documenting the patterns in a note
+
+The gate's two broad label rules match on the keyword plus `=` or `:`,
+independent of what follows — so a note that *documents* them (writing
+`api_key=` in prose) trips its own guard. Because a blocked file is skipped
+rather than failed, its old chunks stay in the DB and `mem_search` keeps
+answering from pre-trip content indefinitely.
+
+A Markdown note can declare an exemption for itself
+([#2076](https://github.com/memtomem/memtomem/issues/2076)):
+
+```markdown
+---
+redaction: documents-patterns
+---
+
+The guard matches `api_key=` on the keyword alone.
+```
+
+Unlike `--force-unsafe`, this reaches every indexing path — including the
+ones that have no bypass flag at all (`mem_index`, the file watcher, the
+debounce drain) — because it travels with the content the gate already
+reads. In exchange it is deliberately narrow:
+
+- **Markdown only, exact literal, fails closed.** One *unindented* top-level
+  `redaction: documents-patterns` key in the leading frontmatter block.
+  Indented, quoted, commented, nested under another field, duplicated, or any
+  other value means no exemption.
+- **Label hits only.** It waives only the two unquoted `api_key`/`password`
+  label rules. A provider token, private-key header, AWS key, or a quoted-JSON
+  credential (`"password": "…"`) re-blocks the file even with the declaration
+  — so a secret pasted into an exempt note later is still refused.
+- **Never for `project_shared`.** Hard-refused, exactly like `--force-unsafe`.
+- **Not silent.** Every honoured *and* refused declaration writes an audit
+  line, increments the `exempted` counter (`mem_add_redaction_stats`, Settings
+  → Redaction), and is named per run by `mm index`, the shell, and `mem_index`.
+
+Note the asymmetry with `--force-unsafe`: a declaration is persistent, so it
+keeps applying on unattended re-indexes until someone removes it from the file.
+That is the point — it is how the note stays searchable — but it means the
+declaration should describe why the file needs it, and only files that really
+document the patterns should carry one.
+
+See [ADR-0006](../../adr/0006-web-ui-folder-upload-redaction.md) (Axis E,
+Axis E.5) for the full trust-boundary design.
 
 ### Namespace-scoped indexing
 
@@ -161,9 +203,12 @@ mm index --status                   # snapshot queue depth + oldest entry
 All three accept `--json` for one-line scripted output.
 
 `--debounce-window` and `--flush` enforce the same redaction gate as direct
-indexing — there's no way to opt out (`--force-unsafe` errors if combined
-with any of the three debounce flags, since the queue only carries
-`path` / `namespace` / `force`). A blocked file is not silently marked
+indexing, and there is no flag to opt out (`--force-unsafe` errors if
+combined with any of the three debounce flags, since the queue only carries
+`path` / `namespace` / `force`). A Markdown file's own
+`redaction: documents-patterns` declaration *is* honoured here — it lives in
+the content, not in the queue entry — and is the only way such a file drains
+cleanly. A blocked file is not silently marked
 indexed: it surfaces as an `Errors` entry in the drain result and **stays
 queued**, retried on every subsequent drain. The gate re-runs on each retry
 (it fires before the content-hash skip), so the entry keeps erroring until
@@ -412,12 +457,14 @@ You can also pass plain text as `content` — it will be placed in the template 
 - A `force_unsafe` write is a one-time bypass, but the file it leaves behind
   is permanent. Later CRUD writes (`mm add`, `mem_add`, `mem_edit`) do not
   rescan it, but every automated re-index path — the `mem_index` MCP tool,
-  the file watcher, the debounce queue — scans the content again, blocks on
-  it again, and offers no bypass; re-forcing it takes an explicit opt-in on
-  a human-facing surface, either `mm index --force-unsafe` or the Web UI's
-  "Index without privacy gate" checkbox. If the match was a false positive
-  you will keep re-forcing it; if it was a real secret, rotate it and edit
-  the file.
+  the file watcher, the debounce queue — scans the content again and blocks
+  on it again; re-forcing it takes an explicit opt-in on a human-facing
+  surface, either `mm index --force-unsafe` or the Web UI's "Index without
+  privacy gate" checkbox. If it was a real secret, rotate it and edit the
+  file. If it was a false positive in a Markdown note that *documents* the
+  patterns, the standing answer is a `redaction: documents-patterns`
+  frontmatter declaration (see "Documenting the patterns in a note" above),
+  which the automated paths do honour — for label-shaped hits only.
 
 ### `mem_batch_add` — Add multiple notes
 

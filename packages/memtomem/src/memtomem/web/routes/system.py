@@ -863,6 +863,9 @@ async def add_memory_dir(
                 "blocked_files": stats.blocked_files,
                 "blocked_paths": list(stats.blocked_paths),
                 "blocked_project_shared_files": stats.blocked_project_shared_files,
+                # #2076: files indexed under a frontmatter-declared exemption.
+                "exempted_files": stats.exempted_files,
+                "exempted_paths": list(stats.exempted_paths),
                 "chunks_missing_vectors": stats.chunks_missing_vectors,
                 # The advisory fields travel with every other index result;
                 # this hand-built payload omitted them, so the shared reporter
@@ -1182,6 +1185,11 @@ async def reindex_all(
             "duration_ms": stats.duration_ms,
             "blocked_files": stats.blocked_files,
             "blocked_project_shared_files": stats.blocked_project_shared_files,
+            # #2076, unconditional for the same reason as ``retryable_errors``
+            # below: a zero must be distinguishable from a server that
+            # predates the field. ``exempted_paths`` stays conditional, like
+            # ``blocked_paths`` — it is a detail of this counter.
+            "exempted_files": stats.exempted_files,
             # Both keys are unconditional (``errors`` was previously omitted
             # when empty): a client reading ``retryable_errors`` must be able
             # to tell "this root had no retryable failures" from "this server
@@ -1202,6 +1210,8 @@ async def reindex_all(
         }
         if stats.blocked_files:
             entry["blocked_paths"] = list(stats.blocked_paths)
+        if stats.exempted_files:
+            entry["exempted_paths"] = list(stats.exempted_paths)
         results.append(entry)
     all_errors = [e for r in results for e in r.get("errors", [])]
     all_retryable_errors = [
@@ -1209,11 +1219,14 @@ async def reindex_all(
     ]
     total_blocked = 0
     total_blocked_ps = 0
+    total_exempted = 0
     for r in results:
         b = r.get("blocked_files", 0)
         total_blocked += b if isinstance(b, int) else 0
         bps = r.get("blocked_project_shared_files", 0)
         total_blocked_ps += bps if isinstance(bps, int) else 0
+        ex = r.get("exempted_files", 0)
+        total_exempted += ex if isinstance(ex, int) else 0
     return {
         "ok": len(all_errors) == 0,
         "results": results,
@@ -1221,6 +1234,7 @@ async def reindex_all(
         "retryable_errors": all_retryable_errors,
         "blocked_files": total_blocked,
         "blocked_project_shared_files": total_blocked_ps,
+        "exempted_files": total_exempted,
     }
 
 
@@ -1664,6 +1678,8 @@ async def trigger_index(
         blocked_files=stats.blocked_files,
         blocked_paths=list(stats.blocked_paths),
         blocked_project_shared_files=stats.blocked_project_shared_files,
+        exempted_files=stats.exempted_files,
+        exempted_paths=list(stats.exempted_paths),
         namespaces_preserved_against_rules=stats.namespaces_preserved_against_rules,
         chunks_missing_vectors=stats.chunks_missing_vectors,
         namespaces_reassigned=stats.namespaces_reassigned,

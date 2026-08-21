@@ -26,7 +26,8 @@ Helper guarantees: bar is always closed on exit (including raise), stream
 runs serially over the supplied ``paths``, returned aggregate dict has
 stable keys ``total_files``, ``indexed``, ``skipped``, ``deleted``,
 ``total_chunks``, ``duration_ms``, ``errors``, ``retryable_errors``,
-``bar_rendered``, ``blocked``, ``blocked_paths``, ``blocked_project_shared``
+``bar_rendered``, ``blocked``, ``blocked_paths``, ``blocked_project_shared``,
+``exempted``, ``exempted_paths``
 (ADR-0006 PR-A).
 
 :func:`print_blocked_summary` / :func:`print_index_errors` are the shared
@@ -155,6 +156,10 @@ async def run_with_progress(
         "blocked": 0,
         "blocked_paths": [],
         "blocked_project_shared": 0,
+        # #2076: files indexed under a frontmatter-declared redaction
+        # exemption, same aggregation shape as the blocked counters.
+        "exempted": 0,
+        "exempted_paths": [],
         # #2061 namespace advisory, aggregated from each stream's ``complete``
         # event so the CLI reports the same numbers the non-stream
         # ``IndexingStats`` carries.
@@ -301,6 +306,8 @@ async def run_with_progress(
                         agg["blocked"] += evt.get("blocked_files", 0)
                         agg["blocked_project_shared"] += evt.get("blocked_project_shared_files", 0)
                         agg["blocked_paths"].extend(evt.get("blocked_paths") or [])
+                        agg["exempted"] += evt.get("exempted_files", 0)
+                        agg["exempted_paths"].extend(evt.get("exempted_paths") or [])
                         errs = evt.get("errors") or []
                         if errs:
                             agg["errors"].extend(errs)
@@ -344,6 +351,18 @@ def print_blocked_summary(
         click.secho(f"    {p}", fg="yellow")
     if bypassable:
         click.secho(f"  → {bypass_hint}", fg="yellow")
+        # #2076: the standing alternative to the one-shot valve. Only for
+        # Markdown — the declaration lives in a frontmatter block, which a
+        # ``.yaml`` / ``.json`` / ``.rst`` source does not have, so naming it
+        # for those would be advice that cannot work. Gated on the paths
+        # actually listed, not on the corpus.
+        if any(str(p).lower().endswith((".md", ".markdown")) for p in blocked_paths):
+            click.secho(
+                "  → for a Markdown note that documents the patterns, declare "
+                "`redaction: documents-patterns` in its frontmatter "
+                "(audit-logged, and refused for project_shared files)",
+                fg="yellow",
+            )
     if blocked_project_shared:
         click.secho(
             f"  → {blocked_project_shared} file(s) are in the project_shared tier — "
@@ -351,6 +370,31 @@ def print_blocked_summary(
             "user/project_local or remove the secret.",
             fg="yellow",
         )
+
+
+def print_exempted_summary(
+    *,
+    exempted: int,
+    exempted_paths: Sequence[str],
+) -> None:
+    """Name the files indexed under a declared redaction exemption (#2076).
+
+    The counterpart to :func:`print_blocked_summary`: a file that carries
+    ``redaction: documents-patterns`` in its frontmatter indexes normally,
+    and this is what keeps that from being invisible. The declaration is
+    persistent — unlike ``--force-unsafe``, nobody re-types it per run — so
+    the run that uses it is the one place a reader can notice it is still
+    there. No-op when nothing was exempted.
+    """
+    if not exempted:
+        return
+    click.secho(
+        f"  {exempted} file(s) indexed under a declared redaction exemption "
+        "(frontmatter `redaction: documents-patterns`, audit-logged):",
+        fg="yellow",
+    )
+    for p in exempted_paths:
+        click.secho(f"    {p}", fg="yellow")
 
 
 def print_missing_vector_advisory(*, chunks_missing_vectors: int, force_hint: str) -> None:
@@ -477,6 +521,7 @@ def print_index_errors(
 # error handling around the await, so they manage ``asyncio.run`` themselves.
 __all__ = [
     "print_blocked_summary",
+    "print_exempted_summary",
     "print_index_errors",
     "print_namespace_advisory",
     "run_with_progress",

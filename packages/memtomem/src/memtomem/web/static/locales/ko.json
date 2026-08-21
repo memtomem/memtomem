@@ -1240,6 +1240,7 @@
   "settings.redaction.outcome.blocked_project_shared": "차단됨 (project_shared)",
   "settings.redaction.outcome.bypassed": "우회됨",
   "settings.redaction.outcome.pass": "통과",
+  "settings.redaction.outcome.exempted": "면제됨 (파일 선언)",
   "settings.redaction.empty": "이번 세션에서 레닥션 게이트를 거친 쓰기가 아직 없습니다.",
   "settings.redaction.error": "오류: {error}",
   "settings.redaction.load_failed": "민감정보 차단 통계를 불러오지 못했습니다.",

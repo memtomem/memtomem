@@ -35,6 +35,7 @@ from memtomem.config import (
 from memtomem import privacy
 from memtomem.errors import EmbeddingError, NamespaceResolutionError, RetryableError
 from memtomem.indexing.differ import DiffResult, compute_diff
+from memtomem.indexing.redaction_exemption import declared_exemption
 from memtomem.models import Chunk, IndexingStats
 
 if TYPE_CHECKING:
@@ -566,6 +567,12 @@ class IndexFileResult(_IndexFileBase, total=False):
     # bypassable with force_unsafe) — aggregated into
     # ``IndexingStats.blocked_project_shared_files``.
     blocked_project_shared: int
+    # 1 when the file carried a frontmatter ``redaction: documents-patterns``
+    # declaration the guard honoured (#2076). Set only on the success return,
+    # after the chunk transaction commits: an exempted file whose embedding or
+    # storage write then fails was not indexed under an exemption, and
+    # counting it would overstate how often the valve is actually used.
+    exempted: int
     # Ids of the chunks this file left untouched because their content hash
     # already matched — the ``DiffResult.unchanged`` set, and the only chunks
     # a run can leave without a vector while reporting success (#2115).
@@ -768,6 +775,7 @@ class IndexEngine:
         retryable_errors: list[str] = []
         blocked_paths: list[str] = []
         blocked_project_shared = 0
+        exempted_paths: list[str] = []
         applied_namespaces: list[str | None] = []
         # Keep the prepass vector positionally aligned with ``files``. A
         # successful upsert replaces its entry below with the authoritative
@@ -777,6 +785,8 @@ class IndexEngine:
         for i, r in enumerate(raw_results):
             if isinstance(r, dict):
                 file_results.append(r)
+                if r.get("exempted"):
+                    exempted_paths.append(str(files[i]))
                 all_errors.extend(r.get("errors", []))
                 retryable_errors.extend(r.get("retryable_errors", []))
                 decision = r.get("namespace_decision")
@@ -840,6 +850,8 @@ class IndexEngine:
             blocked_files=len(blocked_paths),
             blocked_paths=tuple(blocked_paths),
             blocked_project_shared_files=blocked_project_shared,
+            exempted_files=len(exempted_paths),
+            exempted_paths=tuple(exempted_paths),
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
@@ -1159,6 +1171,8 @@ class IndexEngine:
             applied_namespaces=(
                 (result["resolved_namespace"],) if "resolved_namespace" in result else ()
             ),
+            exempted_files=1 if result.get("exempted") else 0,
+            exempted_paths=(str(file_path),) if result.get("exempted") else (),
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
@@ -1630,7 +1644,23 @@ class IndexEngine:
                 "errors": [f"{file_path.name}: binary file detected, skipping"],
             }
 
-        if self._registry.get(file_path.suffix) is None:
+        # Adjudicate on the *canonical* path (#2076). ``classify_scope``
+        # pattern-matches the path string and the two bulk paths disagree on
+        # what they hand us — non-stream passes the discovered leaf as found
+        # (only the root was resolved), stream passes ``fp.resolve()``. That
+        # divergence was inert while every bypass needed an explicit
+        # ``force_unsafe``; a file-declared exemption makes the scope decision
+        # load-bearing on its own, so a user-dir symlink pointing at a
+        # ``project_shared`` note must not be adjudicated as ``user``, and an
+        # ``.md`` alias to a non-Markdown target must not claim a Markdown
+        # frontmatter declaration. Storage identity is deliberately NOT
+        # changed: chunks keep keying on ``file_path`` as before.
+        try:
+            decision_path = file_path.resolve()
+        except OSError:  # pragma: no cover - defensive: unreadable parent
+            decision_path = file_path
+
+        if self._registry.get(decision_path.suffix) is None:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
         # ADR-0006 Axes A.3/B.2 — secret-redaction trust boundary for
@@ -1643,15 +1673,27 @@ class IndexEngine:
         # and re-scanning the whole file would double-count and re-litigate
         # already-stored content (e.g. a prior ``force_unsafe`` write elsewhere
         # in the same file). See ADR-0006 "Implementation outline (PR-A)".
-        scope_val, project_root = self._resolve_scope(file_path)
+        #
+        # A file may also declare its own exemption in frontmatter (#2076,
+        # ADR-0006 Axis E.5). Unlike ``force_unsafe`` — which no surface can
+        # pass to the watcher, the debounce drain, or ``mem_index`` — the
+        # declaration travels with the content the gate already reads, so it
+        # reaches every un-adjudicated surface at once. The guard still
+        # decides: it honours the declaration only for label-shaped hits, and
+        # hard-refuses it for ``project_shared`` exactly as it does the valve.
+        scope_val, project_root = self._resolve_scope(decision_path)
+        exempted = False
         if not already_scanned:
+            declared = declared_exemption(decision_path, content)
             guard = privacy.enforce_write_guard(
                 content,
                 surface="index",
                 force_unsafe=force_unsafe,
                 scope=scope_val,
+                declared_exemption=declared,
                 audit_context={"path": str(file_path)},
             )
+            exempted = guard.decision == "exempted"
             if guard.decision in ("blocked", "blocked_project_shared"):
                 # Never log the matched bytes — only the hit count.
                 logger.warning(
@@ -1666,7 +1708,7 @@ class IndexEngine:
                     scope=scope_val,
                     decision=guard.decision,
                 )
-            if guard.decision not in ("pass", "bypassed"):
+            if guard.decision not in ("pass", "bypassed", "exempted"):
                 raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
 
         new_chunks = self.chunk_content(file_path, content)
@@ -1931,6 +1973,8 @@ class IndexEngine:
             result["unchanged_chunk_ids"] = unchanged_ids
         if diff_result.to_upsert:
             result["resolved_namespace"] = resolved_ns
+        if exempted:
+            result["exempted"] = 1
 
         # Per-source AI summary refresh — runs *after* the transaction so a
         # slow LLM call never holds the chunk write lock. The signature
@@ -1992,7 +2036,8 @@ class IndexEngine:
           ``file, files_done, files_total, indexed, skipped``.
         - ``"complete"``: final summary — ``total_files, total_chunks,
           indexed_chunks, skipped_chunks, deleted_chunks, duration_ms,
-          errors, retryable_errors, resolved_namespaces, applied_namespaces``.
+          errors, retryable_errors, resolved_namespaces, applied_namespaces,
+          exempted_files, exempted_paths``.
           ``errors`` is a list of human-readable strings in the same loose
           shape as ``IndexingStats.errors`` so non-stream UI handlers reuse
           verbatim. ``retryable_errors`` is its same-string retryable subset.
@@ -2035,6 +2080,8 @@ class IndexEngine:
                     "blocked_files": 0,
                     "blocked_paths": [],
                     "blocked_project_shared_files": 0,
+                    "exempted_files": 0,
+                    "exempted_paths": [],
                     "namespaces_preserved_against_rules": 0,
                     "namespaces_reassigned": 0,
                     "namespace_moves": [],
@@ -2062,6 +2109,8 @@ class IndexEngine:
                     "blocked_files": 0,
                     "blocked_paths": [],
                     "blocked_project_shared_files": 0,
+                    "exempted_files": 0,
+                    "exempted_paths": [],
                     "namespaces_preserved_against_rules": 0,
                     "namespaces_reassigned": 0,
                     "namespace_moves": [],
@@ -2103,11 +2152,13 @@ class IndexEngine:
                 "skipped": 0,
                 "deleted": 0,
                 "blocked": 0,
+                "exempted": 0,
                 "blocked_project_shared": 0,
             }
             all_errors: list[str] = []
             retryable_errors: list[str] = []
             blocked_paths: list[str] = []
+            exempted_paths: list[str] = []
             applied_namespaces: list[str | None] = []
 
             for i, fp in enumerate(files, start=1):
@@ -2221,6 +2272,9 @@ class IndexEngine:
                 agg["deleted"] += result["deleted"]
                 agg["blocked"] += result.get("blocked", 0)
                 agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
+                if result.get("exempted"):
+                    agg["exempted"] += 1
+                    exempted_paths.append(str(fp))
                 unchanged_ids.extend(result.get("unchanged_chunk_ids", ()))
                 all_errors.extend(result.get("errors", []))
                 retryable_errors.extend(result.get("retryable_errors", []))
@@ -2260,6 +2314,8 @@ class IndexEngine:
                 "applied_namespaces": _distinct_sorted(applied_namespaces),
                 "blocked_files": agg["blocked"],
                 "blocked_paths": blocked_paths,
+                "exempted_files": agg["exempted"],
+                "exempted_paths": exempted_paths,
                 "blocked_project_shared_files": agg["blocked_project_shared"],
                 "namespaces_preserved_against_rules": tally.preserved_against_rules,
                 "namespaces_reassigned": tally.reassigned,
@@ -2320,6 +2376,39 @@ class IndexEngine:
                 )
             )
         return result
+
+    def preview_redaction_decision(self, file_path: Path, content: str) -> str:
+        """What would the redaction gate decide for ``content`` at ``file_path``?
+
+        The read-only twin of the gate in ``_index_file``: same canonical-path
+        rule, same scope resolution, same frontmatter-exemption lookup, same
+        :func:`privacy.enforce_write_guard`. Returns one of ``"pass"`` /
+        ``"blocked"`` / ``"blocked_project_shared"`` / ``"exempted"``.
+
+        ``mm memory doctor`` needs this to route a stale file to the finding
+        whose remediation can actually work, and asked the question itself
+        with a bare ``privacy.scan`` before #2076 — which is a *second*
+        implementation of "is this blocked" that silently disagrees the moment
+        the guard grows a branch (an exempt file read as blocked, sent to a
+        remedy it does not need). Consuming the engine's own judgement is what
+        keeps the two from drifting.
+
+        Records nothing: ``record_outcome=False`` keeps a diagnostic run out of
+        the audit counters and emits no bypass/exemption log line. A read-only
+        command must not look like a write in the audit trail.
+        """
+        try:
+            decision_path = file_path.resolve()
+        except OSError:  # pragma: no cover - defensive: unreadable parent
+            decision_path = file_path
+        scope_val, _ = self._resolve_scope(decision_path)
+        return privacy.enforce_write_guard(
+            content,
+            surface="memory_doctor",
+            scope=scope_val,
+            declared_exemption=declared_exemption(decision_path, content),
+            record_outcome=False,
+        ).decision
 
     def _resolve_scope(self, file_path: Path) -> tuple[str, Path | None]:
         """Classify ``file_path`` into ``(scope, project_root)`` (ADR-0011 §2).

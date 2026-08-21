@@ -322,18 +322,21 @@ class TestCounter:
             "pass": 1,
             "bypassed": 1,
             "blocked_project_shared": 0,
+            "exempted": 0,
         }
         assert snap["by_tool"]["mem_add"] == {
             "blocked": 2,
             "pass": 1,
             "bypassed": 0,
             "blocked_project_shared": 0,
+            "exempted": 0,
         }
         assert snap["by_tool"]["mem_batch_add"] == {
             "blocked": 0,
             "pass": 0,
             "bypassed": 1,
             "blocked_project_shared": 0,
+            "exempted": 0,
         }
 
     def test_record_unknown_outcome_is_dropped(self, caplog):
@@ -361,6 +364,7 @@ class TestCounter:
             "pass": 0,
             "bypassed": 0,
             "blocked_project_shared": 0,
+            "exempted": 0,
         }
         assert snap["by_tool"] == {}
 
@@ -684,3 +688,189 @@ class TestNewSecretPatterns1488:
         idxs = {h.pattern_index for h in privacy.scan(ghp)}
         assert 5 in idxs, "ghp_ must still be caught by the legacy sk-/ghp_/xox rule"
         assert 14 not in idxs, "gh[ousr]_ (index 14) must exclude 'p' — no duplication"
+
+
+class TestDeclaredExemption:
+    """Per-file declared exemption — ADR-0006 Axis E.5 / issue #2076.
+
+    A file that documents the redaction patterns can declare
+    ``redaction: documents-patterns`` in its frontmatter; the indexer passes
+    that declaration here. What the guard does with it is the whole security
+    boundary, so the decision matrix is pinned row by row.
+    """
+
+    DECL = "documents-patterns"
+    # Label-shaped hits: the two broad unquoted rules a note documenting the
+    # patterns actually trips.
+    LABEL_ONLY = "The pattern is api_key= followed by a value, or password: foo."
+    # Not exemptible under any declaration.
+    TOKEN = "sk-" + "a" * 24
+    QUOTED_JSON = '{"password": "hunter2"}'
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    def test_allowlist_is_a_subset_of_the_live_pattern_set(self):
+        # Keyed by literal regex string, not index: DEFAULT_PATTERNS is synced
+        # from memtomem-stm and a resync may reorder it. If an entry ever
+        # stops matching a live pattern, this fails rather than silently
+        # widening (or narrowing) what a declaration can waive.
+        for pattern in privacy.EXEMPTIBLE_DOC_PATTERNS:
+            assert pattern in privacy.DEFAULT_PATTERNS
+        assert len(privacy.EXEMPTIBLE_DOC_PATTERNS) == 2
+
+    def test_label_only_content_is_exempted(self):
+        result = privacy.enforce_write_guard(
+            self.LABEL_ONLY, surface="index", declared_exemption=self.DECL
+        )
+        assert result.decision == "exempted"
+        assert privacy.snapshot()["outcomes"]["exempted"] == 1
+
+    def test_clean_content_still_passes(self):
+        result = privacy.enforce_write_guard(
+            "nothing sensitive here", surface="index", declared_exemption=self.DECL
+        )
+        assert result.decision == "pass"
+        assert privacy.snapshot()["outcomes"]["exempted"] == 0
+
+    @pytest.mark.parametrize("extra", [TOKEN, QUOTED_JSON])
+    def test_mixed_hits_stay_blocked(self, extra):
+        # The bound that keeps a standing exemption from becoming an ingest
+        # path: a real token — or a serialized credential the quoted-JSON rule
+        # exists for — re-blocks the file even though it also documents the
+        # label patterns.
+        result = privacy.enforce_write_guard(
+            f"{self.LABEL_ONLY}\n{extra}\n", surface="index", declared_exemption=self.DECL
+        )
+        assert result.decision == "blocked"
+        assert privacy.snapshot()["outcomes"]["exempted"] == 0
+
+    def test_non_label_hit_alone_stays_blocked(self):
+        result = privacy.enforce_write_guard(
+            self.TOKEN, surface="index", declared_exemption=self.DECL
+        )
+        assert result.decision == "blocked"
+
+    def test_quoted_json_credential_is_not_exemptible(self):
+        # Pinned separately from the mixed case: the quoted-JSON label rule is
+        # deliberately outside EXEMPTIBLE_DOC_PATTERNS because an arbitrary
+        # password matches no provider-token pattern, so nothing else would
+        # catch it.
+        result = privacy.enforce_write_guard(
+            self.QUOTED_JSON, surface="index", declared_exemption=self.DECL
+        )
+        assert result.decision == "blocked"
+
+    def test_project_shared_is_hard_refused(self):
+        # ADR-0011 §5: the declaration has the same ceiling as force_unsafe —
+        # git history cannot be retracted.
+        result = privacy.enforce_write_guard(
+            self.LABEL_ONLY,
+            surface="index",
+            scope="project_shared",
+            declared_exemption=self.DECL,
+        )
+        assert result.decision == "blocked_project_shared"
+        assert privacy.snapshot()["outcomes"]["blocked_project_shared"] == 1
+        assert privacy.snapshot()["outcomes"]["exempted"] == 0
+
+    def test_force_unsafe_wins_when_both_are_set(self):
+        result = privacy.enforce_write_guard(
+            self.LABEL_ONLY,
+            surface="index",
+            force_unsafe=True,
+            declared_exemption=self.DECL,
+        )
+        assert result.decision == "bypassed"
+
+    @pytest.mark.parametrize("value", [None, "", "true", "documents_patterns", "yes"])
+    def test_unrecognised_declaration_values_do_not_exempt(self, value):
+        result = privacy.enforce_write_guard(
+            self.LABEL_ONLY, surface="index", declared_exemption=value
+        )
+        assert result.decision == "blocked"
+
+    def test_record_outcome_false_suppresses_counters_and_audit(self, caplog):
+        # ``preview_redaction_decision`` (mm memory doctor) asks the question
+        # read-only: a diagnostic must not look like a write in the audit
+        # trail.
+        with caplog.at_level(logging.WARNING):
+            result = privacy.enforce_write_guard(
+                self.LABEL_ONLY,
+                surface="memory_doctor",
+                declared_exemption=self.DECL,
+                record_outcome=False,
+            )
+        assert result.decision == "exempted"
+        assert privacy.snapshot()["outcomes"]["exempted"] == 0
+        assert "redaction exemption" not in caplog.text
+
+
+class TestExemptionAudit:
+    """The exemption audit line names the mechanism *and* the outcome.
+
+    ``emit_bypass_audit`` hard-codes ``force_unsafe=True``; reusing it for a
+    declaration would report a mechanism nobody used, and a refused
+    declaration would look identical to an honoured one.
+    """
+
+    DECL = "documents-patterns"
+    SECRET_LABEL = "api_key=AKIATESTKEY1234567890"
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    def test_honoured_declaration_logs_decision_and_mechanism(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            privacy.enforce_write_guard(
+                self.SECRET_LABEL,
+                surface="index",
+                declared_exemption=self.DECL,
+                audit_context={"path": "/notes/redaction.md"},
+            )
+        assert "redaction exemption declared in file" in caplog.text
+        assert "decision=exempted" in caplog.text
+        assert "documents-patterns" in caplog.text
+        assert "/notes/redaction.md" in caplog.text
+        assert "force_unsafe" not in caplog.text
+
+    def test_refused_declaration_is_as_visible_as_an_honoured_one(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            privacy.enforce_write_guard(
+                f"{self.SECRET_LABEL}\nsk-{'a' * 24}\n",
+                surface="index",
+                declared_exemption=self.DECL,
+            )
+        assert "decision=blocked" in caplog.text
+        assert "exemption_refused='uncovered_pattern'" in caplog.text
+
+    def test_project_shared_refusal_names_the_declaration_not_the_valve(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            privacy.enforce_write_guard(
+                self.SECRET_LABEL,
+                surface="index",
+                scope="project_shared",
+                declared_exemption=self.DECL,
+            )
+        assert "decision=blocked_project_shared" in caplog.text
+        assert "blocked_scope='project_shared'" in caplog.text
+        # The valve was not used, so the valve's line must not be emitted.
+        assert "redaction bypass via force_unsafe=True" not in caplog.text
+
+    def test_matched_bytes_never_reach_the_audit_line(self, caplog):
+        secret = "api_key=AKIATESTKEY1234567890"
+        with caplog.at_level(logging.WARNING):
+            privacy.enforce_write_guard(
+                secret,
+                surface="index",
+                declared_exemption=self.DECL,
+                audit_context={"path": f"/notes/{secret}.md"},
+            )
+        assert "AKIATESTKEY1234567890" not in caplog.text
+        assert privacy._AUDIT_REDACTED_MARKER in caplog.text

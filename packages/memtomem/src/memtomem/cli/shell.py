@@ -325,7 +325,11 @@ async def _cmd_index(comp, args: list[str]) -> None:
     # and surface non-redaction per-file errors (previously count-only /
     # silent). The shell deliberately has no inline force-unsafe syntax
     # (mirrors _cmd_add), so the bypass hint names the CLI command to run.
-    from memtomem.cli._index_progress import print_blocked_summary, print_index_errors
+    from memtomem.cli._index_progress import (
+        print_blocked_summary,
+        print_exempted_summary,
+        print_index_errors,
+    )
 
     print_blocked_summary(
         blocked=stats.blocked_files,
@@ -335,6 +339,10 @@ async def _cmd_index(comp, args: list[str]) -> None:
             f"run `mm index --force-unsafe {path}` (outside the shell) to "
             "index the non-project_shared files anyway (audit-logged)."
         ),
+    )
+    print_exempted_summary(
+        exempted=stats.exempted_files,
+        exempted_paths=stats.exempted_paths,
     )
     print_index_errors(
         stats.errors,

@@ -271,6 +271,14 @@ class IndexingStats:
     # remains the valid untagged carve-out. Appended last for positional
     # construction compatibility.
     applied_namespaces: tuple[str | None, ...] = ()
+    # #2076 / ADR-0006 Axis E.5: files indexed under a frontmatter-declared
+    # ``redaction: documents-patterns`` exemption. Counted only for files whose
+    # chunks actually committed, so this measures the valve's real use rather
+    # than every file that declared it. ``exempted_paths`` are the absolute
+    # paths so surfaces can name them the way ``blocked_paths`` does. Appended
+    # after the existing fields to keep positional construction stable.
+    exempted_files: int = 0
+    exempted_paths: tuple[str, ...] = ()
     # #2061 namespace advisory. ``namespaces_preserved_against_rules`` counts
     # files that kept their stored namespace while the current path rules
     # would have assigned a different one — the signal that a rule edit has

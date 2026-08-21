@@ -420,7 +420,18 @@ JS_PATTERNS_SHA: str = hashlib.sha256(
 # The four-label split is the audit surface: "blocked" measures guard
 # value on user-tier writes, "bypassed" measures escape-hatch usage,
 # "blocked_project_shared" measures attempted bypass into git history.
-_VALID_OUTCOMES: tuple[str, ...] = ("blocked", "pass", "bypassed", "blocked_project_shared")
+_VALID_OUTCOMES: tuple[str, ...] = (
+    "blocked",
+    "pass",
+    "bypassed",
+    "blocked_project_shared",
+    # A file that declared ``redaction: documents-patterns`` in its
+    # frontmatter and whose every hit is an exemptible label rule
+    # (issue #2076, ADR-0006 Axis E.5). Distinct from "bypassed": the
+    # declaration is per-file, visible in the file, and narrower — it
+    # waives only ``EXEMPTIBLE_DOC_PATTERNS``, never a token/PEM/AWS hit.
+    "exempted",
+)
 
 
 @dataclass(frozen=True)
@@ -433,6 +444,44 @@ class RedactionHit:
 
     pattern_index: int
     span: tuple[int, int]
+
+
+# ADR-0006 Axis E.5 / issue #2076 — the only patterns a per-file
+# ``redaction: documents-patterns`` declaration may waive.
+#
+# Keyed by the literal regex **string**, not by index: ``DEFAULT_PATTERNS`` is
+# synced from memtomem-stm and a resync may reorder it, which would silently
+# re-point index-based entries at unrelated rules. ``test_privacy`` pins both
+# membership and the count.
+#
+# Deliberately only the two broad *unquoted* label rules — the ones that fire
+# on ordinary prose writing ``api_key=`` or ``password:``. The quoted-JSON
+# label rule is NOT here: it exists for genuinely serialized credentials
+# (``docker inspect`` / ``kubectl get secret -o json`` / DB config), where an
+# arbitrary password matches no provider-token pattern, so nothing else in the
+# set would catch it.
+EXEMPTIBLE_DOC_PATTERNS: tuple[str, ...] = (
+    DEFAULT_PATTERNS[0],
+    DEFAULT_PATTERNS[1],
+)
+
+
+def exemption_covers(hits: list[RedactionHit]) -> bool:
+    """True when a declared exemption may waive **every** hit in ``hits``.
+
+    All-or-nothing on purpose: a note documenting ``api_key=`` that also
+    carries a real ``sk-...`` token (or a quoted-JSON credential) stays
+    blocked. Mixed content is exactly the case where a standing per-file
+    exemption would otherwise become a silent ingest path for a secret
+    pasted into the file long after the declaration was written.
+
+    An empty hit list is not an exemption case (the guard returns ``pass``
+    before consulting this) and answers ``False``.
+    """
+    if not hits:
+        return False
+    exemptible = {DEFAULT_PATTERNS.index(p) for p in EXEMPTIBLE_DOC_PATTERNS}
+    return all(h.pattern_index in exemptible for h in hits)
 
 
 @lru_cache(maxsize=1)
@@ -545,7 +594,7 @@ _AUDIT_VALUE_MAX_LEN = 200
 _AUDIT_REDACTED_MARKER = "<redacted: secret-shape>"
 
 
-def _sanitize_audit_value(value: object) -> object:
+def sanitize_audit_value(value: object) -> object:
     """Strip secret-shaped substrings from a single audit-context value.
 
     The helper's audit log emits ``audit_context`` after ``surface=`` so
@@ -570,6 +619,12 @@ def _sanitize_audit_value(value: object) -> object:
     return value
 
 
+#: Pre-#2076 name. The helper became public when the indexer's exemption
+#: parser (``indexing/redaction_exemption.py``) needed it from outside this
+#: module; the alias keeps older references working.
+_sanitize_audit_value = sanitize_audit_value
+
+
 def emit_bypass_audit(
     *,
     surface: str,
@@ -587,7 +642,7 @@ def emit_bypass_audit(
     Funnelling that callsite through this helper instead of an ad-hoc
     ``logger.warning`` keeps the "matched bytes never reach logs"
     invariant in one place: every audit value passes through
-    :func:`_sanitize_audit_value` first.
+    :func:`sanitize_audit_value` first.
 
     The corresponding counter (:func:`record`) is intentionally **not**
     bumped here — callers that have their own per-item bookkeeping
@@ -595,7 +650,7 @@ def emit_bypass_audit(
     double-count if this helper also recorded.
     """
     if audit_context:
-        sanitized = {k: _sanitize_audit_value(v) for k, v in audit_context.items()}
+        sanitized = {k: sanitize_audit_value(v) for k, v in audit_context.items()}
         ctx_pairs = ", " + ", ".join(f"{k}={v!r}" for k, v in sanitized.items())
     else:
         ctx_pairs = ""
@@ -608,12 +663,51 @@ def emit_bypass_audit(
     )
 
 
+DECLARED_EXEMPTION_DOCUMENTS_PATTERNS = "documents-patterns"
+
+
+def emit_exemption_audit(
+    *,
+    surface: str,
+    decision: str,
+    content_chars: int,
+    hits: int,
+    audit_context: dict[str, object] | None = None,
+) -> None:
+    """Emit a structured audit line for a file-declared redaction exemption.
+
+    Separate from :func:`emit_bypass_audit`, whose message hard-codes
+    ``force_unsafe=True`` — reusing it for a declaration would report a
+    mechanism the caller never used. The line always names the **actual**
+    decision, so a refused declaration (``project_shared``, or hits outside
+    :data:`EXEMPTIBLE_DOC_PATTERNS`) is as visible as an honoured one.
+
+    Every context value goes through :func:`sanitize_audit_value` first:
+    matched bytes never reach error messages, audit lines, or responses.
+    """
+    if audit_context:
+        sanitized = {k: sanitize_audit_value(v) for k, v in audit_context.items()}
+        ctx_pairs = ", " + ", ".join(f"{k}={v!r}" for k, v in sanitized.items())
+    else:
+        ctx_pairs = ""
+    logger.warning(
+        "redaction exemption declared in file (surface=%s, decision=%s%s, "
+        "content_chars=%d, hits=%d)",
+        surface,
+        decision,
+        ctx_pairs,
+        content_chars,
+        hits,
+    )
+
+
 def enforce_write_guard(
     content: str,
     *,
     surface: str,
     force_unsafe: bool = False,
     scope: str = "user",
+    declared_exemption: str | None = None,
     audit_context: dict[str, object] | None = None,
     record_outcome: bool = True,
 ) -> WriteGuardResult:
@@ -632,7 +726,7 @@ def enforce_write_guard(
       structured audit log line. Extra request shape (namespace, file,
       route, item_idx, …) is rendered from ``audit_context`` as
       ``key=value`` pairs **after** the ``surface=`` field. Each
-      audit value is run through ``_sanitize_audit_value`` first so a
+      audit value is run through ``sanitize_audit_value`` first so a
       secret embedded in a user-controlled string field (path,
       filename, key) cannot leak through the bypass log either —
       matched bytes never reach error messages, audit lines, or
@@ -657,6 +751,26 @@ def enforce_write_guard(
       memory is ``scope="project_local"`` (gitignored) or
       ``scope="user"`` (private to the user).
 
+    Per-file declared exemption (ADR-0006 Axis E.5, issue #2076):
+
+    - ``declared_exemption="documents-patterns"`` is set by the indexer
+      when the file on disk declares that key in its frontmatter. It
+      records ``"exempted"`` and returns ``decision == "exempted"``
+      **only** when every hit belongs to :data:`EXEMPTIBLE_DOC_PATTERNS`
+      (the two broad unquoted label rules); any other hit — provider
+      token, PEM block, AWS material, quoted-JSON credential — falls
+      through to ``"blocked"`` with ``exemption_refused`` in the audit
+      line. Both outcomes are audit-logged via
+      :func:`emit_exemption_audit`.
+    - ``force_unsafe`` wins when both are set: it is the invocation-scoped
+      valve the caller asked for explicitly, and its audit line is the one
+      that describes what happened.
+    - ``scope == "project_shared"`` hard-refuses the declaration exactly as
+      it hard-refuses ``force_unsafe`` (ADR-0011 §5).
+    - Only surfaces that adjudicate a **file** pass this: ingress guards
+      scanning request content (``mem_add`` / ``mem_edit`` / upload / chunk
+      edit) do not, and keep refusing.
+
     Transactional callers (``mem_batch_add``) pass
     ``record_outcome=False`` so the per-entry decisions can be
     collected without committing counters; the caller then runs
@@ -669,15 +783,29 @@ def enforce_write_guard(
         if record_outcome:
             record("pass", surface)
         return WriteGuardResult("pass", [])
-    if force_unsafe and scope == "project_shared":
+    declared = declared_exemption == DECLARED_EXEMPTION_DOCUMENTS_PATTERNS
+    if (force_unsafe or declared) and scope == "project_shared":
         if record_outcome:
             record("blocked_project_shared", surface)
-            emit_bypass_audit(
-                surface=surface,
-                content_chars=len(content),
-                hits=len(hits),
-                audit_context={**(audit_context or {}), "blocked_scope": "project_shared"},
-            )
+            ctx = {**(audit_context or {}), "blocked_scope": "project_shared"}
+            if declared and not force_unsafe:
+                # Name the mechanism that was actually refused. ADR-0011 §5:
+                # the ceiling is the same for both valves — project_shared
+                # content reaches git history, where nothing can retract it.
+                emit_exemption_audit(
+                    surface=surface,
+                    decision="blocked_project_shared",
+                    content_chars=len(content),
+                    hits=len(hits),
+                    audit_context={**ctx, "exemption": declared_exemption},
+                )
+            else:
+                emit_bypass_audit(
+                    surface=surface,
+                    content_chars=len(content),
+                    hits=len(hits),
+                    audit_context=ctx,
+                )
         return WriteGuardResult("blocked_project_shared", hits)
     if force_unsafe:
         if record_outcome:
@@ -689,6 +817,22 @@ def enforce_write_guard(
                 audit_context=audit_context,
             )
         return WriteGuardResult("bypassed", hits)
+    if declared:
+        covered = exemption_covers(hits)
+        if record_outcome:
+            emit_exemption_audit(
+                surface=surface,
+                decision="exempted" if covered else "blocked",
+                content_chars=len(content),
+                hits=len(hits),
+                audit_context={
+                    **(audit_context or {}),
+                    "exemption": declared_exemption,
+                    **({} if covered else {"exemption_refused": "uncovered_pattern"}),
+                },
+            )
+            record("exempted" if covered else "blocked", surface)
+        return WriteGuardResult("exempted" if covered else "blocked", hits)
     if record_outcome:
         record("blocked", surface)
     return WriteGuardResult("blocked", hits)

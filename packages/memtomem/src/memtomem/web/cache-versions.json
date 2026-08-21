@@ -88,7 +88,8 @@
     },
     "/settings-harness.js": {
       "versions": {
-        "9": "100a96cefa15a8c03bd9edffe8f918a852001355af923ead529246a95c3502b4"
+        "9": "100a96cefa15a8c03bd9edffe8f918a852001355af923ead529246a95c3502b4",
+        "10": "a19ac82af4bd68c04fe86f5fbeb5677d8b1fb2d8a5bd7cb1c423b2ba130a45bf"
       }
     },
     "/settings-hooks-watchdog.js": {

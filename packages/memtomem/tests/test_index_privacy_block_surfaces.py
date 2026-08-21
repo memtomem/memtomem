@@ -236,6 +236,51 @@ class TestShellIndexBlockedSurfacing:
         # applies to the git-tracked tier (ADR-0011 §5).
         assert "mm index --force-unsafe" not in out
 
+    async def test_declared_exemption_is_named_in_the_shell_summary(
+        self, bm25_only_components, capsys
+    ):
+        # A persistent bypass that nobody re-types per run needs the run to
+        # say it is still there (#2076).
+        from memtomem.cli.shell import _cmd_index
+
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "declared.md").write_text(_DECLARED)
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert "declared redaction exemption" in out
+        assert "declared.md" in out
+
+    async def test_blocked_markdown_hints_the_frontmatter_declaration(
+        self, bm25_only_components, capsys
+    ):
+        from memtomem.cli.shell import _cmd_index
+
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "plain.md").write_text(_DOCUMENTS_PATTERNS)
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert "redaction: documents-patterns" in out
+
+    async def test_blocked_non_markdown_gets_no_frontmatter_hint(
+        self, bm25_only_components, capsys
+    ):
+        # A ``.yaml`` source has no frontmatter block — naming the declaration
+        # there would be advice that cannot work.
+        from memtomem.cli.shell import _cmd_index
+
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "conf.yaml").write_text("ok: 1\npassword: hunter2xyz\n")
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert "blocked by redaction guard" in out
+        assert "redaction: documents-patterns" not in out
+
     async def test_non_redaction_errors_printed(self, bm25_only_components, capsys):
         from memtomem.cli.shell import _cmd_index
 
@@ -365,3 +410,215 @@ class TestShellIndexBlockedSurfacing:
         assert "ERROR (retryable): chunk store unreachable" in out
         assert f"mm index {mem_dir}" in out
         assert "once the chunk store is reachable" in out
+
+
+# A note that documents the patterns rather than carrying a credential: the
+# #2076 case. Both label rules, no token.
+_DOCUMENTS_PATTERNS = (
+    "# Redaction notes\n\n"
+    "The guard matches `api_key=` and `password:` on the keyword alone, so\n"
+    "this very paragraph trips it.\n"
+)
+_DECLARED = f"---\nredaction: documents-patterns\n---\n{_DOCUMENTS_PATTERNS}"
+
+
+class TestDeclaredExemptionIndexing:
+    """#2076 — a file that declares its own exemption indexes normally.
+
+    The declaration reaches surfaces ``force_unsafe`` never could (``mem_index``,
+    the watcher, the debounce drain) because it travels with the content the
+    gate already reads. These pins cover the three aggregation points and the
+    bounds: mixed hits, non-Markdown, and ``project_shared``.
+    """
+
+    async def test_bulk_indexes_declared_file_and_reports_it(self, bm25_only_components):
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "declared.md").write_text(_DECLARED)
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.blocked_files == 0
+        assert stats.indexed_chunks > 0
+        assert stats.exempted_files == 1
+        assert any("declared.md" in p for p in stats.exempted_paths)
+
+    async def test_undeclared_sibling_is_still_blocked(self, bm25_only_components):
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "declared.md").write_text(_DECLARED)
+        (mem_dir / "plain.md").write_text(_DOCUMENTS_PATTERNS)
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.exempted_files == 1
+        assert stats.blocked_files == 1
+        assert any("plain.md" in p for p in stats.blocked_paths)
+
+    async def test_single_file_index_reports_the_exemption(self, bm25_only_components):
+        comp, mem_dir = bm25_only_components
+        declared = mem_dir / "declared.md"
+        declared.write_text(_DECLARED)
+
+        stats = await comp.index_engine.index_file(declared)
+
+        assert stats.indexed_chunks > 0
+        assert stats.exempted_files == 1
+        assert stats.exempted_paths == (str(declared),)
+
+    async def test_stream_reports_the_exemption(self, bm25_only_components):
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "declared.md").write_text(_DECLARED)
+
+        events = [ev async for ev in comp.index_engine.index_path_stream(mem_dir, recursive=True)]
+        complete = next(ev for ev in events if ev["type"] == "complete")
+
+        assert complete["blocked_files"] == 0
+        assert complete["exempted_files"] == 1
+        assert any("declared.md" in p for p in complete["exempted_paths"])
+
+    async def test_no_declaration_means_no_exemption_reported(self, bm25_only_components):
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "clean.md").write_text(_CLEAN)
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.exempted_files == 0
+        assert stats.exempted_paths == ()
+
+    async def test_declared_file_with_a_real_token_stays_blocked(self, bm25_only_components):
+        # The bound that matters most: a declaration written months ago must
+        # not wave through a credential pasted into the file later.
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "declared.md").write_text(f"{_DECLARED}\napi token: {_SECRET}\n")
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.blocked_files == 1
+        assert stats.exempted_files == 0
+
+    async def test_yaml_frontmatter_lookalike_is_not_exempt(self, bm25_only_components):
+        # A ``.yaml`` source has no frontmatter block; leading dashes do not
+        # make one.
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "conf.yaml").write_text("---\nredaction: documents-patterns\npassword: x\n")
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.blocked_files == 1
+        assert stats.exempted_files == 0
+
+    async def test_project_shared_declaration_is_hard_refused(
+        self, bm25_only_components, monkeypatch
+    ):
+        # ADR-0011 §5 — same ceiling as force_unsafe.
+        comp, mem_dir = bm25_only_components
+        declared = mem_dir / "declared.md"
+        declared.write_text(_DECLARED)
+        engine = comp.index_engine
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+
+        with pytest.raises(PrivacyRejection) as ei:
+            await engine.index_file(declared)
+
+        assert ei.value.decision == "blocked_project_shared"
+
+    async def test_exemption_is_counted_only_after_the_write_commits(
+        self, bm25_only_components, monkeypatch
+    ):
+        # An exempted file whose storage write fails was not indexed under an
+        # exemption; counting it would overstate how often the valve is used.
+        comp, mem_dir = bm25_only_components
+        declared = mem_dir / "declared.md"
+        declared.write_text(_DECLARED)
+        engine = comp.index_engine
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("storage down")
+
+        monkeypatch.setattr(engine._storage, "upsert_chunks", _boom)
+
+        # Bulk, so the per-file failure is flattened into ``errors`` and a
+        # stats object still comes back to inspect (single-file re-raises).
+        stats = await engine.index_path(mem_dir, recursive=True)
+
+        assert any("storage down" in e for e in stats.errors)
+        assert stats.exempted_files == 0
+        assert stats.exempted_paths == ()
+
+    async def test_already_scanned_ingress_does_not_consult_the_declaration(
+        self, bm25_only_components
+    ):
+        # The feature is scoped to un-adjudicated indexing. An ingress-guarded
+        # caller adjudicated request content upstream; the reindex must not
+        # re-decide, in either direction.
+        comp, mem_dir = bm25_only_components
+        declared = mem_dir / "declared.md"
+        declared.write_text(_DECLARED)
+
+        stats = await comp.index_engine.index_file(declared, already_scanned=True)
+
+        assert stats.indexed_chunks > 0
+        assert stats.exempted_files == 0
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("os"), "symlink"), reason="platform has no symlink support"
+)
+class TestDeclaredExemptionSymlinkParity:
+    """The gate adjudicates the *canonical* path (#2076).
+
+    ``classify_scope`` reads the path string, and the two bulk paths disagree
+    on whether they resolve the discovered leaf. While every bypass required
+    an explicit ``force_unsafe`` that divergence was inert; a file-declared
+    exemption makes the scope decision load-bearing on its own, so an alias
+    must not launder either the tier or the file type.
+    """
+
+    @staticmethod
+    def _symlink(link, target):
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:  # pragma: no cover - CI platform
+            pytest.skip(f"symlink creation unavailable: {exc}")
+
+    async def test_alias_to_a_project_shared_note_is_refused_on_both_paths(
+        self, bm25_only_components, monkeypatch, tmp_path
+    ):
+        comp, mem_dir = bm25_only_components
+        shared_dir = tmp_path / "proj" / ".memtomem" / "memories"
+        shared_dir.mkdir(parents=True)
+        target = shared_dir / "declared.md"
+        target.write_text(_DECLARED)
+        self._symlink(mem_dir / "alias.md", target)
+
+        engine = comp.index_engine
+        # Only the resolved path lands in the project tier; the alias does not.
+        monkeypatch.setattr(
+            engine,
+            "_resolve_scope",
+            lambda p: (
+                ("project_shared", shared_dir)
+                if str(p).startswith(str(shared_dir))
+                else ("user", None)
+            ),
+        )
+
+        stats = await engine.index_path(mem_dir, recursive=True)
+        assert stats.blocked_project_shared_files == 1
+        assert stats.exempted_files == 0
+
+        events = [ev async for ev in engine.index_path_stream(mem_dir, recursive=True)]
+        complete = next(ev for ev in events if ev["type"] == "complete")
+        assert complete["blocked_project_shared_files"] == 1
+        assert complete["exempted_files"] == 0
+
+    async def test_md_alias_to_a_non_markdown_target_claims_no_declaration(
+        self, bm25_only_components, tmp_path
+    ):
+        comp, mem_dir = bm25_only_components
+        target = tmp_path / "conf.yaml"
+        target.write_text("---\nredaction: documents-patterns\npassword: x\n")
+        self._symlink(mem_dir / "alias.md", target)
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.exempted_files == 0

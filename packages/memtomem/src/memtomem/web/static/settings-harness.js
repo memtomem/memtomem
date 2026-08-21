@@ -708,8 +708,8 @@ qs('health-refresh-btn')?.addEventListener('click', loadHarnessHealth);
 
 
 // ADR-0006 PR-B (Axis E.1 audit surface): the GUI view of ``privacy.snapshot()``
-// — process-lifetime redaction counters (blocked / bypassed / pass /
-// project_shared) totalled and broken down per write surface. Mirrors the MCP
+// — process-lifetime redaction counters (blocked / bypassed / exempted / pass
+// / project_shared) totalled and broken down per write surface. Mirrors the MCP
 // ``mem_add_redaction_stats`` tool. Surface names are internal constants but
 // escaped defensively; outcome labels come from ``t()`` (trusted locale).
 async function loadRedactionStats() {
@@ -721,9 +721,10 @@ async function loadRedactionStats() {
     const outcomes = (d && d.outcomes) || {};
     const byTool = (d && d.by_tool) || {};
     // Fixed outcome set (privacy._VALID_OUTCOMES); ordered so the two "blocked"
-    // variants sit together and the security-relevant "bypassed" reads before
-    // the benign "pass".
-    const OUTCOMES = ['blocked', 'blocked_project_shared', 'bypassed', 'pass'];
+    // variants sit together and the two bypass mechanisms — the one-shot
+    // "bypassed" (force_unsafe) and the standing "exempted" (a file's own
+    // frontmatter declaration, #2076) — read before the benign "pass".
+    const OUTCOMES = ['blocked', 'blocked_project_shared', 'bypassed', 'exempted', 'pass'];
     const label = (k) => t(`settings.redaction.outcome.${k}`);
     const cards = OUTCOMES.map(k => `
       <div class="health-card card">
