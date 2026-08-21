@@ -212,7 +212,7 @@ class TestMemIndexDeclaredExemption:
 
         output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
 
-        assert "declared redaction exemption" in output
+        assert "Declared redaction exemption: 1 file(s)" in output
         assert "redaction: documents-patterns" in output
         assert str(note) in output
 

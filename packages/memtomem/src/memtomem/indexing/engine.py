@@ -571,7 +571,11 @@ class IndexFileResult(_IndexFileBase, total=False):
     # declaration the guard honoured (#2076). Set only on the success return,
     # after the chunk transaction commits: an exempted file whose embedding or
     # storage write then fails was not indexed under an exemption, and
-    # counting it would overstate how often the valve is actually used.
+    # counting it would overstate how often the valve is actually used. A file
+    # whose chunks were all unchanged *does* count — it was adjudicated and
+    # admitted under the declaration this run, and a standing bypass that went
+    # unreported on steady-state re-indexes would be invisible exactly when
+    # someone should notice it is still in force.
     exempted: int
     # Ids of the chunks this file left untouched because their content hash
     # already matched — the ``DiffResult.unchanged`` set, and the only chunks

@@ -544,6 +544,23 @@ class TestDeclaredExemptionIndexing:
         assert stats.exempted_files == 0
         assert stats.exempted_paths == ()
 
+    async def test_unchanged_file_still_reports_its_standing_exemption(self, bm25_only_components):
+        # A steady-state re-index writes no chunks but still admitted the file
+        # under its declaration. Reporting only files with *new* chunks would
+        # hide a standing bypass exactly on the runs where someone should
+        # notice it is still in force.
+        comp, mem_dir = bm25_only_components
+        declared = mem_dir / "declared.md"
+        declared.write_text(_DECLARED)
+
+        first = await comp.index_engine.index_path(mem_dir, recursive=True)
+        assert first.indexed_chunks > 0
+
+        second = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert second.indexed_chunks == 0
+        assert second.exempted_files == 1
+
     async def test_already_scanned_ingress_does_not_consult_the_declaration(
         self, bm25_only_components
     ):

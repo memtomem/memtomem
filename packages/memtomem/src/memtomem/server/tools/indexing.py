@@ -172,9 +172,9 @@ async def mem_index(
         # exemption is the only way a pattern-documenting note indexes over
         # MCP at all; naming the files is what keeps that from being silent.
         result += (
-            f"\n- Indexed under a declared redaction exemption "
-            f"({stats.exempted_files}, frontmatter `redaction: documents-patterns`, "
-            "audit-logged):\n" + "\n".join(f"    {p}" for p in stats.exempted_paths)
+            f"\n- Declared redaction exemption: {stats.exempted_files} file(s) admitted by "
+            "their own frontmatter `redaction: documents-patterns` (audit-logged):\n"
+            + "\n".join(f"    {p}" for p in stats.exempted_paths)
         )
 
     if auto_tag and stats.indexed_chunks > 0:
