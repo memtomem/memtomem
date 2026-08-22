@@ -189,12 +189,13 @@ async def test_mem_embedding_reset_apply_current_repairs_mismatch(degraded_compo
     assert "onnx/bge-m3" in reset_out
     assert "1024d" in reset_out
 
-    # The receipt must not send an agent to ``mem_index(force=true)``: inside a
-    # session that call passes the session namespace explicitly, which
-    # overrides preservation and restamps every row it re-embeds (ADR-0033,
-    # #2104). The CLI command passes no namespace. #2115.
+    # The receipt must name the forced re-index — an apply-current reset
+    # leaves the store with no vectors until it runs (#2115). The CLI is the
+    # named remedy because a whole-tree re-embed is a long shell job, not
+    # because the MCP call is unsafe: since #2104 both preserve stored
+    # namespaces, session or not.
     assert "mm index --force" in reset_out
-    assert "mem_index(force=true) to re-index" not in reset_out
+    assert "keeps the namespace its chunks are stored under" in reset_out
     assert "dense search finds nothing" in reset_out
 
     # Live storage view: mismatch cleared.

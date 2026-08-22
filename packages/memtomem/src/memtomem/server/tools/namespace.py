@@ -78,7 +78,9 @@ async def mem_ns_set(
 
     One exception: while a session is active this is the *read* default only —
     resolver-backed writes go to agent-runtime:<agent_id> unless the call
-    passes namespace= explicitly.
+    passes namespace= explicitly. Either way a re-index (mem_index) applies
+    the bound namespace only to files with no stored rows; an already-indexed
+    file keeps its own (#2104).
 
     ``namespace`` is run through :func:`validate_namespace` before the
     write, mirroring ``mem_session_start(namespace=...)``. Without the

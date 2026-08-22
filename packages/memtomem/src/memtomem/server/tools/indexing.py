@@ -10,7 +10,7 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
 from memtomem.server.tools._provenance import (
-    capture_session_and_namespace,
+    capture_session_and_namespace_split,
     record_write_provenance,
 )
 
@@ -71,11 +71,21 @@ async def mem_index(
         # Session id and namespace in one ``_session_lock`` acquisition:
         # split, a transition between them files the chunks and their
         # provenance under different sessions.
-        provenance_session_id, effective_ns = await capture_session_and_namespace(app, namespace)
+        provenance_session_id, caller_ns, session_ns = await capture_session_and_namespace_split(
+            app, namespace
+        )
 
+        # The two namespaces travel in different slots on purpose (#2104).
+        # ``caller_ns`` is what this call named: explicit intent, and it wins
+        # everywhere. ``session_ns`` is ambient — an agent session or a
+        # ``mem_ns_set`` current namespace — so it binds only sources with no
+        # stored rows. Passing it as the explicit namespace, as this tool used
+        # to, made ``mem_index(force=true)`` under a session restamp every file
+        # it re-embedded, including another agent's.
+        #
         # ``force`` re-embeds; it does not re-resolve namespaces (#2061), so
         # a file keeps the namespace its chunks are stored under unless
-        # ``effective_ns`` names one. Applying changed namespace rules to
+        # ``caller_ns`` names one. Applying changed namespace rules to
         # already-indexed files is ``mm index --reassign-namespaces``, which
         # stays CLI-only — the core tool descriptions are at their character
         # budget (``test_core_tool_descriptions``), so a parameter here would
@@ -86,7 +96,8 @@ async def mem_index(
             target,
             recursive=recursive,
             force=force,
-            namespace=effective_ns,
+            namespace=caller_ns,
+            new_source_namespace=session_ns,
             path_scope="explicit",
         )
 
@@ -140,10 +151,11 @@ async def mem_index(
         )
     if stats.chunks_missing_vectors:
         # Hand-built for the same reason as the advisory above. The remedy
-        # names the CLI: with an agent or current namespace active,
-        # ``mem_index(force=true)`` passes it explicitly, which overrides
-        # namespace preservation and restamps every row it re-embeds
-        # (ADR-0033, #2104) — a repair should not move an agent's memories.
+        # names the CLI because a re-embed of a whole tree is a long,
+        # interruptible job better run from a shell than from a tool call
+        # that has to hold a client's turn open. Both paths preserve stored
+        # namespaces now (#2104), so the choice is ergonomic, not a safety
+        # caveat.
         result += (
             f"\n- No embedding: {stats.chunks_missing_vectors} unchanged chunk(s) "
             "have no vector, so dense search will not find them. Re-embed with "

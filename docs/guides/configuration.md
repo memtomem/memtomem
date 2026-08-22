@@ -301,23 +301,19 @@ Resolving it is a two-step process — pick **one** of:
   ```
 
   MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
-  `mem_index(path="...", force=true)` — but read the caveat below first, and
-  prefer the CLI command when anything else has set a namespace.
+  `mem_index(path="...", force=true)`.
 
-  `mm index --force` re-embeds; it does not re-resolve namespaces, so every
-  file keeps the namespace its chunks are stored under. That holds for any
-  caller that passes no namespace — an explicit namespace still wins, which is
-  what the caveat below is about.
+  `--force` re-embeds; it does not re-resolve namespaces, so every file keeps
+  the namespace its chunks are stored under. The one thing that still
+  overrides that is a namespace the caller *names* — `--namespace` on the CLI,
+  `mem_index(namespace="...")` over MCP — which is intent, and moves the rows
+  it reaches.
 
-  > **Run the recovery from the CLI unless you are certain no namespace is
-  > active.** `mem_index` resolves a namespace from the caller's context and
-  > passes it as an *explicit* one, and an explicit namespace overrides
-  > preservation — so `mem_index(force=true)` restamps everything it re-embeds.
-  > Two things arm that: an agent session (`mem_session_start(agent_id=...)`),
-  > which stamps `agent-runtime:<id>`, and a current namespace set with
-  > `mem_ns_set`, which stamps whatever it names. Clear both first, or run
-  > `mm index --force <memory_dir>`, which passes no namespace and so cannot
-  > move anything.
+  > **A namespace you did not type does not move anything.** An agent session
+  > (`mem_session_start(agent_id=...)`) or a current namespace set with
+  > `mem_ns_set` binds *new* files only: a source the index has never seen is
+  > stamped with it, and an already-indexed file keeps what it has. So the
+  > recovery is safe to run from either surface.
 
   To apply
   changed [namespace rules](#namespace-rules-path-based-auto-tagging) to

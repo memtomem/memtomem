@@ -123,15 +123,24 @@ migration does not earn budget that every call pays for. MCP and web callers
 keep `force` with its now-honest meaning and receive the preservation
 advisory, which names the CLI command.
 
-One pre-existing exception bounds the "every caller" claim: inside an agent
-session, `mem_index` resolves the session's namespace and passes it as an
-*explicit* one (#2004), which short-circuits preservation the way any explicit
-namespace does. So `mem_index(force=true)` under a session still stamps what
-it indexes with `agent-runtime:<id>`. That behavior predates this ADR and is
-not what #2061 reported — the reported path is the CLI recovery command, which
-passes no namespace — but it is the reason this ADR says preservation holds
-"for callers that pass no namespace" rather than "always". Narrowing session
-inheritance to sources with no stored rows is tracked in #2104.
+One caller once bounded the "every caller" claim: inside an agent session,
+`mem_index` resolved the session's namespace and passed it as an *explicit*
+one (#2004), which short-circuited preservation the way any explicit namespace
+does, so `mem_index(force=true)` under a session stamped everything it indexed
+with `agent-runtime:<id>`. That predated this ADR and was not what #2061
+reported — the reported path is the CLI recovery command, which passes no
+namespace — and it is why this ADR originally said preservation holds "for
+callers that pass no namespace" rather than "always".
+
+#2104 closed it by splitting the two intents at the tool boundary. A namespace
+the caller *names* is still explicit and still wins; a namespace inherited from
+session context now travels in a separate `new_source_namespace` slot that the
+engine applies only to sources with no stored rows. The #2004 contract is
+intact — a file the session writes is still bound to `agent-runtime:<id>` —
+while a bulk re-index can no longer move content the session never wrote, and a
+mixed-namespace file reached from a session gets the same force refusal as
+everywhere else. Preservation now holds for every caller that does not name a
+namespace, session or not.
 
 ## Alternatives considered
 

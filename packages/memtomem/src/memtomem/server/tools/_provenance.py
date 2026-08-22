@@ -96,9 +96,9 @@ def render_event_content(event_type: str, chunk_count: int, *, truncated: bool) 
     return f"{base} truncated={MAX_IDS_PER_EVENT}" if truncated else base
 
 
-async def capture_session_and_namespace(
+async def capture_session_and_namespace_split(
     app: AppContext, namespace: str | None
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     """Read the active session id and resolve the namespace as one unit.
 
     Both reads have to happen under a single ``_session_lock``
@@ -123,13 +123,41 @@ async def capture_session_and_namespace(
     generated. Claim and capture use this same lock, so a write either
     captured the session before the claim (and its earlier gauge ticket is
     covered by the drain) or is excluded from the closing session here.
+
+    Returns the caller's namespace and the session-derived one *separately*
+    so a caller can tell which it got (#2104). ``mem_index`` needs the
+    distinction: a namespace the caller named is intent for this call and may
+    move existing rows, while a namespace inherited from an agent session is
+    ambient context and must bind only sources the store has never seen.
+    Collapsing the two is what let ``mem_index(force=true)`` under a session
+    restamp every file it re-embedded. Callers that write genuinely new
+    content (``mem_add``, ``mem_batch_add``, ``mem_fetch``) want the collapsed
+    form and use :func:`capture_session_and_namespace`.
+
+    An empty ``namespace`` is normalized to ``None`` — the collapsed form has
+    always treated ``""`` as absent via its ``or``, and handing a raw ``""``
+    to the indexer as an explicit namespace would stamp rows with it.
     """
     async with app._session_lock:
         session_id = app.current_session_id
         if session_id in app._ending_session_ids:
             session_id = None
         resolved = _resolve_agent_namespace(app, None)
-    return session_id, (namespace or resolved)
+    return session_id, (namespace or None), resolved
+
+
+async def capture_session_and_namespace(
+    app: AppContext, namespace: str | None
+) -> tuple[str | None, str | None]:
+    """Session id plus the one namespace a write should use.
+
+    The collapsed form of :func:`capture_session_and_namespace_split` for the
+    surfaces that write new content and want the caller's namespace to fall
+    back to the session's (#2004). See the split form for why ``mem_index``
+    needs the two kept apart.
+    """
+    session_id, caller_ns, session_ns = await capture_session_and_namespace_split(app, namespace)
+    return session_id, (caller_ns or session_ns)
 
 
 async def mark_provenance_incomplete(app: AppContext, session_id: str | None) -> None:

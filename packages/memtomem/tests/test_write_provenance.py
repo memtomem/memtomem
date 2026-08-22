@@ -16,6 +16,8 @@ from memtomem.server.context import AppContext
 from memtomem.server.tools import _provenance
 from memtomem.server.tools._provenance import (
     PROVENANCE_KIND,
+    capture_session_and_namespace,
+    capture_session_and_namespace_split,
     mark_provenance_incomplete,
     record_write_provenance,
     render_event_content,
@@ -626,6 +628,74 @@ class TestProvenanceSessionAttribution:
         )
 
         await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_the_split_form_reports_which_source_answered(self, bm25_only_components):
+        """#2104: ``mem_index`` has to tell a namespace the caller named from
+        one the session supplied, because only the first may move rows."""
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        sid, caller_ns, session_ns = await capture_session_and_namespace_split(app, None)
+        assert (sid, caller_ns, session_ns) == (
+            app.current_session_id,
+            None,
+            "agent-runtime:planner",
+        )
+
+        _, caller_ns, session_ns = await capture_session_and_namespace_split(app, "pinned")
+        assert (caller_ns, session_ns) == ("pinned", "agent-runtime:planner")
+
+        # ``""`` has always meant absent on the way in; forwarding it as a
+        # caller namespace would stamp rows with an empty string.
+        _, caller_ns, _ = await capture_session_and_namespace_split(app, "")
+        assert caller_ns is None
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("agent_id", "current_ns", "passed", "expected"),
+        [
+            # Ambient: an agent session, the legacy current namespace, neither.
+            ("planner", None, None, "agent-runtime:planner"),
+            (None, "team", None, "team"),
+            (None, None, None, None),
+            # A caller namespace outranks every ambient source.
+            ("planner", None, "pinned", "pinned"),
+            (None, "team", "pinned", "pinned"),
+            (None, None, "pinned", "pinned"),
+            # ``""`` is absent, not a namespace — it must fall through to the
+            # ambient source rather than stamping rows with an empty string.
+            ("planner", None, "", "agent-runtime:planner"),
+            (None, "team", "", "team"),
+            (None, None, "", None),
+        ],
+    )
+    async def test_the_collapsed_form_is_unchanged_for_the_add_surfaces(
+        self, bm25_only_components, agent_id, current_ns, passed, expected
+    ):
+        """``mem_add`` / ``mem_batch_add`` / ``mem_fetch`` read the collapsed
+        form, and #2104 rewrote it in terms of the split one. Pin the whole
+        matrix so that refactor cannot have moved any of these cells."""
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+        if agent_id is not None:
+            await mem_session_start(agent_id=agent_id, ctx=ctx)  # type: ignore[arg-type]
+        app.current_namespace = current_ns
+
+        _, effective_ns = await capture_session_and_namespace(app, passed)
+
+        assert effective_ns == expected
+        if agent_id is not None:
+            await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
     async def test_a_write_parked_on_the_file_lock_is_attributed_to_the_session_it_lands_in(

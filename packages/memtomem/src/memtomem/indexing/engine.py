@@ -440,6 +440,12 @@ class NamespaceMixedUnderForceError(Exception):
 #: latter additionally means current rules would have chosen differently, and
 #: is what the CLI advisory counts so a user whose rule edit did not take
 #: effect is told which command applies it.
+#: ``bound_new_source`` is the session-inheritance carve-out (#2104): a caller
+#: that binds writes to a context namespace (an MCP agent session, a
+#: ``mem_ns_set`` current namespace) passes it as ``new_source_namespace``, and
+#: it applies only to sources with no stored rows. An already-indexed file
+#: keeps its namespace, so a bulk re-index under a session cannot move content
+#: the session did not write.
 NamespaceDecisionReason = Literal[
     "explicit",
     "preserved",
@@ -447,6 +453,7 @@ NamespaceDecisionReason = Literal[
     "resolved",
     "reassigned",
     "mixed_force_refused",
+    "bound_new_source",
 ]
 
 
@@ -465,8 +472,10 @@ class NamespaceDecision:
     reason: NamespaceDecisionReason = "resolved"
 
 
-def _reject_reassign_with_explicit_ns(namespace: str | None, reassign: bool) -> None:
-    """Refuse the one flag pair that cannot mean anything coherent.
+def _reject_reassign_with_explicit_ns(
+    namespace: str | None, reassign: bool, new_source_namespace: str | None = None
+) -> None:
+    """Refuse the flag pairs that cannot mean anything coherent.
 
     An explicit namespace short-circuits rule resolution, so pairing it with
     ``reassign_namespaces=True`` asks for two different targets at once. The
@@ -474,12 +483,26 @@ def _reject_reassign_with_explicit_ns(namespace: str | None, reassign: bool) -> 
     engine entrypoints are public API, and silently letting the explicit
     namespace win would drop the reassignment — and with it the stored lookup
     that reporting depends on — without a word.
+
+    ``new_source_namespace`` is refused alongside ``reassign`` for the same
+    reason at the one place the two overlap: a source with no stored rows.
+    Reassignment says "the rules decide", session binding says "the session
+    decides", and a run cannot honor both. Files that *do* have rows are
+    unaffected by the binding, so the conflict is real but narrow — narrow
+    enough that letting one win silently would be indistinguishable from the
+    other having been applied (#2104).
     """
     if reassign and namespace is not None:
         raise ValueError(
             "reassign_namespaces=True cannot be combined with an explicit namespace: "
             "an explicit namespace short-circuits the rules that reassignment exists "
             "to apply. Pass one or the other."
+        )
+    if reassign and new_source_namespace is not None:
+        raise ValueError(
+            "reassign_namespaces=True cannot be combined with new_source_namespace: "
+            "reassignment resolves every file through the path rules, including the "
+            "row-less ones the binding would claim. Pass one or the other."
         )
 
 
@@ -665,8 +688,9 @@ class IndexEngine:
         force_unsafe: bool = False,
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
+        new_source_namespace: str | None = None,
     ) -> IndexingStats:
-        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces)
+        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
         self._active_runs += 1
         try:
@@ -679,6 +703,7 @@ class IndexEngine:
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
                     reassign_namespaces=reassign_namespaces,
+                    new_source_namespace=new_source_namespace,
                 )
         finally:
             self._active_runs -= 1
@@ -721,6 +746,7 @@ class IndexEngine:
         force_unsafe: bool = False,
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
+        new_source_namespace: str | None = None,
     ) -> IndexingStats:
         start = time.monotonic()
         path = path.resolve()
@@ -758,7 +784,11 @@ class IndexEngine:
         # this prepass — and a lookup failure there fails that file closed,
         # keeping its type in ``retryable_errors`` below.
         prepass_namespaces = await self._resolve_namespaces_per_file(
-            files, namespace, force=force, reassign=reassign_namespaces
+            files,
+            namespace,
+            force=force,
+            reassign=reassign_namespaces,
+            new_source_namespace=new_source_namespace,
         )
 
         async def _bounded(fp: Path) -> IndexFileResult:
@@ -771,6 +801,7 @@ class IndexEngine:
                     path_scope=path_scope,
                     embed_semaphore=embed_sem,
                     reassign_namespaces=reassign_namespaces,
+                    new_source_namespace=new_source_namespace,
                 )
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
@@ -869,6 +900,7 @@ class IndexEngine:
         *,
         force: bool = False,
         reassign: bool = False,
+        new_source_namespace: str | None = None,
     ) -> list[str | None]:
         """Resolve namespaces for ``files`` in stable (sort) order, distinct.
 
@@ -883,10 +915,14 @@ class IndexEngine:
         Pass the same ``force`` the write will use, or the preview answers
         for a different operation than the one being previewed.
         """
-        _reject_reassign_with_explicit_ns(explicit_ns, reassign)
+        _reject_reassign_with_explicit_ns(explicit_ns, reassign, new_source_namespace)
         return _distinct_sorted(
             await self._resolve_namespaces_per_file(
-                files, explicit_ns, force=force, reassign=reassign
+                files,
+                explicit_ns,
+                force=force,
+                reassign=reassign,
+                new_source_namespace=new_source_namespace,
             )
         )
 
@@ -897,6 +933,7 @@ class IndexEngine:
         *,
         force: bool = False,
         reassign: bool = False,
+        new_source_namespace: str | None = None,
     ) -> list[str | None]:
         """Each file's effective namespace, positionally aligned with ``files``.
 
@@ -914,7 +951,13 @@ class IndexEngine:
         indexing every other file in the tree.
         """
         return [
-            await self.effective_namespace_for(f, explicit_ns, force=force, reassign=reassign)
+            await self.effective_namespace_for(
+                f,
+                explicit_ns,
+                force=force,
+                reassign=reassign,
+                new_source_namespace=new_source_namespace,
+            )
             for f in files
         ]
 
@@ -981,6 +1024,7 @@ class IndexEngine:
         lock_held: bool = False,
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
+        new_source_namespace: str | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1029,6 +1073,7 @@ class IndexEngine:
                     already_scanned=already_scanned,
                     path_scope=path_scope,
                     reassign_namespaces=reassign_namespaces,
+                    new_source_namespace=new_source_namespace,
                 )
                 return result, (time.monotonic() - start) * 1000
         async with async_file_lock(
@@ -1046,6 +1091,7 @@ class IndexEngine:
                     already_scanned=already_scanned,
                     path_scope=path_scope,
                     reassign_namespaces=reassign_namespaces,
+                    new_source_namespace=new_source_namespace,
                 )
                 return result, (time.monotonic() - start) * 1000
 
@@ -1060,6 +1106,7 @@ class IndexEngine:
         lock_held: bool = False,
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
+        new_source_namespace: str | None = None,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -1095,6 +1142,13 @@ class IndexEngine:
         stored namespace is preserved, never re-resolved through the rules
         (#2061).
 
+        ``new_source_namespace`` is the session-inheritance slot (#2104): a
+        caller whose writes are bound to a context namespace passes it here
+        instead of as ``namespace``, and it applies only to a source with no
+        stored rows. An already-indexed file keeps its namespace, so a bulk
+        re-index under an agent session cannot move content the session never
+        wrote. Cannot be combined with ``reassign_namespaces=True``.
+
         ``reassign_namespaces=True`` is the opt-in that *does* re-resolve,
         overwriting stored namespaces with what the current rules say. It
         implies ``force`` — applying rules only to files that happen to have
@@ -1121,7 +1175,7 @@ class IndexEngine:
         # missing-source branch in ``_index_file``). ``is_file`` (not
         # ``exists``) is the right predicate — a same-named directory ``exists``
         # but is not indexable, and its old chunks must still be cleaned. (#1566)
-        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces)
+        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
         if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec) and (
@@ -1148,6 +1202,7 @@ class IndexEngine:
                 lock_held=lock_held,
                 path_scope=path_scope,
                 reassign_namespaces=reassign_namespaces,
+                new_source_namespace=new_source_namespace,
             )
         finally:
             self._active_runs -= 1
@@ -1232,6 +1287,7 @@ class IndexEngine:
         *,
         force: bool = False,
         reassign: bool = False,
+        new_source_namespace: str | None = None,
     ) -> NamespaceDecision:
         """Resolve ``file_path``'s namespace and record why (issue #2061).
 
@@ -1239,10 +1295,19 @@ class IndexEngine:
         |---|---|---|
         | explicit namespace | any | that namespace |
         | plain or ``force`` | one, unanimous | preserved |
-        | plain or ``force`` | none | rules → auto_ns → default |
+        | plain or ``force`` | none | ``new_source_namespace`` if given, else rules → auto_ns → default |
         | plain (no force) | several | rules — only the *changed* chunks move, which is the pre-existing ADR-0032 ambiguity |
         | ``force`` | several | refused (:class:`NamespaceMixedUnderForceError`) — force rewrites *every* row, so one namespace would swallow the rest |
         | ``reassign`` | any | rules, deliberately overwriting what is stored |
+
+        ``new_source_namespace`` is the session-inheritance slot (#2104). A
+        caller whose writes are bound to a context namespace — an MCP agent
+        session, a ``mem_ns_set`` current namespace — passes it *here* rather
+        than as ``explicit_ns``, and it reaches only sources with no stored
+        rows. That keeps the #2004 contract for new content while stopping a
+        bulk re-index from restamping files the session never wrote: an
+        explicit namespace is a caller naming a target for *this* call, a
+        bound one is ambient context, and only the first may move rows.
 
         The stored lookup runs on every path, ``reassign`` included: the old
         namespace is what the move summary and the system-namespace warning
@@ -1310,6 +1375,13 @@ class IndexEngine:
         if len(stored) > 1 and force:
             return NamespaceDecision(target=ruled, stored=stored, reason="mixed_force_refused")
 
+        if not stored and new_source_namespace is not None:
+            # The only place a bound namespace applies: a source the store has
+            # never seen. Deliberately *below* the preserved and mixed-force
+            # branches, so binding can neither move an indexed file nor slip
+            # past the refusal a mixed file earns (#2104).
+            return NamespaceDecision(target=new_source_namespace, reason="bound_new_source")
+
         return NamespaceDecision(target=ruled, stored=stored, reason="resolved")
 
     async def namespace_decision_for(
@@ -1319,6 +1391,7 @@ class IndexEngine:
         *,
         force: bool = False,
         reassign: bool = False,
+        new_source_namespace: str | None = None,
     ) -> NamespaceDecision:
         """Public form of :meth:`_namespace_decision`.
 
@@ -1329,9 +1402,13 @@ class IndexEngine:
         just the value, or it silently reintroduces the collapse the refusal
         exists to prevent (#2061).
         """
-        _reject_reassign_with_explicit_ns(explicit_ns, reassign)
+        _reject_reassign_with_explicit_ns(explicit_ns, reassign, new_source_namespace)
         return await self._namespace_decision(
-            file_path, explicit_ns, force=force, reassign=reassign
+            file_path,
+            explicit_ns,
+            force=force,
+            reassign=reassign,
+            new_source_namespace=new_source_namespace,
         )
 
     async def effective_namespace_for(
@@ -1341,6 +1418,7 @@ class IndexEngine:
         *,
         force: bool = False,
         reassign: bool = False,
+        new_source_namespace: str | None = None,
     ) -> str | None:
         """The namespace ``index_file`` will stamp on ``file_path``'s chunks.
 
@@ -1361,9 +1439,13 @@ class IndexEngine:
             NamespaceResolutionError: the stored lookup could not answer
                 (retryable).
         """
-        _reject_reassign_with_explicit_ns(explicit_ns, reassign)
+        _reject_reassign_with_explicit_ns(explicit_ns, reassign, new_source_namespace)
         decision = await self._namespace_decision(
-            file_path, explicit_ns, force=force, reassign=reassign
+            file_path,
+            explicit_ns,
+            force=force,
+            reassign=reassign,
+            new_source_namespace=new_source_namespace,
         )
         return decision.target
 
@@ -1550,6 +1632,7 @@ class IndexEngine:
         path_scope: PathScope = "configured",
         embed_semaphore: asyncio.Semaphore | None = None,
         reassign_namespaces: bool = False,
+        new_source_namespace: str | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
@@ -1717,7 +1800,8 @@ class IndexEngine:
 
         new_chunks = self.chunk_content(file_path, content)
 
-        # Resolve namespace: explicit > preserved > rules > auto_ns > default.
+        # Resolve namespace: explicit > preserved > bound-new-source > rules >
+        # auto_ns > default.
         # ``force`` no longer skips preservation (#2061): it re-embeds, and
         # only ``reassign_namespaces`` re-resolves through the rules. This
         # lookup runs inside the per-file critical section on purpose: a bulk
@@ -1727,7 +1811,11 @@ class IndexEngine:
         # failure here fails this file closed; the bulk flatten branches
         # keep the retryable type in ``stats.retryable_errors``.
         ns_decision = await self._namespace_decision(
-            file_path, namespace, force=force, reassign=reassign_namespaces
+            file_path,
+            namespace,
+            force=force,
+            reassign=reassign_namespaces,
+            new_source_namespace=new_source_namespace,
         )
         resolved_ns = ns_decision.target
         if resolved_ns is not None and ns_decision.reason != "mixed_force_refused":
@@ -2016,6 +2104,7 @@ class IndexEngine:
         force_unsafe: bool = False,
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
+        new_source_namespace: str | None = None,
     ):
         """Like index_path(), but yields progress dicts as each file is processed.
 
@@ -2061,7 +2150,7 @@ class IndexEngine:
         so ``GET /api/indexing/active`` covers discovery and the gaps
         between files, where no lock is held.
         """
-        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces)
+        _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
         self._active_runs += 1
         try:
@@ -2141,7 +2230,11 @@ class IndexEngine:
             # its type kept in ``retryable_errors``.
             resolved_files = [fp.resolve() for fp in files]
             prepass_namespaces = await self._resolve_namespaces_per_file(
-                resolved_files, namespace, force=force, reassign=reassign_namespaces
+                resolved_files,
+                namespace,
+                force=force,
+                reassign=reassign_namespaces,
+                new_source_namespace=new_source_namespace,
             )
             echo_namespaces = list(prepass_namespaces)
             tally = _NamespaceTally()
@@ -2208,6 +2301,7 @@ class IndexEngine:
                             force_unsafe=force_unsafe,
                             path_scope=path_scope,
                             reassign_namespaces=reassign_namespaces,
+                            new_source_namespace=new_source_namespace,
                         )
                         return result
                     finally:

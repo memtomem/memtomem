@@ -150,7 +150,9 @@ async def mem_session_start(
     The *write* routing is a separate consequence of the agent binding:
     with an agent bound, ``mem_add`` / ``mem_batch_add`` / ``mem_index``
     without an explicit ``namespace=`` resolve to
-    ``agent-runtime:<agent_id>``; unbound, they consult
+    ``agent-runtime:<agent_id>`` — for ``mem_index`` only for files the
+    index has never seen, since it re-indexes content the session may not
+    have written (#2104); unbound, they consult
     ``app.current_namespace`` and the indexing config exactly as they do
     with no session at all. Namespace and agent_id remain separate axes
     on ``AppContext``.

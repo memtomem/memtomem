@@ -26,7 +26,11 @@ mem_ns_list()                         # list all namespaces with counts
   personal: 94 chunks
 ```
 
-After `mem_ns_set`, all operations (search, add, index) default to that namespace.
+After `mem_ns_set`, search and add default to that namespace. `mem_index` is
+narrower: it stamps the current namespace on sources the index has never seen,
+while an already-indexed file keeps the namespace its chunks are stored under —
+a re-index does not move content you did not just write. Passing `namespace=`
+explicitly still overrides both.
 
 ### Namespace metadata
 

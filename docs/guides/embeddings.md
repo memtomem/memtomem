@@ -131,10 +131,10 @@ If you switch the embedding model after indexing, run `mm embedding-reset` to de
   `mm embedding-reset --mode apply-current`, then
   `mm index --force <memory_dir>`. `--force` re-embeds only — each file keeps
   the namespace its chunks are stored under, agent session namespaces
-  included. Prefer the CLI over `mem_index(force=true)` here: called inside an
-  agent session, the MCP tool passes that session's namespace explicitly, and
-  an explicit namespace overrides preservation (see
-  [`configuration.md#reset-flow`](configuration.md#reset-flow)).
+  included. `mem_index(force=true)` is equally safe, including inside an agent
+  session: the session namespace binds only files the index has never seen
+  (see [`configuration.md#reset-flow`](configuration.md#reset-flow)). A
+  namespace you pass explicitly still wins.
 
 ## Tuning Throughput
 

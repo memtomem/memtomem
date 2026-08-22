@@ -2417,3 +2417,112 @@ class TestSessionTransitionDrain:
         active = [r for r in rows if r["ended_at"] is None]
         assert len(rows) == 3
         assert [r["id"] for r in active] == [app.current_session_id]
+
+
+class TestSessionNamespaceBindsNewSourcesOnly:
+    """#2104: a session binds writes, not a whole tree.
+
+    ``mem_index`` used to hand the session's namespace to the engine as an
+    *explicit* one, and an explicit namespace beats preservation — so a
+    forced re-index inside a session restamped every file it re-embedded,
+    including files another agent wrote. The session namespace now reaches
+    only sources with no stored rows, which keeps the #2004 write-routing
+    contract without letting it move existing content.
+    """
+
+    @staticmethod
+    async def _namespaces_of(app: AppContext, path: Path) -> list[str]:
+        return await app.storage.namespaces_for_source(path)
+
+    @pytest.mark.asyncio
+    async def test_force_reindex_keeps_pre_existing_files_where_they_are(
+        self, bm25_only_components
+    ):
+        comp, memory_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        existing = memory_dir / "existing.md"
+        existing.write_text("# Existing\n\nIndexed before any session started.\n")
+        await mem_index(path=str(memory_dir), ctx=ctx)  # type: ignore[arg-type]
+        assert await self._namespaces_of(app, existing) == ["default"]
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        fresh = memory_dir / "fresh.md"
+        fresh.write_text("# Fresh\n\nWritten while the planner session is live.\n")
+
+        out = await mem_index(path=str(memory_dir), force=True, ctx=ctx)  # type: ignore[arg-type]
+
+        assert await self._namespaces_of(app, existing) == ["default"]
+        assert await self._namespaces_of(app, fresh) == ["agent-runtime:planner"]
+        # No rule spoke, so nothing was preserved *against* one.
+        assert "Namespaces preserved" not in out
+
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_the_legacy_current_namespace_binds_the_same_way(self, bm25_only_components):
+        """``mem_ns_set``'s current namespace is the pre-multi-agent form of
+        the same ambient binding, and inherits the same limit."""
+        comp, memory_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        existing = memory_dir / "existing.md"
+        existing.write_text("# Existing\n\nIndexed with no namespace set.\n")
+        await mem_index(path=str(memory_dir), ctx=ctx)  # type: ignore[arg-type]
+
+        app.current_namespace = "team"
+        fresh = memory_dir / "fresh.md"
+        fresh.write_text("# Fresh\n\nWritten after mem_ns_set.\n")
+
+        await mem_index(path=str(memory_dir), force=True, ctx=ctx)  # type: ignore[arg-type]
+
+        assert await self._namespaces_of(app, existing) == ["default"]
+        assert await self._namespaces_of(app, fresh) == ["team"]
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_namespace_argument_still_moves_everything(
+        self, bm25_only_components
+    ):
+        """The caller naming a namespace is intent, not ambient context —
+        that path is unchanged and is the documented way to move rows."""
+        comp, memory_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        existing = memory_dir / "existing.md"
+        existing.write_text("# Existing\n\nIndexed before the session.\n")
+        await mem_index(path=str(memory_dir), ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        await mem_index(  # type: ignore[arg-type]
+            path=str(memory_dir), force=True, namespace="pinned", ctx=ctx
+        )
+
+        assert await self._namespaces_of(app, existing) == ["pinned"]
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_namespace_argument_is_absent_not_explicit(self, bm25_only_components):
+        """``""`` has always meant "no namespace" on the way in. Passing it
+        through as explicit would stamp rows with an empty namespace."""
+        comp, memory_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = _StubCtx(app)
+
+        existing = memory_dir / "existing.md"
+        existing.write_text("# Existing\n\nIndexed before the session.\n")
+        await mem_index(path=str(memory_dir), ctx=ctx)  # type: ignore[arg-type]
+
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+        fresh = memory_dir / "fresh.md"
+        fresh.write_text("# Fresh\n\nWritten during the session.\n")
+
+        await mem_index(  # type: ignore[arg-type]
+            path=str(memory_dir), force=True, namespace="", ctx=ctx
+        )
+
+        assert await self._namespaces_of(app, existing) == ["default"]
+        assert await self._namespaces_of(app, fresh) == ["agent-runtime:planner"]
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
