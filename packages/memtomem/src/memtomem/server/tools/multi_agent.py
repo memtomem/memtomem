@@ -32,6 +32,12 @@ def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | Non
     across the entire MCP surface — see G1 in
     ``memtomem-docs/memtomem/planning/multi-agent-public-surface-review-2026-04-26.md``.
 
+    What the caller does with the answer differs by surface. The add
+    surfaces stamp it on the content they create. ``mem_index`` re-indexes
+    content it did not necessarily write, so it applies this namespace only
+    to sources with no stored rows — an already-indexed file keeps its own
+    (#2104).
+
     Priority order (each falls back to the next when ``None``):
 
     1. Explicit ``agent_id`` argument — the caller wants to override the

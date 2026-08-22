@@ -124,6 +124,10 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # and still leave the callers' own parameters ungated, so it is
         # deferred with them and moves when they do.
         ("_provenance.py", "capture_session_and_namespace", "namespace"),
+        # Same rationale for the split form (#2104): it forwards the caller's
+        # already-classified ``namespace`` and only reports which of the two
+        # sources answered. Gating here would double-validate the same value.
+        ("_provenance.py", "capture_session_and_namespace_split", "namespace"),
         # ``mem_tag_merge.target`` is a *tag name*, not a namespace — caught
         # by the parameter-name heuristic but semantically distinct from the
         # ``mem_agent_share.target`` shape above. Tags travel through

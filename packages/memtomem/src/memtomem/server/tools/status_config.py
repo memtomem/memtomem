@@ -848,21 +848,18 @@ async def mem_embedding_reset(
             policy_fingerprint=embedding_policy_fingerprint(config.embedding),
             max_sequence_tokens=config.embedding.max_sequence_tokens,
         )
-        # The remedy names the CLI, not ``mem_index(force=true)``: when an
-        # agent or current namespace is active the MCP tool resolves it and
-        # passes it *explicitly*, which short-circuits namespace preservation
-        # and restamps every row it re-embeds (ADR-0033; narrowing tracked in
-        # #2104). The CLI command passes no namespace, so each file keeps the
-        # namespace its chunks are stored under. Recovery is not the moment to
-        # move an agent's memories.
+        # The remedy names the CLI because re-embedding a whole tree is a
+        # long, interruptible job better run from a shell than from a tool
+        # call holding a client's turn open. It is no longer a safety caveat:
+        # both paths preserve each file's stored namespace, including under a
+        # session (ADR-0033, #2104).
         return (
             f"DB reset to {config.embedding.provider}/{config.embedding.model} "
             f"({config.embedding.dimension}d). All vectors deleted — re-embed "
-            "with `mm index --force <memory_dir>` (CLI). Prefer it over "
-            "mem_index(force=true): an agent session or a namespace set with "
-            "mem_ns_set makes that call stamp everything it re-embeds with "
-            "that namespace. Until the re-embed runs, dense search finds "
-            "nothing."
+            "with `mm index --force <memory_dir>` (CLI) or "
+            "mem_index(force=true); either way each file keeps the namespace "
+            "its chunks are stored under. Until the re-embed runs, dense "
+            "search finds nothing."
         )
 
     # mode == "revert_to_stored"

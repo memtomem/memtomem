@@ -12,7 +12,12 @@ from memtomem.models import IndexingStats
 from memtomem.server.tools.indexing import mem_index
 
 
-def _install_index_result(monkeypatch: pytest.MonkeyPatch, stats: IndexingStats) -> SimpleNamespace:
+def _install_index_result(
+    monkeypatch: pytest.MonkeyPatch,
+    stats: IndexingStats,
+    *,
+    captured: tuple[str | None, str | None, str | None] = (None, None, None),
+) -> SimpleNamespace:
     @asynccontextmanager
     async def _write_in_flight():
         yield
@@ -30,14 +35,26 @@ def _install_index_result(monkeypatch: pytest.MonkeyPatch, stats: IndexingStats)
         AsyncMock(return_value=app),
     )
     monkeypatch.setattr(
-        "memtomem.server.tools.indexing.capture_session_and_namespace",
-        AsyncMock(return_value=(None, None)),
+        "memtomem.server.tools.indexing.capture_session_and_namespace_split",
+        AsyncMock(return_value=captured),
     )
     monkeypatch.setattr("memtomem.server.tools.indexing.record_write_provenance", AsyncMock())
     monkeypatch.setattr(
         "memtomem.server.tools.indexing._check_embedding_mismatch", lambda _app: None
     )
     return app
+
+
+#: A run with nothing to report, for tests that assert on the engine call
+#: rather than on the rendered output.
+_CLEAN_RUN = IndexingStats(
+    total_files=1,
+    total_chunks=2,
+    indexed_chunks=2,
+    skipped_chunks=0,
+    deleted_chunks=0,
+    duration_ms=1.0,
+)
 
 
 class TestMemIndexRetryableErrors:
@@ -90,6 +107,41 @@ class TestMemIndexRetryableErrors:
         assert output.startswith(f"Error (retryable): {retryable}")
         assert output.count(retryable) == 1
         assert "Call mem_index again once the chunk store is reachable." in output
+
+
+class TestMemIndexNamespaceRouting:
+    """#2104: the caller's namespace and the session's travel in different
+    engine slots, because only the first may move already-indexed rows."""
+
+    async def test_a_session_namespace_goes_to_the_new_source_slot(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _install_index_result(
+            monkeypatch,
+            _CLEAN_RUN,
+            captured=("session-1", None, "agent-runtime:planner"),
+        )
+
+        await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        kwargs = app.index_engine.index_path.await_args.kwargs
+        assert kwargs["namespace"] is None
+        assert kwargs["new_source_namespace"] == "agent-runtime:planner"
+
+    async def test_a_caller_namespace_stays_explicit(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _install_index_result(
+            monkeypatch,
+            _CLEAN_RUN,
+            captured=("session-1", "pinned", "agent-runtime:planner"),
+        )
+
+        await mem_index(path=str(tmp_path), namespace="pinned")  # type: ignore[arg-type]
+
+        kwargs = app.index_engine.index_path.await_args.kwargs
+        assert kwargs["namespace"] == "pinned"
+        assert kwargs["new_source_namespace"] == "agent-runtime:planner"
 
 
 class TestMemIndexNamespaceAdvisory:
@@ -160,9 +212,9 @@ class TestMemIndexMissingVectorAdvisory:
         output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
 
         assert "- No embedding: 6 unchanged chunk(s) have no vector" in output
-        # The remedy names the CLI on purpose: with an agent or current
-        # namespace active, mem_index(force=true) passes it explicitly and
-        # restamps what it re-embeds (ADR-0033, #2104).
+        # The remedy names the CLI on purpose: a whole-tree re-embed is a
+        # long shell job. Not a safety caveat — since #2104 the MCP call
+        # preserves stored namespaces too (ADR-0033).
         assert "mm index --force" in output
         assert "mem_index(force=true)" not in output
 

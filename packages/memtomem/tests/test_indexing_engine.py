@@ -2481,6 +2481,197 @@ class TestBulkNamespacePrepass:
         assert stats.namespace_moves == ()
 
 
+class TestBoundNewSourceNamespace:
+    """``new_source_namespace`` — the session-inheritance slot (#2104).
+
+    A caller whose writes are bound to a context namespace (an MCP agent
+    session, a ``mem_ns_set`` current namespace) passes it here instead of as
+    an explicit namespace, so it binds only sources the store has never seen.
+    Before the split, ``mem_index`` passed it explicitly and a forced
+    re-index restamped every file it touched.
+    """
+
+    async def test_binds_only_the_source_with_no_stored_rows(self, components, memory_dir):
+        """The headline: a forced re-index under a session leaves the files
+        it did not write where they are, and claims the one it did."""
+        engine = components.index_engine
+        kept = memory_dir / "kept.md"
+        kept.write_text("# K\n\npersonal note", encoding="utf-8")
+        await engine.index_file(kept, namespace="personal", already_scanned=True)
+        other_agent = memory_dir / "other.md"
+        other_agent.write_text("# O\n\nanother agent's note", encoding="utf-8")
+        await engine.index_file(
+            other_agent, namespace="agent-runtime:builder", already_scanned=True
+        )
+        fresh = memory_dir / "fresh.md"
+        fresh.write_text("# F\n\nwritten during this session", encoding="utf-8")
+
+        stats = await engine.index_path(
+            memory_dir,
+            recursive=True,
+            force=True,
+            new_source_namespace="agent-runtime:planner",
+        )
+
+        assert await components.storage.namespaces_for_source(kept) == ["personal"]
+        assert await components.storage.namespaces_for_source(other_agent) == [
+            "agent-runtime:builder"
+        ]
+        assert await components.storage.namespaces_for_source(fresh) == ["agent-runtime:planner"]
+        assert set(stats.applied_namespaces) == {
+            "personal",
+            "agent-runtime:builder",
+            "agent-runtime:planner",
+        }
+        # Nothing was preserved *against* a rule: the stock config has none.
+        assert stats.namespaces_preserved_against_rules == 0
+        assert stats.namespaces_reassigned == 0
+
+    async def test_a_stored_file_is_preserved_without_force_too(self, components, memory_dir):
+        """The binding is scoped by stored rows, not by ``force`` — an edited
+        file keeps its namespace on an ordinary re-index as well."""
+        engine = components.index_engine
+        fp = memory_dir / "edited.md"
+        fp.write_text("# E\n\nfirst entry", encoding="utf-8")
+        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        fp.write_text("# E\n\nfirst entry\n\nsecond entry", encoding="utf-8")
+
+        await engine.index_path(
+            memory_dir, recursive=True, new_source_namespace="agent-runtime:planner"
+        )
+
+        assert await components.storage.namespaces_for_source(fp) == ["personal"]
+
+    async def test_an_explicit_namespace_still_wins(self, components, memory_dir):
+        """Caller intent outranks ambient context, for stored and row-less
+        files alike."""
+        engine = components.index_engine
+        stored = memory_dir / "stored.md"
+        stored.write_text("# S\n\nentry", encoding="utf-8")
+        await engine.index_file(stored, namespace="personal", already_scanned=True)
+        fresh = memory_dir / "fresh.md"
+        fresh.write_text("# F\n\nentry", encoding="utf-8")
+
+        await engine.index_path(
+            memory_dir,
+            recursive=True,
+            force=True,
+            namespace="pinned",
+            new_source_namespace="agent-runtime:planner",
+        )
+
+        assert await components.storage.namespaces_for_source(stored) == ["pinned"]
+        assert await components.storage.namespaces_for_source(fresh) == ["pinned"]
+
+    async def test_a_mixed_file_is_still_refused_under_force(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The binding must not slip past the refusal an explicit namespace
+        is allowed to bypass — that bypass is exactly what #2104 was."""
+        engine = components.index_engine
+        mixed = memory_dir / "mixed.md"
+        mixed.write_text("# M\n\nfirst entry", encoding="utf-8")
+        clean = memory_dir / "clean.md"
+        clean.write_text("# C\n\nclean entry", encoding="utf-8")
+
+        async def _stored(path):
+            return ["aaa", "bbb"] if Path(path).name == "mixed.md" else []
+
+        monkeypatch.setattr(components.storage, "namespaces_for_source", _stored)
+
+        stats = await engine.index_path(
+            memory_dir,
+            recursive=True,
+            force=True,
+            new_source_namespace="agent-runtime:planner",
+        )
+
+        assert [err for err in stats.errors if err.count("mixed.md") == 1]
+        assert stats.retryable_errors == ()
+        # The clean file in the same run was still indexed, and bound: the
+        # stored lookup stays monkeypatched here, so read the run's own
+        # authoritative echo rather than the store.
+        assert stats.applied_namespaces == ("agent-runtime:planner",)
+        assert stats.total_files == 2
+
+    async def test_reassign_rejects_a_bound_namespace(self, components, memory_dir):
+        """Both claim the row-less files; the engine refuses rather than
+        letting one silently win."""
+        engine = components.index_engine
+        fp = memory_dir / "n.md"
+        fp.write_text("# N\n\nentry", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.index_path(
+                memory_dir,
+                recursive=True,
+                reassign_namespaces=True,
+                new_source_namespace="agent-runtime:planner",
+            )
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.index_file(
+                fp, reassign_namespaces=True, new_source_namespace="agent-runtime:planner"
+            )
+        with pytest.raises(ValueError, match="cannot be combined"):
+            await engine.resolve_namespaces_for(
+                [fp], reassign=True, new_source_namespace="agent-runtime:planner"
+            )
+
+    async def test_the_preview_answers_for_the_same_operation(self, components, memory_dir):
+        """A preview that ignored the binding would promise the rules'
+        namespace for a file the write is about to bind (#2005 parity)."""
+        engine = components.index_engine
+        stored = memory_dir / "stored.md"
+        stored.write_text("# S\n\nentry", encoding="utf-8")
+        await engine.index_file(stored, namespace="personal", already_scanned=True)
+        fresh = memory_dir / "fresh.md"
+        fresh.write_text("# F\n\nentry", encoding="utf-8")
+
+        assert (
+            await engine.effective_namespace_for(
+                stored, force=True, new_source_namespace="agent-runtime:planner"
+            )
+            == "personal"
+        )
+        assert (
+            await engine.effective_namespace_for(
+                fresh, force=True, new_source_namespace="agent-runtime:planner"
+            )
+            == "agent-runtime:planner"
+        )
+        decision = await engine.namespace_decision_for(
+            fresh, force=True, new_source_namespace="agent-runtime:planner"
+        )
+        assert decision.reason == "bound_new_source"
+        assert decision.stored == ()
+
+    async def test_the_stream_path_binds_the_same_way(self, components, memory_dir):
+        """The stream run has its own prepass and locked-write hops, so it
+        can drift from the non-stream path unless both are pinned."""
+        engine = components.index_engine
+        stored = memory_dir / "stored.md"
+        stored.write_text("# S\n\nentry", encoding="utf-8")
+        await engine.index_file(stored, namespace="personal", already_scanned=True)
+        fresh = memory_dir / "fresh.md"
+        fresh.write_text("# F\n\nentry", encoding="utf-8")
+
+        events = [
+            ev
+            async for ev in engine.index_path_stream(
+                memory_dir,
+                recursive=True,
+                force=True,
+                new_source_namespace="agent-runtime:planner",
+            )
+        ]
+
+        complete = [ev for ev in events if ev["type"] == "complete"]
+        assert len(complete) == 1
+        assert set(complete[0]["applied_namespaces"]) == {"personal", "agent-runtime:planner"}
+        assert await components.storage.namespaces_for_source(stored) == ["personal"]
+        assert await components.storage.namespaces_for_source(fresh) == ["agent-runtime:planner"]
+
+
 # ===========================================================================
 # 3. _apply_namespace
 # ===========================================================================

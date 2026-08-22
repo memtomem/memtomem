@@ -24,9 +24,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   that command, so the old workflow tells you what to run instead of failing
   silently. Affects every force surface that passes no namespace —
   `mm index --force`, `mem_index(force=true)`, and the web bulk force paths;
-  reassignment is CLI only for now. (Unchanged and pre-existing: inside an
-  agent session `mem_index` passes that session's namespace explicitly, and an
-  explicit namespace still wins.) A forced re-index of a file whose chunks span several
+  reassignment is CLI only for now. (A namespace you pass explicitly still
+  wins; one inherited from an agent session no longer moves existing files —
+  see the #2104 entry below.) A forced re-index of a file whose chunks span several
   namespaces is now refused per-file (the run continues) rather than
   flattening them into one. Python API: `IndexEngine.effective_namespace_for`
   keeps `force` with the new meaning and gains `reassign`, and the index
@@ -176,11 +176,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   exactly that: `docs/guides/reference/operations.md`,
   `docs/guides/mcp-clients.md`, and the `mm init` wizard's own receipt after it
   offers to reset. A docs guard now fails when a documented `apply-current` is
-  not followed by the forced re-index. `mem_embedding_reset` also stops
-  pointing agents at `mem_index(force=true)`: an agent session or a namespace
-  set with `mem_ns_set` makes that call pass the namespace explicitly, which
-  overrides preservation and restamps what it re-embeds (ADR-0033, #2104), so
-  the receipt now names the CLI command, which passes no namespace.
+  not followed by the forced re-index. `mem_embedding_reset`'s receipt names
+  the CLI command as the remedy — re-embedding a whole tree is a long,
+  interruptible job better run from a shell — and, since #2104, says plainly
+  that either surface preserves stored namespaces.
+
+- **A session no longer restamps files it did not write.** `mem_index`
+  resolved the active agent session's namespace (or a `mem_ns_set` current
+  namespace) and passed it to the indexer as an *explicit* one, and an
+  explicit namespace beats namespace preservation — so `mem_index(force=true)`
+  inside a session rewrote every file it re-embedded to `agent-runtime:<id>`,
+  including files stored under `default` or under another agent's namespace,
+  and slipped past the refusal a mixed-namespace file otherwise earns (#2104).
+  A namespace inherited from session context now travels in its own slot and
+  binds only sources with no stored rows: a file the session writes is still
+  bound to `agent-runtime:<id>` (the #2004 contract), an already-indexed file
+  keeps its namespace, and a namespace the caller names explicitly still wins
+  everywhere. Python API: the index entrypoints and the namespace preview
+  helpers gain a keyword-only `new_source_namespace`, refused alongside
+  `reassign_namespaces=True`.
 
 - **A search whose dense leg was dropped now says so, on every call.** When
   stored embeddings do not match the configured embedding policy the pipeline
