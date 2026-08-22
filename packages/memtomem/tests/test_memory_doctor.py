@@ -1739,6 +1739,26 @@ class TestStaleIndex:
 
         assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
 
+    def test_collapsing_identical_sections_is_reported(self, stale_env):
+        """Dropping one of two byte-identical sections is drift (#2123).
+
+        This was a documented blind spot: the differ keyed deletion on whether
+        the hash still appeared anywhere, so a plain re-index wrote nothing and
+        the check — which asks exactly that question — stayed silent while the
+        orphan rows kept answering searches under a heading the file had lost.
+        """
+        config, mem_dir, note, reindex = stale_env
+        body = "identical body sentence zqx3. " * 100 + "\n"
+        note.write_text(f"# t\n\n## one\n\n{body}\n## two\n\n{body}", encoding="utf-8")
+        reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+        note.write_text(f"# t\n\n## one\n\n{body}", encoding="utf-8")
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+        reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
     def test_garbage_chunk_timestamps_change_nothing(self, stale_env):
         """Timestamps are not an input: a corrupt one neither hides nor invents.
 

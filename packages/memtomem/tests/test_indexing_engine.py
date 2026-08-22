@@ -53,6 +53,11 @@ def _make_chunk_with(
 # ===========================================================================
 
 
+def _under_two(chunk) -> bool:
+    """True when the chunk sits under the ``## two`` heading of the collapse fixture."""
+    return any("two" in heading for heading in chunk.metadata.heading_hierarchy)
+
+
 class TestPathIsExcludedProviderConventions:
     """The single exclude funnel for ``_discover_files``, ``_index_file``,
     and ``mm purge`` must honor provider index-file conventions.
@@ -3330,6 +3335,67 @@ class TestIndexFile:
             f"IndexingStats.deleted_chunks should report removals under force; "
             f"got {stats.deleted_chunks}"
         )
+
+    @staticmethod
+    def _collapse_sources() -> tuple[str, str]:
+        """Two byte-identical sections, then the same file with one of them.
+
+        The body is long enough that each section chunks on its own, so the
+        two chunks share a content_hash and differ only by heading.
+        """
+        body = "identical body sentence here. " * 100 + "\n"
+        both = f"# t\n\n## one\n\n{body}\n## two\n\n{body}"
+        one = f"# t\n\n## one\n\n{body}"
+        return both, one
+
+    async def _assert_collapse_leaves_no_orphans(self, components, memory_dir, *, force):
+        """A file collapsing byte-identical chunks must drop the surplus rows.
+
+        Pre-fix the differ keyed deletion on whether the *hash* still appeared
+        anywhere, so the ``## two`` rows survived a plain re-index and
+        ``--force`` alike, staying searchable under a heading the file no
+        longer had (#2123).
+        """
+        both, one = self._collapse_sources()
+        md_path = memory_dir / f"collapse_{'force' if force else 'plain'}.md"
+        md_path.write_text(both, encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        before = await components.storage.list_chunks_by_source(md_path)
+        assert len(before) >= 2
+        assert any(_under_two(c) for c in before)
+        # Every hash under ``## one`` is matched by a byte-identical one under
+        # ``## two`` — the shape the pre-fix deletion test could not see.
+        assert {c.content_hash for c in before if _under_two(c)} == {
+            c.content_hash for c in before if not _under_two(c)
+        }
+
+        md_path.write_text(one, encoding="utf-8")
+        expected = len(components.index_engine.chunk_content(md_path, one))
+        stats = await components.index_engine.index_file(md_path, force=force)
+
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert len(after) == expected, (
+            f"collapsing identical sections should drop the surplus rows; "
+            f"got {len(after)} rows, expected {expected}"
+        )
+        assert not any(_under_two(c) for c in after), (
+            "a row under the removed heading survived the re-index"
+        )
+        assert stats.deleted_chunks == len(before) - expected
+
+    async def test_collapsing_identical_sections_deletes_orphan_rows(self, components, memory_dir):
+        await self._assert_collapse_leaves_no_orphans(components, memory_dir, force=False)
+
+    async def test_force_reindex_clears_collapsed_duplicates(self, components, memory_dir):
+        await self._assert_collapse_leaves_no_orphans(components, memory_dir, force=True)
 
     async def test_dim_zero_with_real_model_aborts(self, components, memory_dir):
         """Misconfigured embedder (dim=0, non-noop model) must abort instead

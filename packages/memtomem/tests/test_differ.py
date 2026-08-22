@@ -138,6 +138,41 @@ class TestComputeDiff:
         assert first.id == beta_id
         assert second.id == alpha_id
 
+    def test_collapsing_duplicate_hash_deletes_unused_ids(self):
+        # A file that held two byte-identical sections now holds one. The hash
+        # survives, but the second id is not reused by anything and nothing
+        # upserts over it, so it must be deleted rather than left searchable
+        # under a heading the file no longer has (#2123).
+        kept = _mk("duplicate body")
+        kept.metadata = replace(kept.metadata, heading_hierarchy=("one",))
+        one_id, two_id = uuid4(), uuid4()
+        existing = {
+            str(one_id): (kept.content_hash, ("one",)),
+            str(two_id): (kept.content_hash, ("two",)),
+        }
+
+        result = compute_diff(existing, [kept])
+
+        assert result.unchanged == [kept]
+        assert result.to_upsert == []
+        assert result.to_delete == [two_id]
+        assert kept.id == one_id
+
+    def test_collapsing_duplicate_hash_without_hierarchy_deletes_the_surplus(self):
+        # Same collapse through the backward-compatible plain-hash input, where
+        # hash equality alone decides reuse: exactly one id is reused and the
+        # other is deleted.
+        kept = _mk("duplicate body")
+        id_a, id_b = uuid4(), uuid4()
+        existing = {str(id_a): kept.content_hash, str(id_b): kept.content_hash}
+
+        result = compute_diff(existing, [kept])
+
+        assert result.unchanged == [kept]
+        assert result.to_upsert == []
+        assert len(result.to_delete) == 1
+        assert {str(kept.id), str(result.to_delete[0])} == {str(id_a), str(id_b)}
+
     def test_renamed_duplicate_does_not_steal_later_exact_heading_id(self):
         renamed, unchanged = _mk("duplicate body"), _mk("duplicate body")
         renamed.metadata = replace(renamed.metadata, heading_hierarchy=("Gamma",))

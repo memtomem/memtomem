@@ -29,7 +29,7 @@ def compute_diff(
 
     - New chunk hash NOT in existing hashes → upsert (needs embedding)
     - Hash match with a changed heading hierarchy → upsert with reused ID
-    - Existing ID whose hash doesn't appear in new chunks → delete
+    - Existing ID that no new chunk reused → delete
     - Hash and heading hierarchy match → unchanged, reuse existing ID
 
     Duplicate content_hash values are handled safely: each existing ID is
@@ -49,7 +49,6 @@ def compute_diff(
 
     to_upsert: list[Chunk] = []
     unchanged: list[Chunk] = []
-    new_hash_set: set[str] = set()
     used_ids: set[str] = set()
 
     # Reserve exact hierarchy matches first across the whole file. This avoids
@@ -73,7 +72,6 @@ def compute_diff(
             used_ids.add(exact[0])
 
     for index, chunk in enumerate(new_chunks):
-        new_hash_set.add(chunk.content_hash)
         new_hierarchy = chunk.metadata.heading_hierarchy
         reuse = assignments[index]
         if reuse is None:
@@ -92,11 +90,15 @@ def compute_diff(
         else:
             to_upsert.append(chunk)
 
-    # Existing chunks whose hashes are no longer present in any new chunk → stale
-    to_delete = [
-        UUID(cid)
-        for cid, state in existing_hashes.items()
-        if (state[0] if isinstance(state, tuple) else state) not in new_hash_set
-    ]
+    # Existing chunks that no new chunk reused → stale. Keyed on the id, not on
+    # whether the hash survives somewhere: when a file collapses N byte-identical
+    # chunks into fewer, the hash is still present but the surplus ids are not
+    # reused and nothing upserts over them, so a hash-keyed test left them behind
+    # as orphan rows that stayed searchable under a heading the file no longer
+    # has — and that ``--force`` could not clear either, since force only promotes
+    # ``unchanged`` into ``to_upsert`` and reuses this same list (#2123).
+    # ``used_ids`` holds exactly the ids handed to ``unchanged`` or to a reusing
+    # ``to_upsert`` chunk, so the deletions stay disjoint from both.
+    to_delete = [UUID(cid) for cid in existing_hashes if cid not in used_ids]
 
     return DiffResult(to_upsert=to_upsert, to_delete=to_delete, unchanged=unchanged)
