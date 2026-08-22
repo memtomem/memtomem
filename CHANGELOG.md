@@ -86,12 +86,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   matched text itself. Items are paths relative to the memory root each report
   is headed by, so two same-named files under one root stay distinguishable.
   Report-only: `--fix` is unchanged, and the doctor still never writes the DB.
-  Two gaps stay unreported, both inherited from `mm index` and both cases a
-  re-index does not clear either — flagging them would hand out a remediation
-  that provably cannot work: collapsing two byte-identical chunks into one
-  (the differ keys deletion on the hash, not on the reused id), and editing a
-  section's `> tags: [...]` blockquote (the chunk text is unchanged, so the DB
-  keeps the old tags that `mem_search(tag_filter=…)` reads).
+  One gap stays unreported, inherited from `mm index`: editing a section's
+  `> tags: [...]` blockquote changes nothing a plain re-index writes, so the DB
+  keeps the old tags that `mem_search(tag_filter=…)` reads (`mm index --force
+  <file>` does clear it). The other gap this shipped with — collapsing two
+  byte-identical chunks into one — is fixed below and now reports.
   New Python API: `IndexEngine.chunk_content(file_path, content)`, the
   chunk-side companion to `discover_indexable_files`. (#2078)
 - **`mm search --format json` exposes `chunk_id`.** Every item of the JSON
@@ -152,6 +151,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm index` deletes the surplus rows when a file collapses byte-identical
+  chunks.** The differ decided a deletion by asking whether an existing row's
+  content hash still appeared *anywhere* in the new chunk set, rather than
+  whether that specific row's id had been reused. So a file going from N
+  byte-identical chunks to fewer kept every surplus row: the hash was still
+  "present", nothing upserted over it, and `mm index` reported "0 new,
+  N unchanged, 0 deleted". The orphans stayed searchable under a heading the
+  file no longer had, and `--force` could not clear them either — it only
+  promotes matched chunks into the upsert set and reuses the same deletion
+  list. Deletion is now keyed on the ids the reuse pass actually consumed, so
+  a plain re-index drops the surplus rows, `--force` does too, and
+  `mm memory doctor` reports the collapse as `stale_index` (it re-runs this
+  same diff, and previously inherited the blindness). No behaviour change for
+  files without duplicate content: a hash that vanished was never reused
+  either. (#2123)
 - **A lowercase `MEMTOMEM_*` env var keeps its precedence over `config.json`.**
   pydantic-settings matches env names case-insensitively, so
   `memtomem_search__default_top_k=7` was read at construction — but the two
