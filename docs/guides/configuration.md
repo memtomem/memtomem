@@ -157,14 +157,22 @@ by `mm config set` is a fresh read taken after the lock is released,
 so on a busy machine it reflects whatever the stack says at that
 instant.)
 
-Relatedly, `mm config set` now re-checks the whole section's
+Relatedly, every mutation surface now re-checks the whole section's
 cross-field invariants before writing. A combination the section
 validator rejects (say `indexing.max_chunk_tokens` below
-`min_chunk_tokens`) is refused with `<key> was not saved.` rather than
-persisted and then silently dropped by every
-subsequent load. The message speaks only for the requested value:
-reading a legacy config on the way in can still run the `auto_discover`
-migration, which writes.
+`min_chunk_tokens`) is refused rather than persisted and then silently
+dropped by every subsequent load. Each surface reports it in its own
+idiom: `mm config set` exits 1 with `<key> was not saved.`, the MCP
+`mem_config` tool returns `Cannot set '<key>': ...` and neither persists
+nor applies the change, and `PATCH /api/config` lists the section in
+`rejected` with the live config left untouched. The CLI message speaks
+only for the requested value: reading a legacy config on the way in can
+still run the `auto_discover` migration, which writes.
+
+A web PATCH is validated as a whole rather than key by key, because the
+Settings card sends every field you edited in one request: lowering
+`indexing.max_chunk_tokens` and `target_chunk_tokens` together is
+accepted even though either one alone would break the invariant.
 
 ### Moving `config.json` between machines
 

@@ -794,7 +794,6 @@ class TestConfigSaveValidationAndRollback:
         request_mock = MagicMock()
         request_mock.app = app_mock
 
-        from fastapi import HTTPException
         from memtomem.web.routes.system import ConfigPatchRequest, patch_config
 
         req = ConfigPatchRequest(session_trace={"langfuse_enabled": True})
@@ -812,16 +811,28 @@ class TestConfigSaveValidationAndRollback:
         monkeypatch.setattr(_hr, "_set_last_signature", lambda app, sig: None)
         monkeypatch.setattr(_hr, "commit_writer_signature", lambda app: None)
 
-        with pytest.raises(HTTPException) as excinfo:
-            await patch_config(
+        # Since #2110 the section is re-validated at assignment, so this is
+        # refused before the write is attempted and reported the way every
+        # other field-level refusal on this route is — with the section in
+        # ``rejected`` — rather than as the 400 the save-time ValueError used
+        # to raise. (The 200 status that goes with it is pinned at the wire
+        # level in ``test_web_routes.py``.) The saver is patched and asserted
+        # unused: nothing was accepted, so the route must not touch
+        # ``~/.memtomem/config.json`` — this test builds a synthetic config,
+        # and a delta-only save of it would rewrite the developer's real file.
+        with patch("memtomem.web.routes.system.save_config_overrides") as save:
+            resp = await patch_config(
                 request=request_mock,
                 req=req,
                 persist=True,
                 storage=MagicMock(),
                 search_pipeline=MagicMock(),
             )
-        assert excinfo.value.status_code == 400
-        assert "requires langfuse_public_key and langfuse_secret_key" in str(excinfo.value.detail)
+        save.assert_not_called()
+        assert resp.applied == []
+        assert any(
+            "requires langfuse_public_key and langfuse_secret_key" in r for r in resp.rejected
+        )
 
         assert app_mock.state.config.session_trace.langfuse_enabled is False
 
@@ -848,8 +859,14 @@ class TestConfigSaveValidationAndRollback:
             key="session_trace.langfuse_enabled", value="true", persist=True, ctx=MagicMock()
         )
 
-        assert "Failed to persist config" in res
+        # Since #2110 the section is re-validated at assignment, so the tool
+        # refuses before persisting instead of writing, failing validation
+        # inside ``save_config_overrides``, and rolling back by reload.
+        assert "Cannot set 'session_trace.langfuse_enabled'" in res
         assert "requires langfuse_public_key and langfuse_secret_key" in res
+        # The message must not start with "Set " — that prefix is what gates
+        # persistence and the runtime fanout in ``mem_config``.
+        assert not res.startswith("Set ")
 
         assert app_mock.config.session_trace.langfuse_enabled is False
 
