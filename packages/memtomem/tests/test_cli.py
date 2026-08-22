@@ -6,6 +6,7 @@ basic config operations with mocked components.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -629,6 +630,33 @@ class TestConfigCLI:
         assert "the effective value is still 7" in result.output
         # The write itself is legitimate — it applies once the variable is gone.
         assert json.loads(config_file.read_text())["search"]["default_top_k"] == 44
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.environ normalises keys on Windows: two spellings cannot coexist",
+    )
+    def test_config_set_warns_about_a_lowercase_env_var_too(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """A lowercase spelling wins the same way, and the advice says so (#2109).
+
+        The warning names the spelling in effect, but unsetting only that one
+        hands the key to the next spelling rather than to config.json — so the
+        remedy has to be stated over all of them.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"search": {"default_top_k": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "11")
+        monkeypatch.setenv("memtomem_search__default_top_k", "7")
+
+        result = runner.invoke(cli, ["config", "set", "search.default_top_k", "44"])
+        assert result.exit_code == 0, result.output
+        assert "memtomem_search__default_top_k is set and takes precedence" in result.output
+        assert "the effective value is still 7" in result.output
+        assert "once no case spelling of that name is set" in result.output
 
     def test_config_set_reports_pin_it_pruned(
         self, tmp_path, monkeypatch, runner: CliRunner

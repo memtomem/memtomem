@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import warnings
 from pathlib import Path
 
@@ -61,7 +62,7 @@ def _clear_all_memtomem_env(monkeypatch: pytest.MonkeyPatch) -> None:
     import os
 
     for name in list(os.environ):
-        if name.startswith("MEMTOMEM_"):
+        if name.upper().startswith("MEMTOMEM_"):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [])
 
@@ -1122,46 +1123,193 @@ class TestWriteEffectHelpers:
         assert receipt.pruned("search", "default_top_k")
         assert receipt.pinned_after("search", "default_top_k") is MISSING
 
-    def test_env_var_owning_reports_only_what_the_loaders_honour(
+    def test_env_var_owning_reports_the_variable_that_wins(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The helper answers "does env win?", not "did pydantic read it?".
-
-        The loaders test exact-case membership when deciding to yield to env,
-        so a lowercase variable is read at construction and then loses to
-        config.json (#2109). Claiming it "takes precedence" would be wrong.
-        """
+        """The helper answers "does env win?" — and env wins in any case (#2109)."""
         from memtomem.config import env_var_owning
 
-        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
+        _clear_all_memtomem_env(monkeypatch)
         assert env_var_owning("search", "default_top_k") is None
 
         monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "7")
         assert env_var_owning("search", "default_top_k") == "MEMTOMEM_SEARCH__DEFAULT_TOP_K"
 
+    def test_env_var_owning_names_the_variable_as_the_environment_spells_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reported name is what the user has to ``unset``, verbatim.
+
+        On Windows ``os.environ`` normalises keys to uppercase, so there the
+        canonical spelling is the only one that can come back.
+        """
+        from memtomem.config import env_var_owning
+
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("memtomem_search__default_top_k", "7")
+
+        owning = env_var_owning("search", "default_top_k")
+        assert owning is not None
+        assert owning.upper() == "MEMTOMEM_SEARCH__DEFAULT_TOP_K"
+        if sys.platform != "win32":
+            assert owning == "memtomem_search__default_top_k"
+
     def test_env_var_owning_agrees_with_the_loader_on_a_lowercase_name(
         self, override_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Whatever the helper says must match who actually wins, end to end."""
+        """Whatever the helper says must match who actually wins, end to end.
+
+        Pinned to the exact winning value, not just to parity: a parity-only
+        assertion still passes when both sides are wrong together.
+        """
         from memtomem.config import env_var_owning
 
-        monkeypatch.delenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", raising=False)
+        _clear_all_memtomem_env(monkeypatch)
         monkeypatch.setenv("memtomem_search__default_top_k", "7")
         override_path.write_text(json.dumps({"search": {"default_top_k": 33}}))
 
         cfg = Mem2MemConfig()
         load_config_overrides(cfg)
-        env_wins = cfg.search.default_top_k == 7
 
-        assert (env_var_owning("search", "default_top_k") is not None) == env_wins
+        assert cfg.search.default_top_k == 7
+        assert (env_var_owning("search", "default_top_k") is not None) == (
+            cfg.search.default_top_k == 7
+        )
 
     def test_env_var_owning_does_not_match_a_different_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from memtomem.config import env_var_owning
 
+        _clear_all_memtomem_env(monkeypatch)
         monkeypatch.setenv("MEMTOMEM_SEARCH__RRF_K", "60")
         assert env_var_owning("search", "default_top_k") is None
+
+    def test_env_var_owning_does_not_match_a_name_that_merely_starts_the_same(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The case-insensitive scan compares whole names, not prefixes."""
+        from memtomem.config import env_var_owning
+
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("memtomem_search__default_top_k_extra", "7")
+        monkeypatch.setenv("xmemtomem_search__default_top_k", "7")
+        assert env_var_owning("search", "default_top_k") is None
+
+
+class TestEnvNameCaseInsensitivity:
+    """#2109: pydantic reads env names case-insensitively; the loaders must too.
+
+    pydantic-settings binds ``memtomem_search__default_top_k`` at construction
+    (``case_sensitive`` defaults to false), but the loaders used to test exact
+    uppercase membership before yielding — so the lowercase spelling was read
+    and then silently overwritten by ``config.json``. Only an end-to-end test
+    sees that: a unit test of the helper alone passed either way.
+    """
+
+    SPELLINGS = (
+        "MEMTOMEM_SEARCH__DEFAULT_TOP_K",
+        "memtomem_search__default_top_k",
+        "Memtomem_Search__Default_Top_K",
+    )
+
+    @pytest.mark.parametrize("env_name", SPELLINGS)
+    def test_env_beats_config_json_in_any_case(
+        self, env_name: str, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv(env_name, "7")
+        override_path.write_text(json.dumps({"search": {"default_top_k": 33}}), encoding="utf-8")
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+
+        assert cfg.search.default_top_k == 7
+
+    @pytest.mark.parametrize("env_name", SPELLINGS)
+    def test_env_beats_config_d_in_any_case(
+        self, env_name: str, config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv(env_name, "7")
+        (config_d_dir / "fragment.json").write_text(
+            json.dumps({"search": {"default_top_k": 33}}), encoding="utf-8"
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_d(cfg)
+
+        assert cfg.search.default_top_k == 7
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.environ normalises keys on Windows: two spellings cannot coexist",
+    )
+    def test_it_names_the_spelling_pydantic_actually_read(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With colliding spellings, the helper must name the winner.
+
+        pydantic-settings folds the environment into a case-normalised dict,
+        so the later entry overwrites the earlier one. A helper that prefers
+        the canonical spelling would tell the user to unset a variable that is
+        not supplying the value.
+        """
+        import os
+
+        from memtomem.config import env_var_owning
+
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_SEARCH__DEFAULT_TOP_K", "11")
+        monkeypatch.setenv("memtomem_search__default_top_k", "22")
+        override_path.write_text(json.dumps({"search": {"default_top_k": 33}}), encoding="utf-8")
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+
+        owning = env_var_owning("search", "default_top_k")
+        assert owning is not None
+        # The named variable is the one holding the value in effect — whichever
+        # spelling the environment happens to order last.
+        assert int(os.environ[owning]) == cfg.search.default_top_k
+        assert cfg.search.default_top_k != 33
+
+    def test_a_name_pydantic_does_not_read_does_not_displace_config_json(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fold the way pydantic folds, or the loaders yield to nobody.
+
+        "MEMTOMEM_\u017fEARCH__DEFAULT_TOP_K" uppercases to the canonical name
+        (U+017F LATIN SMALL LETTER LONG S uppercases to "S") but does not
+        lowercase to it, so pydantic never reads it. An upper-fold in
+        ``env_var_owning`` would still call it owning, and the loader would
+        drop the persisted value in favour of a variable nothing bound —
+        leaving the field at its default.
+        """
+        from memtomem.config import env_var_owning
+
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_\u017fEARCH__DEFAULT_TOP_K", "7")
+        override_path.write_text(json.dumps({"search": {"default_top_k": 33}}), encoding="utf-8")
+
+        cfg = Mem2MemConfig()
+        assert cfg.search.default_top_k != 7  # pydantic did not bind it
+        load_config_overrides(cfg)
+
+        assert env_var_owning("search", "default_top_k") is None
+        assert cfg.search.default_top_k == 33
+
+    def test_config_json_still_applies_when_no_spelling_is_exported(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The negative half: yielding to env must not become yielding always."""
+        _clear_all_memtomem_env(monkeypatch)
+        override_path.write_text(json.dumps({"search": {"default_top_k": 33}}), encoding="utf-8")
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg)
+
+        assert cfg.search.default_top_k == 33
 
 
 class TestMcpPersistenceSuffix:

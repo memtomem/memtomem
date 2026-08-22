@@ -322,7 +322,7 @@ def _effect_lines(
             click.style(
                 f"warning: {env_var} is set and takes precedence — the effective value is "
                 f"still {_masked(field_name, effective)}. config.json holds your value and "
-                f"it applies once that variable is unset.",
+                f"it applies once no case spelling of that name is set.",
                 fg="yellow",
             )
         )
