@@ -647,10 +647,12 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "Memory index file.",
     ),
     ("cli/review_cmd.py", "_decide", 0, "async_file_lock"): (NON_C0, "", "Memory file (L2)."),
-    ("indexing/engine.py", "IndexEngine._index_file_locked", 0, "async_file_lock"): (
+    ("indexing/engine.py", "IndexEngine._locked_index", 0, "async_file_lock"): (
         NON_C0,
         "",
-        "Per-memory-file indexing lock.",
+        "Per-memory-file indexing lock. Extracted from ``_index_file_locked`` "
+        "in #2105 so the engine-wide file-concurrency slot is taken above it; "
+        "still the only L2 acquire in the engine.",
     ),
     ("server/tools/memory_crud.py", "_locked_chunk", 0, "async_file_lock"): (
         NON_C0,

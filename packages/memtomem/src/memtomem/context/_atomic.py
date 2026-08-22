@@ -196,7 +196,15 @@ def _lock_path_for(data_path: Path) -> Path:
 #   L3  IndexEngine._index_lock. ``index_file(lock_held=True)`` asserts the
 #       caller already holds (or #1566-skipped) this file's L2 sidecar and
 #       enters at L3 directly; the sidecar is HOISTED above ``_index_lock`` so
-#       no path ever acquires L2 while holding L3.
+#       no path ever acquires L2 while holding L3. #2105: the bulk
+#       ``index_path`` fan-out holds L2 ONLY (``engine_serialized=False``),
+#       falling back to L3 where the sidecar is skipped — L3 is engine-wide,
+#       so holding it per file would serialize the run and holding it across
+#       the run would put every L2 acquire under it. Every ENGINE-owned L2
+#       acquire keys on the RESOLVED path, so one physical file has one
+#       sidecar even when the walk reaches it through a symlinked alias.
+#       Outer CRUD callers are not all there yet — three lock an unresolved
+#       path and so split the sidecar for an alias (#2130).
 #   L4  storage / embedder / LLM — leaves; must never acquire L0–L3.
 #
 # Disjoint domains (config.json sidecar, web _gateway_lock/_config_lock) never
