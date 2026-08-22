@@ -18,7 +18,12 @@ from pathlib import Path
 import pytest
 
 from memtomem import config as _cfg
-from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+from memtomem.config import (
+    Mem2MemConfig,
+    assign_section_fields,
+    load_config_d,
+    load_config_overrides,
+)
 
 from .helpers import set_home
 
@@ -1388,3 +1393,92 @@ class TestMcpPersistenceSuffix:
         assert "not written to config.json" in suffix
         assert "a lower layer (default or config.d)" in suffix
         assert "MEMTOMEM_" not in suffix
+
+
+# ---------------------------------------------------------------------------
+# assign_section_fields — the shared mutation primitive (issue #2110)
+# ---------------------------------------------------------------------------
+
+
+class TestAssignSectionFields:
+    """The one place ``mm config set`` / ``mem_config`` / ``PATCH /api/config``
+    mutate a config section, so all three enforce the section's cross-field
+    invariants instead of persisting a combination every later load reverts.
+    """
+
+    def test_rejects_and_restores_a_cross_field_invalid_value(self) -> None:
+        cfg = Mem2MemConfig()
+        default_max = cfg.indexing.max_chunk_tokens
+
+        with pytest.raises(ValueError) as exc:
+            assign_section_fields(cfg.indexing, {"max_chunk_tokens": 64})
+
+        assert "must be <= max_chunk_tokens" in str(exc.value)
+        # The "Value error, " prefix pydantic adds is stripped for display.
+        assert "Value error" not in str(exc.value)
+        assert cfg.indexing.max_chunk_tokens == default_max
+
+    def test_valid_update_applies_and_returns_old_values(self) -> None:
+        cfg = Mem2MemConfig()
+        old = assign_section_fields(cfg.search, {"default_top_k": 20})
+        assert old == {"default_top_k": Mem2MemConfig().search.default_top_k}
+        assert cfg.search.default_top_k == 20
+
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"min_chunk_tokens": 600, "max_chunk_tokens": 1024},
+            {"max_chunk_tokens": 1024, "min_chunk_tokens": 600},
+        ],
+        ids=["min-first", "max-first"],
+    )
+    def test_pair_legal_together_applies_in_either_key_order(
+        self, updates: dict[str, object]
+    ) -> None:
+        """A per-key check would refuse the min-first spelling: 600 is above the
+        still-default max of 512. The section is validated once, as a whole."""
+        cfg = Mem2MemConfig()
+        assign_section_fields(cfg.indexing, dict(updates))
+        assert cfg.indexing.min_chunk_tokens == 600
+        assert cfg.indexing.max_chunk_tokens == 1024
+
+    def test_failed_multi_key_update_restores_every_key(self) -> None:
+        cfg = Mem2MemConfig()
+        before = (
+            cfg.indexing.min_chunk_tokens,
+            cfg.indexing.max_chunk_tokens,
+            cfg.indexing.target_chunk_tokens,
+        )
+
+        with pytest.raises(ValueError):
+            assign_section_fields(
+                cfg.indexing,
+                {"min_chunk_tokens": 600, "max_chunk_tokens": 400, "target_chunk_tokens": 300},
+            )
+
+        assert (
+            cfg.indexing.min_chunk_tokens,
+            cfg.indexing.max_chunk_tokens,
+            cfg.indexing.target_chunk_tokens,
+        ) == before
+
+    def test_touched_key_is_checked_even_when_it_equals_the_default(self) -> None:
+        """``exclude_defaults`` drops untouched defaults from the payload; the
+        touched keys are overlaid back, so setting a field *to* its default
+        still participates in the invariant."""
+        cfg = Mem2MemConfig()
+        default_max = cfg.indexing.max_chunk_tokens
+        cfg.indexing.min_chunk_tokens = default_max + 100
+
+        with pytest.raises(ValueError, match="must be <= max_chunk_tokens"):
+            assign_section_fields(cfg.indexing, {"max_chunk_tokens": default_max})
+
+    def test_survives_warnings_as_errors_on_a_deprecated_defaulted_field(self) -> None:
+        """``rerank.top_k`` is defaulted and deprecated; validating a full dump
+        re-fires its ``mode="before"`` migration, which is a traceback under
+        ``PYTHONWARNINGS=error`` (#2108 review)."""
+        cfg = Mem2MemConfig()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assign_section_fields(cfg.rerank, {"oversample": 3.0})
+        assert cfg.rerank.oversample == 3.0

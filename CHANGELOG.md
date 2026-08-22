@@ -230,6 +230,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   list. `mm search` also inherits the hidden-namespace hint the MCP tools
   already emitted.
 
+- **No config surface can persist a cross-field-invalid section any more.**
+  `ConfigModel` sub-configs don't set `validate_assignment`, so a bare
+  `setattr` never re-runs the section's `@model_validator(mode="after")`.
+  `mm config set` gained that re-check earlier; the MCP `mem_config` tool and
+  `PATCH /api/config` did not, so `mem_config(key="indexing.max_chunk_tokens",
+  value="64", persist=true)` reported success, wrote the value to
+  `config.json`, and every later start then logged `Invalid config section
+  [indexing] ... (reverting section to defaults)` — a pin that never took
+  effect and never explained itself. All three surfaces now go through one
+  `assign_section_fields` helper that assigns, re-validates the assembled
+  section, and restores the previous values on failure, each reporting it in
+  its own idiom (CLI exits 1, `mem_config` returns `Cannot set '<key>': ...`
+  without persisting or fanning out, the web PATCH lists the section in
+  `rejected`). The web path validates the whole update at once rather than key
+  by key, so a pair that is legal only together — the Settings card sends every
+  dirty field of a section in one request — is no longer refused on key order.
+  One response change on the web route: a `session_trace` PATCH that enables
+  Langfuse without keys is now caught at assignment, so it comes back as 200
+  with the section in `rejected` (like every other field-level refusal there)
+  instead of the 400 the save-time validation used to raise. It is still never
+  written and the live config still keeps its value. Relatedly, a
+  `persist=true` PATCH in which *nothing* was accepted no longer takes the save
+  path at all: it used to rewrite `config.json` (a delta-only save, which can
+  prune unrelated stale entries) on behalf of a request that changed nothing.
+  (#2110)
 - **`search.rrf_weights` from config no longer reaches fusion unvalidated.**
   Request-level validation (#2093) did not cover configuration: a persisted
   negative weight inverted its leg (`weight / (k + rank)` rises toward zero as

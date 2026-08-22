@@ -65,6 +65,7 @@ def config_set(key: str, value: str) -> None:
     """Set a config field (e.g., 'search.default_top_k 20'). Persists to ~/.memtomem/config.json."""
     from memtomem.config import (
         Mem2MemConfig,
+        assign_section_fields,
         load_config_d,
         load_config_overrides,
         save_config_overrides,
@@ -94,23 +95,21 @@ def config_set(key: str, value: str) -> None:
     load_config_overrides(cfg)
 
     section_obj = getattr(cfg, section_name)
-    old_val = getattr(section_obj, field_name)
-    setattr(section_obj, field_name, coerced)
-
-    # ``ConfigModel`` sub-configs don't set ``validate_assignment``, so the
-    # cross-field ``@model_validator(mode="after")`` never runs for the setattr
-    # above. Without this check an invalid combination (e.g. max_chunk_tokens
-    # below min_chunk_tokens) is written to config.json and then silently
-    # reverted by every subsequent load — a pin that never takes effect and
-    # never explains itself (#2108).
-    invalid = _section_invariant_error(section_obj, field_name)
-    if invalid is not None:
-        click.echo(click.style(f"{key}: {invalid}", fg="red"))
+    # ``assign_section_fields`` re-runs the section's cross-field
+    # ``@model_validator(mode="after")``, which the bare ``setattr`` path skips
+    # (sub-configs don't set ``validate_assignment``). Without it an invalid
+    # combination (e.g. max_chunk_tokens below min_chunk_tokens) is written to
+    # config.json and then silently reverted by every subsequent load — a pin
+    # that never takes effect and never explains itself (#2108).
+    try:
+        old_val = assign_section_fields(section_obj, {field_name: coerced})[field_name]
+    except ValueError as e:
+        click.echo(click.style(f"{key}: {e}", fg="red"))
         # Not "nothing written": loading the file above may have run the
         # legacy auto_discover migration, which writes. Only the requested
         # value is guaranteed absent.
         click.echo(f"{key} was not saved.")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     try:
         receipt = save_config_overrides(cfg)
@@ -230,45 +229,6 @@ def _rebuild_fts(cfg: Mem2MemConfig, *, requested: str, effective: str) -> None:
         )
     else:
         click.echo(f"FTS index rebuilt with {effective} ({count} chunks).")
-
-
-def _section_invariant_error(section_obj: object, field_name: str) -> str | None:
-    """Cross-field validation error for the mutated section, if any.
-
-    Mirrors the re-validation ``load_config_overrides`` runs (config.py),
-    including its two subtleties:
-
-    * ``exclude_defaults`` keeps untouched defaulted legacy fields (e.g.
-      ``rerank.top_k``) out of the payload so they don't re-fire their
-      ``mode="before"`` deprecation; the mutated key is overlaid back so it is
-      checked even when its value equals the default.
-    * ``catch_warnings(record=True)`` forces ``simplefilter("always")`` so an
-      ambient ``-W error`` / ``PYTHONWARNINGS=error`` cannot turn an internal
-      validation pass into a traceback.
-
-    A check only — no coerced model is assigned back.
-    """
-    import warnings
-
-    from pydantic import ValidationError
-
-    dumped = section_obj.model_dump()
-    payload = section_obj.model_dump(exclude_defaults=True)
-    if field_name in dumped:
-        payload[field_name] = dumped[field_name]
-    try:
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            type(section_obj).model_validate(payload)
-    except ValidationError as exc:
-        msgs = []
-        for error in exc.errors():
-            msg = error.get("msg", "")
-            if msg.startswith("Value error, "):
-                msg = msg[len("Value error, ") :]
-            msgs.append(msg)
-        return "; ".join(msgs) if msgs else str(exc)
-    return None
 
 
 def _effective_value(section_name: str, field_name: str) -> object:

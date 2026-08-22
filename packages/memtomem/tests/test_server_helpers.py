@@ -537,6 +537,24 @@ class TestSetConfigKey:
         assert msg.startswith("Set ")
         assert config.search.rrf_weights == [1.5, 0.8]
 
+    def test_cross_field_invalid_value_rejected(self):
+        """A combination the section validator rejects must not be accepted here.
+
+        ``setattr`` skips the section's ``model_validator(mode="after")``, so
+        ``max_chunk_tokens`` below ``min_chunk_tokens`` used to be accepted,
+        persisted by ``mem_config(persist=True)``, and then dropped by every
+        later load (#2110).
+        """
+        config = Mem2MemConfig()
+        default_max = config.indexing.max_chunk_tokens
+
+        msg = _set_config_key(config, "indexing.max_chunk_tokens", "64")
+
+        assert "must be <= max_chunk_tokens" in msg
+        # ``mem_config`` gates persistence and fanout on this prefix.
+        assert not msg.startswith("Set ")
+        assert config.indexing.max_chunk_tokens == default_max
+
 
 # ===========================================================================
 # error_handler.py — @tool_handler

@@ -6,7 +6,7 @@ import copy
 import math
 import os
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1475,6 +1475,89 @@ def env_var_owning(section_name: str, field_name: str) -> str | None:
     return owning
 
 
+def validation_error_message(exc: ValidationError) -> str:
+    """Flatten a ``ValidationError`` into one human-readable line.
+
+    Pydantic prefixes messages raised from a validator with ``"Value error, "``;
+    that prefix is noise in a CLI line, an MCP tool reply, or a ``rejected``
+    entry, so it is stripped. Several errors are joined with ``"; "``.
+    """
+    msgs = []
+    for error in exc.errors():
+        msg = error.get("msg", "")
+        if msg.startswith("Value error, "):
+            msg = msg[len("Value error, ") :]
+        msgs.append(msg)
+    return "; ".join(msgs) if msgs else str(exc)
+
+
+def section_invariant_error(section_obj: object, touched: Iterable[str]) -> str | None:
+    """Cross-field validation error for a mutated section, if any.
+
+    ``ConfigModel`` sub-configs don't set ``validate_assignment``, so the
+    section's ``@model_validator(mode="after")`` never runs for a bare
+    ``setattr``. This mirrors the re-validation ``load_config_overrides``
+    performs, including its two subtleties:
+
+    * ``exclude_defaults`` keeps untouched defaulted legacy fields (e.g.
+      ``rerank.top_k``) out of the payload so they don't re-fire their
+      ``mode="before"`` deprecation; the *touched* keys are overlaid back so
+      they are checked even when their value equals the default.
+    * ``catch_warnings(record=True)`` forces ``simplefilter("always")`` so an
+      ambient ``-W error`` / ``PYTHONWARNINGS=error`` cannot turn an internal
+      validation pass into a traceback.
+
+    A check only — no coerced model is assigned back.
+    """
+    import warnings
+
+    dumped = section_obj.model_dump()  # type: ignore[attr-defined]
+    payload = section_obj.model_dump(exclude_defaults=True)  # type: ignore[attr-defined]
+    payload.update({key: dumped[key] for key in touched if key in dumped})
+    try:
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            type(section_obj).model_validate(payload)  # type: ignore[attr-defined]
+    except ValidationError as exc:
+        return validation_error_message(exc)
+    return None
+
+
+def assign_section_fields(section_obj: object, updates: Mapping[str, object]) -> dict[str, object]:
+    """Assign already-coerced values to one config section, invariants enforced.
+
+    The single "mutate a section" primitive shared by every mutation surface —
+    ``mm config set``, the MCP ``mem_config`` tool, and ``PATCH /api/config``.
+    Without it each surface takes the bare ``setattr`` path, so a combination
+    the section validator rejects is written to ``config.json`` and then
+    silently dropped by every subsequent load (#2110).
+
+    The whole *update* is validated once, not each key in turn: the web
+    settings card sends every dirty field of a section in one request, and a
+    per-key check would reject a legal edit depending on dict order (raising
+    ``min_chunk_tokens`` past the old ``max_chunk_tokens`` while also raising
+    ``max_chunk_tokens`` is valid as a pair, invalid one key at a time).
+
+    Coercion stays with the caller: the surfaces receive values in different
+    shapes (CLI strings, JSON scalars) and already have their own coercion
+    step.
+
+    Returns ``{field: previous value}``. Raises ``ValueError`` with the
+    validator's message if the resulting section is invalid, after restoring
+    every previous value — cross-field invariants are about field
+    *combinations*, so partial retention isn't meaningful.
+    """
+    old_values = {key: getattr(section_obj, key) for key in updates}
+    for key, value in updates.items():
+        setattr(section_obj, key, value)
+    invalid = section_invariant_error(section_obj, updates.keys())
+    if invalid is not None:
+        for key, old in old_values.items():
+            setattr(section_obj, key, old)
+        raise ValueError(invalid)
+    return old_values
+
+
 def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:
     """Apply persisted overrides from ~/.memtomem/config.json (if exists).
 
@@ -1551,7 +1634,10 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                     )
         # ``ConfigModel`` sub-configs don't set ``validate_assignment=True``, so
         # the ``@model_validator(mode="after")`` cross-field checks never re-run
-        # for the ``setattr`` overrides above. Re-validate the assembled section
+        # for the ``setattr`` overrides above. (``section_invariant_error`` above
+        # is the same check for the mutation surfaces; this copy stays inline
+        # because it also re-emits the captured deprecation warnings.)
+        # Re-validate the assembled section
         # so an invariant the validator was written to reject (e.g.
         # ``session_trace.langfuse_enabled`` with no keys, or
         # ``min_chunk_tokens > max_chunk_tokens``) fails loudly instead of
@@ -2522,18 +2608,10 @@ def save_config_overrides(
     concurrent writer between the save and a follow-up read would make the
     report describe someone else's write (issue #2108).
     """
-    from pydantic import ValidationError
-
     try:
         config.session_trace.model_validate(config.session_trace.model_dump())
     except ValidationError as e:
-        msgs = []
-        for error in e.errors():
-            msg = error.get("msg", "")
-            if msg.startswith("Value error, "):
-                msg = msg[len("Value error, ") :]
-            msgs.append(msg)
-        raise ValueError("; ".join(msgs) if msgs else str(e))
+        raise ValueError(validation_error_message(e))
 
     import json as _json
     import logging

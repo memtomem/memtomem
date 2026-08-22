@@ -120,7 +120,12 @@ def _set_config_key(config: Mem2MemConfig, key: str, value: str) -> str:
 
     Returns a human-readable confirmation or error message.
     """
-    from memtomem.config import FIELD_CONSTRAINTS, MUTABLE_FIELDS, coerce_and_validate
+    from memtomem.config import (
+        FIELD_CONSTRAINTS,
+        MUTABLE_FIELDS,
+        assign_section_fields,
+        coerce_and_validate,
+    )
 
     parts = key.split(".")
     if len(parts) != 2:
@@ -165,7 +170,17 @@ def _set_config_key(config: Mem2MemConfig, key: str, value: str) -> str:
         except (ValueError, TypeError) as exc:
             return f"Invalid value '{value}' for '{key}': {exc}"
 
-    setattr(section, field_name, coerced)
+    # Re-run the section's cross-field ``@model_validator(mode="after")``, which
+    # a bare ``setattr`` skips: an invalid combination used to be accepted here
+    # and then persisted by ``mem_config(persist=True)``, only for every later
+    # load to drop the whole section back to defaults (#2110). The returned
+    # message does not start with "Set ", so the caller neither persists nor
+    # fans out, and the runtime config is already rolled back.
+    try:
+        assign_section_fields(section, {field_name: coerced})
+    except ValueError as exc:
+        return f"Cannot set '{key}': {exc}"
+
     show_val = coerced
     if field_name == "langfuse_secret_key" or field_name == "api_key":
         show_val = "***" if coerced else ""

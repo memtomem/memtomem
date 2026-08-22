@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem.config import IndexingConfig, SearchConfig
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
@@ -86,38 +87,35 @@ class FakeConfig:
         sqlite_path = Path("/tmp/test.db")
         collection_name = "memories"
 
-    class _Search:
-        default_top_k = 10
-        bm25_candidates = 50
-        dense_candidates = 50
-        rrf_k = 60
-        enable_bm25 = True
-        enable_dense = True
-        tokenizer = "unicode61"
-        rrf_weights = [1.0, 1.0]
-
-    class _Indexing:
-        memory_dirs = [Path("/tmp/memories")]
-        project_memory_dirs: list[Path] = []
-        supported_extensions = frozenset({".md", ".json"})
-        max_chunk_tokens = 512
-        min_chunk_tokens = 128
-        target_chunk_tokens = 384
-        chunk_overlap_tokens = 0
-        structured_chunk_mode = "original"
-        exclude_patterns: list[str] = []
-        # Per-source AI summary knobs; default off to match production.
-        auto_summarize = False
-        summary_language = "en"
-        summary_max_input_chars = 3000
-        summary_max_tokens = 256
-
-        def all_index_roots(self):
-            # Mirror ``IndexingConfig.all_index_roots`` — coerce each
-            # entry to ``Path`` so the helper honours its declared
-            # return type even when a test (or
-            # ``load_config_overrides``) assigns raw ``str`` values.
-            return [Path(d) for d in (*self.memory_dirs, *self.project_memory_dirs)]
+    def __init__(self) -> None:
+        # ``search`` and ``indexing`` are the *real* section models, not stubs:
+        # ``PATCH /api/config`` re-validates the assembled section through
+        # ``assign_section_fields`` (#2110), and a duck-typed double would skip
+        # the cross-field invariants the route exists to enforce — a green test
+        # for a code path production never takes. Values below match what these
+        # tests assumed before; ``all_index_roots`` comes from the real model.
+        #
+        # Built per instance, not as class attributes: every other section here
+        # is a class-level singleton, so a test that mutates one leaks into the
+        # next (which is why the ``app`` fixture re-resets a few fields by
+        # hand). A config PATCH mutates arbitrary fields of these two, so they
+        # get a fresh model per ``FakeConfig()`` instead.
+        self.search = SearchConfig(
+            default_top_k=10,
+            bm25_candidates=50,
+            dense_candidates=50,
+            rrf_k=60,
+            enable_bm25=True,
+            enable_dense=True,
+            tokenizer="unicode61",
+            rrf_weights=[1.0, 1.0],
+        )
+        self.indexing = IndexingConfig(
+            memory_dirs=[Path("/tmp/memories")],
+            project_memory_dirs=[],
+            supported_extensions=frozenset({".md", ".json"}),
+            exclude_patterns=[],
+        )
 
     class _Decay:
         enabled = False
@@ -141,8 +139,6 @@ class FakeConfig:
 
     embedding = _Embedding()
     storage = _Storage()
-    search = _Search()
-    indexing = _Indexing()
     decay = _Decay()
     mmr = _MMR()
     rerank = _Rerank()
@@ -269,16 +265,12 @@ def app():
     application.state.llm = None
     application.state.summary_regen = None
     cfg = FakeConfig()
-    # _Indexing is a class-level singleton — reset mutable fields so tests that
-    # mutate exclude_patterns or memory_dirs don't leak into later tests.
-    # The memory_dirs reset matters for any test that reassigns the list to
-    # exercise a custom corpus shape (symlinked / tilde / nested / orphan
-    # cases): without it, the override persists across the fixture boundary
-    # and an unrelated test downstream sees the wrong default and fails the
-    # path-inside-memory_dirs gate (e.g. ``/api/index`` 403s).
-    cfg.indexing.exclude_patterns = []
-    cfg.indexing.memory_dirs = [Path("/tmp/memories")]
-    cfg.indexing.project_memory_dirs = []
+    # ``cfg.indexing`` is built fresh per ``FakeConfig()`` (see its ``__init__``),
+    # so exclude_patterns / memory_dirs no longer leak between tests — including
+    # for any test that reassigns memory_dirs to exercise a custom corpus shape
+    # (symlinked / tilde / nested / orphan cases), where a leaked override made
+    # an unrelated downstream test fail the path-inside-memory_dirs gate
+    # (e.g. ``/api/index`` 403s).
     application.state.config = cfg
     application.state.dedup_scanner = dedup_scanner
     application.state.project_root = Path.cwd()
@@ -751,6 +743,49 @@ class TestConfig:
         assert app.state.config.rerank.max_pool == 200
         assert app.state.search_pipeline._reranker is None
         assert app.state.search_pipeline._rerank_config is None
+
+    async def test_patch_rejects_cross_field_invalid_section(self, app, client: AsyncClient):
+        """#2110: a combination the section validator rejects never reaches disk.
+
+        ``setattr`` skips the section's ``model_validator(mode="after")``, so
+        this used to be persisted and then dropped by every later load.
+        """
+        with patch("memtomem.web.routes.system.save_config_overrides") as save:
+            resp = await client.patch(
+                "/api/config?persist=true",
+                json={"indexing": {"max_chunk_tokens": 64}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert any("must be <= max_chunk_tokens" in r for r in data["rejected"])
+        assert app.state.config.indexing.max_chunk_tokens == 512
+        # Nothing was accepted, so nothing is written at all — the rejected
+        # combination never reaches config.json, and neither does a
+        # rewrite-for-nothing of the operator's file.
+        save.assert_not_called()
+
+    async def test_patch_applies_a_pair_that_is_legal_only_together(self, app, client: AsyncClient):
+        """The settings card sends every dirty field of a section at once, so
+        the update is validated as a whole: lowering ``max_chunk_tokens`` to 128
+        is invalid against the *old* ``target_chunk_tokens`` of 384 and valid
+        against the new one sent alongside it (#2110)."""
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.patch(
+                "/api/config",
+                json={"indexing": {"max_chunk_tokens": 128, "target_chunk_tokens": 100}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["rejected"] == []
+        assert {c["field"] for c in data["applied"]} == {
+            "indexing.max_chunk_tokens",
+            "indexing.target_chunk_tokens",
+        }
+        assert app.state.config.indexing.max_chunk_tokens == 128
+        assert app.state.config.indexing.target_chunk_tokens == 100
 
     async def test_patch_exclude_patterns_accepts_valid(self, app, client: AsyncClient):
         with patch("memtomem.web.routes.system.save_config_overrides"):

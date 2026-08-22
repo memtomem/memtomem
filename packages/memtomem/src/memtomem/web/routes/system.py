@@ -28,6 +28,7 @@ from memtomem.config import (
     FIELD_CONSTRAINTS,
     MUTABLE_FIELDS,
     RerankConfig,
+    assign_section_fields,
     classify_scope,
     build_comparand,
     coerce_and_validate,
@@ -622,6 +623,18 @@ async def patch_config(
                             )
                         continue
 
+                    # Coerce every key first, then assign the section in one
+                    # go. ``assign_section_fields`` re-runs the section's
+                    # cross-field ``@model_validator(mode="after")`` — which the
+                    # bare ``setattr`` path skips — so an invalid combination is
+                    # rejected here instead of being persisted and then dropped
+                    # by every later load (#2110). Validating the update as a
+                    # whole matters on this surface in particular: the settings
+                    # card sends every dirty field of a section at once, and a
+                    # per-key check would refuse a pair that is legal together
+                    # (raising min_chunk_tokens and max_chunk_tokens in the same
+                    # request) depending on key order.
+                    section_updates: dict[str, object] = {}
                     for key, value in updates.items():
                         full_key = f"{section_name}.{key}"
                         if key not in allowed:
@@ -635,8 +648,21 @@ async def patch_config(
                             rejected.append(f"{full_key}: {e}")
                             continue
 
-                        old_val = getattr(section_obj, key)
-                        setattr(section_obj, key, coerced)
+                        section_updates[key] = coerced
+
+                    if not section_updates:
+                        continue
+
+                    try:
+                        old_values = assign_section_fields(section_obj, section_updates)
+                    except ValueError as e:
+                        # Nothing was assigned — the helper restored the section.
+                        rejected.append(f"{section_name}: {e}")
+                        continue
+
+                    for key, coerced in section_updates.items():
+                        full_key = f"{section_name}.{key}"
+                        old_val = old_values[key]
                         if full_key == "search.tokenizer" and old_val != coerced:
                             tokenizer_changed = True
                         if full_key == "embedding.onnx_batch_size" and old_val != coerced:
@@ -662,7 +688,12 @@ async def patch_config(
                 # mem_config and CLI ``config set`` ordering. Otherwise a 400/503
                 # would leave the live tokenizer or reranker on the rejected
                 # value (and the old reranker already close()'d, unrecoverable).
-                if persist:
+                # Nothing accepted means nothing to write: a fully-rejected
+                # request used to still take the save path, which rewrites
+                # config.json (delta-only, so it can prune unrelated stale
+                # entries) on the operator's behalf for a request that changed
+                # nothing. Whole-section refusal (#2110) makes that case common.
+                if persist and (applied or rerank_changed):
                     try:
                         save_config_overrides(config)
                     except (ValueError, TimeoutError) as e:
