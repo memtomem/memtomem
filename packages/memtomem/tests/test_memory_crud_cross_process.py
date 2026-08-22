@@ -33,6 +33,8 @@ import pytest
 from helpers import StubCtx
 from memtomem.context import _atomic as atomic_mod
 from memtomem.context._atomic import _lock_path_for, async_file_lock
+from memtomem.indexing import engine as engine_mod
+from memtomem.indexing.engine import IndexEngine
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
 
@@ -293,6 +295,9 @@ async def test_stream_sidecar_timeout_folds_into_errors_and_continues(
     complete = next(e for e in events if e["type"] == "complete")
     assert len(complete["errors"]) == 1, f"expected 1 timeout error, got {complete['errors']}"
     assert "a-stuck.md" in complete["errors"][0]
+    # A sidecar budget overrun is transient, so it must also be reported as
+    # retryable — ``mm index`` drives its hook retry off this field (#2105).
+    assert complete["retryable_errors"] == complete["errors"]
     # The other file still indexed — the stream continued past the timeout.
     sources = {p.name for p in await comp.storage.get_all_source_files()}
     assert "b-ok.md" in sources
@@ -348,6 +353,303 @@ async def test_mem_add_times_out_when_sidecar_held(bm25_only_components, monkeyp
     assert "locked by another process" in out
 
 
+# ==================================================== B2. bulk index_path (#2105)
+
+
+@pytest.mark.asyncio
+async def test_index_path_acquires_sidecar_per_file_while_index_lock_free(
+    bm25_only_components, monkeypatch
+):
+    """The bulk (non-stream) path takes the L2 sidecar once per file, with
+    ``_index_lock`` free at every acquire (#2105).
+
+    Before the fix ``_index_path_inner`` called ``_index_file`` directly under
+    a run-wide ``_index_lock``: ``lock_paths`` would be empty, so a second
+    process could move a file's chunks between this run's namespace
+    resolution and its commit. The ``[False, False]`` half is the ordering
+    invariant — L2 is never acquired while L3 is held.
+    """
+    comp, mem_dir = bm25_only_components
+    (mem_dir / "a.md").write_text("## A\n\nbody.\n", encoding="utf-8")
+    (mem_dir / "b.md").write_text("## B\n\nbody.\n", encoding="utf-8")
+
+    engine = comp.index_engine
+    lock_paths: list[Path] = []
+    index_lock_held_at_acquire: list[bool] = []
+    real = atomic_mod.async_file_lock
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def spy(lock_path, *, timeout):
+        lock_paths.append(Path(lock_path))
+        index_lock_held_at_acquire.append(engine._index_lock.locked())
+        async with real(lock_path, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(atomic_mod, "async_file_lock", spy)
+    await engine.index_path(mem_dir, recursive=True)
+
+    assert sorted(p.name for p in lock_paths) == [".a.md.lock", ".b.md.lock"], (
+        f"bulk index must take one sidecar per file, got {[p.name for p in lock_paths]}"
+    )
+    assert index_lock_held_at_acquire == [False, False], (
+        "sidecar must be taken before _index_lock (L2 -> L3), never while it is held"
+    )
+
+
+@pytest.mark.asyncio
+async def test_index_path_sidecar_timeout_folds_into_errors_and_continues(
+    bm25_only_components, monkeypatch
+):
+    """A sidecar held by another *process* makes the bulk run skip that file
+    with a retryable error and index the rest (#2105).
+
+    The cross-process half of the guarantee: unlike the same-loop holder in
+    the stream test above, this contends on the real ``portalocker`` flock,
+    which is what a second ``mm`` or the web/MCP server actually holds.
+    """
+    comp, mem_dir = bm25_only_components
+    stuck = mem_dir / "a-stuck.md"
+    ok = mem_dir / "b-ok.md"
+    stuck.write_text("## Stuck\n\nheld.\n", encoding="utf-8")
+    ok.write_text("## Ok\n\nfree.\n", encoding="utf-8")
+
+    monkeypatch.setattr(atomic_mod, "_MEMORY_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+    ready_q = _CTX.Queue()
+    release_evt = _CTX.Event()
+    holder = _CTX.Process(
+        target=_hold_sidecar,
+        args=(str(_lock_path_for(stuck.resolve())), ready_q, release_evt),
+    )
+    holder.start()
+    try:
+        assert ready_q.get(timeout=15) == "acquired"
+
+        start = time.monotonic()
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+        # Bounded by the budget, not by the holder: a regression to a blocking
+        # acquire would hang here instead of failing.
+        assert time.monotonic() - start < 5.0
+    finally:
+        release_evt.set()
+        holder.join(timeout=10)
+        assert holder.exitcode == 0
+
+    assert len(stats.errors) == 1, f"expected 1 timeout error, got {stats.errors}"
+    assert "a-stuck.md" in stats.errors[0]
+    assert "could not acquire" in stats.errors[0]
+    assert stats.retryable_errors == stats.errors, (
+        "a sidecar budget overrun is transient and must be reported as retryable"
+    )
+
+    sources = {p.name for p in await comp.storage.get_all_source_files()}
+    assert "b-ok.md" in sources
+    assert "a-stuck.md" not in sources
+
+
+@pytest.mark.asyncio
+async def test_two_engines_over_one_file_serialize_on_the_sidecar(bm25_only_components):
+    """Two independent ``IndexEngine`` instances over one file do not overlap.
+
+    This is the in-process half of the issue's "two engines over one file"
+    ask, and it is the sharper half: the engines have *distinct*
+    ``_index_lock`` objects, so L3 cannot be what serializes them — only the
+    sidecar can (``_atomic._intra_async_locks`` is module-global, keyed by
+    ``(lock_path, loop)``). The cross-process half is
+    ``test_index_path_sidecar_timeout_folds_into_errors_and_continues``,
+    which contends on the real flock. Two full component stacks over one
+    sqlite file would mostly measure sqlite's own writer lock instead.
+    """
+    comp, mem_dir = bm25_only_components
+    (mem_dir / "shared.md").write_text("## Shared\n\nbody.\n", encoding="utf-8")
+
+    other = IndexEngine(comp.storage, comp.embedder, comp.config.indexing)
+    assert other._index_lock is not comp.index_engine._index_lock
+
+    trace: list[str] = []
+
+    def _instrument(engine: IndexEngine, tag: str) -> None:
+        orig = engine._index_file
+
+        async def wrapped(fp, force=False, namespace=None, **kwargs):
+            trace.append(f"enter:{tag}")
+            try:
+                await asyncio.sleep(0.05)
+                return await orig(fp, force, namespace=namespace)
+            finally:
+                trace.append(f"exit:{tag}")
+
+        engine._index_file = wrapped  # type: ignore[method-assign]
+
+    _instrument(comp.index_engine, "one")
+    _instrument(other, "two")
+
+    await asyncio.gather(
+        comp.index_engine.index_path(mem_dir, recursive=True),
+        other.index_path(mem_dir, recursive=True),
+    )
+
+    assert len(trace) == 4, f"expected two enter/exit pairs, got {trace}"
+    assert trace[0].startswith("enter:") and trace[1] == trace[0].replace("enter", "exit"), (
+        f"the two engines interleaved on one file: {trace}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_index_path_waits_for_a_crud_span_holding_the_sidecar(bm25_only_components):
+    """A real CRUD-shaped span — sidecar held across the whole
+    read→rewrite→reindex window, reindexing via ``index_file(lock_held=True)``
+    — blocks the bulk run on that file only (#2105).
+
+    This is the branch the two halves of the design meet on: the span holds
+    L2 and enters at L3, while the bulk worker holds no L3 at all, so L2 is
+    the *only* thing that can keep their ``_index_file`` bodies apart. The
+    span's own reindex must not be starved either — it is exempt from the
+    engine-wide file slot precisely so bulk workers queued on its sidecar
+    cannot deadlock it.
+    """
+    comp, mem_dir = bm25_only_components
+    held_file = mem_dir / "a-held.md"
+    free_file = mem_dir / "b-free.md"
+    held_file.write_text("## Held\n\nbody.\n", encoding="utf-8")
+    free_file.write_text("## Free\n\nbody.\n", encoding="utf-8")
+
+    engine = comp.index_engine
+    inflight: list[str] = []
+    overlaps: list[tuple[str, ...]] = []
+    started: list[str] = []
+    orig = engine._index_file
+
+    async def wrapped(fp, force=False, namespace=None, **kwargs):
+        name = Path(fp).name
+        started.append(name)
+        inflight.append(name)
+        if len(inflight) > 1:
+            overlaps.append(tuple(inflight))
+        try:
+            await asyncio.sleep(0)
+            return await orig(fp, force, namespace=namespace)
+        finally:
+            inflight.remove(name)
+
+    engine._index_file = wrapped  # type: ignore[method-assign]
+
+    acquired = asyncio.Event()
+    release = asyncio.Event()
+
+    async def crud_span() -> None:
+        # The CRUD contract: hold L2 for the whole span, then reindex with
+        # ``lock_held=True`` so the engine does not re-acquire the sidecar.
+        async with async_file_lock(_lock_path_for(held_file.resolve()), timeout=5.0):
+            acquired.set()
+            await release.wait()
+            held_file.write_text("## Held\n\nrewritten.\n", encoding="utf-8")
+            await engine.index_file(held_file, lock_held=True)
+
+    span_task = asyncio.create_task(crud_span())
+    await acquired.wait()
+
+    run = asyncio.create_task(engine.index_path(mem_dir, recursive=True))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert started == ["b-free.md"], (
+        f"the held file must not be indexed while the span holds its sidecar: {started}"
+    )
+
+    release.set()
+    await span_task
+    stats = await run
+
+    assert stats.errors == ()
+    assert sorted(set(started)) == ["a-held.md", "b-free.md"]
+    assert not any("a-held.md" in pair and len(set(pair)) == 1 for pair in overlaps), (
+        f"the span and the bulk worker overlapped on one file: {overlaps}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lock_held_reindex_is_not_starved_by_a_saturated_semaphore(
+    bm25_only_components, monkeypatch
+):
+    """The ``lock_held=True`` exemption from the file-concurrency slot is what
+    keeps the lock order acyclic — pin it under saturation (#2105).
+
+    Every slot is held by a worker blocked on the CRUD span's sidecar. If a
+    ``lock_held=True`` reindex also queued for a slot it could never get one
+    (the holders only release once the span releases, and the span cannot
+    finish without reindexing), so this would deadlock rather than fail an
+    assertion — hence the ``wait_for``. ``_FILE_CONCURRENCY`` is monkeypatched
+    to 1 so "saturated" is one parked worker, not eight.
+    """
+    comp, mem_dir = bm25_only_components
+    target = mem_dir / "held.md"
+    target.write_text("## Held\n\nbody.\n", encoding="utf-8")
+
+    monkeypatch.setattr(engine_mod, "_FILE_CONCURRENCY", 1)
+    engine = comp.index_engine
+
+    async with async_file_lock(_lock_path_for(target.resolve()), timeout=5.0):
+        # Saturate the single slot with a bulk run that will park on the
+        # sidecar we hold.
+        bulk = asyncio.create_task(engine.index_path(mem_dir, recursive=True))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert engine._file_semaphore().locked(), "the bulk worker should hold the only slot"
+
+        target.write_text("## Held\n\nrewritten.\n", encoding="utf-8")
+        stats = await asyncio.wait_for(engine.index_file(target, lock_held=True), timeout=5.0)
+        assert stats.total_files == 1
+
+    await bulk
+
+
+@pytest.mark.asyncio
+async def test_index_path_parent_gone_falls_back_to_index_lock(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    """#1566 under the bulk path: a file whose parent vanished after discovery
+    skips the sidecar (never mkdir-resurrecting the dir) and takes
+    ``_index_lock`` instead, so ``engine_serialized=False`` never leaves a
+    file unlocked (#2105)."""
+    comp, mem_dir = bm25_only_components
+    missing = tmp_path / "gone" / "orphan.md"  # parent 'gone/' never created
+
+    engine = comp.index_engine
+    monkeypatch.setattr(
+        engine, "discover_indexable_files", lambda *a, **kw: [missing], raising=True
+    )
+
+    calls: list[Path] = []
+    real = atomic_mod.async_file_lock
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def spy(lock_path, *, timeout):
+        calls.append(Path(lock_path))
+        async with real(lock_path, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(atomic_mod, "async_file_lock", spy)
+
+    index_lock_held: list[bool] = []
+    orig = engine._index_file
+
+    async def wrapped(fp, force=False, namespace=None, **kwargs):
+        index_lock_held.append(engine._index_lock.locked())
+        return await orig(fp, force, namespace=namespace)
+
+    engine._index_file = wrapped  # type: ignore[method-assign]
+
+    await engine.index_path(mem_dir, recursive=True)
+
+    assert calls == [], "parent-gone path must skip the sidecar"
+    assert not (tmp_path / "gone").exists(), "sidecar acquire resurrected the deleted parent dir"
+    assert index_lock_held == [True], "the sidecar-skipping bulk file must still hold _index_lock"
+
+
 # ============================================================ D. watcher requeue
 
 
@@ -400,7 +702,12 @@ async def test_watcher_flush_batch_requeues_only_timed_out(monkeypatch):
 @pytest.mark.asyncio
 async def test_sidecar_lockfiles_are_not_indexed(bm25_only_components):
     """A ``.{name}.md.lock`` sidecar living beside memory files is never picked
-    up by a directory index — only the real markdown gets chunks."""
+    up by a directory index — only the real markdown gets chunks.
+
+    Since #2105 the bulk run creates such a sidecar for every file it visits,
+    so this exclusion is load-bearing on every directory index, not only where
+    a CRUD span happened to leave one behind.
+    """
     comp, mem_dir = bm25_only_components
     (mem_dir / "real.md").write_text("## Real\n\nbody.\n", encoding="utf-8")
     # A sidecar lock as ``async_file_lock``/migrate leave behind.

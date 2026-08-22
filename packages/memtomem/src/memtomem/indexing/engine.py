@@ -10,7 +10,7 @@ import logging
 import os
 import stat as stat_module
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -647,11 +647,34 @@ class IndexEngine:
                 ReStructuredTextChunker(),
             ]
         )
-        # Prevent concurrent indexing of the same files. This is level L3 of the
-        # memory-file lock order (see ``context._atomic`` module docstring): the
-        # per-file sidecar (L2) is acquired ABOVE this lock, never below, so no
-        # path ever waits on a sidecar while holding ``_index_lock`` (#1587).
+        # Level L3 of the memory-file lock order (see ``context._atomic``
+        # module docstring): the per-file sidecar (L2) is acquired ABOVE this
+        # lock, never below, so no path ever waits on a sidecar while holding
+        # ``_index_lock`` (#1587).
+        #
+        # Engine-wide, not per file. ``index_file`` and ``index_path_stream``
+        # hold it per file; the bulk ``index_path`` path does NOT (#2105) —
+        # holding it across a run would mean acquiring L2 under L3, the
+        # reverse-order cycle #1587 removed, and holding it per file would
+        # collapse the run's ``_FILE_CONCURRENCY``-way pipeline to one file at
+        # a time. Bulk relies on L2 instead, whose layer-1 in-process
+        # ``asyncio.Lock`` gives same-process same-file exclusion; it falls
+        # back to L3 only where the sidecar is skipped (``lock_held`` or the
+        # #1566 parent-gone case). The resource ceilings a run-wide L3 used to
+        # imply now live in the engine-scoped semaphores below.
         self._index_lock = asyncio.Lock()
+        # Engine-wide file / embedding concurrency ceilings (#2105). Both were
+        # per-run semaphores while a run-wide ``_index_lock`` made runs
+        # mutually exclusive; once runs (and runs vs. ``index_file`` / stream)
+        # can overlap, per-run objects would multiply the ceiling by the number
+        # of in-flight runs — including the #1783 ONNX activation-memory cap.
+        # Keyed by event loop for the same reason as
+        # ``context._atomic._intra_async_lock_for``: a single instance-level
+        # semaphore binds to the first loop that awaits it and then raises
+        # "bound to a different event loop" when reused, and pytest gives each
+        # async test its own loop.
+        self._file_sems: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+        self._embed_sems: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
         # Observability counter for ``GET /api/indexing/active`` — independent
         # of ``_index_lock`` because runs also span discovery, gaps between
         # files, and lock-wait periods where ``asyncio.Lock.locked()`` would
@@ -678,6 +701,33 @@ class IndexEngine:
         """
         return self._active_runs > 0
 
+    @staticmethod
+    def _loop_local_semaphore(
+        registry: dict[asyncio.AbstractEventLoop, asyncio.Semaphore], limit: int
+    ) -> asyncio.Semaphore:
+        """Return *registry*'s semaphore for the running loop, creating it once.
+
+        Closed loops are pruned on the new-loop path — a contended semaphore
+        strongly references its bound loop, so a ``WeakKeyDictionary`` could
+        not reclaim it. Mirrors ``context._atomic._intra_async_lock_for``.
+        """
+        loop = asyncio.get_running_loop()
+        sem = registry.get(loop)
+        if sem is None:
+            for dead in [lp for lp in registry if lp.is_closed()]:
+                del registry[dead]
+            sem = asyncio.Semaphore(limit)
+            registry[loop] = sem
+        return sem
+
+    def _file_semaphore(self) -> asyncio.Semaphore:
+        """Engine-wide cap on concurrently running ``_index_file`` pipelines."""
+        return self._loop_local_semaphore(self._file_sems, _FILE_CONCURRENCY)
+
+    def _embed_semaphore(self) -> asyncio.Semaphore:
+        """Engine-wide cap on concurrent ``embed_texts`` calls (#1783)."""
+        return self._loop_local_semaphore(self._embed_sems, _resolve_embed_limit(self._embedder))
+
     async def index_path(
         self,
         path: Path,
@@ -694,17 +744,24 @@ class IndexEngine:
         force = force or reassign_namespaces
         self._active_runs += 1
         try:
-            async with self._index_lock:
-                return await self._index_path_inner(
-                    path,
-                    recursive,
-                    force,
-                    namespace,
-                    force_unsafe=force_unsafe,
-                    path_scope=path_scope,
-                    reassign_namespaces=reassign_namespaces,
-                    new_source_namespace=new_source_namespace,
-                )
+            # No run-wide ``_index_lock`` (#2105): each file takes its own L2
+            # sidecar inside ``_bounded`` instead, which is what serializes
+            # this run against another process touching the same file. Holding
+            # L3 here would put every one of those L2 acquires under L3 — the
+            # reverse-order cycle #1587 removed. Run-vs-run and run-vs-CRUD
+            # exclusion is therefore per file, not per run; the concurrency
+            # ceilings a run-wide lock used to imply live in the engine-scoped
+            # semaphores.
+            return await self._index_path_inner(
+                path,
+                recursive,
+                force,
+                namespace,
+                force_unsafe=force_unsafe,
+                path_scope=path_scope,
+                reassign_namespaces=reassign_namespaces,
+                new_source_namespace=new_source_namespace,
+            )
         finally:
             self._active_runs -= 1
 
@@ -766,14 +823,9 @@ class IndexEngine:
         if not files:
             return IndexingStats(0, 0, 0, 0, 0, 0.0)
 
-        sem = asyncio.Semaphore(_FILE_CONCURRENCY)
-        # Embedding gets its own, usually tighter, cap (#1783): the file
-        # semaphore alone let 8 files run ``embed_texts`` at once, which for
-        # the local CPU ONNX provider multiplied peak activation memory
-        # (~31 GB RSS on a 1.2 MB corpus) without adding throughput. Files
-        # still pipeline chunking/hash-diff/DB work under ``sem``; only the
-        # embed call itself queues on ``embed_sem``.
-        embed_sem = asyncio.Semaphore(_resolve_embed_limit(self._embedder))
+        # Both concurrency caps are engine-scoped and applied by
+        # ``_index_file_locked`` (#2105) — see the accessors on
+        # ``IndexEngine``. Nothing to set up per run.
 
         # Per-file namespaces, resolved BEFORE the writes — the same ordering
         # the stream variant uses. Namespace preservation reads the store
@@ -792,17 +844,23 @@ class IndexEngine:
         )
 
         async def _bounded(fp: Path) -> IndexFileResult:
-            async with sem:
-                return await self._index_file(
-                    fp,
-                    force,
-                    namespace=namespace,
-                    force_unsafe=force_unsafe,
-                    path_scope=path_scope,
-                    embed_semaphore=embed_sem,
-                    reassign_namespaces=reassign_namespaces,
-                    new_source_namespace=new_source_namespace,
-                )
+            # ``engine_serialized=False``: take this file's L2 sidecar but not
+            # L3, so the run stays ``_FILE_CONCURRENCY``-way parallel while
+            # still serializing per file against other processes and other
+            # in-process indexers (#2105). The file-concurrency slot is taken
+            # inside ``_index_file_locked``, above L2, together with every
+            # other entry point's.
+            result, _ = await self._index_file_locked(
+                fp,
+                force,
+                namespace=namespace,
+                force_unsafe=force_unsafe,
+                path_scope=path_scope,
+                reassign_namespaces=reassign_namespaces,
+                new_source_namespace=new_source_namespace,
+                engine_serialized=False,
+            )
+            return result
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
         file_results: list[IndexFileResult] = []
@@ -856,8 +914,13 @@ class IndexEngine:
                 all_errors.append(msg)
                 # ``gather(return_exceptions=True)`` erases types; re-read
                 # this one so a transient store outage stays tellable apart
-                # from a permanently broken file (issue #2018).
-                if isinstance(r, RetryableError):
+                # from a permanently broken file (issue #2018). A sidecar
+                # acquire that ran out its budget is the same kind of
+                # transient — the watcher already re-queues on it and
+                # ``mm index`` drives its hook retry off
+                # ``retryable_errors`` — but ``TimeoutError`` is not a
+                # ``RetryableError`` subclass, so name it (#2105).
+                if isinstance(r, RetryableError | TimeoutError):
                     retryable_errors.append(msg)
 
         # Aggregate new_chunk_ids across all files — preserves per-file order
@@ -1014,7 +1077,7 @@ class IndexEngine:
 
     async def _index_file_locked(
         self,
-        resolved_path: Path,
+        path: Path,
         force: bool,
         *,
         namespace: str | None = None,
@@ -1025,13 +1088,40 @@ class IndexEngine:
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
         new_source_namespace: str | None = None,
+        engine_serialized: bool = True,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
-        Single home for the per-file lock policy so ``index_file`` and
-        ``index_path_stream`` cannot drift (#1574 item 6). Returns the raw
-        per-file result plus the duration (ms) of the indexing work itself —
-        measured inside the locks, so lock-wait time is excluded.
+        Single home for the per-file lock policy so ``index_file``,
+        ``index_path_stream`` and the bulk ``index_path`` fan-out cannot drift
+        (#1574 item 6, #2105). Returns the raw per-file result plus the
+        duration (ms) of the indexing work itself — measured inside the locks,
+        so lock-wait time is excluded.
+
+        ``engine_serialized=False`` takes the sidecar (L2) but NOT
+        ``_index_lock`` (L3) — the bulk path, whose files run
+        ``_FILE_CONCURRENCY``-way concurrently and would otherwise serialize
+        on the one engine-wide L3. L2 still supplies both halves of what that
+        path needs: its layer-1 in-process ``asyncio.Lock`` excludes another
+        indexer in this process on the same file, its flock excludes another
+        process. The ``skip_sidecar`` branch below ignores the flag and takes
+        L3 regardless, so a file with no sidecar to hold is never unlocked.
+
+        The lock is keyed on ``path.resolve()`` while ``_index_file`` receives
+        ``path`` **as given**. Every caller must contend on one sidecar per
+        physical file, but the work path is separately load-bearing: namespace
+        rules pattern-match it (``_resolve_namespace_directed``), so resolving
+        a symlinked leaf discovered by
+        the bulk walk would match the target's rules instead of the alias's,
+        including under ``--reassign-namespaces``. Storage identity is not at
+        stake either way — ``storage.sqlite_helpers.norm_path`` resolves
+        ``source_file`` on write.
+
+        Known limit, unchanged in kind by #2105: a symlink retargeted between
+        the ``resolve()`` here and the read inside ``_index_file`` leaves us
+        holding the old target's sidecar while reading the new one. The sidecar
+        never bound external mutation of the data file (see
+        ``context._atomic``); before #2105 this path held no lock at all.
 
         ADR-0011 PR-D round 11 (B2): the cross-process sidecar means the
         sibling lock taken by ``mm context memory-migrate`` is honored here
@@ -1043,6 +1133,68 @@ class IndexEngine:
         CRUD callers hold the sidecar across their whole read→rewrite→reindex
         span and reach here with ``lock_held=True`` instead of
         self-deadlocking.
+        """
+
+        async def _run() -> tuple[IndexFileResult, float]:
+            start = time.monotonic()
+            result = await self._index_file(
+                path,
+                force,
+                namespace=namespace,
+                on_chunk_progress=on_chunk_progress,
+                force_unsafe=force_unsafe,
+                already_scanned=already_scanned,
+                path_scope=path_scope,
+                # Engine-scoped, so the #1783 embedding cap holds across every
+                # entry point now that a bulk run can overlap an ``index_file``
+                # or stream call (#2105).
+                embed_semaphore=self._embed_semaphore(),
+                reassign_namespaces=reassign_namespaces,
+                new_source_namespace=new_source_namespace,
+            )
+            return result, (time.monotonic() - start) * 1000
+
+        # Engine-wide file-pipeline slot, ALWAYS acquired above L2 (#2105).
+        # Ordering matters: a task waiting for a slot must hold no sidecar, or
+        # slot holders blocked on that sidecar could never release. That is
+        # exactly why ``lock_held`` callers are exempt — they reach here
+        # already holding L2 for their whole read→rewrite→reindex span, so
+        # queueing them for a slot would be the one shape that closes the
+        # cycle. The ceiling is therefore ``_FILE_CONCURRENCY`` slot-managed
+        # pipelines (bulk fan-out, watcher, stream, single-file, importers)
+        # plus however many interactive CRUD spans are mid-reindex — a
+        # bounded overcommit, and the embedding cap below stays strict for
+        # all of them.
+        if lock_held:
+            # Nothing to key: the caller holds the sidecar, and the
+            # missing-parent test short-circuits — so skip the ``resolve()``
+            # syscall entirely.
+            return await self._locked_index(
+                path, lock_held=True, engine_serialized=engine_serialized, run=_run
+            )
+        async with self._file_semaphore():
+            # One sidecar per physical file: resolve for the lock key only —
+            # the work path stays as the caller discovered it (see docstring).
+            # Resolved inside the slot because ``Path.resolve()`` is a
+            # synchronous stat chain: a bulk gather would otherwise run one
+            # per discovered file on the event loop before anything bounds
+            # them, which on a network-backed tree is the whole walk at once.
+            return await self._locked_index(
+                path.resolve(), lock_held=False, engine_serialized=engine_serialized, run=_run
+            )
+
+    async def _locked_index(
+        self,
+        lock_key: Path,
+        *,
+        lock_held: bool,
+        engine_serialized: bool,
+        run: Callable[[], Awaitable[tuple[IndexFileResult, float]]],
+    ) -> tuple[IndexFileResult, float]:
+        """L2 → L3 half of :meth:`_index_file_locked`, slot already held.
+
+        ``lock_key`` is the resolved path whose sidecar to take; it is unused
+        when ``lock_held`` (the caller owns that sidecar already).
         """
         # In-body import on purpose: tests monkeypatch the budget by dotted
         # path (``memtomem.context._atomic._MEMORY_SIDECAR_LOCK_BUDGET_S``);
@@ -1058,42 +1210,22 @@ class IndexEngine:
         # vanished file — taking the sidecar would ``mkdir`` the deleted
         # parent back into existence just to lock a delete, resurrecting the
         # directory the user removed). ``_index_lock`` still serializes
-        # in-process; a migrate sidecar for a missing-parent path lives in
-        # that same missing parent, so no live pair-op can be mid-flight.
-        skip_sidecar = lock_held or not resolved_path.parent.is_dir()
+        # in-process — including for an ``engine_serialized=False`` caller,
+        # which would otherwise hold no lock at all; a migrate sidecar for a
+        # missing-parent path lives in that same missing parent, so no live
+        # pair-op can be mid-flight.
+        skip_sidecar = lock_held or not lock_key.parent.is_dir()
         if skip_sidecar:
             async with self._index_lock:
-                start = time.monotonic()
-                result = await self._index_file(
-                    resolved_path,
-                    force,
-                    namespace=namespace,
-                    on_chunk_progress=on_chunk_progress,
-                    force_unsafe=force_unsafe,
-                    already_scanned=already_scanned,
-                    path_scope=path_scope,
-                    reassign_namespaces=reassign_namespaces,
-                    new_source_namespace=new_source_namespace,
-                )
-                return result, (time.monotonic() - start) * 1000
+                return await run()
         async with async_file_lock(
-            _lock_path_for(resolved_path),
+            _lock_path_for(lock_key),
             timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S,
         ):
+            if not engine_serialized:
+                return await run()
             async with self._index_lock:
-                start = time.monotonic()
-                result = await self._index_file(
-                    resolved_path,
-                    force,
-                    namespace=namespace,
-                    on_chunk_progress=on_chunk_progress,
-                    force_unsafe=force_unsafe,
-                    already_scanned=already_scanned,
-                    path_scope=path_scope,
-                    reassign_namespaces=reassign_namespaces,
-                    new_source_namespace=new_source_namespace,
-                )
-                return result, (time.monotonic() - start) * 1000
+                return await run()
 
     async def index_file(
         self,
@@ -1967,10 +2099,11 @@ class IndexEngine:
                 self._progress_threshold == 0 or len(texts) > self._progress_threshold
             )
             try:
-                # Only the embed call queues on the embedding semaphore
-                # (bulk ``index_path`` runs only — single-file callers pass
-                # ``None``); everything around it stays governed by the
-                # file-level semaphore alone.
+                # Only the embed call queues on the embedding semaphore;
+                # everything around it stays governed by the file-level
+                # semaphore alone. ``_index_file_locked`` passes the
+                # engine-scoped one for every entry point (#2105); ``None``
+                # is left for direct calls in tests.
                 async with (
                     embed_semaphore if embed_semaphore is not None else contextlib.nullcontext()
                 ):
@@ -2351,7 +2484,11 @@ class IndexEngine:
                             "deleted": 0,
                             "errors": [f"{fp.name}: {exc}"],
                         }
-                        if isinstance(exc, RetryableError):
+                        # ``TimeoutError`` included for the same reason as the
+                        # non-stream branch: a sidecar budget overrun is
+                        # transient, and the two branches promise one error
+                        # shape (#2105).
+                        if isinstance(exc, RetryableError | TimeoutError):
                             retryable_errors.append(f"{fp.name}: {exc}")
                 except BaseException:
                     # Generator was closed (HTTPException, client disconnect,

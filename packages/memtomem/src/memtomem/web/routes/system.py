@@ -1556,8 +1556,9 @@ async def indexing_active(index_engine=Depends(get_index_engine)) -> JSONRespons
 
     Drives cross-tab / post-reload survival of the header indicator
     introduced in #602 (umbrella #582 item 4.11). Covers ``index_path``,
-    ``index_file``, and ``index_path_stream`` uniformly — the SSE stream
-    path is not lock-protected, so we cannot rely on
+    ``index_file``, and ``index_path_stream`` uniformly — neither the SSE
+    stream nor (since #2105) the bulk ``index_path`` run holds
+    ``_index_lock`` for its duration, so we cannot rely on
     ``_index_lock.locked()``.
 
     Response shape is intentionally minimal (``{"active": bool}``) to

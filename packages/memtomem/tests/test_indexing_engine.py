@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from memtomem.config import NamespaceConfig, NamespacePolicyRule
+from memtomem.context import _atomic as atomic_mod
 from memtomem.indexing.engine import (
     IndexEngine,
     _build_exclude_spec,
@@ -897,9 +899,16 @@ class TestActiveRunsCounter:
             engine._index_file = orig  # type: ignore[method-assign]
 
     async def test_stream_serializes_against_index_path(self, components, memory_dir):
-        """The stream's per-file work parks on ``_index_lock`` while an
-        ``index_path`` run holds it (#1574 item 6) — before that fix the
-        stream interleaved freely with locked runs on the same files."""
+        """The stream's per-file work cannot start while an ``index_path`` run
+        is mid-file on the same file (#1574 item 6).
+
+        The exclusion moved in #2105: ``index_path`` no longer holds
+        ``_index_lock`` for its run, so what parks the stream here is the
+        file's L2 sidecar — specifically ``async_file_lock``'s layer-1
+        in-process guard on ``.notes.md.lock``, which the bulk run now takes
+        per file. The pinned property is unchanged: no two indexers work one
+        file at the same time.
+        """
         (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
         engine = components.index_engine
         gate = asyncio.Event()
@@ -908,7 +917,7 @@ class TestActiveRunsCounter:
 
         async def first_call_blocked(fp, force=False, namespace=None, **kwargs):
             calls["n"] += 1
-            if calls["n"] == 1:  # only index_path's call parks, holding the lock
+            if calls["n"] == 1:  # only index_path's call parks, holding the sidecar
                 await gate.wait()
             return await orig(fp, force, namespace=namespace)
 
@@ -917,7 +926,7 @@ class TestActiveRunsCounter:
             locked_run = asyncio.create_task(engine.index_path(memory_dir))
             for _ in range(5):
                 await asyncio.sleep(0)
-            assert engine._index_lock.locked(), "index_path must be parked holding the lock"
+            assert calls["n"] == 1, "index_path must be parked inside its file's work"
 
             gen = engine.index_path_stream(memory_dir, recursive=True)
             ev = await gen.__anext__()
@@ -926,7 +935,7 @@ class TestActiveRunsCounter:
             for _ in range(10):
                 await asyncio.sleep(0)
             assert not nxt.done(), (
-                "stream produced a per-file event while index_path held _index_lock"
+                "stream produced a per-file event while index_path held the file's sidecar"
             )
 
             gate.set()
@@ -3511,6 +3520,64 @@ class _LegacyOnnxSignatureEmbedder(_ConcurrencyRecordingEmbedder):
     supports_input_context = True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges on Windows")
+class TestBulkSymlinkedLeaf:
+    """#2105: routing the bulk fan-out through ``_index_file_locked`` must not
+    change which path the per-file work sees.
+
+    The sidecar has to be keyed on the *resolved* path — one physical file,
+    one ``.lock``, so a CRUD span on the target and a bulk run reached through
+    an alias contend — but ``_index_file`` must keep receiving the path the
+    walk discovered, because namespace rules pattern-match that path
+    (``_resolve_namespace_directed``). Resolving the leaf
+    before handing it over would silently match the target's rules instead of
+    the alias's, including under ``--reassign-namespaces``.
+
+    Storage identity is a separate axis and already canonical either way:
+    ``storage.sqlite_helpers.norm_path`` resolves ``source_file`` on write.
+    """
+
+    async def test_alias_matches_its_own_namespace_rule_and_locks_the_target(
+        self, components, memory_dir, monkeypatch, tmp_path
+    ):
+        # Target outside the memory dir, so the walk discovers only the alias.
+        target = tmp_path / "outside" / "target.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# Target\n\nContent.\n", encoding="utf-8")
+        alias = memory_dir / "alias.md"
+        alias.symlink_to(target)
+
+        engine = components.index_engine
+        # Matches the alias's location only — the target's dir is not covered.
+        _install_rules(
+            engine,
+            [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="by-alias")],
+        )
+
+        lock_paths: list[Path] = []
+        real = atomic_mod.async_file_lock
+
+        @contextlib.asynccontextmanager
+        async def spy(lock_path, *, timeout):
+            lock_paths.append(Path(lock_path))
+            async with real(lock_path, timeout=timeout):
+                yield
+
+        monkeypatch.setattr(atomic_mod, "async_file_lock", spy)
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert not stats.errors
+        assert stats.applied_namespaces == ("by-alias",), (
+            "the rule must match the discovered alias path, not the resolved target: "
+            f"{stats.applied_namespaces}"
+        )
+        # ...while the lock is the target's: one physical file, one sidecar, so
+        # a CRUD span on the target and this run cannot both write it.
+        assert [lp.name for lp in lock_paths] == [".target.md.lock"], (
+            f"the sidecar must be keyed on the resolved path: {[lp.name for lp in lock_paths]}"
+        )
+
+
 class TestEmbedConcurrency:
     """#1783: bulk ``index_path`` used to run up to 8 files' ``embed_texts``
     concurrently (the file-level semaphore was the only gate), multiplying
@@ -3564,6 +3631,82 @@ class TestEmbedConcurrency:
         # While one file embeds, the others sit inside their own _index_file
         # (queued at the embed gate) — multiple pipelines in flight at once.
         assert files_inflight["peak"] >= 2
+
+    async def test_hint_of_one_holds_across_entry_points(self, components, memory_dir):
+        """The embedding cap is engine-wide, not per run (#2105).
+
+        With the run-wide ``_index_lock`` gone, a bulk ``index_path`` can run
+        beside an ``index_file`` call. A per-run semaphore would give each of
+        them its own budget and double the #1783 ceiling, so
+        ``_index_file_locked`` applies one engine-scoped semaphore on every
+        path. ``peak == 1`` is only reachable if both share it.
+        """
+        sub = memory_dir / "sub"
+        sub.mkdir()
+        self._write_files(sub, 4)
+        solo = memory_dir / "solo.md"
+        solo.write_text("# Solo\n\nContent.\n", encoding="utf-8")
+
+        engine = components.index_engine
+        embedder = _ConcurrencyRecordingEmbedder()
+        embedder.preferred_concurrency = 1
+        engine._embedder = embedder
+
+        bulk, single = await asyncio.gather(
+            engine.index_path(sub, recursive=True),
+            engine.index_file(solo),
+        )
+
+        assert bulk.total_files == 4
+        assert single.total_files == 1
+        assert embedder.calls == 5
+        assert embedder.peak == 1
+
+    async def test_file_concurrency_cap_holds_across_overlapping_runs(self, components, memory_dir):
+        """Same for the file-pipeline cap: two ``index_path`` runs can now
+        overlap (#2105), and a per-run ``Semaphore(_FILE_CONCURRENCY)`` would
+        let ``2 x _FILE_CONCURRENCY`` pipelines — and their post-write summary
+        calls — run at once."""
+        one = memory_dir / "one"
+        two = memory_dir / "two"
+        one.mkdir()
+        two.mkdir()
+        self._write_files(one, 8)
+        self._write_files(two, 8)
+
+        engine = components.index_engine
+        engine._embedder = _ConcurrencyRecordingEmbedder()
+
+        inflight = {"now": 0, "peak": 0}
+        original = engine._index_file
+
+        async def tracking(*args, **kwargs):
+            inflight["now"] += 1
+            inflight["peak"] = max(inflight["peak"], inflight["now"])
+            try:
+                return await original(*args, **kwargs)
+            finally:
+                inflight["now"] -= 1
+
+        engine._index_file = tracking
+
+        solo = memory_dir / "solo.md"
+        solo.write_text("# Solo\n\nContent.\n", encoding="utf-8")
+
+        # Bulk + bulk + a single-file call: each of these takes its slot from
+        # the same engine-wide semaphore, so their sum is capped. (A
+        # ``lock_held=True`` CRUD reindex is the one bounded exception — see
+        # ``test_lock_held_reindex_is_not_starved_by_a_saturated_semaphore``.)
+        await asyncio.gather(
+            engine.index_path(one, recursive=True),
+            engine.index_path(two, recursive=True),
+            engine.index_file(solo),
+        )
+
+        assert inflight["peak"] <= _FILE_CONCURRENCY, (
+            f"overlapping runs exceeded the engine-wide file cap: {inflight['peak']}"
+        )
+        assert inflight["peak"] >= 2, "the cap must not have serialized the runs"
 
     async def test_absent_hint_preserves_overlap(self, components, memory_dir):
         """No ``preferred_concurrency`` attribute → default = file-level cap,
