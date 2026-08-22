@@ -1274,6 +1274,13 @@ class TestEnvNameCaseInsensitivity:
         assert int(os.environ[owning]) == cfg.search.default_top_k
         assert cfg.search.default_top_k != 33
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "os.environ upper-cases keys on Windows, which folds U+017F to 'S': "
+            "the name arrives canonical and pydantic does bind it"
+        ),
+    )
     def test_a_name_pydantic_does_not_read_does_not_displace_config_json(
         self, override_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1285,6 +1292,10 @@ class TestEnvNameCaseInsensitivity:
         ``env_var_owning`` would still call it owning, and the loader would
         drop the persisted value in favour of a variable nothing bound —
         leaving the field at its default.
+
+        POSIX only, and for the same reason the assertion is worth making
+        there: Windows normalises the key to the canonical name on the way
+        into ``os.environ``, so the divergence this pins cannot arise.
         """
         from memtomem.config import env_var_owning
 
