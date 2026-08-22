@@ -390,7 +390,7 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
 
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
-            _lock_path_for,
+            memory_lock_path,
             async_file_lock,
         )
 
@@ -401,7 +401,7 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         # the file's namespace in between and turn the guard into decoration.
         # ``lock_held=True`` skips the nested engine acquire.
         try:
-            async with async_file_lock(_lock_path_for(path), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            async with async_file_lock(memory_lock_path(path), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
                 mix_err = await namespace_mix_refusal(
                     index_engine=comp.index_engine,
                     storage=comp.storage,

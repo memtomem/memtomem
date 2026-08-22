@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, TypeVar
 
-from memtomem.context._atomic import _lock_path_for, async_file_lock
+from memtomem.context._atomic import async_file_lock, memory_lock_path
 from memtomem.errors import NamespaceMutationBusyError
 
 if TYPE_CHECKING:
@@ -42,9 +42,16 @@ def _busy_error() -> NamespaceMutationBusyError:
     )
 
 
-def _lock_paths_for(candidates: Sequence[NamespaceChunkCandidate]) -> set[Path]:
-    """Return canonical L2 keys without resurrecting deleted parent trees."""
-    lock_paths: set[Path] = set()
+def _lockable_sources(candidates: Sequence[NamespaceChunkCandidate]) -> set[Path]:
+    """Resolved source paths that may be locked, skipping deleted parent trees.
+
+    Returns the FILES, not their sidecars: the keys are built by
+    :func:`_coordinated_mutation` with ``memory_lock_path`` so the builder and
+    the acquire live in one function. ``test_context_c0_prelude_guard`` derives
+    lock paths by intra-function taint, and a key crossing this helper boundary
+    made the acquire below invisible to it (#2130).
+    """
+    lockable: set[Path] = set()
     for candidate in candidates:
         source = candidate.source_file.expanduser().resolve(strict=False)
         try:
@@ -57,8 +64,8 @@ def _lock_paths_for(candidates: Sequence[NamespaceChunkCandidate]) -> set[Path]:
             raise _busy_error() from exc
         if not stat.S_ISDIR(parent_stat.st_mode):
             continue
-        lock_paths.add(_lock_path_for(source))
-    return lock_paths
+        lockable.add(source)
+    return lockable
 
 
 async def _coordinated_mutation(
@@ -72,7 +79,7 @@ async def _coordinated_mutation(
     for _attempt in range(_MAX_RETARGET_ATTEMPTS):
         if deadline - time.monotonic() <= 0:
             break
-        planned_lock_paths = _lock_paths_for(candidates)
+        planned_lock_paths = {memory_lock_path(src) for src in _lockable_sources(candidates)}
         retarget = False
 
         try:
@@ -88,7 +95,7 @@ async def _coordinated_mutation(
                 # releasing and acquiring the expanded sorted lock set.
                 current = await load_candidates()
                 candidates = current
-                current_lock_paths = _lock_paths_for(current)
+                current_lock_paths = {memory_lock_path(src) for src in _lockable_sources(current)}
                 if not current_lock_paths.issubset(planned_lock_paths):
                     retarget = True
                 else:

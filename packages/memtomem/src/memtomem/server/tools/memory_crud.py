@@ -184,7 +184,7 @@ async def _locked_chunk(
     """
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
-        _lock_path_for,
+        memory_lock_path,
         async_file_lock,
     )
 
@@ -195,7 +195,7 @@ async def _locked_chunk(
     source_file = chunk.metadata.source_file
     for _ in range(_CHUNK_LOCK_MOVE_RETRIES):
         key = AppContext.memory_file_lock_key(source_file)
-        sidecar = _lock_path_for(source_file.expanduser().resolve())
+        sidecar = memory_lock_path(source_file)
         try:
             async with app.get_memory_file_lock(key):
                 async with async_file_lock(sidecar, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
@@ -657,7 +657,7 @@ async def _mem_add_core(
     # both. ``lock_held=True`` skips index_file's nested sidecar acquire.
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
-        _lock_path_for,
+        memory_lock_path,
         async_file_lock,
     )
 
@@ -676,7 +676,7 @@ async def _mem_add_core(
                 async with (
                     app.get_memory_file_lock(target),
                     async_file_lock(
-                        _lock_path_for(target.expanduser().resolve()),
+                        memory_lock_path(target),
                         timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
                     ),
                 ):
@@ -1131,7 +1131,7 @@ async def mem_delete(
         # the locks too so it sees the same state the delete acts on.
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
-            _lock_path_for,
+            memory_lock_path,
             async_file_lock,
         )
 
@@ -1139,7 +1139,7 @@ async def mem_delete(
             async with (
                 app.get_memory_file_lock(sf_path),
                 async_file_lock(
-                    _lock_path_for(sf_path.expanduser().resolve()),
+                    memory_lock_path(sf_path),
                     timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
                 ),
             ):
@@ -1511,7 +1511,7 @@ async def mem_batch_add(
     # these entries, same as the single-entry mem_add path above.
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
-        _lock_path_for,
+        memory_lock_path,
         async_file_lock,
     )
 
@@ -1526,7 +1526,7 @@ async def mem_batch_add(
                 async with (
                     app.get_memory_file_lock(target),
                     async_file_lock(
-                        _lock_path_for(target.expanduser().resolve()),
+                        memory_lock_path(target),
                         timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
                     ),
                 ):

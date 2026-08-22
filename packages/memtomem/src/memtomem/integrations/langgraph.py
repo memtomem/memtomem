@@ -340,7 +340,7 @@ class MemtomemStore:
 
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
-            _lock_path_for,
+            memory_lock_path,
             async_file_lock,
         )
         from memtomem.memory_scope import namespace_mix_refusal
@@ -351,7 +351,9 @@ class MemtomemStore:
         # append is decoration. This adapter previously took no lock at all;
         # adding it here is what makes the guard mean something.
         try:
-            async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            async with async_file_lock(
+                memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
+            ):
                 mix_err = await namespace_mix_refusal(
                     index_engine=comp.index_engine,
                     storage=comp.storage,

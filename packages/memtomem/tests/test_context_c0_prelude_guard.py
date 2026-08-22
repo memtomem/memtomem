@@ -63,8 +63,11 @@ _WRAPPERS = frozenset(
 #: from a canonical-lock path builder (below).
 _PRIMITIVES = frozenset({"_file_lock", "async_file_lock"})
 
+#: Container methods that carry a lock path into the container they mutate.
+_CONTAINER_MUTATORS = frozenset({"add", "append", "extend", "update"})
+
 #: Builders whose result is a canonical (or canonical-shaped) sidecar path.
-_LOCK_PATH_BUILDERS = frozenset({"_lock_path_for", "canonical_lock_path"})
+_LOCK_PATH_BUILDERS = frozenset({"_lock_path_for", "canonical_lock_path", "memory_lock_path"})
 
 #: Names that satisfy §10 when they dominate a C0 body.
 _PRELUDES = frozenset({"run_swap_prelude", "_recover_and_reap_internal_dirs"})
@@ -84,6 +87,7 @@ _PRE_PRELUDE_ALLOWED = frozenset(
         "async_file_lock",
         "_lock_path_for",
         "canonical_lock_path",
+        "memory_lock_path",
         "enter_context",
         "ExitStack",
         "_lock_timeout",
@@ -125,9 +129,10 @@ _CONSENT_FIRST_ALLOWED = _PRE_PRELUDE_ALLOWED | {
 RUNS_SWAP_PRELUDE = "RUNS_SWAP_PRELUDE"  # C0 over a skills-capable root
 EXEMPT = "EXEMPT"  # C0, but never over skills
 NON_C0 = "NON_C0"  # a sidecar lock that is not a canonical NAME lock
+MEMORY_L2 = "MEMORY_L2"  # the memory-FILE sidecar domain (L2), not context artifacts
 INFRASTRUCTURE = "INFRASTRUCTURE"  # the lock-composition helpers themselves
 
-_CLASSIFICATIONS = frozenset({RUNS_SWAP_PRELUDE, EXEMPT, NON_C0, INFRASTRUCTURE})
+_CLASSIFICATIONS = frozenset({RUNS_SWAP_PRELUDE, EXEMPT, NON_C0, MEMORY_L2, INFRASTRUCTURE})
 
 
 @dataclass(frozen=True)
@@ -230,7 +235,17 @@ def _canonical_path_vars(fn: ast.AST, builders: frozenset[str] = _LOCK_PATH_BUIL
       comprehension, never the ``_file_lock(lock_path)`` two lines down;
     * ``[…for p in {_lock_path_for(x)}]`` — comprehension generators;
     * ``ordered = sorted([lock_a, lock_b])`` — one hop removed, so the analysis
-      iterates to a fixed point rather than looking one level deep.
+      iterates to a fixed point rather than looking one level deep;
+    * ``paths.add(_lock_path_for(x))`` — a container filled by MUTATION binds
+      no name, so an Assign/For-only analysis never taints ``paths`` and the
+      ``for p in sorted(paths)`` loop below it stays clean. That blind spot
+      hid the ``mm context memory-migrate`` batch acquire
+      (``cli/context_cmd.py``) from this guard entirely — a real memory-file
+      L2 site, unclassified and unchecked, found while fixing #2130.
+
+    All five rules run inside ONE fixed point, not in sequence: tainting the
+    container has to feed the loop-variable rule, and that only happens if
+    both are re-evaluated together until nothing grows.
     """
     names: set[str] = set()
     while True:
@@ -250,6 +265,14 @@ def _canonical_path_vars(fn: ast.AST, builders: frozenset[str] = _LOCK_PATH_BUIL
             elif isinstance(node, ast.comprehension):
                 if _mentions(node.iter, known):
                     grown |= _bound_names(node.target)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _CONTAINER_MUTATORS
+                and isinstance(node.func.value, ast.Name)
+                and any(_mentions(arg, known) for arg in node.args)
+            ):
+                grown.add(node.func.value.id)
         if grown == names:
             return names
         names = grown
@@ -623,66 +646,84 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "The user config.json.",
     ),
     ("cli/memory.py", "_add", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory FILE lock (L2) — the memory domain, not context artifacts.",
     ),
     ("cli/agent_cmd.py", "_run_share", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory FILE lock (L2) — the day file `mm agent share` appends to. "
         "Added with the #2005 namespace guard, which has to inspect the same "
         "file the append lands in.",
     ),
     ("integrations/langgraph.py", "MemtomemStore.add", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory FILE lock (L2) — the adapter's append target, same span as "
         "``mm add``. Added with the #2005 namespace guard (this path held no "
         "lock at all before).",
     ),
     ("cli/memory_doctor_cmd.py", "_apply_fix", 0, "_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory index file.",
     ),
-    ("cli/review_cmd.py", "_decide", 0, "async_file_lock"): (NON_C0, "", "Memory file (L2)."),
+    ("cli/review_cmd.py", "_decide", 0, "async_file_lock"): (MEMORY_L2, "", "Memory file (L2)."),
     ("indexing/engine.py", "IndexEngine._locked_index", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Per-memory-file indexing lock. Extracted from ``_index_file_locked`` "
         "in #2105 so the engine-wide file-concurrency slot is taken above it; "
         "still the only L2 acquire in the engine.",
     ),
     ("server/tools/memory_crud.py", "_locked_chunk", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory file (L2).",
     ),
     ("server/tools/memory_crud.py", "_mem_add_core", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory file (L2).",
     ),
     ("server/tools/memory_crud.py", "mem_delete", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory file (L2).",
     ),
     ("server/tools/memory_crud.py", "mem_batch_add", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory file (L2).",
     ),
     ("tools/memory_mutation.py", "locked_source_chunk", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory file (L2).",
     ),
     ("web/routes/system.py", "add_memory", 0, "async_file_lock"): (
-        NON_C0,
+        MEMORY_L2,
         "",
         "Memory file (L2) on the web side.",
+    ),
+    ("cli/context_cmd.py", "_memory_migrate_run", 0, "async_file_lock"): (
+        MEMORY_L2,
+        "",
+        "Memory file (L2) — ``mm context memory-migrate`` takes the source and "
+        "target sidecars of every planned move under one shared deadline. "
+        "Invisible to this guard until #2130 taught the taint analysis about "
+        "containers filled by ``.add()``; it had been building its keys from "
+        "unresolved paths the whole time.",
+    ),
+    ("services/namespace_management.py", "_coordinated_mutation", 0, "async_file_lock"): (
+        MEMORY_L2,
+        "",
+        "Memory file (L2) — the namespace-mutation service freezes every "
+        "affected source under one shared deadline. Was invisible to this "
+        "guard while its keys were built in the ``_lockable_sources`` helper; "
+        "#2130 moved the ``memory_lock_path`` calls into this function so the "
+        "builder and the acquire share a scope.",
     ),
     # ── INFRASTRUCTURE — the lock-composition helpers themselves ─────────
     ("context/_canonical_txn.py", "canonical_sidecar_lock", 0, "_file_lock"): (
@@ -895,6 +936,302 @@ def test_every_c0_site_is_classified() -> None:
     )
     stale = sorted(set(C0_SITES) - {s.key for s in sites})
     assert not stale, f"C0_SITES rows no longer present in the tree: {stale}"
+
+
+#: The one approved key builder for the memory-file (L2) domain, and the
+#: builders that must never key one — ``_lock_path_for`` keys on the path as
+#: given (the #2130 bug) and ``canonical_lock_path`` keys on an artifact NAME.
+_MEMORY_KEY_BUILDER = frozenset({"memory_lock_path"})
+_NON_MEMORY_KEY_BUILDERS = frozenset({"_lock_path_for", "canonical_lock_path"})
+
+
+def _derived_from(fn: ast.AST, builders: frozenset[str]) -> set[str]:
+    """Names in *fn* carrying a path from *builders*, plus the builders."""
+    return _canonical_path_vars(fn, builders) | set(builders)
+
+
+def _imported_as(tree: ast.AST, canonical: frozenset[str]) -> frozenset[str]:
+    """Local names an IMPORT in this module binds to one of *canonical*.
+
+    Provenance, not spelling. Two ways a name lies about what it holds, and
+    only an import-derived set closes both:
+
+    * ``from … import _lock_path_for as memory_lock_path`` — the wrong builder
+      under the right-looking name;
+    * ``def memory_lock_path(p): return _lock_path_for(p)`` — a local wrapper
+      wearing the approved name. ``_alias_expand`` cannot catch this one: it
+      seeds every canonical name as mapping to itself, so the literal spelling
+      is approved no matter what actually binds it.
+
+    So the approved set is built from imports only, and :func:`_rebound_names`
+    subtracts anything the module also binds itself.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in node.names:
+            if alias.name.rsplit(".", 1)[-1] in canonical:
+                bound.add(alias.asname or alias.name.rsplit(".", 1)[-1])
+    return frozenset(bound)
+
+
+def _rebound_names(tree: ast.AST) -> frozenset[str]:
+    """Names this module binds itself — ``def``, ``class``, assignment, param.
+
+    A name that is both imported and rebound cannot be trusted to hold the
+    import at the point of use, so the approved set drops it and the site is
+    reported rather than assumed compliant.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+            args = getattr(node, "args", None)
+            if args is not None:
+                for arg in (
+                    list(args.posonlyargs)
+                    + list(args.args)
+                    + list(args.kwonlyargs)
+                    + ([args.vararg] if args.vararg else [])
+                    + ([args.kwarg] if args.kwarg else [])
+                ):
+                    bound.add(arg.arg)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                bound |= _bound_names(target)
+    return frozenset(bound)
+
+
+def _memory_l2_offense(fn: ast.AST, arg: ast.expr | None, tree: ast.AST) -> str | None:
+    """Why *arg* is not a valid memory-file (L2) key, or ``None`` if it is.
+
+    The single home of the MEMORY_L2 rule, shared by the package scan and the
+    synthetic mutation tests below — a synthetic test that only exercised the
+    taint helpers would stay green if this logic were deleted outright.
+    """
+    approved = _imported_as(tree, _MEMORY_KEY_BUILDER) - _rebound_names(tree)
+    # Banned keeps the canonical spellings on top of the imported ones: a
+    # locally defined ``_lock_path_for`` is reported rather than waved through,
+    # which is the fail-safe direction for a lock-key rule.
+    banned = _imported_as(tree, _NON_MEMORY_KEY_BUILDERS) | _NON_MEMORY_KEY_BUILDERS
+    if arg is None or not approved or not _mentions(arg, _derived_from(fn, approved)):
+        return "not keyed on memory_lock_path"
+    if banned and _mentions(arg, _derived_from(fn, banned)):
+        return "also keyed on a non-memory builder"
+    return None
+
+
+def _function_containing(tree: ast.AST, lineno: int) -> ast.AST | None:
+    """Innermost function whose body spans *lineno*."""
+    best, best_start = None, -1
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.lineno <= lineno <= getattr(node, "end_lineno", node.lineno) and (
+            node.lineno > best_start
+        ):
+            best, best_start = node, node.lineno
+    return best
+
+
+def test_memory_l2_sites_key_on_the_resolved_path() -> None:
+    """Every memory-FILE (L2) acquire must build its key with
+    ``memory_lock_path``, never bare ``_lock_path_for`` (#2130).
+
+    The invariant is one physical file, one sidecar. ``IndexEngine`` keys on
+    the resolved path, so a caller that keys on an unresolved one takes a
+    *different* lockfile for the same file whenever a symlink is in the way —
+    a CRUD span on ``.alias.md.lock`` does not exclude an indexer holding
+    ``.target.md.lock``, and since #2105 the bulk path holds no ``_index_lock``
+    to fall back on. Six sites were doing exactly that.
+
+    Scope comes from the registry, which ``test_every_c0_site_is_classified``
+    keeps honest: a new memory-file acquire cannot be added without being
+    classified, and classifying it ``MEMORY_L2`` lands it here. Enumerating the
+    call sites by hand and then guarding that same enumeration would certify
+    itself (#1866) — and would have missed ``_memory_migrate_run``, which this
+    guard could not even see until #2130.
+
+    The check is function-scoped and has TWO halves, because either alone is
+    satisfiable by a bug:
+
+    * **positive** — the locked path must trace back to a ``memory_lock_path``
+      call in the function that takes the lock. Banning ``_lock_path_for``
+      alone would leave ``canonical_lock_path`` — which keys on the artifact
+      NAME and resolves only the root — as a passing substitute that
+      reintroduces the very same split.
+    * **negative** — it must NOT also trace back to one of those other
+      builders. Taint through a container is existential (one good insertion
+      marks the whole set), so a batch that fills ``paths`` from
+      ``memory_lock_path`` *and* ``canonical_lock_path`` would satisfy the
+      positive half while locking half its files on the wrong key. That is a
+      live shape: ``_memory_migrate_run`` inserts a source key and a target
+      key into one set.
+
+    Because the trace is intra-function, every memory-file acquire must build
+    its own key rather than receive one (see ``IndexEngine._locked_index`` and
+    ``namespace_management._coordinated_mutation``, both moved for this).
+    """
+    sites, trees = _discover()
+    offenders: list[str] = []
+    for site in sites:
+        if C0_SITES.get(site.key, ("", "", ""))[0] != MEMORY_L2:
+            continue
+        fn = _function_containing(trees[site.module], site.lineno)
+        if fn is None:
+            offenders.append(f"{site.module}:{site.lineno} {site.qualname} (no enclosing function)")
+            continue
+        arg = site.node.args[0] if site.node.args else None
+        offense = _memory_l2_offense(fn, arg, trees[site.module])
+        if offense is not None:
+            offenders.append(f"{site.module}:{site.lineno} {site.qualname} ({offense})")
+    assert not offenders, (
+        "memory-file (L2) acquire does not key on memory_lock_path; without it an "
+        "alias and its target take different sidecars and do not serialize (#2130):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def _offense_for(source: str) -> str | None:
+    """Run the MEMORY_L2 rule over one synthetic module's single acquisition."""
+    sites, tree = sites_in_source(source, "synthetic.py")
+    assert len(sites) == 1, f"expected exactly one discovered acquire, got {len(sites)}"
+    fn = _function_containing(tree, sites[0].lineno)
+    assert fn is not None
+    arg = sites[0].node.args[0] if sites[0].node.args else None
+    return _memory_l2_offense(fn, arg, tree)
+
+
+def test_memory_l2_guard_rejects_the_other_builders() -> None:
+    """The MEMORY_L2 rule must reject every non-``memory_lock_path`` key, not
+    just ``_lock_path_for``.
+
+    Synthetic source, and it drives the real validator rather than the taint
+    helpers underneath it: a test that re-implemented the rule would stay green
+    if the rule itself were deleted (``feedback_pin_test_mutation_validation``).
+    Both substitutions are still *discovered* as acquisitions, so a
+    negative-only guard would wave ``canonical_lock_path`` straight through.
+    """
+    for builder in ("_lock_path_for", "canonical_lock_path"):
+        source = (
+            f"from memtomem.context._atomic import {builder}, async_file_lock\n"
+            "async def span(note):\n"
+            f"    async with async_file_lock({builder}(note), timeout=1):\n"
+            "        pass\n"
+        )
+        assert _offense_for(source) == "not keyed on memory_lock_path", builder
+
+
+def test_memory_l2_guard_rejects_a_mixed_container() -> None:
+    """A batch filling one container from ``memory_lock_path`` AND another
+    builder must be rejected.
+
+    Taint through a container is existential — one good insertion marks the
+    whole set — so the positive half alone accepts this while half the batch
+    locks on the wrong key. ``_memory_migrate_run`` inserts a source key and a
+    target key into one set, so this is the shape it would regress into, not a
+    hypothetical.
+    """
+    source = (
+        "from memtomem.context._atomic import async_file_lock, memory_lock_path\n"
+        "from memtomem.context._canonical_txn import canonical_lock_path\n"
+        "async def batch(plan):\n"
+        "    paths = set()\n"
+        "    for entry in plan:\n"
+        "        paths.add(memory_lock_path(entry['source']))\n"
+        "        paths.add(canonical_lock_path(entry['target']))\n"
+        "    for p in sorted(paths):\n"
+        "        async with async_file_lock(p, timeout=1):\n"
+        "            pass\n"
+    )
+    assert _offense_for(source) == "also keyed on a non-memory builder"
+
+
+def test_memory_l2_guard_sees_through_a_renaming_import() -> None:
+    """``import _lock_path_for as memory_lock_path`` must not satisfy the rule.
+
+    The check is on PROVENANCE, not spelling. A name-only comparison would read
+    this as compliant while the alias restores the exact bug #2130 fixed — the
+    same renaming-import hole the discovery scan itself closes with
+    ``_alias_expand``.
+    """
+    source = (
+        "from memtomem.context._atomic import _lock_path_for as memory_lock_path\n"
+        "from memtomem.context._atomic import async_file_lock\n"
+        "async def span(note):\n"
+        "    async with async_file_lock(memory_lock_path(note), timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) == "not keyed on memory_lock_path"
+
+
+def test_memory_l2_guard_rejects_a_local_wrapper_wearing_the_name() -> None:
+    """A locally defined ``memory_lock_path`` that wraps ``_lock_path_for``
+    must not satisfy the rule.
+
+    The renaming-import case is only half of the provenance problem, and the
+    alias map cannot see this half: it seeds every canonical name as mapping to
+    itself, so the literal spelling reads as approved no matter what binds it.
+    A wrapper is the natural way this bug comes back — someone "keeps the call
+    sites tidy" and the helper underneath stops resolving.
+    """
+    source = (
+        "from memtomem.context._atomic import _lock_path_for, async_file_lock\n"
+        "def memory_lock_path(p):\n"
+        "    return _lock_path_for(p)\n"
+        "async def span(note):\n"
+        "    async with async_file_lock(memory_lock_path(note), timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) == "not keyed on memory_lock_path"
+
+
+def test_memory_l2_guard_rejects_a_parameter_wearing_the_name() -> None:
+    """Same hole through a parameter: a caller can pass any builder in under
+    the approved name, so an imported-but-shadowed name is not trusted."""
+    source = (
+        "from memtomem.context._atomic import async_file_lock, memory_lock_path\n"
+        "async def span(note, memory_lock_path=memory_lock_path):\n"
+        "    async with async_file_lock(memory_lock_path(note), timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) == "not keyed on memory_lock_path"
+
+
+def test_memory_l2_guard_accepts_the_real_builder() -> None:
+    """Sanity counterpart: the compliant shape must return no offense, so the
+    three rejection tests above are not just asserting a constant."""
+    source = (
+        "from memtomem.context._atomic import async_file_lock, memory_lock_path\n"
+        "async def span(note):\n"
+        "    async with async_file_lock(memory_lock_path(note), timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) is None
+
+
+def test_container_mutation_taints_the_lock_path() -> None:
+    """``paths.add(_lock_path_for(x))`` then ``for p in sorted(paths)`` is a
+    real acquisition, and this guard must see it.
+
+    Synthetic source, not the tree: a guard exercised only against a tree it
+    already passes proves nothing about what it would catch
+    (``feedback_pin_test_mutation_validation``). This exact shape hid
+    ``mm context memory-migrate``'s batch acquire until #2130.
+    """
+    source = (
+        "async def batch(plan):\n"
+        "    paths = set()\n"
+        "    for entry in plan:\n"
+        "        paths.add(_lock_path_for(entry['source']))\n"
+        "    for p in sorted(paths):\n"
+        "        async with async_file_lock(p, timeout=1):\n"
+        "            pass\n"
+    )
+    sites, _ = sites_in_source(source, "synthetic.py")
+    assert [(s.qualname, s.callee) for s in sites] == [("batch", "async_file_lock")]
 
 
 def test_classifications_are_from_the_closed_set_and_explained() -> None:

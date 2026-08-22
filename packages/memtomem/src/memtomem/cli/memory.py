@@ -319,7 +319,7 @@ async def _add(
 
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
-            _lock_path_for,
+            memory_lock_path,
             async_file_lock,
         )
 
@@ -334,7 +334,7 @@ async def _add(
         for _attempt in range(NS_RETARGET_ATTEMPTS):
             try:
                 async with async_file_lock(
-                    _lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
+                    memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
                 ):
                     # Resolved inside the lock, like ``_mem_add_core`` — the write is
                     # attributed to whichever session is live at write time, not at
