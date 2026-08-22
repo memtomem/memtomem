@@ -1167,8 +1167,9 @@ class IndexEngine:
         # all of them.
         if lock_held:
             # Nothing to key: the caller holds the sidecar, and the
-            # missing-parent test short-circuits — so skip the ``resolve()``
-            # syscall entirely.
+            # missing-parent test short-circuits — so this branch adds no
+            # ``resolve()`` of its own. (``index_file`` resolves before
+            # calling in; that is its own path handling, not this one's.)
             return await self._locked_index(
                 path, lock_held=True, engine_serialized=engine_serialized, run=_run
             )

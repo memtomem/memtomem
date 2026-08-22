@@ -872,8 +872,9 @@ class TestActiveRunsCounter:
 
     async def test_active_concurrent_runs(self, components, memory_dir):
         """Counter, not boolean — two parallel ``index_path`` calls both
-        bump it to 2 even though the lock serializes the inner work
-        (``_active_runs += 1`` is *outside* ``async with self._index_lock``).
+        bump it to 2 even though their per-file work is serialized (since
+        #2105 by each file's L2 sidecar, not by a run-wide ``_index_lock``);
+        ``_active_runs += 1`` sits outside every lock.
         """
         (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
         engine = components.index_engine
