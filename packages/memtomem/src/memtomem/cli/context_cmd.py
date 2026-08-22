@@ -5485,7 +5485,7 @@ async def _memory_migrate_run(
     from memtomem.cli._bootstrap import cli_components
     from memtomem.context._atomic import (
         _MIGRATE_SIDECAR_LOCK_BUDGET_S,
-        _lock_path_for,
+        memory_lock_path,
         async_file_lock,
     )
     from memtomem.errors import ConfigError
@@ -5738,8 +5738,8 @@ async def _memory_migrate_run(
         # gets only the remaining budget.
         all_lock_paths: set[Path] = set()
         for entry in plan:
-            all_lock_paths.add(_lock_path_for(entry["source"]))
-            all_lock_paths.add(_lock_path_for(entry["target"]))
+            all_lock_paths.add(memory_lock_path(entry["source"]))
+            all_lock_paths.add(memory_lock_path(entry["target"]))
         deadline = time.monotonic() + _MIGRATE_SIDECAR_LOCK_BUDGET_S
         async with AsyncExitStack() as stack:
             for lp in sorted(all_lock_paths, key=str):

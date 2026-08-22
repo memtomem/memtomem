@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from memtomem.context import _atomic
-from memtomem.context._atomic import _lock_path_for, async_file_lock
+from memtomem.context._atomic import async_file_lock, memory_lock_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -68,7 +68,7 @@ async def locked_source_chunk(
     # a second yield (which would break the @asynccontextmanager protocol).
     acquired = False
     try:
-        async with async_file_lock(_lock_path_for(resolved), timeout=budget):
+        async with async_file_lock(memory_lock_path(resolved), timeout=budget):
             acquired = True
             fresh = await storage.get_chunk(chunk_id)
             if fresh is None:

@@ -169,7 +169,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                 else:
                     from memtomem.context._atomic import (
                         _CRUD_SIDECAR_LOCK_BUDGET_S,
-                        _lock_path_for,
+                        memory_lock_path,
                         async_file_lock,
                     )
 
@@ -179,7 +179,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                     target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
                     write_location = str(target)
                     async with async_file_lock(
-                        _lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
+                        memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
                     ):
                         await asyncio.to_thread(
                             append_entry,

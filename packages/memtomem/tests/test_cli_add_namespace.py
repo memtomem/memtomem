@@ -255,7 +255,7 @@ class TestResolutionHappensUnderTheLock:
     @pytest.mark.asyncio
     async def test_resolver_runs_while_the_target_lock_is_held(self, monkeypatch, tmp_path, home):
         from memtomem.cli.memory import _add
-        from memtomem.context._atomic import _lock_path_for, async_file_lock
+        from memtomem.context._atomic import async_file_lock, memory_lock_path
 
         base = tmp_path / "memories"
         base.mkdir(parents=True, exist_ok=True)
@@ -267,7 +267,7 @@ class TestResolutionHappensUnderTheLock:
         async def get_session(session_id: str) -> dict | None:
             observed["asked_for"] = session_id
             try:
-                async with async_file_lock(_lock_path_for(target), timeout=0.2):
+                async with async_file_lock(memory_lock_path(target), timeout=0.2):
                     observed["lock_held"] = False
             except TimeoutError:
                 observed["lock_held"] = True

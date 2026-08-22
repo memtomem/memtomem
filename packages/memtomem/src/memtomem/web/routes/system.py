@@ -2055,7 +2055,7 @@ async def add_memory(
 
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
-        _lock_path_for,
+        memory_lock_path,
         async_file_lock,
     )
 
@@ -2066,7 +2066,7 @@ async def add_memory(
     # no AppContext L1 lock; L2's in-process guard serializes web handlers too.
     # ``lock_held=True`` skips the nested engine acquire.
     try:
-        async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+        async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
             # Issue #2005: refuse before appending when the target already
             # holds another namespace — re-chunking would restamp its chunks
             # with this write's namespace. Inside the lock so the check and

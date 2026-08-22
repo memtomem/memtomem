@@ -2035,10 +2035,10 @@ def _apply_fix(
     """
     import stat
 
-    from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
+    from memtomem.context._atomic import _file_lock, atomic_write_text, memory_lock_path
 
     removed: list[tuple[int, str]] = []
-    with _file_lock(_lock_path_for(index_path)):
+    with _file_lock(memory_lock_path(index_path)):
         # §5.1 — fresh, newline-preserving read (NOT read_text()).
         try:
             fresh_text = index_path.read_bytes().decode("utf-8")

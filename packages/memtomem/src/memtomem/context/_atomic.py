@@ -54,6 +54,7 @@ __all__ = [
     "is_copy_skipped_rel",
     "iter_installed_files",
     "link_or_copy_file",
+    "memory_lock_path",
     "rename_no_replace",
     "validate_tree_strict",
     "write_tree_payload",
@@ -170,6 +171,30 @@ def _lock_path_for(data_path: Path) -> Path:
     return data_path.parent / f".{data_path.name}.lock"
 
 
+def memory_lock_path(data_path: Path) -> Path:
+    """L2 sidecar path for a MEMORY file — always keyed on the resolved path.
+
+    The memory-file domain's invariant is **one physical file, one sidecar**.
+    ``IndexEngine`` resolves before keying (``_index_file_locked``), so a
+    caller that keys on an unresolved path takes a *different* lockfile for the
+    same file whenever a symlink is involved: a CRUD span holding
+    ``.alias.md.lock`` does not exclude an indexer holding ``.target.md.lock``,
+    and since #2105 the bulk path holds no ``_index_lock`` either, so nothing
+    else stands between them (#2130).
+
+    Use this — never bare ``_lock_path_for`` — for every memory-file (L2)
+    acquire. ``test_context_c0_prelude_guard`` enforces that on every site it
+    classifies ``MEMORY_L2``. ``expanduser`` because config-derived memory dirs
+    may still carry a ``~``; ``resolve`` is non-strict, so a day file that does
+    not exist yet still gets its parents resolved.
+
+    NOT for the context-artifact domain: ``canonical_lock_path`` deliberately
+    resolves only the root and keys on the artifact NAME, so flat ``<name>.md``
+    and dir ``<name>/`` share one lock (ADR-0030 §6).
+    """
+    return _lock_path_for(data_path.expanduser().resolve())
+
+
 # --- Memory-file cross-process CRUD serialization (issue #1587) -------------
 #
 # Lock-ordering invariant for the memory-file domain. Levels are acquired
@@ -179,7 +204,9 @@ def _lock_path_for(data_path: Path) -> Path:
 #   L0  debounce queue _Lock (indexing/debounce.py) — CLI hook path only.
 #   L1  per-file asyncio.Lock — AppContext.get_memory_file_lock. Multi: sorted
 #       keys. In-process, MCP-server-scope only.
-#   L2  cross-process sidecar lock — ``async_file_lock(_lock_path_for(f))``.
+#   L2  cross-process sidecar lock — ``async_file_lock(memory_lock_path(f))``
+#       for memory files; ``_lock_path_for`` direct only in the disjoint
+#       domains below (config.json, settings, projects).
 #       Multi: sorted by str(lock_path) (memory-migrate). From ANY event loop
 #       acquire ONLY via ``async_file_lock`` (never the blocking ``_file_lock``
 #       synchronously on a loop): a sync ``LOCK_EX`` here can block the loop
@@ -200,11 +227,11 @@ def _lock_path_for(data_path: Path) -> Path:
 #       ``index_path`` fan-out holds L2 ONLY (``engine_serialized=False``),
 #       falling back to L3 where the sidecar is skipped — L3 is engine-wide,
 #       so holding it per file would serialize the run and holding it across
-#       the run would put every L2 acquire under it. Every ENGINE-owned L2
-#       acquire keys on the RESOLVED path, so one physical file has one
-#       sidecar even when the walk reaches it through a symlinked alias.
-#       Outer CRUD callers are not all there yet — three lock an unresolved
-#       path and so split the sidecar for an alias (#2130).
+#       the run would put every L2 acquire under it. Every L2 acquire in this
+#       domain keys on the RESOLVED path via ``memory_lock_path``, so one
+#       physical file has one sidecar even when a caller reaches it through a
+#       symlinked alias (#2130); the prelude guard enforces that on every site
+#       it classifies MEMORY_L2.
 #   L4  storage / embedder / LLM — leaves; must never acquire L0–L3.
 #
 # Disjoint domains (config.json sidecar, web _gateway_lock/_config_lock) never
@@ -284,7 +311,8 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
        second; serializes against other processes (a second server, the CLI,
        ``memory-migrate``).
 
-    The caller passes the sidecar path (``_lock_path_for(data_file)``), not the
+    The caller passes the sidecar path (``memory_lock_path(data_file)`` in the
+    memory-file domain, ``_lock_path_for(data_file)`` elsewhere), not the
     data file. ``**Never**`` unlink the sidecar — deleting it reintroduces the
     ``os.replace`` inode race (see
     ``feedback_sidecar_lockfile_for_replaced_files``).

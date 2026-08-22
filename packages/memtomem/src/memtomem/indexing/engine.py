@@ -1166,27 +1166,26 @@ class IndexEngine:
         # bounded overcommit, and the embedding cap below stays strict for
         # all of them.
         if lock_held:
-            # Nothing to key: the caller holds the sidecar, and the
-            # missing-parent test short-circuits — so this branch adds no
-            # ``resolve()`` of its own. (``index_file`` resolves before
-            # calling in; that is its own path handling, not this one's.)
+            # No sidecar to key: the caller holds it, and the missing-parent
+            # test short-circuits — so this branch resolves nothing.
             return await self._locked_index(
-                path, lock_held=True, engine_serialized=engine_serialized, run=_run
+                None, lock_held=True, engine_serialized=engine_serialized, run=_run
             )
         async with self._file_semaphore():
-            # One sidecar per physical file: resolve for the lock key only —
-            # the work path stays as the caller discovered it (see docstring).
-            # Resolved inside the slot because ``Path.resolve()`` is a
-            # synchronous stat chain: a bulk gather would otherwise run one
+            # Resolving happens in ``_locked_index``, inside this slot: it is a
+            # synchronous stat chain, and a bulk gather would otherwise run one
             # per discovered file on the event loop before anything bounds
-            # them, which on a network-backed tree is the whole walk at once.
+            # them — on a network-backed tree, the whole walk at once.
             return await self._locked_index(
-                path.resolve(), lock_held=False, engine_serialized=engine_serialized, run=_run
+                path,
+                lock_held=False,
+                engine_serialized=engine_serialized,
+                run=_run,
             )
 
     async def _locked_index(
         self,
-        lock_key: Path,
+        path: Path | None,
         *,
         lock_held: bool,
         engine_serialized: bool,
@@ -1194,17 +1193,28 @@ class IndexEngine:
     ) -> tuple[IndexFileResult, float]:
         """L2 → L3 half of :meth:`_index_file_locked`, slot already held.
 
-        ``lock_key`` is the resolved path whose sidecar to take; it is unused
-        when ``lock_held`` (the caller owns that sidecar already).
+        ``path`` is the file to key the sidecar on, or ``None`` when
+        ``lock_held`` — the caller owns that sidecar already. The key is built
+        here rather than by the caller so the builder and the acquire stay in
+        one function: ``test_context_c0_prelude_guard`` derives lock paths by
+        intra-function taint, and a key handed in as a parameter makes this
+        acquire invisible to it.
         """
         # In-body import on purpose: tests monkeypatch the budget by dotted
         # path (``memtomem.context._atomic._MEMORY_SIDECAR_LOCK_BUDGET_S``);
         # a module-top ``from`` import would freeze the value.
         from memtomem.context._atomic import (
             _MEMORY_SIDECAR_LOCK_BUDGET_S,
-            _lock_path_for,
             async_file_lock,
+            memory_lock_path,
         )
+
+        # One sidecar per physical file — ``memory_lock_path`` resolves, which
+        # is what makes an alias and its target contend on one lockfile
+        # (#2130). The work path stays as the caller discovered it (see
+        # ``_index_file_locked``); only the key is canonical. The sidecar's
+        # parent IS the file's resolved parent, so it answers #1566 too.
+        lock_path = None if path is None else memory_lock_path(path)
 
         # Skip the sidecar when the caller already holds it (lock_held) or
         # when the parent dir is gone (#1566: a delete-by-source pass for a
@@ -1215,12 +1225,11 @@ class IndexEngine:
         # which would otherwise hold no lock at all; a migrate sidecar for a
         # missing-parent path lives in that same missing parent, so no live
         # pair-op can be mid-flight.
-        skip_sidecar = lock_held or not lock_key.parent.is_dir()
-        if skip_sidecar:
+        if lock_path is None or not lock_path.parent.is_dir():
             async with self._index_lock:
                 return await run()
         async with async_file_lock(
-            _lock_path_for(lock_key),
+            lock_path,
             timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S,
         ):
             if not engine_serialized:

@@ -32,7 +32,7 @@ import pytest
 
 from helpers import StubCtx
 from memtomem.context import _atomic as atomic_mod
-from memtomem.context._atomic import _lock_path_for, async_file_lock
+from memtomem.context._atomic import _lock_path_for, async_file_lock, memory_lock_path
 from memtomem.indexing import engine as engine_mod
 from memtomem.indexing.engine import IndexEngine
 from memtomem.server.context import AppContext
@@ -603,6 +603,103 @@ async def test_lock_held_reindex_is_not_starved_by_a_saturated_semaphore(
         assert stats.total_files == 1
 
     await bulk
+
+
+@pytest.mark.requires_symlinks
+@pytest.mark.asyncio
+async def test_crud_span_through_an_alias_still_excludes_the_indexer(
+    bm25_only_components, monkeypatch
+):
+    """A CRUD span reaching a file through a symlink alias must still exclude a
+    bulk run reaching the same file through its target (#2130).
+
+    Both sides now key the sidecar with ``memory_lock_path``, which resolves —
+    so the span's ``.alias.md.lock`` and the indexer's key are the same
+    lockfile. Before the fix the span held ``.alias.md.lock`` while the engine
+    held ``.target.md.lock``: two different files, no exclusion, and since
+    #2105 the bulk path holds no ``_index_lock`` to fall back on, so their
+    ``_index_file`` bodies could overlap outright.
+    """
+    comp, mem_dir = bm25_only_components
+    target = mem_dir / "target.md"
+    target.write_text("## Target\n\nbody.\n", encoding="utf-8")
+    alias = mem_dir / "alias.md"
+    alias.symlink_to(target)
+
+    engine = comp.index_engine
+    # ``started`` records ENTRIES, not what happens to be in flight at a
+    # sampling instant: the pre-fix leak is a file that runs *and finishes*
+    # inside the span, which an in-flight snapshot misses entirely.
+    started: list[str] = []
+    inflight: list[str] = []
+    overlaps: list[tuple[str, ...]] = []
+    orig = engine._index_file
+
+    async def wrapped(fp, force=False, namespace=None, **kwargs):
+        started.append(Path(fp).name)
+        inflight.append(Path(fp).name)
+        if len(inflight) > 1:
+            overlaps.append(tuple(inflight))
+        try:
+            await asyncio.sleep(0)
+            return await orig(fp, force, namespace=namespace)
+        finally:
+            inflight.remove(Path(fp).name)
+
+    engine._index_file = wrapped  # type: ignore[method-assign]
+
+    acquired = asyncio.Event()
+    release = asyncio.Event()
+
+    async def crud_span_via_alias() -> None:
+        # The span keys on the ALIAS — the shape every CRUD caller has.
+        async with async_file_lock(memory_lock_path(alias), timeout=5.0):
+            acquired.set()
+            await release.wait()
+
+    span = asyncio.create_task(crud_span_via_alias())
+    await acquired.wait()
+
+    # Wait for BOTH of the engine's acquires to be attempted rather than
+    # counting scheduler turns. One event would be satisfied by whichever file
+    # reaches the lock first — under the broken keying that is the alias, which
+    # blocks correctly, leaving the target's leak still ahead of the assertion.
+    attempted: list[Path] = []
+    both_attempted = asyncio.Event()
+    real = atomic_mod.async_file_lock
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def spy(lock_path, *, timeout):
+        attempted.append(Path(lock_path))
+        if len(attempted) >= 2:
+            both_attempted.set()
+        async with real(lock_path, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(atomic_mod, "async_file_lock", spy)
+
+    run = asyncio.create_task(engine.index_path(mem_dir, recursive=True))
+    await asyncio.wait_for(both_attempted.wait(), timeout=5.0)
+    assert started == [], (
+        "the indexer worked the file while a CRUD span held its alias's sidecar: "
+        f"{started} — the two sides keyed different lockfiles"
+    )
+    # Both spellings asked for the SAME lockfile — the one the span holds.
+    assert set(attempted) == {memory_lock_path(target)}, (
+        f"engine keyed more than one sidecar for one physical file: {sorted(set(attempted))}"
+    )
+
+    release.set()
+    await span
+    stats = await run
+
+    assert stats.errors == ()
+    # Both spellings of one physical file share one sidecar, so the walk works
+    # them one at a time even though they are two entries in the file set.
+    assert sorted(started) == ["alias.md", "target.md"]
+    assert overlaps == [], f"two writers overlapped on one physical file: {overlaps}"
 
 
 @pytest.mark.asyncio
