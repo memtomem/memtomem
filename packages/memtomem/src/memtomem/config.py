@@ -1435,20 +1435,44 @@ def _section_value(data: dict, section_name: str, field_name: str) -> object:
 def env_var_owning(section_name: str, field_name: str) -> str | None:
     """The env var that actually *wins* this key, or ``None``.
 
-    "Wins" is the operative word, so this uses the same exact-case membership
-    test the override loaders use to decide whether to yield
-    (``load_config_overrides`` / ``load_config_d``). pydantic-settings itself
-    matches env names case-insensitively, so a lowercase variable is read at
-    construction and then quietly loses to ``config.json`` — a divergence
-    tracked in #2109. Reporting only what the loaders honour keeps callers
-    from promising a precedence that would not hold (issue #2108).
+    This is the single source of truth for "does the environment own this
+    key": both override loaders (``load_config_overrides`` /
+    ``load_config_d``) call it to decide whether to yield, and the reporting
+    surfaces (``mm config set``, ``mem_config(persist=True)``) call it to
+    decide what to tell the user (issue #2108). One function, so "read by
+    pydantic" and "honoured by the loaders" cannot drift apart.
 
-    Returned as the canonical uppercase spelling, which is what the caller
-    needs to unset. On Windows, where ``os.environ`` is case-insensitive and
-    normalises keys to uppercase, every spelling lands here anyway.
+    Matching is case-insensitive, because that is how pydantic-settings reads
+    the variable in the first place (``case_sensitive`` defaults to false).
+    An exact-case test here used to make a lowercase export win at
+    construction and then quietly lose to ``config.json`` (issue #2109).
+
+    Folding with ``str.lower`` is not a style choice: it is the operation
+    pydantic-settings performs, and the two directions are not equivalent for
+    every character. ``"MEMTOMEM_\u017fEARCH__DEFAULT_TOP_K".upper()`` is the
+    canonical name (U+017F LATIN SMALL LETTER LONG S uppercases to "S") while
+    its lowercase form is not — so an upper-fold here would make the loaders
+    yield to a variable pydantic never read, dropping ``config.json`` in
+    favour of nothing at all.
+
+    Returned as the environment spells it — that is the name the caller has
+    to ``unset`` — which is the canonical uppercase form on Windows, where
+    ``os.environ`` normalises keys. If several spellings of the same name are
+    exported at once, the last one in ``os.environ`` order is returned,
+    because that is the one pydantic-settings reads: it folds the environment
+    into a case-normalised dict, so the later entry overwrites the earlier
+    (measured against pydantic-settings 2.15). Naming any other spelling would
+    point the user at a variable that is not supplying the value — though
+    unsetting it then reveals the next spelling rather than ``config.json``,
+    which is why the reporting surfaces phrase the remedy over every spelling
+    of the name rather than over the one they print.
     """
-    wanted = f"MEMTOMEM_{section_name.upper()}__{field_name.upper()}"
-    return wanted if wanted in os.environ else None
+    wanted = f"memtomem_{section_name}__{field_name}".lower()
+    owning: str | None = None
+    for name in os.environ:
+        if name.lower() == wanted:
+            owning = name
+    return owning
 
 
 def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:
@@ -1465,7 +1489,6 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
     """
     import json as _json
     import logging
-    import os
     import warnings
 
     _log = logging.getLogger(__name__)
@@ -1491,8 +1514,8 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
         applied_keys: set[str] = set()
         for key, value in updates.items():
             if hasattr(section_obj, key):
-                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
-                if env_var in os.environ:
+                env_var = env_var_owning(section_name, key)
+                if env_var is not None:
                     _log.debug(
                         "Skipping %s.%s from %s: %s is set in environment (env wins)",
                         section_name,
@@ -1683,7 +1706,6 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
     """
     import json as _json
     import logging
-    import os
 
     _log = logging.getLogger(__name__)
 
@@ -1715,8 +1737,8 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
             for key, value in updates.items():
                 if not hasattr(section_obj, key):
                     continue
-                env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
-                if env_var in os.environ:
+                env_var = env_var_owning(section_name, key)
+                if env_var is not None:
                     _log.debug(
                         "Skipping %s.%s from %s: %s is set (env wins)",
                         section_name,

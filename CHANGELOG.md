@@ -152,6 +152,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A lowercase `MEMTOMEM_*` env var keeps its precedence over `config.json`.**
+  pydantic-settings matches env names case-insensitively, so
+  `memtomem_search__default_top_k=7` was read at construction — but the two
+  override loaders rebuilt the canonical uppercase name and tested exact
+  membership before yielding to the environment, so `config.json` was applied
+  on top and the exported value silently lost. Only the spelling differed
+  between a variable that won and one that did not (#2109). Both loaders now
+  call `env_var_owning()`, which folds names the same way pydantic does and
+  returns the name as the environment spells it; the `mm config set` and
+  `mem_config(persist=True)` precedence warnings name that spelling, which is
+  the one supplying the value. If more than one spelling of a name is
+  exported, the reported one is the one in effect, and `config.json` applies
+  once no case spelling of that name is set.
+
 - **An index run now reports the chunks it left without an embedding.** After
   `mm embedding-reset --mode apply-current`, the chunk rows and their content
   hashes survive while the vectors do not, so a plain `mm index` matches every
