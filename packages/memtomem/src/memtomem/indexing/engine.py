@@ -2057,13 +2057,23 @@ class IndexEngine:
         #
         # Blocked files never reach here: the redaction gate raises above,
         # before the diff, so a refused file is not handed ``--force`` advice.
+        # ``metadata_only`` chunks are skipped by the embedder exactly like
+        # ``unchanged`` ones — they keep the vector they already had — so they
+        # belong in this capture too.
         unchanged_ids = (
-            [str(c.id) for c in diff_result.unchanged] if self._embedder.dimension > 0 else []
+            [str(c.id) for c in diff_result.unchanged + diff_result.metadata_only]
+            if self._embedder.dimension > 0
+            else []
         )
 
-        if force and diff_result.unchanged:
+        if force and (diff_result.unchanged or diff_result.metadata_only):
+            # A forced run re-embeds every matched chunk, and ``upsert_chunks``
+            # writes the fresh metadata along with the content, so the
+            # metadata-only bucket has nothing left to do on this path.
             diff_result = DiffResult(
-                to_upsert=diff_result.to_upsert + diff_result.unchanged,
+                to_upsert=(
+                    diff_result.to_upsert + diff_result.unchanged + diff_result.metadata_only
+                ),
                 to_delete=diff_result.to_delete,
                 unchanged=[],
             )
@@ -2185,8 +2195,16 @@ class IndexEngine:
             if diff_result.to_delete:
                 await self._storage.delete_chunks(diff_result.to_delete)
 
-            if diff_result.unchanged:
-                await self._storage.update_chunk_line_ranges(diff_result.unchanged)
+            # Both buckets keep their stored vector, and a sibling edit can have
+            # shifted either one's lines, so both need the cheap range refresh.
+            hash_matched = diff_result.unchanged + diff_result.metadata_only
+            if hash_matched:
+                await self._storage.update_chunk_line_ranges(hash_matched)
+
+            if diff_result.metadata_only:
+                # Content identical, retrieval metadata moved: rewrite the tags
+                # column alone rather than re-embedding the chunk (#2124).
+                await self._storage.update_chunk_tags(diff_result.metadata_only)
 
             if diff_result.to_upsert:
                 await self._storage.upsert_chunks(diff_result.to_upsert)
@@ -2197,7 +2215,12 @@ class IndexEngine:
         result: IndexFileResult = {
             "total": len(new_chunks),
             "indexed": len(diff_result.to_upsert),
-            "skipped": len(diff_result.unchanged),
+            # Metadata-only rows are reported as skipped: nothing was embedded,
+            # and the counters are a documented parse target (``mm index``'s
+            # summary line, the ``mem_index`` block, ``IndexResponse``), so the
+            # cheap metadata write stays as silent as its sibling
+            # ``update_chunk_line_ranges``.
+            "skipped": len(diff_result.unchanged) + len(diff_result.metadata_only),
             "deleted": len(diff_result.to_delete),
             "errors": [],
             "new_chunk_ids": truly_new_chunk_ids,

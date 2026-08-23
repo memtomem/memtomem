@@ -86,11 +86,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   matched text itself. Items are paths relative to the memory root each report
   is headed by, so two same-named files under one root stay distinguishable.
   Report-only: `--fix` is unchanged, and the doctor still never writes the DB.
-  One gap stays unreported, inherited from `mm index`: editing a section's
-  `> tags: [...]` blockquote changes nothing a plain re-index writes, so the DB
-  keeps the old tags that `mem_search(tag_filter=…)` reads (`mm index --force
-  <file>` does clear it). The other gap this shipped with — collapsing two
-  byte-identical chunks into one — is fixed below and now reports.
+  The two gaps this shipped with were both closed in the indexer's own diff and
+  now report: collapsing two byte-identical chunks into one, and editing a
+  section's `> tags: [...]` blockquote (both below).
   New Python API: `IndexEngine.chunk_content(file_path, content)`, the
   chunk-side companion to `discover_indexable_files`. (#2078)
 - **`mm search --format json` exposes `chunk_id`.** Every item of the JSON
@@ -151,6 +149,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Editing a section's `> tags: [...]` blockquote reaches the DB on a plain
+  re-index.** The blockquote is promoted to `metadata.tags` and stripped from
+  the chunk text, so editing it moved neither the content hash nor the heading
+  hierarchy — the two things the differ compared. The chunk was classified
+  `unchanged` and the row kept tags the file no longer carried, so
+  `mem_search(tag_filter=…)` / `mm search --tag-filter` answered for the old tag
+  and missed the new one. The only remedy was `mm index --force`, a full
+  re-embed to propagate a metadata edit. The diff now has a third outcome
+  between "unchanged" and "re-embed": content identical, retrieval metadata
+  moved. Such chunks keep their id, their vector and their `updated_at`, and only
+  the `tags` column is rewritten — the cheap non-embedding write
+  `update_chunk_line_ranges` already established. Tag comparison is set
+  membership, matching `tag_filter` semantics (ADR-0002), so a row stored in a
+  different order is not rewritten. `mm memory doctor` reports the drift as
+  `stale_index`, since a plain re-index now does write something. The counters
+  are unchanged: such a chunk is reported as `unchanged`/skipped, because
+  nothing was embedded. Note the file wins — a tag set only in the DB
+  (`mem_tag_rename`, `mem_tag_replace`) is overwritten from the file on the next
+  re-index of that section, the same way it already was whenever the section's
+  text changed. New backend method: `update_chunk_tags`; `get_chunk_index_state`
+  now returns `(hash, hierarchy, tags)`. (#2124)
 - **`mm index` deletes the surplus rows when a file collapses byte-identical
   chunks.** The differ decided a deletion by asking whether an existing row's
   content hash still appeared *anywhere* in the new chunk set, rather than

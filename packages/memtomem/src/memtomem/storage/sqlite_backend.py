@@ -1179,6 +1179,67 @@ class SqliteBackend(
             ) from exc
         return len(changed)
 
+    async def update_chunk_tags(self, chunks: Sequence[Chunk]) -> int:
+        """Refresh ``tags`` for hash-matched chunks without rewriting content.
+
+        The metadata sibling of :meth:`update_chunk_line_ranges`, and the write
+        behind the differ's ``metadata_only`` bucket: a section's
+        ``> tags: [...]`` blockquote is stripped from the chunk text, so editing
+        it moves neither the content hash nor the heading hierarchy and a plain
+        re-index used to leave the row filed under tags the file no longer
+        carried (#2124). Only the ``tags`` column is touched — FTS, vectors,
+        timestamps and personalization stay as they are, the same contract
+        ``update_chunk_line_ranges`` keeps. ``updated_at`` deliberately does not
+        advance: it is not a re-index watermark (#2078), and bumping it here
+        would move time-decay scoring for an edit that changed no content.
+
+        Takes ``_tag_write_lock`` so an index run cannot interleave with the
+        read-modify-write tag ops (rename / delete / merge / per-chunk replace)
+        on the same column.
+
+        Returns the number of rows whose tag set actually moved.
+        """
+        if not chunks:
+            return 0
+
+        db = self._get_db()
+        chunk_by_id = {str(chunk.id): chunk for chunk in chunks}
+        ids = list(chunk_by_id)
+        async with self._tag_write_lock:
+            try:
+                rows = db.execute(
+                    f"SELECT id, tags FROM chunks WHERE id IN ({placeholders(len(ids))})",
+                    ids,
+                ).fetchall()
+                changed = []
+                for chunk_id, stored_json in rows:
+                    try:
+                        stored = set(json.loads(stored_json))
+                    except (json.JSONDecodeError, TypeError):
+                        # Corrupt tag JSON is exactly a row that should be
+                        # rewritten from the file, not one to skip.
+                        logger.warning("Corrupted tags for chunk %s", chunk_id)
+                        stored = None  # type: ignore[assignment]
+                    chunk = chunk_by_id[chunk_id]
+                    if stored is None or stored != set(chunk.metadata.tags):
+                        changed.append(chunk)
+                if not changed:
+                    return 0
+
+                db.executemany(
+                    "UPDATE chunks SET tags=? WHERE id=?",
+                    [(json.dumps(list(chunk.metadata.tags)), str(chunk.id)) for chunk in changed],
+                )
+                if not self._in_transaction:
+                    db.commit()
+            except Exception as exc:
+                if not self._in_transaction:
+                    db.rollback()
+                raise StorageError(
+                    f"update_chunk_tags failed, transaction rolled back: {exc}"
+                ) from exc
+        return len(changed)
+
     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
         db = self._get_read_db()
         row = db.execute("SELECT * FROM chunks WHERE id=?", (str(chunk_id),)).fetchone()
@@ -1988,21 +2049,32 @@ class SqliteBackend(
 
     async def get_chunk_index_state(
         self, source_file: Path
-    ) -> dict[str, tuple[str, tuple[str, ...]]]:
-        """Return hash and retrieval-relevant hierarchy for a source's chunks."""
+    ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]]:
+        """Return hash, hierarchy and tags for a source's chunks.
+
+        The three fields the differ compares. ``tags`` rides along because it is
+        read at query time (``mem_search(tag_filter=...)``) yet stripped from the
+        chunk text, so it is the one piece of retrieval state a content hash
+        cannot speak for (#2124).
+        """
         db = self._get_db()
         rows = db.execute(
-            "SELECT id, content_hash, heading_hierarchy FROM chunks WHERE source_file=?",
+            "SELECT id, content_hash, heading_hierarchy, tags FROM chunks WHERE source_file=?",
             (norm_path(source_file),),
         ).fetchall()
-        state: dict[str, tuple[str, tuple[str, ...]]] = {}
-        for chunk_id, content_hash, heading_json in rows:
+        state: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
+        for chunk_id, content_hash, heading_json, tags_json in rows:
             try:
                 hierarchy = tuple(json.loads(heading_json))
             except (json.JSONDecodeError, TypeError):
                 logger.warning("Corrupted heading_hierarchy for chunk %s", chunk_id)
                 hierarchy = ()
-            state[chunk_id] = (content_hash, hierarchy)
+            try:
+                tags = tuple(json.loads(tags_json))
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Corrupted tags for chunk %s", chunk_id)
+                tags = ()
+            state[chunk_id] = (content_hash, hierarchy, tags)
         return state
 
     async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:

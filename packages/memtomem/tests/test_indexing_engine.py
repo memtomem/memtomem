@@ -3397,6 +3397,98 @@ class TestIndexFile:
     async def test_force_reindex_clears_collapsed_duplicates(self, components, memory_dir):
         await self._assert_collapse_leaves_no_orphans(components, memory_dir, force=True)
 
+    @staticmethod
+    def _tagged(tag: str) -> str:
+        body = "tag drift body sentence here. " * 20 + "\n"
+        return f"# t\n\n## s\n\n> tags: [{tag}]\n\n{body}"
+
+    async def test_tag_blockquote_edit_lands_without_re_embedding(self, components, memory_dir):
+        """Editing ``> tags: [...]`` alone must reach the DB (#2124).
+
+        The blockquote is stripped from the chunk text, so neither the content
+        hash nor the heading hierarchy moves and a plain re-index used to call
+        the chunk unchanged — leaving ``mem_search(tag_filter=...)`` reading
+        tags the file no longer carried. The row must now be re-tagged in
+        place: same id, no embedding call, vector untouched.
+        """
+        md_path = memory_dir / "tagged.md"
+        md_path.write_text(self._tagged("alpha"), encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        before = await components.storage.list_chunks_by_source(md_path)
+        assert [tuple(c.metadata.tags) for c in before] == [("alpha",)]
+        embed_calls = mock_embedder.embed_texts.call_count
+
+        md_path.write_text(self._tagged("bravo"), encoding="utf-8")
+        stats = await components.index_engine.index_file(md_path)
+
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert [tuple(c.metadata.tags) for c in after] == [("bravo",)]
+        assert [c.id for c in after] == [c.id for c in before], "the row must keep its id"
+        assert mock_embedder.embed_texts.call_count == embed_calls, (
+            "a metadata-only edit must not re-embed"
+        )
+        assert after[0].updated_at == before[0].updated_at, (
+            "updated_at is not a re-index watermark and must not move here"
+        )
+        # Counted as skipped: nothing was embedded, and the summary counters
+        # are a documented parse target.
+        assert (stats.indexed_chunks, stats.skipped_chunks, stats.deleted_chunks) == (0, 1, 0)
+
+    async def test_repeated_tag_sync_is_a_no_op(self, components, memory_dir):
+        """The second run must not rewrite anything — no churn on every index."""
+        md_path = memory_dir / "tagged_noop.md"
+        md_path.write_text(self._tagged("alpha"), encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        md_path.write_text(self._tagged("bravo"), encoding="utf-8")
+        await components.index_engine.index_file(md_path)
+
+        assert (
+            await components.storage.update_chunk_tags(
+                await components.storage.list_chunks_by_source(md_path)
+            )
+            == 0
+        )
+        stats = await components.index_engine.index_file(md_path)
+        assert (stats.indexed_chunks, stats.skipped_chunks, stats.deleted_chunks) == (0, 1, 0)
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert [tuple(c.metadata.tags) for c in after] == [("bravo",)]
+
+    async def test_forced_reindex_still_carries_fresh_tags(self, components, memory_dir):
+        """The documented ``--force`` workaround keeps working after the fix."""
+        md_path = memory_dir / "tagged_force.md"
+        md_path.write_text(self._tagged("alpha"), encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        md_path.write_text(self._tagged("bravo"), encoding="utf-8")
+        stats = await components.index_engine.index_file(md_path, force=True)
+
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert [tuple(c.metadata.tags) for c in after] == [("bravo",)]
+        assert stats.indexed_chunks == 1, "force re-embeds rather than taking the cheap path"
+
     async def test_dim_zero_with_real_model_aborts(self, components, memory_dir):
         """Misconfigured embedder (dim=0, non-noop model) must abort instead
         of silently producing BM25-only chunks.
