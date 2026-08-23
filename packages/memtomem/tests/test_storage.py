@@ -82,8 +82,8 @@ class TestChunkCRUD:
         )
 
     @pytest.mark.asyncio
-    async def test_update_chunk_tags_leaves_payload_and_indexes_untouched(self, storage):
-        """The metadata sibling of the line-range refresh: tags only (#2124)."""
+    async def test_update_chunk_metadata_leaves_payload_and_indexes_untouched(self, storage):
+        """The metadata sibling of the line-range refresh: tags + validity."""
         chunk = _make_chunk("tag refresh payload")
         chunk.embedding = [0.1] * 1024
         chunk.metadata = dataclasses.replace(chunk.metadata, tags=("alpha",))
@@ -93,7 +93,8 @@ class TestChunkCRUD:
         db = storage._get_db()
         before = db.execute(
             "SELECT rowid, content, content_hash, updated_at, access_count, "
-            "start_line, end_line, tags FROM chunks WHERE id=?",
+            "start_line, end_line, tags, valid_from_unix, valid_to_unix "
+            "FROM chunks WHERE id=?",
             (str(chunk.id),),
         ).fetchone()
         before_fts = db.execute(
@@ -104,16 +105,18 @@ class TestChunkCRUD:
         ).fetchone()
 
         chunk.metadata = dataclasses.replace(chunk.metadata, tags=("bravo",))
-        assert await storage.update_chunk_tags([chunk]) == 1
-        assert await storage.update_chunk_tags([chunk]) == 0
+        assert await storage.update_chunk_metadata([chunk]) == 1
+        assert await storage.update_chunk_metadata([chunk]) == 0
 
         after = db.execute(
             "SELECT rowid, content, content_hash, updated_at, access_count, "
-            "start_line, end_line, tags FROM chunks WHERE id=?",
+            "start_line, end_line, tags, valid_from_unix, valid_to_unix "
+            "FROM chunks WHERE id=?",
             (str(chunk.id),),
         ).fetchone()
-        assert after[:7] == before[:7], "only the tags column may move"
+        assert after[:7] == before[:7], "only the metadata columns may move"
         assert json.loads(after[7]) == ["bravo"]
+        assert after[8:] == before[8:], "validity was not edited, so it must not move"
         assert (
             db.execute(
                 "SELECT content, source_file FROM chunks_fts WHERE rowid=?", (after[0],)
@@ -126,7 +129,7 @@ class TestChunkCRUD:
         )
 
     @pytest.mark.asyncio
-    async def test_update_chunk_tags_ignores_order_and_rewrites_corrupt_json(self, storage):
+    async def test_update_chunk_metadata_ignores_tag_order_and_rewrites_corrupt_json(self, storage):
         chunk = _make_chunk("tag order payload")
         chunk.metadata = dataclasses.replace(chunk.metadata, tags=("a", "b"))
         await storage.upsert_chunks([chunk])
@@ -134,19 +137,59 @@ class TestChunkCRUD:
 
         db.execute("UPDATE chunks SET tags=? WHERE id=?", ('["b", "a"]', str(chunk.id)))
         db.commit()
-        assert await storage.update_chunk_tags([chunk]) == 0, "order alone is not a change"
+        assert await storage.update_chunk_metadata([chunk]) == 0, "order alone is not a change"
 
         db.execute("UPDATE chunks SET tags=? WHERE id=?", ("not json", str(chunk.id)))
         db.commit()
-        assert await storage.update_chunk_tags([chunk]) == 1, "corrupt tags are rewritten"
+        assert await storage.update_chunk_metadata([chunk]) == 1, "corrupt tags are rewritten"
         assert json.loads(
             db.execute("SELECT tags FROM chunks WHERE id=?", (str(chunk.id),)).fetchone()[0]
         ) == ["a", "b"]
 
     @pytest.mark.asyncio
-    async def test_get_chunk_index_state_carries_tags(self, storage):
+    async def test_update_chunk_metadata_refreshes_the_validity_window(self, storage):
+        """The frontmatter validity window is metadata too (#2140)."""
+        chunk = _make_chunk("validity refresh payload")
+        chunk.metadata = dataclasses.replace(
+            chunk.metadata, valid_from_unix=1000, valid_to_unix=2000
+        )
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+
+        chunk.metadata = dataclasses.replace(
+            chunk.metadata, valid_from_unix=1000, valid_to_unix=9999
+        )
+        assert await storage.update_chunk_metadata([chunk]) == 1
+        assert await storage.update_chunk_metadata([chunk]) == 0
+
+        assert db.execute(
+            "SELECT valid_from_unix, valid_to_unix FROM chunks WHERE id=?", (str(chunk.id),)
+        ).fetchone() == (1000, 9999)
+
+    @pytest.mark.asyncio
+    async def test_update_chunk_metadata_clears_a_dropped_validity_bound(self, storage):
+        """Dropping the frontmatter key means unbounded, not "leave as is"."""
+        chunk = _make_chunk("validity clear payload")
+        chunk.metadata = dataclasses.replace(
+            chunk.metadata, valid_from_unix=1000, valid_to_unix=2000
+        )
+        await storage.upsert_chunks([chunk])
+
+        chunk.metadata = dataclasses.replace(
+            chunk.metadata, valid_from_unix=None, valid_to_unix=None
+        )
+        assert await storage.update_chunk_metadata([chunk]) == 1
+
+        assert storage._get_db().execute(
+            "SELECT valid_from_unix, valid_to_unix FROM chunks WHERE id=?", (str(chunk.id),)
+        ).fetchone() == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_get_chunk_index_state_carries_tags_and_validity(self, storage):
         chunk = _make_chunk("index state payload")
-        chunk.metadata = dataclasses.replace(chunk.metadata, tags=("alpha",))
+        chunk.metadata = dataclasses.replace(
+            chunk.metadata, tags=("alpha",), valid_from_unix=10, valid_to_unix=20
+        )
         await storage.upsert_chunks([chunk])
 
         state = await storage.get_chunk_index_state(chunk.metadata.source_file)
@@ -155,6 +198,8 @@ class TestChunkCRUD:
             chunk.content_hash,
             tuple(chunk.metadata.heading_hierarchy),
             ("alpha",),
+            10,
+            20,
         )
 
     @pytest.mark.asyncio

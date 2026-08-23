@@ -1179,16 +1179,23 @@ class SqliteBackend(
             ) from exc
         return len(changed)
 
-    async def update_chunk_tags(self, chunks: Sequence[Chunk]) -> int:
-        """Refresh ``tags`` for hash-matched chunks without rewriting content.
+    async def update_chunk_metadata(self, chunks: Sequence[Chunk]) -> int:
+        """Refresh retrieval metadata for hash-matched chunks, content untouched.
 
         The metadata sibling of :meth:`update_chunk_line_ranges`, and the write
-        behind the differ's ``metadata_only`` bucket: a section's
-        ``> tags: [...]`` blockquote is stripped from the chunk text, so editing
-        it moves neither the content hash nor the heading hierarchy and a plain
-        re-index used to leave the row filed under tags the file no longer
-        carried (#2124). Only the ``tags`` column is touched — FTS, vectors,
-        timestamps and personalization stay as they are, the same contract
+        behind the differ's ``metadata_only`` bucket. It covers the columns a
+        search reads that a chunk's own text cannot speak for, because both are
+        stamped on from outside it:
+
+        * ``tags`` — a section's ``> tags: [...]`` blockquote, promoted to
+          metadata and stripped from the text (#2124);
+        * ``valid_from_unix`` / ``valid_to_unix`` — the file-level frontmatter
+          validity window, applied to every chunk the file produces (#2140).
+
+        Editing either moves neither the content hash nor the heading hierarchy,
+        so a plain re-index used to leave every hash-matched row carrying the old
+        value. Only these columns are touched — FTS, vectors, timestamps and
+        personalization stay as they are, the same contract
         ``update_chunk_line_ranges`` keeps. ``updated_at`` deliberately does not
         advance: it is not a re-index watermark (#2078), and bumping it here
         would move time-decay scoring for an edit that changed no content.
@@ -1197,7 +1204,7 @@ class SqliteBackend(
         read-modify-write tag ops (rename / delete / merge / per-chunk replace)
         on the same column.
 
-        Returns the number of rows whose tag set actually moved.
+        Returns the number of rows whose metadata actually moved.
         """
         if not chunks:
             return 0
@@ -1208,27 +1215,41 @@ class SqliteBackend(
         async with self._tag_write_lock:
             try:
                 rows = db.execute(
-                    f"SELECT id, tags FROM chunks WHERE id IN ({placeholders(len(ids))})",
+                    f"SELECT id, tags, valid_from_unix, valid_to_unix FROM chunks "
+                    f"WHERE id IN ({placeholders(len(ids))})",
                     ids,
                 ).fetchall()
                 changed = []
-                for chunk_id, stored_json in rows:
+                for chunk_id, stored_json, valid_from, valid_to in rows:
+                    chunk = chunk_by_id[chunk_id]
                     try:
-                        stored = set(json.loads(stored_json))
+                        stored_tags: set[str] | None = set(json.loads(stored_json))
                     except (json.JSONDecodeError, TypeError):
                         # Corrupt tag JSON is exactly a row that should be
                         # rewritten from the file, not one to skip.
                         logger.warning("Corrupted tags for chunk %s", chunk_id)
-                        stored = None  # type: ignore[assignment]
-                    chunk = chunk_by_id[chunk_id]
-                    if stored is None or stored != set(chunk.metadata.tags):
+                        stored_tags = None
+                    if (
+                        stored_tags is None
+                        or stored_tags != set(chunk.metadata.tags)
+                        or (valid_from, valid_to)
+                        != (chunk.metadata.valid_from_unix, chunk.metadata.valid_to_unix)
+                    ):
                         changed.append(chunk)
                 if not changed:
                     return 0
 
                 db.executemany(
-                    "UPDATE chunks SET tags=? WHERE id=?",
-                    [(json.dumps(list(chunk.metadata.tags)), str(chunk.id)) for chunk in changed],
+                    "UPDATE chunks SET tags=?, valid_from_unix=?, valid_to_unix=? WHERE id=?",
+                    [
+                        (
+                            json.dumps(list(chunk.metadata.tags)),
+                            chunk.metadata.valid_from_unix,
+                            chunk.metadata.valid_to_unix,
+                            str(chunk.id),
+                        )
+                        for chunk in changed
+                    ],
                 )
                 if not self._in_transaction:
                     db.commit()
@@ -1236,7 +1257,7 @@ class SqliteBackend(
                 if not self._in_transaction:
                     db.rollback()
                 raise StorageError(
-                    f"update_chunk_tags failed, transaction rolled back: {exc}"
+                    f"update_chunk_metadata failed, transaction rolled back: {exc}"
                 ) from exc
         return len(changed)
 
@@ -2049,21 +2070,23 @@ class SqliteBackend(
 
     async def get_chunk_index_state(
         self, source_file: Path
-    ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]]:
-        """Return hash, hierarchy and tags for a source's chunks.
+    ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None]]:
+        """Return hash, hierarchy and retrieval metadata for a source's chunks.
 
-        The three fields the differ compares. ``tags`` rides along because it is
-        read at query time (``mem_search(tag_filter=...)``) yet stripped from the
-        chunk text, so it is the one piece of retrieval state a content hash
-        cannot speak for (#2124).
+        The fields the differ compares. Beyond hash and hierarchy it carries the
+        columns a search reads that the chunk text cannot speak for, because
+        they are stamped on from outside it: ``tags``, promoted from a section
+        blockquote that is then stripped (#2124), and the file-level validity
+        window (#2140). Anything else with that property belongs here too.
         """
         db = self._get_db()
         rows = db.execute(
-            "SELECT id, content_hash, heading_hierarchy, tags FROM chunks WHERE source_file=?",
+            "SELECT id, content_hash, heading_hierarchy, tags, valid_from_unix, valid_to_unix"
+            " FROM chunks WHERE source_file=?",
             (norm_path(source_file),),
         ).fetchall()
-        state: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
-        for chunk_id, content_hash, heading_json, tags_json in rows:
+        state: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None]] = {}
+        for chunk_id, content_hash, heading_json, tags_json, valid_from, valid_to in rows:
             try:
                 hierarchy = tuple(json.loads(heading_json))
             except (json.JSONDecodeError, TypeError):
@@ -2074,7 +2097,7 @@ class SqliteBackend(
             except (json.JSONDecodeError, TypeError):
                 logger.warning("Corrupted tags for chunk %s", chunk_id)
                 tags = ()
-            state[chunk_id] = (content_hash, hierarchy, tags)
+            state[chunk_id] = (content_hash, hierarchy, tags, valid_from, valid_to)
         return state
 
     async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:

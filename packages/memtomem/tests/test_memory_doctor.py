@@ -28,6 +28,7 @@ Layers:
 from __future__ import annotations
 
 import json
+from collections import Counter
 import os
 import re
 import sys
@@ -898,20 +899,23 @@ def _insert_chunk(
     start_line: int = 0,
     end_line: int = 0,
     tags: tuple[str, ...] = (),
+    valid_from_unix: int | None = None,
+    valid_to_unix: int | None = None,
 ) -> None:
     """Insert one ``chunks`` row (read-only doctor never touches FTS).
 
     ``content_hash`` / ``heading_hierarchy`` / ``tags`` default to synthetic or
     empty values, which is fine for every check that only counts rows. The
-    staleness checks diff real hashes *and tags*, so those tests pass the values
-    a real index run would write (see :func:`_insert_real_chunks`).
+    staleness checks diff real hashes *and retrieval metadata*, so those tests
+    pass the values a real index run would write (see
+    :func:`_insert_real_chunks`).
     """
     db = backend._get_db()
     db.execute(
         "INSERT INTO chunks (id, content, content_hash, source_file, heading_hierarchy, "
         "start_line, end_line, created_at, updated_at, access_count, last_accessed_at, "
-        "importance_score, tags) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "importance_score, tags, valid_from_unix, valid_to_unix) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             chunk_id,
             content if content is not None else f"content of {chunk_id}",
@@ -926,6 +930,8 @@ def _insert_chunk(
             last_accessed_at,
             importance_score,
             json.dumps(list(tags)),
+            valid_from_unix,
+            valid_to_unix,
         ),
     )
     db.commit()
@@ -1579,6 +1585,8 @@ def _insert_real_chunks(backend, config, path: Path, *, updated_at=_FIXTURE_INDE
             start_line=c.metadata.start_line,
             end_line=c.metadata.end_line,
             tags=tuple(c.metadata.tags),
+            valid_from_unix=c.metadata.valid_from_unix,
+            valid_to_unix=c.metadata.valid_to_unix,
         )
     return len(chunks)
 
@@ -1759,6 +1767,68 @@ class TestStaleIndex:
         assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
 
         reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+    def test_stale_validity_window_on_matching_text_is_reported(self, stale_env):
+        """Rows whose validity window no longer matches the file are drift (#2140).
+
+        The window comes from file-level frontmatter and is stamped on every
+        chunk, so rows can disagree with the file while their text matches it
+        byte for byte — exactly what a pre-#2140 index run left behind. The
+        check must see that, and a re-index must clear it. Editing the
+        frontmatter itself would not prove this: that moves the text of the
+        chunk carrying it, which the hash comparison already catches.
+        """
+        import asyncio
+
+        config, mem_dir, note, reindex = stale_env
+        body = "validity body zqx6. " * 40 + "\n"
+        note.write_text(
+            f"---\nvalid_to: 2030-01-01\n---\n\n# t\n\n## s\n\n{body}", encoding="utf-8"
+        )
+        reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+        async def _skew():
+            backend = SqliteBackend(
+                config.storage, dimension=0, embedding_provider="none", embedding_model=""
+            )
+            await backend.initialize()
+            try:
+                db = backend._get_db()
+                db.execute("UPDATE chunks SET valid_to_unix = ?", (123456789,))
+                db.commit()
+            finally:
+                await backend.close()
+
+        asyncio.run(_skew())
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+        reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+    def test_unreadable_validity_bound_is_not_reported_as_drift(self, stale_env):
+        """Junk in a numeric column is "can't tell", not evidence of an edit."""
+        import asyncio
+
+        config, mem_dir, note, reindex = stale_env
+        body = "validity junk zqx7. " * 40 + "\n"
+        note.write_text(f"# t\n\n## s\n\n{body}", encoding="utf-8")
+        reindex()
+
+        async def _corrupt():
+            backend = SqliteBackend(
+                config.storage, dimension=0, embedding_provider="none", embedding_model=""
+            )
+            await backend.initialize()
+            try:
+                db = backend._get_db()
+                db.execute("UPDATE chunks SET valid_to_unix = ?", ("not-a-number",))
+                db.commit()
+            finally:
+                await backend.close()
+
+        asyncio.run(_corrupt())
         assert "stale_index" not in _stale_findings(config, mem_dir)
 
     def test_tag_order_alone_is_not_reported(self, stale_env):
@@ -2273,10 +2343,17 @@ class TestChunkContentParity:
         mem_dir = tmp_path / ".claude" / "projects" / "-parity" / "memory"
         mem_dir.mkdir(parents=True)
         note = mem_dir / "note.md"
+        # Carries real retrieval metadata — frontmatter validity plus per-section
+        # tags — so the parity assertion below compares something other than the
+        # defaults. A fixture without them would "pass" comparing None to None.
         note.write_text(
+            "---\nvalid_from: 2020-01-01\nvalid_to: 2030-01-01\n---\n\n"
             "# title\n\nintro paragraph with enough words to stand alone as prose.\n\n"
-            "## section one\n\n" + ("body sentence for section one. " * 40) + "\n\n"
-            "## section two\n\n" + ("body sentence for section two. " * 40) + "\n",
+            "## section one\n\n> tags: [alpha]\n\n"
+            + ("body sentence for section one. " * 40)
+            + "\n\n## section two\n\n> tags: [bravo]\n\n"
+            + ("body sentence for section two. " * 40)
+            + "\n",
             encoding="utf-8",
         )
 
@@ -2305,15 +2382,24 @@ class TestChunkContentParity:
 
         doctor = _doctor_engine(config).chunk_content(note, note.read_text(encoding="utf-8"))
         assert len(doctor) > 1, "fixture should produce several chunks"
-        assert {c.content_hash for c in doctor} == {state[0] for state in persisted.values()}
-        assert {tuple(c.metadata.heading_hierarchy) for c in doctor} == {
-            state[1] for state in persisted.values()
-        }
-        # Tags ride in the same state tuple and are diffed too (#2124), so the
-        # parity this test guards has to cover them as well.
-        assert {tuple(c.metadata.tags) for c in doctor} == {
-            state[2] for state in persisted.values()
-        }
+        assert any(c.metadata.tags for c in doctor), "fixture must exercise real tags"
+        assert any(c.metadata.valid_to_unix for c in doctor), "...and a real validity window"
+
+        # Whole state tuples, as a multiset: comparing field projections
+        # separately would pass even if the fields belonged to different chunks,
+        # and would not notice a sixth field the doctor never learned to read.
+        # This is what keeps the two chunkers' idea of a chunk identical (#2078),
+        # field for field, as the state grows (#2124, #2140).
+        def _state_of(chunk):
+            return (
+                chunk.content_hash,
+                tuple(chunk.metadata.heading_hierarchy),
+                tuple(chunk.metadata.tags),
+                chunk.metadata.valid_from_unix,
+                chunk.metadata.valid_to_unix,
+            )
+
+        assert Counter(_state_of(c) for c in doctor) == Counter(persisted.values())
 
 
 class TestCli:

@@ -2202,9 +2202,10 @@ class IndexEngine:
                 await self._storage.update_chunk_line_ranges(hash_matched)
 
             if diff_result.metadata_only:
-                # Content identical, retrieval metadata moved: rewrite the tags
-                # column alone rather than re-embedding the chunk (#2124).
-                await self._storage.update_chunk_tags(diff_result.metadata_only)
+                # Content identical, retrieval metadata moved: rewrite the
+                # metadata columns alone — tags (#2124) and the validity window
+                # (#2140) — rather than re-embedding the chunk.
+                await self._storage.update_chunk_metadata(diff_result.metadata_only)
 
             if diff_result.to_upsert:
                 await self._storage.upsert_chunks(diff_result.to_upsert)

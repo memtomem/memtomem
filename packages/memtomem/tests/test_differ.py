@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from memtomem.indexing.differ import compute_diff
 from memtomem.models import Chunk, ChunkMetadata
 
@@ -154,6 +156,95 @@ class TestComputeDiff:
         assert result.to_upsert == []
         assert result.to_delete == []
         assert chunk.id == existing_id
+
+    def test_unsupported_state_width_is_rejected(self):
+        # A width nobody knows how to read must fail loudly. Truncating it would
+        # silently drop a field a caller had just started supplying — which is
+        # exactly how these bugs (#2124, #2140) arise in the first place.
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("s",))
+        six = {str(uuid4()): (chunk.content_hash, ("s",), (), None, None, "future-field")}
+        four = {str(uuid4()): (chunk.content_hash, ("s",), (), None)}
+
+        for existing in (six, four):
+            with pytest.raises(ValueError, match="unsupported chunk state width"):
+                compute_diff(existing, [chunk])
+
+    def test_unsupported_state_type_is_rejected(self):
+        # A non-string scalar would match no hash and send every existing id to
+        # ``to_delete`` — silent data loss wearing a diff's clothes.
+        chunk = _mk("same body")
+        for bad in (None, 7, b"hash-as-bytes", ["hash"]):
+            with pytest.raises(ValueError, match="unsupported chunk state type"):
+                compute_diff({str(uuid4()): bad}, [chunk])  # type: ignore[dict-item]
+
+    def test_validity_change_is_metadata_only(self):
+        # The validity window comes from file-level frontmatter and is stamped
+        # on every chunk, so editing it moves no chunk's text (#2140).
+        chunk = _mk("same body")
+        chunk.metadata = replace(
+            chunk.metadata,
+            heading_hierarchy=("s",),
+            tags=("alpha",),
+            valid_from_unix=100,
+            valid_to_unix=999,
+        )
+        existing_id = uuid4()
+        existing = {str(existing_id): (chunk.content_hash, ("s",), ("alpha",), 100, 200)}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.metadata_only == [chunk]
+        assert result.unchanged == []
+        assert result.to_upsert == []
+        assert chunk.id == existing_id
+
+    def test_dropping_a_validity_bound_is_metadata_only(self):
+        # Removing the frontmatter key means unbounded — a real change, not
+        # "the caller said nothing".
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("s",), tags=("alpha",))
+        existing = {str(uuid4()): (chunk.content_hash, ("s",), ("alpha",), None, 200)}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.metadata_only == [chunk]
+        assert result.unchanged == []
+
+    def test_matching_validity_stays_unchanged(self):
+        chunk = _mk("same body")
+        chunk.metadata = replace(
+            chunk.metadata,
+            heading_hierarchy=("s",),
+            tags=("alpha",),
+            valid_from_unix=100,
+            valid_to_unix=200,
+        )
+        existing = {str(uuid4()): (chunk.content_hash, ("s",), ("alpha",), 100, 200)}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.unchanged == [chunk]
+        assert result.metadata_only == []
+
+    def test_three_element_state_says_nothing_about_validity(self):
+        # A caller that supplies tags but not the window must not have its
+        # silence read as "unbounded" — that would report drift on every file
+        # carrying a validity window.
+        chunk = _mk("same body")
+        chunk.metadata = replace(
+            chunk.metadata,
+            heading_hierarchy=("s",),
+            tags=("alpha",),
+            valid_from_unix=100,
+            valid_to_unix=200,
+        )
+        existing = {str(uuid4()): (chunk.content_hash, ("s",), ("alpha",))}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.unchanged == [chunk]
+        assert result.metadata_only == []
 
     def test_matching_tags_stay_unchanged(self):
         chunk = _mk("same body")
