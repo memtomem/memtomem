@@ -6012,6 +6012,28 @@ class TestIndexRoutesInvalidateSearchCache:
         assert resp.status_code == 200, resp.text
         assert app.state.search_pipeline.invalidate_cache.call_count == 1
 
+    async def test_edit_chunk_invalidates_on_the_namespace_503_branch(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """That branch's "nothing was changed" is a claim about the *file*:
+        restoring the pre-image runs a rollback re-index, which is itself a
+        write. The MCP twin invalidates on its rollback path; so must this."""
+        from memtomem.errors import NamespaceResolutionError
+
+        source = tmp_path / "edit.md"
+        source.write_text("# Heading\n\nBody one.\nBody two.\nBody three.\n", encoding="utf-8")
+        chunk = _make_test_chunk(source=str(source))
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+        app.state.index_engine.index_file = AsyncMock(
+            side_effect=NamespaceResolutionError("store down")
+        )
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.patch(f"/api/chunks/{CHUNK_ID}", json={"new_content": "rewritten body"})
+
+        assert resp.status_code == 503, resp.text
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
     async def test_delete_chunk_invalidates(self, app, client: AsyncClient, tmp_path: Path):
         chunk = _make_test_chunk(source=str(tmp_path / "missing.md"))
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])

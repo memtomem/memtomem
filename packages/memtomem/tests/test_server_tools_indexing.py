@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -354,6 +355,62 @@ class TestMemIndexInvalidatesSearchCache:
         await mem_index(path=str(tmp_path), ctx=None)
 
         app.search_pipeline.invalidate_cache.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalidates_before_provenance_so_cancellation_cannot_skip_it(
+        self, monkeypatch, tmp_path
+    ):
+        """The chunks are durable the moment the engine returns. A cancellation
+        landing on any later await escapes the ``except Exception`` handlers
+        around it, so the drop has to happen first — not after provenance."""
+        stats = IndexingStats(
+            total_files=1,
+            total_chunks=2,
+            indexed_chunks=2,
+            skipped_chunks=0,
+            deleted_chunks=0,
+            duration_ms=1.0,
+            mutated=True,
+        )
+        app = _install_index_result(monkeypatch, stats)
+        monkeypatch.setattr(
+            "memtomem.server.tools.indexing.record_write_provenance",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await mem_index(path=str(tmp_path), ctx=None)
+
+        app.search_pipeline.invalidate_cache.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_auto_tag_pass_gets_the_live_pipeline(self, monkeypatch, tmp_path):
+        """``auto_tag`` upserts land after the index invalidation, so they need
+        their own drop — otherwise a search in between re-warms the cache and
+        freezes the pre-tag rows into it."""
+        stats = IndexingStats(
+            total_files=1,
+            total_chunks=2,
+            indexed_chunks=2,
+            skipped_chunks=0,
+            deleted_chunks=0,
+            duration_ms=1.0,
+            mutated=True,
+        )
+        app = _install_index_result(monkeypatch, stats)
+        app.storage = SimpleNamespace()
+        captured: dict = {}
+
+        async def fake_auto_tag(storage, **kwargs):
+            captured.update(kwargs)
+            return 3
+
+        monkeypatch.setattr("memtomem.tools.auto_tag.auto_tag_storage", fake_auto_tag)
+
+        out = await mem_index(path=str(tmp_path), auto_tag=True, ctx=None)
+
+        assert "Auto-tagged: 3 chunks" in out
+        assert captured["search_pipeline"] is app.search_pipeline
 
     @pytest.mark.asyncio
     async def test_steady_state_run_does_not_invalidate(self, monkeypatch, tmp_path):

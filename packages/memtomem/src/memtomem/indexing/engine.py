@@ -2373,6 +2373,11 @@ class IndexEngine:
                     "skipped_chunks": 0,
                     "deleted_chunks": 0,
                     "duration_ms": 0.0,
+                    # Nothing was walked, so nothing was written. Stated
+                    # rather than omitted: the key is part of the event shape
+                    # now, and a consumer should not have to know which
+                    # completion path it is reading (#2141).
+                    "mutated": False,
                     "errors": [f"path is outside configured memory directories: {path}"],
                     "retryable_errors": [],
                     "resolved_namespaces": [],
@@ -2402,6 +2407,11 @@ class IndexEngine:
                     "skipped_chunks": 0,
                     "deleted_chunks": 0,
                     "duration_ms": 0.0,
+                    # Nothing was walked, so nothing was written. Stated
+                    # rather than omitted: the key is part of the event shape
+                    # now, and a consumer should not have to know which
+                    # completion path it is reading (#2141).
+                    "mutated": False,
                     "errors": [f"index path does not exist: {path}"],
                     "retryable_errors": [],
                     "resolved_namespaces": [],

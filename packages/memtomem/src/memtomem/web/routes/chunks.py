@@ -181,6 +181,13 @@ async def edit_chunk(
             # before re-raising, so nothing was changed and a retry is the
             # right response — a 500 would tell the caller to file a bug
             # instead. Mirrors the 503 the delete route below already answers.
+            #
+            # "Nothing was changed" is a claim about the *file*, not the
+            # index: restoring the pre-image runs a rollback re-index, which
+            # is itself a write (#2141). Invalidate here for the same reason
+            # the generic branch below does, and the same reason the MCP twin
+            # invalidates on its rollback path.
+            search_pipeline.invalidate_cache()
             logger.warning("Namespace lookup failed during chunk edit %s: %s", chunk_id, exc)
             raise HTTPException(
                 status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL

@@ -140,6 +140,20 @@ class TestEngineMutatedFlag:
         assert progress and progress[0]["mutated"] is True
         assert complete and complete[0]["mutated"] is True
 
+    async def test_early_complete_events_carry_mutated_too(self, components, tmp_path):
+        """The key is part of the event shape, so a consumer should not have to
+        know which completion path it is reading: a path that resolves to
+        nothing completes with ``mutated=False`` rather than omitting it."""
+        _mock_embedder(components)
+        missing = tmp_path / "not-a-thing"
+
+        events = [e async for e in components.index_engine.index_path_stream(missing)]
+
+        complete = [e for e in events if e["type"] == "complete"]
+        assert complete, events
+        assert complete[0]["total_files"] == 0
+        assert complete[0]["mutated"] is False
+
 
 # ===========================================================================
 # Watcher
