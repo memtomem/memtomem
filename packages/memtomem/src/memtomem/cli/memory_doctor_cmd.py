@@ -1303,8 +1303,8 @@ def _analyze_dir(
                 severity="warn",
                 summary=(
                     f"{len(stale_ok)} indexed file(s) changed on disk since their chunks "
-                    "were written — `mem_search` returns the older text "
-                    "(run `mm index <file>`)"
+                    "were written — `mem_search` answers from the older content or "
+                    "retrieval metadata (run `mm index <file>`)"
                 ),
                 items=stale_ok,
             )
