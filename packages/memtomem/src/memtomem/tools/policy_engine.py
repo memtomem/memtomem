@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,6 +23,19 @@ _NS_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 _VALID_TYPES = {"auto_archive", "auto_promote", "auto_expire", "auto_consolidate", "auto_tag"}
 
 
+# Cap on how many chunk ids a single run records, per id list. Scheduler runs
+# are already bounded by ``max_actions_per_run``; only a manual run can exceed
+# this. Truncation is reported, never silent — see ``_record_ids``.
+_MAX_RECORDED_IDS = 2000
+
+
+def _record_ids(outcome: dict, key: str, ids: list[str]) -> None:
+    """Store ``ids`` under ``key``, capped, noting how many were omitted."""
+    outcome[key] = [str(i) for i in ids[:_MAX_RECORDED_IDS]]
+    if len(ids) > _MAX_RECORDED_IDS:
+        outcome[f"{key}_omitted"] = len(ids) - _MAX_RECORDED_IDS
+
+
 @dataclass(frozen=True)
 class PolicyRunResult:
     policy_name: str
@@ -30,6 +43,16 @@ class PolicyRunResult:
     affected_count: int
     dry_run: bool
     details: str
+    # Audit payload for the maintenance run log (#2132). Defaulted so the five
+    # positional fields above keep their existing construction sites. ``frozen``
+    # only forbids mutation of the fields themselves; the dict is never hashed.
+    namespaces: tuple[str, ...] = ()
+    outcome: dict = field(default_factory=dict)
+    #: Handler-reported failure that did not raise (the handler still returns a
+    #: result whose ``details`` explains it). Maps to a ``status=error`` row.
+    error: str | None = None
+    #: Set by ``run_policy`` when a run row was written.
+    run_id: int | None = None
 
 
 def _resolve_archive_ns(template: str, tags_json: str | None, fallback: str) -> str:
@@ -102,6 +125,7 @@ async def execute_auto_archive(
             details=(
                 f"Error: age_field must be 'created_at' or 'last_accessed_at', got {age_field!r}"
             ),
+            error=f"age_field must be 'created_at' or 'last_accessed_at', got {age_field!r}",
         )
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age)).isoformat()
@@ -110,7 +134,9 @@ async def execute_auto_archive(
 
     # Template mode needs current namespace + tags per chunk to route and
     # skip self-moves. Flat mode can fetch only ids.
-    select_cols = "id, namespace, tags" if ns_template is not None else "id"
+    # ``namespace`` is selected in both modes: template mode routes on it, flat
+    # mode records it as the run's source namespaces.
+    select_cols = "id, namespace, tags" if ns_template is not None else "id, namespace"
 
     where_parts: list[str] = []
     params: list = []
@@ -144,17 +170,31 @@ async def execute_auto_archive(
     rows = db.execute(query, params).fetchall()
 
     ids_by_target: dict[str, list[str]] = {}
+    source_namespaces: set[str] = set()
     if ns_template is None:
         if rows:
             ids_by_target[archive_ns] = [r[0] for r in rows]
+            source_namespaces.update(r[1] for r in rows if r[1])
     else:
         for chunk_id, current_ns, tags_json in rows:
             target = _resolve_archive_ns(ns_template, tags_json, fallback=archive_ns)
             if target == current_ns:
                 continue  # already in target bucket
             ids_by_target.setdefault(target, []).append(chunk_id)
+            if current_ns:
+                source_namespaces.add(current_ns)
 
     count = sum(len(ids) for ids in ids_by_target.values())
+
+    # A list of fixed-key records, not ``{namespace: ids}``: a namespace is
+    # user-supplied text and would collide with the omission bookkeeping.
+    moved: list[dict] = []
+    for target, ids in sorted(ids_by_target.items()):
+        record: dict = {"target": target}
+        _record_ids(record, "ids", ids)
+        record["omitted"] = record.pop("ids_omitted", 0)
+        moved.append(record)
+    outcome: dict = {"moved": moved} if moved else {}
 
     if not dry_run and count > 0:
         for target, ids in ids_by_target.items():
@@ -179,6 +219,8 @@ async def execute_auto_archive(
         affected_count=count,
         dry_run=dry_run,
         details=details,
+        namespaces=tuple(sorted(source_namespaces | set(ids_by_target))),
+        outcome=outcome,
     )
 
 
@@ -193,7 +235,7 @@ async def execute_auto_expire(
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age)).isoformat()
 
     db = storage._get_db()
-    query = "SELECT id FROM chunks WHERE created_at < ? AND access_count = 0"
+    query = "SELECT id, namespace FROM chunks WHERE created_at < ? AND access_count = 0"
     params: list = [cutoff]
     if namespace:
         query += " AND namespace = ?"
@@ -202,8 +244,14 @@ async def execute_auto_expire(
     rows = db.execute(query, params).fetchall()
     count = len(rows)
 
+    # Built before the delete: this is the only surviving record of what the
+    # rows were once ``DELETE FROM chunks`` has run.
+    ids = [r[0] for r in rows]
+    outcome: dict = {}
+    if ids:
+        _record_ids(outcome, "deleted_ids", ids)
+
     if not dry_run and count > 0:
-        ids = [r[0] for r in rows]
         ph = ",".join("?" for _ in ids)
         db.execute(f"DELETE FROM chunks WHERE id IN ({ph})", ids)
         db.commit()
@@ -214,6 +262,8 @@ async def execute_auto_expire(
         affected_count=count,
         dry_run=dry_run,
         details=f"{'Would expire' if dry_run else 'Expired'} {count} unaccessed chunks older than {max_age} days",
+        namespaces=tuple(sorted({r[1] for r in rows if r[1]})),
+        outcome=outcome,
     )
 
 
@@ -233,12 +283,13 @@ async def execute_auto_tag(
         query += " AND namespace = ?"
         params.append(namespace)
     count = db.execute(query, params).fetchone()[0]
+    outcome: dict = {}
 
     if not dry_run and count > 0:
         try:
             from memtomem.tools.auto_tag import auto_tag_storage
 
-            await auto_tag_storage(
+            stats = await auto_tag_storage(
                 storage,
                 max_tags=max_tags,
                 namespace_filter=namespace,
@@ -252,7 +303,18 @@ async def execute_auto_tag(
                 affected_count=0,
                 dry_run=False,
                 details=f"Auto-tag failed: {exc}",
+                namespaces=(namespace,) if namespace else (),
+                error=str(exc),
             )
+        # ``count`` above is a pre-count estimate of untagged chunks; these are
+        # what the run actually did.
+        outcome.update(
+            {
+                "total_chunks": stats.total_chunks,
+                "tagged_chunks": stats.tagged_chunks,
+                "skipped_chunks": stats.skipped_chunks,
+            }
+        )
 
     return PolicyRunResult(
         policy_name="",
@@ -260,6 +322,8 @@ async def execute_auto_tag(
         affected_count=count,
         dry_run=dry_run,
         details=f"{'Would tag' if dry_run else 'Tagged'} {count} untagged chunks (max_tags={max_tags})",
+        namespaces=(namespace,) if namespace else (),
+        outcome=outcome,
     )
 
 
@@ -324,6 +388,7 @@ async def execute_auto_consolidate(
             affected_count=0,
             dry_run=dry_run,
             details="Error: min_group_size must be at least 2",
+            error="min_group_size must be at least 2",
         )
 
     raw_groups = await storage.get_consolidation_groups(
@@ -334,6 +399,11 @@ async def execute_auto_consolidate(
     applied = 0
     llm_fallback_count = 0
     detail_parts: list[str] = []
+    group_records: list[dict] = []
+    deleted_summary_ids: list[str] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    seen_namespaces: set[str] = set()
 
     for g in raw_groups:
         source_path = Path(g["source"])
@@ -351,6 +421,7 @@ async def execute_auto_consolidate(
                 sorted(ns_set),
             )
             detail_parts.append(f"{source_path.name} (SKIP: mixed ns)")
+            skipped.append(f"{source_path.name} (mixed ns)")
             continue
         chunk_ns = next(iter(ns_set))
 
@@ -385,6 +456,7 @@ async def execute_auto_consolidate(
                 [c.id for c in chunks],
             ):
                 detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
+                skipped.append(f"{source_path.name} (agent-consolidated)")
                 continue
 
         if dry_run:
@@ -394,6 +466,8 @@ async def execute_auto_consolidate(
             continue
 
         if stale:
+            # Captured before the delete — the stale summary is destroyed here.
+            deleted_summary_ids.append(str(existing[0].id))
             await storage.delete_chunks([existing[0].id])
 
         try:
@@ -419,7 +493,7 @@ async def execute_auto_consolidate(
                 "namespace": chunk_ns,
                 "chunk_count": len(chunks),
             }
-            await apply_consolidation(
+            summary_id = await apply_consolidation(
                 storage,
                 group_dict,
                 summary,
@@ -433,11 +507,21 @@ async def execute_auto_consolidate(
                 exc_info=True,
             )
             detail_parts.append(f"{source_path.name} (FAILED)")
+            failed.append(source_path.name)
             continue
 
         applied += 1
         tag = " (regen)" if stale else ""
         detail_parts.append(f"{source_path.name}{tag}")
+        group_records.append(
+            {
+                "source": str(source_path),
+                "summary_id": str(summary_id),
+                "chunk_ids": group_dict["chunk_ids"],
+                "regenerated": stale,
+            }
+        )
+        seen_namespaces.add(chunk_ns)
 
     verb = "Would consolidate" if dry_run else "Consolidated"
     if detail_parts:
@@ -447,12 +531,36 @@ async def execute_auto_consolidate(
     if llm_fallback_count > 0:
         details += f" (llm_fallback_count={llm_fallback_count})"
 
+    outcome: dict = {}
+    if group_records:
+        outcome["groups"] = group_records
+    if deleted_summary_ids:
+        outcome["deleted_summary_ids"] = deleted_summary_ids
+    if skipped:
+        outcome["skipped"] = skipped
+    if failed:
+        outcome["failed"] = failed
+    if llm_fallback_count:
+        outcome["llm_fallback_count"] = llm_fallback_count
+
+    # A group that failed after its stale summary was deleted leaves the source
+    # without a summary. ``deleted_summary_ids`` records what went; the status
+    # must not read ``ok`` while that is true.
+    error = f"{len(failed)} group(s) failed: {', '.join(failed)}" if failed else None
+
+    namespaces = set(seen_namespaces)
+    if group_records:
+        namespaces.add(summary_namespace)
+
     return PolicyRunResult(
         policy_name="",
         policy_type="auto_consolidate",
         affected_count=applied,
         dry_run=dry_run,
         details=details,
+        namespaces=tuple(sorted(namespaces)),
+        outcome=outcome,
+        error=error,
     )
 
 
@@ -533,9 +641,14 @@ async def execute_auto_promote(
         where_parts.append("last_accessed_at >= ?")
         params.append(recency_cutoff)
 
-    query = "SELECT id FROM chunks WHERE " + " AND ".join(where_parts)
+    query = "SELECT id, namespace FROM chunks WHERE " + " AND ".join(where_parts)
     rows = db.execute(query, params).fetchall()
     count = len(rows)
+
+    outcome: dict = {}
+    if rows:
+        _record_ids(outcome, "promoted_ids", [r[0] for r in rows])
+        outcome["target_namespace"] = target_ns
 
     if not dry_run and count > 0:
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -554,6 +667,8 @@ async def execute_auto_promote(
         affected_count=count,
         dry_run=dry_run,
         details=details,
+        namespaces=tuple(sorted({r[1] for r in rows if r[1]} | {target_ns})),
+        outcome=outcome,
     )
 
 
@@ -572,14 +687,23 @@ async def run_policy(
     dry_run: bool = False,
     *,
     llm_provider: LLMProvider | None = None,
+    source: str = "mcp",
 ) -> PolicyRunResult:
     """Execute a single policy.
 
     ``llm_provider`` is forwarded to ``execute_auto_consolidate`` when set.
+    ``source`` labels the resulting maintenance run row (``scheduler`` for
+    unattended runs, ``mcp`` for tool calls).
+
+    This is the single choke point for policy execution — both
+    ``run_all_enabled`` and ``mem_policy_run(name=...)`` reach handlers through
+    it — so it is where the maintenance run row (#2132) is written. Applied
+    runs only: a dry run mutates nothing and records nothing.
     """
     ptype = policy["policy_type"]
     handler = _HANDLERS.get(ptype)
     if handler is None:
+        # No row: nothing ran.
         return PolicyRunResult(
             policy_name=policy["name"],
             policy_type=ptype,
@@ -588,27 +712,61 @@ async def run_policy(
             details=f"Unknown policy type: {ptype}",
         )
 
-    if ptype == "auto_consolidate":
-        result = await execute_auto_consolidate(
-            storage,
-            policy.get("config", {}),
-            policy.get("namespace_filter"),
-            dry_run,
-            llm_provider=llm_provider,
+    run_id: int | None = None
+    if not dry_run:
+        run_id = await storage.maintenance_run_start(
+            ptype, policy_name=policy["name"], source=source
         )
-    else:
-        result = await handler(
-            storage,
-            policy.get("config", {}),
-            policy.get("namespace_filter"),
-            dry_run,
+
+    try:
+        if ptype == "auto_consolidate":
+            result = await execute_auto_consolidate(
+                storage,
+                policy.get("config", {}),
+                policy.get("namespace_filter"),
+                dry_run,
+                llm_provider=llm_provider,
+            )
+        else:
+            result = await handler(
+                storage,
+                policy.get("config", {}),
+                policy.get("namespace_filter"),
+                dry_run,
+            )
+    except Exception as exc:
+        # The mutation may have partly landed; record that and let the caller
+        # see the original failure.
+        if run_id is not None:
+            try:
+                await storage.maintenance_run_finish(
+                    run_id, status="error", error=f"{type(exc).__name__}: {exc}"
+                )
+            except Exception:
+                # Best-effort: the original failure is the one worth raising.
+                logger.warning("could not finalize maintenance run %s", run_id, exc_info=True)
+        raise
+
+    if run_id is not None:
+        await storage.maintenance_run_finish(
+            run_id,
+            status="error" if result.error else "ok",
+            affected_count=result.affected_count,
+            namespaces=result.namespaces,
+            summary=result.outcome,
+            error=result.error,
         )
+
     return PolicyRunResult(
         policy_name=policy["name"],
         policy_type=result.policy_type,
         affected_count=result.affected_count,
         dry_run=result.dry_run,
         details=result.details,
+        namespaces=result.namespaces,
+        outcome=result.outcome,
+        error=result.error,
+        run_id=run_id,
     )
 
 
@@ -618,6 +776,7 @@ async def run_all_enabled(
     max_actions: int | None = None,
     *,
     llm_provider: LLMProvider | None = None,
+    source: str = "mcp",
 ) -> list[PolicyRunResult]:
     """Run all enabled policies.
 
@@ -626,12 +785,16 @@ async def run_all_enabled(
             this limit.  The cap is checked between policies — individual
             handlers run atomically.
         llm_provider: Optional LLM provider forwarded to consolidation.
+        source: Label for the maintenance run rows written per applied policy
+            (``scheduler`` for unattended runs, ``mcp`` for tool calls).
     """
     policies = await storage.policy_get_enabled()
     results: list[PolicyRunResult] = []
     cumulative = 0
     for p in policies:
-        result = await run_policy(storage, p, dry_run=dry_run, llm_provider=llm_provider)
+        result = await run_policy(
+            storage, p, dry_run=dry_run, llm_provider=llm_provider, source=source
+        )
         if not dry_run:
             await storage.policy_update_last_run(p["name"])
         results.append(result)

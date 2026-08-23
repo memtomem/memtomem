@@ -12,6 +12,7 @@ from memtomem.storage.mixins.entities import EntityMixin
 from memtomem.storage.mixins.policies import PolicyMixin
 from memtomem.storage.mixins.schedules import ScheduleMixin
 from memtomem.storage.mixins.formation import FormationMixin
+from memtomem.storage.mixins.maintenance_runs import MaintenanceRunMixin
 
 __all__ = [
     "SessionMixin",
@@ -26,4 +27,5 @@ __all__ = [
     "PolicyMixin",
     "ScheduleMixin",
     "FormationMixin",
+    "MaintenanceRunMixin",
 ]

@@ -172,6 +172,219 @@ class TestEntityExtraction:
 # ── Policy Engine ────────────────────────────────────────────────────
 
 
+class TestPolicyRunRecording:
+    """The maintenance run log written by the run_policy choke point (#2132)."""
+
+    @staticmethod
+    def _policy(name: str, ptype: str, config: dict | None = None) -> dict:
+        return {
+            "name": name,
+            "policy_type": ptype,
+            "config": config or {},
+            "namespace_filter": None,
+        }
+
+    async def test_dry_run_writes_no_row(self, storage):
+        await run_policy(
+            storage, self._policy("p", "auto_expire", {"max_age_days": 1}), dry_run=True
+        )
+        assert await storage.maintenance_run_latest(limit=10) == []
+
+    async def test_unknown_policy_type_writes_no_row(self, storage):
+        result = await run_policy(storage, self._policy("p", "nonsense"), dry_run=False)
+        assert "Unknown policy type" in result.details
+        assert await storage.maintenance_run_latest(limit=10) == []
+
+    async def test_applied_run_writes_ok_row_with_name_and_source(self, storage):
+        result = await run_policy(
+            storage,
+            self._policy("expire-old", "auto_expire", {"max_age_days": 1}),
+            dry_run=False,
+            source="scheduler",
+        )
+        (run,) = await storage.maintenance_run_latest(limit=10)
+        assert run["kind"] == "auto_expire"
+        assert run["policy_name"] == "expire-old"
+        assert run["source"] == "scheduler"
+        assert run["status"] == "ok"
+        assert run["completed_at"] is not None
+        assert result.run_id == run["id"]
+
+    async def test_handler_exception_finalizes_error_row_and_reraises(self, storage, monkeypatch):
+        import memtomem.tools.policy_engine as engine
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("handler exploded")
+
+        monkeypatch.setitem(engine._HANDLERS, "auto_archive", boom)
+
+        with pytest.raises(RuntimeError, match="handler exploded"):
+            await run_policy(storage, self._policy("arch", "auto_archive"), dry_run=False)
+
+        (run,) = await storage.maintenance_run_latest(limit=10)
+        assert run["status"] == "error"
+        assert "RuntimeError: handler exploded" == run["error"]
+
+    async def test_handler_reported_failure_maps_to_error_status(self, storage, monkeypatch):
+        """auto_tag swallows its failure into details — the row must still say error."""
+        chunk = make_chunk("untagged content", namespace="default")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET tags = '[]' WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        async def boom(*args, **kwargs):
+            raise ValueError("tagger down")
+
+        import memtomem.tools.auto_tag as auto_tag_mod
+
+        monkeypatch.setattr(auto_tag_mod, "auto_tag_storage", boom)
+
+        result = await run_policy(storage, self._policy("tagger", "auto_tag"), dry_run=False)
+        assert "Auto-tag failed" in result.details
+
+        (run,) = await storage.maintenance_run_latest(limit=10)
+        assert run["status"] == "error"
+        assert "tagger down" in run["error"]
+
+    async def test_auto_expire_row_records_deleted_ids_and_namespaces(self, storage):
+        old_time = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+        chunk = make_chunk("doomed content", namespace="scratchpad")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute(
+            "UPDATE chunks SET created_at = ?, access_count = 0 WHERE id = ?",
+            [old_time, str(chunk.id)],
+        )
+        db.commit()
+
+        await run_policy(
+            storage, self._policy("expire", "auto_expire", {"max_age_days": 90}), dry_run=False
+        )
+
+        (run,) = await storage.maintenance_run_latest(kind="auto_expire")
+        assert run["affected_count"] == 1
+        assert run["summary"]["deleted_ids"] == [str(chunk.id)]
+        assert run["namespaces"] == ["scratchpad"]
+        # The chunk itself is gone — the row is the only surviving record.
+        assert (
+            db.execute("SELECT COUNT(*) FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()[0]
+            == 0
+        )
+
+    async def test_auto_archive_row_records_moved_ids_by_target(self, storage):
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        chunk = make_chunk("stale content", namespace="default")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ? WHERE id = ?", [old_time, str(chunk.id)])
+        db.commit()
+
+        await run_policy(
+            storage,
+            self._policy("arch", "auto_archive", {"max_age_days": 30}),
+            dry_run=False,
+        )
+
+        (run,) = await storage.maintenance_run_latest(kind="auto_archive")
+        assert run["summary"]["moved"] == [
+            {"target": "archive", "ids": [str(chunk.id)], "omitted": 0}
+        ]
+        # both the source and the target namespace are recorded
+        assert run["namespaces"] == ["archive", "default"]
+
+    async def test_auto_promote_row_records_ids_and_target(self, storage):
+        chunk = make_chunk("hot content", namespace="archive")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 50 WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        await run_policy(
+            storage,
+            self._policy("promo", "auto_promote", {"min_access_count": 5}),
+            dry_run=False,
+        )
+
+        (run,) = await storage.maintenance_run_latest(kind="auto_promote")
+        assert run["summary"]["promoted_ids"] == [str(chunk.id)]
+        assert run["summary"]["target_namespace"] == "default"
+        assert run["namespaces"] == ["archive", "default"]
+
+    async def test_recorded_ids_are_capped_and_report_the_omission(self, storage, monkeypatch):
+        import memtomem.tools.policy_engine as engine
+
+        monkeypatch.setattr(engine, "_MAX_RECORDED_IDS", 2)
+
+        old_time = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+        chunks = [make_chunk(f"doomed {i}", namespace="default") for i in range(5)]
+        await storage.upsert_chunks(chunks)
+        db = storage._get_db()
+        db.executemany(
+            "UPDATE chunks SET created_at = ?, access_count = 0 WHERE id = ?",
+            [(old_time, str(c.id)) for c in chunks],
+        )
+        db.commit()
+
+        await run_policy(
+            storage, self._policy("expire", "auto_expire", {"max_age_days": 90}), dry_run=False
+        )
+
+        (run,) = await storage.maintenance_run_latest(kind="auto_expire")
+        assert run["affected_count"] == 5
+        assert len(run["summary"]["deleted_ids"]) == 2
+        assert run["summary"]["deleted_ids_omitted"] == 3
+
+    async def test_config_validation_failure_records_error_status(self, storage):
+        """An invalid config never mutates — the row must not claim ``ok``."""
+        result = await run_policy(
+            storage,
+            self._policy("arch", "auto_archive", {"age_field": "nonsense"}),
+            dry_run=False,
+        )
+        assert "Error: age_field" in result.details
+
+        (run,) = await storage.maintenance_run_latest(kind="auto_archive")
+        assert run["status"] == "error"
+        assert "age_field" in run["error"]
+
+    async def test_moved_ids_survive_a_namespace_named_like_the_omission_key(self, storage):
+        """Namespace names are user text; they must not collide with bookkeeping."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        chunk = make_chunk("stale", namespace="default", tags=["ids_omitted"])
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET created_at = ? WHERE id = ?", [old_time, str(chunk.id)])
+        db.commit()
+
+        await run_policy(
+            storage,
+            self._policy(
+                "arch",
+                "auto_archive",
+                {"max_age_days": 30, "archive_namespace_template": "{first_tag}"},
+            ),
+            dry_run=False,
+        )
+
+        (run,) = await storage.maintenance_run_latest(kind="auto_archive")
+        assert run["summary"]["moved"] == [
+            {"target": "ids_omitted", "ids": [str(chunk.id)], "omitted": 0}
+        ]
+
+    async def test_run_all_enabled_forwards_source_and_records_each_policy(self, storage):
+        await storage.policy_add("expire", "auto_expire", {"max_age_days": 90})
+        await storage.policy_add("promo", "auto_promote", {"min_access_count": 5})
+
+        results = await run_all_enabled(storage, dry_run=False, source="scheduler")
+        assert len(results) == 2
+
+        runs = await storage.maintenance_run_latest(limit=10)
+        assert {r["policy_name"] for r in runs} == {"expire", "promo"}
+        assert {r["source"] for r in runs} == {"scheduler"}
+        assert {r["id"] for r in runs} == {r.run_id for r in results}
+
+
 class TestPolicyEngine:
     async def test_auto_archive_dry_run(self, storage):
         """Dry-run should count but not actually move chunks."""
@@ -1085,6 +1298,73 @@ class TestAutoConsolidate:
         assert len(summaries_after) == 1
         assert summaries_after[0].id != old_summary_id
 
+    async def test_regeneration_run_records_deleted_and_new_summary_ids(self, storage):
+        """The stale summary is deleted — the run row is what says which one (#2132)."""
+        source = "meeting-run-record.md"
+        await storage.upsert_chunks(
+            [make_chunk(f"Chunk {i}", source=source, heading=("Doc", f"§{i}")) for i in range(3)]
+        )
+        policy = {
+            "name": "consol",
+            "policy_type": "auto_consolidate",
+            "config": {"min_group_size": 3},
+            "namespace_filter": None,
+        }
+        await run_policy(storage, policy, dry_run=False)
+
+        (first_run,) = await storage.maintenance_run_latest(kind="auto_consolidate")
+        first_summary_id = first_run["summary"]["groups"][0]["summary_id"]
+        assert first_run["status"] == "ok"
+        assert "deleted_summary_ids" not in first_run["summary"]
+
+        await storage.upsert_chunks(
+            [make_chunk("Newly added chunk", source=source, heading=("Doc", "§new"))]
+        )
+        await run_policy(storage, policy, dry_run=False)
+
+        runs = await storage.maintenance_run_latest(kind="auto_consolidate", limit=2)
+        second_run = runs[0]
+        assert second_run["summary"]["deleted_summary_ids"] == [first_summary_id]
+        group = second_run["summary"]["groups"][0]
+        assert group["regenerated"] is True
+        assert group["summary_id"] != first_summary_id
+        assert len(group["chunk_ids"]) == 4
+
+    async def test_failed_group_after_stale_delete_records_error(self, storage, monkeypatch):
+        """The old summary is already gone — the row must not read ``ok``."""
+        import memtomem.tools.consolidation_engine as consolidation_engine
+
+        source = "meeting-failed-regen.md"
+        await storage.upsert_chunks(
+            [make_chunk(f"Chunk {i}", source=source, heading=("Doc", f"§{i}")) for i in range(3)]
+        )
+        policy = {
+            "name": "consol",
+            "policy_type": "auto_consolidate",
+            "config": {"min_group_size": 3},
+            "namespace_filter": None,
+        }
+        await run_policy(storage, policy, dry_run=False)
+        (first_run,) = await storage.maintenance_run_latest(kind="auto_consolidate")
+        old_summary_id = first_run["summary"]["groups"][0]["summary_id"]
+
+        await storage.upsert_chunks(
+            [make_chunk("Newly added chunk", source=source, heading=("Doc", "§new"))]
+        )
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("apply failed")
+
+        monkeypatch.setattr(consolidation_engine, "apply_consolidation", boom)
+        await run_policy(storage, policy, dry_run=False)
+
+        run = (await storage.maintenance_run_latest(kind="auto_consolidate", limit=2))[0]
+        assert run["status"] == "error"
+        assert "1 group(s) failed" in run["error"]
+        # The record still says which summary the run destroyed.
+        assert run["summary"]["deleted_summary_ids"] == [old_summary_id]
+        assert run["summary"]["failed"] == [source]
+
     async def test_auto_consolidate_mixed_namespace_skips(self, storage, caplog):
         """A source file whose chunks span multiple namespaces is skipped with a warn."""
         source = "mixed-ns.md"
@@ -1350,6 +1630,16 @@ class TestMemConsolidateApplyIntegration:
 
         assert "Consolidation applied" in result
         assert "Summary chunk id" in result
+        assert "Run id:" in result
+
+        # The agent path bypasses run_policy, so it records its own run (#2132).
+        (run,) = await components.storage.maintenance_run_latest(kind="consolidate_apply")
+        assert run["status"] == "ok"
+        assert run["source"] == "mcp"
+        assert run["summary"]["summary_id"] in result
+        assert run["summary"]["linked"] == len(original_ids)
+        assert run["summary"]["keep_originals"] is True
+        assert run["summary"]["decayed_ids"] == []
 
         # There should be at least one NEW chunk on disk whose source_file is
         # NOT the virtual .consolidated.md path — file-first means the

@@ -115,6 +115,7 @@ class PolicyScheduler:
                 dry_run=False,
                 max_actions=self._config.max_actions_per_run,
                 llm_provider=getattr(self._app, "llm_provider", None),
+                source="scheduler",
             )
             self._consecutive_failures = 0
         except Exception:

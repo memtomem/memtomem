@@ -72,6 +72,9 @@ class TestPolicyScheduler:
                 dry_run=False,
                 max_actions=100,
                 llm_provider=app.llm_provider,
+                # Unattended runs are labelled so the maintenance run log can
+                # tell them apart from manual mem_policy_run calls (#2132).
+                source="scheduler",
             )
 
     @pytest.mark.asyncio

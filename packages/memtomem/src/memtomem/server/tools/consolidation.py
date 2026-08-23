@@ -303,63 +303,118 @@ async def mem_consolidate_apply(
     from memtomem.server.tools.memory_crud import _mem_add_core
 
     source_name = group["source"].split("/")[-1]
-    add_result, stats = await _mem_add_core(
-        content=summary,
-        title=f"Consolidated: {source_name}",
-        tags=["consolidated", "summary"],
-        file=None,
-        namespace=group.get("namespace"),
-        template=None,
-        ctx=ctx,
-        scope=cast(TargetScope, derived_scope),
-        confirm_project_shared=confirm_project_shared,
-        project_root_override=project_root_override,
-        event_type="consolidate_apply",
+    # Applied-run record (#2132). Opened after the scope checks above so a
+    # refused call leaves no row; the policy path records its own runs through
+    # ``run_policy``, which this handler deliberately does not go through.
+    run_id = await app.storage.maintenance_run_start("consolidate_apply", source="mcp")
+    run_summary: dict = {
+        "group_id": group_id,
+        "source": group["source"],
+        "keep_originals": keep_originals,
+        "chunk_ids": [str(c) for c in group["chunk_ids"]],
+    }
+    run_namespaces = [group.get("namespace") or "default"]
+
+    try:
+        add_result, stats = await _mem_add_core(
+            content=summary,
+            title=f"Consolidated: {source_name}",
+            tags=["consolidated", "summary"],
+            file=None,
+            namespace=group.get("namespace"),
+            template=None,
+            ctx=ctx,
+            scope=cast(TargetScope, derived_scope),
+            confirm_project_shared=confirm_project_shared,
+            project_root_override=project_root_override,
+            event_type="consolidate_apply",
+        )
+
+        if stats is None or not stats.new_chunk_ids:
+            logger.warning(
+                "mem_consolidate_apply: mem_add produced no new chunk ids — "
+                "cannot link originals for group %s",
+                group_id,
+            )
+            await app.storage.maintenance_run_finish(
+                run_id,
+                status="ok",
+                affected_count=0,
+                namespaces=run_namespaces,
+                summary={**run_summary, "summary_id": None, "linked": 0, "warning": "unlinked"},
+            )
+            await app.storage.scratch_delete("consolidation_groups")
+            return (
+                f"Consolidation applied for group {group_id} (unlinked).\n"
+                f"{add_result}\n"
+                f"- Original chunks: {group['chunk_count']}\n"
+                f"- Originals kept: {keep_originals}\n"
+                "- Warning: could not recover summary chunk id; relations not created."
+            )
+
+        if len(stats.new_chunk_ids) > 1:
+            # Canary for chunker behavior drift. Today the Markdown chunker
+            # keeps a single ``Consolidated: ...`` H1 section together, so we
+            # expect exactly 1. If this warning ever fires, revisit the
+            # summary → chunk matching strategy (see Phase A.5 docs-review
+            # thread) — the current "take the first" rule is intentionally
+            # simple so the contract failure is loud.
+            logger.warning(
+                "mem_consolidate_apply: mem_add produced %d chunks, using first as summary_id",
+                len(stats.new_chunk_ids),
+            )
+
+        summary_id = stats.new_chunk_ids[0]
+
+        # Link originals → summary via the shared helper (same edge type that
+        # execute_auto_consolidate uses, so queries like mem_related / mem_expand
+        # work uniformly across both flows).
+        linked = await link_consolidation_relations(
+            app.storage,
+            group["chunk_ids"],
+            summary_id,
+        )
+
+        decayed_ids: list[str] = []
+        if not keep_originals and group["chunk_ids"]:
+            scores = await app.storage.get_importance_scores(group["chunk_ids"])
+            if scores:
+                floored = {
+                    cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()
+                }
+                await app.storage.update_importance_scores(floored)
+                decayed_ids = [str(cid) for cid in floored]
+    except Exception as exc:
+        # The mutation may have partly landed — ``_mem_add_core`` can have
+        # appended and indexed the summary before the failure — so the row
+        # keeps the provenance known at this point.
+        try:
+            await app.storage.maintenance_run_finish(
+                run_id,
+                status="error",
+                namespaces=run_namespaces,
+                summary=run_summary,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            # Best-effort: the original failure is the one worth raising.
+            logger.warning("could not finalize maintenance run %s", run_id, exc_info=True)
+        raise
+
+    # Finalized before the cache/scratch cleanup below: the decay above is the
+    # last memory mutation, and the audit write must not hinge on cleanup.
+    await app.storage.maintenance_run_finish(
+        run_id,
+        status="ok",
+        affected_count=linked,
+        namespaces=run_namespaces,
+        summary={
+            **run_summary,
+            "summary_id": str(summary_id),
+            "linked": linked,
+            "decayed_ids": decayed_ids,
+        },
     )
-
-    if stats is None or not stats.new_chunk_ids:
-        logger.warning(
-            "mem_consolidate_apply: mem_add produced no new chunk ids — "
-            "cannot link originals for group %s",
-            group_id,
-        )
-        await app.storage.scratch_delete("consolidation_groups")
-        return (
-            f"Consolidation applied for group {group_id} (unlinked).\n"
-            f"{add_result}\n"
-            f"- Original chunks: {group['chunk_count']}\n"
-            f"- Originals kept: {keep_originals}\n"
-            "- Warning: could not recover summary chunk id; relations not created."
-        )
-
-    if len(stats.new_chunk_ids) > 1:
-        # Canary for chunker behavior drift. Today the Markdown chunker
-        # keeps a single ``Consolidated: ...`` H1 section together, so we
-        # expect exactly 1. If this warning ever fires, revisit the
-        # summary → chunk matching strategy (see Phase A.5 docs-review
-        # thread) — the current "take the first" rule is intentionally
-        # simple so the contract failure is loud.
-        logger.warning(
-            "mem_consolidate_apply: mem_add produced %d chunks, using first as summary_id",
-            len(stats.new_chunk_ids),
-        )
-
-    summary_id = stats.new_chunk_ids[0]
-
-    # Link originals → summary via the shared helper (same edge type that
-    # execute_auto_consolidate uses, so queries like mem_related / mem_expand
-    # work uniformly across both flows).
-    linked = await link_consolidation_relations(
-        app.storage,
-        group["chunk_ids"],
-        summary_id,
-    )
-
-    if not keep_originals and group["chunk_ids"]:
-        scores = await app.storage.get_importance_scores(group["chunk_ids"])
-        if scores:
-            floored = {cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()}
-            await app.storage.update_importance_scores(floored)
 
     app.search_pipeline.invalidate_cache()
     await app.storage.scratch_delete("consolidation_groups")
@@ -369,5 +424,6 @@ async def mem_consolidate_apply(
         f"{add_result}\n"
         f"- Summary chunk id: {summary_id}\n"
         f"- Originals linked: {linked}/{group['chunk_count']}\n"
-        f"- Originals kept: {keep_originals}"
+        f"- Originals kept: {keep_originals}\n"
+        f"- Run id: {run_id}"
     )

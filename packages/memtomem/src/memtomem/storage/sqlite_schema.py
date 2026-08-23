@@ -819,6 +819,43 @@ def create_tables(
         )
     """)
 
+    # --- Maintenance run log (#2132) ---
+    # One row per *applied* (non-dry-run) maintenance run: policy runs keyed by
+    # ``policy_name`` plus the agent-path ``consolidate_apply``. ``summary_json``
+    # carries the per-kind outcome, including the chunk ids acted on by the
+    # destructive kinds (``auto_expire`` deletes rows outright).
+    #
+    # Deliberately no FK to ``chunks``: the recorded ids are provenance, and for
+    # ``auto_expire`` the referenced rows are gone by the time the row is
+    # finalized. That also keeps the table out of namespace-merge remapping
+    # (``sqlite_namespace._chunk_reference_columns`` discovers FK tables), so a
+    # recorded namespace name is historical, not a live reference.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_runs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind            TEXT NOT NULL,
+            policy_name     TEXT,
+            source          TEXT NOT NULL,
+            status          TEXT NOT NULL,
+            started_at      TEXT NOT NULL,
+            completed_at    TEXT,
+            affected_count  INTEGER NOT NULL DEFAULT 0,
+            namespaces_json TEXT NOT NULL DEFAULT '[]',
+            summary_json    TEXT NOT NULL DEFAULT '{}',
+            error           TEXT
+        )
+    """)
+    # ``id`` (AUTOINCREMENT) rather than ``started_at`` is the ordering key for
+    # "latest run" — timestamps are second-precision and two runs can tie.
+    db.execute("CREATE INDEX IF NOT EXISTS idx_maintenance_runs_kind ON maintenance_runs(kind, id)")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_maintenance_runs_policy "
+        "ON maintenance_runs(policy_name, id)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_maintenance_runs_started ON maintenance_runs(started_at)"
+    )
+
     # --- Health watchdog snapshots ---
     db.execute("""
         CREATE TABLE IF NOT EXISTS health_snapshots (
