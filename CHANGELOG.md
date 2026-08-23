@@ -36,6 +36,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Applied maintenance runs now leave a record of what they changed.**
+  `memory_policies.last_run_at` said *when* a policy last ran but nothing said
+  what that run did, which mattered most for `auto_expire` — it issues a real
+  `DELETE FROM chunks`, so a user who noticed memories missing had no way to
+  ask what the last run removed. Every applied (non-dry-run) policy run and
+  every `mem_consolidate_apply` now writes a row to a new `maintenance_runs`
+  table: status, source (`scheduler` vs `mcp`), affected count, namespaces
+  touched, and a per-kind summary carrying the chunk ids acted on by the
+  destructive kinds and the ids moved by `auto_archive` / `auto_promote`.
+  Read them with `mem_policy_list(runs=N)`; `mem_policy_run(dry_run=False)`
+  now reports the run id it wrote. A run interrupted between its mutation and
+  its record stays visible as `running` with no completion time, rather than
+  vanishing. Dry runs
+  record nothing, no policy changed what it does, and the table is additive
+  (no `SCHEMA_VERSION` bump); records are kept 90 days. (#2132)
 - **A Markdown note can declare a per-file redaction exemption.** The guard's
   two broad label rules match on the keyword plus `=`/`:` regardless of what
   follows, so a note that *documents* the redaction patterns trips its own

@@ -38,6 +38,7 @@ EXPECTED_USER_TABLES = frozenset(
         "eval_cases",
         "health_snapshots",
         "idempotency_ledger",
+        "maintenance_runs",
         "memory_assertions",
         "memory_candidate_transitions",
         "memory_candidates",

@@ -128,7 +128,7 @@ mem_policy_run(name="archive-stale")
 → [DRY RUN] Would archive 12 chunks older than 30 days → 'archive'
 
 mem_policy_run(name="archive-stale", dry_run=False)
-→ Archived 12 chunks older than 30 days → 'archive'
+→ Archived 12 chunks older than 30 days → 'archive' (run #42)
 ```
 
 Run all enabled policies at once:
@@ -139,6 +139,38 @@ mem_policy_run()
   - archive-stale (auto_archive): Would archive 12 chunks older than 30 days → 'archive'
   - promote-active (auto_promote): Would promote 3 chunks → 'default'
 ```
+
+### Run history
+
+Every *applied* (non-dry-run) run is recorded, so "what did the last
+maintenance run change?" is answerable after the fact — which matters most for
+`auto_expire`, whose deletion is real and irreversible. Dry runs record nothing.
+
+Each record holds the run's status (`ok`, `error`, or `running` — either still
+in flight, or interrupted before it could finish, which a missing completion
+time distinguishes), where it came from (`scheduler` for the
+background scheduler, `mcp` for a tool call), the affected count, the namespaces
+touched, and a per-kind summary of what changed — including the chunk ids for
+the destructive kinds (`auto_expire` deletions and the stale summaries
+`auto_consolidate` replaces) and the ids moved by `auto_archive` /
+`auto_promote`.
+
+Pass `runs=N` to `mem_policy_list` to see the last N runs per policy:
+
+```
+mem_policy_list(runs=2)
+→ Memory Policies (1):
+  - expire-old (auto_expire, enabled) (last run: 2026-04-12T10:00:00)
+    Config: {"max_age_days": 90}
+    Runs:
+    - #42 ok 2026-04-12T10:00:00+00:00 (scheduler) affected=8 ns=default,work
+      deleted_ids: 8 — a1b2c3d4, e5f6a7b8, … (+3 more)
+    - #38 error 2026-04-11T10:00:00+00:00 (mcp) — ValueError: disk full
+```
+
+`mem_consolidate_apply` records its runs too; because they belong to no policy,
+they are listed under a trailing `Other maintenance runs:` block in the same
+output. Records are kept for 90 days and are wiped by `mm reset`.
 
 Use `namespace_filter` when creating a policy to restrict it to a specific namespace:
 
