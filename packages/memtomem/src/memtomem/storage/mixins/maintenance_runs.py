@@ -26,10 +26,18 @@ _MAINTENANCE_RUN_MAX_AGE_DAYS = 90
 
 _FINAL_STATUSES = frozenset({"ok", "error"})
 
-_SELECT_COLS = (
-    "id, kind, policy_name, source, status, started_at, completed_at, "
-    "affected_count, namespaces_json, summary_json, error"
-)
+# One static statement, no SQL assembled at call time: a NULL bind means "no
+# filter" for that column, so the four filter combinations share one query and
+# nothing here can grow into an injection vector as the filters change.
+_LATEST_SQL = """
+    SELECT id, kind, policy_name, source, status, started_at, completed_at,
+           affected_count, namespaces_json, summary_json, error
+    FROM maintenance_runs
+    WHERE (? IS NULL OR kind = ?)
+      AND (? IS NULL OR policy_name = ?)
+    ORDER BY id DESC
+    LIMIT ?
+"""
 
 
 class MaintenanceRunMixin:
@@ -105,21 +113,8 @@ class MaintenanceRunMixin:
         """Return the most recent runs, newest first."""
         if limit <= 0:
             return []
-        clauses: list[str] = []
-        params: list[object] = []
-        if kind is not None:
-            clauses.append("kind = ?")
-            params.append(kind)
-        if policy_name is not None:
-            clauses.append("policy_name = ?")
-            params.append(policy_name)
-        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
-        params.append(limit)
         db = self._get_read_db()
-        rows = db.execute(
-            f"SELECT {_SELECT_COLS} FROM maintenance_runs {where}ORDER BY id DESC LIMIT ?",
-            tuple(params),
-        ).fetchall()
+        rows = db.execute(_LATEST_SQL, (kind, kind, policy_name, policy_name, limit)).fetchall()
         return [
             {
                 "id": r[0],
