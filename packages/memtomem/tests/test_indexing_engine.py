@@ -3459,7 +3459,7 @@ class TestIndexFile:
         await components.index_engine.index_file(md_path)
 
         assert (
-            await components.storage.update_chunk_tags(
+            await components.storage.update_chunk_metadata(
                 await components.storage.list_chunks_by_source(md_path)
             )
             == 0
@@ -3468,6 +3468,70 @@ class TestIndexFile:
         assert (stats.indexed_chunks, stats.skipped_chunks, stats.deleted_chunks) == (0, 1, 0)
         after = await components.storage.list_chunks_by_source(md_path)
         assert [tuple(c.metadata.tags) for c in after] == [("bravo",)]
+
+    @staticmethod
+    def _dated(valid_to: str) -> str:
+        a = "alpha section body sentence here. " * 100 + "\n"
+        b = "beta section body sentence here. " * 100 + "\n"
+        return f"---\nvalid_to: {valid_to}\n---\n\n# t\n\n## a\n\n{a}\n## b\n\n{b}"
+
+    async def test_frontmatter_validity_edit_reaches_every_chunk(self, components, memory_dir):
+        """The window is file-level, so every chunk must follow it (#2140).
+
+        Only the chunk that carries the frontmatter changes text, so before the
+        fix a plain re-index refreshed that one row and left the rest of the
+        file filtered by a window it no longer declared.
+        """
+        md_path = memory_dir / "dated.md"
+        md_path.write_text(self._dated("2030-01-01"), encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        before = await components.storage.list_chunks_by_source(md_path)
+        assert len(before) > 2, "fixture must produce several chunks"
+        assert len({c.metadata.valid_to_unix for c in before}) == 1
+
+        md_path.write_text(self._dated("2040-01-01"), encoding="utf-8")
+        await components.index_engine.index_file(md_path)
+
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert len({c.metadata.valid_to_unix for c in after}) == 1, (
+            "every chunk must carry the same window; a split means rows were left behind"
+        )
+        assert after[0].metadata.valid_to_unix != before[0].metadata.valid_to_unix
+        # Exactly one row changes text — the chunk holding the frontmatter — so
+        # it is replaced. Every other row keeps its identity: those took the
+        # cheap metadata path rather than being rewritten.
+        assert len({c.id for c in before} - {c.id for c in after}) == 1
+
+    async def test_validity_edit_does_not_re_embed_untouched_sections(self, components, memory_dir):
+        md_path = memory_dir / "dated_embed.md"
+        md_path.write_text(self._dated("2030-01-01"), encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        chunk_count = len(await components.storage.list_chunks_by_source(md_path))
+        md_path.write_text(self._dated("2040-01-01"), encoding="utf-8")
+        stats = await components.index_engine.index_file(md_path)
+
+        # Only the frontmatter-bearing chunk changes text; the rest ride the
+        # cheap metadata path.
+        assert stats.indexed_chunks == 1
+        assert stats.skipped_chunks == chunk_count - 1
+        embedded = mock_embedder.embed_texts.await_args.args[0]
+        assert len(embedded) == 1, "untouched sections must not be re-embedded"
 
     async def test_forced_reindex_still_carries_fresh_tags(self, components, memory_dir):
         """The documented ``--force`` workaround keeps working after the fix."""

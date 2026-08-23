@@ -149,6 +149,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Editing a file's frontmatter validity window reaches every chunk of that
+  file.** `valid_from` / `valid_to` are file-level: the chunker stamps the same
+  window onto every chunk a file produces. The frontmatter is not part of a body
+  chunk's text, so editing it moved no body chunk's content hash, and a plain
+  re-index refreshed only the chunk that happens to carry the frontmatter while
+  every other row kept filtering by a window the file no longer declared.
+  Measured before the fix: a two-section file went from one window across five
+  chunks to four rows on the old window and one on the new. The validity window
+  now travels with tags on the metadata-only path added in #2124 — same cheap
+  write, no re-embed, ids and vectors kept — and `mm memory doctor` reports rows
+  whose window disagrees with the file as `stale_index`, including rows left
+  behind by an older version. Renamed with the widened scope:
+  `StorageBackend.update_chunk_tags` → `update_chunk_metadata` (unreleased, and
+  distinct from the same-named web route). (#2140)
 - **Editing a section's `> tags: [...]` blockquote reaches the DB on a plain
   re-index.** The blockquote is promoted to `metadata.tags` and stripped from
   the chunk text, so editing it moved neither the content hash nor the heading
@@ -168,8 +182,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   nothing was embedded. Note the file wins — a tag set only in the DB
   (`mem_tag_rename`, `mem_tag_replace`) is overwritten from the file on the next
   re-index of that section, the same way it already was whenever the section's
-  text changed. New backend method: `update_chunk_tags`; `get_chunk_index_state`
-  now returns `(hash, hierarchy, tags)`. (#2124)
+  text changed. New backend method: `update_chunk_metadata`;
+  `get_chunk_index_state` now returns the retrieval metadata alongside the hash
+  and hierarchy. (#2124)
 - **`mm index` deletes the surplus rows when a file collapses byte-identical
   chunks.** The differ decided a deletion by asking whether an existing row's
   content hash still appeared *anywhere* in the new chunk set, rather than

@@ -40,11 +40,13 @@ Checks (per configured ``memory_dir``):
   by ``start_line``, so stale ranges return the wrong neighbours). Reordering
   two sections is the pure case — same bytes, same hashes, different answer.
   The check asks what a plain re-index would write, so it sees exactly what the
-  indexer's own diff sees — which is why the two gaps it shipped with were both
-  closed in the differ rather than here: collapsing two byte-identical chunks
-  into one now deletes the orphan rows (#2123), and editing a section's
-  ``> tags: [...]`` blockquote is now a metadata-only update the diff reports
-  (#2124). Anything the differ still cannot see, this report cannot see either.
+  indexer's own diff sees — which is why every gap found so far was closed in
+  the differ rather than here: collapsing two byte-identical chunks into one now
+  deletes the orphan rows (#2123), and the columns a search reads that a chunk's
+  text cannot speak for — a section's ``> tags: [...]`` blockquote (#2124) and
+  the file-level frontmatter validity window (#2140) — are now metadata-only
+  updates the diff reports. Anything the differ still cannot see, this report
+  cannot see either.
 * **stale_index_blocked** — the same drift on a file the redaction guard
   would refuse. Split out because ``mm index`` *skips* such a file rather than
   failing it (the case #2076 measured), so "run `mm index`" would be advice
@@ -945,10 +947,35 @@ def _open_readonly_db(db_path: Path) -> sqlite3.Connection | None:
     return conn
 
 
+# The file-level validity window as stored: ``(valid_from_unix, valid_to_unix)``,
+# either bound possibly ``None`` for "unbounded". Read alongside tags because a
+# search filters on both and neither is derivable from the chunk's text.
+_Validity = tuple[int | None, int | None]
+
+
+def _coerce_validity(valid_from: object, valid_to: object) -> _Validity:
+    """Read the two validity columns, treating junk as unbounded.
+
+    A corrupt bound is not evidence that the file changed, so it degrades to
+    ``None`` — the same value an absent frontmatter window produces — rather
+    than to a sentinel that would report every such row as drift forever.
+    """
+
+    def one(value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return None
+
+    return one(valid_from), one(valid_to)
+
+
 def _read_chunk_states(
     db_path: Path, dir_key: str
-) -> dict[str, dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...]]]] | None:
-    """Per-source ``{chunk_id: (hash, hierarchy, start_line, end_line, tags)}``.
+) -> dict[str, dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...], _Validity]]] | None:
+    """Per-source ``{chunk_id: (hash, hierarchy, start, end, tags, validity)}``.
 
     A batched, read-only superset of ``SqliteBackend.get_chunk_index_state``:
     one prefix-scoped query per dir rather than one per file. Hash, hierarchy
@@ -958,7 +985,8 @@ def _read_chunk_states(
     chunks by ``start_line``. ``None`` means "couldn't read", which the caller
     reports as no finding rather than as drift.
 
-    Tags are appended last so the existing positional reads keep their meaning.
+    Retrieval metadata is appended after the line range so the existing
+    positional reads keep their meaning.
     """
     from memtomem.indexing.engine import norm_dir_prefix
 
@@ -969,16 +997,29 @@ def _read_chunk_states(
     try:
         rows = conn.execute(
             "SELECT source_file, id, content_hash, heading_hierarchy, start_line, end_line,"
-            " tags FROM chunks WHERE substr(source_file, 1, ?) = ?",
+            " tags, valid_from_unix, valid_to_unix"
+            " FROM chunks WHERE substr(source_file, 1, ?) = ?",
             (len(prefix), prefix),
         ).fetchall()
     except sqlite3.DatabaseError:
         return None
     finally:
         conn.close()
-    states: dict[str, dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...]]]] = {}
+    states: dict[
+        str, dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...], _Validity]]
+    ] = {}
     unreadable: set[str] = set()
-    for source_file, chunk_id, content_hash, heading_json, start_line, end_line, tags_json in rows:
+    for (
+        source_file,
+        chunk_id,
+        content_hash,
+        heading_json,
+        start_line,
+        end_line,
+        tags_json,
+        valid_from,
+        valid_to,
+    ) in rows:
         try:
             hierarchy = tuple(json.loads(heading_json))
         except (json.JSONDecodeError, TypeError):
@@ -1000,7 +1041,13 @@ def _read_chunk_states(
             # DB degrades store-wide.
             unreadable.add(source_file)
             continue
-        states.setdefault(source_file, {})[chunk_id] = (content_hash, hierarchy, *span, tags)
+        states.setdefault(source_file, {})[chunk_id] = (
+            content_hash,
+            hierarchy,
+            *span,
+            tags,
+            _coerce_validity(valid_from, valid_to),
+        )
     for source_file in unreadable:
         states.pop(source_file, None)
     return states
@@ -1032,13 +1079,14 @@ def _read_indexable_content(path: Path) -> str | None:
 
 def _read_source_state(
     db_path: Path, source_file: str
-) -> dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...]]] | None:
+) -> dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...], _Validity]] | None:
     """Re-read one source's chunk state, fresh. See :func:`_confirm_stale`.
 
-    Same shape as :func:`_read_chunk_states` — including the trailing tags, which
-    the differ needs to see a ``> tags: [...]`` edit (#2124). The two readers
-    must stay in step: this one re-confirms what that one reported, so a field
-    missing here would quietly un-report the drift it was checking.
+    Same shape as :func:`_read_chunk_states` — including the trailing retrieval
+    metadata, which the differ needs to see a ``> tags: [...]`` edit (#2124) or a
+    frontmatter validity-window edit (#2140). The two readers must stay in step:
+    this one re-confirms what that one reported, so a field missing here would
+    quietly un-report the drift it was checking.
     """
     from memtomem.storage.sqlite_helpers import norm_path
 
@@ -1047,16 +1095,25 @@ def _read_source_state(
         return None
     try:
         rows = conn.execute(
-            "SELECT id, content_hash, heading_hierarchy, start_line, end_line, tags FROM chunks"
-            " WHERE source_file = ?",
+            "SELECT id, content_hash, heading_hierarchy, start_line, end_line, tags,"
+            " valid_from_unix, valid_to_unix FROM chunks WHERE source_file = ?",
             (norm_path(Path(source_file)),),
         ).fetchall()
     except sqlite3.DatabaseError:
         return None
     finally:
         conn.close()
-    state: dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...]]] = {}
-    for chunk_id, content_hash, heading_json, start_line, end_line, tags_json in rows:
+    state: dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...], _Validity]] = {}
+    for (
+        chunk_id,
+        content_hash,
+        heading_json,
+        start_line,
+        end_line,
+        tags_json,
+        valid_from,
+        valid_to,
+    ) in rows:
         try:
             hierarchy = tuple(json.loads(heading_json))
         except (json.JSONDecodeError, TypeError):
@@ -1069,13 +1126,19 @@ def _read_source_state(
             tags = tuple(json.loads(tags_json))
         except (json.JSONDecodeError, TypeError):
             tags = ()
-        state[chunk_id] = (content_hash, hierarchy, *span, tags)
+        state[chunk_id] = (
+            content_hash,
+            hierarchy,
+            *span,
+            tags,
+            _coerce_validity(valid_from, valid_to),
+        )
     return state
 
 
 def _confirm_stale(
     engine: object,
-    state: dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...]]],
+    state: dict[str, tuple[str, tuple[str, ...], int, int, tuple[str, ...], _Validity]],
     path: Path,
 ) -> tuple[Literal["stale", "fresh", "skip"], str]:
     """Do this file's chunks still describe what is on disk?
@@ -1141,7 +1204,10 @@ def _confirm_stale(
     except Exception:  # pragma: no cover - defensive: a chunker crash is not a finding
         return "skip", decision
     try:
-        diff = compute_diff({cid: (st[0], st[1], st[4]) for cid, st in state.items()}, new_chunks)
+        diff = compute_diff(
+            {cid: (st[0], st[1], st[4], st[5][0], st[5][1]) for cid, st in state.items()},
+            new_chunks,
+        )
     except (ValueError, TypeError):
         # A chunk id that isn't a UUID is corrupt storage state, which other
         # tooling owns; a read-only diagnostic must not crash on it, and
@@ -1149,8 +1215,9 @@ def _confirm_stale(
         return "skip", decision
     if diff.to_upsert or diff.to_delete or diff.metadata_only:
         # ``metadata_only`` is drift a re-index does clear: the chunk text is
-        # identical but its ``> tags: [...]`` blockquote moved, and the row's
-        # tags are what ``mem_search(tag_filter=...)`` reads (#2124).
+        # identical but a column the search reads moved — its ``> tags: [...]``
+        # blockquote (#2124) or the file's frontmatter validity window (#2140),
+        # both stamped on from outside the text the hash covers.
         return "stale", decision
     # Hash-matched chunks whose *position* moved are drift too. ``compute_diff``
     # calls them unchanged (it matches on content), but a re-index writes their
