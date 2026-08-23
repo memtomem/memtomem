@@ -785,6 +785,71 @@ class TestAutoTag:
         stats = await auto_tag_storage(storage, overwrite=True)
         assert stats.tagged_chunks == 1
 
+    async def test_auto_tag_storage_invalidates_when_it_writes(self, storage):
+        """#2141: the pass rewrites exactly the column a tag-filtered search
+        keys on, so a caller that owns a live pipeline must see its cache
+        dropped — every call site used to leave it warm."""
+        from types import SimpleNamespace
+
+        calls = {"n": 0}
+        pipeline = SimpleNamespace(invalidate_cache=lambda: calls.__setitem__("n", calls["n"] + 1))
+        chunk = _chunk("Python programming language for data", source="inv.md")
+        await storage.upsert_chunks([chunk])
+
+        stats = await auto_tag_storage(storage, max_tags=3, search_pipeline=pipeline)
+
+        assert stats.tagged_chunks == 1
+        assert calls["n"] == 1
+
+    async def test_auto_tag_storage_does_not_invalidate_without_a_write(self, storage):
+        """A dry run and a pass that changes nothing stay free — the gate is
+        real upserts, not the ``tagged_chunks`` counter (a dry run reports
+        chunks as tagged without writing them)."""
+        from types import SimpleNamespace
+
+        calls = {"n": 0}
+        pipeline = SimpleNamespace(invalidate_cache=lambda: calls.__setitem__("n", calls["n"] + 1))
+        chunk = _chunk("dry run content for tagging", source="inv_dry.md")
+        await storage.upsert_chunks([chunk])
+
+        stats = await auto_tag_storage(storage, dry_run=True, search_pipeline=pipeline)
+
+        assert stats.tagged_chunks >= 1
+        assert calls["n"] == 0
+
+    async def test_auto_tag_storage_invalidates_after_a_partial_failure(self, storage):
+        """The upserts already committed are durable and searchable, so a pass
+        that dies partway through must still drop the cache — hence the
+        ``finally``."""
+        from types import SimpleNamespace
+
+        calls = {"n": 0}
+        pipeline = SimpleNamespace(invalidate_cache=lambda: calls.__setitem__("n", calls["n"] + 1))
+        await storage.upsert_chunks(
+            [
+                _chunk("Python programming language data", source="inv_a.md"),
+                _chunk("Kubernetes cluster deployment scaling", source="inv_b.md"),
+            ]
+        )
+        real_upsert = storage.upsert_chunks
+        seen = {"n": 0}
+
+        async def flaky_upsert(chunks):
+            seen["n"] += 1
+            if seen["n"] > 1:
+                raise RuntimeError("store blip")
+            return await real_upsert(chunks)
+
+        storage.upsert_chunks = flaky_upsert
+        try:
+            with pytest.raises(RuntimeError, match="store blip"):
+                await auto_tag_storage(storage, max_tags=3, search_pipeline=pipeline)
+        finally:
+            storage.upsert_chunks = real_upsert
+
+        assert seen["n"] == 2
+        assert calls["n"] == 1
+
     async def test_auto_tag_storage_dry_run(self, storage):
         """dry_run=True should not write to storage."""
         chunk = _chunk("dry run content for tagging test", source="dry.md")

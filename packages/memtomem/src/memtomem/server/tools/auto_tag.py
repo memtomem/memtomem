@@ -39,6 +39,7 @@ async def mem_auto_tag(
         overwrite=overwrite,
         dry_run=dry_run,
         llm_provider=app.llm_provider,
+        search_pipeline=app.search_pipeline,
     )
 
     mode = " (dry-run)" if dry_run else ""

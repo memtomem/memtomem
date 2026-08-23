@@ -42,6 +42,7 @@ async def list_tags(
 async def run_auto_tag(
     body: AutoTagRequest,
     storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> AutoTagResponse:
     """Auto-extract keyword tags for chunks. Set dry_run=false to persist tags.
 
@@ -59,6 +60,7 @@ async def run_auto_tag(
         overwrite=body.overwrite,
         dry_run=body.dry_run,
         sample_limit=sample_limit,
+        search_pipeline=search_pipeline,
     )
     return AutoTagResponse(
         total_chunks=stats.total_chunks,

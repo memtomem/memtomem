@@ -101,6 +101,20 @@ async def mem_index(
             path_scope="explicit",
         )
 
+        # #2141: the search result cache is keyed on the query and filters
+        # alone, never on content, so an index run that rewrote a chunk — or
+        # only its tags / validity window / line range, which the counters
+        # report as ``skipped`` — would keep answering from the pre-index
+        # cache for up to ``search.cache_ttl``. Gated on the engine's
+        # ``mutated`` flag so a steady-state re-index stays free.
+        #
+        # Immediately after the engine returns, ahead of every other await:
+        # the chunks are already durable here, and a cancellation landing on
+        # a later await would escape the ``except Exception`` handlers around
+        # it and leave committed writes behind a stale cache.
+        if stats.mutated:
+            app.search_pipeline.invalidate_cache()
+
         # No-ops on its own when nothing new was written, which covers the
         # zero-file and unchanged-re-index paths below.
         await record_write_provenance(
@@ -196,6 +210,10 @@ async def mem_index(
             app.storage,
             source_filter=str(target) if target.is_file() else None,
             max_tags=5,
+            # #2141: these tag upserts land *after* the index invalidation
+            # above, so without their own drop a search running in between
+            # would re-warm the cache and freeze the pre-tag rows in it.
+            search_pipeline=app.search_pipeline,
         )
         result += f"\n- Auto-tagged: {tagged} chunks"
 

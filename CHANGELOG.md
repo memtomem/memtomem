@@ -149,6 +149,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Re-index, then search, now sees the re-index.** Search results are cached
+  for `search.cache_ttl` (30s) and keyed on the query and its filters, never on
+  content. Every other write surface dropped that cache; the indexing surfaces
+  never did, so in a long-lived process — the MCP server, `mm web`, `mm shell`,
+  the file watcher, the LangGraph store — a query warmed just before an index
+  run kept answering from the pre-index cache for up to the TTL. That made the
+  "re-index, then search" remediation `mm memory doctor` prints for
+  `stale_index` unobservable in the same session, which is exactly when a user
+  checks whether the fix worked. Short-lived CLI runs were never affected (each
+  is a fresh process with an empty cache). The engine now reports whether a run
+  actually committed a search-visible write, and every long-lived surface drops
+  the cache on it. The flag is not derivable from the counters: a tag-only
+  (#2124), validity-only (#2140), or line-range-only rewrite mutates exactly
+  the columns search filters on while being reported as `skipped`.
+
 - **Editing a file's frontmatter validity window reaches every chunk of that
   file.** `valid_from` / `valid_to` are file-level: the chunker stamps the same
   window onto every chunk a file produces. The frontmatter is not part of a body

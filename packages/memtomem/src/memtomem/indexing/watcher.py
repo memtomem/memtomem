@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from memtomem.indexing.engine import IndexEngine
     from memtomem.models import IndexingStats
+    from memtomem.search.pipeline import SearchPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +131,15 @@ class FileWatcher:
         index_engine: IndexEngine,
         config: IndexingConfig,
         debounce_ms: int = 1500,
+        *,
+        search_pipeline: SearchPipeline | None = None,
     ) -> None:
         self._engine = index_engine
         self._config = config
+        # Optional so the many test constructors keep working; both production
+        # call sites (server/context.py, web/app.py) pass the live pipeline so
+        # a watched-file edit drops the search result cache (#2141).
+        self._search_pipeline = search_pipeline
         self._debounce_s = debounce_ms / 1000.0
         self._observer: BaseObserver | None = None
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
@@ -141,6 +148,18 @@ class FileWatcher:
         self._handler: _MarkdownEventHandler | None = None
         self._watches: dict[Path, ObservedWatch] = {}
         self._reconfigure_lock = asyncio.Lock()
+
+    def _invalidate_if_mutated(self, stats: IndexingStats) -> None:
+        """Drop the search result cache when a run actually wrote something.
+
+        The cache is keyed on query + filters, never on content (#2141), so
+        without this a query warmed just before a watched-file edit keeps
+        answering from the pre-edit cache for up to ``search.cache_ttl``.
+        Gated on ``mutated`` rather than the counters because a tag-only or
+        validity-only edit is deliberately reported as ``skipped``.
+        """
+        if self._search_pipeline is not None and stats.mutated:
+            self._search_pipeline.invalidate_cache()
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -326,6 +345,9 @@ class FileWatcher:
                 return indexed
 
             indexed += stats.indexed_chunks
+            # Per attempt, not once at the end: a retry that later fails must
+            # not swallow the writes an earlier attempt already committed.
+            self._invalidate_if_mutated(stats)
             self._log_backfill_stats(d, stats, reported)
             if not stats.retryable_errors:
                 return indexed
@@ -463,6 +485,7 @@ class FileWatcher:
 
         try:
             stats = await self._engine.index_file(file_path)
+            self._invalidate_if_mutated(stats)
             if stats.deleted_chunks and not stats.indexed_chunks and not file_path.exists():
                 # #1566: pure delete pass (file gone from disk) — "Auto-reindexed
                 # ... indexed=0 ... deleted=N" reads as a no-op in logs a user

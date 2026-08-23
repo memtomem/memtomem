@@ -494,7 +494,11 @@ class AppContext:
                 # watcher/schedulers/watchdog walk the index or re-embed
                 # chunks and would crash on the missing ``chunks_vec`` table.
                 # Recovery happens via ``mem_embedding_reset``.
-                watcher = FileWatcher(comp.index_engine, self.config.indexing)
+                watcher = FileWatcher(
+                    comp.index_engine,
+                    self.config.indexing,
+                    search_pipeline=comp.search_pipeline,
+                )
                 if comp.embedding_broken is None:
                     await watcher.start()
 

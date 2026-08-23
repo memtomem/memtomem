@@ -305,3 +305,12 @@ class IndexingStats:
     # Appended last for positional construction compatibility.
     exempted_files: int = 0
     exempted_paths: tuple[str, ...] = ()
+
+    # #2141: True iff this run committed at least one durable, search-visible
+    # chunk write (delete / upsert / line-range refresh / metadata-only
+    # refresh). The counters cannot answer this — metadata-only rows are
+    # reported as ``skipped_chunks`` (#2124/#2140) and the line-range refresh
+    # is reported nowhere — so long-lived callers gate their
+    # ``SearchPipeline.invalidate_cache()`` on this flag instead.
+    # Appended last for positional construction compatibility.
+    mutated: bool = False

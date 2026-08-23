@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from memtomem.llm.base import LLMProvider
+    from memtomem.search.pipeline import SearchPipeline
     from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
@@ -294,6 +295,7 @@ async def auto_tag_storage(
     dry_run: bool = False,
     llm_provider: LLMProvider | None = None,
     sample_limit: int = 0,
+    search_pipeline: SearchPipeline | None = None,
 ) -> AutoTagStats:
     """Apply keyword-based tags to chunks in storage.
 
@@ -310,6 +312,13 @@ async def auto_tag_storage(
         max_tags: Maximum tags to extract per chunk (default 5).
         overwrite: If False (default), skip chunks that already have tags.
         dry_run: If True, compute tags but do NOT write to storage.
+        search_pipeline: When given, its result cache is dropped after a pass
+            that wrote at least one chunk. Optional so the storage-only
+            callers stay callable; every caller holding a live pipeline
+            should pass it (#2141). Mirrors the invalidation policy
+            ``services.tag_management`` applies to the other tag-write
+            surfaces — this one rewrites exactly the column a tag-filtered
+            search keys on.
 
     Returns:
         AutoTagStats with total_chunks, tagged_chunks, skipped_chunks counts.
@@ -330,88 +339,99 @@ async def auto_tag_storage(
     total = 0
     tagged = 0
     skipped = 0
+    written = 0
     samples: list[AutoTagSample] = []
 
-    for source in sorted(sources):
-        chunks: list[Chunk] = await storage.list_chunks_by_source(source, limit=10_000)
-        if namespace_filter is not None:
-            chunks = [c for c in chunks if c.metadata.namespace == namespace_filter]
-        for chunk in chunks:
-            total += 1
+    try:
+        for source in sorted(sources):
+            chunks: list[Chunk] = await storage.list_chunks_by_source(source, limit=10_000)
+            if namespace_filter is not None:
+                chunks = [c for c in chunks if c.metadata.namespace == namespace_filter]
+            for chunk in chunks:
+                total += 1
 
-            # Skip chunks that already have tags unless overwrite is requested
-            if chunk.metadata.tags and not overwrite:
-                skipped += 1
-                continue
+                # Skip chunks that already have tags unless overwrite is requested
+                if chunk.metadata.tags and not overwrite:
+                    skipped += 1
+                    continue
 
-            new_tags = await _extract_tags_with_fallback(
-                chunk.content,
-                max_tags=max_tags,
-                heading_hierarchy=chunk.metadata.heading_hierarchy,
-                llm_provider=llm_provider,
-            )
-            if not new_tags:
-                skipped += 1
-                continue
-
-            if not dry_run:
-                # Lock-narrow: keep the slow LLM/keyword extraction outside
-                # the lock and only serialize the read-modify-write window
-                # against ``services.tag_management`` (#688). The re-read
-                # inside the lock guards against a concurrent rename /
-                # delete / merge slipping in between our outer
-                # ``list_chunks_by_source`` and the upsert — without it,
-                # ``auto_tag`` would silently overwrite a tag mutation that
-                # landed during the LLM call.
-                async with storage._tag_write_lock:
-                    latest = await storage.get_chunk(chunk.id)
-                    if latest is None:
-                        # Deleted while we were extracting; skip cleanly.
-                        skipped += 1
-                        total -= 1  # rebalance: the chunk no longer exists
-                        continue
-                    # Copy-with-override: spread every existing metadata
-                    # field then replace only ``tags``. The previous
-                    # explicit-list shape silently dropped any field not
-                    # enumerated here — including ``overlap_before/after``,
-                    # ``parent_context``, ``file_context``, and the
-                    # temporal-validity columns (``valid_from_unix`` /
-                    # ``valid_to_unix``). Mirrors
-                    # ``web/routes/chunks.py:update_chunk_tags``.
-                    new_meta = latest.metadata.__class__(
-                        **{
-                            **{
-                                f: getattr(latest.metadata, f)
-                                for f in latest.metadata.__dataclass_fields__
-                            },
-                            "tags": tuple(new_tags),
-                        }
-                    )
-                    updated = Chunk(
-                        content=latest.content,
-                        metadata=new_meta,
-                        id=latest.id,
-                        content_hash=latest.content_hash,
-                        embedding=latest.embedding,
-                        created_at=latest.created_at,
-                        updated_at=datetime.now(timezone.utc),
-                    )
-                    await storage.upsert_chunks([updated])
-
-            tagged += 1
-            if sample_limit > 0 and len(samples) < sample_limit:
-                preview = chunk.content[:_SAMPLE_PREVIEW_MAX]
-                if len(chunk.content) > _SAMPLE_PREVIEW_MAX:
-                    preview += "…"
-                samples.append(
-                    AutoTagSample(
-                        chunk_id=str(chunk.id),
-                        source_file=str(chunk.metadata.source_file),
-                        content_preview=preview,
-                        current_tags=tuple(chunk.metadata.tags or ()),
-                        suggested_tags=tuple(new_tags),
-                    )
+                new_tags = await _extract_tags_with_fallback(
+                    chunk.content,
+                    max_tags=max_tags,
+                    heading_hierarchy=chunk.metadata.heading_hierarchy,
+                    llm_provider=llm_provider,
                 )
+                if not new_tags:
+                    skipped += 1
+                    continue
+
+                if not dry_run:
+                    # Lock-narrow: keep the slow LLM/keyword extraction outside
+                    # the lock and only serialize the read-modify-write window
+                    # against ``services.tag_management`` (#688). The re-read
+                    # inside the lock guards against a concurrent rename /
+                    # delete / merge slipping in between our outer
+                    # ``list_chunks_by_source`` and the upsert — without it,
+                    # ``auto_tag`` would silently overwrite a tag mutation that
+                    # landed during the LLM call.
+                    async with storage._tag_write_lock:
+                        latest = await storage.get_chunk(chunk.id)
+                        if latest is None:
+                            # Deleted while we were extracting; skip cleanly.
+                            skipped += 1
+                            total -= 1  # rebalance: the chunk no longer exists
+                            continue
+                        # Copy-with-override: spread every existing metadata
+                        # field then replace only ``tags``. The previous
+                        # explicit-list shape silently dropped any field not
+                        # enumerated here — including ``overlap_before/after``,
+                        # ``parent_context``, ``file_context``, and the
+                        # temporal-validity columns (``valid_from_unix`` /
+                        # ``valid_to_unix``). Mirrors
+                        # ``web/routes/chunks.py:update_chunk_tags``.
+                        new_meta = latest.metadata.__class__(
+                            **{
+                                **{
+                                    f: getattr(latest.metadata, f)
+                                    for f in latest.metadata.__dataclass_fields__
+                                },
+                                "tags": tuple(new_tags),
+                            }
+                        )
+                        updated = Chunk(
+                            content=latest.content,
+                            metadata=new_meta,
+                            id=latest.id,
+                            content_hash=latest.content_hash,
+                            embedding=latest.embedding,
+                            created_at=latest.created_at,
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                        await storage.upsert_chunks([updated])
+                        written += 1
+
+                tagged += 1
+                if sample_limit > 0 and len(samples) < sample_limit:
+                    preview = chunk.content[:_SAMPLE_PREVIEW_MAX]
+                    if len(chunk.content) > _SAMPLE_PREVIEW_MAX:
+                        preview += "…"
+                    samples.append(
+                        AutoTagSample(
+                            chunk_id=str(chunk.id),
+                            source_file=str(chunk.metadata.source_file),
+                            content_preview=preview,
+                            current_tags=tuple(chunk.metadata.tags or ()),
+                            suggested_tags=tuple(new_tags),
+                        )
+                    )
+    finally:
+        # In ``finally``: a pass that tagged some chunks and then failed — or
+        # was cancelled — has already committed those upserts, and those rows
+        # are exactly what a tag-filtered search caches. ``written`` counts
+        # real upserts, so a dry run and a pass that changed nothing stay
+        # free (#2141).
+        if written and search_pipeline is not None:
+            search_pipeline.invalidate_cache()
 
     return AutoTagStats(
         total_chunks=total,

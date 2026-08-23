@@ -374,6 +374,12 @@ class MemtomemStore:
         except TimeoutError:
             return {"error": "locked", "detail": f"{target} is locked by another process; retry."}
 
+        # #2141: the store holds one ``Components`` — and one warmed search
+        # cache — for its whole lifetime, so an un-invalidated write stays
+        # invisible to ``search`` for up to ``search.cache_ttl``.
+        if stats.mutated:
+            comp.search_pipeline.invalidate_cache()
+
         return {
             "file": str(target),
             "indexed_chunks": stats.indexed_chunks,
@@ -397,6 +403,8 @@ class MemtomemStore:
         """Delete a chunk by UUID."""
         comp = await self._ensure_init()
         deleted = await comp.storage.delete_chunks([UUID(chunk_id)])
+        if deleted:
+            comp.search_pipeline.invalidate_cache()
         return deleted > 0
 
     # ── Sessions (Episodic Memory) ────────────────────────────────────────
@@ -603,6 +611,8 @@ class MemtomemStore:
             recursive=recursive,
             namespace=namespace,
         )
+        if stats.mutated:
+            comp.search_pipeline.invalidate_cache()
         return {
             "total_files": stats.total_files,
             "indexed_chunks": stats.indexed_chunks,
