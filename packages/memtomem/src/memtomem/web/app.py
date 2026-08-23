@@ -490,7 +490,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # ``server/context.py``; without this ``mm web`` ran with no fs
         # watcher at all.
         if comp.embedding_broken is None:
-            watcher = FileWatcher(comp.index_engine, comp.config.indexing)
+            watcher = FileWatcher(
+                comp.index_engine,
+                comp.config.indexing,
+                search_pipeline=comp.search_pipeline,
+            )
             await watcher.start()
 
         # Publish one coherent state only after every startup step succeeded.

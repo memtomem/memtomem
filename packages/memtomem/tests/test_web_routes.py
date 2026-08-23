@@ -8,6 +8,7 @@ full component initialization (embedding provider, SQLite, etc.).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import stat
@@ -225,6 +226,8 @@ def app():
 
     # -- index engine mock --
     index_engine = AsyncMock()
+    # ``mutated=True`` mirrors what an engine that indexed chunks really
+    # returns; the index routes gate their cache invalidation on it (#2141).
     index_engine.index_path = AsyncMock(
         return_value=IndexingStats(
             total_files=1,
@@ -233,6 +236,7 @@ def app():
             skipped_chunks=0,
             deleted_chunks=0,
             duration_ms=100.0,
+            mutated=True,
         )
     )
     index_engine.index_file = AsyncMock(
@@ -243,6 +247,7 @@ def app():
             skipped_chunks=0,
             deleted_chunks=0,
             duration_ms=50.0,
+            mutated=True,
         )
     )
     # Sync helpers powering the preview-namespace route. Default to a
@@ -4726,10 +4731,39 @@ class TestRemoveMemoryDirChunkCleanup:
         assert under_target_b in deleted_paths
         assert under_keep not in deleted_paths
 
+    # ---------------------------------------------------------------------------
+    # POST /api/upload — redaction guard wire-in
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# POST /api/upload — redaction guard wire-in
-# ---------------------------------------------------------------------------
+    async def test_partial_sweep_failure_still_invalidates_the_committed_deletes(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2141 class: the first source's chunks are gone from the store even
+        though a later source blows the request up, so a warmed query must not
+        keep returning them."""
+        target = tmp_path / "going-away"
+        keep = tmp_path / "keep-this"
+        target.mkdir()
+        keep.mkdir()
+        app.state.config.indexing.memory_dirs = [target, keep]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (target / "a.md", 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
+            (target / "b.md", 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
+        ]
+        app.state.storage.delete_by_source = AsyncMock(side_effect=[2, RuntimeError("store blip")])
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        with (
+            patch("memtomem.web.routes.system.save_config_overrides"),
+            pytest.raises(RuntimeError, match="store blip"),
+        ):
+            await client.post(
+                "/api/memory-dirs/remove",
+                json={"path": str(target), "delete_chunks": True},
+            )
+
+        assert app.state.storage.delete_by_source.await_count == 2
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
 
 
 class TestUploadRedaction:
@@ -5897,3 +5931,208 @@ class TestDeleteSourceParity:
         )
 
         probe.assert_awaited_once()
+
+
+class TestIndexRoutesInvalidateSearchCache:
+    """#2141: every long-lived index surface must drop the search result TTL
+    cache. The web process holds one pipeline for its lifetime, so a query
+    warmed before an index run would otherwise keep answering from the
+    pre-index cache for up to ``search.cache_ttl``."""
+
+    @staticmethod
+    def _unmutated(**over):
+        base = dict(
+            total_files=1,
+            total_chunks=2,
+            indexed_chunks=0,
+            skipped_chunks=2,
+            deleted_chunks=0,
+            duration_ms=1.0,
+        )
+        base.update(over)
+        return IndexingStats(**base)
+
+    async def test_trigger_index_invalidates(self, app, client: AsyncClient):
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+
+        assert resp.status_code == 200
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    async def test_trigger_index_steady_state_does_not_invalidate(self, app, client: AsyncClient):
+        app.state.index_engine.index_path = AsyncMock(return_value=self._unmutated())
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+
+        assert resp.status_code == 200
+        assert app.state.search_pipeline.invalidate_cache.call_count == 0
+
+    async def test_reindex_all_invalidates_per_root(self, app, client: AsyncClient, tmp_path):
+        app.state.config.indexing.memory_dirs = [str(tmp_path)]
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.post("/api/reindex")
+
+        assert resp.status_code == 200
+        assert app.state.search_pipeline.invalidate_cache.call_count >= 1
+
+    async def test_index_stream_invalidates_even_without_a_complete_event(
+        self, app, client: AsyncClient
+    ):
+        """Unconditional and in ``finally``: a client can disconnect after a
+        file's chunk transaction commits but before its progress event is
+        produced, so the flag never reaches the route. Dropping a still-valid
+        cache costs one cold search; keeping a stale one hides a write."""
+
+        async def _one_event(*args, **kwargs):
+            yield {"type": "discovery", "files_total": 1}
+
+        app.state.index_engine.index_path_stream = _one_event
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.post("/api/index/stream", json={"path": "/tmp/memories"})
+
+        assert resp.status_code == 200
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    async def test_add_memory_dir_auto_index_invalidates(self, app, client: AsyncClient, tmp_path):
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": True},
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    async def test_delete_chunk_invalidates(self, app, client: AsyncClient, tmp_path: Path):
+        chunk = _make_test_chunk(source=str(tmp_path / "missing.md"))
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 200
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    async def test_delete_chunk_invalidates_when_verification_fails(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """The commit-then-500 shape: the rows are gone but the verification
+        read fails, so the caller sees an error. A warmed query must not keep
+        returning the deleted chunk."""
+        chunk = _make_test_chunk(source=str(tmp_path / "missing.md"))
+        # The row is still present on the read before the delete, so the
+        # route deletes it; the *post-delete* verification read is what blows
+        # up — rows gone, caller gets a 500.
+        app.state.storage.get_chunk = AsyncMock(
+            side_effect=[chunk, chunk, chunk, chunk, RuntimeError("store blip")]
+        )
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code >= 500
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    async def test_delete_chunk_refusal_inside_the_guarded_region_does_not_invalidate(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """A refusal raised *after* the ``try`` opens but before the first
+        write — here unusable source-line provenance — must leave the flag
+        disarmed. ``invalidate_cache`` also drops the LLM query-expansion
+        cache, so flushing on a pure refusal is pointless churn."""
+        source = tmp_path / "present.md"
+        source.write_text("# Heading\n\nBody.\n", encoding="utf-8")
+        chunk = _make_test_chunk(source=str(source))
+        # Unusable provenance -> 409 from inside the guarded region, no write.
+        chunk = dataclasses.replace(
+            chunk, metadata=dataclasses.replace(chunk.metadata, start_line=0)
+        )
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
+
+        assert resp.status_code == 409, resp.text
+        app.state.storage.delete_chunks.assert_not_called()
+        assert app.state.search_pipeline.invalidate_cache.call_count == 0
+
+    async def test_reindex_all_keeps_earlier_roots_invalidation_when_a_later_root_raises(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Per root, not once after the loop: the first root's committed write
+        must be reflected even though the second root blows the request up."""
+        first = tmp_path / "one"
+        second = tmp_path / "two"
+        first.mkdir()
+        second.mkdir()
+        app.state.config.indexing.memory_dirs = [str(first), str(second)]
+        mutated = IndexingStats(
+            total_files=1,
+            total_chunks=1,
+            indexed_chunks=1,
+            skipped_chunks=0,
+            deleted_chunks=0,
+            duration_ms=1.0,
+            mutated=True,
+        )
+        app.state.index_engine.index_path = AsyncMock(
+            side_effect=[mutated, RuntimeError("engine blew up")]
+        )
+        app.state.search_pipeline.invalidate_cache.reset_mock()
+
+        with pytest.raises(RuntimeError, match="engine blew up"):
+            await client.post("/api/reindex")
+
+        # Both roots were attempted — the second is what failed, so the
+        # single invalidation belongs to the first.
+        assert app.state.index_engine.index_path.await_count == 2
+        assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    async def test_index_stream_invalidates_when_the_generator_is_closed_mid_run(self, app):
+        """The case the ``mutated`` flag can never survive, and the reason the
+        ``finally`` is unconditional: the consumer goes away after a file's
+        chunk transaction commits but before the run reports anything about
+        it. Driven at the route level — an in-process ASGI transport drains
+        the generator instead of cancelling it, so going through the HTTP
+        client would pass for the wrong reason."""
+        from memtomem.web.routes.system import index_stream
+        from memtomem.web.schemas import IndexRequest
+
+        committed = {"files": 0}
+
+        async def _hangs_after_a_committed_file(*args, **kwargs):
+            # The engine committed a file's chunk transaction, but the event
+            # that would have carried ``mutated`` never reaches the route —
+            # deliberately omitted here, because on a real cancellation it
+            # never would. An implementation that gated the ``finally`` on an
+            # observed flag would wrongly pass with ``mutated: True`` present.
+            committed["files"] += 1
+            yield {"type": "progress", "file": "a.md"}
+            await asyncio.sleep(30)  # pragma: no cover — closed before this returns
+
+        engine = SimpleNamespace(index_path_stream=_hangs_after_a_committed_file)
+        pipeline = app.state.search_pipeline
+        pipeline.invalidate_cache.reset_mock()
+
+        response = await index_stream(
+            IndexRequest(path="/tmp/memories"),
+            index_engine=engine,
+            search_pipeline=pipeline,
+        )
+        body = response.body_iterator
+        first = await body.__anext__()
+        assert "progress" in first
+        await body.aclose()
+
+        assert committed["files"] == 1
+        assert pipeline.invalidate_cache.call_count == 1

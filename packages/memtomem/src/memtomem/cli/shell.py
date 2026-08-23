@@ -220,6 +220,10 @@ async def _cmd_add(comp, args: list[str]) -> None:
     append_entry(target, content)
     # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
     stats = await comp.index_engine.index_file(target, already_scanned=True)
+    # #2141: unlike one-shot ``mm add``, the shell keeps one process — and one
+    # warmed search cache — alive across commands.
+    if stats.mutated:
+        comp.search_pipeline.invalidate_cache()
 
     click.secho(f"Added to {target.name} ({stats.indexed_chunks} chunks indexed)", fg="green")
 
@@ -317,6 +321,8 @@ async def _cmd_index(comp, args: list[str]) -> None:
             fg="yellow",
         )
         return
+    if stats.mutated:
+        comp.search_pipeline.invalidate_cache()
     click.secho(
         f"Done: {stats.total_files} files, {stats.indexed_chunks} chunks ({stats.duration_ms}ms)",
         fg="green",

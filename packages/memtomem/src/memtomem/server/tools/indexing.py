@@ -110,6 +110,17 @@ async def mem_index(
             stats=stats,
         )
 
+        # #2141: the search result cache is keyed on the query and filters
+        # alone, never on content, so an index run that rewrote a chunk — or
+        # only its tags / validity window / line range, which the counters
+        # report as ``skipped`` — would keep answering from the pre-index
+        # cache for up to ``search.cache_ttl``. Gated on the engine's
+        # ``mutated`` flag so a steady-state re-index stays free. Inside
+        # ``write_in_flight`` on purpose: the drop must be visible before the
+        # tool reports the run as finished.
+        if stats.mutated:
+            app.search_pipeline.invalidate_cache()
+
     errors, retryable_errors = _partition_index_errors(stats.errors, stats.retryable_errors)
 
     if stats.errors and stats.total_files == 0:

@@ -608,6 +608,16 @@ class IndexFileResult(_IndexFileBase, total=False):
     # written at all. Collected only when the embedder is supposed to produce
     # vectors, so a BM25-only store carries no id lists.
     unchanged_chunk_ids: list[str]
+    # True iff this file committed a durable, search-visible chunk write:
+    # a delete, an upsert, a line-range refresh, or a metadata-only refresh
+    # (tags #2124 / validity window #2140). Deliberately NOT derivable from
+    # the counters: metadata-only rows are reported as ``skipped`` and the
+    # line-range refresh is reported nowhere, so ``indexed + deleted > 0``
+    # misses exactly the writes search filters on. Consumers use it to decide
+    # whether to drop the search result cache (#2141). Absent on every path
+    # that returns before the transaction commits — read it with
+    # ``.get("mutated", False)``.
+    mutated: bool
 
 
 class IndexEngine:
@@ -954,6 +964,7 @@ class IndexEngine:
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
             chunks_missing_vectors=missing_vectors,
+            mutated=any(r.get("mutated", False) for r in file_results),
         )
 
     async def resolve_namespaces_for(
@@ -1378,6 +1389,7 @@ class IndexEngine:
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
             chunks_missing_vectors=await self._count_missing_vectors(self._unchanged_ids([result])),
+            mutated=result.get("mutated", False),
         )
 
     async def is_duplicate(
@@ -1760,7 +1772,14 @@ class IndexEngine:
                 deleted,
                 file_path,
             )
-        return {"total": 0, "indexed": 0, "skipped": 0, "deleted": deleted, "errors": []}
+        return {
+            "total": 0,
+            "indexed": 0,
+            "skipped": 0,
+            "deleted": deleted,
+            "errors": [],
+            "mutated": deleted > 0,
+        }
 
     async def _index_file(
         self,
@@ -1995,7 +2014,14 @@ class IndexEngine:
             # collapse, and refusing here would strand its rows as
             # permanently searchable content for a file with no content.
             deleted = await self._storage.delete_by_source(file_path)
-            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": deleted, "errors": []}
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": deleted,
+                "errors": [],
+                "mutated": deleted > 0,
+            }
 
         if ns_decision.reason == "mixed_force_refused":
             # Reached only when a namespace-bearing upsert would follow. The
@@ -2198,17 +2224,30 @@ class IndexEngine:
             # Both buckets keep their stored vector, and a sibling edit can have
             # shifted either one's lines, so both need the cheap range refresh.
             hash_matched = diff_result.unchanged + diff_result.metadata_only
+            ranges_changed = 0
             if hash_matched:
-                await self._storage.update_chunk_line_ranges(hash_matched)
+                ranges_changed = await self._storage.update_chunk_line_ranges(hash_matched)
 
+            metadata_changed = 0
             if diff_result.metadata_only:
                 # Content identical, retrieval metadata moved: rewrite the
                 # metadata columns alone — tags (#2124) and the validity window
                 # (#2140) — rather than re-embedding the chunk.
-                await self._storage.update_chunk_metadata(diff_result.metadata_only)
+                metadata_changed = await self._storage.update_chunk_metadata(
+                    diff_result.metadata_only
+                )
 
             if diff_result.to_upsert:
                 await self._storage.upsert_chunks(diff_result.to_upsert)
+
+        # Both metadata mutators return the count of rows they actually
+        # changed, so a run whose diff bucketed rows as metadata-only but
+        # found every column already current still reports ``mutated=False``
+        # (#2141). ``to_delete``/``to_upsert`` are non-empty only when there
+        # is real work, so their length is signal enough.
+        mutated = bool(
+            diff_result.to_delete or diff_result.to_upsert or ranges_changed or metadata_changed
+        )
 
         # The namespace write is committed as of here. Capture the decision
         # now, before the auxiliary work below, so a failure in something that
@@ -2224,6 +2263,7 @@ class IndexEngine:
             "skipped": len(diff_result.unchanged) + len(diff_result.metadata_only),
             "deleted": len(diff_result.to_delete),
             "errors": [],
+            "mutated": mutated,
             "new_chunk_ids": truly_new_chunk_ids,
             "namespace_decision": ns_decision,
             "namespace_written": bool(diff_result.to_upsert),
@@ -2419,6 +2459,7 @@ class IndexEngine:
                 "exempted": 0,
                 "blocked_project_shared": 0,
             }
+            any_mutated = False
             all_errors: list[str] = []
             retryable_errors: list[str] = []
             blocked_paths: list[str] = []
@@ -2541,6 +2582,7 @@ class IndexEngine:
                 agg["deleted"] += result["deleted"]
                 agg["blocked"] += result.get("blocked", 0)
                 agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
+                any_mutated = any_mutated or result.get("mutated", False)
                 if result.get("exempted"):
                     agg["exempted"] += 1
                     exempted_paths.append(str(fp))
@@ -2566,6 +2608,10 @@ class IndexEngine:
                     "files_total": total_files,
                     "indexed": result["indexed"],
                     "skipped": result["skipped"],
+                    # Per-file, not just on ``complete``: a client that
+                    # disconnects mid-stream still needs to learn that files
+                    # already committed (#2141).
+                    "mutated": result.get("mutated", False),
                 }
 
             duration = (time.monotonic() - start) * 1000
@@ -2586,6 +2632,7 @@ class IndexEngine:
                 "exempted_files": agg["exempted"],
                 "exempted_paths": exempted_paths,
                 "blocked_project_shared_files": agg["blocked_project_shared"],
+                "mutated": any_mutated,
                 "namespaces_preserved_against_rules": tally.preserved_against_rules,
                 "namespaces_reassigned": tally.reassigned,
                 "namespace_moves": list(tally.summary()),

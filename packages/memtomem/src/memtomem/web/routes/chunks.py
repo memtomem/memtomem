@@ -76,6 +76,7 @@ async def edit_chunk(
     body: EditRequest,
     storage=Depends(get_storage),
     index_engine=Depends(get_index_engine),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> ChunkOut:
     chunk = await storage.get_chunk(chunk_id)
     if chunk is None:
@@ -159,13 +160,19 @@ async def edit_chunk(
             # the metadata header on disk. Prefix ``new_content`` with ``## ``
             # to override the heading explicitly. Guarded above; skip the engine
             # gate (ADR-0006 PR-A). Rolls back the file on reindex failure.
-            await mutate_source_and_reindex(
+            stats = await mutate_source_and_reindex(
                 index_engine,
                 meta.source_file,
                 lambda: replace_chunk_body(
                     meta.source_file, meta.start_line, meta.end_line, body.new_content
                 ),
             )
+            # #2141, the web twin of ``memory_crud._mutate_file_and_reindex``:
+            # the edit rewrote chunk text (or only its tags / line ranges,
+            # which the counters report as ``skipped``), so a query warmed
+            # before it must not keep serving the pre-edit body.
+            if stats.mutated:
+                search_pipeline.invalidate_cache()
         except NamespaceResolutionError as exc:
             # Before the generic handler below, and the web twin of the MCP
             # ``_mutate_file_and_reindex`` re-raise (#2005 follow-up): the
@@ -179,6 +186,12 @@ async def edit_chunk(
                 status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
             ) from exc
         except Exception as exc:
+            # The rollback re-index inside ``mutate_source_and_reindex`` is
+            # itself a write, and a failure can land anywhere in that pair, so
+            # the only sound post-condition on this branch is "the index may
+            # have moved". Mirrors the MCP twin, which invalidates on the
+            # rollback path too (``memory_crud.py``).
+            search_pipeline.invalidate_cache()
             logger.error("Chunk edit failed for %s: %s", chunk_id, exc, exc_info=True)
             raise HTTPException(status_code=500, detail="Edit failed. Check server logs.") from exc
 
@@ -199,6 +212,7 @@ async def delete_chunk(
     storage=Depends(get_storage),
     index_engine=Depends(get_index_engine),
     config=Depends(get_config),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> DeleteResponse:
     chunk = await storage.get_chunk(chunk_id)
     if chunk is None:
@@ -311,134 +325,154 @@ async def delete_chunk(
         # rollback here (unlike edit): the intent is deletion, so on a reindex
         # failure we fall back to an index-only delete rather than restoring the
         # line. ``lock_held=True`` skips the nested sidecar acquire (#1587).
-        if source_exists:
-            if meta.start_line < 1 or meta.end_line < meta.start_line:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Chunk has no usable source-line provenance; no index entry was "
-                        "deleted. Reindex the source and retry."
-                    ),
-                )
-
-            # Issue #2005: ``force=True`` used to re-apply namespace
-            # resolution to every chunk, including the ones this delete leaves
-            # alone — so deleting one chunk from an ``aaa`` file moved its
-            # survivors to whatever the rules said that day. Passing the
-            # file's existing namespace was the fix at the time.
-            #
-            # Since #2061 / ADR-0033 the engine preserves a unanimously stored
-            # namespace under ``force`` itself, and refuses outright when the
-            # file's rows span several. So the re-index below deliberately
-            # passes **no** namespace: this pre-flight is a gate, not the
-            # write's authority. Pinning what it resolved would re-introduce
-            # the bug twice over — an explicit namespace wins over the
-            # refusal, and it would freeze a value read outside the write's
-            # own critical section, so a concurrent writer that moved the file
-            # in between would be silently undone. The engine re-resolves
-            # in-lock; that answer is the authoritative one.
-            #
-            # What the pre-flight is still for: refusing *before* the file is
-            # edited. Letting the engine refuse would leave the entry already
-            # removed from disk with its chunks still indexed.
-            #
-            # Outside the try below on purpose. That handler's fallback is an
-            # index-only delete, which is the right answer when the *file*
-            # edit fails but a wrong one here: the row would go while the
-            # source kept the entry, so the chunk returns on the next
-            # re-index and the caller was told the delete succeeded. A
-            # namespace lookup that cannot answer is retryable, and nothing
-            # has been mutated yet.
-            try:
-                # ``force=True`` matches the re-index below, so the decision
-                # reports what that call would decide on its own.
-                decision = await index_engine.namespace_decision_for(source, force=True)
-            except NamespaceResolutionError as exc:
-                # Only this one: it is the resolver's declared "the store did
-                # not answer" signal and is genuinely retryable. Catching
-                # everything here would dress a config or programming error up
-                # as a transient failure and invite the caller to keep retrying.
-                logger.warning("Namespace lookup failed for %s: %s", source, exc)
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "Could not determine the source file's namespace; nothing was "
-                        "deleted. Retry once the chunk store is reachable."
-                    ),
-                ) from exc
-            if decision.reason == "mixed_force_refused":
-                # Before the file edit below: refusing after it would leave the
-                # entry gone from disk with its chunks still indexed. Permanent
-                # (409, not 503) — retrying changes nothing; splitting the file
-                # per namespace does.
-                logger.warning(
-                    "Refusing chunk delete for %s: source spans namespaces %s",
-                    source,
-                    ", ".join(sorted(decision.stored)),
-                )
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "This source file's chunks span several namespaces, and the "
-                        "re-index a delete performs would rewrite every remaining chunk "
-                        "into one of them. Nothing was deleted. Split the file so each "
-                        "namespace has its own, then retry."
-                    ),
-                )
-            try:
-                await asyncio.to_thread(remove_lines, source, meta.start_line, meta.end_line)
-            except ValueError as exc:
-                logger.warning("Stale line provenance for chunk %s: %s", chunk_id, exc)
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Chunk source-line provenance is stale; no index entry was deleted. "
-                        "Reindex the source and retry."
-                    ),
-                ) from exc
-            except OSError as exc:
-                logger.warning("Source file deletion failed for chunk %s", chunk_id, exc_info=True)
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "Could not update the source file; no index entry was deleted. "
-                        "Retry once the file is accessible."
-                    ),
-                ) from exc
-            except Exception as exc:
-                logger.error("Source deletion failed for chunk %s", chunk_id, exc_info=True)
-                raise HTTPException(
-                    status_code=500,
-                    detail="Source deletion failed; no index entry was deleted. Check server logs.",
-                ) from exc
-
-            try:
-                # No ``namespace=``: see the pre-flight above. The engine
-                # preserves the file's stored namespace in-lock, which is both
-                # the correct value and a fresher one than anything read here.
-                stats = await index_engine.index_file(
-                    source,
-                    force=True,
-                    already_scanned=True,
-                    lock_held=True,
-                )
-            except Exception as exc:
-                logger.warning("Re-index failed after deleting chunk %s: %s", chunk_id, exc)
-            else:
-                if stats.errors:
-                    logger.warning(
-                        "Re-index reported errors after deleting chunk %s: %s",
-                        chunk_id,
-                        "; ".join(stats.errors),
+        # #2141: the chunk delete can commit and the verification read below
+        # can then fail with a 500, so the invalidation belongs in ``finally``
+        # rather than on the success path. It is armed rather than
+        # unconditional: every gate between here and the first write refuses
+        # without touching disk or the store, and ``invalidate_cache`` also
+        # drops the LLM query-expansion cache, so flushing on a pure refusal
+        # would be pointless churn.
+        mutation_attempted = False
+        try:
+            if source_exists:
+                if meta.start_line < 1 or meta.end_line < meta.start_line:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Chunk has no usable source-line provenance; no index entry was "
+                            "deleted. Reindex the source and retry."
+                        ),
                     )
 
-            # A single-file index can report an error in IndexingStats instead
-            # of raising (for example, an embedding failure), or can finish with
-            # zero work after a read error.  Verify the target row rather than
-            # treating the await itself as proof of deletion.
-            await ensure_index_row_absent(source_removed=True)
-        else:
-            await ensure_index_row_absent(source_removed=False)
+                # Issue #2005: ``force=True`` used to re-apply namespace
+                # resolution to every chunk, including the ones this delete leaves
+                # alone — so deleting one chunk from an ``aaa`` file moved its
+                # survivors to whatever the rules said that day. Passing the
+                # file's existing namespace was the fix at the time.
+                #
+                # Since #2061 / ADR-0033 the engine preserves a unanimously stored
+                # namespace under ``force`` itself, and refuses outright when the
+                # file's rows span several. So the re-index below deliberately
+                # passes **no** namespace: this pre-flight is a gate, not the
+                # write's authority. Pinning what it resolved would re-introduce
+                # the bug twice over — an explicit namespace wins over the
+                # refusal, and it would freeze a value read outside the write's
+                # own critical section, so a concurrent writer that moved the file
+                # in between would be silently undone. The engine re-resolves
+                # in-lock; that answer is the authoritative one.
+                #
+                # What the pre-flight is still for: refusing *before* the file is
+                # edited. Letting the engine refuse would leave the entry already
+                # removed from disk with its chunks still indexed.
+                #
+                # Outside the try below on purpose. That handler's fallback is an
+                # index-only delete, which is the right answer when the *file*
+                # edit fails but a wrong one here: the row would go while the
+                # source kept the entry, so the chunk returns on the next
+                # re-index and the caller was told the delete succeeded. A
+                # namespace lookup that cannot answer is retryable, and nothing
+                # has been mutated yet.
+                try:
+                    # ``force=True`` matches the re-index below, so the decision
+                    # reports what that call would decide on its own.
+                    decision = await index_engine.namespace_decision_for(source, force=True)
+                except NamespaceResolutionError as exc:
+                    # Only this one: it is the resolver's declared "the store did
+                    # not answer" signal and is genuinely retryable. Catching
+                    # everything here would dress a config or programming error up
+                    # as a transient failure and invite the caller to keep retrying.
+                    logger.warning("Namespace lookup failed for %s: %s", source, exc)
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Could not determine the source file's namespace; nothing was "
+                            "deleted. Retry once the chunk store is reachable."
+                        ),
+                    ) from exc
+                if decision.reason == "mixed_force_refused":
+                    # Before the file edit below: refusing after it would leave the
+                    # entry gone from disk with its chunks still indexed. Permanent
+                    # (409, not 503) — retrying changes nothing; splitting the file
+                    # per namespace does.
+                    logger.warning(
+                        "Refusing chunk delete for %s: source spans namespaces %s",
+                        source,
+                        ", ".join(sorted(decision.stored)),
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "This source file's chunks span several namespaces, and the "
+                            "re-index a delete performs would rewrite every remaining chunk "
+                            "into one of them. Nothing was deleted. Split the file so each "
+                            "namespace has its own, then retry."
+                        ),
+                    )
+                try:
+                    # Armed before the call, not after: a partial write that
+                    # then raises is exactly the case the flag must cover.
+                    mutation_attempted = True
+                    await asyncio.to_thread(remove_lines, source, meta.start_line, meta.end_line)
+                except ValueError as exc:
+                    logger.warning("Stale line provenance for chunk %s: %s", chunk_id, exc)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Chunk source-line provenance is stale; no index entry was deleted. "
+                            "Reindex the source and retry."
+                        ),
+                    ) from exc
+                except OSError as exc:
+                    logger.warning(
+                        "Source file deletion failed for chunk %s", chunk_id, exc_info=True
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Could not update the source file; no index entry was deleted. "
+                            "Retry once the file is accessible."
+                        ),
+                    ) from exc
+                except Exception as exc:
+                    logger.error("Source deletion failed for chunk %s", chunk_id, exc_info=True)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Source deletion failed; no index entry was deleted. Check server logs.",
+                    ) from exc
+
+                try:
+                    # No ``namespace=``: see the pre-flight above. The engine
+                    # preserves the file's stored namespace in-lock, which is both
+                    # the correct value and a fresher one than anything read here.
+                    stats = await index_engine.index_file(
+                        source,
+                        force=True,
+                        already_scanned=True,
+                        lock_held=True,
+                    )
+                except Exception as exc:
+                    logger.warning("Re-index failed after deleting chunk %s: %s", chunk_id, exc)
+                else:
+                    if stats.errors:
+                        logger.warning(
+                            "Re-index reported errors after deleting chunk %s: %s",
+                            chunk_id,
+                            "; ".join(stats.errors),
+                        )
+
+                # A single-file index can report an error in IndexingStats instead
+                # of raising (for example, an embedding failure), or can finish with
+                # zero work after a read error.  Verify the target row rather than
+                # treating the await itself as proof of deletion.
+                await ensure_index_row_absent(source_removed=True)
+            else:
+                # The index-only branch deletes rows directly inside the
+                # helper, so it is a mutation by definition.
+                mutation_attempted = True
+                await ensure_index_row_absent(source_removed=False)
+        finally:
+            if mutation_attempted:
+                search_pipeline.invalidate_cache()
 
     return DeleteResponse(deleted=1)
 

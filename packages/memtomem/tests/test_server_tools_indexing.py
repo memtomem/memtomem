@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -29,6 +29,9 @@ def _install_index_result(
     app = SimpleNamespace(
         index_engine=index_engine,
         write_in_flight=lambda: _write_in_flight(),
+        # #2141: the tool drops the search result cache when the run mutated
+        # something, so every stub app needs the attribute.
+        search_pipeline=SimpleNamespace(invalidate_cache=MagicMock()),
     )
     monkeypatch.setattr(
         "memtomem.server.tools.indexing._get_app_initialized",
@@ -286,3 +289,84 @@ class TestMemIndexDeclaredExemption:
         output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
 
         assert "exemption" not in output
+
+
+class TestMemIndexInvalidatesSearchCache:
+    """#2141: the search result TTL cache is keyed on query + filters, never
+    on content, so an index run that wrote something must drop it. The gate is
+    the engine's ``mutated`` flag, NOT the counters — a tag-only or
+    validity-only rewrite is deliberately reported as ``skipped``."""
+
+    @pytest.mark.asyncio
+    async def test_mutated_run_invalidates(self, monkeypatch, tmp_path):
+        stats = IndexingStats(
+            total_files=1,
+            total_chunks=2,
+            indexed_chunks=2,
+            skipped_chunks=0,
+            deleted_chunks=0,
+            duration_ms=1.0,
+            mutated=True,
+        )
+        app = _install_index_result(monkeypatch, stats)
+
+        await mem_index(path=str(tmp_path), ctx=None)
+
+        app.search_pipeline.invalidate_cache.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_run_invalidates_despite_silent_counters(
+        self, monkeypatch, tmp_path
+    ):
+        """The #2124/#2140 shape: every chunk reported as skipped, yet the tag
+        and validity columns search filters on were rewritten."""
+        stats = IndexingStats(
+            total_files=1,
+            total_chunks=2,
+            indexed_chunks=0,
+            skipped_chunks=2,
+            deleted_chunks=0,
+            duration_ms=1.0,
+            mutated=True,
+        )
+        app = _install_index_result(monkeypatch, stats)
+
+        await mem_index(path=str(tmp_path), ctx=None)
+
+        app.search_pipeline.invalidate_cache.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_unmutated_run_does_not_invalidate_even_with_counters_set(
+        self, monkeypatch, tmp_path
+    ):
+        """Pins that the gate reads the flag rather than re-deriving it from
+        ``indexed_chunks + deleted_chunks``."""
+        stats = IndexingStats(
+            total_files=1,
+            total_chunks=2,
+            indexed_chunks=2,
+            skipped_chunks=0,
+            deleted_chunks=1,
+            duration_ms=1.0,
+        )
+        app = _install_index_result(monkeypatch, stats)
+
+        await mem_index(path=str(tmp_path), ctx=None)
+
+        app.search_pipeline.invalidate_cache.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_steady_state_run_does_not_invalidate(self, monkeypatch, tmp_path):
+        stats = IndexingStats(
+            total_files=1,
+            total_chunks=2,
+            indexed_chunks=0,
+            skipped_chunks=2,
+            deleted_chunks=0,
+            duration_ms=1.0,
+        )
+        app = _install_index_result(monkeypatch, stats)
+
+        await mem_index(path=str(tmp_path), ctx=None)
+
+        app.search_pipeline.invalidate_cache.assert_not_called()

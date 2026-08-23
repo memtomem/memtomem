@@ -882,6 +882,11 @@ async def add_memory_dir(
             stats = await index_engine.index_path(
                 resolved, recursive=True, force=False, force_unsafe=force_unsafe
             )
+            # #2141: register+index in one call, so a query warmed before the
+            # registration would otherwise keep answering without the new
+            # directory's chunks for up to ``search.cache_ttl``.
+            if stats.mutated:
+                search_pipeline.invalidate_cache()
             indexed = {
                 "total_files": stats.total_files,
                 "total_chunks": stats.total_chunks,
@@ -1019,10 +1024,19 @@ async def remove_memory_dir(
                     # one place; matches the comparison done by
                     # :func:`resolve_owning_memory_dir` (#647).
                     prefix = norm_dir_prefix(resolved)
-                    for row in rows:
-                        source_path = row[0]
-                        if norm_path(source_path).startswith(prefix):
-                            deleted_chunks += await storage.delete_by_source(source_path)
+                    try:
+                        for row in rows:
+                            source_path = row[0]
+                            if norm_path(source_path).startswith(prefix):
+                                deleted_chunks += await storage.delete_by_source(source_path)
+                    finally:
+                        # Same cache-staleness class as #2141: these rows are
+                        # gone from the store but a warmed query would still
+                        # return them. In ``finally`` because a source that
+                        # fails partway through the sweep must not discard the
+                        # deletions the sources before it already committed.
+                        if deleted_chunks:
+                            search_pipeline.invalidate_cache()
 
                 watcher = getattr(request.app.state, "file_watcher", None)
                 if watcher is not None:
@@ -1163,6 +1177,7 @@ async def reindex_all(
     force: bool = False,
     config=Depends(get_config),
     index_engine=Depends(get_index_engine),
+    search_pipeline=Depends(get_search_pipeline),
 ):
     """Re-index every registered index root (user-tier + project-tier per ADR-0011)."""
     results: list[dict] = []
@@ -1207,6 +1222,10 @@ async def reindex_all(
                 }
             )
             continue
+        # Per root, not once after the loop (#2141): a later root that raises
+        # must not discard the cache drop the roots before it already earned.
+        if stats.mutated:
+            search_pipeline.invalidate_cache()
         entry: dict = {
             "path": str(resolved),
             "total_files": stats.total_files,
@@ -1611,11 +1630,19 @@ async def indexing_active(index_engine=Depends(get_index_engine)) -> JSONRespons
 async def index_stream(
     req: IndexRequest,
     index_engine=Depends(get_index_engine),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> StreamingResponse:
     """Stream CSRF-protected indexing progress as Server-Sent Events."""
     resolved = Path(req.path).expanduser().resolve()
 
     async def _generate():
+        # #2141: unconditional, in ``finally``, and deliberately NOT gated on
+        # the ``mutated`` flag the events carry. A client can disconnect after
+        # a file's chunk transaction commits but before its progress event is
+        # produced — the generator is cancelled mid-run and the flag never
+        # reaches this frame — so the only sound post-condition here is "this
+        # run may have written". Dropping a still-valid cache costs one cold
+        # search; keeping a stale one hides a committed write.
         try:
             async for event in index_engine.index_path_stream(
                 resolved,
@@ -1652,6 +1679,8 @@ async def index_stream(
             # other error surface at this trust boundary uses.
             error_event = {"type": "error", "message": _redact_message(str(exc))}
             yield f"data: {json.dumps(error_event)}\n\n"
+        finally:
+            search_pipeline.invalidate_cache()
 
     return StreamingResponse(
         _generate(),
@@ -1673,6 +1702,7 @@ async def index_stream_get_disabled() -> None:
 async def trigger_index(
     req: IndexRequest = IndexRequest(),
     index_engine=Depends(get_index_engine),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> IndexResponse:
     resolved = Path(req.path).expanduser().resolve()
     try:
@@ -1696,6 +1726,8 @@ async def trigger_index(
             status_code=503,
             detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
         ) from exc
+    if stats.mutated:
+        search_pipeline.invalidate_cache()
     return IndexResponse(
         total_files=stats.total_files,
         total_chunks=stats.total_chunks,
@@ -1791,6 +1823,7 @@ async def upload_files(
     request: Request,
     force_unsafe: bool = False,
     index_engine=Depends(get_index_engine),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> UploadResponse:
     """Upload one or more files, save to ~/.memtomem/uploads/, and index them.
 
@@ -1858,6 +1891,10 @@ async def upload_files(
                 try:
                     dest = promote_no_overwrite(item.path, upload_dir, fname)
                     stats = await index_engine.index_file(dest, already_scanned=True)
+                    # Per file (#2141): a later file in the batch can raise,
+                    # and the files already promoted are already searchable.
+                    if stats.mutated:
+                        search_pipeline.invalidate_cache()
                     results.append(
                         UploadFileResult(
                             filename=fname,
@@ -1925,6 +1962,7 @@ async def add_memory(
     storage=Depends(get_storage),
     config=Depends(get_config),
     server_project_root=Depends(get_project_root),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> AddMemoryResponse:
     from datetime import datetime, timezone
 
@@ -2154,6 +2192,13 @@ async def add_memory(
             stats = await index_engine.index_file(
                 target, namespace=write_ns, already_scanned=True, lock_held=True
             )
+            # #2141, before the tag merge below: that merge can raise (or the
+            # lock can time out) *after* the chunk write committed, and the
+            # 500 the caller then sees must not leave a warmed query answering
+            # as if the entry had never been added. Invalidating twice is
+            # harmless; skipping it once is not.
+            if stats.mutated:
+                search_pipeline.invalidate_cache()
 
             # Apply tags to indexed chunks (the chunker doesn't parse tag text
             # from content). Inside the lock — it upserts rows keyed to this
@@ -2176,6 +2221,10 @@ async def add_memory(
                         updated.append(c)
                 if updated:
                     await storage.upsert_chunks(updated)
+                    # Written outside the engine, so it carries no ``mutated``
+                    # flag of its own — and it rewrites exactly the tag column
+                    # search filters on (#2141).
+                    search_pipeline.invalidate_cache()
     except TimeoutError as exc:
         raise HTTPException(
             status_code=503, detail="Memory file is locked by another writer; try again."
