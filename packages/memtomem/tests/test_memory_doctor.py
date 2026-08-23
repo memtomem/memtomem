@@ -897,20 +897,21 @@ def _insert_chunk(
     heading_hierarchy: tuple[str, ...] | None = None,
     start_line: int = 0,
     end_line: int = 0,
+    tags: tuple[str, ...] = (),
 ) -> None:
     """Insert one ``chunks`` row (read-only doctor never touches FTS).
 
-    ``content_hash`` / ``heading_hierarchy`` default to synthetic values, which
-    is fine for every check that only counts rows. The staleness checks diff
-    real hashes, so those tests pass the values a real index run would write
-    (see :func:`_insert_real_chunks`).
+    ``content_hash`` / ``heading_hierarchy`` / ``tags`` default to synthetic or
+    empty values, which is fine for every check that only counts rows. The
+    staleness checks diff real hashes *and tags*, so those tests pass the values
+    a real index run would write (see :func:`_insert_real_chunks`).
     """
     db = backend._get_db()
     db.execute(
         "INSERT INTO chunks (id, content, content_hash, source_file, heading_hierarchy, "
         "start_line, end_line, created_at, updated_at, access_count, last_accessed_at, "
-        "importance_score) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "importance_score, tags) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             chunk_id,
             content if content is not None else f"content of {chunk_id}",
@@ -924,6 +925,7 @@ def _insert_chunk(
             access_count,
             last_accessed_at,
             importance_score,
+            json.dumps(list(tags)),
         ),
     )
     db.commit()
@@ -1576,6 +1578,7 @@ def _insert_real_chunks(backend, config, path: Path, *, updated_at=_FIXTURE_INDE
             heading_hierarchy=tuple(c.metadata.heading_hierarchy),
             start_line=c.metadata.start_line,
             end_line=c.metadata.end_line,
+            tags=tuple(c.metadata.tags),
         )
     return len(chunks)
 
@@ -1738,6 +1741,49 @@ class TestStaleIndex:
         _set_mtime(note, datetime(2020, 1, 1, tzinfo=timezone.utc))
 
         assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+    def test_tag_blockquote_edit_is_reported(self, stale_env):
+        """A section's ``> tags: [...]`` edit is drift the doctor must see (#2124).
+
+        The blockquote is stripped from the chunk text, so nothing the content
+        hash covers moves — but the row's tags are what
+        ``mem_search(tag_filter=...)`` reads, and a re-index now rewrites them.
+        """
+        config, mem_dir, note, reindex = stale_env
+        body = "tag drift body zqx4. " * 20 + "\n"
+        note.write_text(f"# t\n\n## s\n\n> tags: [alpha]\n\n{body}", encoding="utf-8")
+        reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+        note.write_text(f"# t\n\n## s\n\n> tags: [bravo]\n\n{body}", encoding="utf-8")
+        assert _stale_findings(config, mem_dir)["stale_index"].items == ["note.md"]
+
+        reindex()
+        assert "stale_index" not in _stale_findings(config, mem_dir)
+
+    def test_tag_order_alone_is_not_reported(self, stale_env):
+        """Set membership, not order — a reordered stored tuple is not drift."""
+        config, mem_dir, note, reindex = stale_env
+        body = "tag order body zqx5. " * 20 + "\n"
+        note.write_text(f"# t\n\n## s\n\n> tags: [alpha, bravo]\n\n{body}", encoding="utf-8")
+        reindex()
+
+        import asyncio
+
+        async def _shuffle():
+            backend = SqliteBackend(
+                config.storage, dimension=0, embedding_provider="none", embedding_model=""
+            )
+            await backend.initialize()
+            try:
+                db = backend._get_db()
+                db.execute("UPDATE chunks SET tags = ?", ('["bravo", "alpha"]',))
+                db.commit()
+            finally:
+                await backend.close()
+
+        asyncio.run(_shuffle())
+        assert "stale_index" not in _stale_findings(config, mem_dir)
 
     def test_collapsing_identical_sections_is_reported(self, stale_env):
         """Dropping one of two byte-identical sections is drift (#2123).
@@ -2259,9 +2305,14 @@ class TestChunkContentParity:
 
         doctor = _doctor_engine(config).chunk_content(note, note.read_text(encoding="utf-8"))
         assert len(doctor) > 1, "fixture should produce several chunks"
-        assert {c.content_hash for c in doctor} == {h for h, _ in persisted.values()}
+        assert {c.content_hash for c in doctor} == {state[0] for state in persisted.values()}
         assert {tuple(c.metadata.heading_hierarchy) for c in doctor} == {
-            h for _, h in persisted.values()
+            state[1] for state in persisted.values()
+        }
+        # Tags ride in the same state tuple and are diffed too (#2124), so the
+        # parity this test guards has to cover them as well.
+        assert {tuple(c.metadata.tags) for c in doctor} == {
+            state[2] for state in persisted.values()
         }
 
 

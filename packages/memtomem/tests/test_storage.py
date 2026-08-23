@@ -1,6 +1,7 @@
 """Tests for storage backend operations."""
 
 import dataclasses
+import json
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -78,6 +79,82 @@ class TestChunkCRUD:
         assert (
             db.execute("SELECT embedding FROM chunks_vec WHERE rowid=?", (after[0],)).fetchone()
             == before_vec
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_chunk_tags_leaves_payload_and_indexes_untouched(self, storage):
+        """The metadata sibling of the line-range refresh: tags only (#2124)."""
+        chunk = _make_chunk("tag refresh payload")
+        chunk.embedding = [0.1] * 1024
+        chunk.metadata = dataclasses.replace(chunk.metadata, tags=("alpha",))
+        await storage.upsert_chunks([chunk])
+        await storage.increment_access([chunk.id])
+
+        db = storage._get_db()
+        before = db.execute(
+            "SELECT rowid, content, content_hash, updated_at, access_count, "
+            "start_line, end_line, tags FROM chunks WHERE id=?",
+            (str(chunk.id),),
+        ).fetchone()
+        before_fts = db.execute(
+            "SELECT content, source_file FROM chunks_fts WHERE rowid=?", (before[0],)
+        ).fetchone()
+        before_vec = db.execute(
+            "SELECT embedding FROM chunks_vec WHERE rowid=?", (before[0],)
+        ).fetchone()
+
+        chunk.metadata = dataclasses.replace(chunk.metadata, tags=("bravo",))
+        assert await storage.update_chunk_tags([chunk]) == 1
+        assert await storage.update_chunk_tags([chunk]) == 0
+
+        after = db.execute(
+            "SELECT rowid, content, content_hash, updated_at, access_count, "
+            "start_line, end_line, tags FROM chunks WHERE id=?",
+            (str(chunk.id),),
+        ).fetchone()
+        assert after[:7] == before[:7], "only the tags column may move"
+        assert json.loads(after[7]) == ["bravo"]
+        assert (
+            db.execute(
+                "SELECT content, source_file FROM chunks_fts WHERE rowid=?", (after[0],)
+            ).fetchone()
+            == before_fts
+        )
+        assert (
+            db.execute("SELECT embedding FROM chunks_vec WHERE rowid=?", (after[0],)).fetchone()
+            == before_vec
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_chunk_tags_ignores_order_and_rewrites_corrupt_json(self, storage):
+        chunk = _make_chunk("tag order payload")
+        chunk.metadata = dataclasses.replace(chunk.metadata, tags=("a", "b"))
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+
+        db.execute("UPDATE chunks SET tags=? WHERE id=?", ('["b", "a"]', str(chunk.id)))
+        db.commit()
+        assert await storage.update_chunk_tags([chunk]) == 0, "order alone is not a change"
+
+        db.execute("UPDATE chunks SET tags=? WHERE id=?", ("not json", str(chunk.id)))
+        db.commit()
+        assert await storage.update_chunk_tags([chunk]) == 1, "corrupt tags are rewritten"
+        assert json.loads(
+            db.execute("SELECT tags FROM chunks WHERE id=?", (str(chunk.id),)).fetchone()[0]
+        ) == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_get_chunk_index_state_carries_tags(self, storage):
+        chunk = _make_chunk("index state payload")
+        chunk.metadata = dataclasses.replace(chunk.metadata, tags=("alpha",))
+        await storage.upsert_chunks([chunk])
+
+        state = await storage.get_chunk_index_state(chunk.metadata.source_file)
+
+        assert state[str(chunk.id)] == (
+            chunk.content_hash,
+            tuple(chunk.metadata.heading_hierarchy),
+            ("alpha",),
         )
 
     @pytest.mark.asyncio

@@ -196,15 +196,18 @@ class TestStorageExtended:
         assert c1.content_hash in hash_values
         assert c2.content_hash in hash_values
 
-    async def test_get_chunk_index_state_includes_heading_hierarchy(self, components):
+    async def test_get_chunk_index_state_includes_heading_hierarchy_and_tags(self, components):
         storage = components.storage
         chunk = make_chunk(content="indexed state", source="state.md")
-        chunk.metadata = dataclasses.replace(chunk.metadata, heading_hierarchy=("Parent", "Child"))
+        chunk.metadata = dataclasses.replace(
+            chunk.metadata, heading_hierarchy=("Parent", "Child"), tags=("alpha",)
+        )
         await storage.upsert_chunks([chunk])
 
         state = await storage.get_chunk_index_state(Path("/tmp/state.md"))
 
-        assert state == {str(chunk.id): (chunk.content_hash, ("Parent", "Child"))}
+        # Tags ride along because the differ compares them too (#2124).
+        assert state == {str(chunk.id): (chunk.content_hash, ("Parent", "Child"), ("alpha",))}
 
     # ---- get_embeddings_for_chunks -------------------------------------------
 

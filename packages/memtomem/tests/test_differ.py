@@ -138,6 +138,114 @@ class TestComputeDiff:
         assert first.id == beta_id
         assert second.id == alpha_id
 
+    def test_tag_change_is_metadata_only_not_unchanged(self):
+        # The section blockquote is stripped from chunk text, so a tag edit
+        # moves neither hash nor hierarchy. With stored tags supplied, the
+        # chunk lands in ``metadata_only`` and keeps its id (#2124).
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("s",), tags=("bravo",))
+        existing_id = uuid4()
+        existing = {str(existing_id): (chunk.content_hash, ("s",), ("alpha",))}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.metadata_only == [chunk]
+        assert result.unchanged == []
+        assert result.to_upsert == []
+        assert result.to_delete == []
+        assert chunk.id == existing_id
+
+    def test_matching_tags_stay_unchanged(self):
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("s",), tags=("alpha",))
+        existing = {str(uuid4()): (chunk.content_hash, ("s",), ("alpha",))}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.unchanged == [chunk]
+        assert result.metadata_only == []
+
+    def test_tag_order_alone_is_not_drift(self):
+        # ``tag_filter`` is set membership (ADR-0002); rewriting a row because
+        # its stored order differs would churn on every re-index.
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("s",), tags=("a", "b"))
+        existing = {str(uuid4()): (chunk.content_hash, ("s",), ("b", "a"))}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.unchanged == [chunk]
+        assert result.metadata_only == []
+
+    def test_states_without_tags_never_report_metadata_drift(self):
+        # Two-element and bare-hash states mean "this caller did not say what
+        # the row's tags are" — not "the row has no tags".
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("s",), tags=("alpha",))
+        two_element = {str(uuid4()): (chunk.content_hash, ("s",))}
+        bare_hash = {str(uuid4()): chunk.content_hash}
+
+        for existing in (two_element, bare_hash):
+            result = compute_diff(existing, [chunk])
+            assert result.metadata_only == []
+            assert result.unchanged == [chunk]
+
+    def test_heading_change_wins_over_tag_change(self):
+        # A moved heading needs a re-embed, so it stays in ``to_upsert`` even
+        # when the tags moved too — the cheap path must not swallow it.
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("new",), tags=("bravo",))
+        existing = {str(uuid4()): (chunk.content_hash, ("old",), ("alpha",))}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.to_upsert == [chunk]
+        assert result.metadata_only == []
+
+    def test_reordered_tagged_duplicates_keep_their_own_ids(self):
+        # Two byte-identical sections under the same heading, distinguishable
+        # only by their tags. Reordering them must not swap ids — the ids carry
+        # access counts, links and line positions.
+        first, second = _mk("duplicate body"), _mk("duplicate body")
+        first.metadata = replace(first.metadata, heading_hierarchy=("s",), tags=("beta",))
+        second.metadata = replace(second.metadata, heading_hierarchy=("s",), tags=("alpha",))
+        alpha_id, beta_id = uuid4(), uuid4()
+        existing = {
+            str(alpha_id): (first.content_hash, ("s",), ("alpha",)),
+            str(beta_id): (first.content_hash, ("s",), ("beta",)),
+        }
+
+        result = compute_diff(existing, [first, second])
+
+        assert result.metadata_only == []
+        assert result.unchanged == [first, second]
+        assert first.id == beta_id
+        assert second.id == alpha_id
+
+    def test_wildcard_state_is_spent_last_in_a_mixed_shape_map(self):
+        # A state map that mixes shapes: one bare hash (wildcard — matches any
+        # hierarchy), one two-element and one three-element entry. The wildcard
+        # must be reserved last, or it takes an id an exact-hierarchy chunk
+        # needed and strands that chunk in ``to_upsert`` for no reason.
+        a, b, c = _mk("dup body"), _mk("dup body"), _mk("dup body")
+        a.metadata = replace(a.metadata, heading_hierarchy=("B",), tags=("x",))
+        b.metadata = replace(b.metadata, heading_hierarchy=("A",), tags=("x",))
+        c.metadata = replace(c.metadata, heading_hierarchy=("B",), tags=("x",))
+        wild_id, a_id, b_tagged_id = uuid4(), uuid4(), uuid4()
+        existing = {
+            str(wild_id): a.content_hash,
+            str(a_id): (a.content_hash, ("A",)),
+            str(b_tagged_id): (a.content_hash, ("B",), ("x",)),
+        }
+
+        result = compute_diff(existing, [a, b, c])
+
+        assert result.to_upsert == []
+        assert result.to_delete == []
+        assert a.id == b_tagged_id, "the exact hierarchy+tags match is reserved first"
+        assert b.id == a_id, "the exact-hierarchy id must not be spent on a wildcard match"
+        assert c.id == wild_id
+
     def test_collapsing_duplicate_hash_deletes_unused_ids(self):
         # A file that held two byte-identical sections now holds one. The hash
         # survives, but the second id is not reused by anything and nothing
