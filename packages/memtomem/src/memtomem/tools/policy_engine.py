@@ -400,8 +400,10 @@ async def execute_auto_consolidate(
     from memtomem.tools.consolidation_engine import (
         DEFAULT_SUMMARY_NAMESPACE,
         CONSOLIDATED_SUFFIX,
+        SUMMARY_PATH_SCAN_LIMIT,
         apply_consolidation,
         compute_source_hash,
+        is_policy_summary,
         make_heuristic_summary,
         make_llm_summary,
         parse_source_hash,
@@ -475,11 +477,34 @@ async def execute_auto_consolidate(
         # changed (chunk added/removed) and we must regenerate.
         current_hash = compute_source_hash([c.id for c in chunks])
         virtual_path = source_path.parent / f"{source_path.name}{CONSOLIDATED_SUFFIX}"
-        existing = await storage.list_chunks_by_source(virtual_path, limit=1)
+        existing = await storage.list_chunks_by_source(virtual_path, limit=SUMMARY_PATH_SCAN_LIMIT)
+        # Ownership before the hash (#2161). Reading the first chunk's embedded
+        # ``Source hash:`` line and acting on it trusts whatever occupies the
+        # path: a foreign chunk quoting a matching hash suppressed the policy
+        # over that source forever, and one without a hash was reported as
+        # "would consolidate" by dry-run over a group the live run then refused.
+        # The check runs before the ``dry_run`` branch so both report the same
+        # collision, and no LLM call is spent on a group that cannot be written.
+        if len(existing) >= SUMMARY_PATH_SCAN_LIMIT or any(
+            not is_policy_summary(c) for c in existing
+        ):
+            logger.warning(
+                "auto_consolidate: refusing %s — summary path %s is occupied by "
+                "chunks this policy does not own",
+                source_path,
+                virtual_path,
+            )
+            detail_parts.append(f"{source_path.name} (COLLISION: summary path occupied)")
+            failed.append(f"{source_path.name} (collision)")
+            continue
         stale = False
         if existing:
-            old_hash = parse_source_hash(existing[0].content)
-            if old_hash == current_hash:
+            # Idempotent only when the path holds exactly the one summary the
+            # last run left. Several owned rows mean a previous replacement
+            # went wrong, so a matching hash on one of them is not evidence the
+            # path is current — regenerate and let ``_clear_policy_summaries``
+            # collapse them back to one.
+            if len(existing) == 1 and parse_source_hash(existing[0].content) == current_hash:
                 continue  # idempotent — same inputs, same output
             stale = True  # regenerate below
         else:
@@ -552,7 +577,10 @@ async def execute_auto_consolidate(
             # Recorded only now: the replacement happens inside
             # ``apply_consolidation``'s transaction, so on failure the old
             # summary is still there and reporting it deleted would be a lie.
-            deleted_summary_ids.append(str(existing[0].id))
+            # Every owned row is listed, not just the first: the clear empties
+            # the whole path, so reporting one id under-reports a path that had
+            # collected more than one summary.
+            deleted_summary_ids.extend(str(c.id) for c in existing)
         tag = " (regen)" if stale else ""
         detail_parts.append(f"{source_path.name}{tag}")
         group_records.append(

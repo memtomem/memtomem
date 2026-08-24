@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from memtomem.errors import EmbeddingDimensionMismatchError, SchemaDowngradeError
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.storage.sqlite_meta import MetaManager
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,22 @@ _SHARED_FROM_TAG_PREFIX = "shared-from="
 # escape text instead of the characters they encode (pre ``ensure_ascii=False``
 # memory_writer fix). Bump (``..._v2``) to force a re-run.
 _TAGS_UNICODE_REPAIR_KEY = "tags_unicode_repair_v1"
+
+# One-shot adoption key for consolidation summaries written before
+# ``chunks.origin`` existed (#2161). Bump (``..._v2``) to re-run.
+_ORIGIN_BACKFILL_KEY = "origin_backfill_v1"
+
+# The shape ``consolidation_engine._make_summary_chunk`` has always written,
+# duplicated here rather than imported so storage keeps no dependency on
+# ``tools``. Only the backfill reads these: the live ownership predicate is the
+# ``origin`` column, and this fingerprint exists solely to decide which
+# pre-column rows may be adopted. It is deliberately the *whole* shape — path
+# suffix, all three tags, and the derived heading — because each part alone is
+# reproducible by a user chunk, which is the bug being fixed.
+_CONSOLIDATED_SUFFIX = ".consolidated.md"
+_DEFAULT_SUMMARY_NAMESPACE = "archive:summary"
+_LEGACY_SUMMARY_TAGS: frozenset[str] = frozenset({"consolidated", "summary", "heuristic"})
+_LEGACY_SUMMARY_HEADING_PREFIX = "Consolidated: "
 
 # Matches a single ``\uXXXX`` BMP escape sequence as literal text (a backslash,
 # a ``u``, then four hex digits) — what a mis-decoded tag still carries.
@@ -154,7 +171,8 @@ def create_tables(
             valid_from_unix INTEGER,
             valid_to_unix INTEGER,
             scope TEXT NOT NULL DEFAULT 'user',
-            project_root TEXT
+            project_root TEXT,
+            origin TEXT
         )
     """)
 
@@ -225,6 +243,18 @@ def create_tables(
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
+
+    # Idempotent migration: writer provenance (#2161). NULL for everything a
+    # user or agent writes; the consolidation policy stamps
+    # ``ORIGIN_CONSOLIDATION_POLICY`` on the summaries it owns, which is what
+    # lets it delete them without inferring ownership from tags. Summaries
+    # written before this column exists are adopted by
+    # ``_backfill_summary_origin`` below.
+    try:
+        db.execute("ALTER TABLE chunks ADD COLUMN origin TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
 
     db.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
@@ -820,6 +850,11 @@ def create_tables(
         )
     """)
 
+    # Runs here, not with the other back-fills above: it reads
+    # ``memory_policies`` to recover the namespace each consolidation policy
+    # was configured to write summaries under.
+    _backfill_summary_origin(db, meta)
+
     # --- Maintenance run log (#2132) ---
     # One row per *applied* (non-dry-run) maintenance run: policy runs keyed by
     # ``policy_name`` plus the agent-path ``consolidate_apply``. ``summary_json``
@@ -974,6 +1009,131 @@ def _backfill_chunk_links(db: sqlite3.Connection, meta: MetaManager) -> int:
 
     meta.set_meta(_CHUNK_LINKS_BACKFILL_KEY, "done")
     return inserted
+
+
+def _configured_summary_namespaces(db: sqlite3.Connection) -> set[str]:
+    """Namespaces a consolidation policy may have written summaries under.
+
+    The built-in default plus whatever every ``auto_consolidate`` policy row
+    configures, so the one-shot ``origin`` back-fill can apply the namespace
+    conjunct the predicate it replaces used without a config object. Rows with
+    unreadable config contribute nothing — this only ever narrows what the
+    back-fill will adopt.
+    """
+    namespaces = {_DEFAULT_SUMMARY_NAMESPACE}
+    try:
+        rows = db.execute(
+            "SELECT config FROM memory_policies WHERE policy_type = 'auto_consolidate'"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Table not created yet (a caller running an older setup order).
+        return namespaces
+    for (config_json,) in rows:
+        try:
+            config = json.loads(config_json) if config_json else {}
+        except (ValueError, TypeError):
+            continue
+        if isinstance(config, dict):
+            value = config.get("summary_namespace")
+            if isinstance(value, str) and value:
+                namespaces.add(value)
+    return namespaces
+
+
+def _backfill_summary_origin(db: sqlite3.Connection, meta: MetaManager) -> int:
+    """Adopt pre-#2161 consolidation summaries into the ``origin`` column.
+
+    Ownership over the virtual summary path used to be inferred from a
+    namespace + tag combination, which a user's own chunk can reproduce — the
+    hole #2161 closes by stamping ``origin`` at write time. Every summary
+    written before the column existed lacks that stamp, and treating them all
+    as foreign would fail the first regeneration closed in every existing
+    store, so this one-shot pass adopts the rows that carry the full shape
+    ``_make_summary_chunk`` has always written — the ``.consolidated.md`` path
+    suffix, all three legacy tags, and the single heading entry
+    ``Consolidated: <name>`` derived from the row's own path — *and* are the
+    target of a ``consolidated_into`` edge.
+
+    That last requirement is what keeps the adoption from being another
+    inference. Every part of the shape is metadata a user can type; the edge is
+    written by ``link_consolidation_relations`` from the ids of the chunks that
+    were summarised. It is not unforgeable — ``mem_link`` takes an arbitrary
+    ``relation_type`` — so it is one conjunct among several rather than the
+    proof the ``origin`` column itself is; what it rules out is the ordinary
+    lookalike, a note that merely reads like a summary.
+
+    The namespace is required too, so this pass can never reach a row the old
+    predicate would have spared. It is configurable, and ``create_tables`` has
+    no config object — but the value is recorded where the policy that used it
+    lives, so the accepted set is the built-in default plus whatever every
+    ``auto_consolidate`` row in ``memory_policies`` names. A store whose policy
+    row is gone keeps only the default; a summary written under some other
+    namespace then stays foreign, which fails its next consolidation closed
+    rather than deleting anything.
+
+    The ``Source hash:`` line is not required: callers driving
+    ``apply_consolidation`` directly may write summaries without one, and
+    excluding those would strand their groups permanently.
+
+    A summary whose edges never landed — the partial write #2158 fixed — is
+    left foreign. That fails its source's next consolidation closed rather than
+    deleting anything, and is recoverable by removing the orphaned summary.
+
+    What remains, deliberately: a chunk that reproduces *all* of this — the
+    path, the tags, the derived heading, an edge, and the summary namespace —
+    is adopted, and no evidence available at migration time separates it from a
+    real summary. That set is a strict subset of what the predicate being
+    removed already deleted (namespace + tags, with no heading or edge asked
+    for), so the transition never widens the exposure it inherits; it only
+    ends it going forward, where ``origin`` is written by the one writer that
+    can. Adopting nothing instead would fail the first regeneration closed in
+    every existing store, and the receipts that would prove ownership
+    (``maintenance_runs``) only exist since #2132.
+
+    Idempotent: completion is recorded in ``_memtomem_meta`` and re-runs are
+    no-ops. Returns the number of rows stamped on this call (0 once recorded).
+    """
+    if meta.get_meta(_ORIGIN_BACKFILL_KEY) == "done":
+        return 0
+
+    namespaces = _configured_summary_namespaces(db)
+    rows = db.execute(
+        "SELECT id, source_file, tags, heading_hierarchy, namespace FROM chunks "
+        "WHERE origin IS NULL AND source_file LIKE ? "
+        "AND EXISTS (SELECT 1 FROM chunk_relations r WHERE r.target_id = chunks.id "
+        "AND r.relation_type = 'consolidated_into')",
+        (f"%{_CONSOLIDATED_SUFFIX}",),
+    ).fetchall()
+
+    stamped = 0
+    for chunk_id, source_file, tags_json, heading_json, namespace in rows:
+        if namespace not in namespaces:
+            continue
+        if not isinstance(source_file, str) or not source_file.endswith(_CONSOLIDATED_SUFFIX):
+            continue
+        try:
+            tags = json.loads(tags_json) if tags_json else []
+            headings = json.loads(heading_json) if heading_json else []
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(tags, list) or not isinstance(headings, list):
+            continue
+        if not _LEGACY_SUMMARY_TAGS.issubset({t for t in tags if isinstance(t, str)}):
+            continue
+        # The stored path may use either separator (a store can travel between
+        # platforms), so split on both rather than going through Path.
+        base = source_file.replace("\\", "/").rsplit("/", 1)[-1]
+        source_name = base[: -len(_CONSOLIDATED_SUFFIX)]
+        if headings != [f"{_LEGACY_SUMMARY_HEADING_PREFIX}{source_name}"]:
+            continue
+        db.execute(
+            "UPDATE chunks SET origin = ? WHERE id = ?",
+            (ORIGIN_CONSOLIDATION_POLICY, chunk_id),
+        )
+        stamped += 1
+
+    meta.set_meta(_ORIGIN_BACKFILL_KEY, "done")
+    return stamped
 
 
 def _decode_unicode_escaped(text: str) -> str:

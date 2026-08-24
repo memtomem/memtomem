@@ -7,7 +7,22 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
+
+#: ``ChunkMetadata.origin`` value stamped on summaries written by the
+#: consolidation policy (``memtomem.tools.consolidation_engine``). It is the
+#: ownership proof ``_clear_policy_summaries`` deletes on: no ingress surface
+#: (``mem_add``, indexing, the agent-path ``mem_consolidate_apply``) accepts an
+#: origin, so a chunk carrying this value can only have come from
+#: ``_make_summary_chunk`` or the one-shot migration backfill that adopts
+#: summaries written before the column existed.
+ORIGIN_CONSOLIDATION_POLICY = "consolidation_policy"
+
+#: The origins a chunk may legitimately carry. Stored as TEXT, so a value from
+#: an older or newer writer decodes verbatim and simply never equals a known
+#: constant — an unrecognised origin is treated as "not ours", never as owned.
+ChunkOrigin = Literal["consolidation_policy"]
 
 
 class ChunkType(StrEnum):
@@ -45,6 +60,12 @@ class ChunkMetadata:
     # multiple worktrees of the same project without path-prefix collisions.
     scope: str = "user"
     project_root: Path | None = None
+    # Provenance of the writer that produced this chunk (#2161). ``None`` for
+    # everything a user or agent writes — the only value in use is
+    # ``ORIGIN_CONSOLIDATION_POLICY``, and only the consolidation policy sets
+    # it. Ownership over the virtual summary path is decided on this field
+    # rather than on a namespace/tag combination a user chunk can reproduce.
+    origin: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from helpers import make_chunk
 
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.tools.consolidation_engine import (
     DEFAULT_SUMMARY_NAMESPACE,
     apply_consolidation,
@@ -1552,6 +1553,11 @@ class TestAutoConsolidate:
         assert second != first
         surviving = await storage.list_chunks_by_source(virtual, limit=5)
         assert [c.id for c in surviving] == [second]
+        # The replacement could only happen because the first summary came back
+        # from storage still stamped: ``origin`` has to survive the upsert and
+        # the row decode, or the second apply would classify its predecessor as
+        # foreign and fail the group closed (#2161).
+        assert surviving[0].metadata.origin == ORIGIN_CONSOLIDATION_POLICY
         # The replaced summary took its edges with it (FK cascade).
         related = await storage.get_related(chunks[0].id)
         assert [target for target, _ in related] == [second]
@@ -1584,13 +1590,49 @@ class TestAutoConsolidate:
         assert survivor is not None
         assert survivor.content == squatter.content
 
+    async def test_apply_consolidation_refuses_a_chunk_matching_the_old_predicate(self, storage):
+        """A user chunk wearing the policy's namespace *and* all three tags.
+
+        This is the exact shape ownership-by-inference got wrong (#2161):
+        namespace ``archive:summary`` plus ``consolidated`` + ``summary`` +
+        ``heuristic`` at a real file literally named ``<source>.consolidated.md``
+        classified as policy-owned and was deleted. Nothing but the ``origin``
+        stamp — which no ingress surface can write — makes a chunk ours, so
+        this one is foreign and the group fails closed.
+
+        Mutation check: restoring the namespace+tags predicate deletes the
+        chunk and this test fails."""
+        from memtomem.errors import StorageError
+
+        chunks = [make_chunk(f"lookalike {i}", source="lookalike.md") for i in range(3)]
+        lookalike = make_chunk(
+            "A user's own note that happens to wear every legacy owner marker",
+            source="lookalike.md.consolidated.md",
+            namespace=DEFAULT_SUMMARY_NAMESPACE,
+            tags=("consolidated", "summary", "heuristic"),
+            heading=("Consolidated: lookalike.md",),
+        )
+        await storage.upsert_chunks([*chunks, lookalike])
+
+        group = {
+            "source": "/tmp/lookalike.md",
+            "chunk_ids": [str(c.id) for c in chunks],
+            "namespace": "default",
+            "chunk_count": 3,
+        }
+        with pytest.raises(StorageError, match="not policy-owned"):
+            await apply_consolidation(storage, group, "Summary that must not land")
+
+        survivor = await storage.get_chunk(lookalike.id)
+        assert survivor is not None
+        assert survivor.content == lookalike.content
+
     async def test_apply_consolidation_refuses_an_agent_summary_at_the_path(self, storage):
         """An agent-written summary is not the policy's to replace.
 
-        ``mem_consolidate_apply`` tags its summaries ``consolidated`` +
-        ``summary``; matching those two in the summary namespace would classify
-        the agent's work as policy-owned and delete it. The ``heuristic`` tag
-        that ``_make_summary_chunk`` writes is what tells them apart."""
+        ``mem_consolidate_apply`` writes through ``mem_add``, which has no way
+        to set ``origin``, so its summaries are foreign to the policy wherever
+        they land — including this path."""
         from memtomem.errors import StorageError
 
         chunks = [make_chunk(f"agent collide {i}", source="agent-collide.md") for i in range(3)]
@@ -1654,6 +1696,122 @@ class TestAutoConsolidate:
             Path(f"/tmp/{source}.consolidated.md"), limit=5
         )
         assert summaries == []
+
+    async def test_auto_consolidate_foreign_chunk_with_matching_hash_is_a_collision(self, storage):
+        """A foreign chunk quoting a matching source hash must not be trusted.
+
+        The preflight used to read the first chunk at the virtual path and act
+        on its embedded ``Source hash:`` line before ownership was established
+        (#2161). A chunk that merely *contains* the current hash — trivial to
+        produce by quoting a summary — then suppressed consolidation over that
+        source forever, silently and in both dry-run and live runs."""
+        source = "hash-squat.md"
+        chunks = [
+            make_chunk(f"Squatted chunk {i}", source=source, heading=("Doc", f"§{i}"))
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+        current_hash = compute_source_hash([c.id for c in chunks])
+        squatter = make_chunk(
+            f"Not a policy summary, but it quotes\n\nSource hash: {current_hash}\n",
+            source=f"{source}.consolidated.md",
+        )
+        await storage.upsert_chunks([squatter])
+
+        dry = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=True
+        )
+        assert dry.affected_count == 0
+        assert "COLLISION" in dry.details
+
+        live = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert live.affected_count == 0
+        assert "COLLISION" in live.details
+
+        # The squatter is untouched and no summary was written beside it.
+        remaining = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert [c.id for c in remaining] == [squatter.id]
+        assert remaining[0].content == squatter.content
+
+    async def test_auto_consolidate_collision_beside_an_owned_summary(self, storage):
+        """One owned summary plus one foreign chunk still fails the group closed.
+
+        The owned row must survive too: the refusal happens in the preflight,
+        so ``apply_consolidation`` — the only thing that deletes — never runs."""
+        source = "mixed-owner.md"
+        chunks = [
+            make_chunk(f"Mixed chunk {i}", source=source, heading=("Doc", f"§{i}"))
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+        first = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert first.affected_count == 1
+        virtual = Path(f"/tmp/{source}.consolidated.md")
+        (owned,) = await storage.list_chunks_by_source(virtual, limit=5)
+
+        intruder = make_chunk(
+            "Someone else's chunk landing beside the policy's summary",
+            source=f"{source}.consolidated.md",
+        )
+        await storage.upsert_chunks([intruder, make_chunk("New input", source=source)])
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 0
+        assert "COLLISION" in result.details
+        surviving = {c.id for c in await storage.list_chunks_by_source(virtual, limit=5)}
+        assert surviving == {owned.id, intruder.id}
+
+    async def test_auto_consolidate_duplicate_owned_summaries_regenerate(self, storage):
+        """Two owned summaries at one path are stale, even if one hash matches.
+
+        A matching hash is evidence the path is current only when the path
+        holds exactly the single summary the last run left. Several owned rows
+        mean an earlier replacement went wrong, so the run regenerates and the
+        clear collapses them — and the record names every id it removed, not
+        just the first one read (#2161)."""
+        source = "double-summary.md"
+        chunks = [
+            make_chunk(f"Doubled chunk {i}", source=source, heading=("Doc", f"§{i}"))
+            for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
+        policy = {
+            "name": "consol",
+            "policy_type": "auto_consolidate",
+            "config": {"min_group_size": 3},
+            "namespace_filter": None,
+        }
+        await run_policy(storage, policy, dry_run=False)
+        virtual = Path(f"/tmp/{source}.consolidated.md")
+        (owned,) = await storage.list_chunks_by_source(virtual, limit=5)
+
+        # A second owned summary at the same path, carrying the *current* hash —
+        # the shape a partially-failed replacement leaves behind.
+        twin = make_chunk(
+            owned.content + "\n\nsecond copy",
+            source=f"{source}.consolidated.md",
+            namespace=DEFAULT_SUMMARY_NAMESPACE,
+            tags=("consolidated", "summary", "heuristic"),
+            heading=(f"Consolidated: {source}",),
+            origin=ORIGIN_CONSOLIDATION_POLICY,
+        )
+        await storage.upsert_chunks([twin])
+
+        await run_policy(storage, policy, dry_run=False)
+
+        runs = await storage.maintenance_run_latest(kind="auto_consolidate", limit=2)
+        assert set(runs[0]["summary"]["deleted_summary_ids"]) == {str(owned.id), str(twin.id)}
+        surviving = await storage.list_chunks_by_source(virtual, limit=5)
+        assert len(surviving) == 1
+        assert surviving[0].id not in {owned.id, twin.id}
 
     async def test_apply_consolidation_decay_floor(self, storage):
         """keep_originals=False applies decay but never drops below DECAY_FLOOR=0.3."""

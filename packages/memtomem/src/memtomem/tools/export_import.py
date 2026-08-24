@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, get_args
 from uuid import UUID, uuid4
 
 from memtomem.errors import EmbeddingError
-from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
@@ -181,7 +181,13 @@ async def export_chunks(
 
 def _chunk_to_dict(chunk: Chunk) -> dict:
     meta = chunk.metadata
+    origin: dict[str, str] = {"origin": meta.origin} if meta.origin else {}
     return {
+        # Writer provenance (#2161), emitted only when set. A summary that
+        # round-trips without it would come back unowned, and the policy would
+        # then fail every regeneration of that source closed. Import admits it
+        # only from a verified self-export — see ``_dict_to_chunk``.
+        **origin,
         # v2 additions: chunk_id + content_hash survive the roundtrip so
         # importers can dedup / preserve identity across instances.
         "chunk_id": str(chunk.id),
@@ -378,7 +384,9 @@ async def import_chunks(
 
     for idx, record in enumerate(bundle.chunks):
         try:
-            chunk, bundle_chunk_id = _dict_to_chunk(record, namespace_override=namespace)
+            chunk, bundle_chunk_id = _dict_to_chunk(
+                record, namespace_override=namespace, allow_origin=is_self_export
+            )
             parsed.append((chunk, bundle_chunk_id))
         except Exception as exc:
             # Never interpolate ``exc`` into the log: parse errors raised by
@@ -412,6 +420,14 @@ async def import_chunks(
     # Overwriting those would quietly downgrade them (backfilling rows that have
     # none is the separate question ``mem_entity_scan`` answers).
     newly_imported: list[Chunk] = []
+    # Rows an update-conflict is about to overwrite in place. ``upsert_chunks``
+    # writes ``origin`` like any other column, so an incoming record — which
+    # carries None for everything except a verified self-export — would strip
+    # the provenance the stored row already had, and the one-shot backfill that
+    # could have re-adopted it has long recorded itself done (#2161). The
+    # stored value always wins: an import may replace a chunk's content, never
+    # its writer.
+    origin_carryover: list[Chunk] = []
 
     if on_conflict == "duplicate":
         # Back-compat path: every record gets a fresh UUID, no hash check
@@ -438,6 +454,7 @@ async def import_chunks(
                 chunk.id = existing_id
                 updated += 1
                 to_upsert.append(chunk)
+                origin_carryover.append(chunk)
             else:
                 if preserve_ids and bundle_chunk_id:
                     try:
@@ -452,6 +469,13 @@ async def import_chunks(
                     chunk.id = candidate
                 to_upsert.append(chunk)
                 newly_imported.append(chunk)
+
+    if origin_carryover:
+        stored = await storage.get_chunks_batch([c.id for c in origin_carryover])
+        for chunk in origin_carryover:
+            prior = stored.get(chunk.id)
+            if prior is not None:
+                chunk.metadata = replace(chunk.metadata, origin=prior.metadata.origin)
 
     imported = failed = 0
     if to_upsert:
@@ -518,14 +542,33 @@ async def import_chunks(
     )
 
 
-def _dict_to_chunk(record: dict, namespace_override: str | None = None) -> tuple[Chunk, str | None]:
+def _dict_to_chunk(
+    record: dict,
+    namespace_override: str | None = None,
+    *,
+    allow_origin: bool = False,
+) -> tuple[Chunk, str | None]:
     """Parse one bundle record. Returns ``(chunk, bundle_chunk_id_or_None)``.
 
     The second element is the bundle's ``chunk_id`` string if present (v2),
     separated so the caller can decide whether to preserve the UUID based on
     ``on_conflict`` and ``preserve_ids``.
+
+    ``allow_origin`` gates writer provenance (#2161) and is set only for a
+    bundle whose local-provenance marker verified. ``origin`` is an ownership
+    proof the consolidation policy deletes on, so accepting it from a bundle
+    anyone can author would hand back the forgery the typed column exists to
+    prevent: a crafted record at a virtual summary path would import as
+    policy-owned. Foreign bundles therefore import ``origin=None``, and even a
+    self-export is held to the known constant.
     """
     ns = namespace_override or record.get("namespace", "default")
+    raw_origin = record.get("origin")
+    origin = (
+        ORIGIN_CONSOLIDATION_POLICY
+        if allow_origin and raw_origin == ORIGIN_CONSOLIDATION_POLICY
+        else None
+    )
     meta = ChunkMetadata(
         source_file=Path(record["source_file"]),
         heading_hierarchy=tuple(record.get("heading_hierarchy", [])),
@@ -535,6 +578,7 @@ def _dict_to_chunk(record: dict, namespace_override: str | None = None) -> tuple
         language=record.get("language", "en"),
         tags=tuple(record.get("tags", [])),
         namespace=ns,
+        origin=origin,
     )
     created_at = (
         datetime.fromisoformat(record["created_at"])
