@@ -208,8 +208,7 @@ class AnalyticsMixin:
         # Transaction-aware: ``apply_consolidation`` decays the originals in the
         # same transaction that creates their summary, so committing here would
         # end the caller's transaction early and strand a partial write (#2158).
-        if not self._in_transaction:
-            db.commit()
+        self._commit_if_standalone(db)
         return len(scores)
 
     async def get_importance_scores(self, chunk_ids: list) -> dict[str, float]:

@@ -64,7 +64,7 @@ class HistoryMixin:
             "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, result_scores, created_at) VALUES (?, ?, ?, ?, ?)",
             (query_text, emb_blob, json.dumps(result_chunk_ids), json.dumps(result_scores), now),
         )
-        db.commit()
+        self._commit_if_standalone(db)
 
         # Periodic pruning of old entries
         self._history_save_count += 1
@@ -109,7 +109,7 @@ class HistoryMixin:
                 now,
             ),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         self._history_save_count += 1
         if self._history_save_count % self._HISTORY_PRUNE_INTERVAL == 0:
             self._prune_old_history()
@@ -127,10 +127,13 @@ class HistoryMixin:
         ).isoformat(timespec="seconds")
         db = self._get_db()
         deleted = db.execute("DELETE FROM query_history WHERE created_at < ?", (cutoff,)).rowcount
-        # Commit unconditionally: the DELETE opens an implicit transaction
-        # even when it matches zero rows, and leaving it open makes the next
-        # explicit BEGIN IMMEDIATE (save_search_feedback) fail.
-        db.commit()
+        # Commit whenever this runs standalone, including at zero rows: the
+        # DELETE opens an implicit transaction even when it matches nothing,
+        # and leaving it open makes the next explicit BEGIN IMMEDIATE
+        # (save_search_feedback) fail. Inside a caller's transaction the
+        # owner closes it instead, so committing here would end that
+        # transaction early (#2162).
+        self._commit_if_standalone(db)
         if deleted:
             _log.info(
                 "Pruned %d old query_history rows (>%d days)", deleted, self._HISTORY_MAX_AGE_DAYS

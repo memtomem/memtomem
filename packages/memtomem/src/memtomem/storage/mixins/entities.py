@@ -55,13 +55,11 @@ class EntityMixin:
                 rows,
             )
             inserted = cur.rowcount
-            if not self._in_transaction:
-                db.commit()
+            self._commit_if_standalone(db)
         except Exception as exc:
             # Roll back the pending DELETE instead of leaving it to be flushed by
             # the next unrelated commit on the shared writer connection (#1572).
-            if not self._in_transaction:
-                db.rollback()
+            self._rollback_if_standalone(db)
             raise StorageError(f"upsert_entities failed, transaction rolled back: {exc}") from exc
         # Rows actually stored, not rows offered: a caller counting entities
         # would otherwise over-report the ones the conflict clause collapsed.
@@ -107,11 +105,9 @@ class EntityMixin:
         db = self._get_db()
         try:
             cur = db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
-            if not self._in_transaction:
-                db.commit()
+            self._commit_if_standalone(db)
         except Exception as exc:
-            if not self._in_transaction:
-                db.rollback()
+            self._rollback_if_standalone(db)
             raise StorageError(
                 f"delete_entities_for_chunk failed, transaction rolled back: {exc}"
             ) from exc

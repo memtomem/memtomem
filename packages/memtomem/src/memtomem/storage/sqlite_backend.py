@@ -440,6 +440,27 @@ class SqliteBackend(
         owner = self._transaction_owner
         return owner is not None and owner is self._current_task()
 
+    def _commit_if_standalone(self, db: sqlite3.Connection) -> None:
+        """Commit a writer's own work, unless it is running inside ``transaction()``.
+
+        Every storage writer must reach the connection's commit through this
+        (or through the ``owns_transaction`` shape, for writers that run their
+        own ``BEGIN``). A bare ``db.commit()`` inside an owner's transaction
+        ends it early and strands a partial write (#2158, #2162);
+        ``test_mixin_commit_guard.py`` enforces that.
+        """
+        if not self._in_transaction:
+            db.commit()
+
+    def _rollback_if_standalone(self, db: sqlite3.Connection) -> None:
+        """Discard a writer's own work, unless it is running inside ``transaction()``.
+
+        Inside a transaction the owner decides what a failure means, and a
+        rollback here would throw away work the owner has not seen fail.
+        """
+        if not self._in_transaction:
+            db.rollback()
+
     def _require_transaction_idle(self, operation: str) -> None:
         """Reject operations that bypass the guarded writer connection."""
         if self._transaction_owner is not None:
