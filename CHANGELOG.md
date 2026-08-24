@@ -232,6 +232,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A consolidation summary is now identified by provenance, not by its tags.**
+  The auto-consolidate policy owns the virtual path
+  `<source>.consolidated.md` and clears it before writing a replacement. What
+  it was allowed to delete there was inferred from a namespace plus the tags
+  `consolidated` + `summary` + `heuristic` — a combination a user's own chunk
+  can carry, at a real file that may legitimately be named that way, in which
+  case the policy deleted it. Chunks now record the writer that produced them
+  (`origin`), a field no ingress surface accepts: not `mem_add`, not the
+  indexer, not the agent-path `mem_consolidate_apply`. Only a summary the
+  policy itself wrote is replaceable; anything else at the path fails the
+  group closed, as it already did for a plainly foreign chunk.
+  Summaries written before the column existed are adopted once, at migration
+  time, and only when they reproduce the full shape the policy's writer has
+  always emitted (path suffix, all three tags, and the derived
+  `Consolidated: <name>` heading), are the target of a `consolidated_into`
+  edge, and sit in a namespace a consolidation policy actually writes summaries
+  under — the built-in default plus whatever the stored `auto_consolidate`
+  policy rows configure. That last conjunct is what keeps the adoption from
+  reaching a row the rule it replaces would have spared. Anything it cannot
+  place stays foreign, including a summary whose edges never landed (the
+  partial write fixed in #2158): the source's next consolidation refuses rather
+  than deleting, and removing the orphaned summary recovers it.
+  The column is additive, so a store keeps working on an older
+  binary; that binary still runs the old tag rule, and a summary it writes
+  after the upgrade will need deleting by hand before the policy will replace
+  it. The preflight in `execute_auto_consolidate` establishes ownership before
+  reading the embedded source hash: a foreign chunk quoting a matching hash
+  used to suppress consolidation over that source silently and forever, and
+  one without a hash made dry-run report "would consolidate" over a group the
+  live run refused. A run that regenerates now also names every summary row it
+  removed rather than only the first one it read. Exported bundles carry
+  `origin` so a restore round-trips, but it is accepted only from a bundle
+  whose local-provenance marker verifies against this install's key — a
+  hand-written bundle cannot claim policy ownership — and an import never
+  overwrites the stamp on a row it updates in place. (#2161)
+
 - **Re-index, then search, now sees the re-index.** Search results are cached
   for `search.cache_ttl` (30s) and keyed on the query and its filters, never on
   content. Every other write surface dropped that cache; the indexing surfaces

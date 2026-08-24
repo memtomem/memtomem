@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from memtomem.models import Chunk, ChunkMetadata
+from memtomem.models import Chunk
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
@@ -95,16 +95,13 @@ class DedupScanner:
 
         # Update keep chunk if tags changed
         if merged_tags != set(keep_chunk.metadata.tags):
-            new_meta = ChunkMetadata(
-                source_file=keep_chunk.metadata.source_file,
-                heading_hierarchy=keep_chunk.metadata.heading_hierarchy,
-                chunk_type=keep_chunk.metadata.chunk_type,
-                start_line=keep_chunk.metadata.start_line,
-                end_line=keep_chunk.metadata.end_line,
-                language=keep_chunk.metadata.language,
-                tags=tuple(sorted(merged_tags)),
-                namespace=keep_chunk.metadata.namespace,
-            )
+            # ``replace`` rather than a field-by-field rebuild: this merge only
+            # changes tags, and enumerating the fields silently dropped every
+            # one added since it was written (overlap, validity window, scope,
+            # project_root — and ``origin``, whose loss would leave a
+            # consolidation summary unowned and fail its next regeneration
+            # closed, #2161). A new metadata field must not need an edit here.
+            new_meta = replace(keep_chunk.metadata, tags=tuple(sorted(merged_tags)))
             updated = Chunk(
                 content=keep_chunk.content,
                 metadata=new_meta,

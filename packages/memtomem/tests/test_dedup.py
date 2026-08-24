@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -9,7 +10,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from memtomem.models import Chunk, ChunkMetadata, SearchResult
+from memtomem.models import (
+    ORIGIN_CONSOLIDATION_POLICY,
+    Chunk,
+    ChunkMetadata,
+    SearchResult,
+)
 from memtomem.search.dedup import DedupScanner
 
 
@@ -324,6 +330,46 @@ class TestMergeDryRun:
         assert {c.id for c in storage._chunks} == {keep.id}
         kept = storage._chunks[0]
         assert kept.metadata.tags == ("a", "b")
+
+    @pytest.mark.asyncio
+    async def test_tag_merge_preserves_every_other_metadata_field(self, scanner_factory):
+        """The merge rewrites tags — it must not quietly drop the rest.
+
+        This rebuilt ``ChunkMetadata`` field by field, so each field added
+        since it was written was silently reset on any tag-merge. ``origin``
+        made that load-bearing (#2161): losing it leaves a consolidation
+        summary unowned, and the policy then fails every later regeneration of
+        that source closed rather than replacing it.
+
+        Mutation check: enumerating the fields again fails this test."""
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        rich = ChunkMetadata(
+            source_file=Path("/s.md"),
+            tags=("a",),
+            origin=ORIGIN_CONSOLIDATION_POLICY,
+            scope="project_shared",
+            project_root=Path("/repo"),
+            valid_from_unix=1_700_000_000,
+            valid_to_unix=1_800_000_000,
+            overlap_before=7,
+            overlap_after=9,
+            parent_context="Doc title",
+            file_context="s.md > Doc title",
+        )
+        keep = Chunk(content="x", metadata=rich, embedding=[], created_at=t0)
+        dup = Chunk(
+            content="x",
+            metadata=ChunkMetadata(source_file=Path("/s.md"), tags=("b",)),
+            embedding=[],
+            created_at=t0 + timedelta(minutes=1),
+        )
+        scanner, storage, _ = scanner_factory([keep, dup])
+
+        await scanner.merge(keep.id, [dup.id], dry_run=False)
+
+        kept = storage._chunks[0].metadata
+        assert kept.tags == ("a", "b")
+        assert kept == replace(rich, tags=("a", "b"))
 
     @pytest.mark.asyncio
     async def test_default_apply_path_unchanged(self, scanner_factory):
