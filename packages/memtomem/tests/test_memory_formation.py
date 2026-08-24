@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -591,17 +592,20 @@ async def test_assertion_reuses_existing_entity_id(storage):
     assert {row["object"] for row in rows} == {"one", "two"}
 
 
-def _neighbour_result(content, score, *, valid_to_unix=None):
-    from pathlib import Path
+#: Deliberately under /private/tmp: on macOS the MCP formatter rewrites that
+#: prefix and the CLI does not, so the two surfaces' path handling is
+#: distinguishable. Expectations are computed from the formatters, never
+#: written as literals — the rewrite is platform-specific.
+_NEIGHBOUR_SOURCE = Path("/private/tmp/notes.md")
 
+
+def _neighbour_result(content, score, *, valid_to_unix=None):
     from memtomem.models import Chunk, ChunkMetadata
     from memtomem.storage.base import SearchResult
 
     chunk = Chunk(
         content=content,
-        metadata=ChunkMetadata(
-            source_file=Path("/private/tmp/notes.md"), valid_to_unix=valid_to_unix
-        ),
+        metadata=ChunkMetadata(source_file=_NEIGHBOUR_SOURCE, valid_to_unix=valid_to_unix),
         embedding=[0.5, 0.5],
     )
     return SearchResult(chunk=chunk, score=score, rank=1, source="dense")
@@ -680,7 +684,10 @@ async def test_candidate_evidence_reports_neighbours_and_summary_counts(storage,
     # Excerpts only — an embedding must never ride out on a review surface.
     assert all("embedding" not in n for n in result["neighbours"])
     # Paths go through the same display formatter mem_search results use.
-    assert result["neighbours"][0]["source_file"] == "/tmp/notes.md"
+    # Computed, not literal: _display_path rewrites /private/tmp only on macOS.
+    from memtomem.server.formatters import _display_path
+
+    assert result["neighbours"][0]["source_file"] == _display_path(_NEIGHBOUR_SOURCE)
 
 
 @pytest.mark.asyncio
@@ -832,7 +839,13 @@ async def test_cli_evidence_prints_envelope_and_reports_missing_candidate(monkey
     assert envelope["status"] == "available"
     assert envelope["neighbours"][0]["label"] == "potential_conflict"
     # CLI keeps paths verbatim; it runs on the machine that owns them.
-    assert envelope["neighbours"][0]["source_file"] == "/private/tmp/notes.md"
+    assert envelope["neighbours"][0]["source_file"] == str(_NEIGHBOUR_SOURCE)
+    from memtomem.server.formatters import _display_path
+
+    if _display_path(_NEIGHBOUR_SOURCE) != str(_NEIGHBOUR_SOURCE):
+        # Where the two formatters disagree, this pins that the CLI does not
+        # borrow the MCP one.
+        assert envelope["neighbours"][0]["source_file"] != _display_path(_NEIGHBOUR_SOURCE)
 
     with pytest.raises(click.ClickException, match="Candidate not found"):
         await _evidence("nope", 5)
