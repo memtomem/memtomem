@@ -27,11 +27,8 @@ class RelationMixin:
         # Transaction-aware: ``apply_consolidation`` writes the
         # ``consolidated_into`` edges in the same transaction that creates the
         # summary they point at, so committing here would end the caller's
-        # transaction early and strand a partial write (#2158). The other
-        # writers in this mixin have no in-transaction caller and still commit
-        # unconditionally.
-        if not self._in_transaction:
-            db.commit()
+        # transaction early and strand a partial write (#2158).
+        self._commit_if_standalone(db)
 
     async def get_related(self, chunk_id: UUID) -> list[tuple[UUID, str]]:
         db = self._get_db()
@@ -49,7 +46,7 @@ class RelationMixin:
             "DELETE FROM chunk_relations WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
             (str(source_id), str(target_id), str(target_id), str(source_id)),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def rename_tag(self, old_tag: str, new_tag: str) -> int:
@@ -75,7 +72,7 @@ class RelationMixin:
                 batch.append((json.dumps(tags), now, row[0]))
         if batch:
             db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-            db.commit()
+            self._commit_if_standalone(db)
         return len(batch)
 
     async def delete_tag(self, tag: str) -> int:
@@ -95,7 +92,7 @@ class RelationMixin:
                 batch.append((json.dumps(tags), now, row[0]))
         if batch:
             db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-            db.commit()
+            self._commit_if_standalone(db)
         return len(batch)
 
     async def merge_tags(self, sources: Sequence[str], target: str) -> int:
@@ -133,5 +130,5 @@ class RelationMixin:
                 batch.append((json.dumps(new_tags), now, row[0]))
         if batch:
             db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-            db.commit()
+            self._commit_if_standalone(db)
         return len(batch)

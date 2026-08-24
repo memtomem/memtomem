@@ -65,7 +65,7 @@ class FormationMixin:
                 candidate["expires_at"],
             ),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def list_memory_candidates(
@@ -78,7 +78,7 @@ class FormationMixin:
             "WHERE status='pending' AND expires_at <= ?",
             (now,),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         rows = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
@@ -97,7 +97,7 @@ class FormationMixin:
             "WHERE id=? AND status='pending' AND expires_at <= ?",
             (candidate_id, now),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         row = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
@@ -119,7 +119,7 @@ class FormationMixin:
             "WHERE session_id=? AND fingerprint=? AND status='pending' AND expires_at <= ?",
             (session_id, fingerprint, now),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         row = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
@@ -133,6 +133,12 @@ class FormationMixin:
         self, candidate_id: str, reviewer: str, reason: str = ""
     ) -> dict[str, Any] | None:
         """Atomically claim a pending candidate before any durable write."""
+        # The claim state machine brackets a durable write that happens
+        # outside SQLite (the pinned store, a memory file). Joining a
+        # caller's transaction would let a rollback undo the transition
+        # while that write stands, which is how a candidate gets written
+        # twice or stays claimed forever. It owns its own durability.
+        self._require_transaction_idle("claim_memory_candidate")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         cursor = db.execute(
@@ -157,7 +163,7 @@ class FormationMixin:
                 reason or "approval claim",
                 now,
             )
-        db.commit()
+        self._commit_if_standalone(db)
         if cursor.rowcount == 0:
             return None
         return await self.get_memory_candidate(candidate_id)
@@ -170,6 +176,12 @@ class FormationMixin:
         reason: str = "durable write failed or was cancelled",
     ) -> bool:
         """Release a failed write claim so the candidate can be retried."""
+        # The claim state machine brackets a durable write that happens
+        # outside SQLite (the pinned store, a memory file). Joining a
+        # caller's transaction would let a rollback undo the transition
+        # while that write stands, which is how a candidate gets written
+        # twice or stays claimed forever. It owns its own durability.
+        self._require_transaction_idle("release_memory_candidate")
         db = self._get_db()
         cursor = db.execute(
             "UPDATE memory_candidates SET status='pending', reviewer=NULL, "
@@ -187,11 +199,17 @@ class FormationMixin:
                 reason,
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
-        db.commit()
+        self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def finalize_memory_candidate(self, candidate_id: str) -> bool:
         """Finalize a successfully persisted candidate claim."""
+        # The claim state machine brackets a durable write that happens
+        # outside SQLite (the pinned store, a memory file). Joining a
+        # caller's transaction would let a rollback undo the transition
+        # while that write stands, which is how a candidate gets written
+        # twice or stays claimed forever. It owns its own durability.
+        self._require_transaction_idle("finalize_memory_candidate")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         cursor = db.execute(
@@ -209,7 +227,7 @@ class FormationMixin:
                 "durable write completed",
                 now,
             )
-        db.commit()
+        self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def recover_stale_memory_candidates(
@@ -284,6 +302,12 @@ class FormationMixin:
         reason: str,
     ) -> bool:
         """Quarantine a recovered claim after its durable write completed."""
+        # The claim state machine brackets a durable write that happens
+        # outside SQLite (the pinned store, a memory file). Joining a
+        # caller's transaction would let a rollback undo the transition
+        # while that write stands, which is how a candidate gets written
+        # twice or stays claimed forever. It owns its own durability.
+        self._require_transaction_idle("mark_memory_candidate_write_uncertain")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         cursor = db.execute(
@@ -302,7 +326,7 @@ class FormationMixin:
                 reason,
                 now,
             )
-        db.commit()
+        self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def resolve_uncertain_memory_candidate(
@@ -335,7 +359,7 @@ class FormationMixin:
                 reason,
                 now,
             )
-        db.commit()
+        self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def list_memory_candidate_transitions(self, candidate_id: str) -> list[dict[str, Any]]:
@@ -387,7 +411,7 @@ class FormationMixin:
                 reason or f"candidate {status}",
                 now,
             )
-        db.commit()
+        self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def add_assertion(
@@ -439,7 +463,7 @@ class FormationMixin:
                 extractor_version,
             ),
         )
-        db.commit()
+        self._commit_if_standalone(db)
 
     async def link_assertions(self, source_id: str, target_id: str, edge_type: str) -> None:
         if edge_type not in {"supersedes", "contradicts", "supports"}:
@@ -452,7 +476,7 @@ class FormationMixin:
         )
         if edge_type == "supersedes":
             db.execute("UPDATE memory_assertions SET status='superseded' WHERE id=?", (target_id,))
-        db.commit()
+        self._commit_if_standalone(db)
 
     async def query_assertions(
         self,

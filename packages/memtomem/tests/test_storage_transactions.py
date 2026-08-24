@@ -3,8 +3,10 @@
 import asyncio
 import logging
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
+
 
 from helpers import make_chunk
 from memtomem.errors import StorageError
@@ -290,6 +292,216 @@ async def test_relation_and_importance_writers_commit_standalone(storage):
 
     assert edge is not None and edge[0] == "consolidated_into"
     assert score[0] == pytest.approx(0.25)
+
+
+def _candidate(candidate_id: str, session_id: str = "txn-session") -> dict:
+    """A minimal ``memory_candidates`` row, shaped as ``formation.py`` builds it."""
+    now = datetime.now(timezone.utc)
+    return {
+        "id": candidate_id,
+        "session_id": session_id,
+        "kind": "fact",
+        "operation": "add",
+        "destination": "memory",
+        "content": "candidate content",
+        "evidence": [],
+        "matched_existing_ids": [],
+        "confidence": 0.5,
+        "sensitivity": "normal",
+        "proposed_diff": "+ candidate content",
+        "extractor_version": "test-v1",
+        "fingerprint": candidate_id,
+        "status": "pending",
+        "created_at": now.isoformat(timespec="seconds"),
+        "expires_at": (now + timedelta(days=30)).isoformat(timespec="seconds"),
+    }
+
+
+def _committed_rows(storage, sql: str, params: tuple) -> list[tuple]:
+    """Query through a second connection.
+
+    The writer connection reports its own uncommitted rows, which would turn a
+    lost commit into a passing test.
+    """
+    observer = sqlite3.connect(str(storage._config.sqlite_path), timeout=0)
+    try:
+        return observer.execute(sql, params).fetchall()
+    finally:
+        observer.close()
+
+
+async def _add_candidate_with_session(storage) -> bool:
+    """``memory_candidates.session_id`` is a foreign key, so the session first."""
+    await storage.create_session("txn-session", "tester", "default")
+    return await storage.add_memory_candidate(_candidate("txn-candidate"))
+
+
+async def _link_a_stored_chunk(storage) -> None:
+    """``chunk_links.target_id`` is a foreign key, so the chunk first."""
+    target = make_chunk(content="link target")
+    await storage.upsert_chunks([target])
+    await storage.add_chunk_link(None, target.id, "shared", "default")
+
+
+# One writer per mixin swept in #2162, exercised through the public API:
+# ``(label, run_writer, sql, params)``. The AST guard proves the *shape* holds
+# for all 46 sites; these prove the shape means what it is supposed to mean.
+_SWEPT_WRITERS = [
+    (
+        "formation",
+        _add_candidate_with_session,
+        "SELECT id FROM memory_candidates WHERE id=?",
+        ("txn-candidate",),
+    ),
+    (
+        "schedules",
+        lambda s: s.schedule_insert("0 3 * * *", "consolidate"),
+        "SELECT id FROM schedules WHERE job_kind=?",
+        ("consolidate",),
+    ),
+    (
+        "scratch",
+        lambda s: s.scratch_set("txn-key", "txn-value"),
+        "SELECT value FROM working_memory WHERE key=?",
+        ("txn-key",),
+    ),
+    (
+        "share_links",
+        _link_a_stored_chunk,
+        "SELECT link_type FROM chunk_links WHERE link_type=?",
+        ("shared",),
+    ),
+    (
+        "policies",
+        lambda s: s.policy_add("txn-policy", "decay", {"half_life_days": 30}),
+        "SELECT id FROM memory_policies WHERE name=?",
+        ("txn-policy",),
+    ),
+    (
+        "history",
+        lambda s: s.save_query_history("txn query", [], [], []),
+        "SELECT query_text FROM query_history WHERE query_text=?",
+        ("txn query",),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label,run_writer,sql,params",
+    _SWEPT_WRITERS,
+    ids=[case[0] for case in _SWEPT_WRITERS],
+)
+async def test_swept_writers_roll_back_with_the_owner(storage, label, run_writer, sql, params):
+    """A writer inside ``transaction()`` must leave the decision to the owner.
+
+    Each of these committed unconditionally before #2162, which ended the
+    owner's transaction from the inside and made everything written up to that
+    point durable regardless of how the block finished.
+    """
+    with pytest.raises(RuntimeError, match="roll back owner"):
+        async with storage.transaction():
+            await run_writer(storage)
+            raise RuntimeError("roll back owner")
+
+    assert _committed_rows(storage, sql, params) == []
+
+
+@pytest.mark.parametrize(
+    "label,run_writer,sql,params",
+    _SWEPT_WRITERS,
+    ids=[case[0] for case in _SWEPT_WRITERS],
+)
+async def test_swept_writers_still_commit_standalone(storage, label, run_writer, sql, params):
+    """Joining a transaction must not cost these writers their own commit."""
+    await run_writer(storage)
+
+    assert _committed_rows(storage, sql, params) != []
+    assert storage._get_db().in_transaction is False
+
+
+async def test_cleanup_old_sessions_closes_its_transaction_at_zero_rows(storage):
+    """A DELETE that matches nothing still opens an implicit transaction.
+
+    The commit used to be conditional on ``rowcount``, so a no-op cleanup left
+    that transaction open on the shared writer connection for the next
+    unrelated commit to flush (#1572), and made the next ``BEGIN IMMEDIATE``
+    fail.
+    """
+    assert await storage.cleanup_old_sessions(max_age_days=1) == 0
+    assert storage._get_db().in_transaction is False
+
+
+async def test_prune_old_history_inside_a_transaction_leaves_it_open(storage):
+    """Pruning is bookkeeping; it must not end a caller's transaction.
+
+    It commits unconditionally when standalone — including at zero rows, for
+    the reason above — which is exactly the shape that ends someone else's
+    transaction when it is not guarded.
+    """
+    async with storage.transaction():
+        await storage.create_session("owner-row", "owner", "default")
+        storage._prune_old_history()
+        assert storage._get_db().in_transaction is True
+
+    assert await storage.get_session("owner-row") is not None
+
+
+async def test_scratch_cleanup_closes_its_transaction_at_zero_rows(storage):
+    """Same zero-row leak as ``cleanup_old_sessions``, in the other cleanup.
+
+    The commit used to be conditional on the delete count, so a cleanup that
+    matched nothing left its implicit transaction open on the shared writer
+    connection for the next unrelated commit to flush (#1572).
+    """
+    assert await storage.scratch_cleanup() == 0
+    assert storage._get_db().in_transaction is False
+
+
+# Writers whose durability cannot be someone else's to decide: each is a claim
+# taken *before* a durable write that happens outside SQLite, or the record
+# that closes one out. Joining a caller's transaction would let a rollback undo
+# the claim while the write it authorised still stands.
+_CLAIM_WRITERS = [
+    ("idempotency_claim", lambda s: s.idempotency_claim("mem_add", "k")),
+    ("idempotency_complete", lambda s: s.idempotency_complete("mem_add", "k", "{}")),
+    ("idempotency_release", lambda s: s.idempotency_release("mem_add", "k")),
+    ("claim_memory_candidate", lambda s: s.claim_memory_candidate("cand-1", "reviewer")),
+    ("release_memory_candidate", lambda s: s.release_memory_candidate("cand-1")),
+    ("finalize_memory_candidate", lambda s: s.finalize_memory_candidate("cand-1")),
+    (
+        "mark_memory_candidate_write_uncertain",
+        lambda s: s.mark_memory_candidate_write_uncertain("cand-1", actor="a", reason="r"),
+    ),
+    ("schedule_try_claim", lambda s: s.schedule_try_claim("sched-1", None)),
+    ("schedule_mark_run", lambda s: s.schedule_mark_run("sched-1", "ok")),
+]
+
+
+@pytest.mark.parametrize(
+    "name,run_writer", _CLAIM_WRITERS, ids=[case[0] for case in _CLAIM_WRITERS]
+)
+async def test_claim_writers_refuse_to_join_a_caller_transaction(storage, name, run_writer):
+    """Refusing is the point: silently joining is what breaks at-most-once.
+
+    These bracket a durable write outside SQLite — a memory file the caller
+    appended, a job the scheduler already started. Deferring their commit to a
+    caller's transaction means a rollback can un-claim work that really
+    happened, and the retry duplicates it.
+    """
+    async with storage.transaction():
+        with pytest.raises(StorageError, match=f"{name}.*transaction is active"):
+            await run_writer(storage)
+        # Refusing must not take the caller's transaction down with it.
+        assert storage._get_db().in_transaction is True
+
+
+@pytest.mark.parametrize(
+    "name,run_writer", _CLAIM_WRITERS, ids=[case[0] for case in _CLAIM_WRITERS]
+)
+async def test_claim_writers_still_work_standalone(storage, name, run_writer):
+    """The refusal is about composition only; the ordinary path is unchanged."""
+    await run_writer(storage)
+    assert storage._get_db().in_transaction is False
 
 
 @pytest.mark.parametrize("stray", ["commit", "rollback"])

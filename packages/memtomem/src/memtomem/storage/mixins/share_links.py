@@ -92,7 +92,7 @@ class ShareLinkMixin:
                 now,
             ),
         )
-        db.commit()
+        self._commit_if_standalone(db)
 
     async def delete_dangling_chunk_links(self) -> int:
         """Delete ``chunk_links`` rows whose source chunk has been removed.
@@ -105,7 +105,7 @@ class ShareLinkMixin:
         db = self._get_db()
         cur = db.execute("DELETE FROM chunk_links WHERE source_id IS NULL")
         deleted = cur.rowcount
-        db.commit()
+        self._commit_if_standalone(db)
         return deleted
 
     async def get_chunk_link(

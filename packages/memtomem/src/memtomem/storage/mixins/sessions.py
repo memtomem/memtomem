@@ -65,13 +65,11 @@ class SessionMixin:
                 " VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
                 (session_id, agent_id, now, namespace, meta_json),
             )
-            if not self._in_transaction:
-                db.commit()
+            self._commit_if_standalone(db)
         except Exception:
             # Close the failed transaction instead of leaving it to be
             # flushed by the next unrelated commit (#1572 idiom).
-            if not self._in_transaction:
-                db.rollback()
+            self._rollback_if_standalone(db)
             raise
 
     async def end_session(self, session_id: str, summary: str | None, metadata: dict) -> None:
@@ -270,11 +268,9 @@ class SessionMixin:
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (session_id, event_type, content, json.dumps(chunk_ids or []), now, meta_json),
             )
-            if not self._in_transaction:
-                db.commit()
+            self._commit_if_standalone(db)
         except Exception:
-            if not self._in_transaction:
-                db.rollback()
+            self._rollback_if_standalone(db)
             raise
 
     async def list_sessions(
@@ -427,6 +423,9 @@ class SessionMixin:
             "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
             (cutoff,),
         )
-        if cursor.rowcount:
-            db.commit()
+        # Commit unconditionally: a DELETE that matched nothing still
+        # opens an implicit transaction on the shared writer connection,
+        # and leaving it for the next unrelated commit to flush is the
+        # #1572 hazard.
+        self._commit_if_standalone(db)
         return cursor.rowcount
