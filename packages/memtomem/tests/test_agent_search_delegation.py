@@ -85,6 +85,7 @@ class TestDelegation:
             top_k=5,
             namespace="agent-runtime:alpha,shared",
             current_namespace=None,
+            record=True,
             project_context_root=Path("/tmp/project"),
             origin="mcp",
         )
