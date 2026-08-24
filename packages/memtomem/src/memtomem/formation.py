@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
 from memtomem import privacy
+
+logger = logging.getLogger(__name__)
 
 EXTRACTOR_VERSION = "heuristic-v1"
 DEFAULT_STALE_CLAIM_MINUTES = 15
@@ -156,3 +160,192 @@ async def propose_memory_candidate(
     if existing["content"] != body:
         raise ValueError("idempotency_key was already used with different content")
     return existing, True
+
+
+#: Longest neighbour excerpt included in a review envelope. Enough to judge
+#: what the existing memory claims; short enough that a five-neighbour
+#: envelope stays readable in a terminal and in an MCP response.
+NEIGHBOUR_EXCERPT_CHARS = 300
+
+
+def _excerpt(text: str) -> str:
+    """One-line, length-capped preview of an existing memory."""
+    flat = " ".join(text.split())
+    if len(flat) <= NEIGHBOUR_EXCERPT_CHARS:
+        return flat
+    return flat[:NEIGHBOUR_EXCERPT_CHARS] + "..."
+
+
+def _currently_valid(chunk: Any, as_of_unix: int) -> bool:
+    """Whether ``chunk``'s temporal-validity window covers ``as_of_unix``.
+
+    Inclusive on both ends, ``None`` meaning unbounded — the same semantics as
+    ``search.pipeline._apply_validity_filter``, deliberately reported rather
+    than applied: a memory that has already been superseded is exactly the
+    neighbour a reviewer most needs to see.
+    """
+    vfrom = chunk.metadata.valid_from_unix
+    vto = chunk.metadata.valid_to_unix
+    lower = vfrom if vfrom is not None else float("-inf")
+    upper = vto if vto is not None else float("inf")
+    return lower <= as_of_unix <= upper
+
+
+async def candidate_neighbour_evidence(
+    storage: Any,
+    embedder: Any,
+    candidate: dict[str, Any],
+    *,
+    top_k: int = 5,
+    project_context_root: Any = None,
+    display_path: Callable[[Any], str] = str,
+) -> dict[str, Any]:
+    """Describe what the store already says about ``candidate``.
+
+    Decides nothing and writes no memory: the candidate keeps its status and
+    its stored fields. (The caller's own ``get_memory_candidate`` lookup can
+    still flip an *already-expired* pending row to ``expired`` — a pre-existing
+    side effect of every candidate accessor, not of gathering evidence.) The
+    returned envelope always carries a ``status`` — evidence that cannot be
+    gathered must never block inspecting or deciding a candidate, so a failed
+    lookup is reported in-band instead of raised.
+
+    ``status`` is one of:
+
+    - ``available`` — the lookup ran. ``neighbours`` may still be empty, which
+      means the store genuinely has nothing close.
+    - ``dense_disabled`` — the store is bm25-only, so there is no neighbour
+      signal to give at all (not "no neighbours").
+    - ``dense_not_indexed`` — the store holds chunks but none of them have a
+      vector yet (right after an embedding reset, or mid first index). Dense
+      search would answer "nothing is close" about a corpus it cannot see.
+    - ``dimension_mismatch`` — the embedder's width disagrees with the
+      store's; re-index or fix the embedding config before trusting a review.
+    - ``unavailable`` — anything else went wrong; details are logged.
+
+    When the store can answer, ``coverage`` reports ``{"total", "with_dense"}``
+    for the same project scope the search is pinned to, so a reviewer can
+    discount an empty or thin result set that reflects a partly-vectorised
+    corpus rather than an empty one.
+
+    The corpus is the indexed chunks the caller's scope can see: accepted,
+    durable memories. Pending candidates are not compared against each other,
+    and pinned-context blocks are not visible to dense search.
+
+    Args:
+        storage: Storage backend.
+        embedder: Embedding provider.
+        candidate: Candidate row, as returned by the storage accessors.
+        top_k: Maximum neighbours to return, highest dense score first.
+        project_context_root: Project root to pin neighbours to.
+        display_path: Renders a chunk's source path for the calling surface —
+            the MCP surface passes a redacting formatter, the CLI does not.
+
+    Returns:
+        A fresh envelope dict; see ``status`` above.
+    """
+    from memtomem.errors import QueryEmbeddingDimensionError
+    from memtomem.search.conflict import (
+        CONFLICT_OVERLAP_MAX,
+        DENSE_SCORE_THRESHOLD,
+        EVIDENCE_VERSION,
+        RESTATEMENT_OVERLAP_MIN,
+        find_neighbours,
+    )
+
+    envelope: dict[str, Any] = {
+        "candidate_id": candidate.get("id"),
+        "status": "available",
+        "version": EVIDENCE_VERSION,
+        "corpus": "indexed_chunks",
+        "thresholds": {
+            "dense_score": DENSE_SCORE_THRESHOLD,
+            "conflict_overlap_max": CONFLICT_OVERLAP_MAX,
+            "restatement_overlap_min": RESTATEMENT_OVERLAP_MIN,
+        },
+        "neighbours": [],
+        "summary": {"potential_conflict": 0, "restatement_candidate": 0, "related": 0},
+    }
+
+    if getattr(storage, "dense_enabled", True) is False:
+        envelope["status"] = "dense_disabled"
+        envelope["reason"] = "store is bm25-only; no neighbour signal is available"
+        return envelope
+
+    # A live ``chunks_vec`` table is not the same as a vectorised corpus: an
+    # embedding reset recreates it empty, and a first index fills it gradually.
+    # Reporting "nothing is close" from a corpus dense search cannot see yet
+    # would be the one failure this envelope exists to prevent.
+    coverage = None
+    get_coverage = getattr(storage, "get_dense_coverage", None)
+    if get_coverage is not None:
+        try:
+            # Scoped to the same project the neighbour search is pinned to. A
+            # store-wide count would let another project's vectors vouch for
+            # this one, and would report that project's totals here.
+            coverage = await get_coverage(project_context_root)
+        except TypeError:
+            # Older/stubbed backends without the scoped parameter.
+            try:
+                coverage = await get_coverage()
+            except Exception:
+                logger.warning("Candidate evidence: dense coverage probe failed", exc_info=True)
+        except Exception:
+            logger.warning("Candidate evidence: dense coverage probe failed", exc_info=True)
+    if coverage is not None:
+        envelope["coverage"] = dict(coverage)
+        if coverage.get("total", 0) > 0 and coverage.get("with_dense", 0) == 0:
+            envelope["status"] = "dense_not_indexed"
+            envelope["reason"] = (
+                "no indexed chunk has a vector yet; re-index before reading this as "
+                "'nothing is close'"
+            )
+            return envelope
+
+    try:
+        neighbours = await find_neighbours(
+            candidate.get("content", ""),
+            storage,
+            embedder,
+            top_k=top_k,
+            project_context_root=project_context_root,
+        )
+    except QueryEmbeddingDimensionError:
+        # Only the store's own width check earns this remedy. Recognized by
+        # type, not by message: an embedding provider is free to raise its own
+        # ValueError mentioning a dimension, and that caller has a different
+        # problem. The message stays in the log — the response carries a fixed
+        # remediation instead of an echoed error string.
+        logger.warning("Candidate evidence: query embedding width mismatch", exc_info=True)
+        envelope["status"] = "dimension_mismatch"
+        envelope["reason"] = (
+            "the embedder's vector width disagrees with the store's; re-index "
+            "or fix the embedding configuration before trusting this evidence"
+        )
+        return envelope
+    except Exception:
+        logger.warning("Candidate evidence lookup failed", exc_info=True)
+        envelope["status"] = "unavailable"
+        envelope["reason"] = "neighbour lookup failed; see server logs"
+        return envelope
+
+    as_of_unix = int(datetime.now(timezone.utc).timestamp())
+    for n in neighbours:
+        meta = n.chunk.metadata
+        envelope["neighbours"].append(
+            {
+                "chunk_id": str(n.chunk.id),
+                "source_file": display_path(meta.source_file),
+                "namespace": meta.namespace,
+                "excerpt": _excerpt(n.chunk.content),
+                "dense_score": round(n.dense_score, 4),
+                "text_overlap": round(n.text_overlap, 4),
+                "label": n.label,
+                "valid_from_unix": meta.valid_from_unix,
+                "valid_to_unix": meta.valid_to_unix,
+                "currently_valid": _currently_valid(n.chunk, as_of_unix),
+            }
+        )
+        envelope["summary"][n.label] += 1
+
+    return envelope

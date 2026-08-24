@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
+from memtomem.errors import QueryEmbeddingDimensionError
 from memtomem.formation import propose_memory_candidate, scan_session_candidates
 from memtomem.server.tools import formation as formation_tools
 
@@ -589,3 +591,436 @@ async def test_assertion_reuses_existing_entity_id(storage):
         )
     rows = await storage.query_assertions("same entity", "value")
     assert {row["object"] for row in rows} == {"one", "two"}
+
+
+#: Deliberately under /private/tmp: on macOS the MCP formatter rewrites that
+#: prefix and the CLI does not, so the two surfaces' path handling is
+#: distinguishable. Expectations are computed from the formatters, never
+#: written as literals — the rewrite is platform-specific.
+_NEIGHBOUR_SOURCE = Path("/private/tmp/notes.md")
+
+
+def _neighbour_result(content, score, *, valid_to_unix=None):
+    from memtomem.models import Chunk, ChunkMetadata
+    from memtomem.storage.base import SearchResult
+
+    chunk = Chunk(
+        content=content,
+        metadata=ChunkMetadata(source_file=_NEIGHBOUR_SOURCE, valid_to_unix=valid_to_unix),
+        embedding=[0.5, 0.5],
+    )
+    return SearchResult(chunk=chunk, score=score, rank=1, source="dense")
+
+
+class _EvidenceStorage:
+    """Real candidate lookup is not needed here — only the dense half."""
+
+    dense_enabled = True
+
+    def __init__(self, results=None, error=None, coverage=None):
+        self.results = results or []
+        self.error = error
+        self.coverage = coverage if coverage is not None else {"total": 4, "with_dense": 4}
+
+    async def get_dense_coverage(self):
+        return self.coverage
+
+    async def dense_search(self, embedding, top_k=20, **kwargs):
+        if self.error is not None:
+            raise self.error
+        return self.results
+
+
+class _Embedder:
+    async def embed_query(self, text):
+        return [0.5, 0.5]
+
+
+def _evidence_config():
+    """Minimal config for the project-scope resolver the tool threads through."""
+    return SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[]))
+
+
+async def _seed_candidate(storage, text="Decision: use blue-green deployment"):
+    from memtomem.formation import scan_session_candidates
+
+    session_id = f"evidence-{uuid4()}"
+    await storage.create_session(session_id, "agent", "default")
+    await storage.add_session_event(session_id, "note", text)
+    created = await scan_session_candidates(storage, session_id)
+    return created[0]
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_reports_neighbours_and_summary_counts(storage, monkeypatch):
+    candidate = await _seed_candidate(storage)
+    dense = _EvidenceStorage(
+        [
+            _neighbour_result("Rollout happens through canary traffic shifting", 0.9),
+            _neighbour_result("Decision: use blue-green deployment", 0.85),
+        ]
+    )
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+
+    assert result["ok"] is True
+    assert result["status"] == "available"
+    assert result["corpus"] == "indexed_chunks"
+    assert result["summary"] == {
+        "potential_conflict": 1,
+        "restatement_candidate": 1,
+        "related": 0,
+    }
+    labels = [n["label"] for n in result["neighbours"]]
+    assert labels == ["potential_conflict", "restatement_candidate"]
+    # Excerpts only — an embedding must never ride out on a review surface.
+    assert all("embedding" not in n for n in result["neighbours"])
+    # Paths go through the same display formatter mem_search results use.
+    # Computed, not literal: _display_path rewrites /private/tmp only on macOS.
+    from memtomem.server.formatters import _display_path
+
+    assert result["neighbours"][0]["source_file"] == _display_path(_NEIGHBOUR_SOURCE)
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_shows_superseded_neighbours_flagged_not_hidden(
+    storage, monkeypatch
+):
+    candidate = await _seed_candidate(storage)
+    expired = int(datetime.now(timezone.utc).timestamp()) - 3600
+    dense = _EvidenceStorage(
+        [_neighbour_result("Rollout happens through canary shifts", 0.9, valid_to_unix=expired)]
+    )
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+
+    assert len(result["neighbours"]) == 1
+    assert result["neighbours"][0]["currently_valid"] is False
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_never_mutates_the_candidate_row(storage, monkeypatch):
+    candidate = await _seed_candidate(storage)
+    before = await storage.get_memory_candidate(candidate["id"])
+    dense = _EvidenceStorage([_neighbour_result("anything at all", 0.9)])
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+    assert result["status"] == "available"
+    assert await storage.get_memory_candidate(candidate["id"]) == before
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_rejects_unknown_candidate_and_bad_top_k(storage, monkeypatch):
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    missing = json.loads(await formation_tools.mem_candidate_evidence("no-such-candidate"))
+    assert missing == {"ok": False, "reason": "candidate not found"}
+
+    bad = json.loads(await formation_tools.mem_candidate_evidence("no-such-candidate", top_k=21))
+    assert bad == {"ok": False, "reason": "top_k must be between 1 and 20"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (
+            QueryEmbeddingDimensionError("Embedding dimension mismatch: query has 2d"),
+            "dimension_mismatch",
+        ),
+        (RuntimeError("vector index is corrupt"), "unavailable"),
+    ],
+)
+async def test_candidate_evidence_reports_failure_in_band(
+    storage, monkeypatch, caplog, error, expected_status
+):
+    candidate = await _seed_candidate(storage)
+    dense = _EvidenceStorage(error=error)
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    with caplog.at_level("WARNING", logger="memtomem.formation"):
+        result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+
+    # In band: the reviewer still gets an envelope, and can still decide.
+    assert result["ok"] is True
+    assert result["status"] == expected_status
+    assert result["reason"]
+    # The raised message stays in the log; the response carries fixed guidance.
+    assert "2d" not in result["reason"]
+    assert result["neighbours"] == []
+    assert caplog.records
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_distinguishes_bm25_only_from_no_neighbours(storage, monkeypatch):
+    candidate = await _seed_candidate(storage)
+
+    async def _never_called(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("dense_search called on a bm25-only store")
+
+    monkeypatch.setattr(storage, "dense_search", _never_called, raising=False)
+    monkeypatch.setattr(type(storage), "dense_enabled", property(lambda self: False))
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+    assert result["status"] == "dense_disabled"
+    assert result["neighbours"] == []
+
+
+@pytest.mark.asyncio
+async def test_cli_evidence_prints_envelope_and_reports_missing_candidate(monkeypatch, capsys):
+    import click
+
+    from memtomem.cli.review_cmd import _evidence
+
+    dense = _EvidenceStorage([_neighbour_result("Canary rollout is the standard", 0.9)])
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(
+            side_effect=lambda cid: (
+                {"id": cid, "content": "Decision: use blue-green deployment"}
+                if cid == "candidate-1"
+                else None
+            )
+        ),
+        dense_enabled=True,
+        dense_search=dense.dense_search,
+    )
+
+    @asynccontextmanager
+    async def fake_components():
+        yield SimpleNamespace(storage=storage, embedder=_Embedder(), config=_evidence_config())
+
+    monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+    await _evidence("candidate-1", 5)
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "available"
+    assert envelope["neighbours"][0]["label"] == "potential_conflict"
+    # CLI keeps paths verbatim; it runs on the machine that owns them.
+    assert envelope["neighbours"][0]["source_file"] == str(_NEIGHBOUR_SOURCE)
+    from memtomem.server.formatters import _display_path
+
+    if _display_path(_NEIGHBOUR_SOURCE) != str(_NEIGHBOUR_SOURCE):
+        # Where the two formatters disagree, this pins that the CLI does not
+        # borrow the MCP one.
+        assert envelope["neighbours"][0]["source_file"] != _display_path(_NEIGHBOUR_SOURCE)
+
+    with pytest.raises(click.ClickException, match="Candidate not found"):
+        await _evidence("nope", 5)
+
+
+def test_candidate_evidence_is_reachable_through_mem_do():
+    from memtomem.server.tool_registry import ACTIONS
+
+    assert ACTIONS["candidate_evidence"].category == "formation"
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_flags_a_corpus_with_no_vectors_yet(storage, monkeypatch):
+    """An unvectorised corpus must not read as "nothing is close"."""
+    candidate = await _seed_candidate(storage)
+    dense = _EvidenceStorage([], coverage={"total": 12, "with_dense": 0})
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(storage, "get_dense_coverage", dense.get_dense_coverage, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+    assert result["status"] == "dense_not_indexed"
+    assert result["coverage"] == {"total": 12, "with_dense": 0}
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_reports_partial_coverage_alongside_results(storage, monkeypatch):
+    candidate = await _seed_candidate(storage)
+    dense = _EvidenceStorage(
+        [_neighbour_result("Canary rollout is the standard", 0.9)],
+        coverage={"total": 10, "with_dense": 3},
+    )
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(storage, "get_dense_coverage", dense.get_dense_coverage, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+    assert result["status"] == "available"
+    assert result["coverage"] == {"total": 10, "with_dense": 3}
+    assert len(result["neighbours"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_classifies_by_type_not_by_error_message(storage, monkeypatch):
+    candidate = await _seed_candidate(storage)
+    dense = _EvidenceStorage(
+        error=ValueError("dimension mismatch in provider payload for token /secret")
+    )
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(storage, "get_dense_coverage", dense.get_dense_coverage, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    result = json.loads(await formation_tools.mem_candidate_evidence(candidate["id"]))
+    assert result["status"] == "unavailable"
+    # The unrecognised error's own text stays in the log, not in the response.
+    assert "/secret" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_cli_evidence_pins_the_same_project_scope_as_the_mcp_tool(monkeypatch, tmp_path):
+    """CLI parity: inside a registered project both surfaces sample the same rows."""
+    from memtomem.cli.review_cmd import _evidence
+
+    project_root = (tmp_path / "proj").resolve()
+    memories = project_root / ".memtomem" / "memories"
+    memories.mkdir(parents=True)
+    monkeypatch.chdir(project_root)
+
+    seen = {}
+
+    class _ScopeStorage(_EvidenceStorage):
+        async def dense_search(self, embedding, top_k=20, **kwargs):
+            seen.update(kwargs)
+            return []
+
+    dense = _ScopeStorage()
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(return_value={"id": "c1", "content": "Decision: X"}),
+        dense_enabled=True,
+        dense_search=dense.dense_search,
+        get_dense_coverage=dense.get_dense_coverage,
+    )
+    config = SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[str(memories)]))
+
+    @asynccontextmanager
+    async def fake_components():
+        yield SimpleNamespace(storage=storage, embedder=_Embedder(), config=config)
+
+    monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+    await _evidence("c1", 5)
+    assert seen["project_context_root"] == project_root
+
+
+@pytest.mark.asyncio
+async def test_dense_coverage_counts_only_the_scoped_project(storage, tmp_path):
+    """Another project's vectors must not vouch for this one's corpus."""
+    from memtomem.models import Chunk, ChunkMetadata
+
+    here = (tmp_path / "here").resolve()
+    there = (tmp_path / "there").resolve()
+    for root in (here, there):
+        (root / ".memtomem" / "memories").mkdir(parents=True)
+
+    def _chunk(root, name):
+        return Chunk(
+            content=f"note in {name}",
+            metadata=ChunkMetadata(
+                source_file=root / ".memtomem" / "memories" / f"{name}.md",
+                scope="project",
+                project_root=root,
+            ),
+            embedding=[],
+        )
+
+    await storage.upsert_chunks([_chunk(here, "a"), _chunk(there, "b"), _chunk(there, "c")])
+
+    store_wide = await storage.get_dense_coverage()
+    scoped = await storage.get_dense_coverage(here)
+    assert store_wide["total"] == 3
+    assert scoped["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_inherits_the_accessor_lazy_expiry(storage, monkeypatch):
+    """The one state change the action can cause, pinned so the docs stay true.
+
+    Gathering evidence writes nothing of its own, but its candidate lookup is
+    the shared accessor, which flips an already-expired pending row. The tool
+    docstring says so; this keeps that claim honest.
+    """
+    candidate = await _seed_candidate(storage)
+    storage._get_db().execute(
+        "UPDATE memory_candidates SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+        (candidate["id"],),
+    )
+    storage._get_db().commit()
+
+    dense = _EvidenceStorage([_neighbour_result("anything", 0.9)])
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    await formation_tools.mem_candidate_evidence(candidate["id"])
+    after = await storage.get_memory_candidate(candidate["id"])
+    assert after["status"] == "expired"

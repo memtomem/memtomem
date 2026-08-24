@@ -37,6 +37,18 @@ class NamespaceConflictError(StorageError):
         self.reason_code = reason_code
 
 
+class QueryEmbeddingDimensionError(StorageError, ValueError):
+    """A query embedding's width disagrees with the stored vector width.
+
+    Subclasses ``ValueError`` so the pre-existing callers that catch one keep
+    working, while callers that report an outcome to a human can recognize
+    *this* condition specifically. Message-sniffing cannot: a provider is free
+    to raise its own ``ValueError`` mentioning a dimension, and handing that
+    caller the "re-index / check MEMTOMEM_EMBEDDING__*" remedy would send them
+    after a problem they do not have.
+    """
+
+
 class StorageStartupError(StorageError):
     """Classified, path-safe storage initialization failure."""
 

@@ -57,7 +57,7 @@ async def _list_candidates(status: str, limit: int) -> None:
 @review.command("show")
 @click.argument("candidate_id")
 def show(candidate_id: str) -> None:
-    """Show one candidate and its evidence."""
+    """Show one candidate and its source evidence (not its neighbours)."""
     asyncio.run(_show(candidate_id))
 
 
@@ -69,6 +69,37 @@ async def _show(candidate_id: str) -> None:
         if candidate is None:
             raise click.ClickException("Candidate not found")
         click.echo(json.dumps(candidate, ensure_ascii=False, indent=2))
+
+
+@review.command("evidence")
+@click.argument("candidate_id")
+@click.option("--top-k", type=click.IntRange(min=1, max=20), default=5)
+def evidence(candidate_id: str, top_k: int) -> None:
+    """Show what stored memory already says about a candidate."""
+    asyncio.run(_evidence(candidate_id, top_k))
+
+
+async def _evidence(candidate_id: str, top_k: int) -> None:
+    from memtomem.cli._bootstrap import cli_components
+    from memtomem.formation import candidate_neighbour_evidence
+    from memtomem.runtime.project_context import _resolve_project_context_root
+
+    async with cli_components() as comp:
+        candidate = await comp.storage.get_memory_candidate(candidate_id)
+        if candidate is None:
+            raise click.ClickException("Candidate not found")
+        # Same project scope the MCP tool pins to (ADR-0011 PR-D): without it
+        # this would sample only user-tier memories inside a registered
+        # project and call the project's own memories absent.
+        envelope = await candidate_neighbour_evidence(
+            comp.storage,
+            comp.embedder,
+            candidate,
+            top_k=top_k,
+            project_context_root=_resolve_project_context_root(comp),
+            # Paths verbatim: the CLI runs on the machine that owns them.
+        )
+        click.echo(json.dumps(envelope, ensure_ascii=False, indent=2))
 
 
 @review.command("recover")

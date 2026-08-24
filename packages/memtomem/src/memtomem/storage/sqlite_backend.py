@@ -20,6 +20,7 @@ import sqlite_vec
 from memtomem.config import StorageConfig
 from memtomem.errors import (
     EmbeddingDimensionMismatchError,
+    QueryEmbeddingDimensionError,
     SchemaDowngradeError,
     StorageError,
     StorageStartupError,
@@ -1860,6 +1861,17 @@ class SqliteBackend(
             for rank_idx, row in enumerate(rows)
         ]
 
+    @property
+    def dense_enabled(self) -> bool:
+        """Whether this store can answer a dense search at all.
+
+        False in bm25-only mode (dimension 0), where ``dense_search``
+        legitimately returns ``[]``. Callers that report a lookup's outcome to
+        a human need this to tell "configured without vectors" apart from
+        "searched and found nothing" — the two are the same empty list.
+        """
+        return self._has_vec_table
+
     async def dense_search(
         self,
         embedding: list[float],
@@ -1887,7 +1899,7 @@ class SqliteBackend(
         # with no ``dense_error`` at all (Codex review, #2120). Kept below the
         # BM25-only guard above: dimension-0 stores accept any width by design.
         if len(embedding) != self._dimension:
-            raise ValueError(
+            raise QueryEmbeddingDimensionError(
                 f"Embedding dimension mismatch: query has {len(embedding)}d "
                 f"but DB expects {self._dimension}d. "
                 f"Check MEMTOMEM_EMBEDDING__MODEL / "
@@ -2021,7 +2033,7 @@ class SqliteBackend(
                 ).fetchall()
             except _sqlite3.OperationalError as exc:
                 if "Dimension mismatch" in str(exc):
-                    raise ValueError(
+                    raise QueryEmbeddingDimensionError(
                         f"Embedding dimension mismatch: query has {len(embedding)}d "
                         f"but DB expects {self._dimension}d. "
                         f"Check MEMTOMEM_EMBEDDING__MODEL / "
@@ -2127,8 +2139,12 @@ class SqliteBackend(
         sources = db.execute("SELECT COUNT(DISTINCT source_file) FROM chunks").fetchone()[0]
         return {"total_chunks": total, "total_sources": sources}
 
-    async def get_dense_coverage(self) -> dict[str, int]:
+    async def get_dense_coverage(self, project_context_root: Path | None = None) -> dict[str, int]:
         """Return dense-vector coverage: ``{"total": N, "with_dense": M}``.
+
+        Store-wide by default. Pass ``project_context_root`` to count only the
+        rows a scoped read would see, so the rollup qualifies that search
+        rather than the whole database.
 
         ``M < N`` when chunks were indexed before the embedder finished
         loading (NoopEmbedder dimension==0 path, or an init-time failure
@@ -2152,11 +2168,27 @@ class SqliteBackend(
         returning only BM25-flavored results.
         """
         db = self._get_read_db()
-        total = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        if project_context_root is None:
+            total = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            with_dense = 0
+            if self._has_vec_table:
+                with_dense = db.execute(
+                    "SELECT COUNT(*) FROM chunks c INNER JOIN chunks_vec v ON v.rowid = c.rowid"
+                ).fetchone()[0]
+            return {"total": total, "with_dense": with_dense}
+
+        # Scoped counts must use the same always-on context fragment
+        # ``dense_search`` applies (ADR-0011 §6), or the rollup would describe
+        # a different corpus than the search it is meant to qualify: another
+        # project's vectors would report this one as covered.
+        frag, params = scope_context_sql(None, project_context_root, column_alias="c.")
+        total = db.execute(f"SELECT COUNT(*) FROM chunks c WHERE ({frag})", params).fetchone()[0]
         with_dense = 0
         if self._has_vec_table:
             with_dense = db.execute(
-                "SELECT COUNT(*) FROM chunks c INNER JOIN chunks_vec v ON v.rowid = c.rowid"
+                "SELECT COUNT(*) FROM chunks c INNER JOIN chunks_vec v ON v.rowid = c.rowid "
+                f"WHERE ({frag})",
+                params,
             ).fetchone()[0]
         return {"total": total, "with_dense": with_dense}
 

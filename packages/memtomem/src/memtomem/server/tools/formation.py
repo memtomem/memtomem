@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from memtomem.formation import (
     DEFAULT_STALE_CLAIM_MINUTES,
+    candidate_neighbour_evidence,
     propose_memory_candidate,
     scan_session_candidates,
 )
@@ -107,6 +108,63 @@ async def mem_candidate_list(status: str = "pending", limit: int = 100, ctx: Ctx
         await app.storage.list_memory_candidates(status=status, limit=limit),
         ensure_ascii=False,
     )
+
+
+@mcp.tool()
+@tool_handler
+@register("formation")
+async def mem_candidate_evidence(candidate_id: str, top_k: int = 5, ctx: CtxType = None) -> str:
+    """Show what stored memory already says about one pending candidate.
+
+    Advisory: it decides nothing and writes no memory. (Like every candidate
+    lookup, fetching one can flip an *already-expired* pending candidate to
+    ``expired`` — a pre-existing property of the accessor, not of this action.)
+    Returns the nearest existing
+    memories with a dense score, a token-overlap ratio, and a label —
+    ``restatement_candidate`` (the store may already say this),
+    ``potential_conflict`` (same topic, different words — could equally be a
+    paraphrase), or ``related``. A high score is not proof of either; read the
+    excerpts.
+
+    The comparison corpus is the indexed memories in the caller's scope. Other
+    pending candidates are not compared against each other, and pinned-context
+    blocks are not visible to it.
+
+    ``status`` reports whether the lookup ran: ``available`` (an empty
+    ``neighbours`` then means nothing is close), ``dense_disabled`` (bm25-only
+    store — no signal exists), ``dense_not_indexed`` (chunks exist but none
+    carry a vector yet), ``dimension_mismatch``, or ``unavailable``. When the
+    store can answer, ``coverage`` gives ``{"total", "with_dense"}`` for the
+    same scope, so a thin result set from a partly-indexed corpus is not read
+    as an empty store. Evidence never blocks review; a failed lookup is
+    reported, not raised.
+
+    Args:
+        candidate_id: Candidate to gather evidence for, in any status.
+        top_k: Maximum neighbours to return, 1-20 (default 5). Out-of-range
+            values return an error, not a clamp.
+    """
+    if not 1 <= top_k <= 20:
+        return json.dumps({"ok": False, "reason": "top_k must be between 1 and 20"})
+    app = await _get_app_initialized(ctx)
+    candidate = await app.storage.get_memory_candidate(candidate_id)
+    if candidate is None:
+        return json.dumps({"ok": False, "reason": "candidate not found"})
+
+    from memtomem.server.formatters import _display_path
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    evidence = await candidate_neighbour_evidence(
+        app.storage,
+        app.embedder,
+        candidate,
+        top_k=top_k,
+        project_context_root=_resolve_project_context_root(app),
+        # Same path formatter mem_search results go through, so this surface
+        # discloses no more than the existing MCP read surface does.
+        display_path=_display_path,
+    )
+    return json.dumps({"ok": True, **evidence}, ensure_ascii=False)
 
 
 @mcp.tool()
