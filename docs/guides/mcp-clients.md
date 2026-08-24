@@ -511,12 +511,12 @@ uses, so the output is identical. Useful as a sanity check between
 | **Quality Lab** | `mem_quality_replay` (replay stored eval cases into a deterministic retrieval-quality report; promote/compare stay on `mm quality`) |
 | **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync`, `mem_context_memory_migrate`, `mem_context_artifact_migrate`, `mem_context_artifact_transfer`, `mem_context_version`, `mem_context_promote`, `mem_context_pull` — cross-runtime artifact push and pull (`mm context`). Parameters: [Context tool reference](reference.md#context-tool-parameters); workflow: [Context Gateway](context-gateway.md) |
 | **Pinned Context** | `mem_pinned_list`, `mem_pinned_get`, `mem_pinned_set`, `mem_pinned_delete`, `mem_context_compose` |
-| **Formation** | `mem_formation_scan`, `mem_candidate_propose`, `mem_candidate_list`, `mem_candidate_review`, `mem_candidate_recover` |
+| **Formation** | `mem_formation_scan`, `mem_candidate_propose`, `mem_candidate_list`, `mem_candidate_evidence`, `mem_candidate_review`, `mem_candidate_recover` |
 
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (99 current tools plus the deprecated `mem_context_migrate` alias, 100 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (100 current tools plus the deprecated `mem_context_migrate` alias, 101 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.
@@ -524,6 +524,32 @@ external agent submit a review candidate without writing durable memory.
 `idempotency_key` are required. The content and source reference pass the
 privacy scanner, accepted proposals remain pending for up to 30 days, and a
 reused idempotency key returns the original proposal unless its content differs.
+
+`mem_candidate_evidence(candidate_id, top_k)` answers the question a reviewer
+cannot answer from the candidate text alone: does the store already say this,
+or the opposite? It returns the nearest existing memories with a `dense_score`,
+a token-`text_overlap` ratio, and an advisory `label` —
+`restatement_candidate`, `potential_conflict`, or `related`. The labels
+describe the *shape* of the similarity, not a verdict: same topic in different
+words is equally consistent with a contradiction and with a paraphrase, so read
+the excerpts. Nothing is decided or written; accept/reject stays with the
+reviewer.
+
+The comparison corpus is the indexed memories in the caller's scope — **not**
+other pending candidates (a candidate's presentation does not depend on what
+else is queued) and **not** pinned-context blocks (dense search cannot see
+them). Superseded memories are returned with `currently_valid: false` rather
+than filtered out, since an out-of-date neighbour is often the most
+informative one.
+
+Evidence never blocks review. The envelope's `status` is `available` (an empty
+`neighbours` list then means nothing is close), `dense_disabled` (a bm25-only
+store has no such signal at all), `dense_not_indexed` (chunks exist but none
+carry a vector yet — right after an embedding reset, or mid first index),
+`dimension_mismatch`, or `unavailable`. When the store can answer, `coverage`
+reports `{"total", "with_dense"}` so a thin result set from a partly-vectorised
+corpus is not mistaken for an empty store. The CLI equivalent is
+`mm review evidence <candidate-id>`, which pins the same project scope.
 `mem_context_migrate` is a deprecated alias for
 `mem_context_memory_migrate` and is scheduled for removal in v0.5.0.
 

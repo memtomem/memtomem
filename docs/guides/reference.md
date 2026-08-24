@@ -87,8 +87,8 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **99 current MCP tools** organized into categories. Full mode
-also registers the deprecated `mem_context_migrate` compatibility alias (100
+memtomem provides **100 current MCP tools** organized into categories. Full mode
+also registers the deprecated `mem_context_migrate` compatibility alias (101
 registered names total):
 
 | Category | Tools | What they do |
@@ -105,7 +105,7 @@ registered names total):
 | **Working Memory** | `mem_scratch_set/get/promote` | Ephemeral key-value scratch space |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* | Monitor and configure |
 | **Pinned Context** | `mem_pinned_list/get/set/delete`, `mem_context_compose` | Keep bounded instructions ahead of retrieved memory |
-| **Formation** | `mem_formation_scan`, `mem_candidate_propose/list/review/recover` | Submit and review proposed memories and recover interrupted approvals |
+| **Formation** | `mem_formation_scan`, `mem_candidate_propose/list/evidence/review/recover` | Submit and review proposed memories, weigh them against existing ones, and recover interrupted approvals |
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 

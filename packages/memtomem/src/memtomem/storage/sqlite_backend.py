@@ -1860,6 +1860,17 @@ class SqliteBackend(
             for rank_idx, row in enumerate(rows)
         ]
 
+    @property
+    def dense_enabled(self) -> bool:
+        """Whether this store can answer a dense search at all.
+
+        False in bm25-only mode (dimension 0), where ``dense_search``
+        legitimately returns ``[]``. Callers that report a lookup's outcome to
+        a human need this to tell "configured without vectors" apart from
+        "searched and found nothing" — the two are the same empty list.
+        """
+        return self._has_vec_table
+
     async def dense_search(
         self,
         embedding: list[float],

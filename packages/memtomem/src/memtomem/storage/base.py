@@ -138,6 +138,9 @@ class StorageBackend(Protocol):
     # ``None`` so existing callers stay source-compatible; the
     # ``scope_context_sql`` helper in :mod:`memtomem.storage.sqlite_scope`
     # reflects how a SQL backend should compose the fragment.
+    @property
+    def dense_enabled(self) -> bool: ...
+
     async def bm25_search(
         self,
         query: str,
