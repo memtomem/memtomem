@@ -75,6 +75,12 @@ class IdempotencyMixin:
         ``INSERT OR IGNORE`` is the atomic test-and-set: exactly one concurrent
         caller inserts the row, the rest fall through to the SELECT.
         """
+        # The ledger exists to be durable *before* the caller's write, so a
+        # retry sees the claim even if that write never lands. Joining a
+        # caller's transaction would put the claim at the mercy of a rollback
+        # that cannot undo whatever the caller already did outside SQLite
+        # (a memory file it appended), and a retry would then duplicate it.
+        self._require_transaction_idle("idempotency_claim")
         db = self._get_db()
         self._purge_expired(db)
         now = self._now_iso()
@@ -86,7 +92,7 @@ class IdempotencyMixin:
             "(tool, key, result, created_at, expires_at) VALUES (?, ?, NULL, ?, ?)",
             (tool, key, now, expires_at),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         if cur.rowcount == 1:
             return ("won", None)
         row = db.execute(
@@ -105,6 +111,9 @@ class IdempotencyMixin:
         TTL is measured from completion so a replay horizon starts once the
         write actually landed.
         """
+        # Durable independently of any caller transaction, as the claim
+        # it closes out is; see ``idempotency_claim``.
+        self._require_transaction_idle("idempotency_complete")
         db = self._get_db()
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_s)).isoformat(
             timespec="seconds"
@@ -113,7 +122,7 @@ class IdempotencyMixin:
             "UPDATE idempotency_ledger SET result = ?, expires_at = ? WHERE tool = ? AND key = ?",
             (result, expires_at, tool, key),
         )
-        db.commit()
+        self._commit_if_standalone(db)
 
     async def idempotency_release(self, tool: str, key: str) -> None:
         """Delete a *pending* claim so a failed write stays re-runnable.
@@ -121,9 +130,12 @@ class IdempotencyMixin:
         Scoped to ``result IS NULL`` so it never removes an already-completed
         row (a late failure after another path recorded success).
         """
+        # Durable independently of any caller transaction, as the claim
+        # it closes out is; see ``idempotency_claim``.
+        self._require_transaction_idle("idempotency_release")
         db = self._get_db()
         db.execute(
             "DELETE FROM idempotency_ledger WHERE tool = ? AND key = ? AND result IS NULL",
             (tool, key),
         )
-        db.commit()
+        self._commit_if_standalone(db)

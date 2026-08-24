@@ -70,7 +70,7 @@ class ScheduleMixin:
                 _utcnow_iso(),
             ),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         return sched_id
 
     async def schedule_get(self, sched_id: str) -> dict | None:
@@ -146,13 +146,13 @@ class ScheduleMixin:
             "UPDATE schedules SET enabled=? WHERE id=?",
             (1 if enabled else 0, sched_id),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         return cur.rowcount > 0
 
     async def schedule_delete(self, sched_id: str) -> bool:
         db = self._get_db()
         cur = db.execute("DELETE FROM schedules WHERE id=?", (sched_id,))
-        db.commit()
+        self._commit_if_standalone(db)
         return cur.rowcount > 0
 
     async def schedule_try_claim(
@@ -177,6 +177,11 @@ class ScheduleMixin:
         UPDATEs, so a single conditional statement is self-atomic — no
         explicit transaction needed.
         """
+        # At-most-once depends on the winning claim being durable before
+        # the job runs. Joining a caller's transaction would let a rollback
+        # make an already-executing slot claimable again (#1564, #2162), so
+        # the claim and its terminal record own their own durability.
+        self._require_transaction_idle("schedule_try_claim")
         ts = (when or datetime.now(timezone.utc)).astimezone(timezone.utc)
         db = self._get_db()
         cur = db.execute(
@@ -184,7 +189,7 @@ class ScheduleMixin:
             "last_run_error=NULL WHERE id=? AND last_run_at IS ?",
             (ts.isoformat(timespec="seconds"), sched_id, prev_last_run_at),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         return cur.rowcount == 1
 
     async def schedule_mark_run(
@@ -197,11 +202,14 @@ class ScheduleMixin:
         """Record a run outcome. ``status`` ∈ {'ok','error','timeout'}."""
         ts = (when or datetime.now(timezone.utc)).astimezone(timezone.utc)
         db = self._get_db()
+        # Terminal record for a claim that owns its durability: rolling it
+        # back would leave the schedule stuck in 'running' forever.
+        self._require_transaction_idle("schedule_mark_run")
         db.execute(
             "UPDATE schedules SET last_run_at=?, last_run_status=?, last_run_error=? WHERE id=?",
             (ts.isoformat(timespec="seconds"), status, error, sched_id),
         )
-        db.commit()
+        self._commit_if_standalone(db)
 
 
 def _row_to_dict(row: tuple) -> dict:

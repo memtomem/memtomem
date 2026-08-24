@@ -25,7 +25,7 @@ class PolicyMixin:
             "VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
             (policy_id, name, policy_type, json.dumps(config), namespace_filter, now, now),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         return policy_id
 
     async def policy_list(self) -> list[dict]:
@@ -71,7 +71,7 @@ class PolicyMixin:
     async def policy_delete(self, name: str) -> bool:
         db = self._get_db()
         cur = db.execute("DELETE FROM memory_policies WHERE name = ?", (name,))
-        db.commit()
+        self._commit_if_standalone(db)
         return cur.rowcount > 0
 
     async def policy_update_last_run(self, name: str) -> None:
@@ -81,7 +81,7 @@ class PolicyMixin:
             "UPDATE memory_policies SET last_run_at = ?, updated_at = ? WHERE name = ?",
             (now, now, name),
         )
-        db.commit()
+        self._commit_if_standalone(db)
 
     async def policy_get_enabled(self) -> list[dict]:
         db = self._get_read_db()

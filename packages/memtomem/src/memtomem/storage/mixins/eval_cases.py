@@ -538,7 +538,7 @@ class EvalCaseMixin:
             "UPDATE eval_cases SET status = ?, updated_at = ? WHERE case_id = ?",
             (status, _now_iso(), case_id),
         )
-        db.commit()
+        self._commit_if_standalone(db)
         return await self.get_eval_case(case_id)
 
     # ---- export / import --------------------------------------------------

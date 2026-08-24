@@ -67,8 +67,7 @@ class MaintenanceRunMixin:
         )
         # The backend's ``transaction()`` owner suppresses inner commits; an
         # audit write must not end a caller's transaction early.
-        if not getattr(self, "_in_transaction", False):
-            db.commit()
+        self._commit_if_standalone(db)
         return int(cur.lastrowid or 0)
 
     async def maintenance_run_finish(
@@ -100,8 +99,7 @@ class MaintenanceRunMixin:
                 run_id,
             ),
         )
-        if not getattr(self, "_in_transaction", False):
-            db.commit()
+        self._commit_if_standalone(db)
 
     async def maintenance_run_latest(
         self,
