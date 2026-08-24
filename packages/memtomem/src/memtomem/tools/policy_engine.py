@@ -59,11 +59,13 @@ class PolicyRunResult:
     #: drop its search cache. Handlers arm it before a write rather than
     #: confirm one after, because the paths that need it are exactly the ones
     #: where the evidence is lost with an exception.
-    #: ``affected_count`` cannot answer this — auto_consolidate's
-    #: stale-regen path deletes the old summary chunk and, when regeneration
-    #: then fails, reports the group as failed with ``affected_count == 0``,
-    #: while auto_tag's count is a pre-scan estimate that can be positive for
-    #: a run that wrote nothing. Long-lived callers (the policy scheduler)
+    #: ``affected_count`` cannot answer this — auto_tag's count is a pre-scan
+    #: estimate that can be positive for a run that wrote nothing, and a
+    #: handler that raises mid-write has no count to report at all. (The
+    #: original #2157 example, auto_consolidate committing a stale-summary
+    #: delete and then failing to regenerate, is gone since #2158 made that
+    #: path atomic — the flag now over-reports there, which is the safe
+    #: direction.) Long-lived callers (the policy scheduler)
     #: gate their ``SearchPipeline.invalidate_cache()`` on this flag, mirroring
     #: ``IndexingStats.mutated`` (#2141).
     #:
@@ -428,11 +430,12 @@ async def execute_auto_consolidate(
     )
 
     applied = 0
-    # Armed the moment a write is *attempted*, not when one is confirmed:
-    # ``apply_consolidation`` commits the summary chunk in its own transaction
-    # and then does the relation / importance work, so a failure after that
-    # commit leaves a searchable summary behind while this group is recorded
-    # as failed (#2157). The stale-summary delete arms it for the same reason.
+    # Armed the moment a write is *attempted*, not when one is confirmed. Since
+    # #2158 ``apply_consolidation`` is one transaction, so a failed group leaves
+    # nothing behind and this over-reports — deliberately. The flag drives cache
+    # invalidation and "did this run touch the store" reporting, where claiming a
+    # write that rolled back is harmless and missing one that landed is not
+    # (#2157).
     mutation_attempted = False
     llm_fallback_count = 0
     detail_parts: list[str] = []
@@ -502,12 +505,6 @@ async def execute_auto_consolidate(
             detail_parts.append(f"{source_path.name}{tag}")
             continue
 
-        if stale:
-            # Captured before the delete — the stale summary is destroyed here.
-            deleted_summary_ids.append(str(existing[0].id))
-            mutation_attempted = True
-            await storage.delete_chunks([existing[0].id])
-
         try:
             # Try LLM summary first, fall back to heuristic on failure.
             summary = None
@@ -551,6 +548,11 @@ async def execute_auto_consolidate(
             continue
 
         applied += 1
+        if stale:
+            # Recorded only now: the replacement happens inside
+            # ``apply_consolidation``'s transaction, so on failure the old
+            # summary is still there and reporting it deleted would be a lie.
+            deleted_summary_ids.append(str(existing[0].id))
         tag = " (regen)" if stale else ""
         detail_parts.append(f"{source_path.name}{tag}")
         group_records.append(
@@ -583,9 +585,9 @@ async def execute_auto_consolidate(
     if llm_fallback_count:
         outcome["llm_fallback_count"] = llm_fallback_count
 
-    # A group that failed after its stale summary was deleted leaves the source
-    # without a summary. ``deleted_summary_ids`` records what went; the status
-    # must not read ``ok`` while that is true.
+    # A failed group leaves the store as it was — since #2158 the replacement is
+    # atomic, so a source that had a stale summary still has it. The status must
+    # still not read ``ok``: the group the policy set out to consolidate wasn't.
     error = f"{len(failed)} group(s) failed: {', '.join(failed)}" if failed else None
 
     namespaces = set(seen_namespaces)

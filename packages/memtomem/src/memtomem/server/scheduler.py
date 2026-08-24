@@ -153,9 +153,10 @@ class PolicyScheduler:
             else:
                 logger.debug("Policy '%s' (%s): %s", r.policy_name, r.policy_type, r.details)
 
-        # Gate on the explicit write signal, not the user-facing counter: a
-        # consolidation run that deleted a stale summary and then failed to
-        # regenerate it reports ``affected_count == 0`` (#2157).
+        # Gate on the explicit write signal, not the user-facing counter: the
+        # counter is a pre-scan estimate for some handlers and unreported by a
+        # handler that raises mid-write, so a run can write with
+        # ``affected_count == 0`` (#2157).
         if any(r.mutated for r in results):
             self._app.search_pipeline.invalidate_cache()
         if total_affected > 0:

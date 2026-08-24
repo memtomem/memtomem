@@ -9,7 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 class AnalyticsMixin:
-    """Mixin providing analytics methods. Requires self._get_db()."""
+    """Mixin providing analytics methods. Requires self._get_db() and
+    self._in_transaction."""
 
     async def get_health_report(self, namespace: str | None = None) -> dict:
         """Compute a memory health report — replaces raw SQL in evaluation.py and web/routes/evaluation.py."""
@@ -204,7 +205,11 @@ class AnalyticsMixin:
             "UPDATE chunks SET importance_score = ? WHERE id = ?",
             [(score, chunk_id) for chunk_id, score in scores.items()],
         )
-        db.commit()
+        # Transaction-aware: ``apply_consolidation`` decays the originals in the
+        # same transaction that creates their summary, so committing here would
+        # end the caller's transaction early and strand a partial write (#2158).
+        if not self._in_transaction:
+            db.commit()
         return len(scores)
 
     async def get_importance_scores(self, chunk_ids: list) -> dict[str, float]:

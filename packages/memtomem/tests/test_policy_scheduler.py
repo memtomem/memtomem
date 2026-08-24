@@ -113,9 +113,9 @@ class TestPolicyScheduler:
 
     @pytest.mark.asyncio
     async def test_cache_invalidated_when_mutated_without_affected_count(self):
-        """The #2157 shape: auto_consolidate deleted a stale summary chunk and
-        then failed to regenerate it — the group is reported as failed with
-        ``affected_count == 0``, but the delete is committed."""
+        """The #2157 shape: a handler wrote but has no count to show for it —
+        the run is reported with ``affected_count == 0`` while the store did
+        change, so the cache must still be dropped."""
         app = _make_app()
         config = PolicyConfig(enabled=True)
         sched = PolicyScheduler(app, config)

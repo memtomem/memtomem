@@ -234,3 +234,58 @@ async def test_preexisting_connection_transaction_is_not_adopted(storage):
         assert storage._transaction_owner is None
     finally:
         db.rollback()
+
+
+async def test_relation_and_importance_writers_roll_back_with_the_owner(storage):
+    """``add_relation`` / ``update_importance_scores`` must join an open txn.
+
+    Both used to commit unconditionally, which ended the owner's transaction
+    from the inside: ``apply_consolidation`` writes its ``consolidated_into``
+    edges and the originals' decay in the same transaction as the summary they
+    describe, and a premature commit there is exactly the partial write #2158
+    is about.
+    """
+    original = make_chunk(content="original chunk")
+    summary = make_chunk(content="summary chunk")
+    await storage.upsert_chunks([original, summary])
+    await storage.update_importance_scores({str(original.id): 0.8})
+
+    with pytest.raises(RuntimeError, match="roll back owner"):
+        async with storage.transaction():
+            await storage.add_relation(original.id, summary.id, "consolidated_into")
+            await storage.update_importance_scores({str(original.id): 0.4})
+            raise RuntimeError("roll back owner")
+
+    assert await storage.get_related(original.id) == []
+    scores = await storage.get_importance_scores([str(original.id)])
+    assert scores[str(original.id)] == pytest.approx(0.8)
+
+
+async def test_relation_and_importance_writers_commit_standalone(storage):
+    """Outside a transaction both writers still commit on their own.
+
+    Observed through a second connection: the writer connection would report
+    its own uncommitted rows and turn a lost commit into a passing test.
+    """
+    original = make_chunk(content="standalone original")
+    summary = make_chunk(content="standalone summary")
+    await storage.upsert_chunks([original, summary])
+
+    await storage.add_relation(original.id, summary.id, "consolidated_into")
+    await storage.update_importance_scores({str(original.id): 0.25})
+
+    observer = sqlite3.connect(str(storage._config.sqlite_path), timeout=0)
+    try:
+        edge = observer.execute(
+            "SELECT relation_type FROM chunk_relations WHERE source_id=? AND target_id=?",
+            (str(original.id), str(summary.id)),
+        ).fetchone()
+        score = observer.execute(
+            "SELECT importance_score FROM chunks WHERE id=?",
+            (str(original.id),),
+        ).fetchone()
+    finally:
+        observer.close()
+
+    assert edge is not None and edge[0] == "consolidated_into"
+    assert score[0] == pytest.approx(0.25)
