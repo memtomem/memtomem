@@ -71,10 +71,11 @@ reports `0 chunks moved` while the metadata row does move — the message says
 which of the two happened. Live sessions follow the rename; share-lineage
 records keep the namespace name they were shared under, as a historical fact.
 
-One rough edge after a merge that dropped duplicates: extracted entities and
-assertions from the dropped copy are kept (they belong to content the surviving
-chunk still holds), so `mem_entity_search` can list the same mention twice and
-entity-type counts read high for those chunks. Re-indexing the file clears it.
+One rough edge after a merge that dropped duplicates: assertions from the
+dropped copy are kept (they belong to content the surviving chunk still holds),
+so the same assertion can appear twice for those chunks. Extracted entities are
+no longer affected — a uniqueness constraint collapses the duplicate mention as
+the merge remaps it. Re-indexing the file clears the assertion case.
 
 ### Bulk assign — `ns_assign`
 
@@ -196,7 +197,13 @@ mem_auto_tag(source_filter="notes", overwrite=True) # re-tag specific files
 
 ### Entity extraction
 
-Scan indexed chunks and extract structured entities (people, dates, decisions, technologies):
+The indexer already extracts entities (people, dates, decisions, technologies)
+for every chunk it writes, and rewrites them when the chunk is re-indexed — see
+`indexing.extract_entities` in [Configuration](../configuration.md#entity-match-boost).
+`mem_entity_scan` is what you run on top of that: to backfill a store indexed by
+an older release, or to re-extract with the higher-quality LLM extractor.
+
+Scan indexed chunks and extract structured entities:
 
 ```
 mem_entity_scan(dry_run=True)                       # preview
@@ -206,8 +213,10 @@ mem_entity_scan(overwrite=True)                     # re-extract already-scanned
 mem_entity_search(entity_type="person")             # query extracted entities
 ```
 
-By default a chunk that already has entities is skipped. `overwrite=True`
-re-extracts every matching chunk, and a chunk whose content no longer yields
+By default a chunk that already has entities is skipped — which, now that the
+indexer populates them, means a plain `mem_entity_scan()` is a no-op over a
+freshly indexed store and `overwrite=True` is the form that does the LLM
+upgrade. `overwrite=True` re-extracts every matching chunk, and a chunk whose content no longer yields
 any entity has its old rows **cleared** — reported as `Chunks cleared` in the
 summary. That matters once [entity boost](../configuration.md#entity-match-boost)
 is enabled: entities left over from a previous version of the content would keep

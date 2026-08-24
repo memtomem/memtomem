@@ -295,6 +295,113 @@ class TestDuplicateChunksMigration:
             db.close()
 
 
+class TestDuplicateEntitiesMigration:
+    """One-time dedup of ``chunk_entities`` rows on startup (#2145).
+
+    The table shipped without a uniqueness constraint, so a namespace merge
+    (``UPDATE OR IGNORE`` with nothing to ignore against) and case-variant
+    writes both left the same mention stored twice for one chunk — which
+    ``get_entity_type_counts`` then counted twice. ``create_tables`` must
+    collapse those groups exactly once and install the NOCASE UNIQUE index.
+    """
+
+    _CHUNK_ID = "00000000-0000-0000-0000-0000000000e1"
+
+    @classmethod
+    def _seed_dup_entities(cls, db: sqlite3.Connection) -> None:
+        # One chunk to hang the rows off (the FK cascades on delete).
+        db.execute(
+            """INSERT INTO chunks
+               (id, content, content_hash, source_file, namespace,
+                start_line, end_line, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                cls._CHUNK_ID,
+                "Python and sqlite",
+                "hash-E",
+                "/tmp/entities.md",
+                "default",
+                0,
+                1,
+                "2026-08-24T00:00:00+00:00",
+                "2026-08-24T00:00:00+00:00",
+            ),
+        )
+        # Three rows for one mention: an exact repeat and a case variant. The
+        # keeper is the highest-confidence row; ties go to the lowest id, i.e.
+        # the earliest write. Plus one genuinely distinct row that must survive
+        # untouched, so the test can tell dedup from a blanket delete.
+        db.executemany(
+            "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
+            "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (cls._CHUNK_ID, "technology", "python", 0.6, 0, "2026-08-24T00:00:00+00:00"),
+                (cls._CHUNK_ID, "technology", "Python", 0.9, 5, "2026-08-24T00:00:01+00:00"),
+                (cls._CHUNK_ID, "technology", "python", 0.6, 9, "2026-08-24T00:00:02+00:00"),
+                (cls._CHUNK_ID, "technology", "sqlite", 1.0, 3, "2026-08-24T00:00:03+00:00"),
+            ],
+        )
+        db.commit()
+
+    def test_collapses_case_variant_rows_and_installs_unique_index(self) -> None:
+        db = _connect_with_vec()
+        try:
+            meta = MetaManager(lambda: db)
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            # Drop the index to simulate an upgrade from a DB that predates it
+            # and already accumulated duplicates.
+            db.execute("DROP INDEX idx_entities_unique")
+            self._seed_dup_entities(db)
+
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+
+            rows = db.execute(
+                "SELECT entity_value, confidence, position FROM chunk_entities "
+                "WHERE chunk_id=? ORDER BY entity_value COLLATE NOCASE",
+                (self._CHUNK_ID,),
+            ).fetchall()
+            assert rows == [("Python", 0.9, 5), ("sqlite", 1.0, 3)]
+
+            # Negative pin: asserting the keeper survived isn't enough — the
+            # lower-confidence copies must be gone, which is the whole point of
+            # the ``COUNT(*)`` that used to read one too many.
+            assert (
+                db.execute(
+                    "SELECT COUNT(*) FROM chunk_entities WHERE chunk_id=? AND confidence=0.6",
+                    (self._CHUNK_ID,),
+                ).fetchone()[0]
+                == 0
+            )
+
+            idx_row = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_entities_unique'"
+            ).fetchone()
+            assert idx_row is not None, "UNIQUE index must be present after migration"
+
+            # The index folds NOCASE, so the variant cannot come back either.
+            with pytest.raises(sqlite3.IntegrityError):
+                db.execute(
+                    "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
+                    "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (self._CHUNK_ID, "technology", "PYTHON", 1.0, 0, "2026-08-24T00:00:04+00:00"),
+                )
+        finally:
+            db.close()
+
+    def test_migration_is_idempotent_after_first_run(self) -> None:
+        db = _connect_with_vec()
+        try:
+            meta = MetaManager(lambda: db)
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            idx_row = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_entities_unique'"
+            ).fetchone()
+            assert idx_row is not None
+        finally:
+            db.close()
+
+
 class TestIdempotencyLedgerSchema:
     """The idempotency_ledger table (issue #1573) installs idempotently."""
 

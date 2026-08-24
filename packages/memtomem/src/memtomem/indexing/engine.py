@@ -37,6 +37,7 @@ from memtomem.errors import EmbeddingError, NamespaceResolutionError, RetryableE
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
 from memtomem.models import Chunk, IndexingStats
+from memtomem.tools.entity_extraction import extract_entities
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
@@ -1781,6 +1782,76 @@ class IndexEngine:
             "mutated": deleted > 0,
         }
 
+    async def _extract_entities_for(self, chunks: Sequence[Chunk]) -> int:
+        """Rewrite ``chunk_entities`` for chunks whose content was just written.
+
+        Call from inside the chunk-write transaction: ``upsert_entities``
+        composes under an open transaction, so entities and their chunk commit
+        together or not at all. Returns the number of entity rows written.
+
+        Only ``diff_result.to_upsert`` belongs here. The ``unchanged`` and
+        ``metadata_only`` buckets keep their stored content, so their entities
+        are still accurate and re-extracting them would be wasted work — and,
+        since ``mutated`` is already true whenever ``to_upsert`` is non-empty,
+        confining extraction to that bucket means the callers' existing
+        cache-invalidation contract still covers every entity write.
+
+        A chunk that now extracts to nothing has its rows deleted rather than
+        left alone: the content that produced them is gone, and a stale row
+        boosts the chunk for a query it no longer matches. ``upsert_entities``
+        early-returns on an empty list, so the delete has to be explicit — same
+        asymmetry ``mem_entity_scan`` handles under ``overwrite``.
+        """
+        if not self._config.extract_entities:
+            return 0
+
+        storage = self._storage
+        # ``EntityMixin`` is reached by duck typing — the storage ABC declares
+        # only the read half of the entity surface (see ``storage/base.py``), so
+        # a backend without the writer must degrade to no entities, not crash.
+        # Every method this helper goes on to call is named here: probing one
+        # and calling three would turn a partial backend's clean degrade into an
+        # ``AttributeError`` halfway through a chunk write.
+        if not all(
+            hasattr(storage, name)
+            for name in (
+                "upsert_entities",
+                "delete_entities_for_chunk",
+                "filter_persisted_chunk_ids",
+            )
+        ):
+            return 0
+
+        # ``upsert_chunks`` inserts ``OR IGNORE``, so a chunk this call was
+        # handed may have lost the #691 uniqueness race and have no row —
+        # writing its entities would trip the foreign key and roll back the
+        # chunk write that did succeed. The winning process writes that
+        # content's entities under the id that survived.
+        persisted = await storage.filter_persisted_chunk_ids([str(c.id) for c in chunks])
+
+        written = 0
+        for chunk in chunks:
+            chunk_id = str(chunk.id)
+            if chunk_id not in persisted:
+                continue
+            entities = extract_entities(chunk.content)
+            if not entities:
+                await storage.delete_entities_for_chunk(chunk_id)
+                continue
+            written += await storage.upsert_entities(
+                chunk_id,
+                [
+                    {
+                        "entity_type": e.entity_type,
+                        "entity_value": e.entity_value,
+                        "confidence": e.confidence,
+                        "position": e.position,
+                    }
+                    for e in entities
+                ],
+            )
+        return written
+
     async def _index_file(
         self,
         file_path: Path,
@@ -2239,6 +2310,16 @@ class IndexEngine:
 
             if diff_result.to_upsert:
                 await self._storage.upsert_chunks(diff_result.to_upsert)
+                # Entities are rewritten with the chunk, inside the same
+                # transaction (#2145). Before this, ``chunk_entities`` was
+                # written only by ``mem_entity_scan``, so it was empty on a
+                # default install and decayed after a scan: an in-place chunk
+                # UPDATE leaves the old rows describing content that is gone,
+                # and a delete cascades them away with nothing to restore them.
+                # Extraction here is the regex path only — stdlib ``re``, no
+                # model, no I/O — so it is free next to the embedding call this
+                # same write already paid for.
+                await self._extract_entities_for(diff_result.to_upsert)
 
         # Both metadata mutators return the count of rows they actually
         # changed, so a run whose diff bucketed rows as metadata-only but

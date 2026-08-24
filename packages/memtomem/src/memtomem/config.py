@@ -345,6 +345,17 @@ class IndexingConfig(ConfigModel):
     # Output token cap — 256 is comfortably above 2-3 sentence prose for both
     # English and Korean. Smaller values risk mid-sentence truncation.
     summary_max_tokens: int = 256
+    # Extract entities (person/date/decision/action_item/technology/concept) for
+    # every chunk the indexer writes, so ``chunk_entities`` is populated on a
+    # default install and is rewritten — not just destroyed — when a file is
+    # edited and re-indexed (#2145). On by default because this path is the
+    # *regex* extractor (``tools.entity_extraction.extract_entities``): stdlib
+    # ``re`` over the chunk body, no model load, no I/O, microseconds next to the
+    # embedding call already happening on the same write. The LLM extractor stays
+    # opt-in as the quality upgrade it already is, via
+    # ``mem_entity_scan(overwrite=True)``. Turning this off keeps the table at
+    # whatever a scan last left there.
+    extract_entities: bool = True
 
     @field_validator(
         "max_chunk_tokens",
@@ -1130,6 +1141,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
         "summary_language",
         "summary_max_input_chars",
         "summary_max_tokens",
+        "extract_entities",
     },
     "embedding": {"batch_size", "onnx_batch_size", "progress_threshold"},
     "decay": {"enabled", "half_life_days"},
@@ -1182,6 +1194,7 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "indexing.summary_language": {"type": str},
     "indexing.summary_max_input_chars": {"type": int, "min": 200, "max": 50000},
     "indexing.summary_max_tokens": {"type": int, "min": 32, "max": 2048},
+    "indexing.extract_entities": {"type": bool},
     "embedding.batch_size": {"type": int, "min": 1, "max": 1024},
     "embedding.onnx_batch_size": {"type": int, "min": 1, "max": 256},
     "embedding.progress_threshold": {"type": int, "min": 0, "max": 100000},

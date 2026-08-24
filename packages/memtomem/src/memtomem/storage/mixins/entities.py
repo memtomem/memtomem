@@ -39,11 +39,22 @@ class EntityMixin:
         try:
             # Overwrite mode: replace this chunk's entities atomically.
             db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
-            db.executemany(
+            # Targeted conflict clause, not ``INSERT OR IGNORE`` (#2145): two
+            # rows differing only in the case of ``entity_value`` are one
+            # mention as far as ``idx_entities_unique`` — and the Stage-7b
+            # boost, which matches ``COLLATE NOCASE`` — are concerned, so the
+            # second is dropped rather than raising mid-transaction. Naming the
+            # conflict target keeps *only* that collision silent: ``OR IGNORE``
+            # would swallow a ``NOT NULL`` violation too, and since the DELETE
+            # above has already run, a malformed row would then leave the chunk
+            # with fewer entities than it had and no error to say so.
+            cur = db.executemany(
                 "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
-                "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(chunk_id, entity_type, entity_value COLLATE NOCASE) DO NOTHING",
                 rows,
             )
+            inserted = cur.rowcount
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -52,7 +63,45 @@ class EntityMixin:
             if not self._in_transaction:
                 db.rollback()
             raise StorageError(f"upsert_entities failed, transaction rolled back: {exc}") from exc
-        return len(entities)
+        # Rows actually stored, not rows offered: a caller counting entities
+        # would otherwise over-report the ones the conflict clause collapsed.
+        return inserted
+
+    async def filter_persisted_chunk_ids(self, chunk_ids: list[str]) -> set[str]:
+        """Return which of ``chunk_ids`` actually have a ``chunks`` row.
+
+        ``chunk_entities`` is a child of ``chunks`` under an enforced foreign
+        key, so a writer that extracts entities alongside a chunk write has to
+        know which of the chunks it handed over were really stored. Not all of
+        them necessarily were: ``upsert_chunks`` inserts ``OR IGNORE`` against
+        the #691 uniqueness index, so when two processes index the same file
+        concurrently the loser's freshly-generated id is dropped on the floor —
+        its content lives on under the winner's id, and the winner's own pass
+        writes the entities for it. Inserting for the dropped id would raise
+        ``FOREIGN KEY constraint failed`` and roll back the whole write.
+
+        Reads through the writer connection deliberately: the caller is
+        typically *inside* the chunk-write transaction, and the read pool's
+        separate connections cannot see rows that transaction has not committed
+        yet — from there every id would look absent.
+        """
+        if not chunk_ids:
+            return set()
+        db = self._get_db()
+        found: set[str] = set()
+        # Chunked to stay under SQLite's 999-host-parameter limit on older
+        # builds, matching the batching in the schema migrations.
+        batch_size = 500
+        for i in range(0, len(chunk_ids), batch_size):
+            batch = chunk_ids[i : i + batch_size]
+            marks = ",".join("?" * len(batch))
+            found.update(
+                row[0]
+                for row in db.execute(
+                    f"SELECT id FROM chunks WHERE id IN ({marks})", batch
+                ).fetchall()
+            )
+        return found
 
     async def delete_entities_for_chunk(self, chunk_id: str) -> int:
         db = self._get_db()
@@ -166,9 +215,10 @@ class EntityMixin:
         Matching is exact and case-insensitive (``COLLATE NOCASE``, ASCII-only —
         adequate for this entity vocabulary), never substring: a substring match
         would let query entity "git" hit stored "github" and every value
-        containing it. ``DISTINCT`` collapses the duplicate rows a namespace
-        merge can leave behind (the table has no uniqueness constraint), so the
-        caller counts distinct keys, never rows.
+        containing it. ``DISTINCT`` collapses matches across candidate chunks
+        into one ``(type, value)`` per query entity, so the caller counts
+        distinct keys, never rows. Per-chunk duplicates no longer reach here at
+        all — ``idx_entities_unique`` folds them at write time (#2145).
         """
         if not chunk_ids or not entity_keys:
             return {}

@@ -221,22 +221,61 @@ class TestGetMatchingEntities:
         assert await storage.get_matching_entities([str(chunk.id)], [("technology", "rust")]) == {}
 
     @pytest.mark.asyncio
-    async def test_distinct_collapses_duplicate_rows(self, storage):
-        # A namespace merge can leave duplicate rows (no uniqueness constraint),
-        # so the boost counts distinct keys, never rows.
-        chunk = make_chunk("dupes")
-        await storage.upsert_chunks([chunk])
-        db = storage._get_db()
-        for _ in range(3):
-            db.execute(
-                "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
-                "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (str(chunk.id), "technology", "sqlite", 1.0, 0, "2026-01-01T00:00:00"),
+    async def test_distinct_collapses_repeated_matches(self, storage):
+        # The same key carried by several candidate chunks is still one key per
+        # chunk: the boost counts distinct keys, never rows.
+        chunks = [make_chunk("dupes one"), make_chunk("dupes two")]
+        await storage.upsert_chunks(chunks)
+        for chunk in chunks:
+            await storage.upsert_entities(
+                str(chunk.id), [{"entity_type": "technology", "entity_value": "sqlite"}]
             )
-        db.commit()
 
-        matches = await storage.get_matching_entities([str(chunk.id)], [("technology", "sqlite")])
-        assert matches == {str(chunk.id): {("technology", "sqlite")}}
+        matches = await storage.get_matching_entities(
+            [str(c.id) for c in chunks], [("technology", "sqlite")]
+        )
+        assert matches == {str(c.id): {("technology", "sqlite")} for c in chunks}
+
+    @pytest.mark.asyncio
+    async def test_malformed_row_raises_instead_of_silently_dropping(self, storage):
+        """The NOCASE conflict clause names its target so it stays narrow.
+
+        ``INSERT OR IGNORE`` would swallow the ``NOT NULL`` violation as well —
+        and because the write deletes the chunk's rows first, that would leave
+        the chunk holding *fewer* entities than before with nothing raised.
+        """
+        chunk = make_chunk("malformed write")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "technology", "entity_value": "sqlite"}]
+        )
+
+        with pytest.raises(StorageError):
+            await storage.upsert_entities(
+                str(chunk.id),
+                [{"entity_type": "technology", "entity_value": None}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_case_variant_within_one_chunk_is_one_row(self, storage):
+        # ``idx_entities_unique`` folds NOCASE (#2145), so a single extraction
+        # yielding "Python" and "python" stores one mention, not two — which is
+        # what ``get_matching_entities`` already believed when it matched
+        # ``COLLATE NOCASE``.
+        chunk = make_chunk("case variants")
+        await storage.upsert_chunks([chunk])
+        written = await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "technology", "entity_value": "Python"},
+                {"entity_type": "technology", "entity_value": "python"},
+            ],
+        )
+
+        assert written == 1
+        rows = await storage.get_entities_for_chunk(str(chunk.id))
+        assert len(rows) == 1
+        assert await storage.get_entity_type_counts() == {"technology": 1}
 
     @pytest.mark.asyncio
     async def test_min_confidence_filters(self, storage):
