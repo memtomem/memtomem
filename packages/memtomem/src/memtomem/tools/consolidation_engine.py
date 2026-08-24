@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.errors import StorageError
-from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 from memtomem.tools.entity_extraction import _ACTION_RE, _DECISION_RE
 
@@ -342,30 +342,34 @@ async def source_has_consolidation_relations(
     return False
 
 
-#: Tags every policy-owned summary carries — the ownership signal for
-#: ``_clear_policy_summaries``. ``heuristic`` is what separates them from the
-#: agent path's summaries, which ``mem_consolidate_apply`` tags
-#: ``["consolidated", "summary"]``; ``_make_summary_chunk`` has always written
-#: all three, so summaries from earlier releases classify as owned too.
-SUMMARY_OWNER_TAGS = frozenset({"consolidated", "summary", "heuristic"})
-
 #: Ownership has to be established over the *whole* path, so the scan asks for
 #: more rows than a summary path can hold and treats hitting the cap as
 #: "cannot establish ownership" rather than as a clean read.
 SUMMARY_PATH_SCAN_LIMIT = 200
 
 
-def _is_policy_summary(chunk: Chunk, summary_namespace: str) -> bool:
-    """Return True if ``chunk`` is a summary this module wrote."""
-    return chunk.metadata.namespace == summary_namespace and SUMMARY_OWNER_TAGS.issubset(
-        set(chunk.metadata.tags)
-    )
+def is_policy_summary(chunk: Chunk) -> bool:
+    """Return True if ``chunk`` is a summary this module wrote.
+
+    Provenance, not inference (#2161). Ownership used to be read off a
+    namespace + tag combination, which held only because the agent path
+    happened to write two of the three tags — a user's own chunk carrying all
+    three in the summary namespace classified as owned and was deleted. The
+    ``origin`` stamp cannot be produced by any ingress surface: ``mem_add``,
+    the indexer and ``mem_consolidate_apply`` never accept an origin, so only
+    ``_make_summary_chunk`` and the one-shot migration backfill can set it.
+
+    The namespace is deliberately *not* part of the test any more. It is
+    configurable per policy run, so keeping it as a second conjunct would
+    strand already-written summaries as foreign the moment a user changed the
+    setting — and it adds nothing next to a marker that cannot be forged.
+    """
+    return chunk.metadata.origin == ORIGIN_CONSOLIDATION_POLICY
 
 
 async def _clear_policy_summaries(
     storage: StorageBackend,
     virtual_path: Path,
-    summary_namespace: str,
 ) -> None:
     """Empty the virtual summary path so this run's summary replaces the last.
 
@@ -376,8 +380,8 @@ async def _clear_policy_summaries(
     not collide).
 
     ``<source>.consolidated.md`` is a perfectly indexable filename, so a real
-    file can occupy the path. Deleting only rows that carry this module's
-    namespace *and* tags keeps a user's file out of it, and anything else at
+    file can occupy the path. Deleting only rows this module's own writer
+    stamped (``origin``) keeps a user's file out of it, and anything else at
     the path fails the group closed rather than consolidating over it.
     """
     existing = await storage.list_chunks_by_source(virtual_path, limit=SUMMARY_PATH_SCAN_LIMIT)
@@ -386,12 +390,12 @@ async def _clear_policy_summaries(
             f"refusing to consolidate: the summary path holds at least "
             f"{SUMMARY_PATH_SCAN_LIMIT} chunks, too many to establish ownership over"
         )
-    foreign = [c for c in existing if not _is_policy_summary(c, summary_namespace)]
+    foreign = [c for c in existing if not is_policy_summary(c)]
     if foreign:
         raise StorageError(
             f"refusing to consolidate: {len(foreign)} chunk(s) at the summary path are not "
-            f"policy-owned summaries (namespace {summary_namespace!r} + tags "
-            f"{sorted(SUMMARY_OWNER_TAGS)}) — a real file appears to occupy it"
+            f"policy-owned summaries (origin != {ORIGIN_CONSOLIDATION_POLICY!r}) — a real "
+            f"file or another writer's chunks appear to occupy it"
         )
     if existing:
         await storage.delete_chunks([c.id for c in existing])
@@ -425,6 +429,10 @@ def _make_summary_chunk(
             tags=("consolidated", "summary", "heuristic"),
             namespace=summary_namespace,
             heading_hierarchy=(f"Consolidated: {source_name}",),
+            # The ownership proof ``_clear_policy_summaries`` deletes on
+            # (#2161). Tags stay as they were: they are display metadata now,
+            # not the predicate.
+            origin=ORIGIN_CONSOLIDATION_POLICY,
         ),
     )
 
@@ -499,7 +507,7 @@ async def apply_consolidation(
         # Clear the path first so a regeneration replaces rather than
         # duplicates, and so the old summary is only gone once its replacement
         # has landed.
-        await _clear_policy_summaries(storage, virtual_path, summary_namespace)
+        await _clear_policy_summaries(storage, virtual_path)
         await storage.upsert_chunks([summary_chunk])
         # The summary is a virtual chunk that never passes through the indexing
         # engine, so this is its only chance at entities (#2155) — without it, a

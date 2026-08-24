@@ -957,7 +957,7 @@ class SqliteBackend(
                        heading_hierarchy=?, chunk_type=?, start_line=?, end_line=?,
                        language=?, tags=?, namespace=?, updated_at=?,
                        valid_from_unix=?, valid_to_unix=?,
-                       scope=?, project_root=?
+                       scope=?, project_root=?, origin=?
                        WHERE id=?""",
                     [
                         (
@@ -976,6 +976,7 @@ class SqliteBackend(
                             c.metadata.valid_to_unix,
                             c.metadata.scope,
                             str(c.metadata.project_root) if c.metadata.project_root else None,
+                            c.metadata.origin,
                             str(c.id),
                         )
                         for c, _ in to_update
@@ -1031,8 +1032,8 @@ class SqliteBackend(
                         namespace, created_at, updated_at,
                         overlap_before, overlap_after,
                         valid_from_unix, valid_to_unix,
-                        scope, project_root)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        scope, project_root, origin)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         (
                             str(c.id),
@@ -1054,6 +1055,7 @@ class SqliteBackend(
                             c.metadata.valid_to_unix,
                             c.metadata.scope,
                             str(c.metadata.project_root) if c.metadata.project_root else None,
+                            c.metadata.origin,
                         )
                         for c in to_insert
                     ],
@@ -2887,6 +2889,14 @@ class SqliteBackend(
             if raw_pr:
                 project_root_val = Path(raw_pr)
 
+        # Writer provenance (#2161) — column 23, may not exist in older DBs.
+        # NULL for every user/agent write; only the consolidation policy stamps
+        # it. An unrecognised value decodes verbatim and simply never matches a
+        # known origin, so ownership stays fail-closed.
+        origin_val: str | None = None
+        if len(row) >= 24:
+            origin_val = row[23]
+
         metadata = ChunkMetadata(
             source_file=Path(source_file),
             heading_hierarchy=hh,
@@ -2902,6 +2912,7 @@ class SqliteBackend(
             valid_to_unix=vto,
             scope=scope_val,
             project_root=project_root_val,
+            origin=origin_val,
         )
 
         # --- timestamps (always timezone-aware) ---

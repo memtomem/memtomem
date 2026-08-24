@@ -24,7 +24,9 @@ from pathlib import Path
 import pytest
 
 from memtomem.config import Mem2MemConfig
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.server.component_factory import Components, close_components, create_components
+from memtomem.tools.consolidation_engine import DEFAULT_SUMMARY_NAMESPACE
 from memtomem.tools.export_import import export_chunks, import_chunks
 
 
@@ -721,6 +723,125 @@ class TestImportShortEmbeddingArray:
             assert await comp_b.storage.recall_chunks(limit=10_000) == [], (
                 "no chunks may be committed when import embedding truncates"
             )
+        finally:
+            await close_components(comp_a)
+            await close_components(comp_b)
+
+
+class TestOriginProvenance:
+    """``origin`` is an ownership proof, so it crosses a bundle carefully.
+
+    A consolidation summary that came back from a bundle unstamped would be
+    foreign to the policy that wrote it, and every later regeneration of that
+    source would fail closed — so the field has to round-trip. But it is also
+    the thing ``_clear_policy_summaries`` deletes on, so accepting it from a
+    bundle anyone can author would re-open the forgery the typed column exists
+    to prevent. Only a bundle whose local-provenance marker verifies against
+    this install's key may carry it (#2161).
+    """
+
+    async def _summary_chunk(self, comp: Components, source: str) -> None:
+        from memtomem.tools.consolidation_engine import _make_summary_chunk
+
+        chunk = _make_summary_chunk(
+            {"source": f"/tmp/{source}", "chunk_ids": [], "namespace": "default"},
+            "Policy-written summary body",
+            DEFAULT_SUMMARY_NAMESPACE,
+        )
+        chunk.embedding = await comp.embedder.embed_query(chunk.content)
+        await comp.storage.upsert_chunks([chunk])
+
+    async def test_a_verified_self_export_round_trips_origin(self, tmp_path):
+        comp_a, _ = await _make_components(tmp_path, "pc_a_origin")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_origin")
+        try:
+            await self._summary_chunk(comp_a, "origin-roundtrip.md")
+            # One shared key file makes B verify A's marker, which is what a
+            # restore onto the same install looks like.
+            key_path = tmp_path / "shared-provenance.key"
+            bundle_path = tmp_path / "origin.json"
+            await export_chunks(
+                comp_a.storage, output_path=bundle_path, provenance_key_path=key_path
+            )
+            await import_chunks(
+                comp_b.storage,
+                comp_b.embedder,
+                bundle_path,
+                provenance_key_path=key_path,
+            )
+
+            imported = await comp_b.storage.recall_chunks(limit=10)
+            assert [c.metadata.origin for c in imported] == [ORIGIN_CONSOLIDATION_POLICY]
+        finally:
+            await close_components(comp_a)
+            await close_components(comp_b)
+
+    async def test_a_foreign_bundle_cannot_claim_an_origin(self, tmp_path):
+        """The forgery case: a hand-written record asserting policy ownership."""
+        import json
+        from datetime import datetime, timezone
+
+        comp_b, _ = await _make_components(tmp_path, "pc_b_forge")
+        try:
+            forged = {
+                "version": "2",
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "total_chunks": 1,
+                "chunks": [
+                    {
+                        "content": "A record claiming to be a policy summary.",
+                        "source_file": "/tmp/forged.md.consolidated.md",
+                        "heading_hierarchy": ["Consolidated: forged.md"],
+                        "chunk_type": "markdown_section",
+                        "tags": ["consolidated", "summary", "heuristic"],
+                        "namespace": DEFAULT_SUMMARY_NAMESPACE,
+                        "origin": ORIGIN_CONSOLIDATION_POLICY,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+            }
+            bundle_path = tmp_path / "forged.json"
+            bundle_path.write_text(json.dumps(forged), encoding="utf-8")
+
+            stats = await import_chunks(comp_b.storage, comp_b.embedder, bundle_path)
+
+            assert stats.imported_chunks == 1
+            imported = await comp_b.storage.recall_chunks(limit=10)
+            assert [c.metadata.origin for c in imported] == [None]
+        finally:
+            await close_components(comp_b)
+
+    async def test_update_conflict_never_strips_a_stored_origin(self, tmp_path):
+        """An import may replace a chunk's content, never its writer.
+
+        A bundle exported before this field existed — or any foreign bundle,
+        which imports ``origin=None`` — must not blank the stamp on a row it
+        updates in place: the one-shot backfill that could have re-adopted it
+        has long recorded itself done.
+        """
+        comp_a, _ = await _make_components(tmp_path, "pc_a_carry")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_carry")
+        try:
+            await self._summary_chunk(comp_a, "carryover.md")
+            (stored,) = await comp_a.storage.recall_chunks(limit=10)
+            assert stored.metadata.origin == ORIGIN_CONSOLIDATION_POLICY
+
+            # Export from A, then import back into A as a *foreign* bundle (no
+            # shared key), so every record arrives with origin=None.
+            bundle_path = tmp_path / "carry.json"
+            await export_chunks(comp_a.storage, output_path=bundle_path)
+            stats = await import_chunks(
+                comp_a.storage,
+                comp_a.embedder,
+                bundle_path,
+                on_conflict="update",
+                provenance_key_path=tmp_path / "unrelated.key",
+            )
+
+            assert stats.updated_chunks == 1
+            (after,) = await comp_a.storage.recall_chunks(limit=10)
+            assert after.id == stored.id
+            assert after.metadata.origin == ORIGIN_CONSOLIDATION_POLICY
         finally:
             await close_components(comp_a)
             await close_components(comp_b)

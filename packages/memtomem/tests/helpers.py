@@ -175,6 +175,7 @@ def make_chunk(
     source: str = "test.md",
     heading: tuple[str, ...] = (),
     embedding: list[float] | None = None,
+    origin: str | None = None,
 ) -> Chunk:
     """Create a test Chunk with sensible defaults."""
     return Chunk(
@@ -184,6 +185,7 @@ def make_chunk(
             tags=tuple(tags),
             namespace=namespace,
             heading_hierarchy=tuple(heading),
+            origin=origin,
         ),
         content_hash=f"hash-{uuid4().hex[:8]}",
         embedding=embedding if embedding is not None else [0.1] * 1024,
