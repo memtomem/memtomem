@@ -101,7 +101,18 @@ _ARG_CONTRACTS: tuple[tuple[str, str, str, str], ...] = (
     ("mem_search", "as_of", "valid_from", "which frontmatter drives the time filter"),
     ("mem_search", "rerank", "top_k", "rerank=false also narrows the candidate pool"),
     ("mem_search", "record", "can differ", "record=false is not a pure telemetry switch"),
-    ("mem_search", "record", "exhaustive", "the retrieval change behind 'can differ'"),
+    (
+        "mem_search",
+        "record",
+        "dense retrieval exhaustive",
+        "the retrieval change behind 'can differ'",
+    ),
+    (
+        "mem_search",
+        "record",
+        "caches neither read nor written",
+        "the cache bypass this entry's budget was raised for",
+    ),
     (
         "mem_search",
         "record",

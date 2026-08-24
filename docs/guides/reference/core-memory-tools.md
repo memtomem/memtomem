@@ -254,6 +254,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `output_format` | `"compact"` (default), `"verbose"`, or `"structured"` (JSON with `hints` field) | `"structured"` |
 | `scope` | Memory tier filter: one value, comma list, or glob; omitted uses user plus current-project tiers | `"user,project_local"`, `"project_*"` |
 | `rerank` | Per-call rerank control: `false` skips the cross-encoder rerank stage (fast path for latency-bounded callers); omitted/`true` follows server config — `true` cannot enable reranking the server has disabled | `false` |
+| `record` | Per-call replay control (default `true`): `false` makes the search a background read for fan-out callers — no access-count increments, no query history, caches neither read nor written, and dense retrieval runs exhaustive, so results can differ | `false` |
 
 ```
 mem_search(query="caching strategy", tag_filter="redis,cache", namespace="work")
@@ -291,7 +292,9 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > search API expose it only after the observation commit succeeds, so it can be
 > used to attach later feedback without guessing which invocation produced a
 > result set. Cache hits receive distinct IDs. Filter-only browsing does not
-> create an observation, and an observation write failure never fails search.
+> create an observation, and an observation write failure never fails search. A
+> call passing `record=false` creates none either: it returns no `query_run_id`
+> and writes no history row, which is the point of the switch.
 > The local snapshot stores ranks, scores, chunk IDs, content hashes, heading
 > hierarchy, namespaces, languages, and source **basenames**—not result content
 > or absolute paths. Existing query history still records the query text and is
