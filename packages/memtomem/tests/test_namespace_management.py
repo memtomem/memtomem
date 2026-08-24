@@ -12,20 +12,11 @@ from uuid import uuid4
 
 import pytest
 
-from helpers import make_chunk
+from helpers import BUDGET_TOLERANCE_S, make_chunk
 from memtomem.context._atomic import _file_lock, _lock_path_for
 from memtomem.errors import NamespaceMutationBusyError
 from memtomem.services import namespace_management
 from memtomem.storage.base import NamespaceChunkCandidate, NamespaceRenameResult
-
-# The coordinator hands each lock ``(t0 + BUDGET) - t1`` from one shared
-# deadline. When both monotonic reads land on the same tick — routine on
-# Windows, whose clock granularity is ~15.6 ms — that expression rounds to
-# a half-ULP ABOVE ``BUDGET`` for a measurable slice of process uptimes
-# (~0.6% sampled over 256-4096 s at BUDGET=30). Femtoseconds of extra
-# allowance is not a budget violation, so give the upper bound a tolerance
-# that is still many orders of magnitude below anything observable.
-_BUDGET_TOLERANCE_S = 1e-6
 
 
 def _hold_sidecar_in_child(lock_path: str, ready, release) -> None:
@@ -90,7 +81,7 @@ class TestNamespaceCoordinator:
             ("exit", lock_b),
             ("exit", lock_a),
         ]
-        assert all(0 < timeout <= 30 + _BUDGET_TOLERANCE_S for timeout in timeouts)
+        assert all(0 < timeout <= 30 + BUDGET_TOLERANCE_S for timeout in timeouts)
         storage.rename_namespace.assert_awaited_once_with(
             "old",
             "new",

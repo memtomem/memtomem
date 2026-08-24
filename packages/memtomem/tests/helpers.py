@@ -14,6 +14,22 @@ from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
 
+# Slack allowed for assertions that pin a *remaining* share of a lock budget against
+# its nominal ceiling. The shared-deadline pattern computes
+# ``deadline = time.monotonic() + BUDGET`` and later ``deadline - time.monotonic()``;
+# when both clock reads land in the same tick, ``fl(t0 + BUDGET) - t0`` exceeds
+# ``BUDGET`` by up to half a ULP, so an exact ``<= BUDGET`` upper bound fails with
+# values like ``30.000000000000227``. The excess is ULP-scale (~2e-13 s at these
+# uptimes), which means the two reads returned the *same* value; Windows CI hits
+# that far more often than Linux/macOS, so a Windows-only failure with this
+# signature is arithmetic, not a platform bug and not a dependency change (#2073).
+#
+# 1e-6 is more than six orders of magnitude below the budgets in use, so a genuine overrun
+# (``5.001``, ``30.5``) still fails the assertion. Import this constant rather than
+# re-typing the literal: a future sweep for the vulnerable shape has to be able to
+# find every site from one symbol.
+BUDGET_TOLERANCE_S = 1e-6
+
 # Developer ``MEMTOMEM_*`` env vars that would override an in-test config
 # and break hermeticity. Add new top-level config sections here when they
 # grow an env-var binding.

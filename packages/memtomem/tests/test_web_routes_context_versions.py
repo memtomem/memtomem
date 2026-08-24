@@ -21,6 +21,8 @@ from memtomem.context import versioning
 from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.web.app import create_app
 
+from helpers import BUDGET_TOLERANCE_S
+
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -580,7 +582,10 @@ class TestLockBudgetOffload:
         # ADR-0030 §6: the op now runs under the canonical name lock first, so
         # its lock_timeout is the REMAINING shared budget (slightly < the 30.0
         # constant after the canonical acquire), not the raw constant.
-        assert seen["lock_timeout"] is not None and 0.0 < seen["lock_timeout"] <= 30.0
+        assert (
+            seen["lock_timeout"] is not None
+            and 0.0 < seen["lock_timeout"] <= 30.0 + BUDGET_TOLERANCE_S
+        )
 
     @pytest.mark.anyio
     async def test_promote_threads_lock_budget_kwarg(self, client, tmp_path, monkeypatch):
@@ -594,7 +599,10 @@ class TestLockBudgetOffload:
         r = await client.put("/api/context/agents/reviewer/labels/staging", json={"version": "v1"})
         assert r.status_code == 200
         # Remaining shared budget after the canonical acquire (ADR-0030 §6).
-        assert seen["lock_timeout"] is not None and 0.0 < seen["lock_timeout"] <= 30.0
+        assert (
+            seen["lock_timeout"] is not None
+            and 0.0 < seen["lock_timeout"] <= 30.0 + BUDGET_TOLERANCE_S
+        )
 
     @pytest.mark.anyio
     async def test_delete_threads_lock_budget_kwarg(self, client, tmp_path, monkeypatch):
@@ -608,7 +616,10 @@ class TestLockBudgetOffload:
         r = await client.delete("/api/context/agents/reviewer/labels/staging")
         assert r.status_code == 200
         # Remaining shared budget after the canonical acquire (ADR-0030 §6).
-        assert seen["lock_timeout"] is not None and 0.0 < seen["lock_timeout"] <= 30.0
+        assert (
+            seen["lock_timeout"] is not None
+            and 0.0 < seen["lock_timeout"] <= 30.0 + BUDGET_TOLERANCE_S
+        )
 
     @pytest.mark.anyio
     async def test_held_sidecar_lock_expires_budget_to_503(self, client, tmp_path, monkeypatch):
