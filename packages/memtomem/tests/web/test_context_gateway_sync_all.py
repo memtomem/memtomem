@@ -14,7 +14,7 @@ The handler's contract (``static/context-gateway.js:435-514``):
 * Artifact POST non-OK responses surface the backend ``detail`` text in the
   failure toast instead of replacing it with a generic client message.
 * The settings POST response body is parsed for severity:
-  ``error`` → ``toast.sync_failed`` ``error`` /
+  ``error`` → ``toast.push_failed`` ``error`` /
   ``aborted`` → ``settings.ctx.mtime_conflict`` ``warning`` /
   ``needs_confirmation`` → info partial + Open Settings action /
   else (``ok`` / ``skipped``) → ``settings.ctx.sync_success``.
@@ -46,7 +46,7 @@ MTIME_CONFLICT_TOAST = "File was modified externally. Reloading..."  # settings.
 SYNC_PARTIAL_NEEDS_CONFIRMATION_TOAST = (
     "Push All complete except Settings — confirm host writes in the Settings panel."
 )
-SYNC_FAILED_TEMPLATE = "Sync failed: {error}"  # toast.sync_failed
+PUSH_FAILED_TEMPLATE = "Push failed: {error}"  # toast.push_failed
 SYNC_PARTIAL_FAILED_TEMPLATE = (
     "{succeeded} pushed — {failed_phase} failed: {reason}"  # toast.sync_partial_failed
 )
@@ -472,16 +472,16 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
         f"Partial-failure toast must name landed + failed phase ({expected!r}), got {toast_text!r}"
     )
 
-    # Negative: the generic single-phase ``Sync failed`` toast must NOT
+    # Negative: the generic single-phase ``Push failed`` toast must NOT
     # render. A regression that drops the partial branch and falls back
-    # to ``toast.sync_failed`` would still produce an error toast with
+    # to ``toast.push_failed`` would still produce an error toast with
     # the agents reason — distinguishing them requires the exact text.
-    sync_failed_only = SYNC_FAILED_TEMPLATE.format(error=agents_reason)
+    push_failed_only = PUSH_FAILED_TEMPLATE.format(error=agents_reason)
     error_toasts = page.locator(
         "#toast-container .toast.toast-error .toast-msg"
     ).all_text_contents()
-    assert sync_failed_only not in [t.strip() for t in error_toasts], (
-        f"Partial failure must not render the bare {sync_failed_only!r} toast; saw {error_toasts!r}"
+    assert push_failed_only not in [t.strip() for t in error_toasts], (
+        f"Partial failure must not render the bare {push_failed_only!r} toast; saw {error_toasts!r}"
     )
 
     # mcp-servers (a later phase) still fired after the agents failure — the run
@@ -597,7 +597,7 @@ def test_sync_all_settings_aborted_emits_mtime_conflict_warning(page, mm_web_url
 
 def test_sync_all_settings_error_emits_failure_toast(page, mm_web_url: str) -> None:
     """S1-d: settings POST returns ``{status: 'error'}`` → error toast
-    with the ``toast.sync_failed`` template and no success toast.
+    with the ``toast.push_failed`` template and no success toast.
 
     This pins the highest-severity non-aborted branch in
     ``context-gateway.js`` so a regression cannot treat a per-result error
@@ -661,7 +661,7 @@ def test_sync_all_settings_error_emits_failure_toast(page, mm_web_url: str) -> N
     toast_text = (
         page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
     ).strip()
-    expected = SYNC_FAILED_TEMPLATE.format(error=error_reason)
+    expected = PUSH_FAILED_TEMPLATE.format(error=error_reason)
     assert toast_text == expected, f"Settings error toast must be {expected!r}, got {toast_text!r}"
 
     success_count = page.locator("#toast-container .toast.toast-success").count()
