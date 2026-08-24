@@ -480,7 +480,7 @@ candidate) refuse with a configuration error naming
 | `MEMTOMEM_INDEXING__TARGET_CHUNK_TOKENS` | `384` | Pass-2 semantic-packing target chunk size; `0` disables packing |
 | `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments. Register per-project with `mm mem init` (run from the project root; a running server/web UI picks the new tier up after restart). Deliberately outside `mm config set`/`unset` — to deregister, edit `indexing.project_memory_dirs` in `~/.memtomem/config.json` directly |
 | `MEMTOMEM_INDEXING__AUTO_SUMMARIZE` | `false` | Generate a per-source LLM summary chunk at index time (requires LLM enabled) |
-| `MEMTOMEM_INDEXING__EXTRACT_ENTITIES` | `true` | Extract entities (person, date, decision, action_item, technology, concept) for every chunk the indexer writes, populating `chunk_entities`. Regex only — stdlib patterns, no model and no network, so it costs microseconds next to the embedding call on the same write. The LLM extractor stays opt-in via `mem_entity_scan(overwrite=True)`. Turning this off leaves the table at whatever a scan last wrote |
+| `MEMTOMEM_INDEXING__EXTRACT_ENTITIES` | `true` | Extract entities (person, date, decision, action_item, technology, concept) for every chunk the indexer writes, populating `chunk_entities`. Regex only — stdlib patterns, no model and no network, so it costs microseconds next to the embedding call on the same write. The LLM extractor stays opt-in via `mem_entity_scan(overwrite=True)`. Governs every write path that stores new content — the indexer, bundle imports, and consolidation summaries. Turning this off leaves the table at whatever a scan last wrote |
 | `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Clamp the leading source body to this many characters before generating the per-source summary |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_TOKENS` | `256` | Output token cap for each per-source summary |
@@ -731,7 +731,11 @@ importance boost, before context-window expansion).
 
 **Populated at index time.** The indexer extracts entities for every chunk it
 writes (`indexing.extract_entities`, on by default), and rewrites them whenever
-the chunk's content is re-indexed — so coverage tracks the corpus instead of
+the chunk's content is re-indexed. Bundle imports and consolidation summaries —
+content that never passes through the indexer — extract on their own write
+paths, under the same knob. An import writes entities only for the chunks it
+genuinely adds: a record whose content the store already has keeps the entities
+it has, which may have come from a richer `mem_entity_scan` LLM pass — so coverage tracks the corpus instead of
 decaying after a one-off pass. A store last indexed by an older release still
 reads empty until [`mem_entity_scan`](reference/organization-maintenance.md)
 runs over it or it is re-indexed with `mm index --force` — a plain re-index

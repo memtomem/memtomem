@@ -72,6 +72,9 @@ class TestPolicyScheduler:
                 dry_run=False,
                 max_actions=100,
                 llm_provider=app.llm_provider,
+                # ``indexing.extract_entities`` reaches the consolidation
+                # summary's entity write through the same forwarding (#2155).
+                extract_entities=app.config.indexing.extract_entities,
                 # Unattended runs are labelled so the maintenance run log can
                 # tell them apart from manual mem_policy_run calls (#2132).
                 source="scheduler",

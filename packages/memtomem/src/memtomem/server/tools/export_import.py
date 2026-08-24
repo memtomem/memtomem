@@ -153,6 +153,7 @@ async def mem_import(
             preserve_ids=preserve_ids,
             force_unsafe=force_unsafe,
             surface="mem_import",
+            extract_entities=app.config.indexing.extract_entities,
         )
     except ImportPrivacyError as exc:
         return (

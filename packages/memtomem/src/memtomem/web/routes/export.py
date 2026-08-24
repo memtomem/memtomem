@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
-from memtomem.web.deps import get_embedder, get_storage
+from memtomem.web.deps import get_config, get_embedder, get_storage
 from memtomem.web.schemas import ExportStatsResponse, ImportResponse
 
 router = APIRouter(prefix="/export", tags=["export"])
@@ -70,6 +70,7 @@ async def import_memories(
     force_unsafe: bool = Form(False),
     storage=Depends(get_storage),
     embedder=Depends(get_embedder),
+    config=Depends(get_config),
 ) -> ImportResponse:
     """Import chunks from a previously exported JSON bundle (multipart upload).
 
@@ -112,6 +113,7 @@ async def import_memories(
             preserve_ids=preserve_ids,
             force_unsafe=force_unsafe,
             surface="web_api_import",
+            extract_entities=config.indexing.extract_entities,
         )
     except ImportPrivacyError as exc:
         # Mirrors the web_api_add 403 shape (system.py); ``blocked_records`` is a

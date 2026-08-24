@@ -334,6 +334,7 @@ async def execute_auto_consolidate(
     dry_run: bool,
     *,
     llm_provider: LLMProvider | None = None,
+    extract_entities: bool = True,
 ) -> PolicyRunResult:
     """Group related chunks by source file and create heuristic summary chunks.
 
@@ -498,6 +499,7 @@ async def execute_auto_consolidate(
                 group_dict,
                 summary,
                 keep_originals=keep_originals,
+                extract_entities=extract_entities,
                 summary_namespace=summary_namespace,
             )
         except Exception:
@@ -687,6 +689,7 @@ async def run_policy(
     dry_run: bool = False,
     *,
     llm_provider: LLMProvider | None = None,
+    extract_entities: bool = True,
     source: str = "mcp",
 ) -> PolicyRunResult:
     """Execute a single policy.
@@ -726,6 +729,7 @@ async def run_policy(
                 policy.get("namespace_filter"),
                 dry_run,
                 llm_provider=llm_provider,
+                extract_entities=extract_entities,
             )
         else:
             result = await handler(
@@ -776,6 +780,7 @@ async def run_all_enabled(
     max_actions: int | None = None,
     *,
     llm_provider: LLMProvider | None = None,
+    extract_entities: bool = True,
     source: str = "mcp",
 ) -> list[PolicyRunResult]:
     """Run all enabled policies.
@@ -785,6 +790,9 @@ async def run_all_enabled(
             this limit.  The cap is checked between policies — individual
             handlers run atomically.
         llm_provider: Optional LLM provider forwarded to consolidation.
+        extract_entities: Forwarded to consolidation so
+            ``indexing.extract_entities`` governs the summary chunk's entities
+            the same way it governs the indexer's.
         source: Label for the maintenance run rows written per applied policy
             (``scheduler`` for unattended runs, ``mcp`` for tool calls).
     """
@@ -793,7 +801,12 @@ async def run_all_enabled(
     cumulative = 0
     for p in policies:
         result = await run_policy(
-            storage, p, dry_run=dry_run, llm_provider=llm_provider, source=source
+            storage,
+            p,
+            dry_run=dry_run,
+            llm_provider=llm_provider,
+            extract_entities=extract_entities,
+            source=source,
         )
         if not dry_run:
             await storage.policy_update_last_run(p["name"])
