@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.tools.entity_sync import sync_entities_for_chunks
 from memtomem.tools.entity_extraction import _ACTION_RE, _DECISION_RE
 
 if TYPE_CHECKING:
@@ -357,6 +358,7 @@ async def apply_consolidation(
     summary: str,
     keep_originals: bool = True,
     summary_namespace: str = DEFAULT_SUMMARY_NAMESPACE,
+    extract_entities: bool = True,
 ) -> UUID:
     """Create a virtual summary chunk for ``group`` and link originals to it.
 
@@ -388,6 +390,9 @@ async def apply_consolidation(
             hard delete.
         summary_namespace: Namespace for the new summary chunk. Default
             ``archive:summary``.
+        extract_entities: Write ``chunk_entities`` for the summary. Carries
+            ``indexing.extract_entities`` from the policy caller, so the knob
+            means the same thing here as it does on every other write path.
 
     Returns:
         The UUID of the newly created summary chunk.
@@ -397,7 +402,17 @@ async def apply_consolidation(
             whether to continue to the next group or abort).
     """
     summary_chunk = _make_summary_chunk(group, summary, summary_namespace)
-    await storage.upsert_chunks([summary_chunk])
+    # One transaction: the summary is idempotency-keyed by its source hash
+    # (``execute_auto_consolidate`` skips a group whose summary already exists),
+    # so a summary that committed while its entity write failed would never be
+    # revisited — the hole would be permanent rather than retried.
+    async with storage.transaction():
+        await storage.upsert_chunks([summary_chunk])
+        # The summary is a virtual chunk that never passes through the indexing
+        # engine, so this is its only chance at entities (#2155) — without it, a
+        # store whose recall leans on consolidation summaries has a hole in
+        # ``chunk_entities`` exactly where the synthesised text lives.
+        await sync_entities_for_chunks(storage, [summary_chunk], enabled=extract_entities)
 
     source_ids = [str(cid) for cid in group.get("chunk_ids", [])]
     await link_consolidation_relations(storage, source_ids, summary_chunk.id)

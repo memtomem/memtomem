@@ -32,7 +32,7 @@ import httpx
 import pytest
 
 from memtomem import provenance
-from memtomem.config import StorageConfig
+from memtomem.config import Mem2MemConfig, StorageConfig
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 from memtomem.storage.sqlite_backend import SqliteBackend
 from memtomem.tools.export_import import (
@@ -324,6 +324,9 @@ async def test_mem_import_foreign_secret_rejected_then_force_unsafe(tmp_path, mo
     app = SimpleNamespace(
         storage=storage,
         embedder=_FakeEmbedder(),
+        # ``mem_import`` reads ``indexing.extract_entities`` to decide whether
+        # imported chunks get entities written (#2155).
+        config=Mem2MemConfig(),
         _session_lock=asyncio.Lock(),
         _ending_session_ids=set(),
         current_session_id=None,
@@ -351,13 +354,15 @@ async def test_mem_import_foreign_secret_rejected_then_force_unsafe(tmp_path, mo
 def _web_app(storage, embedder):
     from fastapi import FastAPI
 
-    from memtomem.web.deps import get_embedder, get_storage
+    from memtomem.web.deps import get_config, get_embedder, get_storage
     from memtomem.web.routes import export as web_export
 
     app = FastAPI()
     app.include_router(web_export.router)
     app.dependency_overrides[get_storage] = lambda: storage
     app.dependency_overrides[get_embedder] = lambda: embedder
+    # The import route resolves ``indexing.extract_entities`` from config (#2155).
+    app.dependency_overrides[get_config] = lambda: Mem2MemConfig()
     return app
 
 

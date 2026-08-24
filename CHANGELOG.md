@@ -36,6 +36,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Entity extraction now also covers the two writers that never reach the
+  indexing engine.** #2145 put extraction on the indexer's chunk-write path, so
+  anything that stored chunks by calling `storage.upsert_chunks` directly still
+  wrote content the extractor never saw. Two writers do: importing a bundle
+  (`mem_import`, `POST /api/export/import`) and the summary chunk `auto_consolidate`
+  synthesises, which is virtual and never indexed from disk at all. Both now
+  write entities with the chunk. Both honour `indexing.extract_entities`, so the knob
+  means one thing everywhere. Import writes entities only for the chunks it
+  genuinely adds — a record whose content the store already has keeps whatever
+  entities it has, which may have come from a richer `mem_entity_scan` LLM pass —
+  and each writer wraps its chunk write and entity write in one transaction, so
+  a failure in either half leaves neither behind.
+  The extraction logic moved to `memtomem.tools.entity_sync.sync_entities_for_chunks`
+  so all three callers share one implementation — including the guard that skips
+  chunks dropped by `upsert_chunks`'s `INSERT OR IGNORE` under the #691
+  uniqueness race, whose entities would otherwise trip the foreign key and roll
+  back the chunk write that did succeed.
+
+  The remaining direct `upsert_chunks` callers are tag-only rewrites that pass
+  `content` and `content_hash` through untouched, so their stored entities still
+  describe their stored content and re-extracting would be wasted work. A new
+  architectural guard (`tests/test_entity_write_coverage.py`) walks the source
+  for `upsert_chunks` callers and fails on any that is in neither category, so a
+  future writer has to say which it is instead of leaving a silent hole. (#2155)
+
 - **Entities are now extracted at index time, so `chunk_entities` is populated
   by default and survives a re-index.** The table had exactly one production
   writer — `mem_entity_scan` — so on a default install it was not sparsely

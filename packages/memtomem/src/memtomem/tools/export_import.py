@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 from memtomem.errors import EmbeddingError
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
@@ -279,6 +280,7 @@ async def import_chunks(
     force_unsafe: bool = False,
     provenance_key_path: Path | None = None,
     surface: str = "import",
+    extract_entities: bool = True,
 ) -> ImportStats:
     """Import chunks from a JSON bundle file.
 
@@ -330,6 +332,10 @@ async def import_chunks(
             sidecar next to the DB by default). Intended for tests.
         surface: Audit/counter label for the redaction guard ("mem_import",
             "web_api_import", …).
+        extract_entities: Write ``chunk_entities`` for the imported chunks.
+            Carries ``indexing.extract_entities`` from callers that hold the
+            config; the default keeps direct callers (and tests) on the same
+            behaviour as the indexer.
     Returns:
         ImportStats with total / imported / skipped / failed / conflict_skipped
         / updated counts.
@@ -399,6 +405,14 @@ async def import_chunks(
     conflict_skipped = 0
     updated = 0
 
+    # Chunks this import genuinely adds, as opposed to hash-matched rows that
+    # already existed. Only the new ones get entities written below: a
+    # hash-matched row holds content the store already had, and its entities may
+    # have come from an LLM scan, which is strictly richer than the regex pass.
+    # Overwriting those would quietly downgrade them (backfilling rows that have
+    # none is the separate question ``mem_entity_scan`` answers).
+    newly_imported: list[Chunk] = []
+
     if on_conflict == "duplicate":
         # Back-compat path: every record gets a fresh UUID, no hash check
         # at this layer. Since #691 the storage UNIQUE index +
@@ -407,6 +421,7 @@ async def import_chunks(
         # mode no longer materialises duplicate rows even though the
         # caller surface still accepts it.
         to_upsert = [c for c, _ in parsed]
+        newly_imported = list(to_upsert)
     else:
         all_hashes = [c.content_hash for c, _ in parsed]
         existing = await storage.get_chunk_ids_by_hashes(all_hashes)
@@ -436,6 +451,7 @@ async def import_chunks(
                         candidate = uuid4()
                     chunk.id = candidate
                 to_upsert.append(chunk)
+                newly_imported.append(chunk)
 
     imported = failed = 0
     if to_upsert:
@@ -474,7 +490,15 @@ async def import_chunks(
             )
 
         try:
-            await storage.upsert_chunks(to_upsert)
+            # One transaction so a failure in either half leaves nothing behind:
+            # without it, a chunk write that committed before the entity write
+            # failed would be reported as a failed import while its rows stayed
+            # in the store.
+            async with storage.transaction():
+                await storage.upsert_chunks(to_upsert)
+                # Imported content never passes through the indexing engine, so
+                # this is the only place its entities can be written (#2155).
+                await sync_entities_for_chunks(storage, newly_imported, enabled=extract_entities)
             # "imported" counts only genuinely new rows; updates are tracked
             # separately so callers can distinguish merge from overwrite.
             imported = len(to_upsert) - updated
