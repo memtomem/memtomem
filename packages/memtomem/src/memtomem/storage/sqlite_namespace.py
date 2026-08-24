@@ -693,16 +693,18 @@ class NamespaceOps:
         target-wins rule again.
 
         ``OR IGNORE`` only collapses a row the survivor already carries
-        where a uniqueness constraint says the two are the same row. Tables
-        without one — ``chunk_entities`` (three non-unique indexes),
-        ``memory_assertions`` (lookup index only) — therefore end up holding
-        *both* copies for a merged chunk: the same entity mention twice, and
-        a `GROUP BY entity_type` count that reads one too many. No
-        well-defined key exists to dedupe them on here (``created_at``
-        differs between the two indexing runs, so "identical row" is not
-        identity), and the state self-heals the next time that chunk is
-        re-indexed, since ``set_chunk_entities`` deletes before inserting.
-        Stated rather than silently inherited.
+        where a uniqueness constraint says the two are the same row.
+        ``chunk_entities`` now has one — ``idx_entities_unique`` on
+        ``(chunk_id, entity_type, entity_value COLLATE NOCASE)`` (#2145) — so a
+        merged chunk keeps one copy of each mention and ``GROUP BY
+        entity_type`` counts it once. ``memory_assertions`` (lookup index only)
+        is still the un-keyed case and does end up holding *both* copies: no
+        well-defined key exists to dedupe them on here (``created_at`` differs
+        between the two indexing runs, so "identical row" is not identity).
+        For entities the state also self-heals the next time that chunk is
+        re-indexed, since ``EntityMixin.upsert_entities`` deletes the chunk's
+        rows before inserting and the indexer now calls it on every chunk
+        write. Stated rather than silently inherited.
 
         One asymmetry is deliberate: ``access_log`` rows move to the survivor
         while ``chunks.access_count`` / ``last_accessed`` stay as the target

@@ -40,6 +40,9 @@ session linkage, so session attribution could only be inferred from a time
 window, and even then it would miss every `mem_read` and `mem_recall`.
 
 **Entity coverage is worse than "sparse" — it is empty by default and decays.**
+(Superseded by #2145 for new writes — see §Deferral. The paragraph is kept as
+the argument that motivated the deferral, and describes the store as it stood
+when this ADR was written.)
 `upsert_entities` has exactly one production call site, inside `mem_entity_scan`
 (`server/tools/entity.py`), as does `delete_entities_for_chunk`. Nothing in `indexing/`,
 `mem_add`, formation or the scheduler writes the table; `JOB_KINDS` has no
@@ -133,6 +136,16 @@ existing store depends on someone having run one.
 
 Issue #2145 tracks that work; it did not exist when #2133 was filed, which is
 why #2133 as written could never be unblocked by an event.
+
+**Half of the trigger has now fired.** #2145 wired the regex extractor into the
+indexing engine's chunk-write path (`indexing.extract_entities`, on by default),
+so every chunk the indexer writes gets an extraction attempt and a re-index
+re-extracts rather than only cascading the old rows away. What #2145
+deliberately left open is the other half named above: stores written before it
+are not backfilled, so for those the answer still depends on someone having run
+`mem_entity_scan`. Status therefore stays *Proposed* — flipping it needs the
+backfill question decided, not just this note. The `set_chunk_entities` comment
+this ADR called out has been corrected in the same change.
 
 Until the trigger fires, implementing D1–D3 would ship a query that returns
 nothing on every default install — the failure mode #2133 itself predicted.

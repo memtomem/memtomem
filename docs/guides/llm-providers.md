@@ -19,7 +19,7 @@ Enabling an LLM upgrades four features. Each degrades gracefully — if a call f
 | Feature | LLM enabled | LLM disabled (default) |
 |---------|-------------|------------------------|
 | Query expansion (`strategy="llm"`) | LLM synonym generation | Disabled — original query used |
-| Entity extraction (`mem_entity_scan`) | LLM structured extraction | Regex + pattern matching |
+| Entity extraction (`mem_entity_scan`) | LLM structured extraction | Regex + pattern matching — also what the indexer runs inline on every chunk write |
 | Auto-tagging (`mem_auto_tag`) | LLM semantic tagging | Keyword frequency heuristic |
 | Consolidation (`auto_consolidate`) | LLM summary | Bullet-point extraction |
 

@@ -36,6 +36,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Entities are now extracted at index time, so `chunk_entities` is populated
+  by default and survives a re-index.** The table had exactly one production
+  writer — `mem_entity_scan` — so on a default install it was not sparsely
+  populated but empty, permanently, until someone typed a maintenance command.
+  Coverage then only shrank: the table cascades on `chunks(id)`, so re-indexing
+  an edited file dropped that chunk's entities with nothing to put them back.
+  `entity_boost` was therefore inert for anyone who had not run a scan, and
+  `mem_status` only warned about that when the boost was enabled — which it is
+  not by default, so a default install got no signal at all. The indexing
+  engine now extracts entities for every chunk it writes, inside the same
+  transaction as the chunk, and rewrites them when the content changes (a chunk
+  that no longer yields any entity has its rows cleared rather than left to
+  boost a query it no longer matches). This is the *regex* extractor — stdlib
+  patterns, no model load, no I/O, microseconds next to the embedding call the
+  same write already paid for; the LLM extractor stays the opt-in quality
+  upgrade it already was, via `mem_entity_scan(overwrite=True)`. New knob
+  `indexing.extract_entities` (`MEMTOMEM_INDEXING__EXTRACT_ENTITIES`, default
+  `true`) turns it off. Ranking is deliberately unchanged: `entity_boost.enabled`
+  still defaults to `false`, and while it is off these rows are not folded into
+  the Quality Lab index fingerprint. Stores indexed by an earlier release are
+  not backfilled — run `mem_entity_scan`, or re-index with `mm index --force`
+  (a plain re-index leaves unchanged files alone, so it writes no entities). Writers that reach
+  storage without going through the indexing engine (import, URL index,
+  consolidation) do not extract yet.
+  See [ADR-0034](docs/adr/0034-session-touched-entities-derived.md) §Deferral.
+  (#2145)
+
+### Changed
+
+- **`chunk_entities` now has a uniqueness constraint.** The table shipped with
+  three non-unique indexes, so one chunk could hold the same mention twice —
+  a namespace merge remapped `chunk_id` with `UPDATE OR IGNORE` and had no key
+  to ignore against, and nothing stopped a value that differed only in case
+  from a stored one, which the entity boost matches `COLLATE NOCASE` anyway.
+  `GROUP BY entity_type` counts then read high. A startup migration collapses
+  existing duplicates (highest confidence wins, ties to the earliest row) and
+  installs `UNIQUE(chunk_id, entity_type, entity_value COLLATE NOCASE)`;
+  `upsert_entities` writes with a conflict clause naming that exact index
+  (so a case-variant collision is dropped while a malformed row still raises)
+  and returns rows actually stored. Automatic extraction made the duplicate state more likely, not less,
+  which is why it lands together. No schema-version bump — the migration is
+  additive and an older binary can still open the database. (#2145)
+
 - **Applied maintenance runs now leave a record of what they changed.**
   `memory_policies.last_run_at` said *when* a policy last ran but nothing said
   what that run did, which mattered most for `auto_expire` — it issues a real

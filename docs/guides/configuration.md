@@ -480,6 +480,7 @@ candidate) refuse with a configuration error naming
 | `MEMTOMEM_INDEXING__TARGET_CHUNK_TOKENS` | `384` | Pass-2 semantic-packing target chunk size; `0` disables packing |
 | `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments. Register per-project with `mm mem init` (run from the project root; a running server/web UI picks the new tier up after restart). Deliberately outside `mm config set`/`unset` — to deregister, edit `indexing.project_memory_dirs` in `~/.memtomem/config.json` directly |
 | `MEMTOMEM_INDEXING__AUTO_SUMMARIZE` | `false` | Generate a per-source LLM summary chunk at index time (requires LLM enabled) |
+| `MEMTOMEM_INDEXING__EXTRACT_ENTITIES` | `true` | Extract entities (person, date, decision, action_item, technology, concept) for every chunk the indexer writes, populating `chunk_entities`. Regex only — stdlib patterns, no model and no network, so it costs microseconds next to the embedding call on the same write. The LLM extractor stays opt-in via `mem_entity_scan(overwrite=True)`. Turning this off leaves the table at whatever a scan last wrote |
 | `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Clamp the leading source body to this many characters before generating the per-source summary |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_TOKENS` | `256` | Output token cap for each per-source summary |
@@ -728,12 +729,16 @@ full `max_boost`, one carrying only `sqlite` by half of it, and leaves a chunk
 carrying neither untouched. Runs as Stage 7b in the search pipeline (after the
 importance boost, before context-window expansion).
 
-**Requires a scan.** Entities only exist for chunks
-[`mem_entity_scan`](reference/organization-maintenance.md) has visited — enabling
-this boost over an unscanned store does nothing, and `mem_status` reports an
-`entity_boost_no_entities` warning when that is the case. Editing a chunk's
-content drops its entities until the next scan. Chunks without entities are never
-penalized, only un-boosted.
+**Populated at index time.** The indexer extracts entities for every chunk it
+writes (`indexing.extract_entities`, on by default), and rewrites them whenever
+the chunk's content is re-indexed — so coverage tracks the corpus instead of
+decaying after a one-off pass. A store last indexed by an older release still
+reads empty until [`mem_entity_scan`](reference/organization-maintenance.md)
+runs over it or it is re-indexed with `mm index --force` — a plain re-index
+skips files whose content has not changed, so it writes no entities for them; the
+boost is inert rather than broken over an empty table, and `mem_status` reports
+an `entity_boost_no_entities` warning when that is the case. Chunks without
+entities are never penalized, only un-boosted.
 
 Valid `query_entity_types` values are `person`, `date`, `decision`, `action_item`,
 `technology`, and `concept`. The default omits `decision`/`action_item` (their
@@ -754,9 +759,11 @@ entities carry hardcoded per-pattern confidences while LLM-extracted ones carry
 model-supplied values. `0.6` is the useful setting — it drops the speculative
 PascalCase technology guesses (0.5) while keeping known-term matches (0.9).
 
-> Enabling this boost makes `chunk_entities` a ranking input, so running a scan
-> changes the Quality Lab index fingerprint. That is intended — the ranking
-> genuinely changed.
+> Enabling this boost makes `chunk_entities` a ranking input, so anything that
+> changes those rows — a re-index, or a `mem_entity_scan` — changes the Quality
+> Lab index fingerprint. That is intended: the ranking genuinely changed. While
+> the boost is disabled the rows are not folded in, so index-time extraction on
+> a default install leaves fingerprints alone.
 
 ## Decay
 

@@ -339,17 +339,27 @@ async def collect_status_report(app: AppContext) -> dict:
             }
         )
 
-    # Entity-match boost ranks on ``chunk_entities`` rows, which only exist for
-    # chunks a scan has visited — an enabled boost over an empty table is inert
-    # rather than broken, and silently so. Same shape as the MMR advisory above.
+    # Entity-match boost ranks on ``chunk_entities`` rows. The indexer writes
+    # those for every chunk it stores (#2145), so an empty table means a store
+    # last indexed before that landed, or one indexed with
+    # ``indexing.extract_entities`` off — either way an enabled boost over it is
+    # inert rather than broken, and silently so. Same shape as the MMR advisory
+    # above.
     if config.entity_boost.enabled and hasattr(app.storage, "get_entity_type_counts"):
         if not await app.storage.get_entity_type_counts():
             warnings.append(
                 {
                     "kind": "entity_boost_no_entities",
                     "detail": "entity_boost.enabled=True but no entities have been "
-                    "extracted — the boost is inert until a scan runs",
-                    "fix": 'run mem_do(action="entity_scan") to populate entities',
+                    "extracted — the boost is inert until this store is indexed "
+                    "by a build that extracts entities, or a scan runs",
+                    # ``mm index <path>`` alone will not do it: a file whose
+                    # content is unchanged bucket as ``unchanged``, never
+                    # ``to_upsert``, so no chunk is rewritten and no entity is
+                    # extracted. ``--force`` is what re-writes them.
+                    "fix": 'run mem_do(action="entity_scan") to populate entities, or '
+                    "re-index with mm index --force <path> (with "
+                    "indexing.extract_entities on, the default)",
                 }
             )
 

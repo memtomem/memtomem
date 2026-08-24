@@ -689,6 +689,7 @@ def create_tables(
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_entities_type_value ON chunk_entities(entity_type, entity_value)"
     )
+    _migrate_entity_uniqueness(db)
 
     # --- Review-first automatic memory formation ---
     db.execute("""
@@ -1174,4 +1175,125 @@ def _migrate_chunks_uniqueness(db: sqlite3.Connection, *, has_vec_table: bool) -
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
+        raise
+
+
+def _migrate_entity_uniqueness(db: sqlite3.Connection) -> None:
+    """One-time dedup + UNIQUE constraint for ``chunk_entities`` (#2145).
+
+    The table shipped with three non-unique indexes, so the same mention could
+    be stored twice for one chunk. Two paths produced that: a namespace merge
+    remapping ``chunk_id`` with ``UPDATE OR IGNORE`` (no constraint meant no
+    collapse, see ``sqlite_namespace._remap_chunk_references``), and any writer
+    inserting a value that differs only in case from one already stored — which
+    the Stage-7b boost then matches ``COLLATE NOCASE`` anyway, and which
+    ``get_entity_type_counts``' ``COUNT(*)`` reads one too many of. Automatic
+    index-time extraction makes both more likely, not less.
+
+    Steps, gated on ``idx_entities_unique`` so later startups are a no-op:
+
+    1. Group rows by ``(chunk_id, entity_type, entity_value COLLATE NOCASE)``.
+    2. Keep the highest-confidence row per group — tie-break by lowest ``id``,
+       i.e. the earliest write — and delete the rest. ``chunk_entities`` has no
+       sidecar tables, so the delete is a single statement per batch.
+    3. Create the UNIQUE INDEX. ``upsert_entities`` writes with an
+       ``ON CONFLICT`` clause naming it from here on, so a case-variant
+       duplicate inside one extraction is dropped at the storage layer instead
+       of raising.
+
+    Matching ``get_matching_entities``, the index folds ``entity_value``
+    ``COLLATE NOCASE`` (ASCII-only, as SQLite's built-in NOCASE is): "Python"
+    and "python" on one chunk are one mention, which is what the boost already
+    believed.
+
+    **Concurrent-startup safety**: mirrors ``_migrate_chunks_uniqueness`` —
+    ``BEGIN IMMEDIATE`` plus a re-check of the index inside the transaction, so
+    two processes booting together cannot both run the dedup. Every production
+    path reaches this with no transaction open, so that is the path that
+    serializes. The ``in_transaction`` branch is defensive — a caller that
+    wrapped ``create_tables`` itself would otherwise get "cannot start a
+    transaction within a transaction" — and composes into whatever the caller
+    began, the same rule the storage mixins follow; it inherits the caller's
+    isolation, so a caller opening a *deferred* transaction would not be
+    serialized against a concurrent migration by this re-check alone.
+
+    **No SCHEMA_VERSION bump**: additive, on the same risk reasoning as #1801
+    (an index rebuilt in place under the fence, no bump). #691 is the shape
+    precedent — a UNIQUE index on ``chunks`` plus a conflict clause in
+    ``upsert_chunks`` — but it landed before the fence existed, so it says
+    nothing about bumping. The residual is
+    real but narrow, and worth stating rather than overclaiming: an older binary
+    can still open and use this DB, but its ``upsert_entities`` inserts without
+    a conflict clause, so an *LLM* scan on that binary raises
+    ``IntegrityError`` if the model emits the same value twice in one chunk
+    (``_parse_entity_response`` does not dedupe; the regex extractor does). The
+    fence exists to stop an older binary corrupting a newer store, and refusing
+    to open the database outright is the heavier failure of the two.
+
+    **SQLite version requirement**: ``ROW_NUMBER()`` needs SQLite ≥ 3.25
+    (2018-09), well below Python 3.12's bundled floor.
+    """
+    if (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_entities_unique'"
+        ).fetchone()
+        is not None
+    ):
+        return
+
+    owns_txn = not db.in_transaction
+    if owns_txn:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-check inside the transaction in case another startup beat us to
+        # the index between the fast-path check and the lock acquisition.
+        if (
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_entities_unique'"
+            ).fetchone()
+            is not None
+        ):
+            if owns_txn:
+                db.execute("COMMIT")
+            return
+
+        loser_rowids = [
+            row[0]
+            for row in db.execute(
+                """
+                SELECT rowid FROM (
+                    SELECT rowid, ROW_NUMBER() OVER (
+                        PARTITION BY chunk_id, entity_type, entity_value COLLATE NOCASE
+                        ORDER BY confidence DESC, id ASC
+                    ) AS rn
+                    FROM chunk_entities
+                )
+                WHERE rn > 1
+                """
+            ).fetchall()
+        ]
+
+        if loser_rowids:
+            # Chunked deletes keep the parameter list under SQLite's 999-host
+            # limit on older builds.
+            batch_size = 500
+            for i in range(0, len(loser_rowids), batch_size):
+                batch = loser_rowids[i : i + batch_size]
+                placeholders = ",".join("?" * len(batch))
+                db.execute(f"DELETE FROM chunk_entities WHERE rowid IN ({placeholders})", batch)
+            logger.info(
+                "Cleaned up %d duplicate entity row(s) before adding "
+                "UNIQUE(chunk_id, entity_type, entity_value COLLATE NOCASE) — see #2145",
+                len(loser_rowids),
+            )
+
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_unique "
+            "ON chunk_entities(chunk_id, entity_type, entity_value COLLATE NOCASE)"
+        )
+        if owns_txn:
+            db.execute("COMMIT")
+    except Exception:
+        if owns_txn:
+            db.execute("ROLLBACK")
         raise
