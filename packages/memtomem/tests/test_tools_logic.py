@@ -1372,10 +1372,18 @@ class TestAutoConsolidate:
         assert group["summary_id"] != first_summary_id
         assert len(group["chunk_ids"]) == 4
 
-    async def test_failed_group_after_stale_delete_records_error(self, storage, monkeypatch):
-        """The old summary is already gone — the row must not read ``ok``."""
-        import memtomem.tools.consolidation_engine as consolidation_engine
+    async def test_failed_regeneration_keeps_the_old_summary(self, storage, monkeypatch):
+        """A failed regeneration must not cost the source its existing summary.
 
+        The replacement happens inside ``apply_consolidation``'s transaction
+        (#2158), so the old summary is still there afterwards and the run must
+        not claim it was deleted — while the row still reads ``error``, because
+        the group the policy set out to consolidate wasn't.
+
+        The failure is injected *inside* ``apply_consolidation`` (at the
+        relation write, after the replace and the upsert) rather than by
+        replacing the function: the whole point is that the delete it already
+        performed rolls back with it."""
         source = "meeting-failed-regen.md"
         await storage.upsert_chunks(
             [make_chunk(f"Chunk {i}", source=source, heading=("Doc", f"§{i}")) for i in range(3)]
@@ -1395,22 +1403,28 @@ class TestAutoConsolidate:
         )
 
         async def boom(*args, **kwargs):
-            raise RuntimeError("apply failed")
+            raise RuntimeError("relation link failed")
 
-        monkeypatch.setattr(consolidation_engine, "apply_consolidation", boom)
+        monkeypatch.setattr(storage, "add_relation", boom)
         await run_policy(storage, policy, dry_run=False)
+        monkeypatch.undo()
 
         run = (await storage.maintenance_run_latest(kind="auto_consolidate", limit=2))[0]
         assert run["status"] == "error"
         assert "1 group(s) failed" in run["error"]
-        # The record still says which summary the run destroyed.
-        assert run["summary"]["deleted_summary_ids"] == [old_summary_id]
         assert run["summary"]["failed"] == [source]
+        # Nothing was destroyed, so nothing is reported as destroyed.
+        assert "deleted_summary_ids" not in run["summary"]
+        surviving = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert [str(c.id) for c in surviving] == [old_summary_id]
 
     async def test_mutated_flag_tracks_writes_not_affected_count(self, storage, monkeypatch):
-        """``mutated`` is the invalidation signal (#2157): a stale-regen run
-        whose regeneration fails deleted a summary chunk while reporting
-        ``affected_count == 0`` — the counter is blind to that write."""
+        """``mutated`` is the invalidation signal (#2157), armed when a write is
+        attempted rather than confirmed: a run whose regeneration fails reports
+        ``affected_count == 0``, and the counter alone can't tell that apart
+        from a run that never tried to write."""
         import memtomem.tools.consolidation_engine as consolidation_engine
 
         source = "meeting-mutated-flag.md"
@@ -1434,7 +1448,7 @@ class TestAutoConsolidate:
         assert idempotent.affected_count == 0
         assert idempotent.mutated is False
 
-        # Input hash changes → the stale summary is deleted, then apply fails.
+        # Input hash changes → regeneration is attempted, and apply fails.
         await storage.upsert_chunks(
             [make_chunk("Newly added chunk", source=source, heading=("Doc", "§new"))]
         )
@@ -1447,17 +1461,21 @@ class TestAutoConsolidate:
         assert failed.affected_count == 0
         assert failed.mutated is True
 
-    async def test_mutated_flag_covers_post_commit_failure(self, storage, monkeypatch):
-        """``apply_consolidation`` commits the summary chunk in its own
-        transaction and *then* links relations / decays originals. A failure in
-        that tail leaves a searchable summary behind while the group is
-        recorded as failed (#2157)."""
+    async def test_relation_failure_rolls_back_the_summary(self, storage, monkeypatch):
+        """A summary must not outlive the edges that make it reachable.
+
+        The summary is idempotency-keyed by its source hash, so one that
+        committed without its ``consolidated_into`` edges would be skipped by
+        every later run and the hole would be permanent (#2158). ``mutated``
+        stays ``True``: it is the conservative "may have written" signal, and
+        over-reporting a rolled-back write is the safe direction (#2157)."""
         import memtomem.tools.consolidation_engine as consolidation_engine
 
         source = "meeting-post-commit-fail.md"
-        await storage.upsert_chunks(
-            [make_chunk(f"Chunk {i}", source=source, heading=("Doc", f"§{i}")) for i in range(3)]
-        )
+        chunks = [
+            make_chunk(f"Chunk {i}", source=source, heading=("Doc", f"§{i}")) for i in range(3)
+        ]
+        await storage.upsert_chunks(chunks)
 
         async def boom(*args, **kwargs):
             raise RuntimeError("relation link failed")
@@ -1470,11 +1488,145 @@ class TestAutoConsolidate:
 
         assert result.affected_count == 0
         assert result.mutated is True
-        # The summary really did commit — that is what the flag is protecting.
         summaries = await storage.list_chunks_by_source(
             Path(f"/tmp/{source}.consolidated.md"), limit=5
         )
-        assert len(summaries) == 1
+        assert summaries == []
+        assert await storage.get_related(chunks[0].id) == []
+
+    async def test_decay_failure_rolls_back_summary_and_relations(self, storage, monkeypatch):
+        """The originals' decay is part of the same unit of work (#2158).
+
+        ``keep_originals=False`` halves the originals' importance after the
+        summary lands; a failure there used to leave the summary and its edges
+        committed with the originals never decayed."""
+        chunks = [make_chunk(f"decay rollback {i}", source="decay-rollback.md") for i in range(3)]
+        await storage.upsert_chunks(chunks)
+        await storage.update_importance_scores({str(c.id): 0.8 for c in chunks})
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("decay write failed")
+
+        monkeypatch.setattr(storage, "update_importance_scores", boom)
+
+        group = {
+            "source": "/tmp/decay-rollback.md",
+            "chunk_ids": [str(c.id) for c in chunks],
+            "namespace": "default",
+            "chunk_count": 3,
+        }
+        summary = make_heuristic_summary(chunks, Path("/tmp/decay-rollback.md"))
+        with pytest.raises(RuntimeError, match="decay write failed"):
+            await apply_consolidation(storage, group, summary, keep_originals=False)
+
+        monkeypatch.undo()
+        assert (
+            await storage.list_chunks_by_source(
+                Path("/tmp/decay-rollback.md.consolidated.md"), limit=5
+            )
+            == []
+        )
+        assert await storage.get_related(chunks[0].id) == []
+        scores = await storage.get_importance_scores([str(c.id) for c in chunks])
+        assert all(score == pytest.approx(0.8) for score in scores.values())
+
+    async def test_apply_consolidation_replaces_any_existing_summary(self, storage):
+        """The virtual path holds one summary — a second apply replaces it.
+
+        ``apply_consolidation`` owns that path, so it clears it inside its own
+        transaction instead of trusting a chunk id read before the write lock;
+        two applies must not leave two summaries behind (#2158)."""
+        chunks = [make_chunk(f"replace {i}", source="replace-source.md") for i in range(3)]
+        await storage.upsert_chunks(chunks)
+        group = {
+            "source": "/tmp/replace-source.md",
+            "chunk_ids": [str(c.id) for c in chunks],
+            "namespace": "default",
+            "chunk_count": 3,
+        }
+        virtual = Path("/tmp/replace-source.md.consolidated.md")
+
+        first = await apply_consolidation(storage, group, "First summary")
+        second = await apply_consolidation(storage, group, "Second summary")
+
+        assert second != first
+        surviving = await storage.list_chunks_by_source(virtual, limit=5)
+        assert [c.id for c in surviving] == [second]
+        # The replaced summary took its edges with it (FK cascade).
+        related = await storage.get_related(chunks[0].id)
+        assert [target for target, _ in related] == [second]
+
+    async def test_apply_consolidation_refuses_to_overwrite_a_real_file(self, storage):
+        """``<source>.consolidated.md`` is an indexable filename.
+
+        If a user really has a file by that name, its chunks are not ours to
+        clear on the way to writing a summary — the group fails closed and the
+        file is untouched."""
+        from memtomem.errors import StorageError
+
+        chunks = [make_chunk(f"collide {i}", source="collide-source.md") for i in range(3)]
+        squatter = make_chunk(
+            "A real file that happens to be named like our virtual path",
+            source="collide-source.md.consolidated.md",
+        )
+        await storage.upsert_chunks([*chunks, squatter])
+
+        group = {
+            "source": "/tmp/collide-source.md",
+            "chunk_ids": [str(c.id) for c in chunks],
+            "namespace": "default",
+            "chunk_count": 3,
+        }
+        with pytest.raises(StorageError, match="not policy-owned"):
+            await apply_consolidation(storage, group, "Summary that must not land")
+
+        survivor = await storage.get_chunk(squatter.id)
+        assert survivor is not None
+        assert survivor.content == squatter.content
+
+    async def test_apply_consolidation_refuses_an_agent_summary_at_the_path(self, storage):
+        """An agent-written summary is not the policy's to replace.
+
+        ``mem_consolidate_apply`` tags its summaries ``consolidated`` +
+        ``summary``; matching those two in the summary namespace would classify
+        the agent's work as policy-owned and delete it. The ``heuristic`` tag
+        that ``_make_summary_chunk`` writes is what tells them apart."""
+        from memtomem.errors import StorageError
+
+        chunks = [make_chunk(f"agent collide {i}", source="agent-collide.md") for i in range(3)]
+        agent_summary = make_chunk(
+            "Agent-written summary that happens to sit at the virtual path",
+            source="agent-collide.md.consolidated.md",
+            namespace=DEFAULT_SUMMARY_NAMESPACE,
+            tags=("consolidated", "summary"),
+        )
+        await storage.upsert_chunks([*chunks, agent_summary])
+
+        group = {
+            "source": "/tmp/agent-collide.md",
+            "chunk_ids": [str(c.id) for c in chunks],
+            "namespace": "default",
+            "chunk_count": 3,
+        }
+        with pytest.raises(StorageError, match="not policy-owned"):
+            await apply_consolidation(storage, group, "Summary that must not land")
+
+        assert await storage.get_chunk(agent_summary.id) is not None
+
+    async def test_link_consolidation_relations_strict_vs_lenient(self, storage):
+        """Strict mode raises where the lenient agent path counts and moves on."""
+        from memtomem.tools.consolidation_engine import link_consolidation_relations
+
+        chunk = make_chunk("linkable", source="link-modes.md")
+        summary = make_chunk("summary target", source="link-modes.md.consolidated.md")
+        await storage.upsert_chunks([chunk, summary])
+        ids = [str(chunk.id), "not-a-uuid"]
+
+        linked = await link_consolidation_relations(storage, ids, summary.id)
+        assert linked == 1
+
+        with pytest.raises(ValueError):
+            await link_consolidation_relations(storage, ids, summary.id, strict=True)
 
     async def test_auto_consolidate_mixed_namespace_skips(self, storage, caplog):
         """A source file whose chunks span multiple namespaces is skipped with a warn."""

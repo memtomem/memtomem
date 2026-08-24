@@ -9,7 +9,8 @@ from uuid import UUID
 
 
 class RelationMixin:
-    """Mixin providing cross-reference and tag methods. Requires self._get_db()."""
+    """Mixin providing cross-reference and tag methods. Requires self._get_db()
+    and self._in_transaction."""
 
     async def add_relation(
         self,
@@ -23,7 +24,14 @@ class RelationMixin:
             "INSERT OR REPLACE INTO chunk_relations (source_id, target_id, relation_type, created_at) VALUES (?, ?, ?, ?)",
             (str(source_id), str(target_id), relation_type, now),
         )
-        db.commit()
+        # Transaction-aware: ``apply_consolidation`` writes the
+        # ``consolidated_into`` edges in the same transaction that creates the
+        # summary they point at, so committing here would end the caller's
+        # transaction early and strand a partial write (#2158). The other
+        # writers in this mixin have no in-transaction caller and still commit
+        # unconditionally.
+        if not self._in_transaction:
+            db.commit()
 
     async def get_related(self, chunk_id: UUID) -> list[tuple[UUID, str]]:
         db = self._get_db()

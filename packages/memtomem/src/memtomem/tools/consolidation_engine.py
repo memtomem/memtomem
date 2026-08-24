@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from memtomem.errors import StorageError
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 from memtomem.tools.entity_extraction import _ACTION_RE, _DECISION_RE
@@ -275,6 +276,8 @@ async def link_consolidation_relations(
     storage: StorageBackend,
     source_ids: list[str],
     summary_id: UUID,
+    *,
+    strict: bool = False,
 ) -> int:
     """Link original chunks to the summary via ``consolidated_into`` edges.
 
@@ -283,9 +286,18 @@ async def link_consolidation_relations(
     create the summary chunk (virtual upsert vs. file-first via ``mem_add``)
     but converge here to establish the relation graph.
 
-    Invalid UUIDs are logged at DEBUG (harmless — they can appear if scratch
-    state leaks stale data). Storage-level exceptions are logged at WARNING
-    and skipped so a single bad row can't tank the whole group.
+    Lenient mode (the default, and the agent-path contract): invalid UUIDs are
+    logged at DEBUG (harmless — they can appear if scratch state leaks stale
+    data), storage-level exceptions at WARNING, and both are skipped so a
+    single bad row can't tank the whole group. The caller reports the returned
+    count and a human decides what to do about a partial link.
+
+    Strict mode: nothing is caught. ``apply_consolidation`` calls it this way
+    because its summary is idempotency-keyed by source hash — a summary that
+    committed while an edge was missing would be skipped by every later policy
+    run, so the hole would be permanent rather than retried (#2158). Invalid
+    UUIDs raise there too: that path builds its ids from real ``Chunk.id``
+    values, so a bad one is a programming error, not leaked scratch state.
     """
     linked = 0
     for cid in source_ids:
@@ -293,8 +305,12 @@ async def link_consolidation_relations(
             await storage.add_relation(UUID(cid), summary_id, "consolidated_into")
             linked += 1
         except (ValueError, TypeError):
+            if strict:
+                raise
             logger.debug("consolidation: skipping invalid UUID %r", cid)
         except Exception:
+            if strict:
+                raise
             logger.warning("consolidation: failed to link %r", cid, exc_info=True)
     return linked
 
@@ -324,6 +340,67 @@ async def source_has_consolidation_relations(
         if any(rel == "consolidated_into" for _, rel in related):
             return True
     return False
+
+
+#: Tags every policy-owned summary carries — the ownership signal for
+#: ``_clear_policy_summaries``. ``heuristic`` is what separates them from the
+#: agent path's summaries, which ``mem_consolidate_apply`` tags
+#: ``["consolidated", "summary"]``; ``_make_summary_chunk`` has always written
+#: all three, so summaries from earlier releases classify as owned too.
+SUMMARY_OWNER_TAGS = frozenset({"consolidated", "summary", "heuristic"})
+
+#: Ownership has to be established over the *whole* path, so the scan asks for
+#: more rows than a summary path can hold and treats hitting the cap as
+#: "cannot establish ownership" rather than as a clean read.
+SUMMARY_PATH_SCAN_LIMIT = 200
+
+
+def _is_policy_summary(chunk: Chunk, summary_namespace: str) -> bool:
+    """Return True if ``chunk`` is a summary this module wrote."""
+    return chunk.metadata.namespace == summary_namespace and SUMMARY_OWNER_TAGS.issubset(
+        set(chunk.metadata.tags)
+    )
+
+
+async def _clear_policy_summaries(
+    storage: StorageBackend,
+    virtual_path: Path,
+    summary_namespace: str,
+) -> None:
+    """Empty the virtual summary path so this run's summary replaces the last.
+
+    Called inside ``apply_consolidation``'s transaction, and reading there on
+    purpose: a chunk id read before the write lock can be stale by the time the
+    delete runs, which is how two runs end up with two summaries at one path
+    (the uniqueness index includes ``content_hash``, so differing summaries do
+    not collide).
+
+    ``<source>.consolidated.md`` is a perfectly indexable filename, so a real
+    file can occupy the path. Deleting only rows that carry this module's
+    namespace *and* tags keeps a user's file out of it, and anything else at
+    the path fails the group closed rather than consolidating over it.
+    """
+    existing = await storage.list_chunks_by_source(virtual_path, limit=SUMMARY_PATH_SCAN_LIMIT)
+    if len(existing) >= SUMMARY_PATH_SCAN_LIMIT:
+        raise StorageError(
+            f"refusing to consolidate: the summary path holds at least "
+            f"{SUMMARY_PATH_SCAN_LIMIT} chunks, too many to establish ownership over"
+        )
+    foreign = [c for c in existing if not _is_policy_summary(c, summary_namespace)]
+    if foreign:
+        raise StorageError(
+            f"refusing to consolidate: {len(foreign)} chunk(s) at the summary path are not "
+            f"policy-owned summaries (namespace {summary_namespace!r} + tags "
+            f"{sorted(SUMMARY_OWNER_TAGS)}) — a real file appears to occupy it"
+        )
+    if existing:
+        await storage.delete_chunks([c.id for c in existing])
+    # ``delete_chunks`` skips its AI-summary cache cleanup while a transaction
+    # is open (the reindex delete+upsert pair depends on that), so the path's
+    # cached prose has to be dropped here — it described the summary that just
+    # went, and the replacement gets its own. Unconditional: a cache row can
+    # outlive the chunks it described.
+    await storage.delete_ai_summary(virtual_path)
 
 
 def _make_summary_chunk(
@@ -375,9 +452,11 @@ async def apply_consolidation(
     idempotency and staleness regeneration.
 
     Args:
-        storage: Storage backend implementing ``upsert_chunks``,
-            ``add_relation``, ``get_importance_scores``,
-            ``update_importance_scores``.
+        storage: Storage backend implementing ``transaction``,
+            ``list_chunks_by_source``, ``delete_chunks``, ``delete_ai_summary``,
+            ``upsert_chunks``, ``add_relation``, ``get_importance_scores``,
+            ``update_importance_scores``. Any summary already stored at the
+            virtual path is replaced.
         group: Dict with at minimum ``source`` (str path) and ``chunk_ids``
             (list of UUID strings). ``namespace`` / ``chunk_count`` are
             accepted but not required.
@@ -398,29 +477,43 @@ async def apply_consolidation(
         The UUID of the newly created summary chunk.
 
     Raises:
-        StorageError: if the summary upsert fails (caller should decide
-            whether to continue to the next group or abort).
+        StorageError: if a storage step fails, or if the virtual summary path
+            is occupied by chunks this module did not write (a real file of
+            that name) — consolidating would delete them.
+        ValueError: if ``group["chunk_ids"]`` holds a non-UUID value.
+        Exception: whatever the storage layer raises is propagated as-is; the
+            transaction rolls back either way, so a failed call leaves the
+            store exactly as it found it and the caller decides whether to
+            continue to the next group or abort.
     """
     summary_chunk = _make_summary_chunk(group, summary, summary_namespace)
-    # One transaction: the summary is idempotency-keyed by its source hash
-    # (``execute_auto_consolidate`` skips a group whose summary already exists),
-    # so a summary that committed while its entity write failed would never be
-    # revisited — the hole would be permanent rather than retried.
+    virtual_path = summary_chunk.metadata.source_file
+    source_ids = [str(cid) for cid in group.get("chunk_ids", [])]
+    # One transaction for the whole group's work. The summary is
+    # idempotency-keyed by its source hash (``execute_auto_consolidate`` skips a
+    # group whose summary already exists), so a summary that committed while its
+    # entities, its ``consolidated_into`` edges, or the originals' decay failed
+    # would never be revisited — the hole would be permanent rather than retried
+    # (#2155 for entities, #2158 for the rest).
     async with storage.transaction():
+        # Clear the path first so a regeneration replaces rather than
+        # duplicates, and so the old summary is only gone once its replacement
+        # has landed.
+        await _clear_policy_summaries(storage, virtual_path, summary_namespace)
         await storage.upsert_chunks([summary_chunk])
         # The summary is a virtual chunk that never passes through the indexing
         # engine, so this is its only chance at entities (#2155) — without it, a
         # store whose recall leans on consolidation summaries has a hole in
         # ``chunk_entities`` exactly where the synthesised text lives.
         await sync_entities_for_chunks(storage, [summary_chunk], enabled=extract_entities)
+        await link_consolidation_relations(storage, source_ids, summary_chunk.id, strict=True)
 
-    source_ids = [str(cid) for cid in group.get("chunk_ids", [])]
-    await link_consolidation_relations(storage, source_ids, summary_chunk.id)
-
-    if not keep_originals and source_ids:
-        scores = await storage.get_importance_scores(source_ids)
-        if scores:
-            floored = {cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()}
-            await storage.update_importance_scores(floored)
+        if not keep_originals and source_ids:
+            scores = await storage.get_importance_scores(source_ids)
+            if scores:
+                floored = {
+                    cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()
+                }
+                await storage.update_importance_scores(floored)
 
     return summary_chunk.id
