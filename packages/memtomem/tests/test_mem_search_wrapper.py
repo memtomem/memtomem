@@ -96,6 +96,7 @@ class TestCoreDelegation:
             context_window=2,
             scope="user",
             rerank=False,
+            record=False,
         )
 
         search_mod.run_search.assert_awaited_once_with(
@@ -112,6 +113,7 @@ class TestCoreDelegation:
             context_window=2,
             scope="user",
             rerank=False,
+            record=False,
             project_context_root=project_root,
             origin="mcp",
         )
@@ -126,6 +128,7 @@ class TestCoreDelegation:
         kwargs = search_mod.run_search.await_args.kwargs
         assert (kwargs["top_k"], kwargs["context_window"], kwargs["origin"]) == (10, 0, "mcp")
         assert kwargs["rerank"] is None
+        assert kwargs["record"] is True
         assert kwargs["namespace"] is None
 
     async def test_the_verbose_alias_does_not_leak_into_the_core(self, monkeypatch):

@@ -57,6 +57,7 @@ async def mem_search(
     output_format: OutputFormat = "compact",
     scope: str | None = None,
     rerank: bool | None = None,
+    record: bool = True,
     ctx: CtxType = None,
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -68,11 +69,10 @@ async def mem_search(
         tag_filter: Comma-separated tags; matches chunks carrying ANY of them
         namespace: Namespace scope (single value)
         as_of: Temporal bound for retroactive search — ``YYYY-MM-DD`` or
-            ``YYYY-QN``. Default ``None`` = now. Chunks whose
-            ``valid_from`` / ``valid_to`` frontmatter excludes that point are
-            filtered out; chunks without those keys are always valid. Time-
-            decay scoring is also anchored to this instant instead of the
-            wall clock.
+            ``YYYY-QN``, default now. Chunks whose ``valid_from`` /
+            ``valid_to`` frontmatter excludes that point are filtered out;
+            chunks without those keys are always valid. Time-decay scoring is
+            anchored to this instant instead of the wall clock.
         bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor)
         dense_weight: RRF weight for meaning matches (default 1.0). Both must be
             finite and >= 0, not both zero; 0 disables that leg
@@ -91,6 +91,9 @@ async def mem_search(
             as well as changing the score scale. Omitted/``true`` follows server
             config; ``true`` cannot enable reranking on a server that has it
             disabled.
+        record: ``false`` = background read, for fan-out callers: no
+            access-count increments, no query history, caches neither read
+            nor written, dense retrieval exhaustive — so results can differ.
 
     A result count below ``top_k`` can mean filters excluded candidates or that
     the index simply holds no more matches. Raising ``top_k`` widens the
@@ -143,6 +146,7 @@ async def mem_search(
         context_window=context_window,
         scope=scope,
         rerank=rerank,
+        record=record,
         project_context_root=project_context_root,
         origin="mcp",
     )

@@ -94,6 +94,7 @@ async def test_every_argument_reaches_the_pipeline_exactly_once():
         context_window=2,
         scope="user",
         rerank=False,
+        record=False,
         project_context_root=root,
         origin="cli",
     )
@@ -111,6 +112,7 @@ async def test_every_argument_reaches_the_pipeline_exactly_once():
             "scope": "user",
             "project_context_root": root,
             "rerank": False,
+            "record": False,
             "origin": "cli",
         }
     ]

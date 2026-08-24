@@ -44,7 +44,7 @@ def _wire_descriptions() -> dict[str, str]:
 #: restating the exact current figure, which goes stale on every reword and
 #: then reads as a contract. This is a budget, not a target: the
 #: floor is roughly "one clear line per parameter", and mem_search alone has
-#: thirteen parameters. Adding text here costs every request in every session,
+#: fourteen of them. Adding text here costs every request in every session,
 #: so an increase should be argued for, and detail that explains the server's
 #: reasoning belongs in a module comment or a guide instead.
 #:
@@ -55,7 +55,16 @@ def _wire_descriptions() -> dict[str, str]:
 #: made it a cap on *parameters* rather than on prose. The increase buys one
 #: parameter line, not room for rationale; the reasoning for this one lives in
 #: ``docs/adr/0032-per-namespace-day-files.md``.
-_TOTAL_BUDGET = 9_200
+#:
+#: Raised 9,200 → 9,400 for ``mem_search.record`` (#2166), by the same
+#: argument: the parameter needs its documented line and the budget had 34
+#: characters left. The entry costs more than the usual one line because
+#: ``record=false`` is not a pure telemetry switch — it also bypasses the
+#: caches and widens dense retrieval, so results can differ, and a caller
+#: told only "skips the counters" would be misled. That warning is pinned in
+#: ``_ARG_CONTRACTS`` below. Paid for in part by dropping "Default ``None``
+#: = now" from ``as_of``, which the signature already says.
+_TOTAL_BUDGET = 9_400
 
 
 def test_core_descriptions_fit_the_budget() -> None:
@@ -91,6 +100,25 @@ _ARG_CONTRACTS: tuple[tuple[str, str, str, str], ...] = (
     ("mem_search", "scope", "project_shared", "how to search across projects"),
     ("mem_search", "as_of", "valid_from", "which frontmatter drives the time filter"),
     ("mem_search", "rerank", "top_k", "rerank=false also narrows the candidate pool"),
+    ("mem_search", "record", "can differ", "record=false is not a pure telemetry switch"),
+    (
+        "mem_search",
+        "record",
+        "dense retrieval exhaustive",
+        "the retrieval change behind 'can differ'",
+    ),
+    (
+        "mem_search",
+        "record",
+        "caches neither read nor written",
+        "the cache bypass this entry's budget was raised for",
+    ),
+    (
+        "mem_search",
+        "record",
+        "no access-count increments",
+        "replay still reads counts, it stops writing them",
+    ),
     ("mem_search", "output_format", "structured", "the machine-readable mode"),
     ("mem_recall", "scope", "user", "the default recall tier"),
 )

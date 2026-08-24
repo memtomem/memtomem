@@ -130,6 +130,7 @@ async def mem_agent_search(
     top_k: int = 10,
     output_format: OutputFormat = "compact",
     shared_namespace: str | None = None,
+    record: bool = True,
     ctx: CtxType = None,
 ) -> str:
     """Search memories with multi-agent scope awareness.
@@ -172,6 +173,11 @@ async def mem_agent_search(
             scraping). Mirrors the same option on ``mem_search`` /
             ``mem_recall`` so callers don't have to switch tools to get
             structured output.
+        record: ``False`` makes this a background read — no access-count
+            increments, no query history, caches neither read nor written,
+            dense retrieval exhaustive, so results can differ. Defaults to
+            recording, as on ``mem_search``; a worker fanning out over a
+            shared store is the case for turning it off.
     """
     if agent_id is not None:
         validate_agent_id(agent_id)
@@ -217,6 +223,7 @@ async def mem_agent_search(
         top_k=top_k,
         namespace=ns_filter,
         current_namespace=None,
+        record=record,
         project_context_root=project_context_root,
         origin="mcp",
     )

@@ -237,6 +237,7 @@ async def run_search(
     context_window: int = 0,
     scope: str | None = None,
     rerank: bool | None = None,
+    record: bool = True,
     project_context_root: Path | None = None,
     origin: SearchOrigin,
 ) -> tuple[list[SearchResult], RetrievalStats, list[str]]:
@@ -249,6 +250,8 @@ async def run_search(
             ``current_namespace``.
         current_namespace: The surface's ambient namespace.
         as_of: ``YYYY-MM-DD`` / ``YYYY-QN`` temporal bound, or ``None``.
+        record: ``False`` runs the query as a replay — see
+            ``SearchPipeline.search`` for what that suppresses and widens.
         project_context_root: ADR-0011 scope anchor; resolve it on the
             caller's side (``runtime.project_context``).
         origin: Call-origin label recorded with the query run.
@@ -282,6 +285,7 @@ async def run_search(
         scope=scope,
         project_context_root=project_context_root,
         rerank=rerank,
+        record=record,
         origin=origin,
     )
 
