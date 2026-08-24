@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 
+from memtomem.errors import QueryEmbeddingDimensionError
 from memtomem.formation import propose_memory_candidate, scan_session_candidates
 from memtomem.server.tools import formation as formation_tools
 
@@ -757,7 +758,10 @@ async def test_candidate_evidence_rejects_unknown_candidate_and_bad_top_k(storag
 @pytest.mark.parametrize(
     ("error", "expected_status"),
     [
-        (ValueError("Embedding dimension mismatch: query has 2d"), "dimension_mismatch"),
+        (
+            QueryEmbeddingDimensionError("Embedding dimension mismatch: query has 2d"),
+            "dimension_mismatch",
+        ),
         (RuntimeError("vector index is corrupt"), "unavailable"),
     ],
 )
@@ -783,6 +787,8 @@ async def test_candidate_evidence_reports_failure_in_band(
     assert result["ok"] is True
     assert result["status"] == expected_status
     assert result["reason"]
+    # The raised message stays in the log; the response carries fixed guidance.
+    assert "2d" not in result["reason"]
     assert result["neighbours"] == []
     assert caplog.records
 
@@ -903,11 +909,11 @@ async def test_candidate_evidence_reports_partial_coverage_alongside_results(sto
 
 
 @pytest.mark.asyncio
-async def test_candidate_evidence_does_not_claim_dimension_fix_for_other_value_errors(
-    storage, monkeypatch
-):
+async def test_candidate_evidence_classifies_by_type_not_by_error_message(storage, monkeypatch):
     candidate = await _seed_candidate(storage)
-    dense = _EvidenceStorage(error=ValueError("embedding provider rejected input token /secret"))
+    dense = _EvidenceStorage(
+        error=ValueError("dimension mismatch in provider payload for token /secret")
+    )
     monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
     monkeypatch.setattr(storage, "get_dense_coverage", dense.get_dense_coverage, raising=False)
     monkeypatch.setattr(
@@ -958,3 +964,63 @@ async def test_cli_evidence_pins_the_same_project_scope_as_the_mcp_tool(monkeypa
     monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
     await _evidence("c1", 5)
     assert seen["project_context_root"] == project_root
+
+
+@pytest.mark.asyncio
+async def test_dense_coverage_counts_only_the_scoped_project(storage, tmp_path):
+    """Another project's vectors must not vouch for this one's corpus."""
+    from memtomem.models import Chunk, ChunkMetadata
+
+    here = (tmp_path / "here").resolve()
+    there = (tmp_path / "there").resolve()
+    for root in (here, there):
+        (root / ".memtomem" / "memories").mkdir(parents=True)
+
+    def _chunk(root, name):
+        return Chunk(
+            content=f"note in {name}",
+            metadata=ChunkMetadata(
+                source_file=root / ".memtomem" / "memories" / f"{name}.md",
+                scope="project",
+                project_root=root,
+            ),
+            embedding=[],
+        )
+
+    await storage.upsert_chunks([_chunk(here, "a"), _chunk(there, "b"), _chunk(there, "c")])
+
+    store_wide = await storage.get_dense_coverage()
+    scoped = await storage.get_dense_coverage(here)
+    assert store_wide["total"] == 3
+    assert scoped["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_evidence_inherits_the_accessor_lazy_expiry(storage, monkeypatch):
+    """The one state change the action can cause, pinned so the docs stay true.
+
+    Gathering evidence writes nothing of its own, but its candidate lookup is
+    the shared accessor, which flips an already-expired pending row. The tool
+    docstring says so; this keeps that claim honest.
+    """
+    candidate = await _seed_candidate(storage)
+    storage._get_db().execute(
+        "UPDATE memory_candidates SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+        (candidate["id"],),
+    )
+    storage._get_db().commit()
+
+    dense = _EvidenceStorage([_neighbour_result("anything", 0.9)])
+    monkeypatch.setattr(storage, "dense_search", dense.dense_search, raising=False)
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                storage=storage, embedder=_Embedder(), config=_evidence_config()
+            )
+        ),
+    )
+    await formation_tools.mem_candidate_evidence(candidate["id"])
+    after = await storage.get_memory_candidate(candidate["id"])
+    assert after["status"] == "expired"

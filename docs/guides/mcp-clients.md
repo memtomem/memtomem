@@ -547,8 +547,9 @@ Evidence never blocks review. The envelope's `status` is `available` (an empty
 store has no such signal at all), `dense_not_indexed` (chunks exist but none
 carry a vector yet — right after an embedding reset, or mid first index),
 `dimension_mismatch`, or `unavailable`. When the store can answer, `coverage`
-reports `{"total", "with_dense"}` so a thin result set from a partly-vectorised
-corpus is not mistaken for an empty store. The CLI equivalent is
+reports `{"total", "with_dense"}` for the same project scope the search is
+pinned to, so a thin result set from a partly-vectorised corpus is not mistaken
+for an empty store. The CLI equivalent is
 `mm review evidence <candidate-id>`, which pins the same project scope.
 `mem_context_migrate` is a deprecated alias for
 `mem_context_memory_migrate` and is scheduled for removal in v0.5.0.

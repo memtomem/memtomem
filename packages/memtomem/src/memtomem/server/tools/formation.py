@@ -116,7 +116,10 @@ async def mem_candidate_list(status: str = "pending", limit: int = 100, ctx: Ctx
 async def mem_candidate_evidence(candidate_id: str, top_k: int = 5, ctx: CtxType = None) -> str:
     """Show what stored memory already says about one pending candidate.
 
-    Read-only, and advisory: it decides nothing. Returns the nearest existing
+    Advisory: it decides nothing and writes no memory. (Like every candidate
+    lookup, fetching one can flip an *already-expired* pending candidate to
+    ``expired`` — a pre-existing property of the accessor, not of this action.)
+    Returns the nearest existing
     memories with a dense score, a token-overlap ratio, and a label —
     ``restatement_candidate`` (the store may already say this),
     ``potential_conflict`` (same topic, different words — could equally be a
@@ -129,8 +132,12 @@ async def mem_candidate_evidence(candidate_id: str, top_k: int = 5, ctx: CtxType
 
     ``status`` reports whether the lookup ran: ``available`` (an empty
     ``neighbours`` then means nothing is close), ``dense_disabled`` (bm25-only
-    store — no signal exists), ``dimension_mismatch``, or ``unavailable``.
-    Evidence never blocks review; a failed lookup is reported, not raised.
+    store — no signal exists), ``dense_not_indexed`` (chunks exist but none
+    carry a vector yet), ``dimension_mismatch``, or ``unavailable``. When the
+    store can answer, ``coverage`` gives ``{"total", "with_dense"}`` for the
+    same scope, so a thin result set from a partly-indexed corpus is not read
+    as an empty store. Evidence never blocks review; a failed lookup is
+    reported, not raised.
 
     Args:
         candidate_id: Candidate to gather evidence for, in any status.

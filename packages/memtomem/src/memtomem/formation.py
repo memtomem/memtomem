@@ -224,8 +224,9 @@ async def candidate_neighbour_evidence(
     - ``unavailable`` — anything else went wrong; details are logged.
 
     When the store can answer, ``coverage`` reports ``{"total", "with_dense"}``
-    so a reviewer can discount an empty or thin result set that reflects a
-    partly-vectorised corpus rather than an empty one.
+    for the same project scope the search is pinned to, so a reviewer can
+    discount an empty or thin result set that reflects a partly-vectorised
+    corpus rather than an empty one.
 
     The corpus is the indexed chunks the caller's scope can see: accepted,
     durable memories. Pending candidates are not compared against each other,
@@ -243,6 +244,7 @@ async def candidate_neighbour_evidence(
     Returns:
         A fresh envelope dict; see ``status`` above.
     """
+    from memtomem.errors import QueryEmbeddingDimensionError
     from memtomem.search.conflict import (
         CONFLICT_OVERLAP_MAX,
         DENSE_SCORE_THRESHOLD,
@@ -278,7 +280,16 @@ async def candidate_neighbour_evidence(
     get_coverage = getattr(storage, "get_dense_coverage", None)
     if get_coverage is not None:
         try:
-            coverage = await get_coverage()
+            # Scoped to the same project the neighbour search is pinned to. A
+            # store-wide count would let another project's vectors vouch for
+            # this one, and would report that project's totals here.
+            coverage = await get_coverage(project_context_root)
+        except TypeError:
+            # Older/stubbed backends without the scoped parameter.
+            try:
+                coverage = await get_coverage()
+            except Exception:
+                logger.warning("Candidate evidence: dense coverage probe failed", exc_info=True)
         except Exception:
             logger.warning("Candidate evidence: dense coverage probe failed", exc_info=True)
     if coverage is not None:
@@ -299,19 +310,18 @@ async def candidate_neighbour_evidence(
             top_k=top_k,
             project_context_root=project_context_root,
         )
-    except ValueError as exc:
-        # Only the store's own width check earns the dimension remediation.
-        # A ValueError from anywhere else (an embedding provider rejecting its
-        # input, say) would be handed a fix that does not apply, so it falls
-        # through to the generic branch with no raw message echoed out.
-        if "dimension mismatch" not in str(exc).lower():
-            logger.warning("Candidate evidence lookup failed", exc_info=True)
-            envelope["status"] = "unavailable"
-            envelope["reason"] = "neighbour lookup failed; see server logs"
-            return envelope
-        logger.warning("Candidate evidence: dimension mismatch", exc_info=True)
+    except QueryEmbeddingDimensionError:
+        # Only the store's own width check earns this remedy. Recognized by
+        # type, not by message: an embedding provider is free to raise its own
+        # ValueError mentioning a dimension, and that caller has a different
+        # problem. The message stays in the log — the response carries a fixed
+        # remediation instead of an echoed error string.
+        logger.warning("Candidate evidence: query embedding width mismatch", exc_info=True)
         envelope["status"] = "dimension_mismatch"
-        envelope["reason"] = str(exc)
+        envelope["reason"] = (
+            "the embedder's vector width disagrees with the store's; re-index "
+            "or fix the embedding configuration before trusting this evidence"
+        )
         return envelope
     except Exception:
         logger.warning("Candidate evidence lookup failed", exc_info=True)
