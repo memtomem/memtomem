@@ -53,6 +53,26 @@ class PolicyRunResult:
     error: str | None = None
     #: Set by ``run_policy`` when a run row was written.
     run_id: int | None = None
+    #: #2157: the cache-invalidation signal. It is deliberately conservative:
+    #: ``False`` guarantees this run wrote nothing search-visible, while
+    #: ``True`` means it wrote — or may have written — and the caller must
+    #: drop its search cache. Handlers arm it before a write rather than
+    #: confirm one after, because the paths that need it are exactly the ones
+    #: where the evidence is lost with an exception.
+    #: ``affected_count`` cannot answer this — auto_consolidate's
+    #: stale-regen path deletes the old summary chunk and, when regeneration
+    #: then fails, reports the group as failed with ``affected_count == 0``,
+    #: while auto_tag's count is a pre-scan estimate that can be positive for
+    #: a run that wrote nothing. Long-lived callers (the policy scheduler)
+    #: gate their ``SearchPipeline.invalidate_cache()`` on this flag, mirroring
+    #: ``IndexingStats.mutated`` (#2141).
+    #:
+    #: ``None`` means the handler did not answer, and ``run_policy`` derives
+    #: the value from the counter — correct for the handlers whose counter is
+    #: a real write count. A handler that sets it explicitly is believed, so
+    #: an explicit ``False`` is not overridden by a non-zero counter.
+    #: Appended last for positional construction compatibility.
+    mutated: bool | None = None
 
 
 def _resolve_archive_ns(template: str, tags_json: str | None, fallback: str) -> str:
@@ -305,6 +325,11 @@ async def execute_auto_tag(
                 details=f"Auto-tag failed: {exc}",
                 namespaces=(namespace,) if namespace else (),
                 error=str(exc),
+                # ``auto_tag_storage`` upserts one chunk at a time, so a pass
+                # that failed partway has already committed the tag rewrites
+                # a tag-filtered search caches. The count is lost with the
+                # exception — assume it wrote (#2157).
+                mutated=True,
             )
         # ``count`` above is a pre-count estimate of untagged chunks; these are
         # what the run actually did.
@@ -324,6 +349,11 @@ async def execute_auto_tag(
         details=f"{'Would tag' if dry_run else 'Tagged'} {count} untagged chunks (max_tags={max_tags})",
         namespaces=(namespace,) if namespace else (),
         outcome=outcome,
+        # ``count`` is a pre-scan estimate of untagged chunks — it can be
+        # positive for a run that wrote nothing (every candidate skipped by
+        # the extractor). ``tagged_chunks`` is incremented only after the
+        # upsert on the non-dry-run path, so it is the real write count.
+        mutated=bool(outcome.get("tagged_chunks", 0)),
     )
 
 
@@ -398,6 +428,12 @@ async def execute_auto_consolidate(
     )
 
     applied = 0
+    # Armed the moment a write is *attempted*, not when one is confirmed:
+    # ``apply_consolidation`` commits the summary chunk in its own transaction
+    # and then does the relation / importance work, so a failure after that
+    # commit leaves a searchable summary behind while this group is recorded
+    # as failed (#2157). The stale-summary delete arms it for the same reason.
+    mutation_attempted = False
     llm_fallback_count = 0
     detail_parts: list[str] = []
     group_records: list[dict] = []
@@ -469,6 +505,7 @@ async def execute_auto_consolidate(
         if stale:
             # Captured before the delete — the stale summary is destroyed here.
             deleted_summary_ids.append(str(existing[0].id))
+            mutation_attempted = True
             await storage.delete_chunks([existing[0].id])
 
         try:
@@ -494,6 +531,7 @@ async def execute_auto_consolidate(
                 "namespace": chunk_ns,
                 "chunk_count": len(chunks),
             }
+            mutation_attempted = True
             summary_id = await apply_consolidation(
                 storage,
                 group_dict,
@@ -563,6 +601,7 @@ async def execute_auto_consolidate(
         namespaces=tuple(sorted(namespaces)),
         outcome=outcome,
         error=error,
+        mutated=not dry_run and mutation_attempted,
     )
 
 
@@ -771,6 +810,13 @@ async def run_policy(
         outcome=result.outcome,
         error=result.error,
         run_id=run_id,
+        # Handlers whose counter is a real write count (archive / expire /
+        # promote) leave ``mutated`` unset — derive it from the counter here.
+        mutated=(
+            result.mutated
+            if result.mutated is not None
+            else (not result.dry_run and result.affected_count > 0)
+        ),
     )
 
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID
+from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -338,3 +339,60 @@ class TestMergeDryRun:
 
         assert deleted == 1
         assert {c.id for c in storage._chunks} == {keep.id}
+
+
+class TestMcpMergeInvalidation:
+    """``mem_dedup_merge`` and the web ``/dedup/merge`` route must agree on
+    when the search cache is dropped (#2157)."""
+
+    @staticmethod
+    def _app() -> MagicMock:
+        app = MagicMock()
+        app.dedup_scanner = MagicMock()
+        app.search_pipeline = MagicMock()
+        return app
+
+    @staticmethod
+    def _patch(monkeypatch, app):
+        from memtomem.server.tools import dedup_decay
+
+        async def _fake_app(_ctx):
+            return app
+
+        monkeypatch.setattr(dedup_decay, "_get_app_initialized", _fake_app)
+
+        async def _no_provenance(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(dedup_decay, "capture_session_for_untracked_write", _no_provenance)
+        monkeypatch.setattr(dedup_decay, "flag_untracked_write", _no_provenance)
+        return dedup_decay
+
+    @pytest.mark.asyncio
+    async def test_failed_apply_invalidates(self, monkeypatch):
+        """The kept chunk's merged tags are upserted before the losers are
+        deleted, so a failed apply may already be search-visible."""
+        app = self._app()
+        app.dedup_scanner.merge = AsyncMock(side_effect=RuntimeError("delete failed"))
+        dedup_decay = self._patch(monkeypatch, app)
+
+        out = await dedup_decay.mem_dedup_merge(
+            keep_id=str(uuid4()), delete_ids=[str(uuid4())], dry_run=False, ctx=None
+        )
+
+        assert "delete failed" in out
+        app.search_pipeline.invalidate_cache.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_dry_run_does_not_invalidate(self, monkeypatch):
+        """A preview writes nothing, however it ends."""
+        app = self._app()
+        app.dedup_scanner.merge = AsyncMock(side_effect=RuntimeError("scan failed"))
+        dedup_decay = self._patch(monkeypatch, app)
+
+        out = await dedup_decay.mem_dedup_merge(
+            keep_id=str(uuid4()), delete_ids=[str(uuid4())], dry_run=True, ctx=None
+        )
+
+        assert "scan failed" in out
+        app.search_pipeline.invalidate_cache.assert_not_called()

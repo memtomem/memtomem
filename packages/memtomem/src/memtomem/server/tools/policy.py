@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -295,29 +296,47 @@ async def mem_policy_run(
         policy = await app.storage.policy_get(name)
         if not policy:
             return f"Error: policy '{name}' not found."
-        result = await run_policy(
+        try:
+            result = await run_policy(
+                app.storage,
+                policy,
+                dry_run=dry_run,
+                llm_provider=app.llm_provider,
+                extract_entities=app.config.indexing.extract_entities,
+            )
+        except (Exception, asyncio.CancelledError):
+            # The run may have partly landed and the ``mutated`` signal died
+            # with the exception — same postcondition as the scheduler's
+            # failure path (#2157). ``CancelledError`` is named explicitly
+            # because it derives from ``BaseException`` (#2141).
+            if not dry_run:
+                app.search_pipeline.invalidate_cache()
+            raise
+        if not dry_run:
+            if result.mutated:
+                app.search_pipeline.invalidate_cache()
+            # After the invalidation: this bookkeeping write can fail, and a
+            # committed policy run must not lose its cache drop to it.
+            await app.storage.policy_update_last_run(name)
+        run_ref = f" (run #{result.run_id})" if result.run_id is not None else ""
+        return f"{'[DRY RUN] ' if dry_run else ''}{result.details}{run_ref}"
+
+    try:
+        results = await run_all_enabled(
             app.storage,
-            policy,
             dry_run=dry_run,
             llm_provider=app.llm_provider,
             extract_entities=app.config.indexing.extract_entities,
         )
+    except (Exception, asyncio.CancelledError):
+        # Policies before the failing one are already committed (#2157).
         if not dry_run:
-            await app.storage.policy_update_last_run(name)
             app.search_pipeline.invalidate_cache()
-        run_ref = f" (run #{result.run_id})" if result.run_id is not None else ""
-        return f"{'[DRY RUN] ' if dry_run else ''}{result.details}{run_ref}"
-
-    results = await run_all_enabled(
-        app.storage,
-        dry_run=dry_run,
-        llm_provider=app.llm_provider,
-        extract_entities=app.config.indexing.extract_entities,
-    )
+        raise
     if not results:
         return "No enabled policies to run."
 
-    if not dry_run:
+    if not dry_run and any(r.mutated for r in results):
         app.search_pipeline.invalidate_cache()
 
     lines = [f"Policy run {'(dry run) ' if dry_run else ''}results:"]

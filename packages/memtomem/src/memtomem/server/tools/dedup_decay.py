@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from memtomem.server import mcp
@@ -95,7 +96,15 @@ async def mem_dedup_merge(
     # Same reason as ``mem_cleanup_orphans``: a merged-away chunk may be
     # one an earlier provenance event still names.
     provenance_session_id = await capture_session_for_untracked_write(app)
-    would_or_did = await app.dedup_scanner.merge(keep_uuid, delete_uuids, dry_run=dry_run)
+    try:
+        would_or_did = await app.dedup_scanner.merge(keep_uuid, delete_uuids, dry_run=dry_run)
+    except (Exception, asyncio.CancelledError):
+        # ``merge`` upserts the kept chunk's merged tags before deleting the
+        # losers, so a failed apply may have committed a search-visible write
+        # (#2157). A dry run writes nothing however it ends.
+        if not dry_run:
+            app.search_pipeline.invalidate_cache()
+        raise
     if dry_run:
         return (
             f"Merge preview (dry-run): {would_or_did} chunks would be deleted, "

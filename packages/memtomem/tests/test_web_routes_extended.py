@@ -559,6 +559,52 @@ class TestDedup:
             "Dedup scan timed out after 0.001s. Try reducing max_scan (current: 500)."
         )
 
+    async def test_dedup_merge_invalidates_cache(self, app, client: AsyncClient):
+        """A merge rewrites the kept chunk's tags and deletes the losers, so
+        cached results can name chunks that no longer exist (#2157)."""
+        app.state.dedup_scanner.merge = AsyncMock(return_value=2)
+        resp = await client.post(
+            "/api/dedup/merge",
+            json={"keep_id": str(uuid.uuid4()), "delete_ids": [str(uuid.uuid4())]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 2
+        app.state.search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_dedup_merge_empty_delete_ids_does_not_invalidate(self, app, client: AsyncClient):
+        """``merge`` returns 0 without reading or writing for an empty list —
+        dropping the cache (and the LLM expansion cache with it) buys
+        nothing (#2157)."""
+        app.state.dedup_scanner.merge = AsyncMock(return_value=0)
+        resp = await client.post(
+            "/api/dedup/merge",
+            json={"keep_id": str(uuid.uuid4()), "delete_ids": []},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 0
+        app.state.dedup_scanner.merge.assert_not_called()
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
+
+    async def test_dedup_merge_invalid_uuid_does_not_invalidate(self, app, client: AsyncClient):
+        """A 422 rejection writes nothing — keep the cache (#2157)."""
+        resp = await client.post(
+            "/api/dedup/merge",
+            json={"keep_id": "not-a-uuid", "delete_ids": []},
+        )
+        assert resp.status_code == 422
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
+
+    async def test_dedup_merge_failure_still_invalidates(self, app, client: AsyncClient):
+        """``merge`` upserts the kept chunk's tags before deleting, so even a
+        failed call may have committed a search-visible write (#2157)."""
+        app.state.dedup_scanner.merge = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(RuntimeError, match="boom"):
+            await client.post(
+                "/api/dedup/merge",
+                json={"keep_id": str(uuid.uuid4()), "delete_ids": [str(uuid.uuid4())]},
+            )
+        app.state.search_pipeline.invalidate_cache.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # GET /api/decay/scan
@@ -591,6 +637,62 @@ class TestDecay:
             assert resp.status_code == 200
             data = resp.json()
             assert data["expired_chunks"] == 20
+
+    async def test_decay_expire_apply_invalidates_cache(self, app, client: AsyncClient):
+        """A non-dry-run expire deletes chunks — the search cache must not
+        keep serving them for the rest of the TTL window (#2157)."""
+        with patch("memtomem.web.routes.decay.expire_chunks") as mock_expire:
+            from memtomem.search.decay import ExpireStats
+
+            mock_expire.return_value = ExpireStats(
+                total_chunks=42, expired_chunks=5, deleted_chunks=5
+            )
+            resp = await client.post(
+                "/api/decay/expire", json={"max_age_days": 90.0, "dry_run": False}
+            )
+            assert resp.status_code == 200
+            assert resp.json()["deleted_chunks"] == 5
+        app.state.search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_decay_expire_no_candidates_does_not_invalidate(self, app, client: AsyncClient):
+        """An applied run that found nothing to expire wrote nothing — the
+        same gate the MCP twin uses (#2157)."""
+        with patch("memtomem.web.routes.decay.expire_chunks") as mock_expire:
+            from memtomem.search.decay import ExpireStats
+
+            mock_expire.return_value = ExpireStats(
+                total_chunks=42, expired_chunks=0, deleted_chunks=0
+            )
+            resp = await client.post(
+                "/api/decay/expire", json={"max_age_days": 90.0, "dry_run": False}
+            )
+            assert resp.status_code == 200
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
+
+    async def test_decay_expire_dry_run_does_not_invalidate(self, app, client: AsyncClient):
+        """A dry-run performs no writes — keep the cache (#2157)."""
+        with patch("memtomem.web.routes.decay.expire_chunks") as mock_expire:
+            from memtomem.search.decay import ExpireStats
+
+            mock_expire.return_value = ExpireStats(
+                total_chunks=42, expired_chunks=5, deleted_chunks=0
+            )
+            resp = await client.post(
+                "/api/decay/expire", json={"max_age_days": 90.0, "dry_run": True}
+            )
+            assert resp.status_code == 200
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
+
+    async def test_decay_expire_failure_does_not_invalidate(self, app, client: AsyncClient):
+        """The single ``delete_chunks`` call this route can reach rolls itself
+        back on failure, so a raised expiry committed nothing (#2157)."""
+        with patch("memtomem.web.routes.decay.expire_chunks") as mock_expire:
+            mock_expire.side_effect = RuntimeError("boom")
+            with pytest.raises(RuntimeError, match="boom"):
+                await client.post(
+                    "/api/decay/expire", json={"max_age_days": 90.0, "dry_run": False}
+                )
+        app.state.search_pipeline.invalidate_cache.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

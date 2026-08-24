@@ -119,7 +119,18 @@ class PolicyScheduler:
                 source="scheduler",
             )
             self._consecutive_failures = 0
+        except asyncio.CancelledError:
+            # ``CancelledError`` derives from ``BaseException``, so it would
+            # slip past the handler below and skip the invalidation entirely
+            # — the #2141 batch rule, on the path that most needs it.
+            self._app.search_pipeline.invalidate_cache()
+            raise
         except Exception:
+            # The failing policy may have partly landed, and earlier policies
+            # in ``run_all_enabled``'s loop are already committed — the
+            # per-result ``mutated`` signal never reached us, so the only
+            # sound postcondition is "may have written" (#2157, #2141 rules).
+            self._app.search_pipeline.invalidate_cache()
             self._consecutive_failures += 1
             if self._consecutive_failures >= 3:
                 logger.warning(
@@ -142,8 +153,12 @@ class PolicyScheduler:
             else:
                 logger.debug("Policy '%s' (%s): %s", r.policy_name, r.policy_type, r.details)
 
-        if total_affected > 0:
+        # Gate on the explicit write signal, not the user-facing counter: a
+        # consolidation run that deleted a stale summary and then failed to
+        # regenerate it reports ``affected_count == 0`` (#2157).
+        if any(r.mutated for r in results):
             self._app.search_pipeline.invalidate_cache()
+        if total_affected > 0:
             logger.info(
                 "Policy scheduler completed: %d policies, %d total actions",
                 len(results),
