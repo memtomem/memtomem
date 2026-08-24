@@ -1889,8 +1889,10 @@ class TestNoHardcodedStrings:
         # Reuses existing toast keys rather than introducing duplicates —
         # the per-target Sync flow already surfaces these classes the
         # same way.
-        assert "t('toast.sync_failed'" in text, (
-            "context-gateway.js Sync All ``error`` branch must reuse ``toast.sync_failed`` (#799)"
+        # #1855: gateway-only key — the error branch now surfaces ``toast.push_failed``
+        # instead; Hooks Sync still owns ``toast.sync_failed`` (see required-keys set above).
+        assert "t('toast.push_failed'" in text, (
+            "context-gateway.js Sync All ``error`` branch must reuse ``toast.push_failed`` (#799)"
         )
         assert "t('settings.ctx.mtime_conflict')" in text, (
             "context-gateway.js Sync All ``aborted`` branch must reuse "
