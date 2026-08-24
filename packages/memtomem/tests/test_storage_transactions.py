@@ -1,6 +1,7 @@
 """Regression coverage for task-affine SQLite transactions (#1896)."""
 
 import asyncio
+import logging
 import sqlite3
 
 import pytest
@@ -289,3 +290,94 @@ async def test_relation_and_importance_writers_commit_standalone(storage):
 
     assert edge is not None and edge[0] == "consolidated_into"
     assert score[0] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("stray", ["commit", "rollback"])
+async def test_transaction_raises_when_a_participant_ends_it(storage, stray):
+    """Ending the transaction from inside the block must fail the owner (#2162).
+
+    Composition relies on participating writers suppressing both their commit
+    and their rollback, which most storage writers do not do. Either one ends
+    the owner's transaction: after a stray commit the owner's commit below is a
+    no-op over already-durable work, and after a stray rollback it is a no-op
+    over work that is gone. Both used to let the block return successfully
+    having persisted only part of itself, or none of it.
+    """
+    chunk = make_chunk(content=f"half-written work via {stray}")
+
+    with pytest.raises(StorageError, match="integrity violation"):
+        async with storage.transaction():
+            await storage.upsert_chunks([chunk])
+            getattr(storage._get_db(), stray)()  # stands in for an unguarded writer
+
+    assert storage._transaction_owner is None
+    assert storage._get_db().in_transaction is False
+
+
+async def test_transaction_integrity_error_does_not_claim_an_outcome(storage):
+    """The tripwire cannot tell a stray commit from a stray rollback.
+
+    ``in_transaction`` reports only that the transaction ended. A message that
+    named one outcome would be wrong half the time, so it must claim neither:
+    here the same error covers a rollback that discarded everything.
+    """
+    chunk = make_chunk(content="discarded by a stray rollback")
+
+    with pytest.raises(StorageError) as excinfo:
+        async with storage.transaction():
+            await storage.upsert_chunks([chunk])
+            storage._get_db().rollback()
+
+    assert "committed or discarded" in str(excinfo.value)
+    assert await storage.get_chunk(chunk.id) is None
+
+
+async def test_transaction_failure_after_a_stolen_commit_reraises_the_original(storage, caplog):
+    """The stolen-transaction report must not mask the caller's exception.
+
+    Callers catch specific types raised from inside the block, so the rollback
+    branch reports the stray commit through the log and re-raises what it was
+    given rather than substituting a ``StorageError`` (#2162).
+    """
+    chunk = make_chunk(content="durable despite the failure")
+
+    with caplog.at_level(logging.ERROR, logger="memtomem.storage.sqlite_backend"):
+        with pytest.raises(RuntimeError, match="caller failure"):
+            async with storage.transaction():
+                await storage.upsert_chunks([chunk])
+                storage._get_db().commit()  # stands in for an unguarded writer
+                raise RuntimeError("caller failure")
+
+    assert any("rollback skipped" in record.message for record in caplog.records)
+    # The log reports the lost rollback, not a durability verdict it cannot
+    # reach: the same branch runs when the stray call was a rollback.
+    assert not any("stays durable" in record.message for record in caplog.records)
+    assert storage._transaction_owner is None
+
+    observer = sqlite3.connect(str(storage._config.sqlite_path), timeout=0)
+    try:
+        row = observer.execute("SELECT id FROM chunks WHERE id=?", (str(chunk.id),)).fetchone()
+    finally:
+        observer.close()
+
+    # Why the lost rollback matters: this row survived the caller's failure.
+    assert row is not None
+
+
+async def test_transaction_failure_after_a_stolen_rollback_reraises_the_original(storage, caplog):
+    """A stray rollback takes the same branch, and must report as tentatively.
+
+    Nothing is durable here, so the log line must not assert that anything is.
+    """
+    chunk = make_chunk(content="discarded before the failure")
+
+    with caplog.at_level(logging.ERROR, logger="memtomem.storage.sqlite_backend"):
+        with pytest.raises(RuntimeError, match="caller failure"):
+            async with storage.transaction():
+                await storage.upsert_chunks([chunk])
+                storage._get_db().rollback()  # stands in for an unguarded writer
+                raise RuntimeError("caller failure")
+
+    assert any("may already be durable" in record.message for record in caplog.records)
+    assert storage._transaction_owner is None
+    assert await storage.get_chunk(chunk.id) is None
