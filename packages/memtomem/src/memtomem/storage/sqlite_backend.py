@@ -509,6 +509,21 @@ class SqliteBackend(
         the task that entered it. Transaction-aware methods called by that
         task suppress their individual commits/rollbacks. Other tasks using
         the shared writer connection fail closed and may retry after exit.
+
+        Composition depends on every participating writer suppressing its own
+        commit and rollback, which most storage writers do not yet do (#2162).
+        On exit this checks that the connection is still in a transaction: if
+        it is not, a participant ended it from underneath the owner, and the
+        owner's commit here would be a silent no-op over whatever that
+        participant decided, so it raises instead. ``in_transaction`` says only
+        that the transaction ended, not whether the work was committed or
+        discarded, so neither outcome may be reported as certain.
+
+        The check also cannot see a participant that ends the transaction and
+        then re-opens an implicit one with further writes — ``in_transaction``
+        reads True again and only the tail is committed here. sqlite3 exposes
+        no connection state that would distinguish that case; it is closed by
+        guarding the writers themselves, not by this net.
         """
         task = self._current_task()
         if task is None:
@@ -532,9 +547,26 @@ class SqliteBackend(
         self._transaction_owner = task
         try:
             yield
+            if not db.in_transaction:
+                raise StorageError(
+                    "transaction() integrity violation: a participating writer ended this "
+                    "transaction from underneath its owner; the work done inside it was "
+                    "either committed or discarded by that writer, and this commit would "
+                    "silently cover up whichever it was (#2162)"
+                )
             db.commit()
         except BaseException:
-            db.rollback()
+            if db.in_transaction:
+                db.rollback()
+            else:
+                # Do not wrap or replace the in-flight exception: callers
+                # catch specific types from inside the block. Report the
+                # stolen transaction and let the original error propagate.
+                logger.error(
+                    "transaction() rollback skipped: a participating writer already ended "
+                    "this transaction, so the work done inside it may already be durable "
+                    "and this failure cannot roll it back (#2162)"
+                )
             raise
         finally:
             self._transaction_owner = None
