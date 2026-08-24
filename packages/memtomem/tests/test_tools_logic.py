@@ -247,6 +247,48 @@ class TestPolicyRunRecording:
         assert run["status"] == "error"
         assert "tagger down" in run["error"]
 
+    async def test_auto_tag_failure_reports_mutated(self, storage, monkeypatch):
+        """``auto_tag_storage`` upserts one chunk at a time, so a pass that
+        failed partway has already committed tag rewrites — the exception
+        carries the count away, so the result must claim a write (#2157)."""
+        chunk = make_chunk("untagged content", namespace="default")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET tags = '[]' WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        async def boom(*args, **kwargs):
+            raise ValueError("tagger down")
+
+        import memtomem.tools.auto_tag as auto_tag_mod
+
+        monkeypatch.setattr(auto_tag_mod, "auto_tag_storage", boom)
+
+        result = await run_policy(storage, self._policy("tagger", "auto_tag"), dry_run=False)
+        assert result.affected_count == 0
+        assert result.mutated is True
+
+    async def test_auto_tag_write_free_run_is_not_mutated(self, storage, monkeypatch):
+        """``affected_count`` is a pre-scan estimate of untagged chunks: it is
+        positive here while the extractor tagged nothing, so the counter-derived
+        default would invalidate a still-valid cache (#2157)."""
+        chunk = make_chunk("untagged content", namespace="default")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET tags = '[]' WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        import memtomem.tools.auto_tag as auto_tag_mod
+
+        async def tagged_nothing(*args, **kwargs):
+            return auto_tag_mod.AutoTagStats(total_chunks=1, tagged_chunks=0, skipped_chunks=1)
+
+        monkeypatch.setattr(auto_tag_mod, "auto_tag_storage", tagged_nothing)
+
+        result = await run_policy(storage, self._policy("tagger", "auto_tag"), dry_run=False)
+        assert result.affected_count > 0
+        assert result.mutated is False
+
     async def test_auto_expire_row_records_deleted_ids_and_namespaces(self, storage):
         old_time = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         chunk = make_chunk("doomed content", namespace="scratchpad")
@@ -1364,6 +1406,75 @@ class TestAutoConsolidate:
         # The record still says which summary the run destroyed.
         assert run["summary"]["deleted_summary_ids"] == [old_summary_id]
         assert run["summary"]["failed"] == [source]
+
+    async def test_mutated_flag_tracks_writes_not_affected_count(self, storage, monkeypatch):
+        """``mutated`` is the invalidation signal (#2157): a stale-regen run
+        whose regeneration fails deleted a summary chunk while reporting
+        ``affected_count == 0`` — the counter is blind to that write."""
+        import memtomem.tools.consolidation_engine as consolidation_engine
+
+        source = "meeting-mutated-flag.md"
+        await storage.upsert_chunks(
+            [make_chunk(f"Chunk {i}", source=source, heading=("Doc", f"§{i}")) for i in range(3)]
+        )
+        policy = {
+            "name": "consol",
+            "policy_type": "auto_consolidate",
+            "config": {"min_group_size": 3},
+            "namespace_filter": None,
+        }
+
+        preview = await run_policy(storage, policy, dry_run=True)
+        assert preview.mutated is False
+
+        first = await run_policy(storage, policy, dry_run=False)
+        assert first.mutated is True
+
+        idempotent = await run_policy(storage, policy, dry_run=False)
+        assert idempotent.affected_count == 0
+        assert idempotent.mutated is False
+
+        # Input hash changes → the stale summary is deleted, then apply fails.
+        await storage.upsert_chunks(
+            [make_chunk("Newly added chunk", source=source, heading=("Doc", "§new"))]
+        )
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("apply failed")
+
+        monkeypatch.setattr(consolidation_engine, "apply_consolidation", boom)
+        failed = await run_policy(storage, policy, dry_run=False)
+        assert failed.affected_count == 0
+        assert failed.mutated is True
+
+    async def test_mutated_flag_covers_post_commit_failure(self, storage, monkeypatch):
+        """``apply_consolidation`` commits the summary chunk in its own
+        transaction and *then* links relations / decays originals. A failure in
+        that tail leaves a searchable summary behind while the group is
+        recorded as failed (#2157)."""
+        import memtomem.tools.consolidation_engine as consolidation_engine
+
+        source = "meeting-post-commit-fail.md"
+        await storage.upsert_chunks(
+            [make_chunk(f"Chunk {i}", source=source, heading=("Doc", f"§{i}")) for i in range(3)]
+        )
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("relation link failed")
+
+        monkeypatch.setattr(consolidation_engine, "link_consolidation_relations", boom)
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+
+        assert result.affected_count == 0
+        assert result.mutated is True
+        # The summary really did commit — that is what the flag is protecting.
+        summaries = await storage.list_chunks_by_source(
+            Path(f"/tmp/{source}.consolidated.md"), limit=5
+        )
+        assert len(summaries) == 1
 
     async def test_auto_consolidate_mixed_namespace_skips(self, storage, caplog):
         """A source file whose chunks span multiple namespaces is skipped with a warn."""
