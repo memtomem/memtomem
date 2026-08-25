@@ -247,3 +247,72 @@ class TestEmptyVectorTable:
             await storage.dense_search([0.1] * 512, top_k=5)
 
         assert ks == [], "the mismatch must be caught before any KNN query"
+
+
+# ---- data_version memo for the chunks_vec row count -------------------------
+#
+# ``count(*)`` on a vec0 vtab is a full scan (no stats), so ``dense_search``
+# memoizes it per read connection behind ``PRAGMA data_version``. The memo
+# must never go stale-low: ``knn_ceiling = min(total_vec_rows, cap)`` clips
+# the KNN K, so a stale-low count silently drops matching results.
+
+
+class _CountingDB:
+    """Delegates to a real connection, counting chunks_vec COUNT queries."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.count_queries = 0
+
+    def execute(self, sql, *args):
+        if "count(*) FROM chunks_vec" in sql:
+            self.count_queries += 1
+        return self._inner.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+async def test_vec_row_count_memoized_until_another_connection_commits(storage):
+    chunk = _make_chunk(content="memo seed", embedding=NEAR)
+    await storage.upsert_chunks([chunk])
+
+    read_db = storage._get_read_db()
+    counting = _CountingDB(read_db)
+
+    assert storage._cached_vec_row_count(counting) == 1
+    assert storage._cached_vec_row_count(counting) == 1
+    assert counting.count_queries == 1  # second call served from the memo
+
+    # A commit on the *writer* connection bumps the reader's data_version.
+    await storage.upsert_chunks([_make_chunk(content="second", source="b.md", embedding=FAR)])
+    assert storage._cached_vec_row_count(counting) == 2
+    assert counting.count_queries == 2
+
+
+async def test_dense_search_sees_rows_committed_after_the_memo_warmed(storage):
+    """The correctness pin: a permanently cached count would clamp
+    ``knn_ceiling`` at the primed value and silently drop newer rows."""
+    await storage.upsert_chunks([_make_chunk(content="first", source="s0.md", embedding=NEAR)])
+    # Prime the memo on every pool connection — dense_search round-robins
+    # over the read pool, so a single search would leave the others cold and
+    # a later search could dodge a stale memo by landing on a cold one.
+    for _ in range(max(1, len(storage._read_pool))):
+        primed = await storage.dense_search(NEAR, top_k=5)
+        assert len(primed) == 1
+
+    await storage.upsert_chunks(
+        [_make_chunk(content=f"later {i}", source=f"s{i}.md", embedding=NEAR) for i in range(1, 5)]
+    )
+    results = await storage.dense_search(NEAR, top_k=5)
+    assert len(results) == 5
+
+
+async def test_vec_row_count_not_memoized_on_the_writer_connection(storage):
+    """The writer's own commits do not bump its own data_version, so the
+    memo must be bypassed on the writer-connection fallback path."""
+    await storage.upsert_chunks([_make_chunk(content="only", embedding=NEAR)])
+    writer = storage._get_db()
+    assert storage._cached_vec_row_count(writer) == 1
+    await storage.upsert_chunks([_make_chunk(content="more", source="b.md", embedding=FAR)])
+    assert storage._cached_vec_row_count(writer) == 2
