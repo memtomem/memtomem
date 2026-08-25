@@ -77,7 +77,14 @@ async def mem_entity_scan(
             if source_filter and not match_source_filter_glob(source_filter, str(source)):
                 continue
 
-            chunks = await storage.list_chunks_by_source(source)
+            # ``limit=None``: ``list_chunks_by_source`` defaults to ``limit=50``,
+            # and a bare call silently scanned only the first 50 chunks of every
+            # source. No cap and no paging — a large file must be covered whole
+            # (``overwrite=False`` re-runs can never reach a skipped tail), and
+            # one query is one snapshot, where OFFSET pages would each read the
+            # store anew and a concurrent re-index between them could make the
+            # walk skip or repeat rows while still reporting completion.
+            chunks = await storage.list_chunks_by_source(source, limit=None)
             if namespace:
                 chunks = [c for c in chunks if c.metadata.namespace == namespace]
             if not chunks:

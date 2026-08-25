@@ -2351,11 +2351,16 @@ class SqliteBackend(
         counts = {row[0]: row[1] for row in rows}
         return [{"bucket": b, "count": counts.get(b, 0)} for b in ordered]
 
-    async def list_chunks_by_source(self, source_file: Path, limit: int = 50) -> list[Chunk]:
+    async def list_chunks_by_source(self, source_file: Path, limit: int | None = 50) -> list[Chunk]:
+        # ``limit=None`` reads the whole source in one snapshot — for callers
+        # that must cover it completely (the entity scan), where paging would
+        # let a concurrent re-index between pages skip or repeat rows. SQLite
+        # treats a negative LIMIT as unbounded. ``rowid`` tie-break: chunks of
+        # a virtual source can share one ``start_line``.
         db = self._get_read_db()
         rows = db.execute(
-            "SELECT * FROM chunks WHERE source_file=? ORDER BY start_line LIMIT ?",
-            (norm_path(source_file), limit),
+            "SELECT * FROM chunks WHERE source_file=? ORDER BY start_line, rowid LIMIT ?",
+            (norm_path(source_file), -1 if limit is None else limit),
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
