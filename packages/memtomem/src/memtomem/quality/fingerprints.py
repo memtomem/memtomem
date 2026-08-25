@@ -148,6 +148,10 @@ def profile_fingerprint(config: Mem2MemConfig) -> tuple[str, dict[str, Any]]:
                 "oversample": config.rerank.oversample,
                 "min_pool": config.rerank.min_pool,
                 "max_pool": config.rerank.max_pool,
+                # A shorter timeout can flip reranked output into the fused
+                # fallback — two runs differing only here must not share a
+                # fingerprint.
+                "timeout_s": config.rerank.timeout_s,
                 # api_key and legacy top_k excluded.
             },
         ),

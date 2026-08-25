@@ -598,3 +598,23 @@ class TestGatedConfidenceNormalization:
         a = index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, entity_rows=self._rows(0.5))
         b = index_fingerprint(_BASE_CORPUS, _VECTORS, _FTS, _EMB, entity_rows=self._rows(0.9))
         assert a != b
+
+
+def test_rerank_timeout_changes_the_profile_fingerprint():
+    """A shorter timeout can flip reranked output into the fused fallback,
+    so two runs differing only in rerank.timeout_s must not share a profile
+    fingerprint — and with the stage disabled the knob must not leak in."""
+    from memtomem.config import Mem2MemConfig
+    from memtomem.quality.fingerprints import profile_fingerprint
+
+    a = Mem2MemConfig()
+    a.rerank.enabled = True
+    b = Mem2MemConfig()
+    b.rerank.enabled = True
+    b.rerank.timeout_s = 5.0
+    assert profile_fingerprint(a)[0] != profile_fingerprint(b)[0]
+
+    off_a = Mem2MemConfig()
+    off_b = Mem2MemConfig()
+    off_b.rerank.timeout_s = 5.0
+    assert profile_fingerprint(off_a)[0] == profile_fingerprint(off_b)[0]

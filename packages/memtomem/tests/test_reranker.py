@@ -234,3 +234,214 @@ class TestRerankerFactory:
 
         with pytest.raises(ValueError):
             create_reranker(RerankConfig(enabled=True, provider="unknown"))
+
+
+class TestRerankerExecutorLifecycle:
+    """#1783 parity: local rerankers run inference on a dedicated 1-worker
+    executor (never the shared default pool, never the event loop), and
+    close() shuts it down so a swapped-out instance cannot keep a worker."""
+
+    @pytest.mark.asyncio
+    async def test_local_close_shuts_down_its_executor(self):
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.local import LocalReranker
+
+        reranker = LocalReranker(RerankConfig(enabled=True, provider="local"))
+        assert reranker._infer_executor._max_workers == 1
+        await reranker.close()
+        assert reranker._infer_executor._shutdown is True
+
+    @pytest.mark.asyncio
+    async def test_fastembed_close_shuts_down_its_executor(self):
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.fastembed import FastEmbedReranker
+
+        reranker = FastEmbedReranker(RerankConfig(enabled=True, provider="fastembed"))
+        assert reranker._infer_executor._max_workers == 1
+        await reranker.close()
+        assert reranker._infer_executor._shutdown is True
+
+    @pytest.mark.asyncio
+    async def test_local_inference_runs_off_the_event_loop(self):
+        """model.predict used to run directly on the loop thread, freezing
+        every other coroutine for the duration of a torch forward pass."""
+        import threading
+
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.local import LocalReranker
+
+        reranker = LocalReranker(RerankConfig(enabled=True, provider="local"))
+        loop_thread = threading.current_thread()
+        seen: dict[str, object] = {}
+
+        class _FakeModel:
+            def predict(self, pairs):
+                seen["thread"] = threading.current_thread()
+                return [0.5] * len(pairs)
+
+        reranker._model = _FakeModel()
+        out = await reranker.rerank("q", [_make_result("a", 1.0)], top_k=5)
+        assert out[0].source == "reranked"
+        assert seen["thread"] is not loop_thread
+        assert seen["thread"].name.startswith("local-rerank")
+        await reranker.close()
+
+
+class TestRerankerAbandonedWorker:
+    """A wait_for timeout cancels the awaiting coroutine, but a running
+    native inference keeps the lone dedicated worker. Later reranks must
+    fail fast (original order) instead of queuing behind the wedged worker
+    and each paying the full timeout; the worker finishing clears the state,
+    and close() must not return while the worker still owns the model."""
+
+    @pytest.mark.asyncio
+    async def test_local_busy_fast_fail_after_timeout_then_recovers(self):
+        import asyncio
+        import threading
+
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.local import LocalReranker
+
+        reranker = LocalReranker(RerankConfig(enabled=True, provider="local"))
+        release = threading.Event()
+
+        class _BlockingModel:
+            def predict(self, pairs):
+                release.wait(10)
+                return [0.5] * len(pairs)
+
+        reranker._model = _BlockingModel()
+        candidates = [_make_result("a", 1.0)]
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(reranker.rerank("q", candidates, top_k=5), timeout=0.05)
+        assert reranker._abandoned is not None
+
+        # The wedged worker is still running: this must return immediately
+        # with the original order, not queue behind it.
+        out = await reranker.rerank("q", candidates, top_k=5)
+        assert out[0].source == "fused"
+
+        release.set()
+        for _ in range(200):
+            if reranker._abandoned is None or reranker._abandoned.done():
+                break
+            await asyncio.sleep(0.01)
+        out = await reranker.rerank("q", candidates, top_k=5)
+        assert out[0].source == "reranked"
+        await reranker.close()
+
+    @pytest.mark.asyncio
+    async def test_local_close_waits_for_the_running_inference(self):
+        import asyncio
+        import threading
+        import time
+
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.local import LocalReranker
+
+        reranker = LocalReranker(RerankConfig(enabled=True, provider="local"))
+        finished = threading.Event()
+
+        class _SlowModel:
+            def predict(self, pairs):
+                time.sleep(0.2)
+                finished.set()
+                return [0.5] * len(pairs)
+
+        reranker._model = _SlowModel()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                reranker.rerank("q", [_make_result("a", 1.0)], top_k=5), timeout=0.05
+            )
+
+        # close() must drain: when it returns, the worker has finished and
+        # no thread still owns the model.
+        await reranker.close()
+        assert finished.is_set()
+        assert reranker._infer_executor._shutdown is True
+
+    @pytest.mark.asyncio
+    async def test_fastembed_busy_fast_fail_after_timeout_then_recovers(self):
+        import asyncio
+        import threading
+
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.fastembed import FastEmbedReranker
+
+        reranker = FastEmbedReranker(RerankConfig(enabled=True, provider="fastembed"))
+        release = threading.Event()
+
+        class _BlockingModel:
+            def rerank(self, query, documents):
+                release.wait(10)
+                return [0.5] * len(documents)
+
+        reranker._model = _BlockingModel()
+        candidates = [_make_result("a", 1.0)]
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(reranker.rerank("q", candidates, top_k=5), timeout=0.05)
+        assert reranker._abandoned is not None
+
+        out = await reranker.rerank("q", candidates, top_k=5)
+        assert out[0].source == "fused"
+
+        release.set()
+        for _ in range(200):
+            if reranker._abandoned is None or reranker._abandoned.done():
+                break
+            await asyncio.sleep(0.01)
+        out = await reranker.rerank("q", candidates, top_k=5)
+        assert out[0].source == "reranked"
+        await reranker.close()
+
+    @pytest.mark.asyncio
+    async def test_fastembed_close_waits_for_the_running_inference(self):
+        import asyncio
+        import threading
+        import time
+
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.fastembed import FastEmbedReranker
+
+        reranker = FastEmbedReranker(RerankConfig(enabled=True, provider="fastembed"))
+        finished = threading.Event()
+
+        class _SlowModel:
+            def rerank(self, query, documents):
+                time.sleep(0.2)
+                finished.set()
+                return [0.5] * len(documents)
+
+        reranker._model = _SlowModel()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                reranker.rerank("q", [_make_result("a", 1.0)], top_k=5), timeout=0.05
+            )
+
+        await reranker.close()
+        assert finished.is_set()
+        assert reranker._infer_executor._shutdown is True
+
+
+def test_rerank_snapshot_tracks_timeout_changes():
+    """A disk edit changing only rerank.timeout_s must produce a different
+    snapshot, or _sync_reranker skips the reinstall and the pipeline keeps
+    running with the old timeout."""
+    from types import SimpleNamespace
+
+    from memtomem.config import RerankConfig
+    from memtomem.web.hot_reload import _rerank_snapshot
+
+    a = SimpleNamespace(rerank=RerankConfig(enabled=True, timeout_s=30.0))
+    b = SimpleNamespace(rerank=RerankConfig(enabled=True, timeout_s=5.0))
+    assert _rerank_snapshot(a) != _rerank_snapshot(b)
+
+
+def test_rerank_timeout_rejects_non_finite():
+    from memtomem.config import RerankConfig
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="timeout_s must be positive"):
+            RerankConfig(timeout_s=bad)

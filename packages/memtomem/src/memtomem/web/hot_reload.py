@@ -414,6 +414,7 @@ def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
         getattr(rerank, "oversample", None),
         getattr(rerank, "min_pool", None),
         getattr(rerank, "max_pool", None),
+        getattr(rerank, "timeout_s", None),
     )
 
 

@@ -1702,6 +1702,7 @@
   "settings.config.label.rerank.oversample": "오버샘플",
   "settings.config.label.rerank.min_pool": "최소 풀",
   "settings.config.label.rerank.max_pool": "최대 풀",
+  "settings.config.label.rerank.timeout_s": "타임아웃(초)",
   "settings.config.label.indexing.supported_extensions": "확장자",
   "settings.config.label.indexing.exclude_patterns": "제외 패턴",
   "settings.config.label.indexing.max_chunk_tokens": "최대 청크 토큰",

@@ -405,7 +405,7 @@ def test_v1_document_may_not_carry_a_v2_section():
 
 def test_unsupported_schema_version_is_rejected():
     with pytest.raises(EvalCaseValidationError, match="schema_version"):
-        load_profile_document(_versioned_doc(3))
+        load_profile_document(_versioned_doc(4))
 
 
 def test_v1_apply_leaves_entity_boost_at_ambient():
@@ -440,3 +440,60 @@ def test_entity_boost_query_types_validated_against_vocabulary():
     # Same contract as every other rejection here: the vocabulary is named, the
     # submitted value is not echoed back.
     assert "nonsense" not in str(exc.value)
+
+
+def test_v3_rerank_timeout_loads_and_applies():
+    """v3 introduced rerank.timeout_s: an explicit value must load, apply to
+    the config, and be part of the canonical payload."""
+    doc = load_profile_document(
+        {
+            "schema_version": 3,
+            "kind": "retrieval_profile",
+            "name": "p",
+            "knobs": {"rerank": {"enabled": True, "timeout_s": 7.5}},
+        }
+    )
+    canonical = canonicalize_profile(doc)
+    assert canonical["rerank"]["timeout_s"] == 7.5
+    applied = apply_profile(Mem2MemConfig(), doc)
+    assert applied.rerank.timeout_s == 7.5
+
+
+def test_pre_v3_document_with_timeout_is_rejected_not_dropped():
+    """A v2 document carrying the v3-only field must be refused: silently
+    canonicalizing without it would give the document a different meaning
+    than its bytes say."""
+    with pytest.raises(EvalCaseValidationError, match=r"rerank\.timeout_s.*schema_version 3"):
+        load_profile_document(
+            {
+                "schema_version": 2,
+                "kind": "retrieval_profile",
+                "name": "p",
+                "knobs": {"rerank": {"enabled": True, "timeout_s": 7.5}},
+            }
+        )
+
+
+def test_pre_v3_canonical_shape_is_unchanged_by_the_v3_field():
+    """The versioned-shape contract: a v1/v2 document's canonical payload —
+    and therefore its fingerprint — must not gain timeout_s from this
+    package upgrade."""
+    for sv in (1, 2):
+        doc = load_profile_document(
+            {
+                "schema_version": sv,
+                "kind": "retrieval_profile",
+                "name": "p",
+                "knobs": {"rerank": {"enabled": True}},
+            }
+        )
+        canonical = canonicalize_profile(doc)
+        assert "timeout_s" not in canonical["rerank"]
+        assert set(canonical["rerank"]) == {
+            "enabled",
+            "provider",
+            "model",
+            "oversample",
+            "min_pool",
+            "max_pool",
+        }

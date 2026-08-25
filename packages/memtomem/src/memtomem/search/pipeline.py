@@ -1621,7 +1621,20 @@ class SearchPipeline:
             # narrowing, mirroring the cache-key and pool-widening sites.
             if apply_rerank and reranker is not None and rerank_cfg is not None and fused:
                 try:
-                    fused = await reranker.rerank(query, fused, top_k=top_k)
+                    # The only wall-clock bound on this await: a hung provider
+                    # (wedged ONNX session, stuck connection) otherwise hangs
+                    # the whole search. Timeout degrades to the fused order
+                    # through the same except arm as a provider error.
+                    fused = await asyncio.wait_for(
+                        reranker.rerank(query, fused, top_k=top_k),
+                        timeout=rerank_cfg.timeout_s,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Reranking timed out after %.1fs, using original order",
+                        rerank_cfg.timeout_s,
+                    )
+                    fused = fused[:top_k]
                 except Exception as exc:
                     logger.warning("Reranking failed, using original order: %s", exc)
                     # Fallback must still honor the caller's response size —
