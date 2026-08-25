@@ -58,16 +58,19 @@ class MaintenanceRunMixin:
             source: ``scheduler`` for unattended runs, ``mcp`` for tool calls.
         """
         db = self._get_db()
-        self._prune_maintenance_runs(db)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cur = db.execute(
-            "INSERT INTO maintenance_runs "
-            "(kind, policy_name, source, status, started_at) VALUES (?, ?, ?, 'running', ?)",
-            (kind, policy_name, source, now),
-        )
-        # The backend's ``transaction()`` owner suppresses inner commits; an
-        # audit write must not end a caller's transaction early.
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            # The prune is a DELETE, so it has to be inside the protected
+            # region: a failure in the INSERT below must not strand it.
+            self._prune_maintenance_runs(db)
+            cur = db.execute(
+                "INSERT INTO maintenance_runs "
+                "(kind, policy_name, source, status, started_at) VALUES (?, ?, ?, 'running', ?)",
+                (kind, policy_name, source, now),
+            )
+            # The backend's ``transaction()`` owner suppresses inner commits; an
+            # audit write must not end a caller's transaction early.
+            self._commit_if_standalone(db)
         return int(cur.lastrowid or 0)
 
     async def maintenance_run_finish(
@@ -86,20 +89,21 @@ class MaintenanceRunMixin:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         unique_ns = sorted({ns for ns in namespaces if ns})
-        db.execute(
-            "UPDATE maintenance_runs SET status = ?, completed_at = ?, affected_count = ?, "
-            "namespaces_json = ?, summary_json = ?, error = ? WHERE id = ?",
-            (
-                status,
-                now,
-                affected_count,
-                json.dumps(unique_ns, ensure_ascii=False),
-                json.dumps(summary or {}, ensure_ascii=False, sort_keys=True, default=str),
-                error,
-                run_id,
-            ),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "UPDATE maintenance_runs SET status = ?, completed_at = ?, affected_count = ?, "
+                "namespaces_json = ?, summary_json = ?, error = ? WHERE id = ?",
+                (
+                    status,
+                    now,
+                    affected_count,
+                    json.dumps(unique_ns, ensure_ascii=False),
+                    json.dumps(summary or {}, ensure_ascii=False, sort_keys=True, default=str),
+                    error,
+                    run_id,
+                ),
+            )
+            self._commit_if_standalone(db)
 
     async def maintenance_run_latest(
         self,

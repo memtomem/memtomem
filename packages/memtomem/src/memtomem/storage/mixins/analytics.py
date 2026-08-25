@@ -201,14 +201,15 @@ class AnalyticsMixin:
         if not scores:
             return 0
         db = self._get_db()
-        db.executemany(
-            "UPDATE chunks SET importance_score = ? WHERE id = ?",
-            [(score, chunk_id) for chunk_id, score in scores.items()],
-        )
-        # Transaction-aware: ``apply_consolidation`` decays the originals in the
-        # same transaction that creates their summary, so committing here would
-        # end the caller's transaction early and strand a partial write (#2158).
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.executemany(
+                "UPDATE chunks SET importance_score = ? WHERE id = ?",
+                [(score, chunk_id) for chunk_id, score in scores.items()],
+            )
+            # Transaction-aware: ``apply_consolidation`` decays the originals in the
+            # same transaction that creates their summary, so committing here would
+            # end the caller's transaction early and strand a partial write (#2158).
+            self._commit_if_standalone(db)
         return len(scores)
 
     async def get_importance_scores(self, chunk_ids: list) -> dict[str, float]:

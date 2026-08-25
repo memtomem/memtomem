@@ -60,11 +60,18 @@ class HistoryMixin:
         emb_blob = (
             struct.pack(f"{len(query_embedding)}f", *query_embedding) if query_embedding else b""
         )
-        db.execute(
-            "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, result_scores, created_at) VALUES (?, ?, ?, ?, ?)",
-            (query_text, emb_blob, json.dumps(result_chunk_ids), json.dumps(result_scores), now),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, result_scores, created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    query_text,
+                    emb_blob,
+                    json.dumps(result_chunk_ids),
+                    json.dumps(result_scores),
+                    now,
+                ),
+            )
+            self._commit_if_standalone(db)
 
         # Periodic pruning of old entries
         self._history_save_count += 1
@@ -93,23 +100,24 @@ class HistoryMixin:
         emb_blob = (
             struct.pack(f"{len(query_embedding)}f", *query_embedding) if query_embedding else b""
         )
-        db.execute(
-            """INSERT INTO query_history
-               (query_text, query_embedding, result_chunk_ids, result_scores,
-                run_id, observation_json, result_snapshot_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                query_text,
-                emb_blob,
-                json.dumps(result_chunk_ids),
-                json.dumps(result_scores),
-                run_id,
-                json.dumps(observation, ensure_ascii=False, sort_keys=True),
-                json.dumps(result_snapshot, ensure_ascii=False),
-                now,
-            ),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                """INSERT INTO query_history
+                   (query_text, query_embedding, result_chunk_ids, result_scores,
+                    run_id, observation_json, result_snapshot_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    query_text,
+                    emb_blob,
+                    json.dumps(result_chunk_ids),
+                    json.dumps(result_scores),
+                    run_id,
+                    json.dumps(observation, ensure_ascii=False, sort_keys=True),
+                    json.dumps(result_snapshot, ensure_ascii=False),
+                    now,
+                ),
+            )
+            self._commit_if_standalone(db)
         self._history_save_count += 1
         if self._history_save_count % self._HISTORY_PRUNE_INTERVAL == 0:
             self._prune_old_history()
@@ -126,14 +134,17 @@ class HistoryMixin:
             datetime.now(timezone.utc) - timedelta(days=self._HISTORY_MAX_AGE_DAYS)
         ).isoformat(timespec="seconds")
         db = self._get_db()
-        deleted = db.execute("DELETE FROM query_history WHERE created_at < ?", (cutoff,)).rowcount
-        # Commit whenever this runs standalone, including at zero rows: the
-        # DELETE opens an implicit transaction even when it matches nothing,
-        # and leaving it open makes the next explicit BEGIN IMMEDIATE
-        # (save_search_feedback) fail. Inside a caller's transaction the
-        # owner closes it instead, so committing here would end that
-        # transaction early (#2162).
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            deleted = db.execute(
+                "DELETE FROM query_history WHERE created_at < ?", (cutoff,)
+            ).rowcount
+            # Commit whenever this runs standalone, including at zero rows: the
+            # DELETE opens an implicit transaction even when it matches nothing,
+            # and leaving it open makes the next explicit BEGIN IMMEDIATE
+            # (save_search_feedback) fail. Inside a caller's transaction the
+            # owner closes it instead, so committing here would end that
+            # transaction early (#2162).
+            self._commit_if_standalone(db)
         if deleted:
             _log.info(
                 "Pruned %d old query_history rows (>%d days)", deleted, self._HISTORY_MAX_AGE_DAYS

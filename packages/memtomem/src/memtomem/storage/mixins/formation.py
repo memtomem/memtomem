@@ -39,33 +39,34 @@ class FormationMixin:
 
     async def add_memory_candidate(self, candidate: dict[str, Any]) -> bool:
         db = self._get_db()
-        cursor = db.execute(
-            """
-            INSERT OR IGNORE INTO memory_candidates (
-                id, session_id, kind, operation, destination, content, evidence,
-                matched_existing_ids, confidence, sensitivity, proposed_diff,
-                status, extractor_version, fingerprint, created_at, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-            """,
-            (
-                candidate["id"],
-                candidate["session_id"],
-                candidate["kind"],
-                candidate["operation"],
-                candidate["destination"],
-                candidate["content"],
-                json.dumps(candidate.get("evidence", [])),
-                json.dumps(candidate.get("matched_existing_ids", [])),
-                candidate["confidence"],
-                candidate.get("sensitivity", "normal"),
-                candidate.get("proposed_diff", ""),
-                candidate["extractor_version"],
-                candidate["fingerprint"],
-                candidate["created_at"],
-                candidate["expires_at"],
-            ),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                """
+                INSERT OR IGNORE INTO memory_candidates (
+                    id, session_id, kind, operation, destination, content, evidence,
+                    matched_existing_ids, confidence, sensitivity, proposed_diff,
+                    status, extractor_version, fingerprint, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    candidate["id"],
+                    candidate["session_id"],
+                    candidate["kind"],
+                    candidate["operation"],
+                    candidate["destination"],
+                    candidate["content"],
+                    json.dumps(candidate.get("evidence", [])),
+                    json.dumps(candidate.get("matched_existing_ids", [])),
+                    candidate["confidence"],
+                    candidate.get("sensitivity", "normal"),
+                    candidate.get("proposed_diff", ""),
+                    candidate["extractor_version"],
+                    candidate["fingerprint"],
+                    candidate["created_at"],
+                    candidate["expires_at"],
+                ),
+            )
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def list_memory_candidates(
@@ -73,12 +74,13 @@ class FormationMixin:
     ) -> list[dict[str, Any]]:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "UPDATE memory_candidates SET status='expired' "
-            "WHERE status='pending' AND expires_at <= ?",
-            (now,),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "UPDATE memory_candidates SET status='expired' "
+                "WHERE status='pending' AND expires_at <= ?",
+                (now,),
+            )
+            self._commit_if_standalone(db)
         rows = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
@@ -92,12 +94,13 @@ class FormationMixin:
     async def get_memory_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "UPDATE memory_candidates SET status='expired' "
-            "WHERE id=? AND status='pending' AND expires_at <= ?",
-            (candidate_id, now),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "UPDATE memory_candidates SET status='expired' "
+                "WHERE id=? AND status='pending' AND expires_at <= ?",
+                (candidate_id, now),
+            )
+            self._commit_if_standalone(db)
         row = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
@@ -114,12 +117,13 @@ class FormationMixin:
         """Return a candidate in any state for an idempotent proposal lookup."""
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "UPDATE memory_candidates SET status='expired' "
-            "WHERE session_id=? AND fingerprint=? AND status='pending' AND expires_at <= ?",
-            (session_id, fingerprint, now),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "UPDATE memory_candidates SET status='expired' "
+                "WHERE session_id=? AND fingerprint=? AND status='pending' AND expires_at <= ?",
+                (session_id, fingerprint, now),
+            )
+            self._commit_if_standalone(db)
         row = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
@@ -141,29 +145,30 @@ class FormationMixin:
         self._require_transaction_idle("claim_memory_candidate")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cursor = db.execute(
-            "UPDATE memory_candidates SET status='writing', reviewer=?, decision_reason=?, "
-            "claim_started_at=? "
-            "WHERE id=? AND status='pending' AND expires_at > ?",
-            (
-                reviewer,
-                reason,
-                now,
-                candidate_id,
-                now,
-            ),
-        )
-        if cursor.rowcount > 0:
-            self._record_candidate_transition(
-                db,
-                candidate_id,
-                "pending",
-                "writing",
-                reviewer,
-                reason or "approval claim",
-                now,
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE memory_candidates SET status='writing', reviewer=?, decision_reason=?, "
+                "claim_started_at=? "
+                "WHERE id=? AND status='pending' AND expires_at > ?",
+                (
+                    reviewer,
+                    reason,
+                    now,
+                    candidate_id,
+                    now,
+                ),
             )
-        self._commit_if_standalone(db)
+            if cursor.rowcount > 0:
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "pending",
+                    "writing",
+                    reviewer,
+                    reason or "approval claim",
+                    now,
+                )
+            self._commit_if_standalone(db)
         if cursor.rowcount == 0:
             return None
         return await self.get_memory_candidate(candidate_id)
@@ -183,23 +188,24 @@ class FormationMixin:
         # twice or stays claimed forever. It owns its own durability.
         self._require_transaction_idle("release_memory_candidate")
         db = self._get_db()
-        cursor = db.execute(
-            "UPDATE memory_candidates SET status='pending', reviewer=NULL, "
-            "decision_reason=NULL, claim_started_at=NULL "
-            "WHERE id=? AND status='writing'",
-            (candidate_id,),
-        )
-        if cursor.rowcount > 0:
-            self._record_candidate_transition(
-                db,
-                candidate_id,
-                "writing",
-                "pending",
-                actor,
-                reason,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE memory_candidates SET status='pending', reviewer=NULL, "
+                "decision_reason=NULL, claim_started_at=NULL "
+                "WHERE id=? AND status='writing'",
+                (candidate_id,),
             )
-        self._commit_if_standalone(db)
+            if cursor.rowcount > 0:
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "writing",
+                    "pending",
+                    actor,
+                    reason,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                )
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def finalize_memory_candidate(self, candidate_id: str) -> bool:
@@ -212,22 +218,23 @@ class FormationMixin:
         self._require_transaction_idle("finalize_memory_candidate")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cursor = db.execute(
-            "UPDATE memory_candidates SET status='approved', decided_at=?, claim_started_at=NULL "
-            "WHERE id=? AND status='writing'",
-            (now, candidate_id),
-        )
-        if cursor.rowcount > 0:
-            self._record_candidate_transition(
-                db,
-                candidate_id,
-                "writing",
-                "approved",
-                "system",
-                "durable write completed",
-                now,
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE memory_candidates SET status='approved', decided_at=?, "
+                "claim_started_at=NULL WHERE id=? AND status='writing'",
+                (now, candidate_id),
             )
-        self._commit_if_standalone(db)
+            if cursor.rowcount > 0:
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "writing",
+                    "approved",
+                    "system",
+                    "durable write completed",
+                    now,
+                )
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def recover_stale_memory_candidates(
@@ -310,23 +317,24 @@ class FormationMixin:
         self._require_transaction_idle("mark_memory_candidate_write_uncertain")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cursor = db.execute(
-            "UPDATE memory_candidates SET status='write_uncertain', reviewer=?, "
-            "decision_reason=?, decided_at=?, claim_started_at=NULL "
-            "WHERE id=? AND status='pending'",
-            (actor, reason, now, candidate_id),
-        )
-        if cursor.rowcount > 0:
-            self._record_candidate_transition(
-                db,
-                candidate_id,
-                "pending",
-                "write_uncertain",
-                actor,
-                reason,
-                now,
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE memory_candidates SET status='write_uncertain', reviewer=?, "
+                "decision_reason=?, decided_at=?, claim_started_at=NULL "
+                "WHERE id=? AND status='pending'",
+                (actor, reason, now, candidate_id),
             )
-        self._commit_if_standalone(db)
+            if cursor.rowcount > 0:
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "pending",
+                    "write_uncertain",
+                    actor,
+                    reason,
+                    now,
+                )
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def resolve_uncertain_memory_candidate(
@@ -343,23 +351,24 @@ class FormationMixin:
             raise ValueError("write_uncertain resolution reason cannot be empty")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cursor = db.execute(
-            "UPDATE memory_candidates SET status='rejected', reviewer=?, "
-            "decision_reason=?, decided_at=?, claim_started_at=NULL "
-            "WHERE id=? AND status='write_uncertain'",
-            (reviewer, reason, now, candidate_id),
-        )
-        if cursor.rowcount > 0:
-            self._record_candidate_transition(
-                db,
-                candidate_id,
-                "write_uncertain",
-                "rejected",
-                reviewer,
-                reason,
-                now,
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE memory_candidates SET status='rejected', reviewer=?, "
+                "decision_reason=?, decided_at=?, claim_started_at=NULL "
+                "WHERE id=? AND status='write_uncertain'",
+                (reviewer, reason, now, candidate_id),
             )
-        self._commit_if_standalone(db)
+            if cursor.rowcount > 0:
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "write_uncertain",
+                    "rejected",
+                    reviewer,
+                    reason,
+                    now,
+                )
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def list_memory_candidate_transitions(self, candidate_id: str) -> list[dict[str, Any]]:
@@ -396,22 +405,23 @@ class FormationMixin:
             raise ValueError("candidate decision must be approved or rejected")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cursor = db.execute(
-            "UPDATE memory_candidates SET status=?, reviewer=?, decision_reason=?, decided_at=? "
-            "WHERE id=? AND status='pending'",
-            (status, reviewer, reason, now, candidate_id),
-        )
-        if cursor.rowcount > 0:
-            self._record_candidate_transition(
-                db,
-                candidate_id,
-                "pending",
-                status,
-                reviewer,
-                reason or f"candidate {status}",
-                now,
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE memory_candidates SET status=?, reviewer=?, decision_reason=?, "
+                "decided_at=? WHERE id=? AND status='pending'",
+                (status, reviewer, reason, now, candidate_id),
             )
-        self._commit_if_standalone(db)
+            if cursor.rowcount > 0:
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "pending",
+                    status,
+                    reviewer,
+                    reason or f"candidate {status}",
+                    now,
+                )
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def add_assertion(
@@ -431,52 +441,59 @@ class FormationMixin:
         extractor_version: str = "manual-v1",
     ) -> None:
         db = self._get_db()
-        db.execute(
-            "INSERT OR IGNORE INTO canonical_entities "
-            "(id, canonical_name, entity_type, aliases, created_at) VALUES (?, ?, ?, '[]', ?)",
-            (entity_id, canonical_name, entity_type, recorded_at),
-        )
-        row = db.execute(
-            "SELECT id FROM canonical_entities WHERE canonical_name=? AND entity_type=?",
-            (canonical_name, entity_type),
-        ).fetchone()
-        if row is None:  # defensive: INSERT OR IGNORE may only lose to an id collision
-            raise ValueError("unable to resolve canonical entity")
-        resolved_entity_id = str(row[0])
-        db.execute(
-            """
-            INSERT INTO memory_assertions (
-                id, subject_entity_id, predicate, object_value, source_chunk_id,
-                recorded_at, valid_from, valid_to, confidence, extractor_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                assertion_id,
-                resolved_entity_id,
-                predicate,
-                object_value,
-                source_chunk_id,
-                recorded_at,
-                valid_from,
-                valid_to,
-                confidence,
-                extractor_version,
-            ),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT OR IGNORE INTO canonical_entities "
+                "(id, canonical_name, entity_type, aliases, created_at) VALUES (?, ?, ?, '[]', ?)",
+                (entity_id, canonical_name, entity_type, recorded_at),
+            )
+            row = db.execute(
+                "SELECT id FROM canonical_entities WHERE canonical_name=? AND entity_type=?",
+                (canonical_name, entity_type),
+            ).fetchone()
+            if row is None:  # defensive: INSERT OR IGNORE may only lose to an id collision
+                # Raised between the INSERT above and the commit below, so it
+                # has to be inside the protected region or the entity write is
+                # left pending on the shared connection (#2167).
+                raise ValueError("unable to resolve canonical entity")
+            resolved_entity_id = str(row[0])
+            db.execute(
+                """
+                INSERT INTO memory_assertions (
+                    id, subject_entity_id, predicate, object_value, source_chunk_id,
+                    recorded_at, valid_from, valid_to, confidence, extractor_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assertion_id,
+                    resolved_entity_id,
+                    predicate,
+                    object_value,
+                    source_chunk_id,
+                    recorded_at,
+                    valid_from,
+                    valid_to,
+                    confidence,
+                    extractor_version,
+                ),
+            )
+            self._commit_if_standalone(db)
 
     async def link_assertions(self, source_id: str, target_id: str, edge_type: str) -> None:
         if edge_type not in {"supersedes", "contradicts", "supports"}:
             raise ValueError("invalid assertion edge type")
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "INSERT OR IGNORE INTO assertion_edges VALUES (?, ?, ?, ?)",
-            (source_id, target_id, edge_type, now),
-        )
-        if edge_type == "supersedes":
-            db.execute("UPDATE memory_assertions SET status='superseded' WHERE id=?", (target_id,))
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT OR IGNORE INTO assertion_edges VALUES (?, ?, ?, ?)",
+                (source_id, target_id, edge_type, now),
+            )
+            if edge_type == "supersedes":
+                db.execute(
+                    "UPDATE memory_assertions SET status='superseded' WHERE id=?", (target_id,)
+                )
+            self._commit_if_standalone(db)
 
     async def query_assertions(
         self,

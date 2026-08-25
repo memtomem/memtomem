@@ -52,7 +52,7 @@ class SessionMixin:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         meta_json = json.dumps(metadata) if metadata else "{}"
-        try:
+        with self._rolls_back_if_standalone(db):
             # ON CONFLICT(id) DO NOTHING: ignore ONLY the id collision (an
             # idempotent retry of a caller-minted uuid4) inside the statement
             # itself; any other integrity error still raises. The previous
@@ -66,11 +66,6 @@ class SessionMixin:
                 (session_id, agent_id, now, namespace, meta_json),
             )
             self._commit_if_standalone(db)
-        except Exception:
-            # Close the failed transaction instead of leaving it to be
-            # flushed by the next unrelated commit (#1572 idiom).
-            self._rollback_if_standalone(db)
-            raise
 
     async def end_session(self, session_id: str, summary: str | None, metadata: dict) -> None:
         """Close a session, **merging** ``metadata`` into the stored document.
@@ -261,7 +256,7 @@ class SessionMixin:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         meta_json = json.dumps(metadata) if metadata else "{}"
-        try:
+        with self._rolls_back_if_standalone(db):
             db.execute(
                 "INSERT INTO session_events"
                 " (session_id, event_type, content, chunk_ids, created_at, metadata)"
@@ -269,9 +264,6 @@ class SessionMixin:
                 (session_id, event_type, content, json.dumps(chunk_ids or []), now, meta_json),
             )
             self._commit_if_standalone(db)
-        except Exception:
-            self._rollback_if_standalone(db)
-            raise
 
     async def list_sessions(
         self,
@@ -419,13 +411,14 @@ class SessionMixin:
             timespec="seconds"
         )
         db = self._get_db()
-        cursor = db.execute(
-            "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
-            (cutoff,),
-        )
-        # Commit unconditionally: a DELETE that matched nothing still
-        # opens an implicit transaction on the shared writer connection,
-        # and leaving it for the next unrelated commit to flush is the
-        # #1572 hazard.
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
+                (cutoff,),
+            )
+            # Commit unconditionally: a DELETE that matched nothing still
+            # opens an implicit transaction on the shared writer connection,
+            # and leaving it for the next unrelated commit to flush is the
+            # #1572 hazard.
+            self._commit_if_standalone(db)
         return cursor.rowcount

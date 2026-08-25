@@ -534,11 +534,12 @@ class EvalCaseMixin:
             )
         db = self._get_db()
         case_id = self._resolve_case_id(db, case_id_or_name)
-        db.execute(
-            "UPDATE eval_cases SET status = ?, updated_at = ? WHERE case_id = ?",
-            (status, _now_iso(), case_id),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "UPDATE eval_cases SET status = ?, updated_at = ? WHERE case_id = ?",
+                (status, _now_iso(), case_id),
+            )
+            self._commit_if_standalone(db)
         return await self.get_eval_case(case_id)
 
     # ---- export / import --------------------------------------------------

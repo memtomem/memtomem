@@ -58,19 +58,20 @@ class ScheduleMixin:
         """
         db = self._get_db()
         sched_id = uuid4().hex[:12]
-        db.execute(
-            "INSERT INTO schedules "
-            "(id, cron_expr, job_kind, params_json, enabled, created_at) "
-            "VALUES (?, ?, ?, ?, 1, ?)",
-            (
-                sched_id,
-                cron_expr,
-                job_kind,
-                json.dumps(params or {}),
-                _utcnow_iso(),
-            ),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT INTO schedules "
+                "(id, cron_expr, job_kind, params_json, enabled, created_at) "
+                "VALUES (?, ?, ?, ?, 1, ?)",
+                (
+                    sched_id,
+                    cron_expr,
+                    job_kind,
+                    json.dumps(params or {}),
+                    _utcnow_iso(),
+                ),
+            )
+            self._commit_if_standalone(db)
         return sched_id
 
     async def schedule_get(self, sched_id: str) -> dict | None:
@@ -142,17 +143,19 @@ class ScheduleMixin:
 
     async def schedule_set_enabled(self, sched_id: str, enabled: bool) -> bool:
         db = self._get_db()
-        cur = db.execute(
-            "UPDATE schedules SET enabled=? WHERE id=?",
-            (1 if enabled else 0, sched_id),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cur = db.execute(
+                "UPDATE schedules SET enabled=? WHERE id=?",
+                (1 if enabled else 0, sched_id),
+            )
+            self._commit_if_standalone(db)
         return cur.rowcount > 0
 
     async def schedule_delete(self, sched_id: str) -> bool:
         db = self._get_db()
-        cur = db.execute("DELETE FROM schedules WHERE id=?", (sched_id,))
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cur = db.execute("DELETE FROM schedules WHERE id=?", (sched_id,))
+            self._commit_if_standalone(db)
         return cur.rowcount > 0
 
     async def schedule_try_claim(
@@ -184,12 +187,13 @@ class ScheduleMixin:
         self._require_transaction_idle("schedule_try_claim")
         ts = (when or datetime.now(timezone.utc)).astimezone(timezone.utc)
         db = self._get_db()
-        cur = db.execute(
-            "UPDATE schedules SET last_run_at=?, last_run_status='running', "
-            "last_run_error=NULL WHERE id=? AND last_run_at IS ?",
-            (ts.isoformat(timespec="seconds"), sched_id, prev_last_run_at),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cur = db.execute(
+                "UPDATE schedules SET last_run_at=?, last_run_status='running', "
+                "last_run_error=NULL WHERE id=? AND last_run_at IS ?",
+                (ts.isoformat(timespec="seconds"), sched_id, prev_last_run_at),
+            )
+            self._commit_if_standalone(db)
         return cur.rowcount == 1
 
     async def schedule_mark_run(
@@ -205,11 +209,12 @@ class ScheduleMixin:
         # Terminal record for a claim that owns its durability: rolling it
         # back would leave the schedule stuck in 'running' forever.
         self._require_transaction_idle("schedule_mark_run")
-        db.execute(
-            "UPDATE schedules SET last_run_at=?, last_run_status=?, last_run_error=? WHERE id=?",
-            (ts.isoformat(timespec="seconds"), status, error, sched_id),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "UPDATE schedules SET last_run_at=?, last_run_status=?, last_run_error=? WHERE id=?",
+                (ts.isoformat(timespec="seconds"), status, error, sched_id),
+            )
+            self._commit_if_standalone(db)
 
 
 def _row_to_dict(row: tuple) -> dict:

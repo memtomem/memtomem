@@ -20,12 +20,13 @@ class PolicyMixin:
         db = self._get_db()
         policy_id = uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "INSERT INTO memory_policies (id, name, policy_type, config, enabled, namespace_filter, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
-            (policy_id, name, policy_type, json.dumps(config), namespace_filter, now, now),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT INTO memory_policies (id, name, policy_type, config, enabled, namespace_filter, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
+                (policy_id, name, policy_type, json.dumps(config), namespace_filter, now, now),
+            )
+            self._commit_if_standalone(db)
         return policy_id
 
     async def policy_list(self) -> list[dict]:
@@ -70,18 +71,20 @@ class PolicyMixin:
 
     async def policy_delete(self, name: str) -> bool:
         db = self._get_db()
-        cur = db.execute("DELETE FROM memory_policies WHERE name = ?", (name,))
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cur = db.execute("DELETE FROM memory_policies WHERE name = ?", (name,))
+            self._commit_if_standalone(db)
         return cur.rowcount > 0
 
     async def policy_update_last_run(self, name: str) -> None:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "UPDATE memory_policies SET last_run_at = ?, updated_at = ? WHERE name = ?",
-            (now, now, name),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "UPDATE memory_policies SET last_run_at = ?, updated_at = ? WHERE name = ?",
+                (now, now, name),
+            )
+            self._commit_if_standalone(db)
 
     async def policy_get_enabled(self) -> list[dict]:
         db = self._get_read_db()

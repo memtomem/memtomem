@@ -37,29 +37,31 @@ class EntityMixin:
         ]
 
         try:
-            # Overwrite mode: replace this chunk's entities atomically.
-            db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
-            # Targeted conflict clause, not ``INSERT OR IGNORE`` (#2145): two
-            # rows differing only in the case of ``entity_value`` are one
-            # mention as far as ``idx_entities_unique`` — and the Stage-7b
-            # boost, which matches ``COLLATE NOCASE`` — are concerned, so the
-            # second is dropped rather than raising mid-transaction. Naming the
-            # conflict target keeps *only* that collision silent: ``OR IGNORE``
-            # would swallow a ``NOT NULL`` violation too, and since the DELETE
-            # above has already run, a malformed row would then leave the chunk
-            # with fewer entities than it had and no error to say so.
-            cur = db.executemany(
-                "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
-                "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(chunk_id, entity_type, entity_value COLLATE NOCASE) DO NOTHING",
-                rows,
-            )
-            inserted = cur.rowcount
-            self._commit_if_standalone(db)
+            # The rollback itself lives in the context manager (#2167), which
+            # also covers a ``BaseException`` this handler would miss; the
+            # ``except`` below stays for the ``StorageError`` translation that
+            # callers of this method match on.
+            with self._rolls_back_if_standalone(db):
+                # Overwrite mode: replace this chunk's entities atomically.
+                db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
+                # Targeted conflict clause, not ``INSERT OR IGNORE`` (#2145): two
+                # rows differing only in the case of ``entity_value`` are one
+                # mention as far as ``idx_entities_unique`` — and the Stage-7b
+                # boost, which matches ``COLLATE NOCASE`` — are concerned, so the
+                # second is dropped rather than raising mid-transaction. Naming the
+                # conflict target keeps *only* that collision silent: ``OR IGNORE``
+                # would swallow a ``NOT NULL`` violation too, and since the DELETE
+                # above has already run, a malformed row would then leave the chunk
+                # with fewer entities than it had and no error to say so.
+                cur = db.executemany(
+                    "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
+                    "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(chunk_id, entity_type, entity_value COLLATE NOCASE) DO NOTHING",
+                    rows,
+                )
+                inserted = cur.rowcount
+                self._commit_if_standalone(db)
         except Exception as exc:
-            # Roll back the pending DELETE instead of leaving it to be flushed by
-            # the next unrelated commit on the shared writer connection (#1572).
-            self._rollback_if_standalone(db)
             raise StorageError(f"upsert_entities failed, transaction rolled back: {exc}") from exc
         # Rows actually stored, not rows offered: a caller counting entities
         # would otherwise over-report the ones the conflict clause collapsed.
@@ -104,10 +106,12 @@ class EntityMixin:
     async def delete_entities_for_chunk(self, chunk_id: str) -> int:
         db = self._get_db()
         try:
-            cur = db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
-            self._commit_if_standalone(db)
+            # Rollback in the context manager (#2167); the ``except`` is the
+            # ``StorageError`` translation callers match on.
+            with self._rolls_back_if_standalone(db):
+                cur = db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
+                self._commit_if_standalone(db)
         except Exception as exc:
-            self._rollback_if_standalone(db)
             raise StorageError(
                 f"delete_entities_for_chunk failed, transaction rolled back: {exc}"
             ) from exc
