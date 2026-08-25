@@ -357,7 +357,11 @@ class SqliteBackend(
                 self._read_pool.append(rconn)
 
             stage = "schema"
-            self._meta = MetaManager(self._get_db)
+            self._meta = MetaManager(
+                self._get_db,
+                commit=self._commit_if_standalone,
+                write_guard=self._rolls_back_if_standalone,
+            )
             self._ns = NamespaceOps(
                 self._get_db, lambda: self._has_vec_table, lambda: self._in_transaction
             )
@@ -725,36 +729,96 @@ class SqliteBackend(
         This is the only sanctioned way to change the embedding model/dimension
         after initial creation.  All existing vector data is lost — a
         re-index is required afterwards.
+
+        Owns its transaction (REFUSES mode): it mutates in-memory embedding
+        state (``_dimension``, ``_has_vec_table``, provider/model fields)
+        alongside the DB, so participating in an outer ``transaction()`` would
+        leave that state pointing at the new config after an owner rollback
+        restored the old schema. Registering itself as the transaction owner
+        makes ``MetaManager.set_meta``'s injected commit defer, so the DROP
+        cannot become durable before the CREATE succeeds. Synchronous on
+        purpose — no ``await`` may land between the DROP and the commit, or a
+        concurrent ``dense_search`` could observe ``chunks_vec`` missing
+        (``test_qa_audit_pins.py::test_reset_embedding_meta_is_single_atomic_transaction``).
         """
         assert self._meta is not None
+        self._require_transaction_idle("reset_embedding_meta")
+        task = self._current_task()
+        if task is None:
+            raise StorageError("reset_embedding_meta requires a running asyncio task")
         db = self._get_db()
-        db.execute("DROP TABLE IF EXISTS chunks_vec")
-        db.execute("DROP TABLE IF EXISTS chunks_vec_info")
-        self._dimension = dimension
-        self._meta.reset_embedding_meta(
-            dimension,
-            provider,
-            model,
-            policy_fingerprint,
-            max_sequence_tokens,
+        if db.in_transaction:
+            raise StorageError(
+                "reset_embedding_meta refused: the connection already has an open "
+                "transaction this task does not own"
+            )
+        prior_state = (
+            self._dimension,
+            self._embedding_provider,
+            self._embedding_model,
+            self._embedding_policy_fingerprint,
+            self._embedding_max_sequence_tokens,
+            self._has_vec_table,
         )
-        if provider:
-            self._embedding_provider = provider
-        if model:
-            self._embedding_model = model
-        if policy_fingerprint:
-            self._embedding_policy_fingerprint = policy_fingerprint
-        if max_sequence_tokens is not None:
-            self._embedding_max_sequence_tokens = max_sequence_tokens
-        if self._dimension > 0:
-            db.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
-                USING vec0(embedding float[{self._dimension}])
-            """)
-            self._has_vec_table = True
-        else:
-            self._has_vec_table = False
-        db.commit()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"reset_embedding_meta could not take the write lock: {exc}"
+            ) from exc
+        self._transaction_owner = task
+        try:
+            db.execute("DROP TABLE IF EXISTS chunks_vec")
+            db.execute("DROP TABLE IF EXISTS chunks_vec_info")
+            self._dimension = dimension
+            self._meta.reset_embedding_meta(
+                dimension,
+                provider,
+                model,
+                policy_fingerprint,
+                max_sequence_tokens,
+            )
+            if provider:
+                self._embedding_provider = provider
+            if model:
+                self._embedding_model = model
+            if policy_fingerprint:
+                self._embedding_policy_fingerprint = policy_fingerprint
+            if max_sequence_tokens is not None:
+                self._embedding_max_sequence_tokens = max_sequence_tokens
+            if self._dimension > 0:
+                db.execute(f"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec
+                    USING vec0(embedding float[{self._dimension}])
+                """)
+                self._has_vec_table = True
+            else:
+                self._has_vec_table = False
+            db.commit()
+        except BaseException:
+            (
+                self._dimension,
+                self._embedding_provider,
+                self._embedding_model,
+                self._embedding_policy_fingerprint,
+                self._embedding_max_sequence_tokens,
+                self._has_vec_table,
+            ) = prior_state
+            if db.in_transaction:
+                try:
+                    db.rollback()
+                except Exception:
+                    # Preserve the reset's own failure (same contract as
+                    # _rolls_back_if_standalone): a rollback that also fails
+                    # must not rename the bug, so it is logged, not raised.
+                    logger.error(
+                        "rollback after a failed embedding reset raised; the reset "
+                        "transaction may still be open on the shared connection (#2167)",
+                        exc_info=True,
+                    )
+            raise
+        finally:
+            self._transaction_owner = None
         self.clear_embedding_mismatch()
 
     async def reset_vec_dimension(self, new_dimension: int) -> None:
@@ -1468,12 +1532,12 @@ class SqliteBackend(
             # prior generation could linger — clear it unconditionally so
             # the source-tab preview doesn't keep referencing a deleted
             # file. Cheap (single row by primary key) so we don't gate it.
-            db.execute(
-                "DELETE FROM _memtomem_meta WHERE key=?",
-                (_ai_summary_key(source_file),),
-            )
-            if not self._in_transaction:
-                db.commit()
+            with self._rolls_back_if_standalone(db):
+                db.execute(
+                    "DELETE FROM _memtomem_meta WHERE key=?",
+                    (_ai_summary_key(source_file),),
+                )
+                self._commit_if_standalone(db)
             return 0
 
         ids = [row[0] for row in rows]
@@ -1717,6 +1781,16 @@ class SqliteBackend(
         # owns that lock, so only the standalone path begins and finalizes one.
         opened_tx = False
         if not self._in_transaction:
+            if db.in_transaction:
+                # Mirrors transaction()'s refusal: beginning on top of a
+                # pending transaction this task does not own would raise
+                # "cannot start a transaction within a transaction" below —
+                # outside this writer's try, stranding it a second time
+                # (#2167). Refuse with the named error instead.
+                raise StorageError(
+                    "update_chunks_scope_for_source refused: the connection already "
+                    "has an open transaction this task does not own"
+                )
             db.execute("BEGIN IMMEDIATE")
             opened_tx = True
         try:
@@ -2711,12 +2785,12 @@ class SqliteBackend(
         the prose without also tearing down the chunk rows.
         """
         db = self._get_db()
-        db.execute(
-            "DELETE FROM _memtomem_meta WHERE key=?",
-            (_ai_summary_key(source_file),),
-        )
-        if not self._in_transaction:
-            db.commit()
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key=?",
+                (_ai_summary_key(source_file),),
+            )
+            self._commit_if_standalone(db)
 
     async def get_all_ai_summaries(self) -> dict[str, dict]:
         """Return ``{normalised_path: record}`` for every cached AI summary.
@@ -2791,11 +2865,13 @@ class SqliteBackend(
 
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.executemany(
-            "UPDATE chunks SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?",
-            [(now, str(cid)) for cid in chunk_ids],
-        )
-        db.commit()
+        with self._rolls_back_if_standalone(db):
+            db.executemany(
+                "UPDATE chunks SET access_count = access_count + 1, "
+                "last_accessed_at = ? WHERE id = ?",
+                [(now, str(cid)) for cid in chunk_ids],
+            )
+            self._commit_if_standalone(db)
 
     async def get_access_counts(self, chunk_ids: Sequence[UUID]) -> dict[str, int]:
         """Return access_count for the given chunk IDs."""
