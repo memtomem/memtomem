@@ -774,3 +774,214 @@ async def test_a_failing_rollback_does_not_replace_the_original_failure(storage,
             db.rollback()
 
     assert any("rollback after a failed write raised" in r.message for r in caplog.records)
+
+
+# ---- #2168 residue outside storage/mixins -----------------------------------
+#
+# The mixin sweep converted every writer under ``storage/mixins/``, but four
+# writers in ``sqlite_backend.py`` / ``sqlite_meta.py`` kept the exact shapes
+# the AST guard rejects: an unconditional commit that ends an owner's
+# transaction early (#2158/#2162), and a ``BEGIN IMMEDIATE`` with no refusal
+# of a pending transaction the task does not own. These pin the converted
+# behavior through the public writers that reach them.
+
+
+async def test_increment_access_inside_transaction_defers_to_owner(storage):
+    chunk = make_chunk(content="counted")
+    await storage.upsert_chunks([chunk])
+
+    async with storage.transaction():
+        await storage.increment_access([chunk.id])
+        # Before the fix increment_access committed unconditionally, ending
+        # the owner's transaction from underneath it; transaction() would
+        # then raise its integrity violation on exit.
+        assert storage._get_db().in_transaction is True
+
+    counts = await storage.get_access_counts([chunk.id])
+    assert counts[str(chunk.id)] == 1
+
+
+async def test_set_ai_summary_inside_transaction_defers_to_owner(storage, tmp_path):
+    src = tmp_path / "note.md"
+
+    async with storage.transaction():
+        await storage.set_ai_summary(src, "kept", "sig", "en")
+        # set_meta's unconditional commit used to end the owner's
+        # transaction here.
+        assert storage._get_db().in_transaction is True
+
+    summaries = await storage.get_all_ai_summaries()
+    assert [rec["summary"] for rec in summaries.values()] == ["kept"]
+
+
+async def test_set_ai_summary_rolls_back_with_its_owner(storage, tmp_path):
+    src = tmp_path / "note.md"
+
+    with pytest.raises(RuntimeError, match="owner failure"):
+        async with storage.transaction():
+            await storage.set_ai_summary(src, "doomed", "sig", "en")
+            raise RuntimeError("owner failure")
+
+    # Before the fix the summary was already durable: set_meta committed it
+    # mid-transaction, so the owner's rollback had nothing left to undo.
+    assert await storage.get_all_ai_summaries() == {}
+
+
+async def test_delete_by_source_empty_branch_defers_to_owner(storage, tmp_path):
+    src = tmp_path / "gone.md"
+    await storage.set_ai_summary(src, "orphaned", "sig", "en")
+
+    with pytest.raises(RuntimeError, match="owner failure"):
+        async with storage.transaction():
+            deleted = await storage.delete_by_source(src)
+            assert deleted == 0  # no chunks, only the summary cache row
+            raise RuntimeError("owner failure")
+
+    # The owner rolled back, so the summary-cache DELETE must roll back too.
+    summaries = await storage.get_all_ai_summaries()
+    assert [rec["summary"] for rec in summaries.values()] == ["orphaned"]
+
+
+async def test_update_chunks_scope_refuses_pending_unowned_transaction(storage, tmp_path):
+    """A stranded implicit transaction must be refused with a named error.
+
+    Before the fix ``BEGIN IMMEDIATE`` raised sqlite3's "cannot start a
+    transaction within a transaction" outside the writer's try block,
+    stranding the transaction a second time.
+    """
+    db = storage._get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(StorageError, match="refused"):
+            await storage.update_chunks_scope_for_source(
+                tmp_path / "old.md", tmp_path / "new.md", "user", None
+            )
+        assert db.in_transaction is True  # the refusal must not touch it
+    finally:
+        db.rollback()
+
+
+async def test_reset_embedding_meta_refuses_an_outer_transaction(storage):
+    """reset mutates in-memory embedding state alongside the DB, so it owns
+    its transaction and refuses to participate in someone else's: an owner
+    rollback would restore the old schema while the in-memory fields kept
+    pointing at the new config."""
+    prior_dim = storage._dimension
+    async with storage.transaction():
+        with pytest.raises(StorageError, match="cannot run while a transaction is active"):
+            await storage.reset_embedding_meta(dimension=8)
+
+    assert storage._dimension == prior_dim
+
+
+async def test_reset_embedding_meta_failure_rolls_back_the_drop(storage, monkeypatch):
+    """The whole reset is one owned transaction: a failure after the DROP must
+    put chunks_vec back and restore the in-memory embedding state. Before the
+    fix set_meta committed mid-reset, making the DROP durable on its own."""
+    db = storage._get_db()
+    assert db.execute("SELECT name FROM sqlite_master WHERE name='chunks_vec'").fetchone()
+    prior_dim = storage._dimension
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("meta write failure")
+
+    monkeypatch.setattr(storage._meta, "reset_embedding_meta", boom)
+    with pytest.raises(RuntimeError, match="meta write failure"):
+        await storage.reset_embedding_meta(dimension=8)
+
+    assert db.in_transaction is False
+    assert storage._dimension == prior_dim
+    assert db.execute("SELECT name FROM sqlite_master WHERE name='chunks_vec'").fetchone()
+    async with storage.transaction():
+        pass
+
+
+async def test_delete_by_source_empty_branch_failure_closes_its_transaction(
+    storage, tmp_path, monkeypatch
+):
+    """The empty-source branch's DELETE + commit sat outside the writer's try:
+    a failure after the DELETE stranded the transaction. The commit step is
+    forced to fail so the DELETE is pending when the guard must clean up."""
+    src = tmp_path / "gone.md"
+    await storage.set_ai_summary(src, "orphaned", "sig", "en")
+
+    def boom(db):
+        raise RuntimeError("commit failure")
+
+    monkeypatch.setattr(storage, "_commit_if_standalone", boom)
+    with pytest.raises(RuntimeError, match="commit failure"):
+        await storage.delete_by_source(src)
+
+    monkeypatch.undo()
+    assert storage._get_db().in_transaction is False
+    async with storage.transaction():
+        pass
+
+
+async def test_reset_embedding_meta_rollback_failure_preserves_the_reset_error(
+    storage, monkeypatch, caplog
+):
+    """A rollback that itself fails must not replace the reset's own failure
+    (the _rolls_back_if_standalone preservation contract)."""
+    real_db = storage._get_db()
+
+    class _RollbackBomb:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        @property
+        def in_transaction(self):
+            return self._real.in_transaction
+
+        def rollback(self):
+            raise sqlite3.OperationalError("rollback failed")
+
+    proxy = _RollbackBomb(real_db)
+    monkeypatch.setattr(storage, "_get_db", lambda: proxy)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("meta write failure")
+
+    monkeypatch.setattr(storage._meta, "reset_embedding_meta", boom)
+
+    with caplog.at_level(logging.ERROR, logger="memtomem.storage.sqlite_backend"):
+        with pytest.raises(RuntimeError, match="meta write failure"):
+            await storage.reset_embedding_meta(dimension=8)
+
+    assert any("failed embedding reset" in r.message for r in caplog.records)
+    monkeypatch.undo()
+    # The logged-but-lost rollback leaves the transaction open by design;
+    # close it for real so the fixture teardown sees an idle connection.
+    if real_db.in_transaction:
+        real_db.rollback()
+
+
+def test_meta_standalone_guard_preserves_the_write_failure(caplog):
+    """The default MetaManager guard (no backend injection) has the same
+    preservation contract as _rolls_back_if_standalone."""
+    from memtomem.storage.sqlite_meta import MetaManager
+
+    real = sqlite3.connect(":memory:")
+    try:
+
+        class _Bomb:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def execute(self, *args):
+                raise sqlite3.OperationalError("disk I/O error")
+
+            def rollback(self):
+                raise sqlite3.OperationalError("rollback failed")
+
+        meta = MetaManager(lambda: _Bomb())
+        with caplog.at_level(logging.ERROR, logger="memtomem.storage.sqlite_meta"):
+            with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+                meta.set_meta("k", "v")
+
+        assert any("failed meta write" in r.message for r in caplog.records)
+    finally:
+        real.close()

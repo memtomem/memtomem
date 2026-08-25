@@ -15,9 +15,16 @@ through ``_commit_if_standalone``/``_rollback_if_standalone``, fails here
 unless it is registered as owning its own transaction.
 
 Scope is ``storage/mixins/`` only. ``sqlite_backend.py`` implements
-``transaction()`` and the helpers — it is the authority, not a participant.
-``sqlite_namespace.py`` composes through an injected ``_in_transaction``
-callable and its own borrow-or-refuse ``_begin_namespace_write``, covered by
+``transaction()`` and the helpers, but it also hosts ordinary participant
+writers (``increment_access``, ``delete_by_source``, ``delete_ai_summary``,
+…) and owns-transaction writers (``reset_embedding_meta``,
+``update_chunks_scope_for_source``) — those are converted to the same
+contract and pinned by ``test_storage_transactions.py`` rather than this AST
+guard; extending the guard to backend/meta writers (which needs exclusions
+for the transaction authority and the standalone-default helpers in
+``sqlite_meta.py``) is tracked follow-up. ``sqlite_namespace.py`` composes
+through an injected ``_in_transaction`` callable and its own
+borrow-or-refuse ``_begin_namespace_write``, covered by
 ``test_namespace_writer_transactions.py``.
 """
 
