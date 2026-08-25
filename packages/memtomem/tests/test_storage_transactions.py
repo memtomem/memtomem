@@ -985,3 +985,51 @@ def test_meta_standalone_guard_preserves_the_write_failure(caplog):
         assert any("failed meta write" in r.message for r in caplog.records)
     finally:
         real.close()
+
+
+async def test_ns_prefix_counters_answer_while_another_task_owns_a_transaction(storage):
+    """The hidden-namespace hint counters are pure reads on the search hot
+    path. Routed through the ownership-guarded writer connection they failed
+    closed for the whole span of any other task's transaction — silently
+    starving the hint (the pipeline wraps them in try/except debug). From the
+    read pool they answer, and see only committed state."""
+    hidden = make_chunk(content="hidden", namespace="agent-runtime:planner", source="h.md")
+    await storage.upsert_chunks([hidden])
+
+    owner_ready = asyncio.Event()
+    release_owner = asyncio.Event()
+
+    async def owner() -> None:
+        async with storage.transaction():
+            # A matching-but-uncommitted chunk: the foreign task below must
+            # count only the committed row, not this pending one.
+            await storage.upsert_chunks(
+                [make_chunk(content="pending", namespace="agent-runtime:pending", source="q.md")]
+            )
+            owner_ready.set()
+            await release_owner.wait()
+
+    owner_task = asyncio.create_task(owner())
+    await owner_ready.wait()
+    try:
+        total, by_prefix = await storage.count_chunks_by_ns_prefix_detail(["agent-runtime:"])
+        assert total == 1
+        assert by_prefix == {"agent-runtime:": 1}
+        assert await storage.count_chunks_by_ns_prefix(["agent-runtime:"]) == 1
+    finally:
+        release_owner.set()
+        await owner_task
+
+
+async def test_ns_prefix_counters_see_own_uncommitted_writes_inside_a_transaction(storage):
+    """Inside this task's own transaction the counters must keep reading the
+    writer connection: the read pool's WAL snapshot cannot see uncommitted
+    rows, and a caller counting mid-transaction is asking about its own work."""
+    async with storage.transaction():
+        await storage.upsert_chunks(
+            [make_chunk(content="pending", namespace="agent-runtime:x", source="p.md")]
+        )
+        assert await storage.count_chunks_by_ns_prefix(["agent-runtime:"]) == 1
+        total, by_prefix = await storage.count_chunks_by_ns_prefix_detail(["agent-runtime:"])
+        assert total == 1
+        assert by_prefix == {"agent-runtime:": 1}
