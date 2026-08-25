@@ -6,14 +6,14 @@ and three read-only skills. It does not add event hooks or automatic indexing.
 
 ## Install
 
-The published npm release is `opencode-memtomem@0.2.1`, bundling core
+The published npm release is `opencode-memtomem@0.2.2`, bundling core
 `0.4.0`.
 
 Do not use an `opencode plugin add` command; OpenCode loads npm plugins from
 the singular `plugin` array in `opencode.json`:
 
 ```json
-{"plugin": ["opencode-memtomem@0.2.1"]}
+{"plugin": ["opencode-memtomem@0.2.2"]}
 ```
 
 Upgrade if your pin is still `0.1.3` or older: those bundle pre-`0.3.14`

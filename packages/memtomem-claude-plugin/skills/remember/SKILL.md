@@ -9,7 +9,10 @@ disable-model-invocation: true
 # Remember information
 
 Use `$ARGUMENTS` as the content to remember.
-If the request does not clearly specify the content to remember, ask before calling a tool.
+If the request does not clearly specify the content to remember, ask before calling a tool — and
+in a non-interactive context (a subagent or scripted run with nobody to ask), do not
+stall and do not guess: stop and report `insufficient_input` naming the missing content to remember.
+A request that does specify the content to remember proceeds normally in either context.
 Confirm that the user explicitly requested persistence. Add a natural title and a small set of useful tags only when they are clear from the content.
 
 Choose the destination from the user's context:
