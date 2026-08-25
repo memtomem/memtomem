@@ -300,3 +300,127 @@ async def test_revert_to_stored_preserves_llm_on_index_engine(degraded_component
     # The engine must still reference the same LLM instance — anything
     # else means the rebuild path silently dropped it.
     assert app.index_engine._llm is sentinel_llm
+
+
+async def test_revert_to_stored_closes_the_retired_generation(degraded_components):
+    """Publish-first, then retire: the swap must close the old pipeline and
+    the old embedder, and only after the new generation is published — a
+    close that runs before publication would tear resources out from under
+    the still-live generation. Pre-fix every revert leaked the retired ONNX
+    InferenceSession + its executor thread and the retired pipeline's
+    reranker until server restart."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    pre_embedder = app.embedder
+    pre_search = app.search_pipeline
+    closed: list[tuple[str, bool, bool]] = []
+
+    def _recording_close(name):
+        async def _close():
+            # Captured at close time: publication (all three slots swapped)
+            # and mismatch clearance must both have happened already.
+            closed.append(
+                (
+                    name,
+                    app.embedder is not pre_embedder and app.search_pipeline is not pre_search,
+                    app.storage.embedding_mismatch is None,
+                )
+            )
+
+        return _close
+
+    pre_embedder.close = _recording_close("embedder")
+    pre_search.close = _recording_close("pipeline")
+
+    out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "Reverted to stored DB settings" in out
+    assert [name for name, _, _ in closed] == ["pipeline", "embedder"]
+    assert all(published for _, published, _ in closed)
+    assert all(cleared for _, _, cleared in closed)
+
+
+async def test_concurrent_reverts_swap_exactly_once(degraded_components):
+    """Two racing reverts must not both publish (the loser would close the
+    winner's freshly published embedder). Serialized on app._config_lock,
+    with the mismatch cleared before the first retirement await, exactly
+    one caller reverts and the other reports nothing to do."""
+    import asyncio as _asyncio
+
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    release = _asyncio.Event()
+
+    async def _slow_close():
+        await release.wait()
+
+    app.search_pipeline.close = _slow_close
+
+    async def _revert():
+        return await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    t1 = _asyncio.create_task(_revert())
+    t2 = _asyncio.create_task(_revert())
+    await _asyncio.sleep(0.05)
+    release.set()
+    outs = sorted([await t1, await t2])
+
+    assert sum("Reverted to stored DB settings" in o for o in outs) == 1
+    assert sum("No mismatch detected" in o for o in outs) == 1
+
+
+async def test_revert_cancellation_still_retires_everything(degraded_components):
+    """A cancellation during the pipeline close must not skip the embedder
+    close (accumulate-and-defer, the lifespan teardown pattern), and the
+    mismatch is already cleared in the publication phase."""
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock
+
+    from memtomem.server.tools.status_config import _revert_to_stored
+
+    app = _make_app(degraded_components)
+    app.search_pipeline.close = AsyncMock(side_effect=_asyncio.CancelledError())
+    embedder_close = AsyncMock(name="old_embedder_close")
+    app.embedder.close = embedder_close
+
+    with pytest.raises(_asyncio.CancelledError):
+        await _revert_to_stored(app)
+
+    embedder_close.assert_awaited_once()
+    assert app.storage.embedding_mismatch is None
+
+
+async def test_revert_to_stored_survives_a_failing_close(degraded_components):
+    """A close that fails must not fail the revert: the swap already
+    happened, so the recovery the user asked for is done."""
+    from unittest.mock import AsyncMock
+
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    app.embedder.close = AsyncMock(side_effect=RuntimeError("close failure"))
+
+    out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "Reverted to stored DB settings" in out
+    assert app.storage.embedding_mismatch is None
+
+
+async def test_revert_to_stored_rebinds_watcher_and_dedup(degraded_components):
+    """The watcher and dedup scanner captured the old engine/embedder at
+    init; without a rebind, post-revert auto-reindexes run through the
+    retired engine and its retired embedder while cache invalidation hits
+    a pipeline nobody queries (the #2141 contract, inverted)."""
+    from unittest.mock import MagicMock
+
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    watcher = MagicMock(name="watcher")
+    app._watcher = watcher
+    pre_dedup = app.dedup_scanner
+    assert pre_dedup is not None
+
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    watcher.rebind.assert_called_once_with(app.index_engine, app.search_pipeline)
+    assert app.dedup_scanner is not pre_dedup
+    assert app.dedup_scanner._embedder is app.embedder
