@@ -20,15 +20,16 @@ class RelationMixin:
     ) -> None:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "INSERT OR REPLACE INTO chunk_relations (source_id, target_id, relation_type, created_at) VALUES (?, ?, ?, ?)",
-            (str(source_id), str(target_id), relation_type, now),
-        )
-        # Transaction-aware: ``apply_consolidation`` writes the
-        # ``consolidated_into`` edges in the same transaction that creates the
-        # summary they point at, so committing here would end the caller's
-        # transaction early and strand a partial write (#2158).
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT OR REPLACE INTO chunk_relations (source_id, target_id, relation_type, created_at) VALUES (?, ?, ?, ?)",
+                (str(source_id), str(target_id), relation_type, now),
+            )
+            # Transaction-aware: ``apply_consolidation`` writes the
+            # ``consolidated_into`` edges in the same transaction that creates the
+            # summary they point at, so committing here would end the caller's
+            # transaction early and strand a partial write (#2158).
+            self._commit_if_standalone(db)
 
     async def get_related(self, chunk_id: UUID) -> list[tuple[UUID, str]]:
         db = self._get_db()
@@ -42,11 +43,12 @@ class RelationMixin:
 
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool:
         db = self._get_db()
-        cursor = db.execute(
-            "DELETE FROM chunk_relations WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
-            (str(source_id), str(target_id), str(target_id), str(source_id)),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "DELETE FROM chunk_relations WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
+                (str(source_id), str(target_id), str(target_id), str(source_id)),
+            )
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def rename_tag(self, old_tag: str, new_tag: str) -> int:
@@ -71,8 +73,9 @@ class RelationMixin:
                 tags = sorted({new_tag if t == old_tag else t for t in tags})
                 batch.append((json.dumps(tags), now, row[0]))
         if batch:
-            db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-            self._commit_if_standalone(db)
+            with self._rolls_back_if_standalone(db):
+                db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
+                self._commit_if_standalone(db)
         return len(batch)
 
     async def delete_tag(self, tag: str) -> int:
@@ -91,8 +94,9 @@ class RelationMixin:
                 tags = [t for t in tags if t != tag]
                 batch.append((json.dumps(tags), now, row[0]))
         if batch:
-            db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-            self._commit_if_standalone(db)
+            with self._rolls_back_if_standalone(db):
+                db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
+                self._commit_if_standalone(db)
         return len(batch)
 
     async def merge_tags(self, sources: Sequence[str], target: str) -> int:
@@ -129,6 +133,7 @@ class RelationMixin:
             if new_tags != tags:
                 batch.append((json.dumps(new_tags), now, row[0]))
         if batch:
-            db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-            self._commit_if_standalone(db)
+            with self._rolls_back_if_standalone(db):
+                db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
+                self._commit_if_standalone(db)
         return len(batch)

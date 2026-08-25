@@ -80,19 +80,20 @@ class ShareLinkMixin:
             )
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "INSERT OR REPLACE INTO chunk_links "
-            "(source_id, target_id, link_type, namespace_target, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                str(source_id) if source_id is not None else None,
-                str(target_id),
-                link_type,
-                namespace_target,
-                now,
-            ),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT OR REPLACE INTO chunk_links "
+                "(source_id, target_id, link_type, namespace_target, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(source_id) if source_id is not None else None,
+                    str(target_id),
+                    link_type,
+                    namespace_target,
+                    now,
+                ),
+            )
+            self._commit_if_standalone(db)
 
     async def delete_dangling_chunk_links(self) -> int:
         """Delete ``chunk_links`` rows whose source chunk has been removed.
@@ -103,9 +104,10 @@ class ShareLinkMixin:
         ``dead_chunk_link_cleanup`` scheduled job (P2 cron Phase A).
         """
         db = self._get_db()
-        cur = db.execute("DELETE FROM chunk_links WHERE source_id IS NULL")
-        deleted = cur.rowcount
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cur = db.execute("DELETE FROM chunk_links WHERE source_id IS NULL")
+            deleted = cur.rowcount
+            self._commit_if_standalone(db)
         return deleted
 
     async def get_chunk_link(

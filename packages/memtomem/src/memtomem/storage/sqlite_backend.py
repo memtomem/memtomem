@@ -10,9 +10,9 @@ import logging
 import os
 import sqlite3
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Iterator, Sequence
 from uuid import UUID
 
 import sqlite_vec
@@ -460,6 +460,41 @@ class SqliteBackend(
         """
         if not self._in_transaction:
             db.rollback()
+
+    @contextmanager
+    def _rolls_back_if_standalone(self, db: sqlite3.Connection) -> Iterator[None]:
+        """Close a writer's failed transaction instead of stranding it (#2167).
+
+        Wrap a writer's statements together with its ``_commit_if_standalone``.
+        Without this, an exception raised between the first ``execute`` and the
+        commit leaves the implicit transaction open on the shared, process-lived
+        writer connection, where the next unrelated commit flushes the failed
+        writer's half-written rows along with its own (#1572).
+
+        The exception is re-raised unchanged, so callers keep catching the exact
+        types they already catch. ``test_mixin_commit_guard.py`` enforces that
+        every ``_commit_if_standalone`` call site — and every write statement
+        that reaches it — sits inside one of these, and that the region holds no
+        ``await``: the protection is only as task-affine as the region is
+        uninterrupted.
+        """
+        try:
+            yield
+        except BaseException:
+            try:
+                self._rollback_if_standalone(db)
+            except Exception:
+                # A rollback that itself fails must not replace the failure the
+                # caller is about to see: it would rename the bug and lose the
+                # traceback that explains it. The transaction stays open, which
+                # is the hazard this helper exists to close, so it is logged at
+                # ERROR rather than swallowed silently.
+                logger.error(
+                    "rollback after a failed write raised; the writer's transaction "
+                    "may still be open on the shared connection (#2167)",
+                    exc_info=True,
+                )
+            raise
 
     def _require_transaction_idle(self, operation: str) -> None:
         """Reject operations that bypass the guarded writer connection."""

@@ -17,11 +17,12 @@ class ScratchMixin:
     ) -> None:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        db.execute(
-            "INSERT OR REPLACE INTO working_memory (key, value, session_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
-            (key, value, session_id, now, expires_at),
-        )
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            db.execute(
+                "INSERT OR REPLACE INTO working_memory (key, value, session_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                (key, value, session_id, now, expires_at),
+            )
+            self._commit_if_standalone(db)
 
     async def scratch_get(self, key: str) -> dict | None:
         db = self._get_db()
@@ -65,8 +66,9 @@ class ScratchMixin:
 
     async def scratch_delete(self, key: str) -> bool:
         db = self._get_db()
-        cursor = db.execute("DELETE FROM working_memory WHERE key = ?", (key,))
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute("DELETE FROM working_memory WHERE key = ?", (key,))
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
     async def scratch_cleanup(self, session_id: str | None = None) -> int:
@@ -74,26 +76,29 @@ class ScratchMixin:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         total = 0
-        c1 = db.execute(
-            "DELETE FROM working_memory WHERE expires_at IS NOT NULL AND expires_at < ? AND promoted = 0",
-            (now,),
-        )
-        total += c1.rowcount
-        if session_id:
-            c2 = db.execute(
-                "DELETE FROM working_memory WHERE session_id = ? AND promoted = 0", (session_id,)
+        with self._rolls_back_if_standalone(db):
+            c1 = db.execute(
+                "DELETE FROM working_memory WHERE expires_at IS NOT NULL AND expires_at < ? AND promoted = 0",
+                (now,),
             )
-            total += c2.rowcount
-        # Commit even at zero rows: a DELETE that matched nothing still
-        # opens an implicit transaction on the shared writer connection,
-        # and leaving it for the next unrelated commit to flush is the
-        # #1572 hazard (same fix as cleanup_old_sessions).
-        self._commit_if_standalone(db)
+            total += c1.rowcount
+            if session_id:
+                c2 = db.execute(
+                    "DELETE FROM working_memory WHERE session_id = ? AND promoted = 0",
+                    (session_id,),
+                )
+                total += c2.rowcount
+            # Commit even at zero rows: a DELETE that matched nothing still
+            # opens an implicit transaction on the shared writer connection,
+            # and leaving it for the next unrelated commit to flush is the
+            # #1572 hazard (same fix as cleanup_old_sessions).
+            self._commit_if_standalone(db)
         return total
 
     async def scratch_promote(self, key: str) -> bool:
         """Mark a working memory entry as promoted."""
         db = self._get_db()
-        cursor = db.execute("UPDATE working_memory SET promoted = 1 WHERE key = ?", (key,))
-        self._commit_if_standalone(db)
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute("UPDATE working_memory SET promoted = 1 WHERE key = ?", (key,))
+            self._commit_if_standalone(db)
         return cursor.rowcount > 0
