@@ -106,8 +106,15 @@ class NamespaceOps:
         get_db: Callable[[], sqlite3.Connection],
         has_vec_table: Callable[[], bool],
         in_transaction: Callable[[], bool],
+        get_read_db: Callable[[], sqlite3.Connection],
     ) -> None:
         self._get_db = get_db
+        # Read-only counters route here when the current task holds no
+        # transaction: the ownership-guarded writer connection refuses reads
+        # while any *other* task owns a transaction, which silently starved
+        # the hidden-namespace search hint for the whole transaction span.
+        # Required (no default), matching the two callables below.
+        self._get_read_db = get_read_db
         # Live lookup so reset_embedding_meta()'s flag flip is visible here
         # without re-construction. Required (no default) — sole caller is
         # SqliteBackend.initialize(); a default would silently regress the
@@ -146,7 +153,9 @@ class NamespaceOps:
         """
         if not prefixes:
             return 0
-        db = self._get_db()
+        # Pure read: answer from the pool unless this task's own transaction
+        # must see its uncommitted writes.
+        db = self._get_db() if self._in_transaction() else self._get_read_db()
         clauses = " OR ".join("namespace LIKE ? ESCAPE '\\'" for _ in prefixes)
         params = [f"{escape_like(p)}%" for p in prefixes]
         row = db.execute(
@@ -174,7 +183,11 @@ class NamespaceOps:
         """
         if not prefixes:
             return 0, {}
-        db = self._get_db()
+        # Same read-pool routing as ``count_chunks_by_ns_prefix``: this runs
+        # on the default-namespace search hot path (the hidden-namespace
+        # hint), where the writer connection both contends with writes and
+        # fails closed while another task owns a transaction.
+        db = self._get_db() if self._in_transaction() else self._get_read_db()
         patterns = [f"{escape_like(p)}%" for p in prefixes]
         columns = ", ".join(
             "SUM(CASE WHEN namespace LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)" for _ in prefixes

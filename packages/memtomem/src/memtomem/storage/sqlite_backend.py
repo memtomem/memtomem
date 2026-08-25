@@ -367,7 +367,10 @@ class SqliteBackend(
                 write_guard=self._rolls_back_if_standalone,
             )
             self._ns = NamespaceOps(
-                self._get_db, lambda: self._has_vec_table, lambda: self._in_transaction
+                self._get_db,
+                lambda: self._has_vec_table,
+                lambda: self._in_transaction,
+                self._get_read_db,
             )
 
             self._dimension, self._dim_mismatch, self._model_mismatch = create_tables(
