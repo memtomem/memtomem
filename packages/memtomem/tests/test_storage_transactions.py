@@ -593,3 +593,151 @@ async def test_transaction_failure_after_a_stolen_rollback_reraises_the_original
     assert any("may already be durable" in record.message for record in caplog.records)
     assert storage._transaction_owner is None
     assert await storage.get_chunk(chunk.id) is None
+
+
+# ---- #2167: a failed writer closes its own transaction ----------------------
+#
+# The AST guard in ``test_mixin_commit_guard.py`` proves every writer has the
+# rollback-protected shape. These prove the shape does what it claims: the
+# failure escapes with its own type, the connection is left usable, and the
+# statements that ran before the failure are gone rather than waiting for the
+# next unrelated commit to flush them (#1572).
+
+
+def _connection_is_idle(storage) -> bool:
+    """Whether the shared writer connection has no transaction pending.
+
+    ``in_transaction`` is the direct reading; ``transaction()`` succeeding
+    afterwards is the consequence that actually breaks for callers, since it
+    takes ``BEGIN IMMEDIATE`` and fails outright on a connection that already
+    has one open.
+    """
+    return storage._get_db().in_transaction is False
+
+
+async def test_add_assertion_closes_its_transaction_when_it_cannot_resolve(storage):
+    """The failure #2167 was filed for.
+
+    ``add_assertion`` inserts into ``canonical_entities`` and then raises
+    ``ValueError`` if the row it needs is not there — between the INSERT and
+    the commit. The entity write sat pending on the shared connection.
+    """
+    db = storage._get_db()
+    # An id collision is the one way the INSERT OR IGNORE loses: the same id
+    # already names a different canonical entity, so the SELECT by name misses.
+    db.execute(
+        "INSERT INTO canonical_entities (id, canonical_name, entity_type, aliases, created_at) "
+        "VALUES (?, ?, ?, '[]', ?)",
+        ("ent-collide", "already-here", "person", "2026-01-01T00:00:00+00:00"),
+    )
+    db.commit()
+
+    with pytest.raises(ValueError, match="unable to resolve canonical entity"):
+        await storage.add_assertion(
+            assertion_id="a1",
+            entity_id="ent-collide",
+            canonical_name="different-name",
+            entity_type="person",
+            predicate="works_at",
+            object_value="acme",
+            source_chunk_id=None,
+            recorded_at="2026-01-02T00:00:00+00:00",
+        )
+
+    assert _connection_is_idle(storage)
+    # The consequence: before the fix this raised "cannot start a transaction
+    # within a transaction" instead of running the caller's work.
+    async with storage.transaction():
+        pass
+    # And the pending entity row was discarded rather than flushed by that
+    # unrelated commit.
+    assert (
+        _committed_rows(
+            storage,
+            "SELECT id FROM canonical_entities WHERE canonical_name=?",
+            ("different-name",),
+        )
+        == []
+    )
+
+
+async def test_a_single_statement_writer_leaves_no_open_transaction(storage):
+    """A lone statement that fails has written nothing, so what the rollback
+    buys is the closed transaction — assert that directly, because a row-count
+    check would pass with or without the fix."""
+    with pytest.raises((sqlite3.InterfaceError, sqlite3.ProgrammingError)):
+        await storage.scratch_set("k", object())  # unbindable value
+
+    assert _connection_is_idle(storage)
+    async with storage.transaction():
+        pass
+
+
+async def test_idempotency_claim_rolls_back_its_purge(storage):
+    """A multi-statement REFUSES writer: the purge DELETE really did run, so
+    the rollback has something to undo. Before the fix the expired row stayed
+    pending and the next unrelated commit deleted it for good."""
+    db = storage._get_db()
+    db.execute(
+        "INSERT INTO idempotency_ledger (tool, key, result, created_at, expires_at) "
+        "VALUES (?, ?, NULL, ?, ?)",
+        ("mem_add", "stale", "2020-01-01T00:00:00+00:00", "2020-01-02T00:00:00+00:00"),
+    )
+    db.commit()
+
+    with pytest.raises((sqlite3.InterfaceError, sqlite3.ProgrammingError)):
+        await storage.idempotency_claim("mem_add", object())
+
+    assert _connection_is_idle(storage)
+    # An unrelated commit is the flush that used to carry the purge with it.
+    await storage.scratch_set("unrelated", "value")
+    assert _committed_rows(
+        storage,
+        "SELECT key FROM idempotency_ledger WHERE key=?",
+        ("stale",),
+    ) == [("stale",)]
+
+
+async def test_cleanup_old_sessions_rolls_back_a_failed_delete(storage):
+    """Failure injected at the connection boundary *inside* the unit, armed for
+    one statement only: an always-raising proxy would take down the unrelated
+    commit this test needs afterwards."""
+    await storage.create_session("old-session", "tester", "default")
+    await storage.end_session("old-session", "done", {})
+    db = storage._get_db()
+    db.execute(
+        "UPDATE sessions SET ended_at=? WHERE id=?", ("2020-01-01T00:00:00+00:00", "old-session")
+    )
+    db.commit()
+
+    class _FailsAfterTheDelete:
+        """Forwards everything, but raises once the DELETE has run."""
+
+        def __init__(self, real):
+            self._real = real
+            self.armed = True
+
+        def execute(self, sql, *args):
+            cur = self._real.execute(sql, *args)
+            if self.armed and sql.strip().upper().startswith("DELETE FROM SESSIONS"):
+                self.armed = False
+                raise sqlite3.OperationalError("injected failure after the DELETE")
+            return cur
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    proxy = _FailsAfterTheDelete(db)
+    real_get_db = storage._get_db
+    storage._get_db = lambda: proxy
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected failure"):
+            await storage.cleanup_old_sessions(max_age_days=1)
+    finally:
+        storage._get_db = real_get_db
+
+    assert _connection_is_idle(storage)
+    await storage.scratch_set("unrelated-2", "value")
+    assert _committed_rows(storage, "SELECT id FROM sessions WHERE id=?", ("old-session",)) == [
+        ("old-session",)
+    ]
