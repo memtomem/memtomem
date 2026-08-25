@@ -1702,6 +1702,7 @@
   "settings.config.label.rerank.oversample": "Oversample",
   "settings.config.label.rerank.min_pool": "Min Pool",
   "settings.config.label.rerank.max_pool": "Max Pool",
+  "settings.config.label.rerank.timeout_s": "Timeout (s)",
   "settings.config.label.indexing.supported_extensions": "Extensions",
   "settings.config.label.indexing.exclude_patterns": "Exclude Patterns",
   "settings.config.label.indexing.max_chunk_tokens": "Max Chunk Tokens",

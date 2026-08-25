@@ -655,6 +655,7 @@ any leftover source the exclude rules don't cover, remove it directly with
 | `MEMTOMEM_RERANK__MIN_POOL` | `20` | Lower bound on the candidate pool (floor for small queries) |
 | `MEMTOMEM_RERANK__MAX_POOL` | `200` | Upper bound on the candidate pool (cost cap for large queries) |
 | `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
+| `MEMTOMEM_RERANK__TIMEOUT_S` | `30.0` | Wall-clock bound on one rerank call; on timeout the search falls back to the fused order (read at load time — restart to change) |
 
 Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before source/tag filters. The candidate pool passed to the cross-encoder is
 

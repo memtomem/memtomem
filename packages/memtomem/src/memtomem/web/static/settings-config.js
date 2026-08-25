@@ -22,7 +22,8 @@ const _CONFIG_LABEL_FIELDS = {
               'enable_bm25', 'enable_dense', 'tokenizer', 'rrf_weights'],
   decay:     ['enabled', 'half_life_days'],
   mmr:       ['enabled', 'lambda_param'],
-  rerank:    ['enabled', 'provider', 'model', 'api_key', 'oversample', 'min_pool', 'max_pool'],
+  rerank:    ['enabled', 'provider', 'model', 'api_key', 'oversample', 'min_pool', 'max_pool',
+              'timeout_s'],
   indexing:  ['supported_extensions', 'exclude_patterns', 'max_chunk_tokens', 'min_chunk_tokens',
               'target_chunk_tokens', 'chunk_overlap_tokens', 'structured_chunk_mode'],
   namespace: ['default_namespace', 'enable_auto_ns'],
@@ -38,6 +39,7 @@ const _READONLY_FIELDS = {
     'max_sequence_tokens', 'onnx_cpu_mem_arena',
   ]),
   indexing: new Set([]),
+  rerank: new Set(['timeout_s']),
 };
 
 // Fields that use a custom widget which persists each change immediately

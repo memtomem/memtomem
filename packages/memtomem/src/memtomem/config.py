@@ -582,6 +582,15 @@ class RerankConfig(ConfigModel):
     model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
     api_key: str = ""
 
+    # Hard wall-clock bound on one rerank call (Stage 3b). A hung provider
+    # (stuck ONNX session, wedged HTTP connection) otherwise hangs the whole
+    # search — the pipeline has no other bound on this await. On timeout the
+    # pipeline falls back to the fused order, exactly as it does for a
+    # provider error. A cold first call that is still *downloading* a model
+    # can exceed this; the download thread keeps running, that one query
+    # degrades to the fused order, and later queries rerank normally.
+    timeout_s: float = 30.0
+
     # Candidate pool (Stage 3b oversample) — the reranker sees
     # ``max(min_pool, min(max_pool, int(oversample * response_top_k)))``
     # items, then returns the caller's response top_k. Defaults give the
@@ -632,10 +641,14 @@ class RerankConfig(ConfigModel):
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
 
-    @field_validator("oversample")
+    @field_validator("oversample", "timeout_s")
     @classmethod
     def oversample_must_be_positive(cls, v: float, info: ValidationInfo) -> float:
-        if v <= 0:
+        import math
+
+        # ``isfinite`` matters for timeout_s: Infinity would silently defeat
+        # the wall-clock bound and NaN makes every comparison false.
+        if not math.isfinite(v) or v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
         return v
 

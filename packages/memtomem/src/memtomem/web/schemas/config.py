@@ -103,6 +103,9 @@ class ConfigRerankOut(BaseModel):
     oversample: float
     min_pool: int
     max_pool: int
+    # Read-only in the Settings response; deliberately absent from the PATCH
+    # surface (load-time knob, like provider/model).
+    timeout_s: float
 
 
 class ConfigNamespaceOut(BaseModel):

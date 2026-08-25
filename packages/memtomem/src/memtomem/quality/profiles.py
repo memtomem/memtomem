@@ -67,14 +67,14 @@ __all__ = [
     "profile_warnings",
 ]
 
-PROFILE_SCHEMA_VERSION = 2
+PROFILE_SCHEMA_VERSION = 3
 PROFILE_KIND = "retrieval_profile"
 
 # Versions this build can load. New documents are written at
 # ``PROFILE_SCHEMA_VERSION``; older ones keep their own canonical shape so an
 # existing profile's identity does not move when a new ranking stage adds a
 # section (see ``_SECTIONS_BY_VERSION``).
-SUPPORTED_PROFILE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
+SUPPORTED_PROFILE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3)
 
 # Sections eligible per schema version. A version only ever *gains* sections:
 # v2 added ``entity_boost`` with the Stage-7b entity-match boost. Canonicalizing
@@ -96,6 +96,22 @@ _SECTIONS_BY_VERSION: dict[int, frozenset[str]] = {
         }
     ),
     2: frozenset(
+        {
+            "search",
+            "decay",
+            "mmr",
+            "access",
+            "importance",
+            "entity_boost",
+            "context_window",
+            "rerank",
+            "query_expansion",
+            "session_summary",
+        }
+    ),
+    # v3 adds no section — it adds the ``rerank.timeout_s`` field (see
+    # ``_FIELD_OVERRIDES_BY_VERSION``).
+    3: frozenset(
         {
             "search",
             "decay",
@@ -148,7 +164,7 @@ _ELIGIBLE_FIELDS: dict[str, tuple[str, ...]] = {
     "importance": ("enabled", "max_boost", "weights"),
     "entity_boost": ("enabled", "max_boost", "query_entity_types", "min_confidence"),
     "context_window": ("enabled", "window_size"),
-    "rerank": ("enabled", "provider", "model", "oversample", "min_pool", "max_pool"),
+    "rerank": ("enabled", "provider", "model", "oversample", "min_pool", "max_pool", "timeout_s"),
     "query_expansion": ("enabled", "max_terms", "strategy"),
     "session_summary": (
         "expansion_lookup_top_k",
@@ -156,6 +172,22 @@ _ELIGIBLE_FIELDS: dict[str, tuple[str, ...]] = {
         "expansion_rescue_weight",
     ),
 }
+
+# Per-version field-set overrides. ``_ELIGIBLE_FIELDS`` above is the CURRENT
+# (v3) shape; a version's canonical payload must never change after release
+# (the same contract ``_SECTIONS_BY_VERSION`` keeps for sections), so an older
+# version pins the field tuple it shipped with. v3 added ``rerank.timeout_s``.
+_FIELD_OVERRIDES_BY_VERSION: dict[int, dict[str, tuple[str, ...]]] = {
+    1: {"rerank": ("enabled", "provider", "model", "oversample", "min_pool", "max_pool")},
+    2: {"rerank": ("enabled", "provider", "model", "oversample", "min_pool", "max_pool")},
+}
+
+
+def _eligible_fields(schema_version: int, section: str) -> tuple[str, ...]:
+    """The eligible fields of ``section`` as of ``schema_version``."""
+    override = _FIELD_OVERRIDES_BY_VERSION.get(schema_version, {})
+    return override.get(section, _ELIGIBLE_FIELDS[section])
+
 
 # Config sections that are pinned to the ambient install wholesale. Named here
 # only to give a document author a targeted error instead of a generic
@@ -391,13 +423,16 @@ class RerankKnobs(_Knobs):
     oversample: float | None = None
     min_pool: int | None = None
     max_pool: int | None = None
+    # Requires schema_version >= 3 — enforced in the document validator, not
+    # here: the knob model is version-agnostic by design.
+    timeout_s: float | None = None
 
     @field_validator("enabled", mode="before")
     @classmethod
     def _bool(cls, v: Any, info: Any) -> Any:
         return _guard_bool(v, info.field_name)
 
-    @field_validator("oversample", mode="before")
+    @field_validator("oversample", "timeout_s", mode="before")
     @classmethod
     def _float(cls, v: Any, info: Any) -> Any:
         return _guard_float(v, info.field_name)
@@ -544,6 +579,26 @@ class RetrievalProfileDoc(BaseModel):
                     f"knobs section(s) {', '.join(newer)} require schema_version "
                     f"{PROFILE_SCHEMA_VERSION}, document declares {sv}"
                 )
+            # Same rule at field granularity: a field introduced in a later
+            # version cannot appear in an older document — canonicalization
+            # would silently drop it, giving the document a different meaning
+            # than its bytes say.
+            knobs_data = data.get("knobs")
+            if isinstance(knobs_data, dict):
+                for section, fields in knobs_data.items():
+                    if not isinstance(fields, dict):
+                        continue
+                    eligible_here = (
+                        _eligible_fields(sv, section) if section in _ELIGIBLE_FIELDS else ()
+                    )
+                    current = _ELIGIBLE_FIELDS.get(section, ())
+                    too_new = sorted(set(fields) & (set(current) - set(eligible_here)))
+                    if too_new:
+                        raise ValueError(
+                            f"knobs field(s) {', '.join(f'{section}.{f}' for f in too_new)} "
+                            f"require schema_version {PROFILE_SCHEMA_VERSION}, "
+                            f"document declares {sv}"
+                        )
         if data.get("kind") != PROFILE_KIND:
             raise ValueError(f"kind must be {PROFILE_KIND!r}")
 
@@ -676,7 +731,8 @@ def canonicalize_profile(doc: RetrievalProfileDoc) -> dict[str, Any]:
         set_fields = knobs.model_dump(exclude_none=True)
         resolved = cls(**set_fields)
         canonical[section] = {
-            field: _normalize(getattr(resolved, field)) for field in _ELIGIBLE_FIELDS[section]
+            field: _normalize(getattr(resolved, field))
+            for field in _eligible_fields(doc.schema_version, section)
         }
     return canonical
 

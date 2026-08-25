@@ -133,6 +133,7 @@ class FakeConfig:
         oversample = 2.0
         min_pool = 20
         max_pool = 200
+        timeout_s = 30.0
 
     class _Namespace:
         default_namespace = "default"
@@ -529,6 +530,7 @@ class TestConfig:
             "oversample": 2.0,
             "min_pool": 20,
             "max_pool": 200,
+            "timeout_s": 30.0,
         }
         assert "namespace" in data
         assert data["indexing"]["exclude_patterns"] == []
@@ -624,6 +626,27 @@ class TestConfig:
         assert app.state.config.rerank.provider == "fastembed"
         assert app.state.search_pipeline._reranker is not None
         assert app.state.search_pipeline._rerank_config is app.state.config.rerank
+
+    async def test_patch_rerank_preserves_custom_timeout(self, app, client: AsyncClient):
+        """timeout_s is not PATCH-mutable, but it must ride along in the
+        RerankConfig reconstruction — patching oversample used to silently
+        reset a custom timeout back to the default."""
+        app.state.config.rerank.timeout_s = 7.5
+        with (
+            patch("memtomem.web.routes.system.save_config_overrides"),
+            patch(
+                "memtomem.web.routes.system._validate_reranker_ready",
+                new_callable=AsyncMock,
+            ),
+        ):
+            resp = await client.patch(
+                "/api/config",
+                json={"rerank": {"enabled": True, "oversample": 3.0}},
+            )
+
+        assert resp.status_code == 200
+        assert app.state.config.rerank.oversample == 3.0
+        assert app.state.config.rerank.timeout_s == 7.5
 
     async def test_patch_rerank_rejects_lazy_load_failure(self, app, client: AsyncClient):
         """Runtime enabling must fail if the lazy reranker cannot load."""

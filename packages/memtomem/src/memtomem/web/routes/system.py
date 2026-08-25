@@ -379,6 +379,7 @@ def _build_config_response(
             oversample=cfg.rerank.oversample,
             min_pool=cfg.rerank.min_pool,
             max_pool=cfg.rerank.max_pool,
+            timeout_s=cfg.rerank.timeout_s,
         ),
         namespace=ConfigNamespaceOut(
             default_namespace=cfg.namespace.default_namespace,
@@ -505,6 +506,11 @@ _RERANK_PATCH_FIELDS = (
     "oversample",
     "min_pool",
     "max_pool",
+    # Not PATCH-mutable (absent from MUTABLE_FIELDS), but it MUST ride along
+    # in the reconstruction: RerankConfig(**candidate_data) would otherwise
+    # silently reset a custom timeout to the default whenever any other
+    # rerank field is patched.
+    "timeout_s",
 )
 
 

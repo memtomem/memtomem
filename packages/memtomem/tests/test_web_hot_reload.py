@@ -866,6 +866,7 @@ class TestApplyRuntimeConfigChanges:
                 oversample=2.0,
                 min_pool=20,
                 max_pool=200,
+                timeout_s=30.0,
             ),
         )
 

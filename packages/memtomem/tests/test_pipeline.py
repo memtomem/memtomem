@@ -611,6 +611,42 @@ class TestRerankCandidatePool:
         results, _ = await pipeline.search("anything", top_k=10)
         assert len(results) == 10
 
+    @pytest.mark.asyncio
+    async def test_rerank_timeout_falls_back_to_top_k(self):
+        """A hung reranker (wedged ONNX session, stuck connection) must not
+        hang the whole search: rerank_cfg.timeout_s is the only wall-clock
+        bound on that await, and on expiry the caller still gets top_k in
+        the fused order."""
+        import asyncio
+
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        started = asyncio.Event()
+
+        class HungReranker:
+            async def rerank(self, query, results, top_k):
+                started.set()
+                await asyncio.sleep(3600)
+
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=HungReranker(),
+            rerank_config=RerankConfig(enabled=True, timeout_s=0.05),
+        )
+
+        results, _ = await pipeline.search("anything", top_k=10)
+        assert started.is_set(), "the reranker must actually have been invoked"
+        assert len(results) == 10
+
+    def test_rerank_timeout_must_be_positive(self):
+        from memtomem.config import RerankConfig
+
+        with pytest.raises(ValueError, match="timeout_s must be positive"):
+            RerankConfig(timeout_s=0)
+        with pytest.raises(ValueError, match="timeout_s must be positive"):
+            RerankConfig(timeout_s=-1.0)
+
     def test_pool_knobs_registered_as_mutable(self):
         """Runtime mutation via `mm config set` / Web UI PATCH must accept
         oversample/min_pool/max_pool (provider/model still need restart)."""

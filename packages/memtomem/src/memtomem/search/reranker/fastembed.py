@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+from memtomem._settlement import settle_shielded
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 
 if TYPE_CHECKING:
@@ -39,6 +41,20 @@ class FastEmbedReranker:
         # the search path and the opt-in warmup task (#1621) can race into
         # ``_get_model`` from different threads.
         self._load_lock = threading.Lock()
+        # Dedicated single-worker executor, the ``OnnxEmbedder`` shape
+        # (#1783): the shared default pool would let N concurrent searches
+        # run N simultaneous ORT cross-encoder inferences — the exact memory
+        # amplification the embedder was hardened against. One worker is the
+        # hard cap; excess reranks queue FIFO, and a queued rerank whose
+        # awaiting task is cancelled never starts.
+        self._infer_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="fastembed-rerank"
+        )
+        # A timed-out inference the pipeline abandoned but the worker thread
+        # is still running (native code cannot be interrupted). While it is
+        # pending, later reranks fail fast instead of queuing behind the
+        # wedged worker and each paying the full timeout again.
+        self._abandoned: Future | None = None
 
     def _get_model(self) -> object:
         """Lazily construct the ``TextCrossEncoder`` — downloads on first use.
@@ -115,7 +131,7 @@ class FastEmbedReranker:
             return model
 
     def _rerank_sync(self, query: str, documents: list[str]) -> list[float]:
-        """Run inference synchronously — called inside ``asyncio.to_thread``."""
+        """Run inference synchronously — runs on the dedicated worker."""
         model = self._get_model()
         # ``rerank`` returns an iterable of floats; materialize inside the
         # thread so the caller doesn't block on lazy evaluation.
@@ -129,11 +145,39 @@ class FastEmbedReranker:
         if not results:
             return results
 
+        if self._abandoned is not None:
+            if not self._abandoned.done():
+                logger.warning(
+                    "FastEmbed rerank busy (a timed-out inference is still running), "
+                    "returning original order"
+                )
+                return results[:top_k]
+            self._abandoned = None
+
         documents = [r.chunk.content for r in results]
+        # ``submit`` + ``wrap_future`` rather than ``run_in_executor``: when
+        # the awaiting task is cancelled, the asyncio wrapper is marked
+        # cancelled even though a *running* worker cannot be interrupted —
+        # only the concurrent future's ``done()`` stays truthful about the
+        # thread, and that is what the busy check above reads.
         try:
-            scores = await asyncio.to_thread(self._rerank_sync, query, documents)
+            # ``submit`` inside the try: post-close it raises synchronously
+            # ("cannot schedule new futures after shutdown"), and that must
+            # flow into the same degrade arm the closed ``_get_model`` used
+            # to reach — the documented post-close contract of this provider.
+            inference = self._infer_executor.submit(self._rerank_sync, query, documents)
+            scores = await asyncio.wrap_future(inference)
         except (ImportError, ValueError):
             # Setup/config errors carry actionable hints — surface, don't hide.
+            raise
+        except asyncio.CancelledError:
+            # The pipeline's wait_for timeout cancels this await, but a
+            # running native inference cannot be interrupted — remember its
+            # future so later reranks fail fast until the worker frees up.
+            # A still-queued inference is genuinely cancelled (never runs)
+            # and needs no tracking.
+            if not inference.done():
+                self._abandoned = inference
             raise
         except Exception as exc:
             logger.warning("FastEmbed rerank failed, returning original order: %s", exc)
@@ -146,11 +190,28 @@ class FastEmbedReranker:
         ]
 
     async def close(self) -> None:
-        # Same shape as ``OnnxEmbedder.close``: force-collect so the underlying
-        # ORT InferenceSession releases its mmap and thread-local arenas before
-        # pytest cleans up tmp_path on Windows. See #206.
+        # Same teardown shape as ``OnnxEmbedder.close``: latch on the loop
+        # thread, then run the blocking drain on a worker so the executor
+        # join (which waits for a still-running inference) never stalls the
+        # loop, with every await shielded so cancellation cannot skip it.
+        loop = asyncio.get_running_loop()
+        self._closed = True
+        future = loop.run_in_executor(None, self._close_sync)
+        await settle_shielded(future, what="fastembed reranker teardown")
+
+    def _close_sync(self) -> None:
+        # Force-collect at the end so the underlying ORT InferenceSession
+        # releases its mmap and thread-local arenas before pytest cleans up
+        # tmp_path on Windows. See #206.
         import gc
 
+        # No ``_load_lock`` here: close() landing mid-construction must
+        # return promptly (#1780) — publish-then-verify in ``_get_model``
+        # already guarantees a closed instance ends with no model published.
         self._closed = True
         self._model = None
+        # cancel_futures drops queued-but-unstarted inferences; wait=True
+        # joins the one that may still be running, so close() completing
+        # means no worker still owns the model/session.
+        self._infer_executor.shutdown(wait=True, cancel_futures=True)
         gc.collect()
