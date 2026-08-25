@@ -36,6 +36,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Stores indexed before index-time extraction are backfilled automatically at
+  startup.** #2145 gave every *new* chunk write an entity-extraction attempt but
+  deliberately left existing stores to `mem_entity_scan` — a maintenance command
+  someone has to know to run. Startup now walks chunks that have no
+  `chunk_entities` rows and gives each one the same regex attempt, from the
+  composition point every entry point shares (MCP server, web, CLI, in-process
+  runtime), so pre-#2145 stores catch up without a command — including chunks a
+  forced re-index can never reach because their source is gone (consolidation
+  summaries, imported bundles). The walk is insert-only and re-checks under the
+  write lock, so rows a concurrent `mem_entity_scan` LLM pass produced are never
+  replaced; work is paged, capped per startup, and resumes from a persisted
+  cursor. Completion is recorded in the `entity_backfill_v1` meta key, and a
+  content write made while `indexing.extract_entities` is off afterwards
+  downgrades it to `stale` — a machine-readable record that coverage has an
+  opted-out gap (remediation stays `mem_entity_scan`; nothing re-walks the store
+  silently). Runs that did work leave a `maintenance_runs` row
+  (`kind="entity_backfill"`, `source="startup"`). This completes ADR-0034's
+  deferral trigger. (#2133)
+
 - **Entity extraction now also covers the two writers that never reach the
   indexing engine.** #2145 put extraction on the indexer's chunk-write path, so
   anything that stored chunks by calling `storage.upsert_chunks` directly still

@@ -247,7 +247,12 @@ async def _replay_profile(
 
     embedded, fingerprint = _embed_document(doc)
     warnings = tuple(profile_warnings(candidate_config, doc))
-    transient = await create_components(candidate_config, load_ambient_config=False)
+    # ``entity_backfill=False``: a replay stack must observe the store, not
+    # migrate it — and the walk's writes would land outside the experiment's
+    # fingerprint accounting.
+    transient = await create_components(
+        candidate_config, load_ambient_config=False, entity_backfill=False
+    )
     try:
         report = await replay_cases(
             transient.storage,

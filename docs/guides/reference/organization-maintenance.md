@@ -200,8 +200,13 @@ mem_auto_tag(source_filter="notes", overwrite=True) # re-tag specific files
 The indexer already extracts entities (people, dates, decisions, technologies)
 for every chunk it writes, and rewrites them when the chunk is re-indexed — see
 `indexing.extract_entities` in [Configuration](../configuration.md#entity-match-boost).
-`mem_entity_scan` is what you run on top of that: to backfill a store indexed by
-an older release, or to re-extract with the higher-quality LLM extractor.
+A store indexed by an older release is backfilled automatically: on startup,
+chunks that have never had an extraction attempt get the same regex pass, so no
+command is needed to catch an existing store up. `mem_entity_scan` is what you
+run on top of that: to re-extract with the higher-quality LLM extractor
+(`overwrite=True`), or to cover content you deliberately wrote while
+`indexing.extract_entities` was off — the one gap the automatic paths leave
+alone, because it records an explicit opt-out.
 
 Scan indexed chunks and extract structured entities:
 
