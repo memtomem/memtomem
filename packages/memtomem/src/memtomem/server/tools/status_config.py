@@ -727,12 +727,41 @@ def _persistence_suffix(key: str, receipt: "SaveReceipt | None") -> str:
     return f" (runtime only — not written to config.json: {reason})"
 
 
-def _revert_to_stored(app: AppContext) -> str:
-    """Switch the runtime embedder to match stored DB settings (non-destructive)."""
+async def _revert_to_stored(app: AppContext) -> str:
+    """Switch the runtime embedder to match stored DB settings (non-destructive).
+
+    Publish-first, then retire: the new embedder/pipeline/engine generation is
+    installed on the ``Components`` container before the old one is closed
+    (the ``swap_reranker`` contract, #1777). Without the close, every revert
+    leaked the retired ONNX InferenceSession plus its dedicated executor
+    thread and the retired pipeline's reranker; without the watcher rebind,
+    auto-reindexes kept running through the retired engine and embedder while
+    cache invalidation hit a pipeline nobody queries. A search or index run
+    already in flight on the old generation may fail when its embedder closes
+    under it — this is an explicit admin action, and the pre-existing behavior
+    was an unbounded leak.
+
+    Serialized on ``app._config_lock``: without it, two concurrent reverts
+    both observe the mismatch, both publish a generation, and the loser
+    closes the winner's freshly published embedder while requests use it.
+    The mismatch is cleared in the same synchronous phase as publication —
+    before the first retirement ``await`` — so a second caller entering the
+    lock sees "nothing to revert" rather than a repeatable swap.
+    """
     from memtomem.embedding.factory import create_embedder
     from memtomem.indexing.engine import IndexEngine
+    from memtomem.search.dedup import DedupScanner
     from memtomem.search.pipeline import SearchPipeline
 
+    async with app._config_lock:
+        return await _revert_to_stored_locked(
+            app, create_embedder, IndexEngine, DedupScanner, SearchPipeline
+        )
+
+
+async def _revert_to_stored_locked(
+    app: AppContext, create_embedder, IndexEngine, DedupScanner, SearchPipeline
+) -> str:
     storage = app.storage
     config = app.config
     mismatch = storage.embedding_mismatch
@@ -761,6 +790,8 @@ def _revert_to_stored(app: AppContext) -> str:
         "_revert_to_stored called before ensure_initialized — "
         "handler must go through _get_app_initialized"
     )
+    old_embedder = comp.embedder
+    old_pipeline = comp.search_pipeline
     new_embedder = create_embedder(config.embedding)
     comp.embedder = new_embedder
     comp.search_pipeline = SearchPipeline(
@@ -794,7 +825,47 @@ def _revert_to_stored(app: AppContext) -> str:
         llm=app.llm_provider,
     )
 
+    # The watcher and the dedup scanner captured the old engine/embedder at
+    # init (server/context.py); without a rebind they keep the retired
+    # generation alive and doing work after this swap.
+    watcher = getattr(app, "_watcher", None)
+    if watcher is not None:
+        watcher.rebind(comp.index_engine, comp.search_pipeline)
+    if app.dedup_scanner is not None:
+        app._dedup_scanner = DedupScanner(storage=storage, embedder=new_embedder)
+
+    # Publication is complete: clear the mismatch in the same synchronous
+    # phase, before the first retirement ``await``, so a concurrent caller
+    # (serialized behind _config_lock) observes "nothing to revert" instead
+    # of swapping — and closing — this freshly published generation.
     storage.clear_embedding_mismatch()
+
+    # New generation is published everywhere — retire the old one. A close
+    # that fails must not fail the revert the user asked for: the swap
+    # already happened, so log and continue (the leak is then no worse than
+    # the pre-close behavior). Cancellation is accumulated and deferred
+    # (the lifespan teardown pattern): every retirement step is attempted
+    # even when this task is cancelled mid-close, then the cancellation
+    # propagates.
+    first_cancel: asyncio.CancelledError | None = None
+    for resource, label in ((old_pipeline, "search pipeline"), (old_embedder, "embedder")):
+        close = getattr(resource, "close", None)
+        if close is None:
+            continue
+        try:
+            await close()
+        except asyncio.CancelledError as exc:
+            if first_cancel is None:
+                first_cancel = exc
+        except Exception:
+            logger.warning(
+                "Failed to close the retired %s after revert_to_stored; "
+                "its resources are leaked until restart",
+                label,
+                exc_info=True,
+            )
+    if first_cancel is not None:
+        raise first_cancel
 
     return (
         f"Reverted to stored DB settings: "
@@ -873,7 +944,7 @@ async def mem_embedding_reset(
         )
 
     # mode == "revert_to_stored"
-    return _revert_to_stored(app)
+    return await _revert_to_stored(app)
 
 
 @mcp.tool()

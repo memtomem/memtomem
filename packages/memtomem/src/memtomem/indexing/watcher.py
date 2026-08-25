@@ -228,6 +228,25 @@ class FileWatcher:
             handler._supported = config.supported_extensions
             self._config = config
 
+    def rebind(
+        self,
+        index_engine: IndexEngine,
+        search_pipeline: SearchPipeline | None,
+    ) -> None:
+        """Point future events at a freshly swapped engine/pipeline pair.
+
+        A component swap (``mem_embedding_reset(mode="revert_to_stored")``)
+        replaces ``Components.index_engine`` / ``search_pipeline``, but this
+        watcher captured the originals at construction — without a rebind
+        every subsequent auto-reindex runs through the retired engine and its
+        retired embedder, and ``_invalidate_if_mutated`` drops the cache of a
+        pipeline nobody queries anymore. An event already being processed
+        finishes on the engine it started with; only future events see the
+        new pair.
+        """
+        self._engine = index_engine
+        self._search_pipeline = search_pipeline
+
     async def stop(self) -> None:
         if self._backfill_task is not None and not self._backfill_task.done():
             # Cancel — the backfill walk can take a while on large trees and
