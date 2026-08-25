@@ -57,6 +57,8 @@ class MaintenanceExecutor:
         for sf in result.confirmed_orphans:
             deleted = await self._app.storage.delete_by_source(sf)
             total_deleted += deleted
+        if total_deleted > 0:
+            self._app.search_pipeline.invalidate_cache()
 
         logger.info(
             "Auto-maintenance: cleaned %d orphaned files (%d chunks)",

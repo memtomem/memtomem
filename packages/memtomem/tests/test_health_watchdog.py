@@ -251,6 +251,9 @@ class TestMaintenanceExecutor:
         result = await executor.cleanup_orphans()
         assert result["orphaned"] == 1
         assert result["deleted_chunks"] == 5
+        # #2159-class: deleting chunks must invalidate the search cache, or
+        # searches keep returning the deleted chunks for the rest of cache_ttl.
+        app.search_pipeline.invalidate_cache.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_cleanup_orphans_skips_suspected_mass_delete(
@@ -274,6 +277,8 @@ class TestMaintenanceExecutor:
         assert result["deleted_chunks"] == 0
         assert result["skipped_reason"] == "orphan_ratio_exceeded"
         app.storage.delete_by_source.assert_not_awaited()
+        # Nothing was deleted, so the search cache must stay warm.
+        app.search_pipeline.invalidate_cache.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_trim_search_cache(self, mock_app):
