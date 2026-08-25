@@ -312,6 +312,10 @@ class SqliteBackend(
         # reset_embedding_meta(), and reset_all() — all three must update this
         # flag in lockstep with the underlying DROP/CREATE.
         self._has_vec_table: bool = False
+        # Per-read-connection memo of ``count(*) FROM chunks_vec``, keyed by
+        # ``id(conn)`` and guarded by that connection's ``PRAGMA data_version``
+        # — see _cached_vec_row_count for why this is safe to cache at all.
+        self._vec_count_cache: dict[int, tuple[int, int]] = {}
 
     async def initialize(self) -> None:
         db_path = Path(self._config.sqlite_path).expanduser()
@@ -413,6 +417,7 @@ class SqliteBackend(
             except Exception:
                 logger.debug("Failed to close partial read connection", exc_info=True)
         self._read_pool.clear()
+        self._vec_count_cache.clear()
         if self._db is not None:
             try:
                 self._db.close()
@@ -514,6 +519,29 @@ class SqliteBackend(
             self._read_pool_idx += 1
         return conn
 
+    def _cached_vec_row_count(self, db: sqlite3.Connection) -> int:
+        """``count(*) FROM chunks_vec``, memoized behind ``PRAGMA data_version``.
+
+        ``chunks_vec`` is a vec0 virtual table: SQLite keeps no row-count stat
+        for a vtab, so a bare ``COUNT(*)`` scans it on every dense query. The
+        memo is safe because ``data_version`` increments on this connection
+        exactly when a *different* connection commits a change to the file —
+        which covers the shared writer connection, the other pool readers,
+        and other processes (CLI index runs, a second server). It does NOT
+        move for this connection's own writes, so the memo is bypassed on the
+        writer connection (the no-read-pool fallback path of _get_read_db).
+        """
+        if db is self._db:
+            return db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0
+        version = db.execute("PRAGMA data_version").fetchone()[0]
+        key = id(db)
+        cached = self._vec_count_cache.get(key)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        count = db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0
+        self._vec_count_cache[key] = (version, count)
+        return count
+
     async def close(self) -> None:
         self._require_transaction_idle("close")
         for rconn in getattr(self, "_read_pool", []):
@@ -527,6 +555,7 @@ class SqliteBackend(
                 logger.debug("Failed to close read pool connection", exc_info=True)
         if hasattr(self, "_read_pool"):
             self._read_pool.clear()
+        self._vec_count_cache.clear()
         if self._db:
             try:
                 self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -2123,11 +2152,11 @@ class SqliteBackend(
         # inner cutoff are a separate concern handled by the exhaustive
         # evaluation path (see ``dense_search`` replay mode).
 
-        # Total embedding rows — the upper bound for a meaningful
-        # KNN K. Cheap; sqlite stores chunks_vec row counts in its
-        # internal stats and ``COUNT(*)`` is O(table-size) only on
-        # the rare cold-cache path.
-        total_vec_rows = db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0
+        # Total embedding rows — the upper bound for a meaningful KNN K.
+        # ``chunks_vec`` is a vec0 *virtual* table, so ``COUNT(*)`` is a
+        # full vtab scan on every call, not a stats lookup — memoized per
+        # connection behind ``PRAGMA data_version`` instead.
+        total_vec_rows = self._cached_vec_row_count(db)
 
         # Nothing to search. Returning early also keeps the schedule below
         # monotonic — with a zero row count the clamp would otherwise produce
