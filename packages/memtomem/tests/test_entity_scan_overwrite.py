@@ -5,6 +5,7 @@ old rows behind (or leaves the search cache holding pre-scan results) is a
 ranking bug, not just bookkeeping.
 """
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -70,6 +71,47 @@ class TestOverwriteClearsStaleRows:
             await mem_entity_scan(overwrite=False, ctx=ctx)  # type: ignore[arg-type]
 
         assert await comp.storage.get_entities_for_chunk(str(chunk.id))
+
+
+class TestScanCoversWholeSource:
+    """The scan must reach every chunk of a source, however large.
+
+    ``list_chunks_by_source`` defaults to ``limit=50``, and the scan used to
+    call it bare — silently covering only the first 50 chunks of each source.
+    ``overwrite=False`` re-runs skip already-extracted chunks, so the tail was
+    not merely late: it was unreachable forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_large_source_is_fully_scanned(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        # Far past both the old silent cap (50) and any plausible default.
+        n = 501
+        chunks = [make_chunk(f"note {i}", source="big.md") for i in range(n)]
+        await comp.storage.upsert_chunks(chunks)
+
+        # Storage-level pin first: ``limit=None`` reads the whole source in one
+        # snapshot — no cap, no duplicates, no gaps.
+        unbounded = await comp.storage.list_chunks_by_source(Path("/tmp/big.md"), limit=None)
+        assert {str(c.id) for c in unbounded} == {str(c.id) for c in chunks}
+        assert len(unbounded) == n
+
+        scanned: set[str] = set()
+
+        async def _one_entity(text, entity_types, provider):
+            from memtomem.tools.entity_extraction import ExtractedEntity
+
+            scanned.add(text)
+            return [ExtractedEntity("technology", "sqlite", 0.9, 0)]
+
+        ctx = StubCtx(AppContext.from_components(comp))
+        with patch("memtomem.tools.entity_extraction.extract_entities_with_llm", _one_entity):
+            out = await mem_entity_scan(ctx=ctx)  # type: ignore[arg-type]
+
+        assert len(scanned) == n
+        assert f"Chunks with entities: {n}" in out
+        for chunk in (chunks[0], chunks[49], chunks[50], chunks[-1]):
+            assert await comp.storage.get_entities_for_chunk(str(chunk.id))
 
 
 class TestScanInvalidatesSearchCache:
