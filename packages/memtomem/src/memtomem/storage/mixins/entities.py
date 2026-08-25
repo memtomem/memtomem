@@ -3,8 +3,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from memtomem.errors import StorageError
+
+if TYPE_CHECKING:
+    from memtomem.models import Chunk
+
+# ``_memtomem_meta`` key for the one-time entity backfill (#2133). Values:
+# a decimal ``chunks.rowid`` cursor while the walk is in progress, ``done``
+# once every pre-existing chunk has had an extraction attempt, or ``stale``
+# when content was written while ``indexing.extract_entities`` was off *after*
+# ``done`` — a machine-readable record that coverage has a gap the write path
+# was told not to fill. The backfill itself never re-runs on ``stale`` (the
+# gap is the user's explicit opt-out; the documented remediation is
+# ``mem_entity_scan``); consumers that need full coverage gate on ``done``.
+_ENTITY_BACKFILL_KEY = "entity_backfill_v1"
+ENTITY_BACKFILL_DONE = "done"
+ENTITY_BACKFILL_STALE = "stale"
 
 
 class EntityMixin:
@@ -116,6 +132,96 @@ class EntityMixin:
                 f"delete_entities_for_chunk failed, transaction rolled back: {exc}"
             ) from exc
         return cur.rowcount
+
+    async def list_chunks_missing_entities(
+        self, *, after_rowid: int = 0, limit: int = 500
+    ) -> list[tuple[int, Chunk]]:
+        """One page of chunks that have no ``chunk_entities`` rows at all.
+
+        The one-time backfill's read primitive (#2133). Keyed on ``rowid``
+        rather than OFFSET so the walk stays stable while the backfill's own
+        writes shrink the "missing" set between pages — an OFFSET would slide
+        over rows as earlier ones gain entities. "Missing" is row-presence,
+        deliberately: there is no per-chunk "extraction attempted" marker, so a
+        chunk whose content yields no entities is indistinguishable here from
+        one never visited. The caller's completion flag, not this predicate, is
+        what stops entity-less chunks being re-walked forever.
+
+        Reads the committed state through the read pool; the backfill re-checks
+        each page on the writer connection inside its transaction before
+        writing (``filter_unextracted_chunk_ids``).
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT chunks.rowid, chunks.* FROM chunks "
+            "WHERE chunks.rowid > ? AND NOT EXISTS "
+            "(SELECT 1 FROM chunk_entities e WHERE e.chunk_id = chunks.id) "
+            "ORDER BY chunks.rowid LIMIT ?",
+            (after_rowid, limit),
+        ).fetchall()
+        return [(row[0], self._row_to_chunk(row[1:])) for row in rows]
+
+    async def filter_unextracted_chunk_ids(self, chunk_ids: list[str]) -> set[str]:
+        """Return which of ``chunk_ids`` still have zero ``chunk_entities`` rows.
+
+        The backfill's in-transaction re-check. Selection happens on the read
+        pool before the write lock is taken, so a concurrent ``mem_entity_scan``
+        (possibly an LLM pass, strictly richer than the regex extractor) can
+        populate a selected chunk in between — and ``upsert_entities`` deletes
+        before inserting, so writing that chunk anyway would replace the richer
+        rows. Reading through the writer connection under the transaction sees
+        everything committed before the write lock, and nothing else can commit
+        while it is held.
+        """
+        if not chunk_ids:
+            return set()
+        db = self._get_db()
+        extracted: set[str] = set()
+        # Chunked under SQLite's 999-host-parameter floor, like
+        # ``filter_persisted_chunk_ids`` above.
+        batch_size = 500
+        for i in range(0, len(chunk_ids), batch_size):
+            batch = chunk_ids[i : i + batch_size]
+            marks = ",".join("?" * len(batch))
+            extracted.update(
+                row[0]
+                for row in db.execute(
+                    f"SELECT DISTINCT chunk_id FROM chunk_entities WHERE chunk_id IN ({marks})",
+                    batch,
+                ).fetchall()
+            )
+        return {cid for cid in chunk_ids if cid not in extracted}
+
+    async def entity_backfill_get_state(self) -> str | None:
+        """Read the ``entity_backfill_v1`` marker (cursor, ``done``, ``stale``)."""
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT value FROM _memtomem_meta WHERE key = ?", (_ENTITY_BACKFILL_KEY,)
+        ).fetchone()
+        return row[0] if row else None
+
+    async def entity_backfill_set_state(self, value: str) -> None:
+        """Write the ``entity_backfill_v1`` marker.
+
+        Direct SQL rather than ``MetaManager.set_meta``: the backend constructs
+        its manager with the standalone commit, so a ``set_meta`` inside an
+        owned ``transaction()`` would end the owner's transaction and trip the
+        #2168 ownership guard. The ``stale`` arming runs inside the indexer's
+        chunk-write transaction, so this write has to compose the same way the
+        other mixin writers do.
+        """
+        db = self._get_db()
+        try:
+            with self._rolls_back_if_standalone(db):
+                db.execute(
+                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                    (_ENTITY_BACKFILL_KEY, value),
+                )
+                self._commit_if_standalone(db)
+        except Exception as exc:
+            raise StorageError(
+                f"entity_backfill_set_state failed, transaction rolled back: {exc}"
+            ) from exc
 
     async def search_entities(
         self,

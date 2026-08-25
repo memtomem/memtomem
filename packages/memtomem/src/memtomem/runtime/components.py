@@ -101,6 +101,7 @@ async def create_components(
     config: Mem2MemConfig | None = None,
     *,
     load_ambient_config: bool = True,
+    entity_backfill: bool = True,
 ) -> Components:
     """Create and initialise all core components.
 
@@ -108,6 +109,10 @@ async def create_components(
     resolved the complete configuration precedence chain.  The default keeps
     the existing server and CLI behaviour of loading ``config.d``, persisted
     overrides, and environment variables before constructing components.
+
+    ``entity_backfill=False`` skips the one-time #2133 entity backfill — for
+    callers standing up transient stacks over stores they must not mutate
+    (Quality Lab replays). Every durable entry point keeps the default.
     """
     from memtomem.config import load_config_d, load_config_overrides
 
@@ -180,6 +185,23 @@ async def create_components(
         embedding_broken = storage.embedding_mismatch
 
     try:
+        # One-time entity backfill for stores indexed before #2145 (#2133).
+        # Before ``SearchPipeline`` exists, so the search cache is born after
+        # these writes and there is no invalidation to coordinate. A failure
+        # degrades entity coverage, never startup — except cancellation, which
+        # the enclosing cleanup path must still see.
+        if entity_backfill:
+            try:
+                from memtomem.tools.entity_backfill import backfill_entities
+
+                await backfill_entities(storage, enabled=config.indexing.extract_entities)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.warning(
+                    "entity backfill failed — continuing startup without it", exc_info=True
+                )
+
         # Build chunker registry with optional code chunkers
         chunkers: list[Chunker] = [
             MarkdownChunker(indexing_config=config.indexing),

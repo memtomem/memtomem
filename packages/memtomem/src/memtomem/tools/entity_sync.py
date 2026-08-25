@@ -39,6 +39,43 @@ _REQUIRED_STORAGE_METHODS = (
     "filter_persisted_chunk_ids",
 )
 
+# Backfill-marker surface, probed separately: arming the ``stale`` marker is an
+# optional courtesy to #2133's coverage contract, and a backend without the
+# marker methods must keep the pre-marker behaviour (skip silently), not lose
+# its entity writes.
+_BACKFILL_STATE_METHODS = ("entity_backfill_get_state", "entity_backfill_set_state")
+
+
+async def _mark_backfill_coverage_stale(storage: Any, chunks: Sequence[Chunk]) -> None:
+    """Downgrade a ``done`` backfill marker to ``stale`` on an unextracted write.
+
+    Content stored while ``indexing.extract_entities`` is off never gets an
+    extraction attempt — not now, and not retroactively when the flag comes
+    back on (the write path only sees new writes, and the startup backfill
+    never re-runs past ``done``). Anything that treats ``done`` as "every
+    chunk has had an attempt" would silently over-claim after such a write, so
+    the marker records the gap instead. Runs inside the caller's chunk-write
+    transaction where there is one, so the marker and the unextracted content
+    commit together — a crash cannot leave the gap unmarked.
+
+    Only a ``done`` marker is downgraded: a cursor keeps its resume position
+    (the walk will still visit rows it has not passed), and ``stale`` is
+    already the conservative answer.
+    """
+    required = _BACKFILL_STATE_METHODS + ("filter_persisted_chunk_ids",)
+    if not all(hasattr(storage, name) for name in required):
+        return
+    from memtomem.storage.mixins.entities import ENTITY_BACKFILL_DONE, ENTITY_BACKFILL_STALE
+
+    if await storage.entity_backfill_get_state() != ENTITY_BACKFILL_DONE:
+        return
+    # The same #691 race-loser rule the enabled path lives by: a chunk whose
+    # ``INSERT OR IGNORE`` lost the uniqueness race stored nothing, so if every
+    # supplied chunk lost, no unextracted content exists and marking the store
+    # ``stale`` would report a coverage gap that was never written.
+    if await storage.filter_persisted_chunk_ids([str(c.id) for c in chunks]):
+        await storage.entity_backfill_set_state(ENTITY_BACKFILL_STALE)
+
 
 async def sync_entities_for_chunks(
     storage: Any,
@@ -75,10 +112,15 @@ async def sync_entities_for_chunks(
         storage: Storage backend. One without the entity-writer surface degrades
             to writing no entities rather than raising.
         chunks: The chunks just written, with content in hand.
-        enabled: ``False`` returns 0 without touching the database — used to
-            honour ``indexing.extract_entities``.
+        enabled: ``False`` writes no entities — used to honour
+            ``indexing.extract_entities``. It still downgrades a completed
+            #2133 backfill marker to ``stale``, because the content being
+            written right now is the coverage gap that marker exists to record.
     """
-    if not enabled or not chunks:
+    if not chunks:
+        return 0
+    if not enabled:
+        await _mark_backfill_coverage_stale(storage, chunks)
         return 0
 
     if not all(hasattr(storage, name) for name in _REQUIRED_STORAGE_METHODS):

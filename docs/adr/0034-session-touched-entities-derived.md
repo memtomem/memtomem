@@ -147,6 +147,22 @@ are not backfilled, so for those the answer still depends on someone having run
 backfill question decided, not just this note. The `set_chunk_entities` comment
 this ADR called out has been corrected in the same change.
 
+**The second half has now fired too.** Existing stores are backfilled
+automatically at startup (`tools/entity_backfill.py`, run from
+`create_components` — the composition point every entry point shares), so the
+answer for a pre-#2145 store no longer depends on someone having run a
+maintenance command. Completion is machine-readable: the `entity_backfill_v1`
+meta key reads `done` when every pre-existing chunk has had an extraction
+attempt, and a content write made while `indexing.extract_entities` is off
+afterwards downgrades it to `stale`. That marker is a requirement on D1–D3's
+implementation, not a courtesy: the derived view must gate on `done` and
+return an explicit incomplete status for any other state, never a silently
+partial answer — a store whose owner opted out of extraction has a coverage
+gap this ADR's honesty contract obliges the view to disclose. Status stays
+*Proposed* only because D1–D3 themselves are not yet implemented; the trigger
+is met, and the status flips to *Accepted* with the change that ships the
+view.
+
 Until the trigger fires, implementing D1–D3 would ship a query that returns
 nothing on every default install — the failure mode #2133 itself predicted.
 After it fires, D1–D3 are a small read-path change with no schema cost.
