@@ -649,16 +649,11 @@ async def test_add_assertion_closes_its_transaction_when_it_cannot_resolve(stora
     # within a transaction" instead of running the caller's work.
     async with storage.transaction():
         pass
-    # And the pending entity row was discarded rather than flushed by that
-    # unrelated commit.
-    assert (
-        _committed_rows(
-            storage,
-            "SELECT id FROM canonical_entities WHERE canonical_name=?",
-            ("different-name",),
-        )
-        == []
-    )
+    # The INSERT OR IGNORE is what opened the transaction; it wrote no row here
+    # (losing to the id collision is the whole reason the SELECT missed), so
+    # what the rollback bought is the closed transaction above, not a discarded
+    # row. The assertion the caller was told did not happen must also be absent.
+    assert _committed_rows(storage, "SELECT id FROM memory_assertions WHERE id=?", ("a1",)) == []
 
 
 async def test_a_single_statement_writer_leaves_no_open_transaction(storage):
@@ -741,3 +736,41 @@ async def test_cleanup_old_sessions_rolls_back_a_failed_delete(storage):
     assert _committed_rows(storage, "SELECT id FROM sessions WHERE id=?", ("old-session",)) == [
         ("old-session",)
     ]
+
+
+async def test_a_failing_rollback_does_not_replace_the_original_failure(storage, caplog):
+    """When the rollback itself raises, the caller still sees its own error.
+
+    The connection is deliberately *not* poisoned here. A rollback only fails
+    when the connection is already unusable, and the state it leaves behind —
+    an open transaction — is exactly what this code path found; refusing every
+    later operation would promote a rare transient into a dead store, which is
+    strictly worse than what shipped before #2167. The lost rollback is
+    reported at ERROR instead, and that report is what this pins.
+    """
+    db = storage._get_db()
+
+    class _RollbackFails:
+        def __init__(self, real):
+            self._real = real
+
+        def rollback(self):
+            raise sqlite3.OperationalError("rollback cannot run")
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    proxy = _RollbackFails(db)
+    real_get_db = storage._get_db
+    storage._get_db = lambda: proxy
+    try:
+        with caplog.at_level(logging.ERROR, logger="memtomem.storage.sqlite_backend"):
+            # Unbindable value: the writer raises, and its rollback then fails.
+            with pytest.raises((sqlite3.InterfaceError, sqlite3.ProgrammingError)):
+                await storage.scratch_set("rollback-fails", object())
+    finally:
+        storage._get_db = real_get_db
+        if db.in_transaction:
+            db.rollback()
+
+    assert any("rollback after a failed write raised" in r.message for r in caplog.records)

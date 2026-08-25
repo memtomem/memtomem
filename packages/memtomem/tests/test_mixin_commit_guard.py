@@ -295,10 +295,119 @@ def _refuses_outer_transaction(fn: ast.AST) -> bool:
 _ROLLBACK_CM = "_rolls_back_if_standalone"
 _COMMIT_HELPER = "_commit_if_standalone"
 
-# SQL that writes. Matched on the leading keyword of a literal statement, the
-# same way ``_TRANSACTION_ENDING_SQL`` is: a write left outside the region is
-# a write nothing rolls back, which is the whole of #2167.
-_WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE")
+# Statements that provably do not write. Classification is deliberately
+# inverted — anything that is not recognisably one of these counts as a write —
+# because the failure modes are not symmetric: a misjudged read costs a
+# needlessly wide region, a misjudged write is the #2167 bug shipped under a
+# green guard. ``WITH`` is absent on purpose: a CTE can end in either an INSERT
+# or a SELECT, and the guard should not have to parse it to find out.
+_READ_ONLY_SQL = ("SELECT", "PRAGMA", "EXPLAIN", "ANALYZE", "VALUES")
+
+
+def _sql_leading_keyword(node: ast.AST) -> str | None:
+    """The first SQL keyword of an ``execute`` argument, when it is knowable.
+
+    ``None`` means the guard cannot tell — a variable, a ``.join``, a name — and
+    the caller must treat that as a write. An f-string is readable up to its
+    first placeholder, which is where the leading keyword always is: the
+    interpolation in this codebase builds ``WHERE`` clauses and placeholder
+    lists, never the verb.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        text = node.value
+    elif isinstance(node, ast.JoinedStr):
+        head = node.values[0] if node.values else None
+        if not (isinstance(head, ast.Constant) and isinstance(head.value, str)):
+            return None
+        text = head.value
+    else:
+        return None
+    stripped = text.strip().lstrip("(").lstrip()
+    return stripped.split(None, 1)[0].upper() if stripped else None
+
+
+def _module_sql_constants(tree: ast.AST) -> dict[str, str]:
+    """Leading keywords of module-level ``NAME = "SELECT ..."`` statements.
+
+    Readers here hoist their longer statements into a module constant, so a
+    resolver that only looked inside the function would call every one of them
+    unknowable — and therefore a write.
+    """
+    consts: dict[str, str] = {}
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        keyword = _sql_leading_keyword(node.value)
+        if isinstance(target, ast.Name) and keyword is not None:
+            consts[target.id] = keyword
+    return consts
+
+
+def _resolve_local_sql(fn: ast.AST, name: str) -> str | None:
+    """The leading keyword of a statement built up in a local variable.
+
+    ``query = "SELECT ..."`` followed by ``query += " WHERE ..."`` is how the
+    filtering readers here are written, and the verb is fixed by the first
+    assignment. Only that first binding is read; if it is not a knowable
+    string, or the name is rebound to something unknowable, the answer is
+    ``None`` and the caller falls back to assuming a write.
+    """
+    first: str | None = None
+    for node in _own_body(fn):
+        if isinstance(node, ast.AugAssign):
+            # ``query += " WHERE ..."`` appends a clause; it cannot change the
+            # verb the first assignment fixed.
+            continue
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id != name:
+            continue
+        keyword = _sql_leading_keyword(node.value)
+        if keyword is None:
+            return None
+        if first is None:
+            first = keyword
+        elif first != keyword:
+            # Two bindings disagreeing on the verb: which one reaches the
+            # execute is a control-flow question this guard will not answer.
+            return None
+    return first
+
+
+def _is_writing_sql(
+    node: ast.AST, fn: ast.AST | None = None, consts: dict[str, str] | None = None
+) -> bool:
+    keyword = _sql_leading_keyword(node)
+    if keyword is None and isinstance(node, ast.Name):
+        if fn is not None:
+            keyword = _resolve_local_sql(fn, node.id)
+        if keyword is None and consts is not None:
+            keyword = consts.get(node.id)
+    if keyword is None:
+        # Unknowable: assume it writes. Widening a region is cheap; missing a
+        # write is the whole bug.
+        return True
+    if keyword in _TRANSACTION_ENDING_SQL:
+        # Handled by the ownership half of this guard, not here.
+        return False
+    return keyword not in _READ_ONLY_SQL
+
+
+def _db_argument(call: ast.Call) -> str | None:
+    """The connection a call operates on, positional or ``db=``.
+
+    Reading only ``args[0]`` would let ``self._commit_if_standalone(db=db)``
+    slip past every containment check while looking identical in review.
+    """
+    if call.args and isinstance(call.args[0], ast.Name):
+        return call.args[0].id
+    for kw in call.keywords:
+        if kw.arg == "db" and isinstance(kw.value, ast.Name):
+            return kw.value.id
+    return None
+
 
 # Methods that write but never commit: they run on a ``db`` handed to them and
 # leave the transaction to their caller. Two things follow, and the tests below
@@ -306,14 +415,25 @@ _WRITE_SQL = ("INSERT", "UPDATE", "DELETE", "REPLACE")
 # write-only helper cannot appear without being classified here. Without the
 # first, ``self._purge_expired(db)`` above a region hides a pending DELETE
 # behind a call that shows no SQL.
-_PARTICIPANT_HELPERS = frozenset(
-    {
-        "_purge_expired",
-        "_prune_maintenance_runs",
-        "_record_candidate_transition",
-        "_import_one_case",
-    }
-)
+#
+# Keyed by ``(file, qualname)`` for the same reason ``OWNED_TRANSACTION_WRITERS``
+# is: a bare method name would let one mixin's classification cover an
+# identically named method on another.
+_PARTICIPANT_HELPERS: dict[tuple[str, str], str] = {
+    ("idempotency.py", "IdempotencyMixin._purge_expired"): "DELETEs expired ledger rows.",
+    ("maintenance_runs.py", "MaintenanceRunMixin._prune_maintenance_runs"): (
+        "DELETEs run rows past the retention window."
+    ),
+    ("formation.py", "FormationMixin._record_candidate_transition"): (
+        "INSERTs the audit row for a state change its caller is making."
+    ),
+    ("eval_cases.py", "EvalCaseMixin._import_one_case"): (
+        "DELETE + INSERTs one case inside import_eval_cases' own BEGIN."
+    ),
+}
+
+#: Bare method names of the above, for matching a call site.
+_PARTICIPANT_HELPER_NAMES = frozenset(q.rsplit(".", 1)[-1] for _, q in _PARTICIPANT_HELPERS)
 
 
 def _protected_regions(fn: ast.AST) -> list[tuple[str, set[int]]]:
@@ -333,10 +453,11 @@ def _protected_regions(fn: ast.AST) -> list[tuple[str, set[int]]]:
                 isinstance(call, ast.Call)
                 and isinstance(call.func, ast.Attribute)
                 and call.func.attr == _ROLLBACK_CM
-                and len(call.args) == 1
-                and isinstance(call.args[0], ast.Name)
+                and _db_argument(call) is not None
             ):
                 continue
+            region_db = _db_argument(call)
+            assert region_db is not None  # narrowed by the check above
             covered: set[int] = set()
             for stmt in node.body:
                 # ``_own_body``-style boundary: a commit inside a nested ``def``
@@ -350,11 +471,11 @@ def _protected_regions(fn: ast.AST) -> list[tuple[str, set[int]]]:
                     if hasattr(sub, "lineno"):
                         covered.add(sub.lineno)
                     stack.extend(ast.iter_child_nodes(sub))
-            regions.append((call.args[0].id, covered))
+            regions.append((region_db, covered))
     return regions
 
 
-def _write_nodes(fn: ast.AST) -> list[tuple[str, ast.AST]]:
+def _write_nodes(fn: ast.AST, consts: dict[str, str] | None = None) -> list[tuple[str, ast.AST]]:
     """``(db-name, node)`` for everything in ``fn`` that writes or commits.
 
     Both halves have to be inside the region. Guarding only the commit lets a
@@ -370,27 +491,47 @@ def _write_nodes(fn: ast.AST) -> list[tuple[str, ast.AST]]:
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         attr = node.func.attr
-        if attr == _COMMIT_HELPER and node.args and isinstance(node.args[0], ast.Name):
-            found.append((node.args[0].id, node))
-        elif attr in _PARTICIPANT_HELPERS and node.args and isinstance(node.args[0], ast.Name):
-            found.append((node.args[0].id, node))
+        if attr in {_COMMIT_HELPER} | _PARTICIPANT_HELPER_NAMES:
+            db_name = _db_argument(node)
+            if db_name is not None:
+                found.append((db_name, node))
         elif (
             attr in {"execute", "executemany", "executescript"}
             and isinstance(node.func.value, ast.Name)
             and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-            and node.args[0].value.strip().upper().lstrip("(").startswith(_WRITE_SQL)
+            and _is_writing_sql(node.args[0], fn, consts)
         ):
             found.append((node.func.value.id, node))
     return found
 
 
-def _unprotected_writes(fn: ast.AST) -> list[int]:
+def _region_exits(fn: ast.AST) -> list[int]:
+    """``return``/``break``/``continue`` inside a protected region.
+
+    Leaving a region by any of these exits the context manager *normally*: no
+    exception, so no rollback, and the commit below never runs either. The
+    statements already issued stay pending on the shared connection while the
+    caller is told the write succeeded — the #2167 failure wearing a shape this
+    guard's containment check would otherwise call compliant.
+    """
+    regions = _protected_regions(fn)
+    if not regions:
+        return []
+    covered: set[int] = set().union(*(lines for _, lines in regions))
+    return sorted(
+        {
+            node.lineno
+            for node in _own_body(fn)
+            if isinstance(node, (ast.Return, ast.Break, ast.Continue)) and node.lineno in covered
+        }
+    )
+
+
+def _unprotected_writes(fn: ast.AST, consts: dict[str, str] | None = None) -> list[int]:
     """Line numbers of writes and commits outside a matching protected region."""
     regions = _protected_regions(fn)
     out: list[int] = []
-    for db_name, node in _write_nodes(fn):
+    for db_name, node in _write_nodes(fn, consts):
         if not any(db_name == name and node.lineno in covered for name, covered in regions):
             out.append(node.lineno)
     return sorted(set(out))
@@ -417,11 +558,15 @@ def _awaits_inside_regions(fn: ast.AST) -> list[int]:
 
 
 def _swallowing_handlers(fn: ast.AST) -> list[int]:
-    """Handlers inside a protected region that do not re-raise.
+    """Handlers inside a protected region that can finish without re-raising.
 
     Catching inside the region and returning normally commits nothing and
     rolls back nothing — the pending statements stay on the connection, and
     the caller is told the write succeeded.
+
+    The raise has to be unconditional. A handler whose ``raise`` sits under an
+    ``if`` re-raises on one path and swallows on the other, and "contains a
+    Raise somewhere" would call that compliant.
     """
     regions = _protected_regions(fn)
     if not regions:
@@ -431,7 +576,7 @@ def _swallowing_handlers(fn: ast.AST) -> list[int]:
     for node in _own_body(fn):
         if not isinstance(node, ast.ExceptHandler) or node.lineno not in covered:
             continue
-        if not any(isinstance(sub, ast.Raise) for stmt in node.body for sub in ast.walk(stmt)):
+        if not any(isinstance(stmt, ast.Raise) for stmt in node.body):
             out.append(node.lineno)
     return sorted(out)
 
@@ -442,20 +587,55 @@ def _commits_standalone(fn: ast.AST) -> bool:
     )
 
 
-def _writes_without_committing(fn: ast.AST) -> bool:
-    """A participant: it writes, but leaves the transaction to its caller."""
+def _writes_without_committing(fn: ast.AST, consts: dict[str, str] | None = None) -> bool:
+    """A participant: it writes, but leaves the transaction to its caller.
+
+    Writing counts transitively — a helper that only calls ``_purge_expired``
+    leaves exactly the same DELETE pending as one that spells it out, and
+    classifying by visible SQL alone would let the delegating version stay
+    unclassified and therefore invisible at its own call sites.
+    """
     if _commits_standalone(fn) or _ends_transaction_directly(fn):
         return False
-    return any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in {"execute", "executemany", "executescript"}
-        and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, str)
-        and node.args[0].value.strip().upper().lstrip("(").startswith(_WRITE_SQL)
-        for node in _own_body(fn)
-    )
+    for node in _own_body(fn):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr in _PARTICIPANT_HELPER_NAMES:
+            return True
+        if (
+            node.func.attr in {"execute", "executemany", "executescript"}
+            and node.args
+            and _is_writing_sql(node.args[0], fn, consts)
+        ):
+            return True
+    return False
+
+
+def _failure_cleanup_lineno(fn: ast.AST) -> int | None:
+    """Where this function discards its own work on the failure path.
+
+    An owned-transaction writer is not covered by the region containment check
+    — it runs its own ``BEGIN`` and ends the transaction itself — so what has
+    to be verified instead is that some handler rolls back. Both spellings
+    count, the method and the SQL, and it has to be inside an ``except``:
+    a rollback on the success path is a different statement entirely.
+    """
+    for node in _own_body(fn):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        for stmt in node.body:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Attribute) and sub.attr in {"rollback", _ROLLBACK_CM}:
+                    return node.lineno
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr in {"execute", "executescript"}
+                    and sub.args
+                    and _sql_leading_keyword(sub.args[0]) == "ROLLBACK"
+                ):
+                    return node.lineno
+    return None
 
 
 def _owner_qualnames(filename: str) -> set[str]:
@@ -475,6 +655,7 @@ def _unprotected_writers() -> dict[tuple[str, str], list[int]]:
     found: dict[tuple[str, str], list[int]] = {}
     for path in sorted(_MIXINS.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        consts = _module_sql_constants(tree)
         owners = _owner_qualnames(path.name)
         for qualname, fn in _qualified_functions(tree):
             if qualname in owners:
@@ -483,7 +664,7 @@ def _unprotected_writers() -> dict[tuple[str, str], list[int]]:
                 continue
             if not _commits_standalone(fn):
                 continue
-            lines = _unprotected_writes(fn)
+            lines = _unprotected_writes(fn, consts)
             if lines:
                 found[(path.name, qualname)] = lines
     return found
@@ -494,11 +675,12 @@ def _unclassified_write_only_helpers() -> dict[tuple[str, str], str]:
     found: dict[tuple[str, str], str] = {}
     for path in sorted(_MIXINS.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        consts = _module_sql_constants(tree)
         owners = _owner_qualnames(path.name)
         for qualname, fn in _qualified_functions(tree):
-            if qualname in owners or not _writes_without_committing(fn):
+            if qualname in owners or not _writes_without_committing(fn, consts):
                 continue
-            if qualname.rsplit(".", 1)[-1] not in _PARTICIPANT_HELPERS:
+            if (path.name, qualname) not in _PARTICIPANT_HELPERS:
                 found[(path.name, qualname)] = "writes without committing"
     return found
 
@@ -625,16 +807,54 @@ class TestEveryMixinWriterClosesItsFailedTransaction:
         )
 
     def test_participant_helper_registry_has_no_stale_entries(self) -> None:
-        """A name that no longer refers to a write-only helper stops certifying
-        anything and would keep covering the next function to take it."""
-        live = {
-            qualname.rsplit(".", 1)[-1]
-            for path in sorted(_MIXINS.glob("*.py"))
-            for qualname, fn in _qualified_functions(ast.parse(path.read_text(encoding="utf-8")))
-            if _writes_without_committing(fn)
-        }
-        stale = sorted(_PARTICIPANT_HELPERS - live)
-        assert not stale, f"_PARTICIPANT_HELPERS names that no longer write: {stale}"
+        """An entry that no longer refers to a write-only helper stops
+        certifying anything and would keep covering the next function to take
+        that name."""
+        live: set[tuple[str, str]] = set()
+        for path in sorted(_MIXINS.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            consts = _module_sql_constants(tree)
+            live |= {
+                (path.name, qualname)
+                for qualname, fn in _qualified_functions(tree)
+                if _writes_without_committing(fn, consts)
+            }
+        stale = sorted(set(_PARTICIPANT_HELPERS) - live)
+        assert not stale, f"_PARTICIPANT_HELPERS entries that no longer write: {stale}"
+
+    def test_no_region_is_left_by_a_normal_exit(self) -> None:
+        """``return`` inside a region leaves it without an exception, so the
+        rollback never runs — and neither does the commit below it."""
+        offenders = {}
+        for path in sorted(_MIXINS.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for qualname, fn in _qualified_functions(tree):
+                lines = _region_exits(fn)
+                if lines:
+                    offenders[(path.name, qualname)] = lines
+        assert not offenders, (
+            "return/break/continue inside a rollback-protected region: move the "
+            f"exit below the region so the commit is always reached: {offenders}"
+        )
+
+    def test_owned_transaction_writers_still_clean_up_on_failure(self) -> None:
+        """The registry's other half of the #2167 contract.
+
+        Owned writers are exempt from region containment because they run their
+        own ``BEGIN`` — but exempt from containment is not exempt from closing a
+        failed transaction. Deleting the ``except`` that rolls back leaves the
+        refusal and the gating intact, so every other check here stays green.
+        """
+        sites = _direct_transaction_enders()
+        uncleaned = [
+            key
+            for key in OWNED_TRANSACTION_WRITERS
+            if key in sites and _failure_cleanup_lineno(sites[key]) is None
+        ]
+        assert not uncleaned, (
+            "registered owned-transaction writers with no rollback on their "
+            f"failure path: {uncleaned}"
+        )
 
     def test_no_await_inside_a_protected_region(self) -> None:
         """A suspension point hands the shared connection to another task
@@ -1048,3 +1268,139 @@ class TestRollbackRegionHelpersRejectFakeCompliance:
             "        self._commit_if_standalone(db)\n"
         )
         assert _swallowing_handlers(fn) == []
+
+    def test_a_keyword_connection_argument_is_still_a_commit(self) -> None:
+        """``_commit_if_standalone(db=db)`` is the same call; reading only
+        ``args[0]`` would make it invisible to every containment check."""
+        fn = self._fn(
+            "async def w(self):\n    db = self._get_db()\n    self._commit_if_standalone(db=db)\n"
+        )
+        assert _unprotected_writes(fn) == [3]
+
+    def test_a_cte_write_is_not_assumed_to_be_a_read(self) -> None:
+        """A statement whose verb the guard cannot see counts as a write: a
+        ``WITH`` can end in an INSERT, and guessing wrong ships the bug."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    db.execute("WITH stale AS (SELECT id FROM t) DELETE FROM t WHERE id IN stale")\n'
+            "    with self._rolls_back_if_standalone(db):\n"
+            "        self._commit_if_standalone(db)\n"
+        )
+        assert 3 in _unprotected_writes(fn)
+
+    def test_unknowable_sql_counts_as_a_write(self) -> None:
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    db.execute(build_statement())\n"
+            "    with self._rolls_back_if_standalone(db):\n"
+            "        self._commit_if_standalone(db)\n"
+        )
+        assert 3 in _unprotected_writes(fn)
+
+    def test_a_select_assembled_in_a_local_is_still_a_read(self) -> None:
+        """The filtering readers build their statement in a variable; treating
+        those as writes would force pointless regions around pure reads."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    query = "SELECT a FROM t"\n'
+            '    query += " WHERE b = ?"\n'
+            "    rows = db.execute(query, params).fetchall()\n"
+        )
+        assert _unprotected_writes(fn) == []
+
+    def test_a_write_assembled_in_a_local_is_caught(self) -> None:
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    stmt = "DELETE FROM t"\n'
+            '    stmt += " WHERE b = ?"\n'
+            "    db.execute(stmt, params)\n"
+        )
+        assert _unprotected_writes(fn) == [5]
+
+    def test_a_return_inside_the_region_is_caught(self) -> None:
+        """Neither commit nor rollback runs on this path, and the statements
+        already issued stay pending while the caller sees success."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    with self._rolls_back_if_standalone(db):\n"
+            '        cur = db.execute("DELETE FROM t WHERE id=?", (i,))\n'
+            "        if not cur.rowcount:\n"
+            "            return False\n"
+            "        self._commit_if_standalone(db)\n"
+        )
+        assert _region_exits(fn) == [6]
+
+    def test_a_return_after_the_region_is_fine(self) -> None:
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    with self._rolls_back_if_standalone(db):\n"
+            '        cur = db.execute("DELETE FROM t")\n'
+            "        self._commit_if_standalone(db)\n"
+            "    return cur.rowcount > 0\n"
+        )
+        assert _region_exits(fn) == []
+
+    def test_a_conditionally_reraising_handler_is_still_swallowing(self) -> None:
+        """One path re-raises, the other returns normally — "contains a Raise"
+        would call that compliant."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    with self._rolls_back_if_standalone(db):\n"
+            "        try:\n"
+            '            db.execute("INSERT INTO t VALUES (1)")\n'
+            "        except Exception:\n"
+            "            if strict:\n"
+            "                raise\n"
+            "        self._commit_if_standalone(db)\n"
+        )
+        assert _swallowing_handlers(fn) == [6]
+
+    def test_an_owned_writer_without_a_rollback_handler_is_caught(self) -> None:
+        """The owned-transaction half: refusal and BEGIN intact, cleanup gone."""
+        without = self._fn(
+            "async def w(self):\n"
+            '    self._require_transaction_idle("w")\n'
+            '    db.execute("BEGIN IMMEDIATE")\n'
+            '    db.execute("INSERT INTO t VALUES (1)")\n'
+            "    db.commit()\n"
+        )
+        assert _failure_cleanup_lineno(without) is None
+
+    def test_an_owned_writer_with_a_rollback_handler_passes(self) -> None:
+        with_cleanup = self._fn(
+            "async def w(self):\n"
+            '    self._require_transaction_idle("w")\n'
+            '    db.execute("BEGIN IMMEDIATE")\n'
+            "    try:\n"
+            '        db.execute("INSERT INTO t VALUES (1)")\n'
+            "        db.commit()\n"
+            "    except Exception:\n"
+            "        db.rollback()\n"
+            "        raise\n"
+        )
+        assert _failure_cleanup_lineno(with_cleanup) == 7
+
+    def test_a_rollback_on_the_success_path_is_not_failure_cleanup(self) -> None:
+        """Only a handler counts: a rollback the happy path runs says nothing
+        about what happens when the write raises."""
+        fn = self._fn(
+            "async def w(self):\n"
+            '    db.execute("BEGIN IMMEDIATE")\n'
+            "    if dry_run:\n"
+            "        db.rollback()\n"
+            "    db.commit()\n"
+        )
+        assert _failure_cleanup_lineno(fn) is None
+
+    def test_a_delegating_helper_is_classified_transitively(self) -> None:
+        """A helper that only calls another participant leaves the same rows
+        pending, and shows no SQL of its own to be spotted by."""
+        fn = self._fn("def helper(self, db):\n    self._purge_expired(db)\n")
+        assert _writes_without_committing(fn) is True
