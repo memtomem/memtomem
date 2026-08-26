@@ -11,6 +11,13 @@ from memtomem.config import Mem2MemConfig
 _YEAR_RE = re.compile(r"\d{1,4}")
 _YEAR_MONTH_RE = re.compile(r"(?P<year>\d{1,4})-(?P<month>\d{1,2})")
 
+#: ``date.fromisoformat`` accepts more than the documented ``YYYY-MM-DD``:
+#: an ISO **week** date (``2026-W15``) and the compact form (``20260406``).
+#: A week bound is the dangerous one — it parses as that week's Monday, so
+#: ``until="2026-W15"`` would cover a single day while reading like seven.
+#: Neither is documented, so both are refused rather than given a meaning.
+_CALENDAR_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
 
 def _parse_recall_date(s: str, *, end_of_period: bool = False):
     """Parse a partial or full ISO date string into a UTC datetime.
@@ -57,11 +64,17 @@ def _parse_recall_date(s: str, *, end_of_period: bool = False):
         # ``fromisoformat`` also accepts a space or a lowercase ``t`` as the
         # separator, and those spellings were being advanced by a day they
         # had not asked for.
-        try:
-            date.fromisoformat(s)
-            date_only = True
-        except ValueError:
-            date_only = False
+        date_only = bool(_CALENDAR_DATE_RE.fullmatch(s))
+        if not date_only:
+            try:
+                date.fromisoformat(s)
+            except ValueError:
+                pass  # carries a time — an instant, handled below
+            else:
+                # Parses as a date but not in the documented shape: an ISO
+                # week or the compact form. Refuse rather than assign it a
+                # period silently.
+                raise ValueError(f"undocumented date-only spelling: {s!r}")
 
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:

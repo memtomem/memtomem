@@ -495,10 +495,25 @@ class TestParseRecallDate:
             ("2026-04", datetime(2026, 4, 1, tzinfo=timezone.utc)),
         ],
     )
-    def test_the_accepted_partial_spellings_are_unchanged(self, value: str, expected: datetime):
-        """Tightening the match must not narrow what already worked — a
-        single-digit month is one of the accepted spellings."""
+    def test_the_documented_partial_spellings_are_unchanged(self, value: str, expected: datetime):
+        """Tightening the match must not narrow the documented spellings — a
+        single-digit month is one of them.
+
+        It does narrow some *undocumented* ones that `int()` used to swallow
+        (`02026`, `+2026`, `2_026`, `2026-004`, `2026- 4`), which is the
+        point of matching the whole value.
+        """
         assert _parse_recall_date(value) == expected
+
+    @pytest.mark.parametrize("value", ["2026-W15", "20260406"])
+    def test_an_undocumented_date_only_spelling_is_refused(self, value: str):
+        """``date.fromisoformat`` accepts more than ``YYYY-MM-DD``. An ISO
+        week is the dangerous one: ``2026-W15`` parses as that week's Monday,
+        so ``until="2026-W15"`` would cover a single day while reading like
+        seven. Neither shape is documented, so neither gets a silent meaning.
+        """
+        with pytest.raises(ValueError, match="Invalid date"):
+            _parse_recall_date(value)
 
 
 # ===========================================================================
