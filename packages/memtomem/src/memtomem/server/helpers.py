@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
+import re
+
 from memtomem.config import Mem2MemConfig
+
+#: The two partial-period spellings ``_parse_recall_date`` accepts. Matched
+#: against the whole value so a suffix cannot ride along unread.
+_YEAR_RE = re.compile(r"\d{1,4}")
+_YEAR_MONTH_RE = re.compile(r"(?P<year>\d{1,4})-(?P<month>\d{1,2})")
+
+#: ``date.fromisoformat`` accepts more than the documented ``YYYY-MM-DD``:
+#: an ISO **week** date (``2026-W15``) and the compact form (``20260406``).
+#: A week bound is the dangerous one — it parses as that week's Monday, so
+#: ``until="2026-W15"`` would cover a single day while reading like seven.
+#: Neither is documented, so both are refused rather than given a meaning.
+_CALENDAR_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _parse_recall_date(s: str, *, end_of_period: bool = False):
@@ -13,36 +27,71 @@ def _parse_recall_date(s: str, *, end_of_period: bool = False):
     bound is used as an exclusive upper bound (``created_at < until``).
 
     Supported formats: ``YYYY``, ``YYYY-MM``, ``YYYY-MM-DD``, full ISO datetime.
+
+    The result is always in UTC. ``chunks.created_at`` is stored as a UTC
+    ISO-8601 string and the bound is compared against it **lexically** in SQL,
+    so an offset-carrying bound left as-is would sort by its printed digits
+    rather than by the instant it denotes: ``2026-01-01T00:00:00+09:00``
+    (= ``2025-12-31T15:00Z``) would exclude a row written at
+    ``2025-12-31T16:00Z``, which is after it.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import date, datetime, timedelta, timezone
 
     s = s.strip()
-    date_part = s.split("T")[0]
-    has_time = "T" in s
-    parts = date_part.split("-")
 
     try:
-        if len(parts) == 1:
-            year = int(parts[0])
+        # A partial period has to be the *whole* value. Routing on
+        # ``s.split("T")[0]`` instead let a suffix ride along unread, so
+        # ``2026Tgarbage`` was accepted as the year 2026 and
+        # ``2026-04T14:30`` as the month of April — neither a documented
+        # partial date nor a value ``fromisoformat`` would accept.
+        if _YEAR_RE.fullmatch(s):
+            year = int(s)
             return datetime(year + (1 if end_of_period else 0), 1, 1, tzinfo=timezone.utc)
 
-        if len(parts) == 2:
-            year, month = int(parts[0]), int(parts[1])
+        year_month = _YEAR_MONTH_RE.fullmatch(s)
+        if year_month:
+            year, month = int(year_month["year"]), int(year_month["month"])
             if end_of_period:
                 if month == 12:
                     return datetime(year + 1, 1, 1, tzinfo=timezone.utc)
                 return datetime(year, month + 1, 1, tzinfo=timezone.utc)
             return datetime(year, month, 1, tzinfo=timezone.utc)
 
-        # YYYY-MM-DD or full ISO datetime
+        # YYYY-MM-DD or full ISO datetime. Only a date-only bound names a
+        # whole period to advance past; one carrying a time is already an
+        # instant. Decide that by parsing rather than by looking for a ``T``:
+        # ``fromisoformat`` also accepts a space or a lowercase ``t`` as the
+        # separator, and those spellings were being advanced by a day they
+        # had not asked for.
+        date_only = bool(_CALENDAR_DATE_RE.fullmatch(s))
+        if not date_only:
+            try:
+                date.fromisoformat(s)
+            except ValueError:
+                pass  # carries a time — an instant, handled below
+            else:
+                # Parses as a date but not in the documented shape: an ISO
+                # week or the compact form. Refuse rather than assign it a
+                # period silently.
+                raise ValueError(f"undocumented date-only spelling: {s!r}")
+
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        if end_of_period and not has_time:
+        else:
+            dt = dt.astimezone(timezone.utc)
+        if end_of_period and date_only:
             dt = dt + timedelta(days=1)
         return dt
 
-    except (ValueError, TypeError) as exc:
+    # OverflowError joins the list because converting to UTC can push a bound
+    # at the very edge of the representable range past it
+    # (``9999-12-31T23:30:00-01:00`` is year 10000 in UTC). That is a bound
+    # this function cannot express, which is what its ValueError means —
+    # letting it escape as OverflowError would reach callers as an internal
+    # error instead of the documented validation failure.
+    except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError(
             f"Invalid date: {s!r}. Use YYYY, YYYY-MM, YYYY-MM-DD or ISO datetime."
         ) from exc

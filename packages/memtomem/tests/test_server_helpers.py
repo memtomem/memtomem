@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -418,6 +418,102 @@ class TestParseRecallDate:
     def test_invalid_date_raises(self):
         with pytest.raises(ValueError, match="Invalid date"):
             _parse_recall_date("not-a-date")
+
+    @pytest.mark.parametrize(
+        "value",
+        ["2026-04-06T14:30:00+09:00", "2026-04-06T14:30:00-05:00"],
+    )
+    def test_an_offset_bound_is_converted_to_utc(self, value: str):
+        """The bound is compared against ``created_at`` lexically in SQL, and
+        that column holds UTC. A bound still carrying its original offset
+        would sort by printed digits rather than by the instant it denotes."""
+        dt = _parse_recall_date(value)
+
+        assert dt.utcoffset() == timedelta(0)
+        assert dt == datetime.fromisoformat(value)
+
+    def test_the_offset_bound_orders_correctly_against_a_stored_row(self):
+        """The regression in full: ``2026-01-01T00:00+09:00`` is
+        ``2025-12-31T15:00Z``, so a row written an hour later belongs in a
+        ``since`` range starting there. Compared as raw strings it did not."""
+        bound = _parse_recall_date("2026-01-01T00:00:00+09:00")
+        row = "2025-12-31T16:00:00+00:00"
+
+        assert datetime.fromisoformat(row) >= bound  # the true answer
+        assert row >= bound.isoformat()  # what the SQL comparison sees
+
+    @pytest.mark.parametrize(
+        "separator",
+        ["T", " ", "t"],
+        ids=["upper-T", "space", "lower-t"],
+    )
+    def test_a_timestamped_until_is_not_advanced_a_day(self, separator: str):
+        """``end_of_period`` advances a *date* to the start of the next one.
+        A bound that already names a time is an instant and must be left
+        alone — but the date-only test used to be ``"T" in s``, and
+        ``fromisoformat`` accepts a space and a lowercase ``t`` too, so those
+        two spellings silently gained 24 hours of range."""
+        dt = _parse_recall_date(f"2026-04-06{separator}14:30:00+00:00", end_of_period=True)
+
+        assert dt == datetime(2026, 4, 6, 14, 30, tzinfo=timezone.utc)
+
+    def test_a_date_only_until_still_advances(self):
+        """The counterpart pin: the advance itself must survive the fix."""
+        assert _parse_recall_date("2026-04-06", end_of_period=True) == datetime(
+            2026, 4, 7, tzinfo=timezone.utc
+        )
+
+    @pytest.mark.parametrize("value", ["2026Tgarbage", "2026-04T14:30", "2026-04junk"])
+    def test_a_partial_period_with_a_suffix_is_rejected(self, value: str):
+        """Routing on ``s.split("T")[0]`` read only the head of the value, so
+        a suffix rode along unread and the bound silently became a whole year
+        or month. A partial period has to be the entire value."""
+        with pytest.raises(ValueError, match="Invalid date"):
+            _parse_recall_date(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        ["9999-12-31T23:30:00-01:00", "0001-01-01T00:30:00+01:00"],
+        ids=["past-max", "before-min"],
+    )
+    def test_a_bound_whose_utc_instant_is_unrepresentable_raises_the_documented_error(
+        self, value: str
+    ):
+        """Converting to UTC can push an edge-of-range bound past the range
+        (``9999-12-31T23:30-01:00`` is year 10000 in UTC). ``OverflowError``
+        is not a subclass of ``ValueError``, so without translating it the
+        caller gets an internal error where this function promises a
+        validation one."""
+        with pytest.raises(ValueError, match="Invalid date"):
+            _parse_recall_date(value)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("2026", datetime(2026, 1, 1, tzinfo=timezone.utc)),
+            ("2026-4", datetime(2026, 4, 1, tzinfo=timezone.utc)),
+            ("2026-04", datetime(2026, 4, 1, tzinfo=timezone.utc)),
+        ],
+    )
+    def test_the_documented_partial_spellings_are_unchanged(self, value: str, expected: datetime):
+        """Tightening the match must not narrow the documented spellings — a
+        single-digit month is one of them.
+
+        It does narrow some *undocumented* ones that `int()` used to swallow
+        (`02026`, `+2026`, `2_026`, `2026-004`, `2026- 4`), which is the
+        point of matching the whole value.
+        """
+        assert _parse_recall_date(value) == expected
+
+    @pytest.mark.parametrize("value", ["2026-W15", "20260406"])
+    def test_an_undocumented_date_only_spelling_is_refused(self, value: str):
+        """``date.fromisoformat`` accepts more than ``YYYY-MM-DD``. An ISO
+        week is the dangerous one: ``2026-W15`` parses as that week's Monday,
+        so ``until="2026-W15"`` would cover a single day while reading like
+        seven. Neither shape is documented, so neither gets a silent meaning.
+        """
+        with pytest.raises(ValueError, match="Invalid date"):
+            _parse_recall_date(value)
 
 
 # ===========================================================================
