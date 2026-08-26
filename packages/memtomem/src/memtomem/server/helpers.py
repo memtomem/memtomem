@@ -19,6 +19,23 @@ _YEAR_MONTH_RE = re.compile(r"(?P<year>\d{1,4})-(?P<month>\d{1,2})")
 _CALENDAR_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
+def _names_a_whole_day(s: str) -> bool:
+    """Whether the value names a whole calendar period rather than an instant.
+
+    ``YYYY`` / ``YYYY-MM`` / ``YYYY-MM-DD`` name a period; anything carrying a
+    time names an instant. Day-granular surfaces need the distinction because
+    they cannot represent an intraday bound: ``mem_activity`` groups by
+    ``DATE(created_at)``, so an ``until`` of ``…T14:30`` could only be rounded
+    to a whole day, silently counting the rest of it.
+
+    Shares the parser's own patterns so the two cannot drift.
+    """
+    s = s.strip()
+    return bool(
+        _YEAR_RE.fullmatch(s) or _YEAR_MONTH_RE.fullmatch(s) or _CALENDAR_DATE_RE.fullmatch(s)
+    )
+
+
 def _parse_recall_date(s: str, *, end_of_period: bool = False):
     """Parse a partial or full ISO date string into a UTC datetime.
 

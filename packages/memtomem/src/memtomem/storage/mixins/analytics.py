@@ -229,7 +229,14 @@ class AnalyticsMixin:
         until: str | None = None,
         namespace: str | None = None,
     ) -> list[dict]:
-        """Aggregate created/updated/accessed counts by day."""
+        """Aggregate created/updated/accessed counts by day.
+
+        ``since`` and ``until`` are ``YYYY-MM-DD`` day labels and **both ends
+        are inclusive** — the comparison is `DATE(created_at) BETWEEN`, so
+        ``until`` names the last day counted, not the first day excluded.
+        Callers holding an exclusive instant must step back to the day it
+        admits before passing it here.
+        """
         db = self._get_read_db()
 
         # Build date filter

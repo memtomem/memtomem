@@ -9,7 +9,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.helpers import _parse_recall_date
+from memtomem.server.helpers import _names_a_whole_day, _parse_recall_date
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,10 @@ async def mem_timeline(
         dt = chunk.created_at
         if since_dt and dt < since_dt:
             continue
-        if until_dt and dt > until_dt:
+        # ``>=``, not ``>``: ``until_dt`` is the start of the period *after*
+        # the requested one, so a chunk landing exactly on it belongs to the
+        # next period.
+        if until_dt and dt >= until_dt:
             continue
 
         tags = list(chunk.metadata.tags) if chunk.metadata.tags else []
@@ -115,29 +118,61 @@ async def mem_activity(
 
     Args:
         since: Start date (YYYY, YYYY-MM, YYYY-MM-DD, default: 30 days ago)
-        until: End date (default: now)
+        until: End date, inclusive — the last day counted (default: now).
+            Counts are per day, so a time of day is refused rather than
+            rounded up to the whole day.
         namespace: Namespace scope
     """
     from memtomem.tools.temporal import ActivityDay, format_activity
 
     app = await _get_app_initialized(ctx)
 
-    # Default: last 30 days
+    # This summary groups by ``DATE(created_at)``, so it can only express whole
+    # days. An intraday bound would have to be rounded to one, which counts the
+    # rest of that day — the caller asked for less than they get, silently. The
+    # documented shapes are all whole periods, so refuse the rest rather than
+    # round. (The implicit ``now`` default is the one instant that does round,
+    # and it rounds to "through today", which is what "default: now" means.)
+    for name, raw in (("since", since), ("until", until)):
+        if raw and not _names_a_whole_day(raw):
+            return (
+                f"Error: {name}={raw!r} names a time of day, but this summary counts "
+                "whole days. Use YYYY, YYYY-MM, or YYYY-MM-DD."
+            )
+
+    # Day labels are rendered with ``date().isoformat()`` rather than
+    # ``strftime("%Y-%m-%d")``: glibc does not zero-pad ``%Y``, so year 1 comes
+    # out as ``1-01-01`` on Linux and ``0001-01-01`` on macOS. These strings are
+    # compared lexically by SQL, and ``'1-01-01' >= '0001-06-01'`` is True — a
+    # bound that renders unpadded silently selects the wrong rows. ``isoformat``
+    # pads on every platform.
     now = datetime.now(timezone.utc)
     try:
         if since:
             since_dt = _parse_recall_date(since)
-            since_str = since_dt.strftime("%Y-%m-%d")
+            since_str = since_dt.date().isoformat()
         else:
             since_dt = now - timedelta(days=30)
-            since_str = since_dt.strftime("%Y-%m-%d")
+            since_str = since_dt.date().isoformat()
 
         if until:
             until_dt = _parse_recall_date(until, end_of_period=True)
-            until_str = until_dt.strftime("%Y-%m-%d")
+            # ``until_dt`` is exclusive — ``_parse_recall_date`` advances a
+            # whole period to the start of the next one — but
+            # ``get_activity_summary`` compares ``DATE(created_at) <= ?``,
+            # which is inclusive. Passing the exclusive bound straight through
+            # counted one day too many: ``until="2026-04"`` reached 2026-05-01.
+            # Step back to the last instant the bound admits and take its date,
+            # which is also the right label for the rendered range. Everything
+            # reaching here names a whole period (guarded above), so the step
+            # back never underflows the minimum representable date.
+            until_str = (until_dt - timedelta(microseconds=1)).date().isoformat()
         else:
+            # ``now`` is already *inside* the day it names, so it needs no step
+            # back — and must not get one: at exactly 00:00:00 the subtraction
+            # lands on yesterday and drops today's activity entirely.
             until_dt = now
-            until_str = until_dt.strftime("%Y-%m-%d")
+            until_str = now.date().isoformat()
     except ValueError as exc:
         return f"Error: {exc}"
 
