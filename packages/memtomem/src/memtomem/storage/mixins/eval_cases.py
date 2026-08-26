@@ -27,7 +27,7 @@ from typing import Any
 from uuid import uuid4
 
 from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValidationError
-from memtomem.models import ScopeFilter
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
 from memtomem.privacy import scan as _privacy_scan
 from memtomem.storage.mixins.history import FEEDBACK_JUDGMENTS
 from memtomem.storage.sqlite_scope import _scopes_glob_clause, _scopes_in_clause
@@ -176,6 +176,16 @@ def validate_portable_filters(db: sqlite3.Connection, filters: object) -> None:
         elif not isinstance(value, str):
             raise EvalCaseError(f"case filter {field!r} must be a string, list of strings, or null")
         _reject_path_shaped(field, value)
+        # Run the production parser here so a filter that cannot be expressed
+        # (a comma list mixed with a glob) is refused at the boundary that
+        # admits the case, not at replay. Translated to EvalCaseError because
+        # this function's contract is that every violation raises that type —
+        # callers catch it by name.
+        parser = NamespaceFilter.parse if field == "namespace" else ScopeFilter.parse
+        try:
+            parser(value)
+        except InvalidFilterSyntaxError as exc:
+            raise EvalCaseError(f"case filter {field!r} is not replayable: {exc}") from exc
     scope = filters.get("scope")
     if scope is not None and _scope_implies_project(db, scope):
         raise EvalCaseError(
