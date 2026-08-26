@@ -672,3 +672,235 @@ async def test_recovered_watcher_indexes_a_new_file_without_a_restart(tmp_path, 
         assert indexed, "watcher never indexed the new file after recovery"
     finally:
         await app.close()
+
+
+# ── #2180: the retired generation is closed by lease, not immediately ──
+
+
+def _count_closes(app, closed: list[str]):
+    """Replace the live pipeline/embedder closes with order-recording stubs.
+
+    Returns the two instances so a test can assert against identity after the
+    swap has moved ``app.embedder`` / ``app.search_pipeline`` on.
+    """
+    embedder = app.embedder
+    pipeline = app.search_pipeline
+
+    def _record(name):
+        async def _close():
+            closed.append(name)
+
+        return _close
+
+    embedder.close = _record("embedder")
+    pipeline.close = _record("pipeline")
+    return embedder, pipeline
+
+
+async def test_inflight_search_keeps_the_retired_generation_open(degraded_components):
+    """A search that entered before the revert must finish on the generation
+    it started with. Pre-#2180 the revert closed the embedder inline, so the
+    dense leg could resume against a closed ONNX session (``_closing`` latched,
+    inference executor shut down with ``cancel_futures=True``)."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    closed: list[str] = []
+    old_embedder, old_pipeline = _count_closes(app, closed)
+    old_generation = degraded_components.generation
+
+    # Stand in for a search parked mid-pipeline: the lease is what the ranked
+    # search body holds across its awaits.
+    with old_generation.hold():
+        out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "Reverted to stored DB settings" in out
+        assert app.embedder is not old_embedder, "the new generation must be published"
+        assert closed == [], "the retired generation was closed under an in-flight lease"
+
+    # Last release schedules the deferred close as a background task.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert closed == ["pipeline", "embedder"]
+    assert app.search_pipeline is not old_pipeline
+
+
+async def test_retired_generation_closes_exactly_once(degraded_components):
+    """Two leaseholders, one close. The pop-before-schedule latch means the
+    first release to reach zero owns the close and every later path — another
+    release, the shutdown drain — finds nothing to run."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    closed: list[str] = []
+    _count_closes(app, closed)
+    old_generation = degraded_components.generation
+
+    with old_generation.hold():
+        with old_generation.hold():
+            await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+            assert closed == []
+        assert closed == [], "close fired while a second lease was still held"
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert closed == ["pipeline", "embedder"]
+
+    # The fixture's own ``close_components`` drains retired generations too;
+    # it must not close this pair a second time.
+    await close_components(degraded_components)
+    assert closed == ["pipeline", "embedder"]
+
+
+async def test_revert_with_no_inflight_work_closes_inline(degraded_components):
+    """Acceptance criterion 3: an idle revert must not defer anything — the
+    close completes before the tool returns, with no background task left."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    closed: list[str] = []
+    _count_closes(app, closed)
+    old_generation = degraded_components.generation
+
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert closed == ["pipeline", "embedder"], "idle revert deferred its close"
+    assert old_generation._close_cb is None
+    assert old_generation._close_task is None
+
+
+async def test_second_revert_leaves_the_older_leased_generation_pinned(degraded_components):
+    """Generations are independent: a still-leased gen N-2 must not be closed
+    by the revert that retires gen N-1, and gen N-1 (idle) closes inline."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    closed: list[str] = []
+    _count_closes(app, closed)
+    gen1 = degraded_components.generation
+
+    with gen1.hold():
+        await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+        assert closed == []
+
+        # Re-arm the mismatch so a second revert has something to swap.
+        # ``embedding_mismatch`` is derived from these raw tuples
+        # (stored provider, stored model, configured provider, configured model).
+        app.storage._model_mismatch = ("onnx", "bge-m3", "onnx", "bge-large")
+        gen2 = degraded_components.generation
+        gen2_embedder = app.embedder
+        gen2_pipeline = app.search_pipeline
+        gen2_closed: list[str] = []
+        _count_closes(app, gen2_closed)
+
+        await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+        assert gen2_closed == ["pipeline", "embedder"], "idle gen N-1 must close inline"
+        assert gen2 is not gen1
+        assert app.embedder is not gen2_embedder
+        assert app.search_pipeline is not gen2_pipeline
+        assert closed == [], "gen N-2 closed while still leased"
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert closed == ["pipeline", "embedder"]
+
+
+async def test_shutdown_drains_a_generation_nobody_released(degraded_components):
+    """A leaseholder that never releases (hung or cancelled task) would pin
+    the retired ONNX session for the life of the process. ``close_components``
+    is the backstop, and a late release must then schedule nothing."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    closed: list[str] = []
+    _count_closes(app, closed)
+    old_generation = degraded_components.generation
+
+    lease = old_generation.hold()
+    lease.__enter__()
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+    assert closed == []
+
+    await close_components(degraded_components)
+    assert closed == ["pipeline", "embedder"]
+
+    lease.__exit__(None, None, None)
+    await asyncio.sleep(0)
+    assert closed == ["pipeline", "embedder"], "the late release closed it a second time"
+
+
+async def test_a_real_search_survives_a_revert_end_to_end(degraded_components):
+    """The acceptance criterion over the factory wiring, not a hand-held
+    lease: a real ``pipeline.search()`` parked in retrieval must finish on the
+    generation it started with, and only then may that generation close.
+
+    Pinning the whole chain matters — a ``Components`` whose container,
+    pipeline and engine ended up on three different handles would still pass
+    the hand-held variants above while closing the embedder mid-search here.
+
+    Retrieval, not the dense leg: this stack is degraded, and a live embedding
+    mismatch suppresses dense retrieval outright (``use_dense`` in
+    ``pipeline.search``), so BM25 is where a search in this state actually
+    parks.
+    """
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    pipeline = app.search_pipeline
+    embedder = app.embedder
+    generation = degraded_components.generation
+    closed: list[str] = []
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_bm25 = app.storage.bm25_search
+
+    async def _blocked_bm25(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await real_bm25(*args, **kwargs)
+
+    app.storage.bm25_search = _blocked_bm25
+
+    def _record(name):
+        async def _close():
+            closed.append(name)
+
+        return _close
+
+    embedder.close = _record("embedder")
+    pipeline.close = _record("pipeline")
+
+    search_task = asyncio.create_task(pipeline.search("anything", top_k=5))
+    await entered.wait()
+    assert generation.leases == 1, "the real search path did not lease its generation"
+
+    out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "Reverted to stored DB settings" in out
+    assert app.embedder is not embedder, "the new generation must be published"
+    assert closed == [], "the revert closed the retired generation under a live search"
+
+    release.set()
+    await search_task
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert closed == ["pipeline", "embedder"]
+
+
+async def test_components_aligns_the_generation_across_the_triple(degraded_components):
+    """A hand-assembled ``Components`` (CLI stacks, tests,
+    ``from_components`` callers) must not end up with the container counting
+    one handle while the pipeline and engine count two others — a revert would
+    then read zero leases and close an embedder two live components use."""
+    from memtomem.runtime.components import Components
+
+    comp = Components(
+        config=degraded_components.config,
+        storage=degraded_components.storage,
+        embedder=degraded_components.embedder,
+        index_engine=degraded_components.index_engine,
+        search_pipeline=degraded_components.search_pipeline,
+    )
+
+    assert comp.generation is comp.search_pipeline._generation
+    assert comp.generation is comp.index_engine._generation
+
+    with comp.search_pipeline._generation.hold():
+        assert comp.generation.leases == 1
