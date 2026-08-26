@@ -267,6 +267,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Recovering from degraded embedding mode no longer needs a server restart to
+  bring the background loops back.** A server that starts with a broken
+  embedding setup skips the file watcher, the consolidation and policy
+  schedulers, and the health watchdog — those loops walk the index and would
+  crash on the missing vector table. Recovering with `mem_embedding_reset`
+  (either mode) fixed search but left every one of them down: files dropped
+  into a memory dir were not auto-indexed, no maintenance ran, and
+  `mem_watchdog` reported "not enabled", which reads as a configuration
+  problem rather than a suppressed service. The reset now starts what startup
+  skipped, in-process. Recovery is per service and retryable — a service whose
+  start fails is reported in the log and retried by the next reset instead of
+  being written off, and a reset on an already-recovered server starts no
+  duplicate loop. `mem_watchdog` now distinguishes "disabled in config" from
+  "suppressed by degraded startup" from "enabled but its recovery start
+  failed". `mm web` is not covered — a degraded web startup never builds a
+  watcher for a reset to start — so its `POST /api/embedding-reset`
+  now says a restart is still needed instead of reporting a bare success.
+  (#2181)
 - **A consolidation summary is now identified by provenance, not by its tags.**
   The auto-consolidate policy owns the virtual path
   `<source>.consolidated.md` and clears it before writing a replacement. What

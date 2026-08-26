@@ -29,7 +29,25 @@ async def mem_watchdog(
     app = await _get_app_initialized(ctx)
     watchdog = app.health_watchdog
     if watchdog is None:
-        return "Health watchdog is not enabled. Set MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true"
+        # A missing handle has three causes, and reporting all of them as
+        # "not enabled" sends a user to the config for a problem that is not
+        # there (#2181). The mismatch is read live off storage — the startup
+        # snapshot on Components is cleared by recovery, so it cannot tell
+        # "still degraded" from "recovered but the start failed".
+        if not app.config.health_watchdog.enabled:
+            return "Health watchdog is not enabled. Set MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true"
+        if getattr(app.storage, "embedding_mismatch", None) is not None:
+            return (
+                "Health watchdog is enabled but suppressed: the server started in "
+                'degraded embedding mode. Run mem_embedding_reset(mode="apply_current") '
+                'or mem_embedding_reset(mode="revert_to_stored") to recover — the '
+                "watchdog starts as part of that recovery."
+            )
+        return (
+            "Health watchdog is enabled but not running — a recovery start likely "
+            "failed. Check the server log for the failure, then re-run "
+            "mem_embedding_reset to retry (or restart the server)."
+        )
 
     if command == "status":
         data = watchdog.get_status()

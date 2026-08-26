@@ -766,6 +766,11 @@ async def _revert_to_stored_locked(
     config = app.config
     mismatch = storage.embedding_mismatch
     if mismatch is None:
+        # Nothing to swap, but this is still the non-destructive retry for a
+        # service whose recovery start failed on an earlier reset (#2181).
+        # Without it the only in-process retry would be ``apply_current``,
+        # which drops every vector to restart a scheduler.
+        await app.recover_from_degraded()
         return "No mismatch detected — nothing to revert."
 
     stored = mismatch["stored"]
@@ -840,6 +845,19 @@ async def _revert_to_stored_locked(
     # of swapping — and closing — this freshly published generation.
     storage.clear_embedding_mismatch()
 
+    # Start what degraded startup skipped (#2181). Placed here, not after the
+    # retirement loop below: that loop re-raises a deferred cancellation, which
+    # would skip recovery entirely. It has to run after the rebind above so the
+    # watcher starts against the new generation, not the retired one.
+    # Its own cancellation joins the deferred accumulation rather than
+    # propagating here — a cancel mid-recovery must not skip the retirement
+    # closes and reintroduce the #2176 leak.
+    first_cancel: asyncio.CancelledError | None = None
+    try:
+        await app.recover_from_degraded()
+    except asyncio.CancelledError as exc:
+        first_cancel = exc
+
     # New generation is published everywhere — retire the old one. A close
     # that fails must not fail the revert the user asked for: the swap
     # already happened, so log and continue (the leak is then no worse than
@@ -847,7 +865,6 @@ async def _revert_to_stored_locked(
     # (the lifespan teardown pattern): every retirement step is attempted
     # even when this task is cancelled mid-close, then the cancellation
     # propagates.
-    first_cancel: asyncio.CancelledError | None = None
     for resource, label in ((old_pipeline, "search pipeline"), (old_embedder, "embedder")):
         close = getattr(resource, "close", None)
         if close is None:
@@ -929,6 +946,11 @@ async def mem_embedding_reset(
             policy_fingerprint=embedding_policy_fingerprint(config.embedding),
             max_sequence_tokens=config.embedding.max_sequence_tokens,
         )
+        # The mismatch is cleared, so the background loops a degraded startup
+        # skipped can run again (#2181). Called unconditionally: on a context
+        # that already recovered this no-ops, and it is also the retry path
+        # for a service whose earlier recovery start failed.
+        await app.recover_from_degraded()
         # The remedy names the CLI because re-embedding a whole tree is a
         # long, interruptible job better run from a shell than from a tool
         # call holding a client's turn open. It is no longer a safety caveat:

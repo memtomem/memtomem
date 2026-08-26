@@ -1467,6 +1467,12 @@ async def reset_embedding(
     """Reset embedding metadata to current config. Drops all vectors."""
     from memtomem.config import embedding_policy_fingerprint
 
+    # A degraded ``mm web`` startup never constructs the file watcher (see
+    # ``web/app.py``), and unlike the MCP server there is nothing here to
+    # start afterwards — clearing the mismatch repairs search but leaves
+    # auto-indexing off. Say so rather than reporting a bare success (#2181).
+    was_degraded = getattr(storage, "embedding_mismatch", None) is not None
+
     await storage.reset_embedding_meta(
         dimension=config.embedding.dimension,
         provider=config.embedding.provider,
@@ -1474,10 +1480,13 @@ async def reset_embedding(
         policy_fingerprint=embedding_policy_fingerprint(config.embedding),
         max_sequence_tokens=config.embedding.max_sequence_tokens,
     )
-    return EmbeddingResetResponse(
-        ok=True,
-        message=("Embedding metadata reset. All indexed vectors deleted — run a forced re-index."),
-    )
+    message = "Embedding metadata reset. All indexed vectors deleted — run a forced re-index."
+    if was_degraded:
+        message += (
+            " This server started in degraded mode, so file watching is off:"
+            " restart `mm web` to resume auto-indexing."
+        )
+    return EmbeddingResetResponse(ok=True, message=message)
 
 
 @router.post("/reset", dependencies=[Depends(_require_localhost)])
