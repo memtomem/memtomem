@@ -430,6 +430,24 @@ class TestPortableFilters:
         with pytest.raises(EvalCaseError):
             await storage.import_eval_cases(_envelope([case]))
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("namespace", "archive:*,work"), ("scope", "project_*,user")],
+    )
+    async def test_import_rejects_a_filter_that_mixes_a_comma_list_with_a_glob(
+        self, bm25_only_components, field: str, value: str
+    ):
+        """Import is the boundary that admits a case, so an unexpressible
+        filter has to be refused here — and as ``EvalCaseError``, the type
+        this validator promises and callers catch by name. Left to replay it
+        would surface as a bare ``ValueError`` past that handler."""
+        comp, _ = bm25_only_components
+        storage = comp.storage
+        case = _case("c-mix", "alpha", [("hash-1", "relevant")])
+        case["filters"] = {field: value}
+        with pytest.raises(EvalCaseError):
+            await storage.import_eval_cases(_envelope([case]))
+
     async def test_unreplayable_filter_case_excluded(self, bm25_only_components):
         comp, _ = bm25_only_components
         storage, pipeline = comp.storage, comp.search_pipeline

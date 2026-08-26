@@ -14,7 +14,10 @@ from memtomem.models import (
     ChunkType,
     ContextInfo,
     IndexingStats,
+    InvalidNamespaceFilterError,
+    InvalidScopeFilterError,
     NamespaceFilter,
+    ScopeFilter,
     SearchResult,
 )
 
@@ -99,6 +102,38 @@ class TestNamespaceFilterParse:
         assert f is not None
         assert f.namespaces == ("archive:summary",)
         assert f.exclude_prefixes == ()
+
+    def test_comma_list_mixed_with_a_glob_is_rejected(self):
+        """``*`` is checked before ``,``, so this used to parse as one pattern
+        containing a literal comma — a LIKE that matches nothing. An empty
+        result set is indistinguishable from "no such chunks", so the caller
+        never learns the query was malformed."""
+        with pytest.raises(InvalidNamespaceFilterError) as excinfo:
+            NamespaceFilter.parse("archive:*,work")
+
+        # The message has to name both working spellings; a user who hit this
+        # needs to know which half to keep.
+        assert "archive:*,work" in str(excinfo.value)
+
+    def test_a_list_argument_may_hold_a_glob_looking_entry(self):
+        """The rejection is about the *string* spelling being ambiguous. A
+        list is already unambiguous — every entry is an exact name — so a
+        value containing ``*`` stays an exact name rather than raising."""
+        f = NamespaceFilter.parse(["lit*eral", "work"])
+
+        assert f is not None
+        assert f.namespaces == ("lit*eral", "work")
+        assert f.pattern is None
+
+
+class TestScopeFilterParse:
+    def test_comma_list_mixed_with_a_glob_is_rejected(self):
+        with pytest.raises(InvalidScopeFilterError):
+            ScopeFilter.parse("project_*,user")
+
+    def test_plain_glob_and_plain_comma_list_still_parse(self):
+        assert ScopeFilter.parse("project_*").pattern == "project_*"
+        assert ScopeFilter.parse("user,project_local").scopes == ("user", "project_local")
 
 
 class TestChunk:

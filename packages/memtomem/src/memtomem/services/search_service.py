@@ -266,6 +266,9 @@ async def run_search(
         InvalidTemporalBoundError: ``as_of`` is not a recognized bound.
         InvalidRrfWeightError: a weight is negative or non-finite, or both
             weights are zero.
+        InvalidFilterSyntaxError: ``namespace`` or ``scope`` mixes a comma
+            list with a glob. Raised from the pipeline's parse, so callers
+            that validate up front see it before this function is reached.
     """
     as_of_unix = parse_as_of_bound(as_of)
 

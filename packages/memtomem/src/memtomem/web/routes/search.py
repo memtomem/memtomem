@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.web.deps import get_config, get_search_pipeline
 from memtomem.web.schemas.core import RetrievalStatsOut, to_result_out
@@ -48,6 +49,15 @@ async def search(
         created_before = created_before.astimezone(UTC)
     if created_from is not None and created_before is not None and created_from >= created_before:
         raise HTTPException(status_code=422, detail="created_from must be before created_before")
+
+    # Parse the namespace here rather than letting the pipeline do it: the
+    # ``except Exception`` around the search call below turns anything raised
+    # there into a 500, and a filter the caller spelled wrong is a request
+    # problem, not a server fault.
+    try:
+        NamespaceFilter.parse(namespace)
+    except InvalidFilterSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if not q and not (
         tag_filter or source_filter or source_exact or chunk_type or created_from or created_before
