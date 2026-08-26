@@ -1788,7 +1788,7 @@ def _dedup_key(item: object) -> object:
     return item
 
 
-def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
+def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = False) -> None:
     """Apply fragments from ``~/.memtomem/config.d/*.json`` (if dir exists).
 
     Intended for administrator-managed or external integration fragments that
@@ -1815,13 +1815,24 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
     for every PATCH. Exceptions that represent real errors still raise
     (pydantic validation etc. are already caught + logged here, not
     raised, so this toggle is purely about log noise).
+
+    ``strict=True`` turns every one of those skips into a
+    :class:`ConfigFragmentError`. A caller that *acts on the difference*
+    between two loads — the MCP server reconciling its watched roots (#2186)
+    — cannot tell a skipped fragment from a user who deleted what it declared,
+    so for that caller a fragment it cannot fully apply has to fail the whole
+    load rather than quietly yield a config missing part of itself.
     """
     import json as _json
     import logging
 
+    from memtomem.errors import ConfigFragmentError
+
     _log = logging.getLogger(__name__)
 
     def _warn(msg: str, *args: object) -> None:
+        if strict:
+            raise ConfigFragmentError(msg % args)
         if not quiet:
             _log.warning(msg, *args)
 

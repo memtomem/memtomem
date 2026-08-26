@@ -646,3 +646,67 @@ async def test_a_corrupted_fragment_is_not_read_as_a_removal(
 
     watcher.reconfigure.assert_not_awaited()
     assert _roots(ctx) == from_fragment
+
+
+@pytest.mark.asyncio
+async def test_a_semantically_corrupt_fragment_is_not_read_as_a_removal(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    """Valid JSON is not the same as an applicable fragment.
+
+    ``{"indexing": {"memory_dirs": "oops"}}`` parses fine and is then skipped
+    by the loader for having the wrong type — handing back a config without
+    the roots that fragment used to declare. Checking JSON syntax alone would
+    wave this through and unwatch them.
+    """
+    root = tmp_path / "one"
+    extra = tmp_path / "two"
+    root.mkdir()
+    extra.mkdir()
+    ctx, watcher = await _make_app(_isolated_config_home, [root])
+
+    (_isolated_config_home / ".memtomem" / "config.json").write_text("{}", encoding="utf-8")
+    frag_dir = _isolated_config_home / ".memtomem" / "config.d"
+    frag_dir.mkdir(exist_ok=True)
+    frag = frag_dir / "10-roots.json"
+    frag.write_text(
+        json.dumps({"indexing": {"memory_dirs": [str(root), str(extra)]}}), encoding="utf-8"
+    )
+    await ctx.reconcile_watched_roots()
+    from_fragment = _roots(ctx)
+    assert extra.resolve() in from_fragment
+
+    watcher.reconfigure.reset_mock()
+    # Still valid JSON, still a JSON object — just the wrong type inside.
+    frag.write_text(json.dumps({"indexing": {"memory_dirs": "oops"}}), encoding="utf-8")
+    await ctx.reconcile_watched_roots()
+
+    watcher.reconfigure.assert_not_awaited()
+    assert _roots(ctx) == from_fragment
+
+
+@pytest.mark.asyncio
+async def test_config_d_vanishing_mid_sample_does_not_fail_the_tool_call(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    """The signature is sampled on every handler entry, outside the block that
+    handles a bad config — so a ``config.d`` swapped out from under the walk
+    must not raise into whatever the caller was doing."""
+    root = tmp_path / "one"
+    root.mkdir()
+    ctx, _watcher = await _make_app(_isolated_config_home, [root])
+
+    frag_dir = _isolated_config_home / ".memtomem" / "config.d"
+    frag_dir.mkdir(exist_ok=True)
+
+    real_iterdir = Path.iterdir
+
+    def _vanishing_iterdir(self: Path):
+        if self == frag_dir:
+            raise OSError("directory replaced mid-walk")
+        return real_iterdir(self)
+
+    with patch.object(Path, "iterdir", _vanishing_iterdir):
+        await ctx.reconcile_watched_roots()  # must not raise
+
+    assert _roots(ctx) == {root.resolve()}

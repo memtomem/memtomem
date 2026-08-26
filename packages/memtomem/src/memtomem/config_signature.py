@@ -51,9 +51,22 @@ def current_signature() -> Signature:
 
     d_path = _config_d_path()
     entries.append((str(d_path), _stat_mtime_ns(d_path) if d_path.is_dir() else -1))
-    if d_path.is_dir():
-        for frag in sorted(p for p in d_path.iterdir() if p.is_file() and p.suffix == ".json"):
-            entries.append((str(frag), _stat_mtime_ns(frag)))
+    try:
+        fragments = (
+            sorted(p for p in d_path.iterdir() if p.is_file() and p.suffix == ".json")
+            if d_path.is_dir()
+            else []
+        )
+    except OSError as exc:
+        # The directory can be replaced or removed between the ``is_dir`` and
+        # the walk. Callers sample this on a hot path (every MCP tool call), so
+        # a concurrent directory swap must not raise into whatever they were
+        # doing — the directory's own mtime entry above already moved, so the
+        # signature still reads as changed and the next sample retries.
+        logger.warning("Listing %s during a config-change check failed: %s", d_path, exc)
+        fragments = []
+    for frag in fragments:
+        entries.append((str(frag), _stat_mtime_ns(frag)))
 
     return tuple(entries)
 
@@ -95,25 +108,19 @@ def build_fresh_config(*, migrate: bool = True, strict_fragments: bool = False) 
     ``config.json`` is pre-parsed here before delegating.
 
     ``strict_fragments=True`` extends that strictness to the ``config.d``
-    fragments, which :func:`load_config_d` logs and skips one at a time. A
-    skipped fragment hands back a config missing whatever it contributed, and a
-    caller that acts on the difference would read a corrupted fragment as a
-    deliberate removal of the roots it declared.
+    fragments, which :func:`load_config_d` otherwise logs and skips one at a
+    time. It is passed down to the loader rather than pre-checked here, so it
+    covers every skip the loader can make — a fragment whose JSON parses but
+    whose ``memory_dirs`` is a string, say — and does it on the same read the
+    config is built from, leaving no window for a write to land between a
+    validation pass and the real one.
     """
     override = _override_path()
     if override.exists():
         # Strict pre-parse — raises on malformed JSON / OS errors.
         _ = json.loads(override.read_text(encoding="utf-8"))
 
-    if strict_fragments:
-        d_path = _config_d_path()
-        if d_path.is_dir():
-            for frag in sorted(p for p in d_path.iterdir() if p.is_file() and p.suffix == ".json"):
-                data = json.loads(frag.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    raise ValueError(f"Config fragment {frag} is not a JSON object")
-
     cfg = Mem2MemConfig()
-    load_config_d(cfg)
+    load_config_d(cfg, strict=strict_fragments)
     load_config_overrides(cfg, migrate=migrate)
     return cfg
