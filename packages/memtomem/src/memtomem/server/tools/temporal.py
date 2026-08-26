@@ -140,15 +140,20 @@ async def mem_activity(
                 "whole days. Use YYYY, YYYY-MM, or YYYY-MM-DD."
             )
 
-    # Default: last 30 days
+    # Day labels are rendered with ``date().isoformat()`` rather than
+    # ``strftime("%Y-%m-%d")``: glibc does not zero-pad ``%Y``, so year 1 comes
+    # out as ``1-01-01`` on Linux and ``0001-01-01`` on macOS. These strings are
+    # compared lexically by SQL, and ``'1-01-01' >= '0001-06-01'`` is True — a
+    # bound that renders unpadded silently selects the wrong rows. ``isoformat``
+    # pads on every platform.
     now = datetime.now(timezone.utc)
     try:
         if since:
             since_dt = _parse_recall_date(since)
-            since_str = since_dt.strftime("%Y-%m-%d")
+            since_str = since_dt.date().isoformat()
         else:
             since_dt = now - timedelta(days=30)
-            since_str = since_dt.strftime("%Y-%m-%d")
+            since_str = since_dt.date().isoformat()
 
         if until:
             until_dt = _parse_recall_date(until, end_of_period=True)
@@ -161,13 +166,13 @@ async def mem_activity(
             # which is also the right label for the rendered range. Everything
             # reaching here names a whole period (guarded above), so the step
             # back never underflows the minimum representable date.
-            until_str = (until_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d")
+            until_str = (until_dt - timedelta(microseconds=1)).date().isoformat()
         else:
             # ``now`` is already *inside* the day it names, so it needs no step
             # back — and must not get one: at exactly 00:00:00 the subtraction
             # lands on yesterday and drops today's activity entirely.
             until_dt = now
-            until_str = now.strftime("%Y-%m-%d")
+            until_str = now.date().isoformat()
     except ValueError as exc:
         return f"Error: {exc}"
 

@@ -136,7 +136,13 @@ class TestActivityToolBound:
         """The step back is a subtraction, so the earliest representable bound
         is where it would raise ``OverflowError`` — outside the ``ValueError``
         handler. Guarding intraday values keeps every arrival a whole period,
-        which always advances first."""
+        which always advances first.
+
+        The same bound pins the rendering: ``strftime("%Y")`` does not zero-pad
+        on glibc, so this arrived as ``1-01-01`` on Linux while passing on
+        macOS. SQL compares these lexically and ``'1-01-01' >= '0001-06-01'``,
+        so an unpadded bound selects the wrong rows rather than failing loudly.
+        """
         captured: dict = {}
         temporal_mod = self._spy_app(monkeypatch, captured)
 
