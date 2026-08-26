@@ -18,6 +18,7 @@ from memtomem._instance_registry import (
     store_digest_for as _store_digest_for,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
+from memtomem.generation import ComponentGeneration
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -736,10 +737,15 @@ async def _revert_to_stored(app: AppContext) -> str:
     leaked the retired ONNX InferenceSession plus its dedicated executor
     thread and the retired pipeline's reranker; without the watcher rebind,
     auto-reindexes kept running through the retired engine and embedder while
-    cache invalidation hit a pipeline nobody queries. A search or index run
-    already in flight on the old generation may fail when its embedder closes
-    under it — this is an explicit admin action, and the pre-existing behavior
-    was an unbounded leak.
+    cache invalidation hit a pipeline nobody queries.
+
+    The retirement is lease-counted (#2180): a search or index run that entered
+    before the swap holds the old generation, so the close waits for its last
+    release instead of pulling the embedder out from under it. With nothing in
+    flight the close still runs inline here — retirement never waits on a
+    timeout. Embedder users outside the pipeline and the engine (the dedup
+    scanner, ``mem_conflicts``, formation, export/import) are not lease-counted
+    and keep the pre-#2180 exposure.
 
     Serialized on ``app._config_lock``: without it, two concurrent reverts
     both observe the mismatch, both publish a generation, and the loser
@@ -797,8 +803,17 @@ async def _revert_to_stored_locked(
     )
     old_embedder = comp.embedder
     old_pipeline = comp.search_pipeline
+    # The new triple counts its in-flight users on a fresh handle (#2180).
+    # Once the components below are published nothing new can reach the old
+    # handle through ``app.*``, so its count only falls from here — except for
+    # a caller that read the components before the swap and enters afterwards,
+    # which keeps the pre-#2180 exposure.
+    old_generation = comp.generation
+    assert old_generation is not None, "Components.__post_init__ always sets a generation"
+    new_generation = ComponentGeneration()
     new_embedder = create_embedder(config.embedding)
     comp.embedder = new_embedder
+    comp.generation = new_generation
     comp.search_pipeline = SearchPipeline(
         storage=storage,
         embedder=new_embedder,
@@ -814,6 +829,7 @@ async def _revert_to_stored_locked(
         context_window_config=config.context_window,
         llm_provider=app.llm_provider,
         session_summary_config=config.session_summary,
+        generation=new_generation,
     )
     comp.index_engine = IndexEngine(
         storage=storage,
@@ -828,6 +844,7 @@ async def _revert_to_stored_locked(
         # revert-to-stored until the server restart re-runs
         # ``component_factory.create_components``.
         llm=app.llm_provider,
+        generation=new_generation,
     )
 
     # The watcher and the dedup scanner captured the old engine/embedder at
@@ -865,22 +882,47 @@ async def _revert_to_stored_locked(
     # (the lifespan teardown pattern): every retirement step is attempted
     # even when this task is cancelled mid-close, then the cancellation
     # propagates.
-    for resource, label in ((old_pipeline, "search pipeline"), (old_embedder, "embedder")):
-        close = getattr(resource, "close", None)
-        if close is None:
-            continue
+    async def _close_old_generation() -> None:
+        cancelled: asyncio.CancelledError | None = None
+        for resource, label in ((old_pipeline, "search pipeline"), (old_embedder, "embedder")):
+            close = getattr(resource, "close", None)
+            if close is None:
+                continue
+            try:
+                await close()
+            except asyncio.CancelledError as exc:
+                if cancelled is None:
+                    cancelled = exc
+            except Exception:
+                logger.warning(
+                    "Failed to close the retired %s after revert_to_stored; "
+                    "its resources are leaked until restart",
+                    label,
+                    exc_info=True,
+                )
+        if cancelled is not None:
+            raise cancelled
+
+    # Tracked before the retire call so shutdown can still close this
+    # generation if its last leaseholder never releases (#2180).
+    comp.retired_generations.append(old_generation)
+    pending_close = old_generation.retire(_close_old_generation)
+    if pending_close is not None:
+        # Idle: close inline, exactly as the pre-#2180 revert did.
         try:
-            await close()
+            await pending_close
         except asyncio.CancelledError as exc:
             if first_cancel is None:
                 first_cancel = exc
-        except Exception:
-            logger.warning(
-                "Failed to close the retired %s after revert_to_stored; "
-                "its resources are leaked until restart",
-                label,
-                exc_info=True,
-            )
+    else:
+        # In flight: the last release runs the close as a background task, so
+        # this revert returns without waiting on it. A cancellation raised
+        # there ends that task instead of this call — nothing to accumulate.
+        logger.info(
+            "revert_to_stored: %d in-flight lease(s) on the retired generation; "
+            "deferring its close to the last release",
+            old_generation.leases,
+        )
     if first_cancel is not None:
         raise first_cancel
 
