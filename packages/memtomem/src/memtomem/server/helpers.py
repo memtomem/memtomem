@@ -13,12 +13,18 @@ def _parse_recall_date(s: str, *, end_of_period: bool = False):
     bound is used as an exclusive upper bound (``created_at < until``).
 
     Supported formats: ``YYYY``, ``YYYY-MM``, ``YYYY-MM-DD``, full ISO datetime.
+
+    The result is always in UTC. ``chunks.created_at`` is stored as a UTC
+    ISO-8601 string and the bound is compared against it **lexically** in SQL,
+    so an offset-carrying bound left as-is would sort by its printed digits
+    rather than by the instant it denotes: ``2026-01-01T00:00:00+09:00``
+    (= ``2025-12-31T15:00Z``) would exclude a row written at
+    ``2025-12-31T16:00Z``, which is after it.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import date, datetime, timedelta, timezone
 
     s = s.strip()
     date_part = s.split("T")[0]
-    has_time = "T" in s
     parts = date_part.split("-")
 
     try:
@@ -34,11 +40,24 @@ def _parse_recall_date(s: str, *, end_of_period: bool = False):
                 return datetime(year, month + 1, 1, tzinfo=timezone.utc)
             return datetime(year, month, 1, tzinfo=timezone.utc)
 
-        # YYYY-MM-DD or full ISO datetime
+        # YYYY-MM-DD or full ISO datetime. Only a date-only bound names a
+        # whole period to advance past; one carrying a time is already an
+        # instant. Decide that by parsing rather than by looking for a ``T``:
+        # ``fromisoformat`` also accepts a space or a lowercase ``t`` as the
+        # separator, and those spellings were being advanced by a day they
+        # had not asked for.
+        try:
+            date.fromisoformat(s)
+            date_only = True
+        except ValueError:
+            date_only = False
+
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        if end_of_period and not has_time:
+        else:
+            dt = dt.astimezone(timezone.utc)
+        if end_of_period and date_only:
             dt = dt + timedelta(days=1)
         return dt
 

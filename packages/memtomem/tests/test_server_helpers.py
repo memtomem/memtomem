@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -418,6 +418,50 @@ class TestParseRecallDate:
     def test_invalid_date_raises(self):
         with pytest.raises(ValueError, match="Invalid date"):
             _parse_recall_date("not-a-date")
+
+    @pytest.mark.parametrize(
+        "value",
+        ["2026-04-06T14:30:00+09:00", "2026-04-06T14:30:00-05:00"],
+    )
+    def test_an_offset_bound_is_converted_to_utc(self, value: str):
+        """The bound is compared against ``created_at`` lexically in SQL, and
+        that column holds UTC. A bound still carrying its original offset
+        would sort by printed digits rather than by the instant it denotes."""
+        dt = _parse_recall_date(value)
+
+        assert dt.utcoffset() == timedelta(0)
+        assert dt == datetime.fromisoformat(value)
+
+    def test_the_offset_bound_orders_correctly_against_a_stored_row(self):
+        """The regression in full: ``2026-01-01T00:00+09:00`` is
+        ``2025-12-31T15:00Z``, so a row written an hour later belongs in a
+        ``since`` range starting there. Compared as raw strings it did not."""
+        bound = _parse_recall_date("2026-01-01T00:00:00+09:00")
+        row = "2025-12-31T16:00:00+00:00"
+
+        assert datetime.fromisoformat(row) >= bound  # the true answer
+        assert row >= bound.isoformat()  # what the SQL comparison sees
+
+    @pytest.mark.parametrize(
+        "separator",
+        ["T", " ", "t"],
+        ids=["upper-T", "space", "lower-t"],
+    )
+    def test_a_timestamped_until_is_not_advanced_a_day(self, separator: str):
+        """``end_of_period`` advances a *date* to the start of the next one.
+        A bound that already names a time is an instant and must be left
+        alone — but the date-only test used to be ``"T" in s``, and
+        ``fromisoformat`` accepts a space and a lowercase ``t`` too, so those
+        two spellings silently gained 24 hours of range."""
+        dt = _parse_recall_date(f"2026-04-06{separator}14:30:00+00:00", end_of_period=True)
+
+        assert dt == datetime(2026, 4, 6, 14, 30, tzinfo=timezone.utc)
+
+    def test_a_date_only_until_still_advances(self):
+        """The counterpart pin: the advance itself must survive the fix."""
+        assert _parse_recall_date("2026-04-06", end_of_period=True) == datetime(
+            2026, 4, 7, tzinfo=timezone.utc
+        )
 
 
 # ===========================================================================
