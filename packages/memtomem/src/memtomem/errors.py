@@ -193,3 +193,15 @@ class NamespaceResolutionError(IndexingError, RetryableError):
     affected root with bounded backoff, issue #2021). A comment saying
     "treat this as retryable" would leave all of those to be remembered.
     """
+
+
+class ConfigFragmentError(Mem2MemError):
+    """A ``config.d`` fragment could not be fully applied under strict loading.
+
+    ``load_config_d`` normally logs and skips whatever it cannot apply, so a
+    corrupted fragment yields a config quietly missing what that fragment
+    declared. Callers that act on the *difference* between two loads — the MCP
+    server reconciling its watched index roots (#2186) — cannot tell that
+    apart from the user having removed those settings, so they load with
+    ``strict=True`` and get this instead.
+    """

@@ -136,6 +136,13 @@ class TestConsumerRegressionPin:
         "memtomem/cli/memory.py",
         # Sync-doctor reads/writes the user-tier registry directly.
         "memtomem/cli/sync_doctor_cmd.py",
+        # Root reconciliation (#2186) is deliberately tier-aware end to end:
+        # it compares the two tiers separately (flattening them would hide a
+        # user-tier → project-tier move, which changes how the engine
+        # classifies scope), snapshots both for the failure path, and writes
+        # both back onto the live config. ``all_index_roots()`` flattens, so
+        # it can express none of that.
+        "memtomem/server/context.py",
         # ``mm context memory-migrate`` derives the user-tier base
         # directory for ``resolve_memory_scope_dir``; legitimately
         # user-tier-only — fan-out across project tiers is not the
