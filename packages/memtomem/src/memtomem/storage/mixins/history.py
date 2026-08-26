@@ -9,6 +9,7 @@ import struct
 from datetime import datetime, timedelta, timezone
 
 from memtomem.errors import FeedbackConflictError, StorageError
+from memtomem.storage.sqlite_helpers import utc_bound_from_iso
 
 _log = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ class HistoryMixin:
         params: list = []
         if since:
             query += " WHERE created_at >= ?"
-            params.append(since)
+            params.append(utc_bound_from_iso(since, field="since"))
         query += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = db.execute(query, params).fetchall()
@@ -385,14 +386,8 @@ class HistoryMixin:
             "FROM query_history h WHERE h.run_id IS NOT NULL"
         )
         if since:
-            try:
-                since_dt = datetime.fromisoformat(since)
-            except ValueError:
-                raise ValueError(f"since must be an ISO-8601 timestamp, got {since!r}") from None
-            if since_dt.tzinfo is None:
-                since_dt = since_dt.replace(tzinfo=timezone.utc)
             query += " AND h.created_at >= ?"
-            params.append(since_dt.astimezone(timezone.utc).isoformat(timespec="seconds"))
+            params.append(utc_bound_from_iso(since, field="since"))
         query += " ORDER BY h.created_at DESC, h.id DESC LIMIT ?"
         params.append(limit)
         rows = self._get_db().execute(query, params).fetchall()
