@@ -68,6 +68,7 @@ from memtomem.config import (
     SessionSummaryConfig,
 )
 from memtomem.constants import SearchOrigin, normalize_search_origin
+from memtomem.generation import ComponentGeneration
 from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.reranker.base import close_reranker_safely
@@ -423,9 +424,17 @@ class SearchPipeline:
         context_window_config: ContextWindowConfig | None = None,
         llm_provider: LLMProvider | None = None,
         session_summary_config: SessionSummaryConfig | None = None,
+        generation: ComponentGeneration | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
+        # The embedder/pipeline/engine generation this pipeline belongs to
+        # (#2180). Callers that publish a whole generation (``create_components``,
+        # the ``revert_to_stored`` swap) pass the shared handle so a search
+        # pins the embedder against a concurrent retirement. A pipeline built
+        # on its own gets a private handle that is never retired — inert, but
+        # it keeps ``search`` free of ``None`` checks.
+        self._generation = generation or ComponentGeneration()
         self._config = config
         self._decay_config = decay_config or DecayConfig()
         self._mmr_config = mmr_config or MMRConfig()
@@ -439,6 +448,8 @@ class SearchPipeline:
         self._llm_provider = llm_provider
         self._session_summary_config = session_summary_config
         self._warned_invalid_rrf_weights = False
+        # The single teardown task, shared by every ``close()`` caller (#2180).
+        self._close_task: asyncio.Future | None = None
 
         # Search result TTL cache (per-instance) with version counter
         self._search_cache: dict[str, tuple[float, int, list[SearchResult], RetrievalStats]] = {}
@@ -1223,7 +1234,10 @@ class SearchPipeline:
         # search may be awaiting, so every rerank-dependent site below
         # (cache key, pool widening, Stage 3b) reads this one snapshot, and
         # the instance cannot be closed out from under the call.
-        with self._lease_reranker() as (reranker, rerank_cfg):
+        # The component generation is held over the same span (#2180) for the
+        # same reason one level up: the dense leg awaits ``self._embedder``,
+        # and ``revert_to_stored`` retires that embedder mid-search.
+        with self._generation.hold(), self._lease_reranker() as (reranker, rerank_cfg):
             apply_rerank = reranker is not None and rerank_cfg is not None and rerank is not False
 
             # Check TTL cache for identical queries
@@ -1878,7 +1892,25 @@ class SearchPipeline:
             return fused, stats
 
     async def close(self) -> None:
-        """Release resources held by the pipeline (reranker client, etc.)."""
+        """Release resources held by the pipeline (reranker client, etc.).
+
+        Close-once, awaited by everyone (#2180): a retired pipeline can be
+        reached by both the deferred generation close and the shutdown drain,
+        and the reranker close below is not repeat-safe the way the embedder's
+        is. Concurrent callers share one close task rather than short-circuit
+        on a flag — a flag set before the teardown finishes would let the
+        second caller return while the first is still mid-close, or after the
+        first was cancelled partway, leaving the reranker open.
+
+        The shared task survives a cancelled caller: cancelling ``close()``
+        does not cancel the teardown, so a later caller (or the lifespan) can
+        still await it to completion.
+        """
+        if self._close_task is None:
+            self._close_task = asyncio.ensure_future(self._close_once())
+        await asyncio.shield(self._close_task)
+
+    async def _close_once(self) -> None:
         # Retired-but-still-leased reranker generations first (#1777):
         # emptying the set now means a lease released after this point finds
         # no retired entry and schedules nothing — no orphan task, no double

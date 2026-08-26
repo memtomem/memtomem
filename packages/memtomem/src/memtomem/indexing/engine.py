@@ -10,7 +10,7 @@ import logging
 import os
 import stat as stat_module
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -34,6 +34,7 @@ from memtomem.config import (
 )
 from memtomem import privacy
 from memtomem.errors import EmbeddingError, NamespaceResolutionError, RetryableError
+from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
 from memtomem.models import Chunk, IndexingStats
@@ -631,9 +632,17 @@ class IndexEngine:
         namespace_config: NamespaceConfig | None = None,
         progress_threshold: int = 32,
         llm: "LLMProvider | None" = None,
+        generation: ComponentGeneration | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
+        # The embedder/pipeline/engine generation this engine belongs to
+        # (#2180); see the matching field on ``SearchPipeline``. Held for the
+        # span of every entry point that can reach ``self._embedder``, so
+        # ``revert_to_stored`` cannot close the embedder under a running
+        # index. An engine built on its own gets a private, never-retired
+        # handle.
+        self._generation = generation or ComponentGeneration()
         self._config = config
         # Optional LLM provider used by the per-source AI summary pipeline.
         # ``None`` is the default — the summary path is fully gated behind
@@ -712,6 +721,22 @@ class IndexEngine:
         """
         return self._active_runs > 0
 
+    @contextlib.contextmanager
+    def _active_run(self) -> Iterator[None]:
+        """Count one in-flight run and pin its component generation (#2180).
+
+        The generation hold spans the same window as the ``_active_runs``
+        counter — entry to exit of a public entry point — because that is
+        exactly the window in which the run may await ``self._embedder``, and
+        ``revert_to_stored`` retires that embedder out from under it.
+        """
+        self._active_runs += 1
+        try:
+            with self._generation.hold():
+                yield
+        finally:
+            self._active_runs -= 1
+
     @staticmethod
     def _loop_local_semaphore(
         registry: dict[asyncio.AbstractEventLoop, asyncio.Semaphore], limit: int
@@ -753,8 +778,7 @@ class IndexEngine:
     ) -> IndexingStats:
         _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
-        self._active_runs += 1
-        try:
+        with self._active_run():
             # No run-wide ``_index_lock`` (#2105): each file takes its own L2
             # sidecar inside ``_bounded`` instead, which is what serializes
             # this run against another process touching the same file. Holding
@@ -773,8 +797,6 @@ class IndexEngine:
                 reassign_namespaces=reassign_namespaces,
                 new_source_namespace=new_source_namespace,
             )
-        finally:
-            self._active_runs -= 1
 
     async def _count_missing_vectors(self, chunk_ids: Sequence[str]) -> int:
         """Count how many hash-matched chunks this run left without a vector.
@@ -1345,8 +1367,7 @@ class IndexEngine:
                 duration_ms=0.0,
                 new_chunk_ids=(),
             )
-        self._active_runs += 1
-        try:
+        with self._active_run():
             result, duration = await self._index_file_locked(
                 file_path.resolve(),
                 force,
@@ -1358,8 +1379,6 @@ class IndexEngine:
                 reassign_namespaces=reassign_namespaces,
                 new_source_namespace=new_source_namespace,
             )
-        finally:
-            self._active_runs -= 1
         tally = _NamespaceTally()
         decision = result.get("namespace_decision")
         if decision is not None:
@@ -1412,7 +1431,11 @@ class IndexEngine:
         from memtomem.models import NamespaceFilter
 
         try:
-            embedding = await self._embedder.embed_query(text)
+            # Held, not counted: this is a probe, not an indexing run, so it
+            # stays out of ``is_active`` — but it awaits the embedder, so it
+            # pins the generation like every other embedder user (#2180).
+            with self._generation.hold():
+                embedding = await self._embedder.embed_query(text)
             ns_filter = NamespaceFilter.parse(namespace) if namespace else None
             results = await self._storage.dense_search(
                 embedding,
@@ -2390,8 +2413,7 @@ class IndexEngine:
         """
         _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
-        self._active_runs += 1
-        try:
+        with self._active_run():
             start = time.monotonic()
             path = path.resolve()
 
@@ -2679,8 +2701,6 @@ class IndexEngine:
                 "namespace_moves": list(tally.summary()),
                 "chunks_missing_vectors": await self._count_missing_vectors(unchanged_ids),
             }
-        finally:
-            self._active_runs -= 1
 
     @staticmethod
     def _apply_namespace(chunks: list[Chunk], namespace: str) -> list[Chunk]:

@@ -6,7 +6,7 @@ Used by the MCP server, the CLI, the web app, and in-process embedders
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -21,6 +21,7 @@ from memtomem.chunking.structured import StructuredChunker
 from memtomem.config import Mem2MemConfig, embedding_policy_fingerprint
 from memtomem.embedding.factory import create_embedder
 from memtomem.errors import EmbeddingDimensionMismatchError
+from memtomem.generation import ComponentGeneration
 from memtomem.indexing.engine import IndexEngine
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.storage.factory import create_storage
@@ -95,6 +96,35 @@ class Components:
     # degraded mode instead of crashing. The dict has the same shape as
     # ``SqliteBackend.embedding_mismatch``. See issue #349.
     embedding_broken: dict | None = None
+    # Lease handle for the currently published ``(embedder, index_engine,
+    # search_pipeline)`` triple, shared with those two components (#2180).
+    # ``revert_to_stored`` swaps all three at once and retires this handle;
+    # the retired generation is closed on its last lease release. Left unset,
+    # it is adopted from the pipeline in ``__post_init__`` — never defaulted
+    # to a fresh handle, which would count nobody (see below).
+    generation: ComponentGeneration | None = None
+    # Generations retired by a swap, kept so shutdown can still close one
+    # whose leaseholder never released (or whose deferred close is pending).
+    retired_generations: list[ComponentGeneration] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # The container, the pipeline and the engine must count into ONE
+        # handle (#2180). A hand-assembled ``Components`` — CLI stacks, tests,
+        # ``AppContext.from_components`` callers — otherwise pairs two private
+        # per-component handles with a third on the container, and a revert
+        # reads zero leases on a generation two live components are using and
+        # closes the embedder under them. Adopting the pipeline's handle makes
+        # the safe wiring the default instead of something every caller has to
+        # remember; a mismatch that cannot be repaired is a bug, not a
+        # fallback.
+        pipeline_generation = getattr(self.search_pipeline, "_generation", None)
+        engine_generation = getattr(self.index_engine, "_generation", None)
+        if self.generation is None:
+            self.generation = pipeline_generation or ComponentGeneration()
+        if engine_generation is not None and engine_generation is not self.generation:
+            self.index_engine._generation = self.generation
+        if pipeline_generation is not None and pipeline_generation is not self.generation:
+            self.search_pipeline._generation = self.generation
 
 
 async def create_components(
@@ -239,6 +269,11 @@ async def create_components(
 
             llm = create_llm(config.llm)
 
+        # One lease handle for the whole triple (#2180) — the engine and the
+        # pipeline must count into the same generation, or a revert would
+        # close the embedder while the other one is still using it.
+        generation = ComponentGeneration()
+
         index_engine = IndexEngine(
             storage=storage,
             embedder=embedder,
@@ -247,6 +282,7 @@ async def create_components(
             namespace_config=config.namespace,
             progress_threshold=config.embedding.progress_threshold,
             llm=llm,
+            generation=generation,
         )
 
         search_pipeline = SearchPipeline(
@@ -264,6 +300,7 @@ async def create_components(
             context_window_config=config.context_window,
             llm_provider=llm,
             session_summary_config=config.session_summary,
+            generation=generation,
         )
 
         return Components(
@@ -274,6 +311,7 @@ async def create_components(
             search_pipeline=search_pipeline,
             llm=llm,
             embedding_broken=embedding_broken,
+            generation=generation,
         )
     except BaseException:
         # Once SearchPipeline exists it owns the reranker. Before that point
@@ -290,6 +328,16 @@ async def create_components(
 async def close_components(comp: Components) -> TeardownResult:
     """Shut down every component even when an earlier close fails."""
     first_cancel: asyncio.CancelledError | None = None
+    # Retired generations first (#2180): a swap deferred their close to the
+    # last lease release, which may never have come (a hung or cancelled
+    # leaseholder). Draining before the current components keeps the close
+    # ordering the swap promised — retired pipeline and embedder go down
+    # before the live ones, never interleaved with them.
+    for retired in comp.retired_generations:
+        cancelled = await retired.drain()
+        if first_cancel is None:
+            first_cancel = cancelled
+    comp.retired_generations.clear()
     for resource, label in (
         (comp.search_pipeline, "search pipeline"),
         (comp.llm, "LLM provider"),
