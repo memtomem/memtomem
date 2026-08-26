@@ -152,18 +152,22 @@ async def mem_activity(
 
         if until:
             until_dt = _parse_recall_date(until, end_of_period=True)
+            # ``until_dt`` is exclusive — ``_parse_recall_date`` advances a
+            # whole period to the start of the next one — but
+            # ``get_activity_summary`` compares ``DATE(created_at) <= ?``,
+            # which is inclusive. Passing the exclusive bound straight through
+            # counted one day too many: ``until="2026-04"`` reached 2026-05-01.
+            # Step back to the last instant the bound admits and take its date,
+            # which is also the right label for the rendered range. Everything
+            # reaching here names a whole period (guarded above), so the step
+            # back never underflows the minimum representable date.
+            until_str = (until_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d")
         else:
+            # ``now`` is already *inside* the day it names, so it needs no step
+            # back — and must not get one: at exactly 00:00:00 the subtraction
+            # lands on yesterday and drops today's activity entirely.
             until_dt = now
-        # ``until_dt`` is exclusive — ``_parse_recall_date`` advances a whole
-        # period to the start of the next one — but ``get_activity_summary``
-        # compares ``DATE(created_at) <= ?``, which is inclusive. Passing the
-        # exclusive bound straight through therefore counted one day too many:
-        # ``until="2026-04"`` reached 2026-05-01. Step back to the last instant
-        # the bound admits and take its date, which is also the right label for
-        # the rendered range. Every value reaching here names a whole period
-        # (guarded above), so the step back never underflows the minimum
-        # representable date.
-        until_str = (until_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d")
+            until_str = now.strftime("%Y-%m-%d")
     except ValueError as exc:
         return f"Error: {exc}"
 

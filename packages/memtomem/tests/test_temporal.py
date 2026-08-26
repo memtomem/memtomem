@@ -238,12 +238,35 @@ class TestActivityRejectsIntradayBounds:
         assert called is False, "the refusal must happen before the query"
 
     @pytest.mark.asyncio
-    async def test_the_default_range_still_works_without_bounds(self, monkeypatch):
-        """The implicit ``now`` is an instant too, but it is the documented
-        default and rounds to "through today" — it must not be refused."""
+    @pytest.mark.parametrize(
+        "frozen",
+        [
+            datetime(2026, 4, 6, 0, 0, 0, tzinfo=timezone.utc),  # exactly midnight
+            datetime(2026, 4, 6, 13, 45, 0, tzinfo=timezone.utc),
+            datetime(2026, 4, 6, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        ],
+        ids=["midnight", "midday", "last-microsecond"],
+    )
+    async def test_the_default_range_reaches_through_today(self, monkeypatch, frozen: datetime):
+        """The implicit ``now`` is an instant, but it is the documented default
+        and means "through today" — so it is neither refused nor stepped back.
+
+        Midnight is the case that matters: ``now`` is already inside the day it
+        names, and subtracting from it there lands on yesterday, dropping the
+        whole of today. The clock is frozen rather than read twice — comparing
+        against a separately-computed ``now()`` both flakes across UTC midnight
+        and cannot reach this boundary on purpose.
+        """
         from unittest.mock import AsyncMock, MagicMock
 
         from memtomem.server.tools import temporal as temporal_mod
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+
+        monkeypatch.setattr(temporal_mod, "datetime", _FrozenDatetime)
 
         app = MagicMock()
         captured: dict = {}
@@ -258,4 +281,4 @@ class TestActivityRejectsIntradayBounds:
         out = await temporal_mod.mem_activity(ctx=None)
 
         assert not out.startswith("Error: ")
-        assert captured["until"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert captured["until"] == "2026-04-06"
