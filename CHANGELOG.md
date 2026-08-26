@@ -267,6 +267,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The MCP server now notices memory dirs added or removed while it is
+  running.** It built its file watcher once, at startup, and nothing ever
+  reconciled it afterwards — so a directory registered by `mm init`, `mm mem
+  init`, `mm config unset`, the web UI, or a hand edit was not watched until the
+  server restarted, and files dropped into it were never auto-indexed. `mm web`,
+  against the same config, picked the change up immediately, which made the
+  asymmetry invisible from a client. The server now checks the config file's
+  stat signature once per tool call (no file is read when nothing changed) and
+  re-watches the roots when they differ. Only the roots are reconciled;
+  everything else stays as stale as before, as reloading it is a separate
+  change. A config file that cannot be parsed is left alone rather than read as
+  "the user removed every directory", a failed re-watch keeps the previous set
+  and is retried on the next call, and a server still in degraded embedding mode
+  picks the new roots up when its recovery starts the watcher. (#2186)
 - **Recovering from degraded embedding mode no longer needs a server restart to
   bring the background loops back.** A server that starts with a broken
   embedding setup skips the file watcher, the consolidation and policy

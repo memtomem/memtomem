@@ -39,15 +39,17 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from memtomem.config import (
-    Mem2MemConfig,
-    _config_d_path,
     _override_path,
-    load_config_d,
-    load_config_overrides,
+)
+from memtomem.config_signature import (
+    Signature as _Signature,
+    _stat_mtime_ns as _stat_mtime_ns_impl,
+    build_fresh_config as _build_fresh_config_impl,
+    current_signature as _current_signature,
+    get_config_mtime_ns as _get_config_mtime_ns,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.search.reranker.base import close_reranker_safely
@@ -65,47 +67,16 @@ logger = logging.getLogger(__name__)
 # Stale signature
 # ---------------------------------------------------------------------------
 
-# Signature is a tuple of (path_str, mtime_ns) pairs sorted by path, including
-# a sentinel for the config.d directory itself so newly created / removed
-# fragments are detected even when their own files weren't touched.
-Signature = tuple[tuple[str, int], ...]
-
-
-def current_signature() -> Signature:
-    """Build the composite ``(path, mtime_ns)`` signature for config state.
-
-    Includes ``~/.memtomem/config.json`` plus every ``~/.memtomem/config.d/
-    *.json`` entry plus the directory mtime itself. Missing files contribute
-    a ``-1`` mtime rather than being skipped, so their appearance or removal
-    still changes the signature.
-    """
-    entries: list[tuple[str, int]] = []
-
-    override = _override_path()
-    entries.append((str(override), _stat_mtime_ns(override)))
-
-    d_path = _config_d_path()
-    entries.append((str(d_path), _stat_mtime_ns(d_path) if d_path.is_dir() else -1))
-    if d_path.is_dir():
-        for frag in sorted(p for p in d_path.iterdir() if p.is_file() and p.suffix == ".json"):
-            entries.append((str(frag), _stat_mtime_ns(frag)))
-
-    return tuple(entries)
-
-
-def _stat_mtime_ns(path: Path) -> int:
-    try:
-        return path.stat().st_mtime_ns
-    except FileNotFoundError:
-        return -1
-    except OSError as exc:
-        logger.warning("stat(%s) failed during hot-reload check: %s", path, exc)
-        return -1
-
-
-def get_config_mtime_ns() -> int:
-    """Return the current ``config.json`` mtime in ns, or ``-1`` if missing."""
-    return _stat_mtime_ns(_override_path())
+# The stat-level signature and the strict config rebuild live in
+# ``memtomem.config_signature`` — the MCP server needs the same change
+# detection for its watched roots (#2186) and ``server/`` must not import from
+# ``web/``. They stay reachable as attributes of this module because the CAS
+# writer-signature contract below and its callers (including tests that
+# monkeypatch ``hot_reload.current_signature``) address them through it.
+Signature = _Signature
+current_signature = _current_signature
+_stat_mtime_ns = _stat_mtime_ns_impl
+get_config_mtime_ns = _get_config_mtime_ns
 
 
 # ---------------------------------------------------------------------------
@@ -164,31 +135,9 @@ def initialize_reload_state(app: FastAPI) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_fresh_config() -> Mem2MemConfig:
-    """Replay the canonical load path used at startup.
-
-    Defaults (+ env via pydantic-settings) → ``config.d`` fragments →
-    ``config.json`` overrides. Raises on ``config.json`` JSON / OS errors
-    so the caller can switch to fail-closed mode.
-
-    :func:`load_config_overrides` itself swallows parse errors with a
-    warning log — startup historically wanted to boot with defaults
-    rather than crash on a bad user file. Hot-reload needs strict
-    behavior: a broken disk must surface as an error banner, not silently
-    fall back to defaults (which would then be written back by the next
-    save). So we pre-parse ``config.json`` here before delegating.
-    """
-    import json as _json
-
-    override = _override_path()
-    if override.exists():
-        # Strict pre-parse — raises on malformed JSON / OS errors.
-        _ = _json.loads(override.read_text(encoding="utf-8"))
-
-    cfg = Mem2MemConfig()
-    load_config_d(cfg)
-    load_config_overrides(cfg)
-    return cfg
+# Kept as a module attribute for the same reason as the signature helpers:
+# handlers and tests reach it through ``hot_reload._build_fresh_config``.
+_build_fresh_config = _build_fresh_config_impl
 
 
 async def reload_if_stale(

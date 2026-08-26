@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.mcpserver import Context
 
 from memtomem.config import Mem2MemConfig
+from memtomem.config_signature import Signature, build_fresh_config, current_signature
 from memtomem.constants import validate_namespace
 
 if TYPE_CHECKING:
@@ -53,6 +54,22 @@ async def _stop_quietly(resource: object | None, stage: str) -> None:
         raise
     except Exception:
         logger.warning("Shutdown step '%s' failed", stage, exc_info=True)
+
+
+def _same_tier(left: object, right: object) -> bool:
+    """Compare one tier of index roots, ignoring how each was spelled.
+
+    The saved config collapses the home prefix to ``~`` and stores strings,
+    while a live ``IndexingConfig`` may hold ``Path`` objects — so the same
+    directory arrives in two shapes. Normalizing the way
+    ``IndexingConfig.all_index_roots`` does (plus ``expanduser``) keeps a
+    round-trip through disk from reading as a change and triggering a
+    pointless re-watch on every tool call.
+    """
+    return [Path(d).expanduser() for d in left] == [  # type: ignore[union-attr]
+        Path(d).expanduser()
+        for d in right  # type: ignore[union-attr]
+    ]
 
 
 def _require_initialized(components: Components | None, attr: str) -> Components:
@@ -157,6 +174,14 @@ class AppContext:
     # its reference to leave the handle retryable, so these are held here for
     # ``close()`` — otherwise a half-built loop outlives every reference to it.
     _failed_services: list[tuple[object, str]] = field(default_factory=list, init=False, repr=False)
+    # Last on-disk config state this context reconciled its watched roots
+    # against (#2186). ``None`` until ``ensure_initialized`` seeds it.
+    _config_signature: Signature | None = field(default=None, init=False, repr=False)
+    # Serializes root reconciliation. Deliberately its own lock: the work spans
+    # a stat, a parse, a live-config mutation and a watcher call, and putting
+    # that behind ``_config_lock`` (held across the embedding-reset swap) or
+    # ``_init_lock`` would entangle it with those orderings for no benefit.
+    _watch_roots_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _scheduler: object | None = field(default=None, init=False, repr=False)
     _policy_scheduler: object | None = field(default=None, init=False, repr=False)
     _health_watchdog: object | None = field(default=None, init=False, repr=False)
@@ -464,6 +489,12 @@ class AppContext:
         background tasks just because a later step failed.
         """
         if self._components is not None:
+            # Already initialized: this call is a handler entering, which is
+            # the moment to notice that another process changed the index roots
+            # (#2186). Kept here rather than in ``_get_app_initialized`` so it
+            # rides the same chokepoint every caller already goes through —
+            # including handlers that reach the context without a ``ctx``.
+            await self.reconcile_watched_roots()
             return self._components
         async with self._init_lock:
             if self._components is not None:
@@ -481,6 +512,13 @@ class AppContext:
             if self.register_server_instance and self._lifecycle_barrier is None:
                 await self._acquire_lifecycle_barrier()
 
+            # Sample the config signature *before* the factory reads the files
+            # (``create_components`` runs ``load_config_d`` /
+            # ``load_config_overrides`` itself). Taking it afterwards would
+            # record a write that landed mid-load as already applied, and the
+            # roots it added would then never be reconciled (#2186). Sampling
+            # early can only cost one redundant reconcile pass.
+            signature_at_load = current_signature()
             comp = await create_components(self.config)
             # Expose storage/embedder via the property accessors *before*
             # constructing schedulers — they reach into ``ctx.storage`` etc.,
@@ -590,6 +628,7 @@ class AppContext:
                 raise
 
             self._dedup_scanner = dedup
+            self._config_signature = signature_at_load
             self._watcher = watcher
             self._watcher_started = watcher_started
             self._scheduler = scheduler
@@ -719,6 +758,113 @@ class AppContext:
             await self._quarantine_failed_start(service, label)
             return False
         return True
+
+    async def reconcile_watched_roots(self) -> None:
+        """Re-watch the index roots when someone else edited the config (#2186).
+
+        The MCP server built its ``FileWatcher`` once, at init; nothing since
+        told it that ``mm init``, ``mm mem init``, ``mm config unset``, the web
+        UI, or a hand edit added or removed a memory dir. Those all just rewrite
+        ``~/.memtomem/config.json`` in another process — so the only way to
+        notice is to look at the file, which is what this does, once per tool
+        call, at the cost of a few ``stat`` calls (see
+        :func:`~memtomem.config_signature.current_signature`).
+
+        Reconciling the roots deliberately does *not* reload the rest of the
+        config: that fanout (tokenizer, reranker, embedding batch size) is the
+        web's ``hot_reload.reload_if_stale`` and porting it is a separate
+        change. Other fields stay as stale as they already were.
+
+        The new roots are written onto the *live* ``IndexingConfig``, which the
+        index engine and the watcher share by identity — the engine's
+        within-roots guard has to accept the new directory too, or its files
+        would be watched and then rejected. Note this also moves the roots the
+        rest of the runtime reads (default write destination, imports, session
+        archives): the reconciled unit is root policy, not just watch
+        membership.
+        """
+        if self._components is None or not self._owns_components:
+            return
+        watcher = self._watcher
+        if watcher is None:
+            return
+
+        async with self._watch_roots_lock:
+            signature = current_signature()
+            if signature == self._config_signature:
+                return
+
+            try:
+                # ``migrate=False``: this is a read, on a hot path, of a file
+                # the user owns. The legacy ``auto_discover`` migration writes
+                # ``config.json``, and a tool call must not rewrite the user's
+                # config as a side effect of looking at it — that write belongs
+                # to startup and to the surfaces that already own it.
+                #
+                # ``strict_fragments``: a ``config.d`` fragment that fails to
+                # parse is skipped by the loader, so the roots it declared
+                # would come back missing and be read here as a removal.
+                #
+                # The signature banked below stays the one sampled *before*
+                # this read: a write landing mid-read is not in ``fresh``, and
+                # banking a signature newer than the config it describes would
+                # mark that write applied and never look at it again.
+                fresh = build_fresh_config(migrate=False, strict_fragments=True)
+            except Exception:
+                # A broken config file must not be read as "the user removed
+                # every root" — ``build_fresh_config`` is strict for exactly
+                # that reason. Bank the signature so the same broken file is
+                # not re-parsed on every subsequent tool call; fixing the file
+                # changes its mtime, which lets the retry through.
+                self._config_signature = signature
+                logger.warning(
+                    "Could not re-read the config while reconciling watched roots — "
+                    "keeping the current root set",
+                    exc_info=True,
+                )
+                return
+
+            indexing = self.config.indexing
+            # Compare the tiers separately, not the flattened roots. Moving a
+            # directory from ``memory_dirs`` to ``project_memory_dirs`` leaves
+            # the flattened list identical while changing what the directory
+            # *is*: the engine classifies scope off ``project_memory_dirs``
+            # (``IndexEngine._resolve_scope`` → ``classify_scope``), so a
+            # missed reclassification keeps writing project-shared content
+            # under user-tier rules.
+            if _same_tier(fresh.indexing.memory_dirs, indexing.memory_dirs) and _same_tier(
+                fresh.indexing.project_memory_dirs, indexing.project_memory_dirs
+            ):
+                self._config_signature = signature
+                return
+
+            previous_memory_dirs = list(indexing.memory_dirs)
+            previous_project_dirs = list(indexing.project_memory_dirs)
+            indexing.memory_dirs = list(fresh.indexing.memory_dirs)
+            indexing.project_memory_dirs = list(fresh.indexing.project_memory_dirs)
+            try:
+                await watcher.reconfigure(indexing)
+            except Exception:
+                # ``reconfigure`` restores its own watch set, so leaving the new
+                # roots on the shared config would desync the engine from the
+                # watcher — the engine would accept files in a directory nobody
+                # watches. Put the roots back and leave the signature unbanked
+                # so the next tool call tries again rather than freezing the
+                # watch set until the user edits the file a second time.
+                indexing.memory_dirs = previous_memory_dirs
+                indexing.project_memory_dirs = previous_project_dirs
+                logger.warning(
+                    "Failed to reconcile watched roots after a config change — "
+                    "still watching the previous set",
+                    exc_info=True,
+                )
+                return
+
+            self._config_signature = signature
+            logger.info(
+                "Reconciled watched index roots after a config change: %d root(s)",
+                len(indexing.all_index_roots()),
+            )
 
     async def _clean_up_failed_watcher_start(self) -> None:
         """Stop a watcher whose recovery start failed; bar the retry if it can't.
