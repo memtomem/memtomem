@@ -861,6 +861,33 @@ async def test_update_chunks_scope_refuses_pending_unowned_transaction(storage, 
         db.rollback()
 
 
+async def test_reset_all_refuses_pending_unowned_transaction(storage, tmp_path):
+    """reset_all must not adopt a transaction it did not open.
+
+    ``owns_txn`` is derived from ``_in_transaction`` (task ownership), which
+    says nothing about a stranded implicit transaction on the shared writer
+    connection. Without the refusal the wipe joined that transaction and the
+    owned-branch commit ended it, flushing the stranger's half-written rows
+    along with the reset.
+    """
+    db = storage._get_db()
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("INSERT INTO _memtomem_meta(key, value) VALUES ('pending_probe', 'uncommitted')")
+    try:
+        with pytest.raises(StorageError, match="refused"):
+            await storage.reset_all()
+        assert db.in_transaction is True  # the refusal must not end it
+    finally:
+        db.rollback()
+
+    # The stranger's row was discarded by its own rollback, not committed by
+    # the reset, and the reset itself did not wipe anything.
+    assert (
+        db.execute("SELECT COUNT(*) FROM _memtomem_meta WHERE key='pending_probe'").fetchone()[0]
+        == 0
+    )
+
+
 async def test_reset_embedding_meta_refuses_an_outer_transaction(storage):
     """reset mutates in-memory embedding state alongside the DB, so it owns
     its transaction and refuses to participate in someone else's: an owner
