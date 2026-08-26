@@ -525,6 +525,65 @@ async def test_recover_from_degraded_retries_a_failed_service(
 
 
 @pytest.mark.asyncio
+async def test_recovery_retains_a_service_whose_cleanup_also_failed(
+    fake_components: Components,
+) -> None:
+    """When the start fails the caller drops its only reference so the handle
+    stays retryable — but a stop that also failed may have left a live loop.
+    Dropping it there would put it beyond the reach of ``close()`` forever."""
+    _enable_all_services(fake_components.config)
+    ctx = await _init_degraded(fake_components)
+
+    doomed = MagicMock(name="scheduler")
+    doomed.start = AsyncMock(side_effect=RuntimeError("start boom"))
+    doomed.stop = AsyncMock(side_effect=RuntimeError("stop boom"))
+
+    with (
+        patch("memtomem.server.scheduler.ConsolidationScheduler", return_value=doomed),
+        patch("memtomem.server.scheduler.PolicyScheduler") as policy,
+        patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog,
+    ):
+        for factory in (policy, watchdog):
+            factory.return_value.start = AsyncMock()
+        await ctx.recover_from_degraded()
+
+    # Retryable (handle left None) *and* still reachable for shutdown.
+    assert ctx._scheduler is None
+    assert [service for service, _ in ctx._failed_services] == [doomed]
+
+    doomed.stop.reset_mock()
+    with patch("memtomem.server.component_factory.close_components") as mock_close:
+        mock_close.return_value = TeardownResult(storage_closed=True)
+        await ctx.close()
+
+    doomed.stop.assert_awaited_once()
+    assert ctx._failed_services == []
+
+
+@pytest.mark.asyncio
+async def test_watcher_retry_is_refused_when_its_cleanup_failed(
+    fake_components: Components,
+) -> None:
+    """The watcher instance is reused across retries and ``FileWatcher.stop``
+    clears its observer/task handles only on the way out. If that stop failed,
+    calling ``start()`` again would replace handles that are still live and
+    leave nothing able to stop them — so the retry is refused instead."""
+    ctx = await _init_degraded(fake_components)
+    watcher = ctx._watcher
+    watcher.start = AsyncMock(side_effect=RuntimeError("start boom"))  # type: ignore[union-attr]
+    watcher.stop = AsyncMock(side_effect=RuntimeError("stop boom"))  # type: ignore[union-attr]
+
+    await ctx.recover_from_degraded()
+    assert ctx._watcher_cleanup_failed is True
+    watcher.start.assert_awaited_once()  # type: ignore[union-attr]
+
+    # A later reset must not start over the attempt we could not stop.
+    watcher.start = AsyncMock()  # type: ignore[union-attr]
+    await ctx.recover_from_degraded()
+    watcher.start.assert_not_awaited()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_recover_from_degraded_serializes_concurrent_callers(
     fake_components: Components,
 ) -> None:

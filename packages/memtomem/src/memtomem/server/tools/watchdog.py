@@ -43,10 +43,15 @@ async def mem_watchdog(
                 'or mem_embedding_reset(mode="revert_to_stored") to recover — the '
                 "watchdog starts as part of that recovery."
             )
+        # Name the mode: ``mem_embedding_reset`` defaults to ``mode="status"``,
+        # which only prints a report and would never retry the start. The
+        # non-destructive mode is the right retry here — the mismatch is
+        # already gone, so it swaps nothing and just re-runs recovery.
         return (
             "Health watchdog is enabled but not running — a recovery start likely "
-            "failed. Check the server log for the failure, then re-run "
-            "mem_embedding_reset to retry (or restart the server)."
+            "failed. Check the server log for the failure, then run "
+            'mem_embedding_reset(mode="revert_to_stored") to retry '
+            "(or restart the server)."
         )
 
     if command == "status":

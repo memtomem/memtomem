@@ -511,6 +511,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
         app.state.summary_regen = None
         app.state.llm = comp.llm
+        # Whether this process started without a watcher because the embedding
+        # was broken. A startup fact, so it must be recorded here rather than
+        # re-derived later from the live mismatch: the first embedding reset
+        # clears that mismatch while the watcher stays absent for the rest of
+        # the process, and a second reset would then claim all is well (#2181).
+        app.state.watcher_suppressed_at_startup = watcher is None
         if watcher is not None:
             app.state.file_watcher = watcher
         hot_reload.initialize_reload_state(app)

@@ -621,7 +621,9 @@ async def test_mem_watchdog_distinguishes_suppressed_from_disabled(degraded_app)
 
     failed = await mem_watchdog(ctx=ctx)  # type: ignore[arg-type]
     assert "not running" in failed
-    assert "re-run mem_embedding_reset" in failed
+    # The remediation must name a mode: bare ``mem_embedding_reset`` defaults
+    # to mode="status", which prints a report and retries nothing.
+    assert 'mem_embedding_reset(mode="revert_to_stored")' in failed
 
 
 async def test_recovered_watcher_indexes_a_new_file_without_a_restart(tmp_path, monkeypatch):

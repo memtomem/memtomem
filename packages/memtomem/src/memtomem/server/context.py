@@ -148,6 +148,15 @@ class AppContext:
     # second start would leak both. ``recover_from_degraded`` (#2181) needs a
     # started/not-started distinction that survives a failed start.
     _watcher_started: bool = field(default=False, init=False, repr=False)
+    # Set when a failed recovery start could not be cleaned up either, so the
+    # attempt may still hold a live observer + task. A retry calls ``start()``,
+    # which overwrites those handles — leaving nothing able to stop them — so
+    # the retry is refused and shutdown does the stopping instead.
+    _watcher_cleanup_failed: bool = field(default=False, init=False, repr=False)
+    # Recovery starts that failed *and* whose cleanup failed. The caller drops
+    # its reference to leave the handle retryable, so these are held here for
+    # ``close()`` — otherwise a half-built loop outlives every reference to it.
+    _failed_services: list[tuple[object, str]] = field(default_factory=list, init=False, repr=False)
     _scheduler: object | None = field(default=None, init=False, repr=False)
     _policy_scheduler: object | None = field(default=None, init=False, repr=False)
     _health_watchdog: object | None = field(default=None, init=False, repr=False)
@@ -634,11 +643,15 @@ class AppContext:
             # a shared helper: init needs all-or-nothing rollback of a whole
             # batch, recovery needs incremental best-effort starts, and one
             # helper serving both would have to carry both failure policies.
-            if self._watcher is not None and not self._watcher_started:
+            if (
+                self._watcher is not None
+                and not self._watcher_started
+                and not self._watcher_cleanup_failed
+            ):
                 try:
                     await self._watcher.start()
                 except asyncio.CancelledError:
-                    await _stop_quietly(self._watcher, "recovery watcher")
+                    await self._clean_up_failed_watcher_start()
                     raise
                 except Exception:
                     logger.warning(
@@ -650,9 +663,7 @@ class AppContext:
                     # before it can fail, and the retry a later reset makes will
                     # overwrite both handles — so whatever this attempt left
                     # running has to be stopped now or nothing ever stops it.
-                    # A cancellation raised by the stop itself propagates (the
-                    # ``_stop_quietly`` contract); the caller defers it.
-                    await _stop_quietly(self._watcher, "recovery watcher")
+                    await self._clean_up_failed_watcher_start()
                 else:
                     self._watcher_started = True
 
@@ -680,14 +691,19 @@ class AppContext:
     async def _start_recovered_service(self, service: Any, label: str) -> bool:
         """Start one recovered background service; ``True`` when it is running.
 
-        A failed start is stopped again so a half-built loop does not linger
-        unreferenced, and reported ``False`` so the caller leaves its handle
-        ``None`` — that missing handle is what makes the next reset retry.
+        A failed start is stopped again so a half-built loop does not linger,
+        and reported ``False`` so the caller leaves its handle ``None`` — that
+        missing handle is what makes the next reset retry.
+
+        When even the stop fails, the instance is kept in ``_failed_services``
+        instead of being dropped: the caller is about to forget its only
+        reference, and something whose shutdown never completed still has to
+        be reachable from :meth:`close`.
         """
         try:
             await service.start()
         except asyncio.CancelledError:
-            await _stop_quietly(service, f"recovery {label}")
+            await self._quarantine_failed_start(service, label)
             raise
         except Exception:
             logger.warning(
@@ -700,9 +716,54 @@ class AppContext:
             # than being swallowed: swallowing it would let a cancelled reset
             # keep starting the remaining services and return as if nothing
             # had happened.
-            await _stop_quietly(service, f"recovery {label}")
+            await self._quarantine_failed_start(service, label)
             return False
         return True
+
+    async def _clean_up_failed_watcher_start(self) -> None:
+        """Stop a watcher whose recovery start failed; bar the retry if it can't.
+
+        Unlike the schedulers the watcher instance is reused across retries, so
+        a stop that fails cannot be answered by dropping the reference —
+        ``FileWatcher.stop`` clears its observer/task handles only on the way
+        out, so a failure there can leave both live while ``start()`` would
+        replace them. Refusing the retry keeps ``close()`` able to stop what is
+        actually running; ``mem_watchdog`` already points at a restart.
+        """
+        if self._watcher is None:
+            return
+        try:
+            await self._watcher.stop()
+        except asyncio.CancelledError:
+            self._watcher_cleanup_failed = True
+            logger.warning("Recovery cleanup of the file watcher was cancelled")
+            raise
+        except Exception:
+            self._watcher_cleanup_failed = True
+            logger.warning(
+                "Recovery cleanup of the file watcher failed — no further in-process "
+                "retry will start over it; restart the server to recover auto-indexing",
+                exc_info=True,
+            )
+
+    async def _quarantine_failed_start(self, service: Any, label: str) -> None:
+        """Stop a service whose start failed; retain it if the stop fails too."""
+        stop = getattr(service, "stop", None) or getattr(service, "close", None)
+        if stop is None:
+            return
+        try:
+            await stop()
+        except asyncio.CancelledError:
+            logger.warning("Recovery cleanup of the %s was cancelled", label)
+            self._failed_services.append((service, label))
+            raise
+        except Exception:
+            logger.warning(
+                "Recovery cleanup of the %s failed — retaining it for shutdown",
+                label,
+                exc_info=True,
+            )
+            self._failed_services.append((service, label))
 
     async def _acquire_lifecycle_barrier(self) -> None:
         """Take the shared lifecycle barrier before storage opens (#1936).
@@ -888,17 +949,23 @@ class AppContext:
                         first_cancel = exc
             self._warmup_task = None
 
-        for resource, stage in (
+        # Recovery starts whose own cleanup failed (#2181) are stopped first:
+        # they are the ones nothing else references, and a retry may have
+        # already built a live replacement alongside them.
+        stop_order = [(service, f"failed {label}") for service, label in self._failed_services]
+        stop_order += [
             (self._health_watchdog, "health_watchdog"),
             (self._policy_scheduler, "policy_scheduler"),
             (self._scheduler, "scheduler"),
             (self._watcher, "watcher"),
-        ):
+        ]
+        for resource, stage in stop_order:
             try:
                 await _stop_quietly(resource, stage)
             except asyncio.CancelledError as exc:
                 if first_cancel is None:
                     first_cancel = exc
+        self._failed_services.clear()
 
         # Default is UNCONFIRMED: only a teardown that actually ran and
         # reported success flips this. A bare ``True`` for the
@@ -923,6 +990,7 @@ class AppContext:
         self._dedup_scanner = None
         self._watcher = None
         self._watcher_started = False
+        self._watcher_cleanup_failed = False
         self._scheduler = None
         self._policy_scheduler = None
         self._health_watchdog = None

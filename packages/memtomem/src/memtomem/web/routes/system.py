@@ -1461,6 +1461,7 @@ async def get_model_readiness(
     dependencies=[Depends(_require_localhost)],
 )
 async def reset_embedding(
+    request: Request,
     storage=Depends(get_storage),
     config=Depends(get_config),
 ) -> EmbeddingResetResponse:
@@ -1471,7 +1472,10 @@ async def reset_embedding(
     # ``web/app.py``), and unlike the MCP server there is nothing here to
     # start afterwards — clearing the mismatch repairs search but leaves
     # auto-indexing off. Say so rather than reporting a bare success (#2181).
-    was_degraded = getattr(storage, "embedding_mismatch", None) is not None
+    # Read the startup fact, not the live mismatch: this very call clears the
+    # mismatch, so a second reset would drop the caveat while the watcher is
+    # still missing.
+    watcher_missing = bool(getattr(request.app.state, "watcher_suppressed_at_startup", False))
 
     await storage.reset_embedding_meta(
         dimension=config.embedding.dimension,
@@ -1481,7 +1485,7 @@ async def reset_embedding(
         max_sequence_tokens=config.embedding.max_sequence_tokens,
     )
     message = "Embedding metadata reset. All indexed vectors deleted — run a forced re-index."
-    if was_degraded:
+    if watcher_missing:
         message += (
             " This server started in degraded mode, so file watching is off:"
             " restart `mm web` to resume auto-indexing."
