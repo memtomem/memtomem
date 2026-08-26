@@ -49,6 +49,7 @@ from memtomem.storage.sqlite_helpers import (
     placeholders,
     quote_ident,
     serialize_f32,
+    utc_bound,
 )
 from memtomem.storage.orphan_gc import (
     OrphanProjectReport,
@@ -221,15 +222,15 @@ def _metadata_filter_sql(
             f"{column_alias}chunk_type IN ({placeholders(len(metadata_filter.chunk_types))})"
         )
         params.extend(metadata_filter.chunk_types)
-    # ``chunks.created_at`` is stored as a UTC ISO-8601 string. Bounds from
-    # the web route are normalized to UTC too, so lexical ordering is temporal
-    # ordering for this column.
+    # ``chunks.created_at`` is stored as a UTC ISO-8601 string and compared
+    # lexically, so the bound is normalized here rather than trusted from the
+    # caller — the web route did normalize, every other caller did not.
     if metadata_filter.created_from is not None:
         conditions.append(f"{column_alias}created_at >= ?")
-        params.append(metadata_filter.created_from.isoformat())
+        params.append(utc_bound(metadata_filter.created_from))
     if metadata_filter.created_before is not None:
         conditions.append(f"{column_alias}created_at < ?")
-        params.append(metadata_filter.created_before.isoformat())
+        params.append(utc_bound(metadata_filter.created_before))
     return " AND ".join(conditions), params
 
 
@@ -2607,10 +2608,10 @@ class SqliteBackend(
             params.append(_chunk_ids_param(chunk_ids))
         if since is not None:
             conditions.append("created_at >= ?")
-            params.append(since.isoformat())
+            params.append(utc_bound(since))
         if until is not None:
             conditions.append("created_at < ?")
-            params.append(until.isoformat())
+            params.append(utc_bound(until))
         if source_filter is not None:
             conditions.append("source_file LIKE ? ESCAPE '\\'")
             params.append(f"%{escape_like(source_filter)}%")

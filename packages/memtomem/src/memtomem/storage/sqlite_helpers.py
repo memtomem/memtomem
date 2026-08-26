@@ -50,6 +50,56 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def utc_bound(value: datetime) -> str:
+    """Render a datetime as a bound comparable against a stored timestamp.
+
+    The ``created_at`` / ``updated_at`` columns hold UTC ISO-8601 strings and
+    every filter on them compares **lexically** — SQLite has no datetime type,
+    so ``created_at >= ?`` orders by the printed digits. That is temporal
+    ordering only while both sides are UTC: a bound left at ``+09:00`` sorts by
+    its own wall-clock reading, so ``2026-01-01T00:00:00+09:00``
+    (= ``2025-12-31T15:00Z``) compares as *later* than a row written at
+    ``2025-12-31T16:00Z``, which actually follows it.
+
+    A naive value is read as UTC, matching how the rest of the storage layer
+    treats one.
+
+    Use this for every datetime that becomes a bound on those columns; do not
+    call ``.isoformat()`` directly at the call site.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def utc_bound_from_iso(value: str, *, field: str, timespec: str = "auto") -> str:
+    """Parse a caller-supplied ISO-8601 string into a UTC bound.
+
+    The string counterpart of :func:`utc_bound`, for surfaces that take the
+    bound as text and would otherwise bind it to SQL untouched.
+
+    ``timespec`` must match the precision the *target column* is written at,
+    because the comparison is lexical. ``query_history.created_at`` is stored
+    with ``timespec="seconds"``, so a bound carrying fractional seconds sorts
+    after every row inside its own second: a poll at ``12:00:00.500`` would
+    miss a run recorded at ``12:00:00.800`` and stored as ``12:00:00+00:00``.
+    Flooring the bound to the same precision keeps the whole second on the
+    inclusive side. Leave it at ``"auto"`` for columns written at full
+    precision, such as ``chunks.created_at``.
+
+    Raises:
+        ValueError: the value is not ISO-8601, named by ``field`` so the
+            message points at the argument the caller passed.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp, got {value!r}") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec=timespec)
+
+
 def escape_like(value: str) -> str:
     """Escape LIKE special characters (``%``, ``_``) in a user-supplied value."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
