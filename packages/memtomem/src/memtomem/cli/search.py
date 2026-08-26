@@ -40,7 +40,16 @@ Examples:
 @click.option("--top-k", "-k", default=10, help="Number of results")
 @click.option("--source-filter", "-s", default=None, help="Source file filter")
 @click.option("--tag-filter", "-t", default=None, help="Tag filter (comma-separated)")
-@click.option("--namespace", "-n", default=None, help="Namespace filter")
+@click.option(
+    "--namespace",
+    "-n",
+    default=None,
+    help=(
+        "Namespace filter: single value, comma list (work,personal), or glob "
+        "(proj:*) — the two spellings cannot be combined. When omitted, system "
+        "namespaces (archive:*, agent-runtime:*) are hidden."
+    ),
+)
 @click.option(
     "--scope",
     default=None,
@@ -128,6 +137,12 @@ async def _search(
     rerank: bool | None = None,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.models import (
+        InvalidNamespaceFilterError,
+        InvalidScopeFilterError,
+        NamespaceFilter,
+        ScopeFilter,
+    )
     from memtomem.services.search_service import (
         InvalidTemporalBoundError,
         parse_as_of_bound,
@@ -142,6 +157,24 @@ async def _search(
         raise click.ClickException(
             f"invalid --as-of value '{as_of}'. "
             "Accepted formats: 'YYYY-MM-DD' (date) or 'YYYY-QN' (quarter, N in 1-4)."
+        ) from None
+
+    # Same reason, same re-wording: the parser's message names the API
+    # argument, the user typed a flag.
+    try:
+        NamespaceFilter.parse(namespace)
+    except InvalidNamespaceFilterError:
+        raise click.ClickException(
+            f"invalid --namespace value '{namespace}': a comma list and a glob "
+            "cannot be combined. Use either '-n work,personal' or '-n proj:*', "
+            "and run one query per pattern when you need several."
+        ) from None
+    try:
+        ScopeFilter.parse(scope)
+    except InvalidScopeFilterError:
+        raise click.ClickException(
+            f"invalid --scope value '{scope}': a comma list and a glob cannot be "
+            "combined. Use either '--scope user,project_local' or '--scope project_*'."
         ) from None
 
     async with cli_components() as comp:

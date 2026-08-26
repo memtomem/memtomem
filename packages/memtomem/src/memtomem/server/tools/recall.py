@@ -53,14 +53,14 @@ async def mem_recall(
         until: Exclusive end date — same formats as *since*
         source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
         tag_filter: Comma-separated tags, matching ANY; applied before *limit*.
-        namespace: Namespace scope — single, comma-separated, or glob (e.g. "project:*")
+        namespace: Namespace scope — single, comma list, or glob ("project:*"), not both.
         limit: Maximum number of chunks to return (default 20)
         output_format: Output format — "compact" (default, human-readable) or "structured"
             (JSON for machine parsing, includes trust-UX hints as a "hints" field).
         scope: ADR-0011 scope-axis filter — single, comma list (``user,project_local``),
-            or glob (``project_*``). When omitted, the default merge applies: in-project
-            recalls return ``user`` + the current project's project tiers; out-of-project
-            recalls return ``user`` only.
+            or glob (``project_*``), not both. Omitted, the default merge applies:
+            in-project recalls return ``user`` + that project's tiers, out-of-project
+            ``user`` only.
 
     Examples::
 

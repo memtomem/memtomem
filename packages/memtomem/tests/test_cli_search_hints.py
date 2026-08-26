@@ -126,3 +126,55 @@ class TestAsOfValidation:
 
         assert result.exit_code != 0
         assert opened is False
+
+
+class TestFilterSyntaxValidation:
+    """A comma list mixed with a glob parses as one pattern matching nothing,
+    so without this rejection the CLI prints "No results found" for a query
+    that was never runnable."""
+
+    def test_namespace_message_names_the_cli_flag(self, monkeypatch) -> None:
+        result = _invoke(monkeypatch, "--namespace", "archive:*,work")
+
+        assert result.exit_code != 0
+        assert "invalid --namespace value 'archive:*,work'" in result.stderr
+
+    def test_scope_message_names_the_cli_flag(self, monkeypatch) -> None:
+        result = _invoke(monkeypatch, "--scope", "project_*,user")
+
+        assert result.exit_code != 0
+        assert "invalid --scope value 'project_*,user'" in result.stderr
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [("--namespace", "archive:*,work"), ("--scope", "project_*,user")],
+    )
+    def test_rejected_before_components_open(self, monkeypatch, flag: str, value: str) -> None:
+        opened = False
+
+        @asynccontextmanager
+        async def fake():
+            nonlocal opened
+            opened = True
+            yield SimpleNamespace()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
+
+        result = CliRunner().invoke(cli, ["search", flag, value, "q"])
+
+        assert result.exit_code != 0
+        assert opened is False
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--namespace", "work,personal"),
+            ("--namespace", "proj:*"),
+            ("--scope", "user,project_local"),
+            ("--scope", "project_*"),
+        ],
+    )
+    def test_each_spelling_on_its_own_still_runs(self, monkeypatch, flag: str, value: str) -> None:
+        result = _invoke(monkeypatch, flag, value)
+
+        assert result.exit_code == 0

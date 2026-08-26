@@ -7,6 +7,7 @@ import logging
 from uuid import UUID
 
 from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
 # LangGraph adapter; re-exported from this module so the long-standing
@@ -67,37 +68,38 @@ async def mem_search(
         top_k: Number of results to return (default 10)
         source_filter: Source path filter — substring, or glob with *, ?, []
         tag_filter: Comma-separated tags; matches chunks carrying ANY of them
-        namespace: Namespace scope (single value)
+        namespace: Namespace scope — value, comma list (``work,personal``) or
+            glob (``proj:*``), not both. Omitted, system namespaces are hidden;
+            naming one includes it.
         as_of: Temporal bound for retroactive search — ``YYYY-MM-DD`` or
             ``YYYY-QN``, default now. Chunks whose ``valid_from`` /
             ``valid_to`` frontmatter excludes that point are filtered out;
-            chunks without those keys are always valid. Time-decay scoring is
-            anchored to this instant instead of the wall clock.
+            chunks without those keys are always valid. Time-decay scoring
+            anchors to this instant, not the wall clock.
         bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor)
         dense_weight: RRF weight for meaning matches (default 1.0). Both must be
             finite and >= 0, not both zero; 0 disables that leg
         context_window: Expand each result with ±N adjacent chunks (0 = off)
-        verbose: Deprecated — use output_format="verbose".
+        verbose: Deprecated — use output_format="verbose"
         output_format: "compact" (default), "verbose" (adds UUID / pipeline stats),
             or "structured" (JSON). A non-default value overrides ``verbose``.
         scope: ADR-0011 tier filter — value, comma list (``user,project_local``)
-            or glob (``project_*``). Omitted, the default merge applies: inside a
-            project ``user`` + that project's tiers, outside one ``user`` only.
-            Pass ``project_shared`` from outside a project to search across
-            projects.
+            or glob (``project_*``), not both. Omitted, the default merge
+            applies: inside a project ``user`` + that project's tiers, outside
+            one ``user`` only. Pass ``project_shared`` from outside a project to
+            search across projects.
         rerank: ``false`` skips the cross-encoder rerank stage — the fast path
-            for latency-bounded callers (typically <100ms vs several seconds) —
-            and collapses the candidate pool to ``top_k``, so it narrows recall
-            as well as changing the score scale. Omitted/``true`` follows server
-            config; ``true`` cannot enable reranking on a server that has it
-            disabled.
+            for latency-bounded callers — and collapses the candidate pool to
+            ``top_k``, so it narrows recall as well as changing the score scale.
+            Omitted/``true`` follows server config; ``true`` cannot enable
+            reranking on a server that has it disabled.
         record: ``false`` = background read, for fan-out callers: no
             access-count increments, no query history, caches neither read
             nor written, dense retrieval exhaustive — so results can differ.
 
-    A result count below ``top_k`` can mean filters excluded candidates or that
-    the index simply holds no more matches. Raising ``top_k`` widens the
-    request; it does not promise more results.
+    A count below ``top_k`` can mean filters excluded candidates or the index
+    holds no more. Raising ``top_k`` widens the request; it does not promise
+    more results.
 
     ``output_format="structured"`` adds a top-level ``score_scale`` naming the
     scale ``score`` is on: ``rerank`` (model-dependent range; the ``reranker``
@@ -126,7 +128,13 @@ async def mem_search(
     try:
         parse_as_of_bound(as_of)
         rrf_weights_from(bm25_weight, dense_weight)
-    except (InvalidTemporalBoundError, InvalidRrfWeightError) as e:
+        NamespaceFilter.parse(namespace)
+        ScopeFilter.parse(scope)
+    except (
+        InvalidTemporalBoundError,
+        InvalidRrfWeightError,
+        InvalidFilterSyntaxError,
+    ) as e:
         return f"Error: {e}"
 
     app = await _get_app_initialized(ctx)
