@@ -17,9 +17,13 @@ These tests lock in the recovery-friendly behavior:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import sqlite3
+import time
 from pathlib import Path
 from typing import Sequence
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import sqlite_vec
@@ -82,16 +86,15 @@ def _seed_legacy_dim0_db(db_path: Path) -> None:
         db.close()
 
 
-@pytest.fixture
-async def degraded_components(tmp_path, monkeypatch):
-    """``create_components`` against a dim=0 DB with config pointing at onnx/bge-m3.
+def _degraded_config(tmp_path, monkeypatch) -> Mem2MemConfig:
+    """Config + monkeypatches that put ``create_components`` into degraded mode.
 
-    Would have raised ``EmbeddingDimensionMismatchError`` pre-#349; now returns
-    ``Components`` with ``embedding_broken`` populated and a relaxed storage.
+    Seeds a dim=0 DB while the config points at onnx/bge-m3, and stubs the
+    embedder factory so nothing downloads ONNX weights.
     """
     db_path = tmp_path / "legacy.db"
     mem_dir = tmp_path / "memories"
-    mem_dir.mkdir()
+    mem_dir.mkdir(exist_ok=True)
     _seed_legacy_dim0_db(db_path)
 
     config = Mem2MemConfig()
@@ -107,12 +110,51 @@ async def degraded_components(tmp_path, monkeypatch):
         "memtomem.runtime.components.create_embedder",
         lambda embedding_config: _FakeEmbedder(),
     )
+    return config
 
-    comp = await create_components(config)
+
+@pytest.fixture
+async def degraded_components(tmp_path, monkeypatch):
+    """``create_components`` against a dim=0 DB with config pointing at onnx/bge-m3.
+
+    Would have raised ``EmbeddingDimensionMismatchError`` pre-#349; now returns
+    ``Components`` with ``embedding_broken`` populated and a relaxed storage.
+    """
+    comp = await create_components(_degraded_config(tmp_path, monkeypatch))
     try:
         yield comp
     finally:
         await close_components(comp)
+
+
+@pytest.fixture
+async def degraded_app(tmp_path, monkeypatch):
+    """A lifespan-owned ``AppContext`` that started in degraded mode (#2181).
+
+    Unlike :func:`_make_app`, this goes through ``ensure_initialized`` — so it
+    owns its components and its background loops, which is what
+    ``recover_from_degraded`` gates on. The watcher class is stubbed; the tests
+    that need a real one patch it themselves.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from memtomem.indexing import watcher as watcher_mod
+
+    def _fake_watcher(*_args: object, **_kwargs: object) -> MagicMock:
+        fake = MagicMock(name="watcher")
+        fake.start = AsyncMock()
+        fake.stop = AsyncMock()
+        return fake
+
+    monkeypatch.setattr(watcher_mod, "FileWatcher", _fake_watcher)
+
+    app = AppContext(config=_degraded_config(tmp_path, monkeypatch))
+    await app.ensure_initialized()
+    assert app.embedding_broken is not None, "fixture must start degraded"
+    try:
+        yield app
+    finally:
+        await app.close()
 
 
 class _StubCtx:
@@ -424,3 +466,209 @@ async def test_revert_to_stored_rebinds_watcher_and_dedup(degraded_components):
     watcher.rebind.assert_called_once_with(app.index_engine, app.search_pipeline)
     assert app.dedup_scanner is not pre_dedup
     assert app.dedup_scanner._embedder is app.embedder
+
+
+# ── #2181: the reset brings the suppressed background loops back ──────
+
+
+async def test_apply_current_starts_the_suppressed_watcher(degraded_app):
+    """Degraded startup leaves the watcher constructed but stopped. Before
+    #2181 it stayed that way after a successful reset, so files dropped into
+    a memory dir were not indexed until the server restarted."""
+    ctx = _StubCtx(degraded_app)
+
+    await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+
+    degraded_app._watcher.start.assert_awaited_once()
+    assert degraded_app.embedding_broken is None
+
+
+async def test_revert_to_stored_starts_the_suppressed_watcher(degraded_app):
+    """Same recovery on the non-destructive path. The watcher must start
+    *after* the rebind, or it would watch through the retired engine."""
+    ctx = _StubCtx(degraded_app)
+
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    watcher = degraded_app._watcher
+    watcher.start.assert_awaited_once()
+    watcher.rebind.assert_called_once_with(degraded_app.index_engine, degraded_app.search_pipeline)
+    # Order matters: a start before the rebind would watch through the engine
+    # this revert just retired.
+    names = [call[0] for call in watcher.mock_calls]
+    assert names.index("rebind") < names.index("start")
+    assert degraded_app.embedding_broken is None
+
+
+async def test_repeated_resets_do_not_start_duplicate_loops(degraded_app):
+    """A second reset is a no-op for recovery. ``FileWatcher.start`` builds a
+    fresh Observer each call, so a duplicate start leaks a thread and a
+    processor task with nothing left holding the first pair."""
+    degraded_app.config.health_watchdog.enabled = True
+    ctx = _StubCtx(degraded_app)
+
+    with patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog:
+        watchdog.return_value.start = AsyncMock()
+        watchdog.return_value.stop = AsyncMock()
+        await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+        await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+        # ... and across modes: the revert path returns early on "nothing to
+        # revert", which must also not re-enter recovery.
+        await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    degraded_app._watcher.start.assert_awaited_once()
+    assert watchdog.call_count == 1
+
+
+async def test_reset_survives_a_failing_recovery_and_retries_it(degraded_app, caplog):
+    """The repair the user asked for has already landed when recovery runs, so
+    a service that fails to start is logged — never raised — and the next
+    reset tries it again."""
+    degraded_app._watcher.start = AsyncMock(side_effect=RuntimeError("watcher boom"))
+    degraded_app.config.health_watchdog.enabled = True
+    ctx = _StubCtx(degraded_app)
+
+    with patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog:
+        watchdog.return_value.start = AsyncMock()
+        watchdog.return_value.stop = AsyncMock()
+        with caplog.at_level(logging.WARNING):
+            out = await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "DB reset to onnx/bge-m3" in out
+        assert "Failed to start the file watcher" in caplog.text
+        # A failed watcher does not keep the other services down.
+        assert degraded_app.health_watchdog is watchdog.return_value
+        assert degraded_app._watcher_started is False
+
+        degraded_app._watcher.start = AsyncMock()
+        await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+
+    degraded_app._watcher.start.assert_awaited_once()
+    assert degraded_app._watcher_started is True
+
+
+async def test_revert_retries_recovery_without_a_destructive_reset(degraded_app):
+    """The non-destructive mode has to stay the retry path. ``revert_to_stored``
+    returns early once the mismatch is gone, so without recovery on that branch
+    a user whose watchdog failed to start could only retry via
+    ``apply_current`` — which drops every vector to restart a scheduler."""
+    degraded_app.config.health_watchdog.enabled = True
+    ctx = _StubCtx(degraded_app)
+
+    with patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog:
+        watchdog.return_value.start = AsyncMock(side_effect=RuntimeError("boom"))
+        watchdog.return_value.stop = AsyncMock()
+        await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+        assert degraded_app.health_watchdog is None
+
+        watchdog.return_value.start = AsyncMock()
+        out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "nothing to revert" in out
+    assert degraded_app.health_watchdog is watchdog.return_value
+    # The retry must not re-start the watcher that came up on the first pass.
+    degraded_app._watcher.start.assert_awaited_once()
+
+
+async def test_revert_still_retires_the_old_generation_when_recovery_is_cancelled(
+    degraded_app,
+):
+    """Recovery runs before the retirement closes, so a cancellation raised
+    inside it must be deferred — propagating it there would skip both closes
+    and re-open the #2176 leak (a leaked ONNX session + its executor thread)."""
+    from unittest.mock import MagicMock
+
+    degraded_app._watcher.start = AsyncMock(side_effect=asyncio.CancelledError())
+    old_pipeline = degraded_app.search_pipeline
+    old_pipeline.close = AsyncMock()
+    old_embedder = degraded_app.embedder
+    old_embedder.close = AsyncMock()
+    ctx = _StubCtx(degraded_app)
+
+    with pytest.raises(asyncio.CancelledError):
+        await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    old_pipeline.close.assert_awaited_once()
+    old_embedder.close.assert_awaited_once()
+    assert isinstance(degraded_app._watcher, MagicMock)
+    # The half-started watcher is stopped rather than left running with its
+    # handles about to be overwritten by the next attempt.
+    degraded_app._watcher.stop.assert_awaited_once()
+
+
+async def test_mem_watchdog_distinguishes_suppressed_from_disabled(degraded_app):
+    """A missing watchdog handle used to read as a config problem in all
+    three cases, sending the user to an env var that is already set."""
+    from memtomem.server.tools.watchdog import mem_watchdog
+
+    ctx = _StubCtx(degraded_app)
+
+    # 1. Genuinely disabled — unchanged message.
+    assert "Set MEMTOMEM_HEALTH_WATCHDOG__ENABLED=true" in await mem_watchdog(ctx=ctx)  # type: ignore[arg-type]
+
+    # 2. Enabled but suppressed by the degraded start.
+    degraded_app.config.health_watchdog.enabled = True
+    suppressed = await mem_watchdog(ctx=ctx)  # type: ignore[arg-type]
+    assert "degraded embedding mode" in suppressed
+    assert "mem_embedding_reset" in suppressed
+
+    # 3. Recovered, but the watchdog's start failed: no longer degraded, so
+    # the message must point at the log and the retry, not at the config.
+    with patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog:
+        watchdog.return_value.start = AsyncMock(side_effect=RuntimeError("boom"))
+        watchdog.return_value.stop = AsyncMock()
+        await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+
+    failed = await mem_watchdog(ctx=ctx)  # type: ignore[arg-type]
+    assert "not running" in failed
+    # The remediation must name a mode: bare ``mem_embedding_reset`` defaults
+    # to mode="status", which prints a report and retries nothing.
+    assert 'mem_embedding_reset(mode="revert_to_stored")' in failed
+
+
+async def test_recovered_watcher_indexes_a_new_file_without_a_restart(tmp_path, monkeypatch):
+    """Acceptance criterion 1, against a real ``FileWatcher``: after the
+    reset, a file dropped into a memory dir is auto-indexed in-process."""
+    from watchdog.observers.polling import PollingObserver
+
+    from memtomem.indexing import watcher as watcher_mod
+
+    # Poll instead of using the platform-native backend: FSEvents/inotify are
+    # unavailable in some sandboxes, where a native-only test fails for
+    # reasons that have nothing to do with the recovery under test.
+    monkeypatch.setattr(
+        watcher_mod, "Observer", lambda: PollingObserver(timeout=0.05), raising=False
+    )
+    real_watcher = watcher_mod.FileWatcher
+    monkeypatch.setattr(
+        watcher_mod,
+        "FileWatcher",
+        lambda *args, **kwargs: real_watcher(*args, debounce_ms=50, **kwargs),
+    )
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    mem_dir = Path(config.indexing.memory_dirs[0])
+    app = AppContext(config=config)
+    await app.ensure_initialized()
+    try:
+        assert app.embedding_broken is not None
+        ctx = _StubCtx(app)
+        await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+
+        (mem_dir / "post-recovery.md").write_text(
+            "# Post recovery\n\nWatcher picked this up without a restart.\n",
+            encoding="utf-8",
+        )
+
+        # Poll rather than sleep a fixed span: the watcher debounce plus the
+        # index round-trip has no bound worth pinning, only a deadline.
+        deadline = time.monotonic() + 30.0
+        indexed = 0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            indexed = (await app.storage.get_stats()).get("total_chunks", 0)
+            if indexed:
+                break
+        assert indexed, "watcher never indexed the new file after recovery"
+    finally:
+        await app.close()

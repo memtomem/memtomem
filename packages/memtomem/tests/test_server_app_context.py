@@ -378,3 +378,248 @@ async def test_ensure_initialized_rolls_back_components_when_watcher_start_fails
     assert ctx._components is None
     assert ctx._owns_components is False
     assert ctx._watcher is None
+
+
+# ── #2181: recovery from degraded startup ─────────────────────────────
+
+
+def _enable_all_services(config: Mem2MemConfig) -> None:
+    """Turn on every background service ``recover_from_degraded`` can start."""
+    config.consolidation_schedule.enabled = True
+    config.policy.enabled = True
+    config.health_watchdog.enabled = True
+
+
+async def _init_degraded(fake_components: Components) -> AppContext:
+    """A lifespan-owned context that started in degraded mode."""
+    fake_components.embedding_broken = {"reason": "dim_mismatch"}
+    ctx = AppContext(config=fake_components.config)
+    with patch(
+        "memtomem.server.component_factory.create_components",
+        return_value=fake_components,
+    ):
+        await ctx.ensure_initialized()
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_recover_from_degraded_starts_what_startup_skipped(
+    fake_components: Components,
+) -> None:
+    """The whole point of #2181: after the embedding mismatch is repaired,
+    the loops degraded startup suppressed come up in-process."""
+    _enable_all_services(fake_components.config)
+    ctx = await _init_degraded(fake_components)
+    ctx._watcher.start.assert_not_awaited()  # type: ignore[attr-defined]
+
+    with (
+        patch("memtomem.server.scheduler.ConsolidationScheduler") as consolidation,
+        patch("memtomem.server.scheduler.PolicyScheduler") as policy,
+        patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog,
+    ):
+        for factory in (consolidation, policy, watchdog):
+            factory.return_value.start = AsyncMock()
+        await ctx.recover_from_degraded()
+
+    ctx._watcher.start.assert_awaited_once()  # type: ignore[attr-defined]
+    assert ctx._scheduler is consolidation.return_value
+    assert ctx._policy_scheduler is policy.return_value
+    assert ctx._health_watchdog is watchdog.return_value
+    # The startup snapshot is a stale reading once recovery has run; leaving
+    # it set keeps every status surface reporting a degraded server.
+    assert ctx.embedding_broken is None
+
+
+@pytest.mark.asyncio
+async def test_recover_from_degraded_is_noop_on_a_healthy_context(
+    fake_components: Components,
+) -> None:
+    """A reset on a server that started healthy must not re-start the
+    watcher — ``FileWatcher.start`` builds a fresh Observer every call, so a
+    second start leaks the first one's thread and processor task."""
+    ctx = AppContext(config=fake_components.config)
+    with patch(
+        "memtomem.server.component_factory.create_components",
+        return_value=fake_components,
+    ):
+        await ctx.ensure_initialized()
+    watcher = ctx._watcher
+    watcher.start.assert_awaited_once()  # type: ignore[attr-defined]
+
+    await ctx.recover_from_degraded()
+
+    watcher.start.assert_awaited_once()  # type: ignore[attr-defined]
+    assert ctx._watcher is watcher
+
+
+@pytest.mark.asyncio
+async def test_recover_from_degraded_skips_unowned_contexts(
+    fake_components: Components,
+) -> None:
+    """``from_components`` contexts (CLI, tests) deliberately run no
+    background loops and do not close the components they were handed.
+    Growing loops on one would hand the supplier tasks it never asked for
+    and never tears down."""
+    _enable_all_services(fake_components.config)
+    fake_components.embedding_broken = {"reason": "dim_mismatch"}
+    ctx = AppContext.from_components(fake_components)
+
+    with (
+        patch("memtomem.server.scheduler.ConsolidationScheduler") as consolidation,
+        patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog,
+    ):
+        await ctx.recover_from_degraded()
+
+    consolidation.assert_not_called()
+    watchdog.assert_not_called()
+    assert ctx._scheduler is None
+    assert ctx._health_watchdog is None
+    # The stale snapshot is still cleared — status honesty does not depend
+    # on owning the loops.
+    assert ctx.embedding_broken is None
+
+
+@pytest.mark.asyncio
+async def test_recover_from_degraded_retries_a_failed_service(
+    fake_components: Components,
+) -> None:
+    """A start that fails must not consume the only recovery attempt.
+
+    One "already recovered" flag would do exactly that: the failure would be
+    permanent until restart, which is the state #2181 exists to end.
+    """
+    _enable_all_services(fake_components.config)
+    ctx = await _init_degraded(fake_components)
+
+    starts: list[object] = []
+
+    def _make_watchdog(*_args: object, **_kwargs: object) -> MagicMock:
+        instance = MagicMock()
+        instance.start = AsyncMock(side_effect=RuntimeError("watchdog boom"))
+        instance.stop = AsyncMock()
+        starts.append(instance)
+        return instance
+
+    with (
+        patch("memtomem.server.scheduler.ConsolidationScheduler") as consolidation,
+        patch("memtomem.server.scheduler.PolicyScheduler") as policy,
+        patch("memtomem.server.health_watchdog.HealthWatchdog", side_effect=_make_watchdog),
+    ):
+        for factory in (consolidation, policy):
+            factory.return_value.start = AsyncMock()
+        await ctx.recover_from_degraded()
+
+        # The failure is logged, not raised — the reset that triggered this
+        # already succeeded — and it does not take the other services down.
+        assert ctx._health_watchdog is None
+        assert ctx._scheduler is consolidation.return_value
+        starts[0].stop.assert_awaited_once()
+
+        # Second reset: the still-missing service is tried again, the ones
+        # already running are not rebuilt.
+        await ctx.recover_from_degraded()
+
+    assert len(starts) == 2
+    assert consolidation.call_count == 1
+    ctx._watcher.start.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_recovery_retains_a_service_whose_cleanup_also_failed(
+    fake_components: Components,
+) -> None:
+    """When the start fails the caller drops its only reference so the handle
+    stays retryable — but a stop that also failed may have left a live loop.
+    Dropping it there would put it beyond the reach of ``close()`` forever."""
+    _enable_all_services(fake_components.config)
+    ctx = await _init_degraded(fake_components)
+
+    doomed = MagicMock(name="scheduler")
+    doomed.start = AsyncMock(side_effect=RuntimeError("start boom"))
+    doomed.stop = AsyncMock(side_effect=RuntimeError("stop boom"))
+
+    with (
+        patch("memtomem.server.scheduler.ConsolidationScheduler", return_value=doomed),
+        patch("memtomem.server.scheduler.PolicyScheduler") as policy,
+        patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog,
+    ):
+        for factory in (policy, watchdog):
+            factory.return_value.start = AsyncMock()
+        await ctx.recover_from_degraded()
+
+    # Retryable (handle left None) *and* still reachable for shutdown.
+    assert ctx._scheduler is None
+    assert [service for service, _ in ctx._failed_services] == [doomed]
+
+    doomed.stop.reset_mock()
+    with patch("memtomem.server.component_factory.close_components") as mock_close:
+        mock_close.return_value = TeardownResult(storage_closed=True)
+        await ctx.close()
+
+    doomed.stop.assert_awaited_once()
+    assert ctx._failed_services == []
+
+
+@pytest.mark.asyncio
+async def test_watcher_retry_is_refused_when_its_cleanup_failed(
+    fake_components: Components,
+) -> None:
+    """The watcher instance is reused across retries and ``FileWatcher.stop``
+    clears its observer/task handles only on the way out. If that stop failed,
+    calling ``start()`` again would replace handles that are still live and
+    leave nothing able to stop them — so the retry is refused instead."""
+    ctx = await _init_degraded(fake_components)
+    watcher = ctx._watcher
+    watcher.start = AsyncMock(side_effect=RuntimeError("start boom"))  # type: ignore[union-attr]
+    watcher.stop = AsyncMock(side_effect=RuntimeError("stop boom"))  # type: ignore[union-attr]
+
+    await ctx.recover_from_degraded()
+    assert ctx._watcher_cleanup_failed is True
+    watcher.start.assert_awaited_once()  # type: ignore[union-attr]
+
+    # A later reset must not start over the attempt we could not stop.
+    watcher.start = AsyncMock()  # type: ignore[union-attr]
+    await ctx.recover_from_degraded()
+    watcher.start.assert_not_awaited()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_recover_from_degraded_serializes_concurrent_callers(
+    fake_components: Components,
+) -> None:
+    """``apply_current`` holds no lock, so two resets can land together.
+    Without ``_init_lock`` both would see an unstarted watcher and start it
+    twice, leaking an Observer thread."""
+    _enable_all_services(fake_components.config)
+    ctx = await _init_degraded(fake_components)
+
+    released = asyncio.Event()
+    starts = 0
+
+    async def _blocking_start() -> None:
+        nonlocal starts
+        starts += 1
+        await released.wait()
+
+    ctx._watcher.start = AsyncMock(side_effect=_blocking_start)  # type: ignore[union-attr]
+
+    with (
+        patch("memtomem.server.scheduler.ConsolidationScheduler") as consolidation,
+        patch("memtomem.server.scheduler.PolicyScheduler") as policy,
+        patch("memtomem.server.health_watchdog.HealthWatchdog") as watchdog,
+    ):
+        for factory in (consolidation, policy, watchdog):
+            factory.return_value.start = AsyncMock()
+        first = asyncio.create_task(ctx.recover_from_degraded())
+        second = asyncio.create_task(ctx.recover_from_degraded())
+        # Let both tasks reach the lock; only one may be inside it.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert starts == 1
+        released.set()
+        await asyncio.gather(first, second)
+
+    assert starts == 1
+    assert consolidation.call_count == 1
+    assert policy.call_count == 1
+    assert watchdog.call_count == 1

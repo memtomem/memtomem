@@ -488,7 +488,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the indexer would crash on the missing chunks_vec table; recovery
         # via ``mem_embedding_reset``. Mirrors the wiring in
         # ``server/context.py``; without this ``mm web`` ran with no fs
-        # watcher at all.
+        # watcher at all. The MCP server recovers in-process via
+        # ``AppContext.recover_from_degraded`` (#2181); ``mm web`` cannot yet —
+        # its own ``POST /api/embedding-reset`` clears the mismatch but
+        # nothing here holds a watcher to start, so that endpoint says a
+        # restart is still needed.
         if comp.embedding_broken is None:
             watcher = FileWatcher(
                 comp.index_engine,
@@ -507,6 +511,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
         app.state.summary_regen = None
         app.state.llm = comp.llm
+        # Whether this process started without a watcher because the embedding
+        # was broken. A startup fact, so it must be recorded here rather than
+        # re-derived later from the live mismatch: the first embedding reset
+        # clears that mismatch while the watcher stays absent for the rest of
+        # the process, and a second reset would then claim all is well (#2181).
+        app.state.watcher_suppressed_at_startup = watcher is None
         if watcher is not None:
             app.state.file_watcher = watcher
         hot_reload.initialize_reload_state(app)

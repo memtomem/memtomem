@@ -141,6 +141,22 @@ class AppContext:
     _owns_components: bool = field(default=False, init=False, repr=False)
     _dedup_scanner: DedupScanner | None = field(default=None, init=False, repr=False)
     _watcher: FileWatcher | None = field(default=None, init=False, repr=False)
+    # Whether ``_watcher.start()`` has actually run. Degraded startup (#349)
+    # constructs the watcher but leaves it stopped, so ``_watcher is not None``
+    # does not mean "watching" — and ``FileWatcher`` exposes no running flag
+    # while ``start()`` unconditionally builds a fresh observer + task, so a
+    # second start would leak both. ``recover_from_degraded`` (#2181) needs a
+    # started/not-started distinction that survives a failed start.
+    _watcher_started: bool = field(default=False, init=False, repr=False)
+    # Set when a failed recovery start could not be cleaned up either, so the
+    # attempt may still hold a live observer + task. A retry calls ``start()``,
+    # which overwrites those handles — leaving nothing able to stop them — so
+    # the retry is refused and shutdown does the stopping instead.
+    _watcher_cleanup_failed: bool = field(default=False, init=False, repr=False)
+    # Recovery starts that failed *and* whose cleanup failed. The caller drops
+    # its reference to leave the handle retryable, so these are held here for
+    # ``close()`` — otherwise a half-built loop outlives every reference to it.
+    _failed_services: list[tuple[object, str]] = field(default_factory=list, init=False, repr=False)
     _scheduler: object | None = field(default=None, init=False, repr=False)
     _policy_scheduler: object | None = field(default=None, init=False, repr=False)
     _health_watchdog: object | None = field(default=None, init=False, repr=False)
@@ -476,6 +492,7 @@ class AppContext:
 
             dedup: DedupScanner | None = None
             watcher: FileWatcher | None = None
+            watcher_started = False
             scheduler: object | None = None
             policy_scheduler: object | None = None
             watchdog: object | None = None
@@ -493,7 +510,9 @@ class AppContext:
                 # Skip background loops in degraded mode (issue #349) — the
                 # watcher/schedulers/watchdog walk the index or re-embed
                 # chunks and would crash on the missing ``chunks_vec`` table.
-                # Recovery happens via ``mem_embedding_reset``.
+                # Recovery happens via ``mem_embedding_reset``, which calls
+                # :meth:`recover_from_degraded` to start what was skipped here
+                # without waiting for a restart (#2181).
                 watcher = FileWatcher(
                     comp.index_engine,
                     self.config.indexing,
@@ -501,6 +520,7 @@ class AppContext:
                 )
                 if comp.embedding_broken is None:
                     await watcher.start()
+                    watcher_started = True
 
                 degraded = comp.embedding_broken is not None
 
@@ -571,10 +591,179 @@ class AppContext:
 
             self._dedup_scanner = dedup
             self._watcher = watcher
+            self._watcher_started = watcher_started
             self._scheduler = scheduler
             self._policy_scheduler = policy_scheduler
             self._health_watchdog = watchdog
             return comp
+
+    async def recover_from_degraded(self) -> None:
+        """Start the background loops a degraded startup skipped (#2181).
+
+        Called by ``mem_embedding_reset`` (both ``apply_current`` and
+        ``revert_to_stored``) once the embedding mismatch is cleared. Degraded
+        startup (#349) leaves the file watcher constructed-but-stopped and
+        never builds the consolidation/policy schedulers or the health
+        watchdog; without this fanout they stay down — no auto-indexing, no
+        maintenance — until the server restarts.
+
+        The tool does not reach into those services itself: this context owns
+        them, so it owns their recovery.
+
+        Recovery is *per service* and **retryable**. Each start is guarded and
+        assigned only on success, so a failure leaves that service missing and
+        a later reset call tries again — whereas one "already recovered" flag
+        would burn the only attempt. A fully recovered context no-ops on the
+        same guards, so a second reset never starts a duplicate loop.
+
+        Failures are logged, not raised: the recovery the user asked for (a
+        working index) has already happened by the time this runs, and losing
+        the scheduler must not turn a successful reset into a failed tool
+        call. Same trade-off as the retirement closes in ``revert_to_stored``.
+        """
+        async with self._init_lock:
+            comp = self._components
+            if comp is None:
+                return
+            # ``from_components`` contexts (CLI, tests) deliberately run no
+            # background loops — growing them here would hand a caller-owned
+            # components object loops it never asked for and does not close.
+            if not self._owns_components:
+                comp.embedding_broken = None
+                return
+
+            # The snapshot is a startup reading that nothing else ever clears;
+            # stale, it keeps status surfaces reporting degraded after a
+            # successful reset. Clearing it is *not* the idempotency gate —
+            # the per-service guards below are.
+            comp.embedding_broken = None
+
+            # Keep the gates and constructor arguments below in step with
+            # ``ensure_initialized``. They are deliberately not extracted into
+            # a shared helper: init needs all-or-nothing rollback of a whole
+            # batch, recovery needs incremental best-effort starts, and one
+            # helper serving both would have to carry both failure policies.
+            if (
+                self._watcher is not None
+                and not self._watcher_started
+                and not self._watcher_cleanup_failed
+            ):
+                try:
+                    await self._watcher.start()
+                except asyncio.CancelledError:
+                    await self._clean_up_failed_watcher_start()
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Failed to start the file watcher after embedding recovery — "
+                        "file edits are not auto-indexed until the next reset or restart",
+                        exc_info=True,
+                    )
+                    # ``start()`` publishes the observer and the processor task
+                    # before it can fail, and the retry a later reset makes will
+                    # overwrite both handles — so whatever this attempt left
+                    # running has to be stopped now or nothing ever stops it.
+                    await self._clean_up_failed_watcher_start()
+                else:
+                    self._watcher_started = True
+
+            if self.config.consolidation_schedule.enabled and self._scheduler is None:
+                from memtomem.server.scheduler import ConsolidationScheduler
+
+                scheduler = ConsolidationScheduler(self, self.config.consolidation_schedule)
+                if await self._start_recovered_service(scheduler, "consolidation scheduler"):
+                    self._scheduler = scheduler
+
+            if self.config.policy.enabled and self._policy_scheduler is None:
+                from memtomem.server.scheduler import PolicyScheduler
+
+                policy_scheduler = PolicyScheduler(self, self.config.policy)
+                if await self._start_recovered_service(policy_scheduler, "policy scheduler"):
+                    self._policy_scheduler = policy_scheduler
+
+            if self.config.health_watchdog.enabled and self._health_watchdog is None:
+                from memtomem.server.health_watchdog import HealthWatchdog
+
+                watchdog = HealthWatchdog(self, self.config.health_watchdog, self.config.scheduler)
+                if await self._start_recovered_service(watchdog, "health watchdog"):
+                    self._health_watchdog = watchdog
+
+    async def _start_recovered_service(self, service: Any, label: str) -> bool:
+        """Start one recovered background service; ``True`` when it is running.
+
+        A failed start is stopped again so a half-built loop does not linger,
+        and reported ``False`` so the caller leaves its handle ``None`` — that
+        missing handle is what makes the next reset retry.
+
+        When even the stop fails, the instance is kept in ``_failed_services``
+        instead of being dropped: the caller is about to forget its only
+        reference, and something whose shutdown never completed still has to
+        be reachable from :meth:`close`.
+        """
+        try:
+            await service.start()
+        except asyncio.CancelledError:
+            await self._quarantine_failed_start(service, label)
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to start the %s after embedding recovery — "
+                "it stays down until the next reset or restart",
+                label,
+                exc_info=True,
+            )
+            # A cancellation arriving during this cleanup propagates rather
+            # than being swallowed: swallowing it would let a cancelled reset
+            # keep starting the remaining services and return as if nothing
+            # had happened.
+            await self._quarantine_failed_start(service, label)
+            return False
+        return True
+
+    async def _clean_up_failed_watcher_start(self) -> None:
+        """Stop a watcher whose recovery start failed; bar the retry if it can't.
+
+        Unlike the schedulers the watcher instance is reused across retries, so
+        a stop that fails cannot be answered by dropping the reference —
+        ``FileWatcher.stop`` clears its observer/task handles only on the way
+        out, so a failure there can leave both live while ``start()`` would
+        replace them. Refusing the retry keeps ``close()`` able to stop what is
+        actually running; ``mem_watchdog`` already points at a restart.
+        """
+        if self._watcher is None:
+            return
+        try:
+            await self._watcher.stop()
+        except asyncio.CancelledError:
+            self._watcher_cleanup_failed = True
+            logger.warning("Recovery cleanup of the file watcher was cancelled")
+            raise
+        except Exception:
+            self._watcher_cleanup_failed = True
+            logger.warning(
+                "Recovery cleanup of the file watcher failed — no further in-process "
+                "retry will start over it; restart the server to recover auto-indexing",
+                exc_info=True,
+            )
+
+    async def _quarantine_failed_start(self, service: Any, label: str) -> None:
+        """Stop a service whose start failed; retain it if the stop fails too."""
+        stop = getattr(service, "stop", None) or getattr(service, "close", None)
+        if stop is None:
+            return
+        try:
+            await stop()
+        except asyncio.CancelledError:
+            logger.warning("Recovery cleanup of the %s was cancelled", label)
+            self._failed_services.append((service, label))
+            raise
+        except Exception:
+            logger.warning(
+                "Recovery cleanup of the %s failed — retaining it for shutdown",
+                label,
+                exc_info=True,
+            )
+            self._failed_services.append((service, label))
 
     async def _acquire_lifecycle_barrier(self) -> None:
         """Take the shared lifecycle barrier before storage opens (#1936).
@@ -760,17 +949,23 @@ class AppContext:
                         first_cancel = exc
             self._warmup_task = None
 
-        for resource, stage in (
+        # Recovery starts whose own cleanup failed (#2181) are stopped first:
+        # they are the ones nothing else references, and a retry may have
+        # already built a live replacement alongside them.
+        stop_order = [(service, f"failed {label}") for service, label in self._failed_services]
+        stop_order += [
             (self._health_watchdog, "health_watchdog"),
             (self._policy_scheduler, "policy_scheduler"),
             (self._scheduler, "scheduler"),
             (self._watcher, "watcher"),
-        ):
+        ]
+        for resource, stage in stop_order:
             try:
                 await _stop_quietly(resource, stage)
             except asyncio.CancelledError as exc:
                 if first_cancel is None:
                     first_cancel = exc
+        self._failed_services.clear()
 
         # Default is UNCONFIRMED: only a teardown that actually ran and
         # reported success flips this. A bare ``True`` for the
@@ -794,6 +989,8 @@ class AppContext:
         self._owns_components = False
         self._dedup_scanner = None
         self._watcher = None
+        self._watcher_started = False
+        self._watcher_cleanup_failed = False
         self._scheduler = None
         self._policy_scheduler = None
         self._health_watchdog = None
