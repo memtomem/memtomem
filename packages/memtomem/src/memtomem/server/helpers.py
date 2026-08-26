@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
 from memtomem.config import Mem2MemConfig
+
+#: The two partial-period spellings ``_parse_recall_date`` accepts. Matched
+#: against the whole value so a suffix cannot ride along unread.
+_YEAR_RE = re.compile(r"\d{1,4}")
+_YEAR_MONTH_RE = re.compile(r"(?P<year>\d{1,4})-(?P<month>\d{1,2})")
 
 
 def _parse_recall_date(s: str, *, end_of_period: bool = False):
@@ -24,16 +31,20 @@ def _parse_recall_date(s: str, *, end_of_period: bool = False):
     from datetime import date, datetime, timedelta, timezone
 
     s = s.strip()
-    date_part = s.split("T")[0]
-    parts = date_part.split("-")
 
     try:
-        if len(parts) == 1:
-            year = int(parts[0])
+        # A partial period has to be the *whole* value. Routing on
+        # ``s.split("T")[0]`` instead let a suffix ride along unread, so
+        # ``2026Tgarbage`` was accepted as the year 2026 and
+        # ``2026-04T14:30`` as the month of April — neither a documented
+        # partial date nor a value ``fromisoformat`` would accept.
+        if _YEAR_RE.fullmatch(s):
+            year = int(s)
             return datetime(year + (1 if end_of_period else 0), 1, 1, tzinfo=timezone.utc)
 
-        if len(parts) == 2:
-            year, month = int(parts[0]), int(parts[1])
+        year_month = _YEAR_MONTH_RE.fullmatch(s)
+        if year_month:
+            year, month = int(year_month["year"]), int(year_month["month"])
             if end_of_period:
                 if month == 12:
                     return datetime(year + 1, 1, 1, tzinfo=timezone.utc)
@@ -61,7 +72,13 @@ def _parse_recall_date(s: str, *, end_of_period: bool = False):
             dt = dt + timedelta(days=1)
         return dt
 
-    except (ValueError, TypeError) as exc:
+    # OverflowError joins the list because converting to UTC can push a bound
+    # at the very edge of the representable range past it
+    # (``9999-12-31T23:30:00-01:00`` is year 10000 in UTC). That is a bound
+    # this function cannot express, which is what its ValueError means —
+    # letting it escape as OverflowError would reach callers as an internal
+    # error instead of the documented validation failure.
+    except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError(
             f"Invalid date: {s!r}. Use YYYY, YYYY-MM, YYYY-MM-DD or ISO datetime."
         ) from exc

@@ -463,6 +463,43 @@ class TestParseRecallDate:
             2026, 4, 7, tzinfo=timezone.utc
         )
 
+    @pytest.mark.parametrize("value", ["2026Tgarbage", "2026-04T14:30", "2026-04junk"])
+    def test_a_partial_period_with_a_suffix_is_rejected(self, value: str):
+        """Routing on ``s.split("T")[0]`` read only the head of the value, so
+        a suffix rode along unread and the bound silently became a whole year
+        or month. A partial period has to be the entire value."""
+        with pytest.raises(ValueError, match="Invalid date"):
+            _parse_recall_date(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        ["9999-12-31T23:30:00-01:00", "0001-01-01T00:30:00+01:00"],
+        ids=["past-max", "before-min"],
+    )
+    def test_a_bound_whose_utc_instant_is_unrepresentable_raises_the_documented_error(
+        self, value: str
+    ):
+        """Converting to UTC can push an edge-of-range bound past the range
+        (``9999-12-31T23:30-01:00`` is year 10000 in UTC). ``OverflowError``
+        is not a subclass of ``ValueError``, so without translating it the
+        caller gets an internal error where this function promises a
+        validation one."""
+        with pytest.raises(ValueError, match="Invalid date"):
+            _parse_recall_date(value)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("2026", datetime(2026, 1, 1, tzinfo=timezone.utc)),
+            ("2026-4", datetime(2026, 4, 1, tzinfo=timezone.utc)),
+            ("2026-04", datetime(2026, 4, 1, tzinfo=timezone.utc)),
+        ],
+    )
+    def test_the_accepted_partial_spellings_are_unchanged(self, value: str, expected: datetime):
+        """Tightening the match must not narrow what already worked — a
+        single-digit month is one of the accepted spellings."""
+        assert _parse_recall_date(value) == expected
+
 
 # ===========================================================================
 # helpers.py — _check_embedding_mismatch
