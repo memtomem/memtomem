@@ -72,11 +72,20 @@ def utc_bound(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def utc_bound_from_iso(value: str, *, field: str) -> str:
+def utc_bound_from_iso(value: str, *, field: str, timespec: str = "auto") -> str:
     """Parse a caller-supplied ISO-8601 string into a UTC bound.
 
     The string counterpart of :func:`utc_bound`, for surfaces that take the
     bound as text and would otherwise bind it to SQL untouched.
+
+    ``timespec`` must match the precision the *target column* is written at,
+    because the comparison is lexical. ``query_history.created_at`` is stored
+    with ``timespec="seconds"``, so a bound carrying fractional seconds sorts
+    after every row inside its own second: a poll at ``12:00:00.500`` would
+    miss a run recorded at ``12:00:00.800`` and stored as ``12:00:00+00:00``.
+    Flooring the bound to the same precision keeps the whole second on the
+    inclusive side. Leave it at ``"auto"`` for columns written at full
+    precision, such as ``chunks.created_at``.
 
     Raises:
         ValueError: the value is not ISO-8601, named by ``field`` so the
@@ -86,7 +95,9 @@ def utc_bound_from_iso(value: str, *, field: str) -> str:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         raise ValueError(f"{field} must be an ISO-8601 timestamp, got {value!r}") from None
-    return utc_bound(parsed)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec=timespec)
 
 
 def escape_like(value: str) -> str:
