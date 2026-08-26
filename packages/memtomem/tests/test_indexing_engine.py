@@ -5380,3 +5380,109 @@ class TestMissingVectorReporting:
 
         assert stats.skipped_chunks > 0
         assert stats.chunks_missing_vectors == stats.skipped_chunks
+
+
+# ---------------------------------------------------------------------------
+# Component-generation lease (#2180)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerationLease:
+    """Every entry point that can await ``self._embedder`` must pin the
+    generation, or ``revert_to_stored`` closes the embedder mid-run."""
+
+    async def test_index_path_holds_the_generation(self, components, memory_dir):
+        """The lease must cover the per-file work, which is where the embed
+        calls live — the same window ``_active_runs`` already counts."""
+        (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
+        engine = components.index_engine
+        generation = components.generation
+        seen: list[int] = []
+        orig = engine._index_file
+
+        async def _watching(fp, force=False, namespace=None, **kwargs):
+            seen.append(generation.leases)
+            return await orig(fp, force, namespace=namespace, **kwargs)
+
+        engine._index_file = _watching  # type: ignore[method-assign]
+
+        await engine.index_path(memory_dir)
+
+        assert seen and all(count > 0 for count in seen), (
+            "a file was indexed without a generation lease held"
+        )
+        assert generation.leases == 0
+
+    async def test_index_file_holds_the_generation(self, components, memory_dir):
+        """The watcher, the CRUD tools, and ``mm index <file>`` all enter
+        here rather than through ``index_path``."""
+        md_path = memory_dir / "single.md"
+        md_path.write_text("# Single\n\nContent.")
+        engine = components.index_engine
+        generation = components.generation
+        seen: list[int] = []
+        orig = engine._index_file_locked
+
+        async def _watching(fp, force=False, **kwargs):
+            seen.append(generation.leases)
+            return await orig(fp, force, **kwargs)
+
+        engine._index_file_locked = _watching  # type: ignore[method-assign]
+
+        await engine.index_file(md_path)
+
+        assert seen == [1]
+        assert generation.leases == 0
+
+    async def test_index_path_stream_holds_the_generation_across_yields(
+        self, components, memory_dir
+    ):
+        """A stream run holds one lease for the whole walk, including the
+        gaps between files where it is suspended on its consumer."""
+        for i in range(2):
+            (memory_dir / f"note{i}.md").write_text(f"# Note {i}\n\nBody.")
+        engine = components.index_engine
+        generation = components.generation
+
+        leases_at_yield: list[int] = []
+        async for event in engine.index_path_stream(memory_dir):
+            if event["type"] != "complete":
+                leases_at_yield.append(generation.leases)
+
+        assert leases_at_yield and all(count > 0 for count in leases_at_yield), (
+            "the stream dropped its lease between files"
+        )
+        assert generation.leases == 0
+
+    async def test_abandoned_stream_releases_the_generation(self, components, memory_dir):
+        """A consumer that walks away (client disconnect, HTTPException) must
+        not pin the retired generation for the life of the process."""
+        for i in range(3):
+            (memory_dir / f"note{i}.md").write_text(f"# Note {i}\n\nBody.")
+        engine = components.index_engine
+        generation = components.generation
+
+        stream = engine.index_path_stream(memory_dir)
+        await stream.__anext__()
+        assert generation.leases == 1
+
+        await stream.aclose()
+        assert generation.leases == 0
+
+    async def test_is_duplicate_holds_the_generation(self, components):
+        """A dedup probe is not an indexing run (it stays out of
+        ``is_active``) but it still awaits the embedder."""
+        engine = components.index_engine
+        generation = components.generation
+        seen: list[int] = []
+
+        async def _watching_embed_query(text):
+            seen.append(generation.leases)
+            return [0.0] * engine._embedder.dimension
+
+        engine._embedder.embed_query = _watching_embed_query
+
+        await engine.is_duplicate("some text")
+
+        assert seen == [1]
+        assert generation.leases == 0

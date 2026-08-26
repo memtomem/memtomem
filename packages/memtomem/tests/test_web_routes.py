@@ -1087,6 +1087,18 @@ class TestSearch:
         assert kwargs["created_before"] > kwargs["created_from"]
         assert kwargs["origin"] == "web"
 
+    async def test_search_rejects_a_namespace_mixing_a_comma_list_with_a_glob(
+        self, client: AsyncClient
+    ):
+        """A filter the caller spelled wrong is a request problem. The search
+        call below the guard is wrapped in ``except Exception`` -> 500, so
+        parsing has to happen ahead of it or a bad namespace reads as a
+        server fault."""
+        resp = await client.get("/api/search", params={"q": "test", "namespace": "archive:*,work"})
+
+        assert resp.status_code == 422, resp.text
+        assert "archive:*,work" in resp.json().get("detail", "")
+
     async def test_search_rejects_naive_or_reversed_date_bounds(self, client: AsyncClient):
         naive = await client.get("/api/search", params={"created_from": "2026-07-01T00:00:00"})
         assert naive.status_code == 422

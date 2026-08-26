@@ -68,6 +68,23 @@ class ChunkMetadata:
     origin: str | None = None
 
 
+class InvalidFilterSyntaxError(ValueError):
+    """A namespace/scope filter argument cannot be expressed as one filter.
+
+    A ``ValueError`` subclass so the surfaces that already translate one
+    carry it without new plumbing: ``server/error_handler.tool_handler``
+    renders it as ``"Error: …"``, and the web app maps it to HTTP 400.
+    """
+
+
+class InvalidNamespaceFilterError(InvalidFilterSyntaxError):
+    """The ``namespace`` argument mixes a comma list with a glob."""
+
+
+class InvalidScopeFilterError(InvalidFilterSyntaxError):
+    """The ``scope`` argument mixes a comma list with a glob."""
+
+
 @dataclass(frozen=True, slots=True)
 class NamespaceFilter:
     """Filter for namespace-scoped queries.
@@ -77,6 +94,13 @@ class NamespaceFilter:
     ``archive:``). Exclusion is applied *only* when no explicit namespace
     is given — the idea is that callers who ask for ``archive:summary``
     directly have already opted in.
+
+    A comma list and a glob are **mutually exclusive** spellings, not
+    composable ones: the SQL layer emits either an ``IN (…)`` list or a
+    single ``LIKE`` pattern (:func:`memtomem.storage.sqlite_helpers.
+    namespace_sql`), and there is no representation for a union of
+    patterns. Combining them is rejected rather than silently read as one
+    pattern that matches nothing.
     """
 
     namespaces: tuple[str, ...] = ()
@@ -96,6 +120,13 @@ class NamespaceFilter:
         affecting explicit queries. When ``value`` is any non-``None`` form
         (exact string, comma list, glob), ``system_prefixes`` is ignored —
         the caller explicitly opted into whatever namespace they named.
+
+        Raises:
+            InvalidNamespaceFilterError: the value mixes a comma list with a
+                glob. ``*`` is checked before ``,``, so such a value would
+                otherwise become one pattern containing a literal comma and
+                match nothing — a silent empty result set rather than an
+                answer the caller can act on.
         """
         prefixes = tuple(system_prefixes) if system_prefixes else ()
 
@@ -105,6 +136,13 @@ class NamespaceFilter:
             return None
         if isinstance(value, list):
             return NamespaceFilter(namespaces=tuple(value))
+        if "*" in value and "," in value:
+            raise InvalidNamespaceFilterError(
+                f"namespace {value!r} mixes a comma list with a glob, which cannot be "
+                "expressed as one filter. Use either a comma list of exact names "
+                '("work,personal") or a single glob ("proj:*"), and issue one query '
+                "per pattern when you need several."
+            )
         if "*" in value:
             return NamespaceFilter(pattern=value)
         if "," in value:
@@ -144,11 +182,24 @@ class ScopeFilter:
         ``project_local`` — invalid scope strings produce an empty
         result set rather than an error, mirroring the namespace parser
         which also accepts arbitrary strings.
+
+        Mixing a comma list with a glob is rejected for the same reason as
+        in :meth:`NamespaceFilter.parse` — the two spellings map to
+        different SQL shapes and cannot be combined.
+
+        Raises:
+            InvalidScopeFilterError: the value mixes a comma list with a glob.
         """
         if value is None:
             return None
         if isinstance(value, list):
             return ScopeFilter(scopes=tuple(value))
+        if "*" in value and "," in value:
+            raise InvalidScopeFilterError(
+                f"scope {value!r} mixes a comma list with a glob, which cannot be "
+                'expressed as one filter. Use either a comma list ("user,project_local") '
+                'or a single glob ("project_*").'
+            )
         if "*" in value:
             return ScopeFilter(pattern=value)
         if "," in value:

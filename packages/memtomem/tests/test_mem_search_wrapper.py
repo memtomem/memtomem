@@ -193,6 +193,52 @@ class TestArgumentValidation:
             "at least one leg must carry weight."
         )
 
+    @pytest.mark.parametrize(
+        ("kwargs", "named"),
+        [
+            ({"namespace": "archive:*,work"}, "namespace 'archive:*,work'"),
+            ({"scope": "project_*,user"}, "scope 'project_*,user'"),
+        ],
+    )
+    async def test_a_comma_glob_mix_is_refused_before_the_app_opens(
+        self, monkeypatch, kwargs: dict, named: str
+    ):
+        """Without this the value parses as one LIKE pattern containing a
+        comma, which matches nothing — the caller reads an empty result set
+        as "no such memories" instead of "that filter was not runnable"."""
+        from memtomem.server.tools import search as search_mod
+
+        monkeypatch.setattr(
+            search_mod, "_get_app_initialized", AsyncMock(side_effect=AssertionError("too late"))
+        )
+
+        out = await search_mod.mem_search(query="hello", ctx=SimpleNamespace(), **kwargs)
+
+        assert out.startswith("Error: ")
+        assert named in out
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"namespace": "work,personal"},
+            {"namespace": "proj:*"},
+            {"scope": "user,project_local"},
+            {"scope": "project_*"},
+        ],
+    )
+    async def test_each_spelling_on_its_own_reaches_the_core(self, monkeypatch, kwargs: dict):
+        from memtomem.server.tools import search as search_mod
+
+        core = AsyncMock(return_value=([], RetrievalStats(), []))
+        monkeypatch.setattr(search_mod, "run_search", core)
+        monkeypatch.setattr(search_mod, "_get_app_initialized", AsyncMock(return_value=_fake_app()))
+
+        await search_mod.mem_search(query="hello", ctx=SimpleNamespace(), **kwargs)
+
+        assert core.await_count == 1
+        for key, value in kwargs.items():
+            assert core.await_args.kwargs[key] == value
+
 
 class TestEmptyResults:
     async def test_filters_excluded_everything(self, monkeypatch):

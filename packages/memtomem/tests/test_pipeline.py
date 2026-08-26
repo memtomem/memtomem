@@ -1405,6 +1405,125 @@ class TestRerankerSwapLeasing:
         assert old.close_calls == 1
 
 
+class TestComponentGenerationLease:
+    """#2180: a ranked search holds its component generation, so the
+    ``revert_to_stored`` swap cannot close the embedder under it."""
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+    _make_pipeline = TestRerankCandidatePool._make_pipeline
+
+    def _pipeline_with_generation(self, fused_input):
+        from memtomem.generation import ComponentGeneration
+
+        generation = ComponentGeneration()
+        pipeline = self._make_pipeline(fused_input, reranker=None, rerank_config=None)
+        pipeline._generation = generation
+        release = asyncio.Event()
+
+        async def blocked_bm25(*args, **kwargs):
+            await release.wait()
+            return fused_input
+
+        pipeline._storage.bm25_search.side_effect = blocked_bm25
+        return pipeline, generation, release
+
+    @pytest.mark.asyncio
+    async def test_ranked_search_holds_the_generation_for_its_whole_body(self):
+        """The lease has to cover the dense leg's ``embed_query`` await, which
+        is where a mid-search embedder close would land."""
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(5)]
+        pipeline, generation, release = self._pipeline_with_generation(fused_input)
+
+        search_task = asyncio.create_task(pipeline.search("anything", top_k=5))
+        await asyncio.sleep(0)
+
+        assert generation.leases == 1
+        release.set()
+        await search_task
+        assert generation.leases == 0
+
+    @pytest.mark.asyncio
+    async def test_search_exception_releases_the_generation(self):
+        """Release is in a ``finally``: a failed search must not pin the
+        retired generation until the process exits."""
+        pipeline, generation, _ = self._pipeline_with_generation([])
+
+        def _boom(*args, **kwargs):
+            # Raise from inside the leased body — the retrieval legs swallow
+            # their own failures, so an escaping error has to come from a
+            # stage that does not.
+            raise RuntimeError("cache key failure")
+
+        pipeline._cache_key = _boom
+
+        with pytest.raises(RuntimeError):
+            await pipeline.search("anything", top_k=5)
+
+        assert generation.leases == 0
+
+    @pytest.mark.asyncio
+    async def test_retired_generation_closes_on_the_last_search(self):
+        """End to end at pipeline level: retire mid-search, and the close runs
+        only once the search that leased it returns."""
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(5)]
+        pipeline, generation, release = self._pipeline_with_generation(fused_input)
+        closed: list[str] = []
+
+        async def _close() -> None:
+            closed.append("generation")
+
+        search_task = asyncio.create_task(pipeline.search("anything", top_k=5))
+        await asyncio.sleep(0)
+
+        assert generation.retire(_close) is None
+        assert closed == []
+
+        release.set()
+        await search_task
+        await asyncio.sleep(0)
+        assert closed == ["generation"]
+
+    @pytest.mark.asyncio
+    async def test_close_runs_once_for_concurrent_callers(self):
+        """A retired pipeline can be reached by both the deferred generation
+        close and the shutdown drain; the reranker close is not repeat-safe."""
+        reranker = CloseAwareFakeReranker()
+        pipeline, _ = TestRerankerSwapLeasing()._blocked_pipeline([], reranker)
+
+        await asyncio.gather(pipeline.close(), pipeline.close())
+        await pipeline.close()
+
+        assert reranker.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_close_still_completes_for_the_next_caller(self):
+        """A flag set before the teardown finishes would let the second caller
+        return while the reranker is still open — the first close was
+        cancelled partway. Callers share one task instead, so the cancelled
+        caller walks away and the next one awaits the same teardown."""
+        reranker = CloseAwareFakeReranker()
+        pipeline, _ = TestRerankerSwapLeasing()._blocked_pipeline([], reranker)
+        gate = asyncio.Event()
+        real_close = reranker.close
+
+        async def _gated_close():
+            await gate.wait()
+            await real_close()
+
+        reranker.close = _gated_close
+
+        first = asyncio.create_task(pipeline.close())
+        await asyncio.sleep(0)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert reranker.close_calls == 0
+
+        gate.set()
+        await pipeline.close()
+        assert reranker.close_calls == 1
+
+
 class TestFilterOnlySearch:
     """Empty-query path (#750): tag/source filter is the primary selector.
 
