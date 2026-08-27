@@ -300,7 +300,7 @@ def _own_body(fn: ast.AST):
         stack.extend(ast.iter_child_nodes(node))
 
 
-def _transaction_ending_nodes(fn: ast.AST) -> list[ast.AST]:
+def _transaction_ending_nodes(fn: ast.AST, consts: dict[str, str] | None = None) -> list[ast.AST]:
     """Every place this function ends a transaction itself.
 
     Four spellings count. The method — matched as an attribute *reference*, not
@@ -308,7 +308,14 @@ def _transaction_ending_nodes(fn: ast.AST) -> list[ast.AST]:
     stashed in a callback ends the transaction just the same, and on any
     receiver name so that renaming the local from ``db`` to ``conn`` does not
     walk a writer out of this guard. The SQL — ``db.execute("COMMIT")``, which
-    no attribute check would ever see.
+    no attribute check would ever see, and the same statement one indirection
+    away: ``sql = "COMMIT"; db.execute(sql)``, or the module constant the
+    longer reads in these files are already written as. A literal-only check
+    put that spelling in no bucket at all — neither a direct ender nor a
+    write-only helper — so it committed its caller's transaction with every
+    check here green (#2207). When a local is rebound and the bindings
+    disagree, the resolver cannot say which one reaches the execute, and the
+    ambiguity is read as an ender.
 
     And two that are neither, because sqlite3 ends the transaction for you.
     ``executescript`` issues a COMMIT before it runs whatever it was handed,
@@ -332,19 +339,25 @@ def _transaction_ending_nodes(fn: ast.AST) -> list[ast.AST]:
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             if node.func.attr == "executescript":
                 found.append(node)
-            elif (
-                node.func.attr == "execute"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-                and node.args[0].value.strip().upper().rstrip(";") in _TRANSACTION_ENDING_SQL
-            ):
-                found.append(node)
+            elif node.func.attr == "execute" and node.args:
+                keyword = _resolved_sql_keyword(node.args[0], fn, consts, node.lineno)
+                if keyword is None:
+                    # Unknowable: assume it ends the transaction, the same way
+                    # ``_is_writing_sql`` assumes an unknowable statement writes.
+                    # A dict lookup, a helper's return value or a name this
+                    # guard cannot follow is exactly where the next hoisted
+                    # COMMIT would hide (#2207). Nothing in the scanned files
+                    # reaches this today — all 279 execute-family calls resolve
+                    # — so the rule costs a future writer one explicit local,
+                    # and costs a hidden commit its hiding place.
+                    found.append(node)
+                elif keyword in _TRANSACTION_ENDING_SQL:
+                    found.append(node)
     return found
 
 
-def _ends_transaction_directly(fn: ast.AST) -> bool:
-    return bool(_transaction_ending_nodes(fn))
+def _ends_transaction_directly(fn: ast.AST, consts: dict[str, str] | None = None) -> bool:
+    return bool(_transaction_ending_nodes(fn, consts))
 
 
 def _is_ownership_read(node: ast.AST) -> bool:
@@ -437,7 +450,7 @@ def _ownership_flags(fn: ast.AST) -> set[str]:
     return flags - rebound
 
 
-def _ungated_transaction_enders(fn: ast.AST) -> list[int]:
+def _ungated_transaction_enders(fn: ast.AST, consts: dict[str, str] | None = None) -> list[int]:
     """Line numbers of transaction-ending statements not under an ownership test.
 
     A ``BORROWS`` writer is safe only while every one of its commits sits
@@ -484,11 +497,11 @@ def _ungated_transaction_enders(fn: ast.AST) -> list[int]:
             for sub in ast.walk(stmt):
                 gated.add(getattr(sub, "lineno", -1))
     return sorted(
-        {node.lineno for node in _transaction_ending_nodes(fn) if node.lineno not in gated}
+        {node.lineno for node in _transaction_ending_nodes(fn, consts) if node.lineno not in gated}
     )
 
 
-def _refuses_outer_transaction(fn: ast.AST) -> bool:
+def _refuses_outer_transaction(fn: ast.AST, consts: dict[str, str] | None = None) -> bool:
     """Whether this function actually *raises* when a caller holds a transaction.
 
     Merely mentioning ``_in_transaction`` is not a refusal — a borrow-or-own
@@ -507,7 +520,7 @@ def _refuses_outer_transaction(fn: ast.AST) -> bool:
     something nested in a branch beside it — and it has to come first: a
     refusal below the commit it is supposed to prevent guards nothing.
     """
-    enders = _transaction_ending_nodes(fn)
+    enders = _transaction_ending_nodes(fn, consts)
     first_ender = min((node.lineno for node in enders), default=None)
 
     def in_time(node: ast.AST) -> bool:
@@ -622,7 +635,7 @@ def _module_sql_constants(tree: ast.AST) -> dict[str, str]:
     return consts
 
 
-def _resolve_local_sql(fn: ast.AST, name: str) -> str | None:
+def _resolve_local_sql(fn: ast.AST, name: str, lineno: int | None = None) -> str | None:
     """The leading keyword of a statement built up in a local variable.
 
     ``query = "SELECT ..."`` followed by ``query += " WHERE ..."`` is how the
@@ -630,6 +643,11 @@ def _resolve_local_sql(fn: ast.AST, name: str) -> str | None:
     assignment. Only that first binding is read; if it is not a knowable
     string, or the name is rebound to something unknowable, the answer is
     ``None`` and the caller falls back to assuming a write.
+
+    ``lineno``, when given, ignores bindings below that line. A name reused
+    further down for a different statement says nothing about the one that
+    reaches *this* call, and reading it would classify the earlier execute by
+    the later assignment.
     """
     first: str | None = None
     for node in _own_body(fn):
@@ -637,7 +655,15 @@ def _resolve_local_sql(fn: ast.AST, name: str) -> str | None:
             # ``query += " WHERE ..."`` appends a clause; it cannot change the
             # verb the first assignment fixed.
             continue
+        if isinstance(node, ast.AnnAssign):
+            # ``sql: str = "COMMIT"`` — one target, and it carries a value.
+            target, value = node.target, node.value
+            if value is None or not isinstance(target, ast.Name) or target.id != name:
+                continue
+            node = ast.Assign(targets=[target], value=value, lineno=node.lineno)
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        if lineno is not None and node.lineno > lineno:
             continue
         target = node.targets[0]
         if not isinstance(target, ast.Name) or target.id != name:
@@ -898,7 +924,7 @@ def _writes_without_committing(
     classifying by visible SQL alone would let the delegating version stay
     unclassified and therefore invisible at its own call sites.
     """
-    if _commits_standalone(fn, helpers) or _ends_transaction_directly(fn):
+    if _commits_standalone(fn, helpers) or _ends_transaction_directly(fn, consts):
         return False
     for node in _own_body(fn):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
@@ -914,7 +940,11 @@ def _writes_without_committing(
     return False
 
 
-def _failure_cleanup_lineno(fn: ast.AST, helpers: _Helpers = _DEFAULT_HELPERS) -> int | None:
+def _failure_cleanup_lineno(
+    fn: ast.AST,
+    helpers: _Helpers = _DEFAULT_HELPERS,
+    consts: dict[str, str] | None = None,
+) -> int | None:
     """Where this function discards its own work on the failure path.
 
     An owned-transaction writer is not covered by the region containment check
@@ -941,7 +971,9 @@ def _failure_cleanup_lineno(fn: ast.AST, helpers: _Helpers = _DEFAULT_HELPERS) -
     # leaves nothing to match cleanup against. That is not "no constraint": it
     # is a shape this check cannot verify, so it reports no cleanup rather than
     # accepting a rollback on any connection at all.
-    commits = [node for node in _transaction_ending_nodes(fn) if _is_commit_ender(node)]
+    commits = [
+        node for node in _transaction_ending_nodes(fn, consts) if _is_commit_ender(node, fn, consts)
+    ]
     if any(_ender_receiver(node) is None for node in commits):
         return None
     owned = {name for name in (_ender_receiver(node) for node in commits) if name is not None}
@@ -991,7 +1023,9 @@ def _ender_receiver(node: ast.AST) -> str | None:
     return None
 
 
-def _is_commit_ender(node: ast.AST) -> bool:
+def _is_commit_ender(
+    node: ast.AST, fn: ast.AST | None = None, consts: dict[str, str] | None = None
+) -> bool:
     """Whether a transaction-ending node *commits* rather than rolls back.
 
     Only commits have to sit inside the protected region: a rollback is the
@@ -1007,7 +1041,13 @@ def _is_commit_ender(node: ast.AST) -> bool:
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Attribute) and node.func.attr == "executescript":
             return True  # issues a COMMIT before running what it was handed
-        keyword = _sql_leading_keyword(node.args[0]) if node.args else None
+        if not node.args:
+            return False
+        keyword = _resolved_sql_keyword(node.args[0], fn, consts)
+        if keyword is None and fn is not None and isinstance(node.args[0], ast.Name):
+            # Unresolvable: the containment check reads that as a commit, since
+            # a commit outside the region is the failure it exists to catch.
+            return _may_bind_keyword(fn, node.args[0].id, frozenset({"COMMIT", "END"}))
         return keyword in {"COMMIT", "END"}
     return False
 
@@ -1087,7 +1127,13 @@ def _rolled_back_connections(
                     if db_name is not None:
                         take(db_name)
                 elif (
-                    attr in {"execute", "executescript"}
+                    # ``execute`` only. ``executescript("ROLLBACK")`` commits the
+                    # pending transaction first and *then* raises "cannot
+                    # rollback - no transaction is active" — measured: the row
+                    # it was supposed to discard survives. Crediting it as
+                    # cleanup certifies a writer that made someone else's work
+                    # durable (#2207).
+                    attr == "execute"
                     and sub.args
                     and _sql_leading_keyword(sub.args[0]) == "ROLLBACK"
                     and isinstance(sub.func.value, ast.Name)
@@ -1159,8 +1205,8 @@ def _gated_writer_violations(
     writes = _write_nodes(fn, consts, helpers)
     commits = [
         (_ender_receiver(node), node)
-        for node in _transaction_ending_nodes(fn)
-        if _is_commit_ender(node)
+        for node in _transaction_ending_nodes(fn, consts)
+        if _is_commit_ender(node, fn, consts)
     ]
 
     def contained(db_name: str | None, node: ast.AST) -> bool:
@@ -1297,21 +1343,125 @@ def _pending_transaction_refusal(
     return None
 
 
-def _may_bind_begin(fn: ast.AST, name: str) -> bool:
-    """Whether any binding of ``name`` in ``fn`` is a ``BEGIN`` statement.
+def _may_bind_keyword(
+    fn: ast.AST,
+    name: str,
+    keywords: frozenset[str] | set[str],
+    lineno: int | None = None,
+) -> bool:
+    """Whether any binding of ``name`` above ``lineno`` starts with a ``keywords``.
 
-    Read when the resolver cannot name one keyword for the local. "Which
-    binding reaches the execute" is a control-flow question this guard does not
-    answer, so a local that is a BEGIN on *any* path is treated as one.
+    Read when the resolver cannot name one keyword for the local. "Which of the
+    bindings that reach here" is a control-flow question this guard does not
+    answer, so a local that is one of these statements on *any* reaching path is
+    treated as one. Bindings below the call site do not reach it and are
+    ignored — otherwise reusing a name further down reclassifies the statement
+    above it.
     """
     for node in _own_body(fn):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id == name:
+                value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == name:
+                value = node.value
+        if value is None:
             continue
-        target = node.targets[0]
-        if isinstance(target, ast.Name) and target.id == name:
-            if _sql_leading_keyword(node.value) == "BEGIN":
-                return True
+        if lineno is not None and getattr(node, "lineno", 0) > lineno:
+            continue
+        keyword = _sql_leading_keyword(value)
+        if keyword is not None and keyword.rstrip(";") in keywords:
+            return True
     return False
+
+
+def _resolved_sql_keyword(
+    arg: ast.AST, fn: ast.AST | None, consts: dict[str, str] | None, lineno: int | None = None
+) -> str | None:
+    """The leading SQL keyword of an ``execute`` argument, through one hop.
+
+    A literal first; then the statically knowable ways of building one —
+    ``"COM" + "MIT"``, ``"COMMIT".format(...)``, a parenthesised literal — and
+    then the local or module constant it was hoisted into. ``lineno`` scopes
+    the local lookup to bindings above the call site, so a name reused later
+    for something else does not reach back and reclassify this one.
+
+    ``None`` means the guard cannot tell, which each caller reads in its own
+    fail-closed direction.
+    """
+    static = _static_string(arg)
+    if static is not None:
+        # ``"COM" + "MIT"`` and ``"COMMIT".format(...)`` are the same statement
+        # assembled in pieces. Reading only the first piece would answer
+        # ``COM`` — a keyword that is in no set, which is worse than not
+        # knowing — so the pieces are joined before the verb is read.
+        head = static.strip().lstrip("(").lstrip().split(None, 1)
+        if head and "{" not in head[0] and "%" not in head[0]:
+            return head[0].upper().rstrip(";")
+        return None
+    keyword = _sql_leading_keyword(arg)
+    if keyword is None and isinstance(arg, ast.Name):
+        if fn is not None:
+            keyword = _resolve_local_sql(fn, arg.id, lineno)
+        if keyword is None and consts is not None and not _shadows_module_name(fn, arg.id):
+            keyword = consts.get(arg.id)
+    return keyword.rstrip(";") if keyword is not None else None
+
+
+def _static_string(arg: ast.AST) -> str | None:
+    """The value of a string expression the guard can evaluate outright.
+
+    Literals, parenthesised literals, and ``+`` concatenations of them —
+    including implicit adjacent-literal concatenation, which the parser has
+    already folded. ``.format`` and ``.strip`` and friends are read through to
+    their receiver, since none of them can change the leading verb; ``join``
+    deliberately is not, because its receiver is the separator.
+    """
+    if isinstance(arg, ast.Constant):
+        return arg.value if isinstance(arg.value, str) else None
+    if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Add):
+        left = _static_string(arg.left)
+        right = _static_string(arg.right)
+        if left is not None and right is not None:
+            return left + right
+        return None
+    if (
+        isinstance(arg, ast.Call)
+        and isinstance(arg.func, ast.Attribute)
+        and arg.func.attr in {"format", "strip", "lstrip", "upper", "lower"}
+    ):
+        return _static_string(arg.func.value)
+    return None
+
+
+def _shadows_module_name(fn: ast.AST | None, name: str) -> bool:
+    """Whether ``name`` is bound inside ``fn`` — a parameter or a local.
+
+    A module constant only explains a name the function does not define for
+    itself. A parameter that happens to match one is a different value
+    entirely, and reading the module's would classify a caller's SQL by a
+    coincidence of spelling.
+    """
+    if fn is None:
+        return False
+    args = getattr(fn, "args", None)
+    if args is not None:
+        for group in (
+            list(getattr(args, "posonlyargs", []) or []),
+            list(args.args or []),
+            list(args.kwonlyargs or []),
+        ):
+            if any(a.arg == name for a in group):
+                return True
+        for extra in (args.vararg, args.kwarg):
+            if extra is not None and extra.arg == name:
+                return True
+    return any(
+        isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name
+        for node in _own_body(fn)
+    )
 
 
 def _blind_begins(fn: ast.AST, consts: dict[str, str] | None = None) -> list[int]:
@@ -1346,17 +1496,18 @@ def _blind_begins(fn: ast.AST, consts: dict[str, str] | None = None) -> list[int
                 and node.args
             ):
                 continue
-            keyword = _sql_leading_keyword(node.args[0])
-            if keyword is None and isinstance(node.args[0], ast.Name):
-                # Hoisted into a local or a module constant: the same statement,
-                # one indirection away from a literal-only check. When the local
-                # is bound more than once and the bindings disagree,
-                # ``_resolve_local_sql`` answers ``None`` — one of those paths
-                # may still run a BEGIN, so the ambiguity is read as one.
-                name = node.args[0].id
-                keyword = _resolve_local_sql(fn, name) or (consts or {}).get(name)
-                if keyword is None and _may_bind_begin(fn, name):
-                    keyword = "BEGIN"
+            # Hoisted into a local or a module constant: the same statement, one
+            # indirection away from a literal-only check. When the local is
+            # bound more than once and the bindings disagree, the resolver
+            # answers ``None`` — one of those paths may still run a BEGIN, so
+            # the ambiguity is read as one.
+            keyword = _resolved_sql_keyword(node.args[0], fn, consts)
+            if (
+                keyword is None
+                and isinstance(node.args[0], ast.Name)
+                and _may_bind_keyword(fn, node.args[0].id, frozenset({"BEGIN"}))
+            ):
+                keyword = "BEGIN"
             if keyword == "BEGIN":
                 found.append(node)
         return found
@@ -1446,7 +1597,9 @@ def _private_connection_violations(
         node.lineno for db_name, node in _write_nodes(fn, consts, helpers) if db_name not in own
     }
     offending |= {
-        node.lineno for node in _transaction_ending_nodes(fn) if _ender_receiver(node) not in own
+        node.lineno
+        for node in _transaction_ending_nodes(fn, consts)
+        if _ender_receiver(node) not in own
     }
     return sorted(offending)
 
@@ -1506,8 +1659,9 @@ def _direct_transaction_enders() -> dict[tuple[str, str], ast.AST]:
     found: dict[tuple[str, str], ast.AST] = {}
     for path in _scanned_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        consts = _module_sql_constants(tree)
         for qualname, fn in _qualified_functions(tree):
-            if _ends_transaction_directly(fn):
+            if _ends_transaction_directly(fn, consts):
                 found[(path.name, qualname)] = fn
     return found
 
@@ -1587,10 +1741,13 @@ class TestEveryMixinWriterCommitsThroughOwnership:
         becomes a licence for exactly the bug this guards.
         """
         sites = _direct_transaction_enders()
+        scanned = _scanned_functions()
         unrefusing = [
             key
             for key, (mode, _) in OWNED_TRANSACTION_WRITERS.items()
-            if mode == REFUSES and key in sites and not _refuses_outer_transaction(sites[key])
+            if mode == REFUSES
+            and key in sites
+            and not _refuses_outer_transaction(sites[key], scanned[key][1])
         ]
         assert not unrefusing, (
             "registered owned-transaction writers with no in-transaction "
@@ -1605,10 +1762,13 @@ class TestEveryMixinWriterCommitsThroughOwnership:
         ``owns_transaction`` test. One ungated statement is the #2162 bug.
         """
         sites = _direct_transaction_enders()
+        scanned = _scanned_functions()
         ungated = {
-            key: _ungated_transaction_enders(sites[key])
+            key: _ungated_transaction_enders(sites[key], scanned[key][1])
             for key, (mode, _) in OWNED_TRANSACTION_WRITERS.items()
-            if mode == BORROWS and key in sites and _ungated_transaction_enders(sites[key])
+            if mode == BORROWS
+            and key in sites
+            and _ungated_transaction_enders(sites[key], scanned[key][1])
         }
         assert not ungated, (
             "borrow-or-own writers end a transaction without gating it on "
@@ -1627,7 +1787,7 @@ class TestEveryMixinWriterCommitsThroughOwnership:
                 continue
             fn, consts, helpers = scanned[key]
             problems = dict(_gated_writer_violations(fn, consts, helpers))
-            ungated = _ungated_transaction_enders(fn)
+            ungated = _ungated_transaction_enders(fn, consts)
             if ungated:
                 problems["enders not gated on self._in_transaction"] = ungated
             if problems:
@@ -1683,6 +1843,7 @@ class TestEveryMixinWriterCommitsThroughOwnership:
         transaction — with this registry entry still reading as compliant.
         """
         sites = _direct_transaction_enders()
+        scanned = _scanned_functions()
         ungated = {}
         for key in (
             ("sqlite_backend.py", "SqliteBackend._commit_if_standalone"),
@@ -1690,7 +1851,7 @@ class TestEveryMixinWriterCommitsThroughOwnership:
         ):
             assert key in TRANSACTION_AUTHORITY, f"{key} is no longer registered as authority"
             assert key in sites, f"{key} no longer ends a transaction; the helper contract moved"
-            lines = _ungated_transaction_enders(sites[key])
+            lines = _ungated_transaction_enders(sites[key], scanned[key][1])
             if lines:
                 ungated[key] = lines
         assert not ungated, f"the ownership helpers end a transaction unconditionally: {ungated}"
@@ -1872,7 +2033,8 @@ class TestEveryMixinWriterClosesItsFailedTransaction:
         uncleaned = [
             key
             for key in OWNED_TRANSACTION_WRITERS
-            if key in sites and _failure_cleanup_lineno(sites[key], scanned[key][2]) is None
+            if key in sites
+            and _failure_cleanup_lineno(sites[key], scanned[key][2], scanned[key][1]) is None
         ]
         assert not uncleaned, (
             "registered owned-transaction writers with no rollback on their "
@@ -1968,6 +2130,144 @@ class TestGuardHelpersRejectFakeCompliance:
                     f"async def w(self):\n    db = self._get_db()\n    db.execute({statement})\n"
                 )
             ), statement
+
+    def test_commit_hoisted_into_a_local_is_flagged(self) -> None:
+        """``sql = "COMMIT"; db.execute(sql)`` is the same statement, one
+        indirection away. A literal-only check put it in no bucket at all —
+        neither a direct ender nor a write-only helper — so it committed its
+        caller's transaction with every check green (#2207)."""
+        assert _ends_transaction_directly(
+            self._fn(
+                "async def w(self):\n"
+                "    db = self._get_db()\n"
+                '    sql = "COMMIT"\n'
+                "    db.execute(sql)\n"
+            )
+        )
+
+    def test_commit_hoisted_into_a_module_constant_is_flagged(self) -> None:
+        """The longer reads in these files are already written this way, so the
+        constant is the spelling a future writer would reach for."""
+        fn = self._fn("async def w(self):\n    db = self._get_db()\n    db.execute(_COMMIT_SQL)\n")
+        assert _ends_transaction_directly(fn, {"_COMMIT_SQL": "COMMIT"})
+        # Without the module's constants the name is unknowable, which is an
+        # ender too — the fail-closed direction, not a second chance to hide.
+        assert _ends_transaction_directly(fn)
+        # A constant that resolves to a read is not an ender.
+        assert not _ends_transaction_directly(fn, {"_COMMIT_SQL": "SELECT"})
+
+    def test_a_hoisted_multi_word_ender_is_flagged(self) -> None:
+        """The resolver answers with the leading keyword, so ``END TRANSACTION``
+        arrives as ``END`` — already an ender — and a trailing ``;`` is trimmed."""
+        assert _ends_transaction_directly(
+            self._fn(
+                "async def w(self):\n"
+                "    db = self._get_db()\n"
+                '    sql = "END TRANSACTION;"\n'
+                "    db.execute(sql)\n"
+            )
+        )
+
+    def test_an_ambiguous_hoisted_ender_is_flagged(self) -> None:
+        """Which binding reaches the execute is a control-flow question this
+        guard does not answer, so a local that is an ender on any path is one —
+        the same fail-closed direction the BEGIN rule takes."""
+        assert _ends_transaction_directly(
+            self._fn(
+                "async def w(self):\n"
+                "    db = self._get_db()\n"
+                '    sql = "COMMIT"\n'
+                "    if rewrite:\n"
+                "        sql = choose_sql()\n"
+                "    db.execute(sql)\n"
+            )
+        )
+
+    def test_a_hoisted_read_is_not_an_ender(self) -> None:
+        """The resolution has to distinguish, or every hoisted statement in
+        these files becomes an ender and the registry fills up with noise."""
+        assert not _ends_transaction_directly(
+            self._fn(
+                "async def w(self):\n"
+                "    db = self._get_db()\n"
+                '    sql = "SELECT 1"\n'
+                "    db.execute(sql)\n"
+            )
+        )
+
+    def test_a_hoisted_ender_is_classified_as_commit_or_rollback(self) -> None:
+        """The containment check needs the same resolution: a hoisted COMMIT
+        must sit inside the region, a hoisted ROLLBACK is the cleanup."""
+        for statement, is_commit in (("COMMIT", True), ("ROLLBACK", False)):
+            fn = self._fn(
+                "async def w(self):\n"
+                "    db = self._get_db()\n"
+                f'    sql = "{statement}"\n'
+                "    db.execute(sql)\n"
+            )
+            nodes = _transaction_ending_nodes(fn)
+            assert len(nodes) == 1, statement
+            assert _is_commit_ender(nodes[0], fn) is is_commit, statement
+
+    def test_an_unknowable_statement_is_an_ender(self) -> None:
+        """The same fail-closed call ``_is_writing_sql`` makes for writes.
+
+        A dict lookup, an attribute, a helper's return value: each is exactly
+        where the next hoisted COMMIT would sit, and none of them can be
+        checked. Every one of the 279 execute-family calls in the scanned files
+        resolves, so the rule costs a future writer one explicit local.
+        """
+        for expression in ("SQL['commit']", "Q.COMMIT", "pick_sql()", 'f"{verb} TRANSACTION"'):
+            assert _ends_transaction_directly(
+                self._fn(
+                    f"async def w(self):\n    db = self._get_db()\n    db.execute({expression})\n"
+                )
+            ), expression
+
+    def test_a_statement_assembled_from_literals_is_read_whole(self) -> None:
+        """Reading only the first piece answers ``COM`` — a keyword in no set,
+        which is worse than not knowing."""
+        for expression in ('"COM" + "MIT"', '"{}COMMIT".format("")', '"  commit  ".strip()'):
+            assert _ends_transaction_directly(
+                self._fn(
+                    f"async def w(self):\n    db = self._get_db()\n    db.execute({expression})\n"
+                )
+            ), expression
+        assert not _ends_transaction_directly(
+            self._fn('async def w(self):\n    db.execute("SELECT " + "1")\n')
+        )
+
+    def test_an_annotated_local_resolves_like_any_other(self) -> None:
+        assert _ends_transaction_directly(
+            self._fn(
+                "async def w(self):\n"
+                "    db = self._get_db()\n"
+                '    sql: str = "COMMIT"\n'
+                "    db.execute(sql)\n"
+            )
+        )
+
+    def test_a_name_reused_below_does_not_reclassify_the_call_above(self) -> None:
+        """Bindings under the call site do not reach it. Without that, reusing
+        a local further down turns the read above it into an ender."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    sql = "SELECT 1"\n'
+            "    db.execute(sql)\n"
+            '    sql = "COMMIT"\n'
+            "    db.execute(sql)\n"
+        )
+        assert [node.lineno for node in _transaction_ending_nodes(fn)] == [6]
+
+    def test_a_parameter_is_not_explained_by_a_module_constant(self) -> None:
+        """A parameter that happens to share a constant's name is a different
+        value. Reading the module's would clear a caller's SQL by a coincidence
+        of spelling; the shadowed name is unknowable instead."""
+        shadowed = self._fn("async def w(self, _Q):\n    db = self._get_db()\n    db.execute(_Q)\n")
+        assert _ends_transaction_directly(shadowed, {"_Q": "SELECT"})
+        plain = self._fn("async def w(self):\n    db = self._get_db()\n    db.execute(_Q)\n")
+        assert not _ends_transaction_directly(plain, {"_Q": "SELECT"})
 
     def test_begin_and_ordinary_sql_are_not_flagged(self) -> None:
         """Opening a transaction is not ending one, and a DML statement that
@@ -3049,6 +3349,17 @@ class TestBackendGuardHelpersRejectFakeCompliance:
             "    db.commit()\n"
         )
         assert _refuses_outer_transaction(fn) is False
+
+    def test_executescript_rollback_is_not_cleanup(self) -> None:
+        """It commits the pending transaction first and *then* raises "cannot
+        rollback - no transaction is active" — measured: the row it was
+        supposed to discard survives. Crediting it certifies a writer that made
+        someone else's work durable (#2207)."""
+        block = ast.parse('def _(self):\n    db.executescript("ROLLBACK")\n').body[0].body
+        assert _rolled_back_connections(block, _DEFAULT_HELPERS) == set()
+        # The ``execute`` spelling is the one that rolls back.
+        block = ast.parse('def _(self):\n    db.execute("ROLLBACK")\n').body[0].body
+        assert _rolled_back_connections(block, _DEFAULT_HELPERS) == {"db"}
 
     def test_a_short_circuited_rollback_is_not_cleanup(self) -> None:
         """``cleanup_enabled and db.rollback()`` runs on one path; a lazy

@@ -861,6 +861,34 @@ async def test_update_chunks_scope_refuses_pending_unowned_transaction(storage, 
         db.rollback()
 
 
+async def test_executescript_rollback_commits_instead_of_rolling_back(storage):
+    """Why ``executescript("ROLLBACK")`` is not cleanup (#2207).
+
+    It reads as the SQL spelling of ``db.rollback()``, but ``executescript``
+    commits the pending transaction *before* running what it was handed — so
+    the statement it then runs finds no transaction, raises, and the work the
+    writer meant to discard is already durable. A guard that credited it as
+    failure cleanup would certify exactly the writer that lost the data.
+
+    ``test_mixin_commit_guard.py`` accepts only the ``execute`` spelling. This
+    is the behaviour that rule is derived from.
+    """
+    db = storage._get_db()
+    db.execute("CREATE TABLE IF NOT EXISTS _rollback_probe(x)")
+    db.commit()
+
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("INSERT INTO _rollback_probe VALUES (1)")
+    with pytest.raises(sqlite3.OperationalError, match="cannot rollback"):
+        db.executescript("ROLLBACK")
+
+    assert db.in_transaction is False
+    assert db.execute("SELECT COUNT(*) FROM _rollback_probe").fetchone()[0] == 1
+
+    db.execute("DROP TABLE _rollback_probe")
+    db.commit()
+
+
 @pytest.mark.parametrize("finisher", ["executescript", "with-connection"])
 async def test_implicit_sqlite_finishers_end_the_owners_transaction(storage, finisher):
     """Why ``executescript`` and ``with db:`` are transaction enders (#2182).
