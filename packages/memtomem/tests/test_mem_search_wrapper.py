@@ -569,9 +569,10 @@ class TestWebhook:
             results=["a", "b"],
             stats=RetrievalStats(final_total=2),
         )
-        # The wrapper fires and forgets, so let the task run before asserting.
-        await asyncio.sleep(0)
-
+        # Asserted with no intervening yield on purpose (#2185): the wrapper
+        # awaits ``fire`` directly now. A ``sleep(0)`` here would let the old
+        # detached ``create_task(fire(...))`` run too, and the test would pass
+        # against the implementation it exists to rule out.
         app.webhook_manager.fire.assert_awaited_once_with(
             "search", {"query": "hello", "result_count": 2}
         )

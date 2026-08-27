@@ -746,3 +746,49 @@ async def test_web_lifespan_blocks_exclusive_acquire(rt):
             finally:
                 child.join(timeout=30)
                 _stop(child)
+
+
+async def test_lifespan_cancels_summary_regen_before_closing_components():
+    """A running regeneration must not outlive storage (#2185).
+
+    ``_run_summary_regen`` writes through the storage that ``close_components``
+    is about to close, so cancelling it *after* teardown would be no better
+    than not cancelling it at all. The order is what this pins: the task has to
+    observe its cancellation before ``close_components`` runs.
+    """
+    import asyncio
+
+    comp = _make_components(embedding_broken=None, stored_info=None)
+    order: list[str] = []
+    running = asyncio.Event()
+
+    async def _regen() -> None:
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            order.append("regen cancelled")
+            raise
+
+    async def _close(_comp):
+        order.append("close_components")
+        return MagicMock(storage_closed=True)
+
+    app = FastAPI()
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch("memtomem.server.component_factory.close_components", _close),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        async with _lifespan(app):
+            app.state.summary_regen_task = asyncio.create_task(_regen())
+            await running.wait()
+
+    assert order == ["regen cancelled", "close_components"], order
+    # The handle is also cleared off app.state with the rest of the published
+    # state, so a second startup cannot inherit a dead task.
+    assert not hasattr(app.state, "summary_regen_task")
