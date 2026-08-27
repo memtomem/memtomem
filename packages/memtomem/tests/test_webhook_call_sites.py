@@ -28,9 +28,12 @@ from memtomem.search.pipeline import RetrievalStats
 
 _TOOLS = Path(memtomem.__file__).parent / "server" / "tools"
 
-#: The modules that fire webhooks. Named rather than globbed so a new firing
-#: module has to be added here deliberately — and ``test_every_firing_module_is_listed``
-#: fails if one appears that is not.
+#: The modules that fire webhooks, as paths relative to ``server/tools/``.
+#: Named rather than globbed so a new firing module has to be added here
+#: deliberately — and ``test_every_firing_module_is_listed`` fails if one
+#: appears that is not. Relative paths rather than basenames: the directory is
+#: flat today, but a basename registry would collapse two same-named modules in
+#: different subpackages into one entry and stop being an enumeration.
 _FIRING_MODULES = ("ask.py", "memory_crud.py", "search.py")
 
 
@@ -125,7 +128,7 @@ def test_every_fire_call_site_is_directly_awaited(module):
 def test_every_firing_module_is_listed():
     """A new firing module must join the list above, not slip past it."""
     firing = {
-        path.name
+        path.relative_to(_TOOLS).as_posix()
         for path in sorted(_TOOLS.rglob("*.py"))
         if _fire_calls(ast.parse(path.read_text(encoding="utf-8")))
     }
