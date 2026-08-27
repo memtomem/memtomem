@@ -512,9 +512,18 @@ async def regenerate_summaries(
 
     import asyncio
 
-    asyncio.create_task(
-        _run_summary_regen(request.app.state, storage, llm, drift_paths, config.indexing)
+    from memtomem.server.background import bg_task_error_cb
+
+    # Held on app.state, not dropped on the floor: ``create_task`` keeps only a
+    # weak reference, and the lifespan needs a handle to cancel this before
+    # ``close_components`` — otherwise the job outlives storage and writes into
+    # a closed connection (#2185).
+    task = asyncio.create_task(
+        _run_summary_regen(request.app.state, storage, llm, drift_paths, config.indexing),
+        name="memtomem-summary-regen",
     )
+    task.add_done_callback(bg_task_error_cb)
+    request.app.state.summary_regen_task = task
     return RegenerateStartResponse(started=True, total=len(drift_paths))
 
 

@@ -1676,6 +1676,35 @@ class TestSources:
         assert status.json()["running"] is False
         assert status.json()["total"] == 0
 
+    async def test_regenerate_task_is_referenced_on_app_state(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """The job handle must survive on ``app.state`` (#2185).
+
+        ``create_task`` keeps only a weak reference, and the lifespan needs a
+        handle to cancel the job before ``close_components`` — otherwise it
+        outlives storage and writes through a closed connection.
+        """
+        app.state.config.indexing.auto_summarize = True
+        app.state.llm = MagicMock()
+        app.state.storage.list_language_drift_paths.return_value = [tmp_path / "drifted.md"]
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _never_finishes(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+
+        with patch("memtomem.web.routes.sources._run_summary_regen", side_effect=_never_finishes):
+            resp = await client.post("/api/sources/regenerate-summaries")
+            assert resp.json() == {"started": True, "total": 1}
+            await started.wait()
+            task = app.state.summary_regen_task
+            assert task is not None and not task.done()
+            release.set()
+            task.cancel()
+
 
 # ---------------------------------------------------------------------------
 # GET /api/chunks
