@@ -4527,6 +4527,63 @@ class TestIndexStreamErrorRedaction:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/index/stream — consumer abandonment
+# ---------------------------------------------------------------------------
+
+
+class TestIndexStreamAbandonment:
+    """#2200: the route's ``_generate()`` wrapper must close the engine's
+    generator, not drop it on the floor.
+
+    ``index_path_stream`` releases ``_active_runs`` and the #2180 generation
+    lease in its own ``finally``, which runs only when that generator is
+    closed. When a client disconnects, Starlette unwinds the wrapper — a bare
+    ``async for`` leaves the inner generator to asyncio's async-generator
+    finalizer (a *scheduled* ``aclose``, not a synchronous one), so
+    ``GET /api/indexing/active`` keeps reporting a run that has stopped and a
+    retired ONNX session stays pinned. The wrapper drives the engine stream
+    through ``contextlib.aclosing`` so the close happens in the same unwind.
+    """
+
+    async def test_closing_the_response_closes_the_engine_stream(self, app, tmp_path):
+        from memtomem.web.routes.system import index_stream
+        from memtomem.web.schemas.memory import IndexRequest
+
+        released: list[str] = []
+
+        async def _stream(*args, **kwargs):
+            # Stands in for the engine's ``_active_run`` context manager: the
+            # release is in a ``finally``, so it is observable only if
+            # something closes this generator.
+            try:
+                yield {"type": "discovery", "files_total": 2}
+                yield {"type": "progress", "file": "a.md", "files_total": 2}
+            finally:
+                released.append("released")
+
+        app.state.index_engine.index_path_stream = _stream
+
+        response = await index_stream(
+            IndexRequest(path=str(tmp_path)),
+            index_engine=app.state.index_engine,
+            search_pipeline=app.state.search_pipeline,
+        )
+        body = response.body_iterator
+        first = await body.__anext__()
+        assert "discovery" in first
+        assert released == [], "engine stream released before the consumer left"
+
+        # The disconnect: the outer generator is closed, the inner one is
+        # never touched directly.
+        await body.aclose()
+
+        assert released == ["released"], (
+            "engine stream still open after the response was closed — the run "
+            "and its generation lease leak until GC"
+        )
+
+
+# ---------------------------------------------------------------------------
 # GET /api/memory-dirs/status
 # ---------------------------------------------------------------------------
 

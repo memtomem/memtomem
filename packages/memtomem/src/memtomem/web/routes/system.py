@@ -13,6 +13,7 @@ on the read side at ``memtomem.indexing.engine.memory_dir_stats``.
 from __future__ import annotations
 
 import asyncio as _asyncio
+import contextlib
 import json
 import logging
 import os
@@ -1663,15 +1664,26 @@ async def index_stream(
         # run may have written". Dropping a still-valid cache costs one cold
         # search; keeping a stale one hides a committed write.
         try:
-            async for event in index_engine.index_path_stream(
-                resolved,
-                recursive=req.recursive,
-                force=req.force,
-                namespace=req.namespace,
-                force_unsafe=req.force_unsafe,
-                path_scope="explicit",
-            ):
-                yield f"data: {json.dumps(event)}\n\n"
+            # #2200: ``aclosing`` rather than a bare ``async for``. This frame
+            # is itself a generator, and Starlette abandons it on client
+            # disconnect without necessarily unwinding it; the engine releases
+            # ``_active_runs`` and the #2180 generation lease in the inner
+            # generator's ``finally``, which only runs when that generator is
+            # closed. Without this, a disconnected run stays "active" in
+            # ``GET /api/indexing/active`` and pins a retired ONNX session
+            # until GC finalizes the frame.
+            async with contextlib.aclosing(
+                index_engine.index_path_stream(
+                    resolved,
+                    recursive=req.recursive,
+                    force=req.force,
+                    namespace=req.namespace,
+                    force_unsafe=req.force_unsafe,
+                    path_scope="explicit",
+                )
+            ) as stream:
+                async for event in stream:
+                    yield f"data: {json.dumps(event)}\n\n"
         except NamespaceResolutionError as exc:
             # Before the generic branch (#2005 follow-up): SSE has no status
             # code, so the *message* is the only place this surface can say
