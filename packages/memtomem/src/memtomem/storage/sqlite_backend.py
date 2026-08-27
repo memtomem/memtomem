@@ -992,6 +992,18 @@ class SqliteBackend(
         """
         db = self._get_db()
         owns_txn = not self._in_transaction
+        if owns_txn and db.in_transaction:
+            # Mirrors transaction()'s refusal. Without this, a pending
+            # transaction this task does not own is adopted silently: the
+            # BEGIN below is skipped, every DELETE joins the stranger's
+            # transaction, and the commit at the end of the owned branch ends
+            # it — flushing whatever that other writer had half-written along
+            # with the wipe. Raised before the try so the StorageError handler
+            # cannot roll the stranger's transaction back either.
+            raise StorageError(
+                "reset_all refused: the connection already has an open "
+                "transaction this task does not own"
+            )
         prior_defer = db.execute("PRAGMA defer_foreign_keys").fetchone()[0]
         deleted: dict[str, int] = {}
         incomplete: list[str] = []
@@ -999,8 +1011,10 @@ class SqliteBackend(
             # Take the write lock before enumerating, so a concurrent writer
             # can't add a table between enumeration and deletion. An enclosing
             # ``transaction()`` has already issued ``BEGIN IMMEDIATE``; a
-            # standalone reset must acquire the same lock itself.
-            if not db.in_transaction:
+            # standalone reset must acquire the same lock itself. Gated on the
+            # same flag as the commit/rollback below: the refusal above has
+            # already established that an unowned transaction is not pending.
+            if owns_txn:
                 db.execute("BEGIN IMMEDIATE")
             db.execute("PRAGMA defer_foreign_keys = ON")
 
@@ -1812,8 +1826,8 @@ class SqliteBackend(
         # rowid set we read can't be invalidated by a concurrent
         # watcher INSERT before we UPDATE. An outer ``transaction()`` already
         # owns that lock, so only the standalone path begins and finalizes one.
-        opened_tx = False
-        if not self._in_transaction:
+        owns_txn = not self._in_transaction
+        if owns_txn:
             if db.in_transaction:
                 # Mirrors transaction()'s refusal: beginning on top of a
                 # pending transaction this task does not own would raise
@@ -1825,14 +1839,13 @@ class SqliteBackend(
                     "has an open transaction this task does not own"
                 )
             db.execute("BEGIN IMMEDIATE")
-            opened_tx = True
         try:
             rows = db.execute(
                 "SELECT rowid FROM chunks WHERE source_file=?",
                 (old_norm,),
             ).fetchall()
             if not rows:
-                if opened_tx:
+                if owns_txn:
                     db.commit()
                 return 0
             rowids = [row[0] for row in rows]
@@ -1880,10 +1893,10 @@ class SqliteBackend(
                     "DELETE FROM _memtomem_meta WHERE key=?",
                     (old_summary_key,),
                 )
-            if opened_tx:
+            if owns_txn:
                 db.commit()
         except Exception as exc:
-            if opened_tx:
+            if owns_txn:
                 db.rollback()
             raise StorageError(
                 f"update_chunks_scope_for_source failed, transaction rolled back: {exc}"

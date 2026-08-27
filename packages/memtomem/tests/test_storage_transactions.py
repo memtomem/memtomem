@@ -861,6 +861,81 @@ async def test_update_chunks_scope_refuses_pending_unowned_transaction(storage, 
         db.rollback()
 
 
+@pytest.mark.parametrize("finisher", ["executescript", "with-connection"])
+async def test_implicit_sqlite_finishers_end_the_owners_transaction(storage, finisher):
+    """Why ``executescript`` and ``with db:`` are transaction enders (#2182).
+
+    Neither contains the word "commit", and a writer using one shows no direct
+    ender and no unprotected write — but sqlite3 ends the transaction anyway:
+    ``executescript`` issues a COMMIT before running what it was handed, and
+    the connection context manager commits on a clean exit. Inside an owner's
+    transaction that is #2162 exactly: the owner's rows go durable and its
+    rollback becomes a no-op.
+
+    ``test_mixin_commit_guard.py`` rejects both constructs in a scanned writer.
+    This is the behaviour that rule is derived from, pinned against the real
+    connection so the rule cannot outlive its reason.
+    """
+    db = storage._get_db()
+    db.execute("CREATE TABLE IF NOT EXISTS _finisher_probe(x)")
+    db.commit()
+
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("INSERT INTO _finisher_probe VALUES (1)")  # the owner's pending work
+    if finisher == "executescript":
+        db.executescript("INSERT INTO _finisher_probe VALUES (2);")
+    else:
+        with db:
+            db.execute("INSERT INTO _finisher_probe VALUES (2)")
+
+    assert db.in_transaction is False, "the finisher left the owner's transaction open"
+    db.rollback()  # the owner's rollback, now a no-op
+    assert db.execute("SELECT COUNT(*) FROM _finisher_probe").fetchone()[0] == 2
+
+    db.execute("DROP TABLE _finisher_probe")
+    db.commit()
+
+
+async def test_reset_all_refuses_pending_unowned_transaction(storage, tmp_path):
+    """reset_all must not adopt a transaction it did not open.
+
+    ``owns_txn`` is derived from ``_in_transaction`` (task ownership), which
+    says nothing about a stranded implicit transaction on the shared writer
+    connection. Without the refusal the wipe joined that transaction and the
+    owned-branch commit ended it, flushing the stranger's half-written rows
+    along with the reset.
+    """
+    survivor = make_chunk(content="must survive a refused reset")
+    await storage.upsert_chunks([survivor])
+
+    db = storage._get_db()
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("INSERT INTO _memtomem_meta(key, value) VALUES ('pending_probe', 'uncommitted')")
+    try:
+        with pytest.raises(StorageError, match="refused"):
+            await storage.reset_all()
+        # Checked before the rollback, so a version that deleted first and
+        # raised afterwards cannot hide behind the cleanup: the refusal has to
+        # come before any write, and it must not end the stranger's
+        # transaction.
+        assert db.in_transaction is True
+        assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+        assert (
+            db.execute("SELECT value FROM _memtomem_meta WHERE key='pending_probe'").fetchone()[0]
+            == "uncommitted"
+        )
+    finally:
+        db.rollback()
+
+    # The stranger's row went out with its own rollback rather than being
+    # committed by the reset, and the survivor is still there.
+    assert (
+        db.execute("SELECT COUNT(*) FROM _memtomem_meta WHERE key='pending_probe'").fetchone()[0]
+        == 0
+    )
+    assert await storage.get_chunk(survivor.id) is not None
+
+
 async def test_reset_embedding_meta_refuses_an_outer_transaction(storage):
     """reset mutates in-memory embedding state alongside the DB, so it owns
     its transaction and refuses to participate in someone else's: an owner
