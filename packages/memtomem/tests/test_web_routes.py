@@ -4532,17 +4532,28 @@ class TestIndexStreamErrorRedaction:
 
 
 class TestIndexStreamAbandonment:
-    """#2200: the route's ``_generate()`` wrapper must close the engine's
-    generator, not drop it on the floor.
+    """#2200: a client disconnect must release the indexing run it started.
 
     ``index_path_stream`` releases ``_active_runs`` and the #2180 generation
     lease in its own ``finally``, which runs only when that generator is
-    closed. When a client disconnects, Starlette unwinds the wrapper — a bare
-    ``async for`` leaves the inner generator to asyncio's async-generator
-    finalizer (a *scheduled* ``aclose``, not a synchronous one), so
-    ``GET /api/indexing/active`` keeps reporting a run that has stopped and a
-    retired ONNX session stays pinned. The wrapper drives the engine stream
-    through ``contextlib.aclosing`` so the close happens in the same unwind.
+    closed — otherwise ``GET /api/indexing/active`` keeps reporting a run that
+    has stopped and a retired ONNX session stays pinned until asyncio's
+    async-generator finalizer (a *scheduled* ``aclose``) gets around to it.
+
+    Two layers have to hold for that to work, and each has a test below:
+
+    1. The route's ``_generate()`` wrapper drives the engine stream through
+       ``contextlib.aclosing``, so closing the wrapper closes the engine's
+       generator in the same unwind.
+    2. The response closes ``_generate()`` at all. Starlette does not — it
+       unwinds ``stream_response``, and a cancellation landing on ``send``
+       (backpressure: the SSE client stopped reading) leaves the body
+       generator suspended at its ``yield``. ``_ClosingStreamingResponse``
+       closes it in ``__call__``'s ``finally``.
+
+    Layer 1 alone passes a test that closes the body iterator by hand, which
+    is exactly the step layer 2 exists to guarantee — so the second test
+    drives the real ASGI disconnect, against the real engine.
     """
 
     async def test_closing_the_response_closes_the_engine_stream(self, app, tmp_path):
@@ -4581,6 +4592,110 @@ class TestIndexStreamAbandonment:
             "engine stream still open after the response was closed — the run "
             "and its generation lease leak until GC"
         )
+
+    async def test_disconnect_while_send_blocks_releases_the_real_run(self, components, memory_dir):
+        """The end-to-end contract, with nothing stubbed between the client
+        and the engine: a disconnect arriving while the response is blocked
+        in ``send`` must drop ``_active_runs`` and release the generation
+        lease before ``__call__`` returns.
+
+        This is the window Starlette leaves open — the cancellation lands on
+        ``send``, not on the body generator's ``__anext__``, so nothing throws
+        into ``_generate()`` and its ``aclosing`` never runs on its own.
+        """
+        from memtomem.web.routes.system import index_stream
+        from memtomem.web.schemas.memory import IndexRequest
+
+        for i in range(3):
+            (memory_dir / f"note{i}.md").write_text(f"# Note {i}\n\nBody.")
+        engine = components.index_engine
+        generation = components.generation
+
+        response = await index_stream(
+            IndexRequest(path=str(memory_dir)),
+            index_engine=engine,
+            search_pipeline=SimpleNamespace(invalidate_cache=lambda: None),
+        )
+
+        sending = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                # Backpressure: the client is no longer reading. The response
+                # parks here, holding the run, until the disconnect arrives.
+                sending.set()
+                await asyncio.Event().wait()
+
+        async def receive():
+            await sending.wait()
+            return {"type": "http.disconnect"}
+
+        scope = {
+            "type": "http",
+            # uvicorn's current value; it selects Starlette's task-group path,
+            # where the disconnect cancels the streaming task rather than
+            # raising out of ``send``.
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "method": "POST",
+            "path": "/api/index/stream",
+            "headers": [],
+        }
+
+        await asyncio.wait_for(response(scope, receive, send), timeout=10)
+
+        assert engine._active_runs == 0, (
+            "the disconnected run is still counted — /api/indexing/active "
+            "reports indexing that has stopped"
+        )
+        assert generation.leases == 0, (
+            "the disconnected run still pins its component generation — a "
+            "retired ONNX session cannot be closed"
+        )
+
+    async def test_failing_cleanup_does_not_replace_the_original_error(self, app, tmp_path):
+        """Closing the body is cleanup, so it must not become the error the
+        server sees. The reason the response is unwinding — here a disconnect
+        surfacing as ``ClientDisconnect`` — is what classifies the request;
+        a generator whose own ``finally`` raises must not take its place.
+        """
+        from starlette.responses import ClientDisconnect
+
+        from memtomem.web.routes.system import index_stream
+        from memtomem.web.schemas.memory import IndexRequest
+
+        async def _stream(*args, **kwargs):
+            try:
+                yield {"type": "discovery", "files_total": 1}
+            finally:
+                raise RuntimeError("cleanup exploded")
+
+        app.state.index_engine.index_path_stream = _stream
+
+        response = await index_stream(
+            IndexRequest(path=str(tmp_path)),
+            index_engine=app.state.index_engine,
+            search_pipeline=app.state.search_pipeline,
+        )
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                # What uvicorn raises once the peer is gone; Starlette's
+                # spec-2.4 path translates it to ``ClientDisconnect``.
+                raise OSError("connection reset")
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "method": "POST",
+            "path": "/api/index/stream",
+            "headers": [],
+        }
+
+        with pytest.raises(ClientDisconnect):
+            await response(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------

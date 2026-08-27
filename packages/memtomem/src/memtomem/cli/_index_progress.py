@@ -256,10 +256,15 @@ async def run_with_progress(
                     path_scope=path_scope,
                     reassign_namespaces=reassign_namespaces,
                 )
-                # #2200: an interrupt escaping this loop (``mm shell`` keeps
-                # running afterwards) must close the engine's generator, not
-                # leave it to GC — its ``finally`` is what drops ``_active_runs``
-                # and releases the #2180 generation lease.
+                # #2200: an interrupt escaping this loop must close the
+                # engine's generator rather than leave it to GC — its
+                # ``finally`` is what drops ``_active_runs`` and releases the
+                # #2180 generation lease. Ordering is the point here: without
+                # this, ``cli_components()`` above tears the embedder and
+                # storage down while the abandoned run still counts as active
+                # and still holds its lease. (That lease guards hot-swap
+                # retirement, which a CLI run never reaches — so this is the
+                # engine's contract, not a reported CLI symptom.)
                 async with contextlib.aclosing(stream):
                     async for evt in stream:
                         if evt["type"] == "discovery":

@@ -776,10 +776,13 @@ class TestIndexProgressStreamClosure:
 
     ``index_path_stream`` drops ``_active_runs`` and releases the #2180
     generation lease in its own ``finally``, which runs only when the
-    generator is closed. ``mm index`` exits right after, but ``mm shell``
-    keeps the process alive, so a stream left to asyncio's async-generator
-    finalizer keeps a retired component generation pinned for the rest of
-    the session.
+    generator is closed. Leaving that to asyncio's async-generator finalizer
+    inverts the shutdown order: ``run_with_progress`` exits its
+    ``cli_components()`` block, closing the embedder and storage, while the
+    abandoned run still counts as active and still holds its generation
+    lease. No CLI symptom has been reported for this — the lease guards
+    hot-swap retirement, which a CLI run never reaches — so what this pins is
+    the engine's contract: close the stream you walk away from.
     """
 
     async def test_interrupt_in_consumer_closes_engine_stream(

@@ -1646,6 +1646,50 @@ async def indexing_active(index_engine=Depends(get_index_engine)) -> JSONRespons
     )
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    """A ``StreamingResponse`` that closes its body iterator when it is done.
+
+    #2200: Starlette never closes ``body_iterator``. On a client disconnect it
+    unwinds ``stream_response`` — the frame doing the ``async for`` — and
+    whether that reaches the body generator depends on where the cancellation
+    lands. Cancelled while awaiting the *generator* (``__anext__``), the error
+    is thrown into it and its ``finally`` runs; cancelled while awaiting
+    ``send`` (backpressure, the common case for an SSE client that stopped
+    reading), the generator is left suspended at its ``yield`` and only
+    asyncio's async-generator finalizer — a *scheduled* ``aclose`` — gets to
+    it. Under uvicorn's ASGI ``spec_version`` 2.3 path both windows are live.
+
+    That distinction matters here because the body generator holds indexing
+    state: it drives ``index_path_stream``, whose ``finally`` drops
+    ``_active_runs`` and releases the #2180 generation lease. Closing the body
+    iterator here makes that release happen in the same unwind as the
+    disconnect, on every path out of ``__call__``.
+    """
+
+    async def _close_body(self) -> None:
+        # ``iterate_in_threadpool`` wrappers and plain async iterators have no
+        # ``aclose``; only generators do, and closing an exhausted one is a
+        # no-op, so this is safe on the normal-completion path too.
+        aclose = getattr(self.body_iterator, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        except BaseException:
+            # Cleanup must not become the error the caller sees: the reason we
+            # are unwinding (``ClientDisconnect``, a cancellation, a send
+            # failure) is what the server needs to classify this request by.
+            # A generator whose own cleanup raises would otherwise replace it.
+            try:
+                await self._close_body()
+            except Exception:
+                logger.warning("Failed to close index-stream body", exc_info=True)
+            raise
+        await self._close_body()
+
+
 @router.post("/index/stream", dependencies=[Depends(require_configured)])
 async def index_stream(
     req: IndexRequest,
@@ -1713,7 +1757,7 @@ async def index_stream(
         finally:
             search_pipeline.invalidate_cache()
 
-    return StreamingResponse(
+    return _ClosingStreamingResponse(
         _generate(),
         media_type="text/event-stream",
         headers={
