@@ -160,13 +160,14 @@ def _is_durable_container(receiver: ast.AST, func: ast.AST) -> bool:
     An attribute chain (``self._tasks``, ``app.state.jobs``) or a name the
     function does not itself create — a module-level set — keeps the task
     alive. A list built inside the same function does not: it dies with the
-    frame, taking the only reference with it.
+    frame, taking the only reference with it. Durability is decided by the
+    *root* of the chain, so ``holder = make_holder()`` followed by
+    ``holder.tasks.append(task)`` is frame-local too.
     """
-    if isinstance(receiver, ast.Attribute):
-        return _attr_chain(receiver) is not None
-    if isinstance(receiver, ast.Name):
-        return receiver.id not in _assigned_in(func)
-    return False
+    chain = _attr_chain(receiver) if isinstance(receiver, (ast.Attribute, ast.Name)) else None
+    if chain is None:
+        return False
+    return chain.split(".", 1)[0] not in _assigned_in(func)
 
 
 def _awaited(name: str, func: ast.AST, after_line: int) -> bool:
@@ -398,6 +399,19 @@ def test_guard_rejects_ownership_from_a_nested_scope():
         "    task = asyncio.create_task(work())\n"
         "    def later():\n"
         "        self._tasks.add(task)\n",
+    )
+    assert len(violations) == 1
+
+
+def test_guard_rejects_a_frame_local_holder():
+    """Durability follows the root of the chain, not the dot count."""
+    violations = _check_source(
+        "sample.py",
+        "import asyncio\n"
+        "async def go():\n"
+        "    holder = make_holder()\n"
+        "    task = asyncio.create_task(work())\n"
+        "    holder.tasks.append(task)\n",
     )
     assert len(violations) == 1
 
