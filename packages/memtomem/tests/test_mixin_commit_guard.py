@@ -483,9 +483,13 @@ def _refuses_outer_transaction(fn: ast.AST) -> bool:
     inverted ``if not self._in_transaction: raise`` refuses the *standalone*
     case and sails straight into a caller's transaction.
 
-    And it has to come first. A refusal below the commit it is supposed to
-    prevent guards nothing, so anything found after the earliest
-    transaction-ending statement does not count.
+    On ``self``, and on the path. ``other._in_transaction`` asks a different
+    object whether *it* is busy, which says nothing about the transaction this
+    writer is about to end, and a refusal parked inside ``if strict:`` is not
+    reached by the paths that skip that branch. So the refusal must be a
+    statement of the function's own body — a sibling of the commit rather than
+    something nested in a branch beside it — and it has to come first: a
+    refusal below the commit it is supposed to prevent guards nothing.
     """
     enders = _transaction_ending_nodes(fn)
     first_ender = min((node.lineno for node in enders), default=None)
@@ -493,17 +497,22 @@ def _refuses_outer_transaction(fn: ast.AST) -> bool:
     def in_time(node: ast.AST) -> bool:
         return first_ender is None or node.lineno < first_ender
 
-    for node in _own_body(fn):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_require_transaction_idle"
-            and in_time(node)
-        ):
-            return True
+    # Top level only: ``_own_body`` walks into every branch, and a refusal one
+    # branch over does not dominate anything.
+    for node in fn.body:  # type: ignore[attr-defined]
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "_require_transaction_idle"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "self"
+                and in_time(call)
+            ):
+                return True
         if not isinstance(node, ast.If) or not in_time(node):
             continue
-        if _is_ownership_read(node.test) and any(
+        if _is_self_ownership_read(node.test) and any(
             isinstance(sub, ast.Raise) for stmt in node.body for sub in ast.walk(stmt)
         ):
             return True
@@ -911,10 +920,18 @@ def _failure_cleanup_lineno(fn: ast.AST, helpers: _Helpers = _DEFAULT_HELPERS) -
     if any(_ender_receiver(node) is None for node in commits):
         return None
     owned = {name for name in (_ender_receiver(node) for node in commits) if name is not None}
+    flags = frozenset(_ownership_flags(fn))
     for node in _own_body(fn):
-        if not isinstance(node, ast.ExceptHandler):
+        # An ``except`` that rolls back, or a ``finally`` that does — the latter
+        # runs on every path out, the failure path included, so it closes the
+        # transaction just as surely.
+        if isinstance(node, ast.ExceptHandler):
+            block = node.body
+        elif isinstance(node, ast.Try) and node.finalbody:
+            block = node.finalbody
+        else:
             continue
-        if _rolled_back_connections(node.body, helpers, frozenset(_ownership_flags(fn))) & owned:
+        if _rolled_back_connections(block, helpers, flags) & owned:
             return node.lineno
     return None
 
@@ -961,9 +978,12 @@ def _rolled_back_connections(
 
     A *call*, not a reference: ``db.rollback`` mentioned but never called is
     the shape a containment check should refuse to read as cleanup. The
-    rollback context manager is the one exception in the other direction —
-    calling ``self._rolls_back_if_standalone(db)`` without a ``with`` builds a
-    generator and rolls nothing back — so it counts only when entered.
+    rollback context manager is not cleanup here at all — it rolls back only
+    when an exception passes *through* its body, so
+    ``with self._rolls_back_if_standalone(db): pass`` inside a handler enters,
+    sees nothing raised, and rolls nothing back. In a handler the direct
+    ``_rollback_if_standalone`` is the tool; the context manager belongs around
+    the writes, where ``_protected_regions`` reads it.
 
     Only statements that run unconditionally are read. A rollback under an
     ``if cleanup_enabled:`` runs on one path and not the other, and cleanup
@@ -971,36 +991,40 @@ def _rolled_back_connections(
     conditions are not that: the ownership gate, which is the condition the
     whole contract is written in terms of (on the other branch the owner
     decides what the failure means), and ``if <db>.in_transaction:``, which
-    only skips a rollback when there is nothing left to roll back.
+    only skips a rollback when there is nothing left to roll back — for that
+    same ``<db>``, since asking a different connection whether it is busy
+    reinstates exactly the skipped-cleanup path.
     """
     names: set[str] = set()
 
-    def scan(block: list[ast.stmt]) -> None:
+    def scan(block: list[ast.stmt], only: str | None = None) -> None:
+        """``only`` restricts what counts to one connection, when a condition
+        above has bound the cleanup to it."""
+
+        def take(name: str) -> None:
+            if only is None or name == only:
+                names.add(name)
+
         for stmt in block:
-            if isinstance(stmt, (ast.With, ast.AsyncWith)):
-                for item in stmt.items:
-                    call = item.context_expr
-                    if (
-                        isinstance(call, ast.Call)
-                        and isinstance(call.func, ast.Attribute)
-                        and call.func.attr in helpers.rollback_cms
-                    ):
-                        db_name = _db_argument(call)
-                        if db_name is not None:
-                            names.add(db_name)
-                scan(stmt.body)
-                continue
             if isinstance(stmt, ast.If):
                 body_keys, orelse_keys = _ownership_gate_keys(stmt.test, flags)
-                if body_keys or _pending_transaction_refusal(stmt.test, flags) is not None:
-                    scan(stmt.body)
+                refusal = _pending_transaction_refusal(stmt.test, flags)
+                if body_keys:
+                    scan(stmt.body, only)
+                elif refusal is not None:
+                    scan(stmt.body, refusal[0] if only is None else only)
                 elif orelse_keys:
-                    scan(stmt.orelse)
+                    scan(stmt.orelse, only)
                 continue
             if isinstance(stmt, ast.Try):
                 # ``try: db.rollback() except: log`` — the preservation shape the
                 # helpers use; the rollback itself still runs unconditionally.
-                scan(stmt.body)
+                # ``finally`` runs on every path out, so it is cleanup too.
+                scan(stmt.body, only)
+                scan(stmt.finalbody, only)
+                continue
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                scan(stmt.body, only)
                 continue
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -1009,18 +1033,18 @@ def _rolled_back_connections(
                     continue
                 attr = sub.func.attr
                 if attr == "rollback" and isinstance(sub.func.value, ast.Name):
-                    names.add(sub.func.value.id)
+                    take(sub.func.value.id)
                 elif attr == _ROLLBACK_HELPER:
                     db_name = _db_argument(sub)
                     if db_name is not None:
-                        names.add(db_name)
+                        take(db_name)
                 elif (
                     attr in {"execute", "executescript"}
                     and sub.args
                     and _sql_leading_keyword(sub.args[0]) == "ROLLBACK"
                     and isinstance(sub.func.value, ast.Name)
                 ):
-                    names.add(sub.func.value.id)
+                    take(sub.func.value.id)
 
     scan(list(stmts))
     return names
@@ -2850,6 +2874,82 @@ class TestBackendGuardHelpersRejectFakeCompliance:
             "    db.execute(sql)\n"
         )
         assert _blind_begins(fn) == [6]
+
+    # ---- shapes a review pass found accepted (round four) -------------------
+
+    def test_a_refusal_on_another_object_does_not_refuse(self) -> None:
+        """``other._in_transaction`` asks a different object whether *it* is
+        busy, which says nothing about the transaction about to be ended."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    if other._in_transaction:\n"
+            "        raise StorageError('refused')\n"
+            "    db.commit()\n"
+        )
+        assert _refuses_outer_transaction(fn) is False
+
+    def test_a_refusal_nested_in_another_branch_does_not_dominate(self) -> None:
+        """Parked inside ``if strict:``, it is not reached by the paths that
+        skip that branch — and those paths still reach the commit."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    if strict:\n"
+            "        if self._in_transaction:\n"
+            "            raise StorageError('refused')\n"
+            "    db.commit()\n"
+        )
+        assert _refuses_outer_transaction(fn) is False
+
+    def test_the_top_level_refusal_shapes_still_pass(self) -> None:
+        """Both sanctioned spellings, so the tightening above cannot pass by
+        refusing everything."""
+        for refusal in (
+            '    self._require_transaction_idle("w")\n',
+            "    if self._in_transaction:\n        raise StorageError('refused')\n",
+        ):
+            fn = self._fn("async def w(self):\n" + refusal + "    db.commit()\n")
+            assert _refuses_outer_transaction(fn) is True, refusal
+
+    def test_an_entered_context_manager_is_not_handler_cleanup(self) -> None:
+        """It rolls back only when an exception passes *through* its body, so
+        entering one inside a handler and doing nothing rolls nothing back."""
+        source = self._GATED.replace(
+            "        if not self._in_transaction:\n            db.rollback()\n",
+            "        with self._rolls_back_if_standalone(db):\n            pass\n",
+        )
+        fn = self._fn(source)
+        assert _rollback_try_regions(fn) == []
+        assert "writes or commits outside a rollback-protected region" in (
+            _gated_writer_violations(fn)
+        )
+
+    def test_the_in_transaction_exemption_binds_its_own_connection(self) -> None:
+        """``if other.in_transaction: db.rollback()`` skips cleanup whenever the
+        other connection is idle — the skipped-cleanup path, reinstated."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    db.execute("BEGIN IMMEDIATE")\n'
+            "    try:\n"
+            "        db.commit()\n"
+            "    except Exception:\n"
+            "        if other.in_transaction:\n"
+            "            db.rollback()\n"
+            "        raise\n"
+        )
+        assert _failure_cleanup_lineno(fn) is None
+
+    def test_a_finally_block_is_guaranteed_cleanup(self) -> None:
+        """``finally`` runs on every path out, the failure path included."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    try:\n"
+            "        db.commit()\n"
+            "    finally:\n"
+            "        db.rollback()\n"
+        )
+        assert _failure_cleanup_lineno(fn) == 3
 
     def test_the_meta_helper_aliases_are_scoped_to_that_file(self) -> None:
         """``_commit`` is generic enough that a mixin method by that name must
