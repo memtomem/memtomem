@@ -354,6 +354,96 @@ class TestHealthWatchdog:
         assert results["sqlite_connectivity"]["status"] == "ok"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("check_name", "expect_maintained"),
+        [("search_cache_size", True), ("dead_memory_pct", False)],
+    )
+    async def test_warning_tier_maintenance_is_opt_in(
+        self, mock_app, tmp_path, check_name, expect_maintained
+    ):
+        """``search_cache_size`` tops out at "warning", so maintenance must act there.
+
+        Every other check keeps the critical-only contract — a warning from
+        ``dead_memory_pct`` must not trigger auto-maintenance.
+        """
+        from memtomem.server.health_watchdog import HealthWatchdog
+
+        app, _db = mock_app
+        app.config = MagicMock()
+        app.config.storage.sqlite_path = tmp_path / "test.db"
+
+        wd = HealthWatchdog(app, HealthWatchdogConfig(enabled=True))
+        with patch("memtomem.server.health_watchdog.HEARTBEAT_CHECKS", []):  # keep the loop inert
+            await wd.start()
+        try:
+            wd._auto_maintain = AsyncMock()
+            snap = HealthSnapshot(
+                tier="heartbeat",
+                check_name=check_name,
+                value={"size": 41},
+                status="warning",
+                created_at=time.time(),
+            )
+            await wd._run_check(AsyncMock(return_value=snap))
+            assert wd._auto_maintain.await_count == (1 if expect_maintained else 0)
+        finally:
+            await wd.stop()
+
+    @pytest.mark.asyncio
+    async def test_warning_tier_maintenance_trims_the_cache(self, mock_app, tmp_path):
+        """End-to-end: a warning snapshot reaches ``trim_search_cache``."""
+        from memtomem.server.health_watchdog import HealthWatchdog
+
+        app, _db = mock_app
+        app.config = MagicMock()
+        app.config.storage.sqlite_path = tmp_path / "test.db"
+
+        wd = HealthWatchdog(app, HealthWatchdogConfig(enabled=True))
+        with patch("memtomem.server.health_watchdog.HEARTBEAT_CHECKS", []):
+            await wd.start()
+        try:
+            wd._maintenance.trim_search_cache = AsyncMock(
+                return_value={"before": 41, "after": 30, "evicted": 11}
+            )
+            snap = HealthSnapshot(
+                tier="heartbeat",
+                check_name="search_cache_size",
+                value={"size": 41},
+                status="warning",
+                created_at=time.time(),
+            )
+            await wd._run_check(AsyncMock(return_value=snap))
+            wd._maintenance.trim_search_cache.assert_awaited_once()
+        finally:
+            await wd.stop()
+
+    @pytest.mark.asyncio
+    async def test_warning_tier_maintenance_respects_the_switch(self, mock_app, tmp_path):
+        """``auto_maintenance=False`` still disables the warning tier."""
+        from memtomem.server.health_watchdog import HealthWatchdog
+
+        app, _db = mock_app
+        app.config = MagicMock()
+        app.config.storage.sqlite_path = tmp_path / "test.db"
+
+        wd = HealthWatchdog(app, HealthWatchdogConfig(enabled=True, auto_maintenance=False))
+        with patch("memtomem.server.health_watchdog.HEARTBEAT_CHECKS", []):
+            await wd.start()
+        try:
+            wd._auto_maintain = AsyncMock()
+            snap = HealthSnapshot(
+                tier="heartbeat",
+                check_name="search_cache_size",
+                value={"size": 41},
+                status="warning",
+                created_at=time.time(),
+            )
+            await wd._run_check(AsyncMock(return_value=snap))
+            wd._auto_maintain.assert_not_awaited()
+        finally:
+            await wd.stop()
+
+    @pytest.mark.asyncio
     async def test_get_status_disabled(self, mock_app, tmp_path):
         from memtomem.server.health_watchdog import HealthWatchdog
 

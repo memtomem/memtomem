@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 _CHECK_TIMEOUT = 30.0  # per-check timeout
 
+# Checks whose highest tier is "warning" by design, so auto-maintenance has to act
+# there or never act at all. ``check_search_cache_size`` tops out at "warning"
+# above 40 entries, and the search pipeline self-evicts above 50, leaving no room
+# for a critical threshold that a live process would ever reach.
+_WARNING_TIER_MAINTENANCE = frozenset({"search_cache_size"})
+
 
 class HealthWatchdog:
     """Coordinates periodic health checks and auto-maintenance."""
@@ -216,16 +222,24 @@ class HealthWatchdog:
                 logger.warning(
                     "Health check CRITICAL: %s — %s", snapshot.check_name, snapshot.value
                 )
-                if self._config.auto_maintenance and self._maintenance:
-                    await self._auto_maintain(snapshot)
             elif snapshot.status == "warning":
                 logger.info("Health check WARNING: %s — %s", snapshot.check_name, snapshot.value)
+
+            if self._should_auto_maintain(snapshot) and self._maintenance:
+                await self._auto_maintain(snapshot)
         except asyncio.TimeoutError:
             logger.warning("Health check timed out: %s", getattr(check_fn, "__name__", "?"))
         except Exception:
             logger.error(
                 "Health check failed: %s", getattr(check_fn, "__name__", "?"), exc_info=True
             )
+
+    def _should_auto_maintain(self, snapshot: HealthSnapshot) -> bool:
+        if not self._config.auto_maintenance:
+            return False
+        if snapshot.status == "critical":
+            return True
+        return snapshot.status == "warning" and snapshot.check_name in _WARNING_TIER_MAINTENANCE
 
     async def _auto_maintain(self, snapshot: HealthSnapshot) -> None:
         if not self._maintenance:
