@@ -54,9 +54,11 @@ async def stop_loop_task(task: asyncio.Task) -> None:
     try:
         await task
     except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass  # already surfaced by ``loop_task_error_cb``
+        return
+    except Exception as exc:
+        # Already reported at error level by ``loop_task_error_cb``; shutdown
+        # has nothing left to do with it.
+        logger.debug("Background loop %s had already died: %s", task.get_name(), exc)
 
 
 def track_task(task: asyncio.Task, tasks: set[asyncio.Task]) -> asyncio.Task:
