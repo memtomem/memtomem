@@ -39,6 +39,7 @@ user can actually run)."""
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from collections.abc import Sequence
@@ -246,7 +247,7 @@ async def run_with_progress(
                 else default_system_prefixes()
             )
             for p in paths:
-                async for evt in comp.index_engine.index_path_stream(
+                stream = comp.index_engine.index_path_stream(
                     p,
                     recursive=recursive,
                     force=force,
@@ -254,72 +255,85 @@ async def run_with_progress(
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
                     reassign_namespaces=reassign_namespaces,
-                ):
-                    if evt["type"] == "discovery":
-                        # Authoritative bar-length source. Engine emits this
-                        # exactly once per stream call after ``_discover_files``
-                        # has run, so the bar appears immediately even when
-                        # the first file's embedding takes a while (no
-                        # ``chunk_progress`` for small files, ``progress``
-                        # only at file completion — without ``discovery``
-                        # the bar would stay invisible until that point).
-                        _grow_bar(evt["files_total"])
-                    elif evt["type"] == "chunk_progress":
-                        # Server-side gating in ``indexing/engine.py`` already
-                        # filters out small files (``progress_threshold``,
-                        # default 32), so we don't threshold here — small
-                        # files simply won't emit these events, matching the
-                        # web Index tab's quiet behavior.
-                        done = evt["chunks_done"]
-                        total = evt["chunks_total"]
-                        is_final = done >= total
-                        now = time.monotonic()
-                        if not is_final and now - throttle_state["last_render"] < 0.1:
-                            continue
-                        throttle_state["last_render"] = now
-                        # Bar length normally comes from the discovery event
-                        # above; this is just the lazy-create fallback for
-                        # legacy stubs that skip discovery and jump straight
-                        # to chunk_progress.
-                        _ensure_bar(evt["files_total"])
-                        # Refresh the sub-label without advancing the bar —
-                        # length is in **file units**, so chunks must not
-                        # double-count. ``update(0, item)`` re-renders with
-                        # the new ``current_item`` only.
-                        bar_state["bar"].update(0, (evt["file"], done, total))
-                    elif evt["type"] == "progress":
-                        # Reset throttle on file boundary so the next file's
-                        # first chunk_progress renders immediately.
-                        throttle_state["last_render"] = 0.0
-                        _ensure_bar(evt["files_total"])
-                        bar_state["bar"].update(1, evt["file"])
-                    elif evt["type"] == "complete":
-                        agg["total_files"] += evt["total_files"]
-                        agg["indexed"] += evt["indexed_chunks"]
-                        agg["skipped"] += evt["skipped_chunks"]
-                        agg["deleted"] += evt.get("deleted_chunks", 0)
-                        agg["total_chunks"] += evt.get("total_chunks", 0)
-                        # Multi-path runs: durations sum, errors concatenate.
-                        # Single-path is the dominant case so this is a
-                        # simple aggregation rather than tracking per-path.
-                        agg["duration_ms"] += evt.get("duration_ms", 0.0)
-                        agg["blocked"] += evt.get("blocked_files", 0)
-                        agg["blocked_project_shared"] += evt.get("blocked_project_shared_files", 0)
-                        agg["blocked_paths"].extend(evt.get("blocked_paths") or [])
-                        agg["exempted"] += evt.get("exempted_files", 0)
-                        agg["exempted_paths"].extend(evt.get("exempted_paths") or [])
-                        errs = evt.get("errors") or []
-                        if errs:
-                            agg["errors"].extend(errs)
-                        retryable_errs = evt.get("retryable_errors") or []
-                        if retryable_errs:
-                            agg["retryable_errors"].extend(retryable_errs)
-                        agg["namespaces_preserved_against_rules"] += evt.get(
-                            "namespaces_preserved_against_rules", 0
-                        )
-                        agg["namespaces_reassigned"] += evt.get("namespaces_reassigned", 0)
-                        agg["namespace_moves"].extend(evt.get("namespace_moves") or [])
-                        agg["chunks_missing_vectors"] += evt.get("chunks_missing_vectors", 0)
+                )
+                # #2200: an interrupt escaping this loop must close the
+                # engine's generator rather than leave it to GC — its
+                # ``finally`` is what drops ``_active_runs`` and releases the
+                # #2180 generation lease. Ordering is the point here: without
+                # this, ``cli_components()`` above tears the embedder and
+                # storage down while the abandoned run still counts as active
+                # and still holds its lease. (That lease guards hot-swap
+                # retirement, which a CLI run never reaches — so this is the
+                # engine's contract, not a reported CLI symptom.)
+                async with contextlib.aclosing(stream):
+                    async for evt in stream:
+                        if evt["type"] == "discovery":
+                            # Authoritative bar-length source. Engine emits this
+                            # exactly once per stream call after ``_discover_files``
+                            # has run, so the bar appears immediately even when
+                            # the first file's embedding takes a while (no
+                            # ``chunk_progress`` for small files, ``progress``
+                            # only at file completion — without ``discovery``
+                            # the bar would stay invisible until that point).
+                            _grow_bar(evt["files_total"])
+                        elif evt["type"] == "chunk_progress":
+                            # Server-side gating in ``indexing/engine.py`` already
+                            # filters out small files (``progress_threshold``,
+                            # default 32), so we don't threshold here — small
+                            # files simply won't emit these events, matching the
+                            # web Index tab's quiet behavior.
+                            done = evt["chunks_done"]
+                            total = evt["chunks_total"]
+                            is_final = done >= total
+                            now = time.monotonic()
+                            if not is_final and now - throttle_state["last_render"] < 0.1:
+                                continue
+                            throttle_state["last_render"] = now
+                            # Bar length normally comes from the discovery event
+                            # above; this is just the lazy-create fallback for
+                            # legacy stubs that skip discovery and jump straight
+                            # to chunk_progress.
+                            _ensure_bar(evt["files_total"])
+                            # Refresh the sub-label without advancing the bar —
+                            # length is in **file units**, so chunks must not
+                            # double-count. ``update(0, item)`` re-renders with
+                            # the new ``current_item`` only.
+                            bar_state["bar"].update(0, (evt["file"], done, total))
+                        elif evt["type"] == "progress":
+                            # Reset throttle on file boundary so the next file's
+                            # first chunk_progress renders immediately.
+                            throttle_state["last_render"] = 0.0
+                            _ensure_bar(evt["files_total"])
+                            bar_state["bar"].update(1, evt["file"])
+                        elif evt["type"] == "complete":
+                            agg["total_files"] += evt["total_files"]
+                            agg["indexed"] += evt["indexed_chunks"]
+                            agg["skipped"] += evt["skipped_chunks"]
+                            agg["deleted"] += evt.get("deleted_chunks", 0)
+                            agg["total_chunks"] += evt.get("total_chunks", 0)
+                            # Multi-path runs: durations sum, errors concatenate.
+                            # Single-path is the dominant case so this is a
+                            # simple aggregation rather than tracking per-path.
+                            agg["duration_ms"] += evt.get("duration_ms", 0.0)
+                            agg["blocked"] += evt.get("blocked_files", 0)
+                            agg["blocked_project_shared"] += evt.get(
+                                "blocked_project_shared_files", 0
+                            )
+                            agg["blocked_paths"].extend(evt.get("blocked_paths") or [])
+                            agg["exempted"] += evt.get("exempted_files", 0)
+                            agg["exempted_paths"].extend(evt.get("exempted_paths") or [])
+                            errs = evt.get("errors") or []
+                            if errs:
+                                agg["errors"].extend(errs)
+                            retryable_errs = evt.get("retryable_errors") or []
+                            if retryable_errs:
+                                agg["retryable_errors"].extend(retryable_errs)
+                            agg["namespaces_preserved_against_rules"] += evt.get(
+                                "namespaces_preserved_against_rules", 0
+                            )
+                            agg["namespaces_reassigned"] += evt.get("namespaces_reassigned", 0)
+                            agg["namespace_moves"].extend(evt.get("namespace_moves") or [])
+                            agg["chunks_missing_vectors"] += evt.get("chunks_missing_vectors", 0)
     finally:
         _close_bar()
 

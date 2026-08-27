@@ -768,3 +768,72 @@ class TestMissingVectorAdvisory:
 
         out = capsys.readouterr().out
         assert "5 unchanged chunk(s) have no embedding" in out
+
+
+class TestIndexProgressStreamClosure:
+    """#2200: an interrupt raised in the *consumer* must close the engine's
+    stream before it leaves ``run_with_progress``.
+
+    ``index_path_stream`` drops ``_active_runs`` and releases the #2180
+    generation lease in its own ``finally``, which runs only when the
+    generator is closed. Leaving that to asyncio's async-generator finalizer
+    inverts the shutdown order: ``run_with_progress`` exits its
+    ``cli_components()`` block, closing the embedder and storage, while the
+    abandoned run still counts as active and still holds its generation
+    lease. No CLI symptom has been reported for this — the lease guards
+    hot-swap retirement, which a CLI run never reaches — so what this pins is
+    the engine's contract: close the stream you walk away from.
+    """
+
+    async def test_interrupt_in_consumer_closes_engine_stream(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import _index_progress as ip_mod
+
+        released: list[str] = []
+
+        class _FakeEngine:
+            async def index_path_stream(self, path, *args, **kwargs):
+                try:
+                    yield {"type": "discovery", "files_total": 1}
+                    yield {
+                        "type": "progress",
+                        "file": str(tmp_path / "a.md"),
+                        "files_done": 1,
+                        "files_total": 1,
+                    }
+                finally:
+                    released.append("released")
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+            config = None
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        class _InterruptingBar:
+            length = 0
+
+            def update(self, *args, **kwargs):
+                # Ctrl-C landing in the consumer frame, not in the engine.
+                raise KeyboardInterrupt
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(ip_mod.click, "progressbar", lambda **kwargs: _InterruptingBar())
+
+        with pytest.raises(KeyboardInterrupt):
+            await ip_mod.run_with_progress([tmp_path], label="  Indexing")
+
+        assert released == ["released"], (
+            "engine stream still open after the consumer was interrupted — the "
+            "run and its generation lease leak until GC"
+        )

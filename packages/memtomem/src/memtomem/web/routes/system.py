@@ -13,12 +13,14 @@ on the read side at ``memtomem.indexing.engine.memory_dir_stats``.
 from __future__ import annotations
 
 import asyncio as _asyncio
+import contextlib
 import json
 import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -1645,6 +1647,61 @@ async def indexing_active(index_engine=Depends(get_index_engine)) -> JSONRespons
     )
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    """A ``StreamingResponse`` that closes its body generator when it is done.
+
+    #2200: Starlette never closes ``body_iterator``. On a client disconnect it
+    unwinds ``stream_response`` — the frame doing the ``async for`` — and
+    whether that reaches the body generator depends on where the cancellation
+    lands. Cancelled while awaiting the *generator* (``__anext__``), the error
+    is thrown into it and its ``finally`` runs; cancelled while awaiting
+    ``send`` (backpressure, the common case for an SSE client that stopped
+    reading), the generator is left suspended at its ``yield`` and only
+    asyncio's async-generator finalizer — a *scheduled* ``aclose`` — gets to
+    it. Under uvicorn's ASGI ``spec_version`` 2.3 path both windows are live.
+
+    That distinction matters here because the body generator holds indexing
+    state: it drives ``index_path_stream``, whose ``finally`` drops
+    ``_active_runs`` and releases the #2180 generation lease. Closing the body
+    iterator here makes that release happen in the same unwind as the
+    disconnect, on every path out of ``__call__``.
+    """
+
+    def __init__(self, content: AsyncGenerator[Any, None], **kwargs: Any) -> None:
+        # Async generators only, enforced rather than documented. Starlette
+        # accepts any ``AsyncIterable``, and for one of those ``async for``
+        # drives whatever ``__aiter__()`` returns — potentially a different
+        # object from the one stored here, which would leave us closing
+        # something the response never iterated. A generator is its own
+        # iterator, so for this response the two cannot diverge.
+        if not isinstance(content, AsyncGenerator):
+            raise TypeError(
+                f"{type(self).__name__} requires an async generator body, "
+                f"got {type(content).__name__}"
+            )
+        super().__init__(content, **kwargs)
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        except BaseException:
+            # Cleanup must not become the error the caller sees: the reason we
+            # are unwinding (``ClientDisconnect``, a cancellation, a send
+            # failure) is what the server needs to classify this request by.
+            # A body whose own cleanup fails must not replace it — including
+            # when that failure is a ``CancelledError`` (cancellation landing
+            # on the close itself), which is why this catches ``BaseException``
+            # and re-raises the original rather than the cleanup's.
+            try:
+                await self.body_iterator.aclose()
+            except BaseException:
+                logger.warning("Failed to close index-stream body", exc_info=True)
+            raise
+        # Normal completion: the body is exhausted and closing it is a no-op,
+        # but a failure here is this response's own and belongs to the caller.
+        await self.body_iterator.aclose()
+
+
 @router.post("/index/stream", dependencies=[Depends(require_configured)])
 async def index_stream(
     req: IndexRequest,
@@ -1663,15 +1720,26 @@ async def index_stream(
         # run may have written". Dropping a still-valid cache costs one cold
         # search; keeping a stale one hides a committed write.
         try:
-            async for event in index_engine.index_path_stream(
-                resolved,
-                recursive=req.recursive,
-                force=req.force,
-                namespace=req.namespace,
-                force_unsafe=req.force_unsafe,
-                path_scope="explicit",
-            ):
-                yield f"data: {json.dumps(event)}\n\n"
+            # #2200: ``aclosing`` rather than a bare ``async for``. This frame
+            # is itself a generator, and Starlette abandons it on client
+            # disconnect without necessarily unwinding it; the engine releases
+            # ``_active_runs`` and the #2180 generation lease in the inner
+            # generator's ``finally``, which only runs when that generator is
+            # closed. Without this, a disconnected run stays "active" in
+            # ``GET /api/indexing/active`` and pins a retired ONNX session
+            # until GC finalizes the frame.
+            async with contextlib.aclosing(
+                index_engine.index_path_stream(
+                    resolved,
+                    recursive=req.recursive,
+                    force=req.force,
+                    namespace=req.namespace,
+                    force_unsafe=req.force_unsafe,
+                    path_scope="explicit",
+                )
+            ) as stream:
+                async for event in stream:
+                    yield f"data: {json.dumps(event)}\n\n"
         except NamespaceResolutionError as exc:
             # Before the generic branch (#2005 follow-up): SSE has no status
             # code, so the *message* is the only place this surface can say
@@ -1701,7 +1769,7 @@ async def index_stream(
         finally:
             search_pipeline.invalidate_cache()
 
-    return StreamingResponse(
+    return _ClosingStreamingResponse(
         _generate(),
         media_type="text/event-stream",
         headers={
