@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -1647,7 +1648,7 @@ async def indexing_active(index_engine=Depends(get_index_engine)) -> JSONRespons
 
 
 class _ClosingStreamingResponse(StreamingResponse):
-    """A ``StreamingResponse`` that closes its body iterator when it is done.
+    """A ``StreamingResponse`` that closes its body generator when it is done.
 
     #2200: Starlette never closes ``body_iterator``. On a client disconnect it
     unwinds ``stream_response`` — the frame doing the ``async for`` — and
@@ -1666,13 +1667,19 @@ class _ClosingStreamingResponse(StreamingResponse):
     disconnect, on every path out of ``__call__``.
     """
 
-    async def _close_body(self) -> None:
-        # ``iterate_in_threadpool`` wrappers and plain async iterators have no
-        # ``aclose``; only generators do, and closing an exhausted one is a
-        # no-op, so this is safe on the normal-completion path too.
-        aclose = getattr(self.body_iterator, "aclose", None)
-        if aclose is not None:
-            await aclose()
+    def __init__(self, content: AsyncGenerator[Any, None], **kwargs: Any) -> None:
+        # Async generators only, enforced rather than documented. Starlette
+        # accepts any ``AsyncIterable``, and for one of those ``async for``
+        # drives whatever ``__aiter__()`` returns — potentially a different
+        # object from the one stored here, which would leave us closing
+        # something the response never iterated. A generator is its own
+        # iterator, so for this response the two cannot diverge.
+        if not isinstance(content, AsyncGenerator):
+            raise TypeError(
+                f"{type(self).__name__} requires an async generator body, "
+                f"got {type(content).__name__}"
+            )
+        super().__init__(content, **kwargs)
 
     async def __call__(self, scope, receive, send) -> None:
         try:
@@ -1681,13 +1688,18 @@ class _ClosingStreamingResponse(StreamingResponse):
             # Cleanup must not become the error the caller sees: the reason we
             # are unwinding (``ClientDisconnect``, a cancellation, a send
             # failure) is what the server needs to classify this request by.
-            # A generator whose own cleanup raises would otherwise replace it.
+            # A body whose own cleanup fails must not replace it — including
+            # when that failure is a ``CancelledError`` (cancellation landing
+            # on the close itself), which is why this catches ``BaseException``
+            # and re-raises the original rather than the cleanup's.
             try:
-                await self._close_body()
-            except Exception:
+                await self.body_iterator.aclose()
+            except BaseException:
                 logger.warning("Failed to close index-stream body", exc_info=True)
             raise
-        await self._close_body()
+        # Normal completion: the body is exhausted and closing it is a no-op,
+        # but a failure here is this response's own and belongs to the caller.
+        await self.body_iterator.aclose()
 
 
 @router.post("/index/stream", dependencies=[Depends(require_configured)])

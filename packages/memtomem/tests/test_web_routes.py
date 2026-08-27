@@ -4549,7 +4549,7 @@ class TestIndexStreamAbandonment:
        unwinds ``stream_response``, and a cancellation landing on ``send``
        (backpressure: the SSE client stopped reading) leaves the body
        generator suspended at its ``yield``. ``_ClosingStreamingResponse``
-       closes it in ``__call__``'s ``finally``.
+       closes it on every exit from ``__call__``.
 
     Layer 1 alone passes a test that closes the body iterator by hand, which
     is exactly the step layer 2 exists to guarantee — so the second test
@@ -4618,11 +4618,16 @@ class TestIndexStreamAbandonment:
         )
 
         sending = asyncio.Event()
+        held: list[tuple[int, int]] = []
 
         async def send(message):
             if message["type"] == "http.response.body":
                 # Backpressure: the client is no longer reading. The response
                 # parks here, holding the run, until the disconnect arrives.
+                # Sample the counters here — asserting only that they end at
+                # zero would pass against a response that never started a run
+                # at all, since zero is also their initial value.
+                held.append((engine._active_runs, generation.leases))
                 sending.set()
                 await asyncio.Event().wait()
 
@@ -4643,6 +4648,11 @@ class TestIndexStreamAbandonment:
 
         await asyncio.wait_for(response(scope, receive, send), timeout=10)
 
+        assert held == [(1, 1)], (
+            "the run and its generation lease were not both held while the "
+            f"response was parked in send — sampled {held}; without this the "
+            "assertions below pass on a response that never indexed anything"
+        )
         assert engine._active_runs == 0, (
             "the disconnected run is still counted — /api/indexing/active "
             "reports indexing that has stopped"
@@ -4652,22 +4662,39 @@ class TestIndexStreamAbandonment:
             "retired ONNX session cannot be closed"
         )
 
-    async def test_failing_cleanup_does_not_replace_the_original_error(self, app, tmp_path):
+    @pytest.mark.parametrize(
+        "cleanup_error",
+        [RuntimeError("cleanup exploded"), asyncio.CancelledError()],
+        ids=["exception", "cancelled"],
+    )
+    async def test_failing_cleanup_does_not_replace_the_original_error(
+        self, app, tmp_path, cleanup_error
+    ):
         """Closing the body is cleanup, so it must not become the error the
-        server sees. The reason the response is unwinding — here a disconnect
-        surfacing as ``ClientDisconnect`` — is what classifies the request;
-        a generator whose own ``finally`` raises must not take its place.
+        server sees. The reason the response is unwinding — here a send
+        failure surfacing as ``ClientDisconnect`` — is what classifies the
+        request; a body whose own cleanup fails must not take its place.
+
+        The ``cancelled`` case is the one a plain ``except Exception`` misses:
+        ``CancelledError`` is a ``BaseException``, so cleanup interrupted by a
+        second cancellation would escape and replace the original.
         """
         from starlette.responses import ClientDisconnect
 
         from memtomem.web.routes.system import index_stream
         from memtomem.web.schemas.memory import IndexRequest
 
+        cleaned_up: list[str] = []
+
         async def _stream(*args, **kwargs):
             try:
                 yield {"type": "discovery", "files_total": 1}
             finally:
-                raise RuntimeError("cleanup exploded")
+                # Records that cleanup ran at all: without this the test still
+                # passes against a response that never closes its body on the
+                # exceptional path, since the disconnect propagates either way.
+                cleaned_up.append("ran")
+                raise cleanup_error
 
         app.state.index_engine.index_path_stream = _stream
 
@@ -4679,8 +4706,11 @@ class TestIndexStreamAbandonment:
 
         async def send(message):
             if message["type"] == "http.response.body":
-                # What uvicorn raises once the peer is gone; Starlette's
-                # spec-2.4 path translates it to ``ClientDisconnect``.
+                # Starlette's spec-2.4 branch translates an ``OSError`` out of
+                # ``send`` into ``ClientDisconnect``. (Uvicorn 0.49 advertises
+                # spec 2.3 and takes the task-group branch instead; this test
+                # drives the 2.4 shape because it is the one that unwinds
+                # through ``__call__`` with an exception to preserve.)
                 raise OSError("connection reset")
 
         async def receive():
@@ -4696,6 +4726,8 @@ class TestIndexStreamAbandonment:
 
         with pytest.raises(ClientDisconnect):
             await response(scope, receive, send)
+
+        assert cleaned_up == ["ran"], "the body was never closed on the exceptional path"
 
 
 # ---------------------------------------------------------------------------
