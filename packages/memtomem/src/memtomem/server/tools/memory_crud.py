@@ -26,7 +26,6 @@ from memtomem.server.tools._provenance import (
     record_write_provenance,
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
-from memtomem.server.webhooks import webhook_error_cb
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -828,12 +827,9 @@ async def _mem_add_core(
     except Exception:
         logger.warning("Duplicate check after mem_add failed", exc_info=True)
 
-    # Fire webhook
+    # Fire webhook (see ``WebhookManager.fire`` — it spawns its own tracked task).
     if app.webhook_manager:
-        task = asyncio.create_task(
-            app.webhook_manager.fire("add", {"file": str(target), "chunks_indexed": 1})
-        )
-        task.add_done_callback(webhook_error_cb)
+        await app.webhook_manager.fire("add", {"file": str(target), "chunks_indexed": 1})
 
     # One-shot dim-mismatch hint — only emitted the first time per MCP session.
     dim_notice = await _announce_dim_mismatch_once(app)

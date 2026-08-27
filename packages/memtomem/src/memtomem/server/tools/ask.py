@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from memtomem.server import mcp
@@ -10,7 +9,6 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.validation import MAX_QUERY_LENGTH
-from memtomem.server.webhooks import webhook_error_cb
 
 logger = logging.getLogger(__name__)
 
@@ -116,17 +114,16 @@ async def mem_ask(
     for s in sources_cited:
         lines.append(f"- {s}")
 
-    # Fire webhook
+    # Fire webhook. ``fire`` only builds the request and hands it to a task the
+    # manager tracks, so awaiting it costs nothing and drops the untracked outer
+    # task that could otherwise fire after ``close()`` (#2185).
     if app.webhook_manager:
-        task = asyncio.create_task(
-            app.webhook_manager.fire(
-                "ask",
-                {
-                    "question": question,
-                    "context_chunks": len(results),
-                },
-            )
+        await app.webhook_manager.fire(
+            "ask",
+            {
+                "question": question,
+                "context_chunks": len(results),
+            },
         )
-        task.add_done_callback(webhook_error_cb)
 
     return "\n".join(lines)

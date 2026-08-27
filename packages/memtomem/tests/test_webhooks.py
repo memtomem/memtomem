@@ -1,5 +1,7 @@
 """Tests for webhook manager."""
 
+import asyncio
+
 import pytest
 import hashlib
 import hmac
@@ -43,6 +45,71 @@ class TestWebhookManager:
         config = WebhookConfig(enabled=True, url="https://example.com", events=["add"])
         mgr = WebhookManager(config)
         await mgr.fire("search", {})
+        assert mgr._client is None
+
+
+class TestWebhookLifecycle:
+    """Pending-task tracking and the post-close race (#2185)."""
+
+    def _mgr(self):
+        from memtomem.config import WebhookConfig
+        from memtomem.server.webhooks import WebhookManager
+
+        return WebhookManager(
+            WebhookConfig(enabled=True, url="https://example.com", events=["add"])
+        )
+
+    @pytest.mark.asyncio
+    async def test_fire_tracks_its_task(self):
+        mgr = self._mgr()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _send(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+
+        mgr._send_with_retry = _send
+        await mgr.fire("add", {"file": "/a.md"})
+        await started.wait()
+        assert len(mgr._pending_tasks) == 1, "in-flight send must be strongly referenced"
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert mgr._pending_tasks == set(), "finished send must be discarded"
+
+    @pytest.mark.asyncio
+    async def test_close_cancels_pending(self):
+        mgr = self._mgr()
+        started = asyncio.Event()
+
+        async def _send(*_args, **_kwargs):
+            started.set()
+            await asyncio.sleep(3600)
+
+        mgr._send_with_retry = _send
+        await mgr.fire("add", {"file": "/a.md"})
+        await started.wait()
+        task = next(iter(mgr._pending_tasks))
+        await mgr.close()
+        assert task.cancelled()
+        assert mgr._pending_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_fire_after_close_is_a_no_op(self):
+        """The lifespan closes webhooks before storage; a late fire must not
+        spawn an untracked task or rebuild an ``AsyncClient`` nobody closes."""
+        mgr = self._mgr()
+        sent = []
+
+        async def _send(*args, **_kwargs):
+            sent.append(args)
+
+        mgr._send_with_retry = _send
+        await mgr.close()
+        await mgr.fire("add", {"file": "/a.md"})
+        assert sent == []
+        assert mgr._pending_tasks == set()
         assert mgr._client is None
 
 

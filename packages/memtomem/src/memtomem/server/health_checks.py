@@ -11,6 +11,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from memtomem.errors import TransactionOwnedError
 from memtomem.server.health_store import HealthSnapshot
 
 if TYPE_CHECKING:
@@ -31,7 +32,7 @@ async def check_sqlite_connectivity(app: AppContext) -> HealthSnapshot:
     """PRAGMA quick_check(1) on main DB."""
     now = time.time()
     try:
-        db = app.storage._get_db()
+        db = app.storage._get_read_db()
         result = db.execute("PRAGMA quick_check(1)").fetchone()
         ok = result and result[0] == "ok"
         return HealthSnapshot(
@@ -39,6 +40,18 @@ async def check_sqlite_connectivity(app: AppContext) -> HealthSnapshot:
             check_name="sqlite_connectivity",
             value={"result": result[0] if result else "no_result"},
             status="ok" if ok else "critical",
+            created_at=now,
+        )
+    except TransactionOwnedError as exc:
+        # Reachable when the read pool is empty and ``_get_read_db`` falls back
+        # to the guarded writer: another task is mid-transaction. That is the
+        # store working, not failing — reporting it critical raised a database
+        # alarm every time a write happened to overlap the heartbeat (#2185).
+        return HealthSnapshot(
+            tier="heartbeat",
+            check_name="sqlite_connectivity",
+            value={"busy": True, "error": str(exc)},
+            status="warning",
             created_at=now,
         )
     except Exception as exc:
@@ -103,7 +116,9 @@ async def check_orphan_count(app: AppContext) -> HealthSnapshot:
 async def check_dead_memory_pct(app: AppContext) -> HealthSnapshot:
     """Percentage of chunks never accessed (access_count=0)."""
     now = time.time()
-    db = app.storage._get_db()
+    # Pure read on a 5-minute cadence: the read pool, not the writer connection
+    # every write has to contend for.
+    db = app.storage._get_read_db()
     row = db.execute(
         "SELECT COUNT(*), SUM(CASE WHEN access_count = 0 THEN 1 ELSE 0 END) FROM chunks"
     ).fetchone()
@@ -227,7 +242,7 @@ async def check_trend_comparison(app: AppContext, store: HealthStore) -> HealthS
 async def check_db_fragmentation(app: AppContext) -> HealthSnapshot:
     """Check SQLite page usage and freelist."""
     now = time.time()
-    db = app.storage._get_db()
+    db = app.storage._get_read_db()
     page_count = db.execute("PRAGMA page_count").fetchone()[0]
     freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
     page_size = db.execute("PRAGMA page_size").fetchone()[0]

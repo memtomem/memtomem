@@ -394,6 +394,7 @@ async def _acquire_lifecycle_barrier_settled() -> HeldBarrier:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     from memtomem._instance_registry import BarrierTimeout
     from memtomem.indexing.watcher import FileWatcher
+    from memtomem.server.background import stop_loop_task
     from memtomem.server.component_factory import close_components, create_components
     from memtomem.web import hot_reload
 
@@ -534,6 +535,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await watcher.stop()
             except BaseException as exc:
                 logger.warning("file watcher stop failed: %s", exc)
+        # Before ``close_components``: a bulk summary regeneration still in
+        # flight would otherwise keep writing through storage that is about to
+        # close (#2185).
+        regen_task = getattr(app.state, "summary_regen_task", None)
+        if regen_task is not None:
+            await stop_loop_task(regen_task)
         # Release the barrier only on a *confirmed* storage close (#1936
         # polarity): an unconfirmed close leaves a possibly-open store, which
         # must keep blocking uninstall until this process exits. Default to
@@ -569,6 +576,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "index_engine",
                 "dedup_scanner",
                 "summary_regen",
+                "summary_regen_task",
                 "llm",
                 "file_watcher",
                 "config_signature",

@@ -24,6 +24,7 @@ from memtomem.errors import (
     SchemaDowngradeError,
     StorageError,
     StorageStartupError,
+    TransactionOwnedError,
 )
 from memtomem.storage.base import (
     ChunkAuditRow,
@@ -434,7 +435,7 @@ class SqliteBackend(
             raise StorageError("Database not initialized. Call initialize() first.")
         owner = self._transaction_owner
         if owner is not None and owner is not self._current_task():
-            raise StorageError(
+            raise TransactionOwnedError(
                 "SQLite transaction is owned by another task; retry after it completes"
             )
         return self._db
@@ -603,7 +604,7 @@ class SqliteBackend(
         if self._transaction_owner is task:
             raise StorageError("Nested transactions are not supported")
         if self._transaction_owner is not None:
-            raise StorageError(
+            raise TransactionOwnedError(
                 "SQLite transaction is owned by another task; retry after it completes"
             )
         db = self._get_db()

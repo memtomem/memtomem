@@ -53,6 +53,7 @@ class WebhookManager:
         self._config = config
         self._client: AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task] = set()
+        self._closed = False
         if config.url:
             err = _validate_webhook_url(config.url)
             if err:
@@ -74,6 +75,12 @@ class WebhookManager:
 
     async def fire(self, event: str, payload: dict) -> None:
         """Fire webhook if enabled and event is in the configured list."""
+        if self._closed:
+            # The lifespan closes webhooks before storage teardown, so a fire
+            # arriving after that would spawn a task nothing tracks or cancels
+            # and rebuild an ``AsyncClient`` nobody closes (#2185).
+            logger.debug("Webhook manager closed; dropping %s event", event)
+            return
         if not self._config.enabled or not self._config.url:
             return
         if event not in self._config.events:
@@ -90,8 +97,11 @@ class WebhookManager:
             ).hexdigest()
             headers["X-Webhook-Signature"] = f"sha256={sig}"
 
-        task = asyncio.create_task(self._send_with_retry(body, headers))
+        task = asyncio.create_task(
+            self._send_with_retry(body, headers), name=f"memtomem-webhook-{event}"
+        )
         self._pending_tasks.add(task)
+        task.add_done_callback(webhook_error_cb)
         task.add_done_callback(self._pending_tasks.discard)
 
     async def _send_with_retry(self, body: str, headers: dict, attempts: int = 3) -> None:
@@ -110,6 +120,7 @@ class WebhookManager:
                 await asyncio.sleep(1.0 * (attempt + 1))
 
     async def close(self) -> None:
+        self._closed = True
         if self._pending_tasks:
             for task in self._pending_tasks:
                 task.cancel()

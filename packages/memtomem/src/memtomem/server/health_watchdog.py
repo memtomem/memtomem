@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import suppress
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from memtomem.scheduler.jobs import JOB_KINDS
+from memtomem.server.background import loop_task_error_cb, stop_loop_task
 from memtomem.server.health_checks import (
     DEEP_CHECKS,
     DIAGNOSTIC_CHECKS,
@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CHECK_TIMEOUT = 30.0  # per-check timeout
+
+# Checks whose highest tier is "warning" by design, so auto-maintenance has to act
+# there or never act at all. ``check_search_cache_size`` tops out at "warning"
+# above 40 entries, and the search pipeline self-evicts above 50, leaving no room
+# for a critical threshold that a live process would ever reach.
+_WARNING_TIER_MAINTENANCE = frozenset({"search_cache_size"})
 
 
 class HealthWatchdog:
@@ -54,7 +60,8 @@ class HealthWatchdog:
         self._store = HealthStore(db_path, self._config.max_snapshots)
         self._store.initialize()
         self._maintenance = MaintenanceExecutor(self._app, self._config)
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run_loop(), name="memtomem-health-watchdog")
+        self._task.add_done_callback(loop_task_error_cb)
         logger.info(
             "Health watchdog started (heartbeat: %.0fs, diagnostic: %.0fs, deep: %.0fs)",
             self._config.heartbeat_interval_seconds,
@@ -64,9 +71,7 @@ class HealthWatchdog:
 
     async def stop(self) -> None:
         if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            await stop_loop_task(self._task)
             self._task = None
         if self._store:
             self._store.close()
@@ -216,16 +221,24 @@ class HealthWatchdog:
                 logger.warning(
                     "Health check CRITICAL: %s — %s", snapshot.check_name, snapshot.value
                 )
-                if self._config.auto_maintenance and self._maintenance:
-                    await self._auto_maintain(snapshot)
             elif snapshot.status == "warning":
                 logger.info("Health check WARNING: %s — %s", snapshot.check_name, snapshot.value)
+
+            if self._should_auto_maintain(snapshot) and self._maintenance:
+                await self._auto_maintain(snapshot)
         except asyncio.TimeoutError:
             logger.warning("Health check timed out: %s", getattr(check_fn, "__name__", "?"))
         except Exception:
             logger.error(
                 "Health check failed: %s", getattr(check_fn, "__name__", "?"), exc_info=True
             )
+
+    def _should_auto_maintain(self, snapshot: HealthSnapshot) -> bool:
+        if not self._config.auto_maintenance:
+            return False
+        if snapshot.status == "critical":
+            return True
+        return snapshot.status == "warning" and snapshot.check_name in _WARNING_TIER_MAINTENANCE
 
     async def _auto_maintain(self, snapshot: HealthSnapshot) -> None:
         if not self._maintenance:

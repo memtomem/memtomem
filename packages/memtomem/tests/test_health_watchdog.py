@@ -107,7 +107,11 @@ def mock_app():
     """Create a minimal mock AppContext for health checks."""
     app = MagicMock()
     db = MagicMock()
+    # Both accessors resolve to the same connection so a check's *behaviour*
+    # can be tested without pinning which one it picked. Which accessor each
+    # check must use is pinned separately, in ``TestConnectionRouting``.
     app.storage._get_db.return_value = db
+    app.storage._get_read_db.return_value = db
     app.search_pipeline._search_cache = {}
     return app, db
 
@@ -150,6 +154,90 @@ class TestHeartbeatChecks:
         app.search_pipeline._search_cache = {str(i): i for i in range(45)}
         snap = await check_search_cache_size(app)
         assert snap.status == "warning"
+
+
+class TestConnectionRouting:
+    """Which connection each check takes (#2185).
+
+    A pure read on the writer connection contends with every write for no
+    benefit; the WAL checkpoint genuinely needs the writer. Distinct mocks per
+    accessor, so a check reaching for the wrong one produces the wrong rows and
+    the assertion below fails loudly rather than passing on a shared mock.
+    """
+
+    @pytest.fixture
+    def split_app(self):
+        app = MagicMock()
+        writer, reader = MagicMock(name="writer"), MagicMock(name="reader")
+        app.storage._get_db.return_value = writer
+        app.storage._get_read_db.return_value = reader
+        return app, writer, reader
+
+    @pytest.mark.asyncio
+    async def test_dead_memory_pct_reads_from_the_pool(self, split_app):
+        from memtomem.server.health_checks import check_dead_memory_pct
+
+        app, writer, reader = split_app
+        reader.execute.return_value.fetchone.return_value = (100, 90)
+        snap = await check_dead_memory_pct(app)
+        assert snap.value["pct"] == 90.0
+        writer.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_db_fragmentation_reads_from_the_pool(self, split_app):
+        from memtomem.server.health_checks import check_db_fragmentation
+
+        app, writer, reader = split_app
+        reader.execute.return_value.fetchone.side_effect = [(100,), (30,), (4096,)]
+        snap = await check_db_fragmentation(app)
+        assert snap.value["frag_pct"] == 30.0
+        writer.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connectivity_reads_from_the_pool(self, split_app):
+        from memtomem.server.health_checks import check_sqlite_connectivity
+
+        app, writer, reader = split_app
+        reader.execute.return_value.fetchone.return_value = ("ok",)
+        snap = await check_sqlite_connectivity(app)
+        assert snap.status == "ok"
+        writer.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wal_status_keeps_the_writer(self, split_app):
+        """``PRAGMA wal_checkpoint`` writes — it must not move to the pool."""
+        from memtomem.server.health_checks import check_wal_status
+
+        app, writer, reader = split_app
+        writer.execute.return_value.fetchone.side_effect = [(0, 10, 10), (4096,)]
+        snap = await check_wal_status(app)
+        assert snap.status == "ok"
+        reader.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_in_flight_transaction_is_busy_not_critical(self, split_app):
+        """A concurrent write is the store working, not a damaged database."""
+        from memtomem.errors import TransactionOwnedError
+        from memtomem.server.health_checks import check_sqlite_connectivity
+
+        app, _writer, _reader = split_app
+        app.storage._get_read_db.side_effect = TransactionOwnedError(
+            "SQLite transaction is owned by another task; retry after it completes"
+        )
+        snap = await check_sqlite_connectivity(app)
+        assert snap.status == "warning"
+        assert snap.value["busy"] is True
+
+    @pytest.mark.asyncio
+    async def test_real_storage_failure_is_still_critical(self, split_app):
+        """The busy branch must not swallow a genuinely broken store."""
+        from memtomem.errors import StorageError
+        from memtomem.server.health_checks import check_sqlite_connectivity
+
+        app, _writer, _reader = split_app
+        app.storage._get_read_db.side_effect = StorageError("database disk image is malformed")
+        snap = await check_sqlite_connectivity(app)
+        assert snap.status == "critical"
 
 
 class TestDiagnosticChecks:
@@ -352,6 +440,96 @@ class TestHealthWatchdog:
 
         assert "sqlite_connectivity" in results
         assert results["sqlite_connectivity"]["status"] == "ok"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("check_name", "expect_maintained"),
+        [("search_cache_size", True), ("dead_memory_pct", False)],
+    )
+    async def test_warning_tier_maintenance_is_opt_in(
+        self, mock_app, tmp_path, check_name, expect_maintained
+    ):
+        """``search_cache_size`` tops out at "warning", so maintenance must act there.
+
+        Every other check keeps the critical-only contract — a warning from
+        ``dead_memory_pct`` must not trigger auto-maintenance.
+        """
+        from memtomem.server.health_watchdog import HealthWatchdog
+
+        app, _db = mock_app
+        app.config = MagicMock()
+        app.config.storage.sqlite_path = tmp_path / "test.db"
+
+        wd = HealthWatchdog(app, HealthWatchdogConfig(enabled=True))
+        with patch("memtomem.server.health_watchdog.HEARTBEAT_CHECKS", []):  # keep the loop inert
+            await wd.start()
+        try:
+            wd._auto_maintain = AsyncMock()
+            snap = HealthSnapshot(
+                tier="heartbeat",
+                check_name=check_name,
+                value={"size": 41},
+                status="warning",
+                created_at=time.time(),
+            )
+            await wd._run_check(AsyncMock(return_value=snap))
+            assert wd._auto_maintain.await_count == (1 if expect_maintained else 0)
+        finally:
+            await wd.stop()
+
+    @pytest.mark.asyncio
+    async def test_warning_tier_maintenance_trims_the_cache(self, mock_app, tmp_path):
+        """End-to-end: a warning snapshot reaches ``trim_search_cache``."""
+        from memtomem.server.health_watchdog import HealthWatchdog
+
+        app, _db = mock_app
+        app.config = MagicMock()
+        app.config.storage.sqlite_path = tmp_path / "test.db"
+
+        wd = HealthWatchdog(app, HealthWatchdogConfig(enabled=True))
+        with patch("memtomem.server.health_watchdog.HEARTBEAT_CHECKS", []):
+            await wd.start()
+        try:
+            wd._maintenance.trim_search_cache = AsyncMock(
+                return_value={"before": 41, "after": 30, "evicted": 11}
+            )
+            snap = HealthSnapshot(
+                tier="heartbeat",
+                check_name="search_cache_size",
+                value={"size": 41},
+                status="warning",
+                created_at=time.time(),
+            )
+            await wd._run_check(AsyncMock(return_value=snap))
+            wd._maintenance.trim_search_cache.assert_awaited_once()
+        finally:
+            await wd.stop()
+
+    @pytest.mark.asyncio
+    async def test_warning_tier_maintenance_respects_the_switch(self, mock_app, tmp_path):
+        """``auto_maintenance=False`` still disables the warning tier."""
+        from memtomem.server.health_watchdog import HealthWatchdog
+
+        app, _db = mock_app
+        app.config = MagicMock()
+        app.config.storage.sqlite_path = tmp_path / "test.db"
+
+        wd = HealthWatchdog(app, HealthWatchdogConfig(enabled=True, auto_maintenance=False))
+        with patch("memtomem.server.health_watchdog.HEARTBEAT_CHECKS", []):
+            await wd.start()
+        try:
+            wd._auto_maintain = AsyncMock()
+            snap = HealthSnapshot(
+                tier="heartbeat",
+                check_name="search_cache_size",
+                value={"size": 41},
+                status="warning",
+                created_at=time.time(),
+            )
+            await wd._run_check(AsyncMock(return_value=snap))
+            wd._auto_maintain.assert_not_awaited()
+        finally:
+            await wd.stop()
 
     @pytest.mark.asyncio
     async def test_get_status_disabled(self, mock_app, tmp_path):

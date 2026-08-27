@@ -53,6 +53,7 @@ from memtomem.config_signature import (
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.search.reranker.base import close_reranker_safely
+from memtomem.server.background import track_task
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -61,6 +62,9 @@ if TYPE_CHECKING:
     from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
+
+# Strong references to FTS rebuilds started without an app to hang them on.
+_BG_TASKS: set[asyncio.Task] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +404,6 @@ def _schedule_fts_rebuild(
     Rapid back-to-back changes therefore collapse to at most two sequential
     rebuilds (issue #278).
     """
-    import asyncio
 
     async def _run_one(target: str) -> None:
         try:
@@ -416,7 +419,10 @@ def _schedule_fts_rebuild(
         return
 
     if app is None:
-        loop.create_task(_run_one(tokenizer))
+        # No app.state to hang the handle on, so a module-level set keeps the
+        # strong reference ``create_task`` does not: an untracked task can be
+        # garbage-collected mid-rebuild (#2185).
+        track_task(loop.create_task(_run_one(tokenizer), name="memtomem-fts-rebuild"), _BG_TASKS)
         return
 
     in_flight = getattr(app.state, "fts_rebuild_task", None)

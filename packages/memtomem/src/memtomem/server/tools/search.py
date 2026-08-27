@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from uuid import UUID
 
@@ -37,7 +36,6 @@ from memtomem.services.search_service import (
 )
 from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
 from memtomem.server.validation import MAX_QUERY_LENGTH
-from memtomem.server.webhooks import webhook_error_cb
 
 logger = logging.getLogger(__name__)
 
@@ -260,12 +258,9 @@ async def mem_search(
         for hint in hints:
             output += f"\n\n({hint})"
 
-    # Fire webhook
+    # Fire webhook (see ``WebhookManager.fire`` — it spawns its own tracked task).
     if app.webhook_manager:
-        task = asyncio.create_task(
-            app.webhook_manager.fire("search", {"query": query, "result_count": len(results)})
-        )
-        task.add_done_callback(webhook_error_cb)
+        await app.webhook_manager.fire("search", {"query": query, "result_count": len(results)})
 
     return output
 
