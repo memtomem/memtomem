@@ -303,27 +303,43 @@ def _own_body(fn: ast.AST):
 def _transaction_ending_nodes(fn: ast.AST) -> list[ast.AST]:
     """Every place this function ends a transaction itself.
 
-    Two spellings count. The method — matched as an attribute *reference*, not
+    Four spellings count. The method — matched as an attribute *reference*, not
     only as a call, because a ``db.commit`` handed to ``asyncio.to_thread`` or
     stashed in a callback ends the transaction just the same, and on any
     receiver name so that renaming the local from ``db`` to ``conn`` does not
-    walk a writer out of this guard. And the SQL — ``db.execute("COMMIT")``,
-    which no attribute check would ever see.
+    walk a writer out of this guard. The SQL — ``db.execute("COMMIT")``, which
+    no attribute check would ever see.
+
+    And two that are neither, because sqlite3 ends the transaction for you.
+    ``executescript`` issues a COMMIT before it runs whatever it was handed,
+    and ``with db:`` commits on a clean exit — both on the shared writer
+    connection, both while an owner's work is pending, and neither with the
+    word "commit" anywhere in the writer. Measured on this backend's
+    connections (created with the module default ``isolation_level``): the
+    owner's rows go durable and its later ``rollback()`` is a no-op. That is
+    #2162 exactly, in a spelling the sweep could not see. No writer here uses
+    either construct today; this keeps it that way.
     """
     found: list[ast.AST] = []
     for node in _own_body(fn):
         if isinstance(node, ast.Attribute) and node.attr in _TRANSACTION_ENDING:
             found.append(node)
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"execute", "executescript"}
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-            and node.args[0].value.strip().upper().rstrip(";") in _TRANSACTION_ENDING_SQL
+        elif isinstance(node, (ast.With, ast.AsyncWith)) and any(
+            isinstance(item.context_expr, ast.Name) for item in node.items
         ):
+            # ``with db:`` — the connection as its own context manager.
             found.append(node)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "executescript":
+                found.append(node)
+            elif (
+                node.func.attr == "execute"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value.strip().upper().rstrip(";") in _TRANSACTION_ENDING_SQL
+            ):
+                found.append(node)
     return found
 
 
@@ -512,8 +528,12 @@ def _refuses_outer_transaction(fn: ast.AST) -> bool:
                 return True
         if not isinstance(node, ast.If) or not in_time(node):
             continue
+        # The raise has to be unconditional, in the same sense the swallowing
+        # check means it: ``if self._in_transaction: if strict: raise`` refuses
+        # on one path and walks into the caller's transaction on the other, and
+        # "contains a Raise somewhere" would call that a refusal.
         if _is_self_ownership_read(node.test) and any(
-            isinstance(sub, ast.Raise) for stmt in node.body for sub in ast.walk(stmt)
+            isinstance(stmt, ast.Raise) for stmt in node.body
         ):
             return True
     return False
@@ -907,6 +927,11 @@ def _failure_cleanup_lineno(fn: ast.AST, helpers: _Helpers = _DEFAULT_HELPERS) -
     transaction on. ``cleanup = db.rollback`` stored for later and
     ``other.rollback()`` both read as cleanup to a check that only looks for
     the name, and neither closes this writer's transaction.
+
+    And the ``try`` it belongs to has to be the one protecting the transaction:
+    an unrelated ``try/finally`` further down the function never runs when the
+    commit above it raises, so reading any handler anywhere as cleanup lets a
+    writer be certified by a block its failure path never reaches.
     """
     # The connection this writer *commits* — deliberately not every ender, or
     # the stray ``other.rollback()`` being judged would enter the set it is
@@ -921,18 +946,23 @@ def _failure_cleanup_lineno(fn: ast.AST, helpers: _Helpers = _DEFAULT_HELPERS) -
         return None
     owned = {name for name in (_ender_receiver(node) for node in commits) if name is not None}
     flags = frozenset(_ownership_flags(fn))
+    commit_lines = {node.lineno for node in commits}
     for node in _own_body(fn):
+        if not isinstance(node, ast.Try):
+            continue
+        # The try has to be the one the commit runs inside, or its handlers are
+        # not on that commit's failure path at all.
+        if not commit_lines & _covered_linenos(node.body):
+            continue
         # An ``except`` that rolls back, or a ``finally`` that does — the latter
         # runs on every path out, the failure path included, so it closes the
         # transaction just as surely.
-        if isinstance(node, ast.ExceptHandler):
-            block = node.body
-        elif isinstance(node, ast.Try) and node.finalbody:
-            block = node.finalbody
-        else:
-            continue
-        if _rolled_back_connections(block, helpers, flags) & owned:
-            return node.lineno
+        blocks = [handler.body for handler in node.handlers]
+        if node.finalbody:
+            blocks.append(node.finalbody)
+        for block in blocks:
+            if _rolled_back_connections(block, helpers, flags) & owned:
+                return node.lineno
     return None
 
 
@@ -945,6 +975,11 @@ _ROLLBACK_HELPER = "_rollback_if_standalone"
 
 def _ender_receiver(node: ast.AST) -> str | None:
     """The connection name a transaction-ending node acts on, when it is a name."""
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            if isinstance(item.context_expr, ast.Name):
+                return item.context_expr.id
+        return None
     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
         return node.value.id
     if (
@@ -965,7 +1000,13 @@ def _is_commit_ender(node: ast.AST) -> bool:
     """
     if isinstance(node, ast.Attribute):
         return node.attr == "commit"
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        # ``with db:`` commits on a clean exit (and rolls back on a failing
+        # one, but it is the commit that ends someone else's transaction).
+        return True
     if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "executescript":
+            return True  # issues a COMMIT before running what it was handed
         keyword = _sql_leading_keyword(node.args[0]) if node.args else None
         return keyword in {"COMMIT", "END"}
     return False
@@ -1028,7 +1069,14 @@ def _rolled_back_connections(
                 continue
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            for sub in ast.walk(stmt):
+            # The call has to be the statement, not something reachable from
+            # inside its expression. ``cleanup_enabled and db.rollback()`` and
+            # ``db.rollback() if retry else None`` both run on one path only,
+            # and a ``lambda: db.rollback()`` runs on none of them — a walk
+            # cannot tell any of those from a rollback that simply happens.
+            if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+                continue
+            for sub in (stmt.value,):
                 if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
                     continue
                 attr = sub.func.attr
@@ -2356,7 +2404,9 @@ class TestRollbackRegionHelpersRejectFakeCompliance:
             "        db.rollback()\n"
             "        raise\n"
         )
-        assert _failure_cleanup_lineno(with_cleanup) == 7
+        # The protecting ``try``, not the handler: what is being certified is
+        # that the commit runs inside a block whose failure path cleans up.
+        assert _failure_cleanup_lineno(with_cleanup) == 4
 
     def test_a_rollback_on_the_success_path_is_not_failure_cleanup(self) -> None:
         """Only a handler counts: a rollback the happy path runs says nothing
@@ -2851,7 +2901,7 @@ class TestBackendGuardHelpersRejectFakeCompliance:
             "            db.rollback()\n"
             "        raise\n"
         )
-        assert _failure_cleanup_lineno(fn) == 6
+        assert _failure_cleanup_lineno(fn) == 4
 
     def test_the_rollback_context_manager_must_be_entered(self) -> None:
         """Called without a ``with``, the factory builds a generator and rolls
@@ -2950,6 +3000,82 @@ class TestBackendGuardHelpersRejectFakeCompliance:
             "        db.rollback()\n"
         )
         assert _failure_cleanup_lineno(fn) == 3
+
+    # ---- shapes a review pass found accepted (round five) -------------------
+
+    def test_executescript_is_a_transaction_ender(self) -> None:
+        """sqlite3 issues a COMMIT before running what it was handed, so this
+        ends an owner's transaction without the word appearing anywhere."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    db.executescript("INSERT INTO t VALUES (1);")\n'
+        )
+        assert _ends_transaction_directly(fn)
+        assert _ender_receiver(_transaction_ending_nodes(fn)[0]) == "db"
+
+    def test_the_connection_as_a_context_manager_is_a_transaction_ender(self) -> None:
+        """``with db:`` commits on a clean exit — the same #2162 bug, spelled
+        as a block rather than a call."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    with db:\n"
+            '        db.execute("INSERT INTO t VALUES (1)")\n'
+        )
+        assert _ends_transaction_directly(fn)
+        assert _ender_receiver(_transaction_ending_nodes(fn)[0]) == "db"
+
+    def test_the_rollback_helper_region_is_not_read_as_a_bare_with(self) -> None:
+        """``with self._rolls_back_if_standalone(db):`` is a call, not a bare
+        name, so the sanctioned region is not swept up as an implicit commit."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    with self._rolls_back_if_standalone(db):\n"
+            '        db.execute("DELETE FROM t")\n'
+            "        self._commit_if_standalone(db)\n"
+        )
+        assert not _ends_transaction_directly(fn)
+
+    def test_a_conditional_raise_inside_the_ownership_branch_is_no_refusal(self) -> None:
+        """The inner nesting: refuses on one path, walks into the caller's
+        transaction on the other."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    if self._in_transaction:\n"
+            "        if strict:\n"
+            "            raise StorageError('refused')\n"
+            "    db.commit()\n"
+        )
+        assert _refuses_outer_transaction(fn) is False
+
+    def test_a_short_circuited_rollback_is_not_cleanup(self) -> None:
+        """``cleanup_enabled and db.rollback()`` runs on one path; a lazy
+        ``lambda: db.rollback()`` on none. Neither is a rollback that happens."""
+        for expression in (
+            "cleanup_enabled and db.rollback()",
+            "db.rollback() if retry else None",
+            "later(lambda: db.rollback())",
+        ):
+            block = ast.parse(f"def _(self):\n    {expression}\n").body[0].body
+            assert _rolled_back_connections(block, _DEFAULT_HELPERS) == set(), expression
+
+    def test_cleanup_must_belong_to_the_try_the_commit_runs_in(self) -> None:
+        """An unrelated ``try/finally`` further down never runs when the commit
+        above it raises, so it certifies nothing."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    db.execute("BEGIN IMMEDIATE")\n'
+            '    db.execute("INSERT INTO t VALUES (1)")\n'
+            "    db.commit()\n"
+            "    try:\n"
+            "        unrelated()\n"
+            "    finally:\n"
+            "        db.rollback()\n"
+        )
+        assert _failure_cleanup_lineno(fn) is None
 
     def test_the_meta_helper_aliases_are_scoped_to_that_file(self) -> None:
         """``_commit`` is generic enough that a mixin method by that name must
