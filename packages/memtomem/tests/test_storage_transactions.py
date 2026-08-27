@@ -870,22 +870,35 @@ async def test_reset_all_refuses_pending_unowned_transaction(storage, tmp_path):
     owned-branch commit ended it, flushing the stranger's half-written rows
     along with the reset.
     """
+    survivor = make_chunk(content="must survive a refused reset")
+    await storage.upsert_chunks([survivor])
+
     db = storage._get_db()
     db.execute("BEGIN IMMEDIATE")
     db.execute("INSERT INTO _memtomem_meta(key, value) VALUES ('pending_probe', 'uncommitted')")
     try:
         with pytest.raises(StorageError, match="refused"):
             await storage.reset_all()
-        assert db.in_transaction is True  # the refusal must not end it
+        # Checked before the rollback, so a version that deleted first and
+        # raised afterwards cannot hide behind the cleanup: the refusal has to
+        # come before any write, and it must not end the stranger's
+        # transaction.
+        assert db.in_transaction is True
+        assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+        assert (
+            db.execute("SELECT value FROM _memtomem_meta WHERE key='pending_probe'").fetchone()[0]
+            == "uncommitted"
+        )
     finally:
         db.rollback()
 
-    # The stranger's row was discarded by its own rollback, not committed by
-    # the reset, and the reset itself did not wipe anything.
+    # The stranger's row went out with its own rollback rather than being
+    # committed by the reset, and the survivor is still there.
     assert (
         db.execute("SELECT COUNT(*) FROM _memtomem_meta WHERE key='pending_probe'").fetchone()[0]
         == 0
     )
+    assert await storage.get_chunk(survivor.id) is not None
 
 
 async def test_reset_embedding_meta_refuses_an_outer_transaction(storage):

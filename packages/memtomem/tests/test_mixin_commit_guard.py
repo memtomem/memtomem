@@ -384,12 +384,19 @@ def _ownership_flags(fn: ast.AST) -> set[str]:
 
     By definition rather than by name. Only the exact
     ``<flag> = not self._in_transaction`` counts: a variable that merely has
-    "transaction" in its name (``transaction_failed``) is not one, and neither
-    is a compound like ``not (self._in_transaction and x)``, whose truth no
-    longer means what the flag is read as meaning.
+    "transaction" in its name (``transaction_failed``) is not one, neither is a
+    compound like ``not (self._in_transaction and x)``, whose truth no longer
+    means what the flag is read as meaning, and neither is
+    ``not other._in_transaction``, which is a question about a different
+    backend.
+
+    Any *other* binding of the same name disqualifies it — ``owns = True``
+    later on, an ``owns += 1``, a ``for owns in ...``, a walrus. The flag is
+    read as a fact about ownership at the point of the commit, and only a name
+    that is never reassigned can carry that fact there.
     """
     flags: set[str] = set()
-    rebound: set[str] = set()
+    canonical: set[int] = set()
     for node in _own_body(fn):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
@@ -400,14 +407,17 @@ def _ownership_flags(fn: ast.AST) -> set[str]:
         if (
             isinstance(value, ast.UnaryOp)
             and isinstance(value.op, ast.Not)
-            and _is_ownership_read(value.operand)
+            and _is_self_ownership_read(value.operand)
         ):
             flags.add(target.id)
-        else:
-            # Any other assignment to the same name — ``owns = True`` later on
-            # — means the gate no longer tracks ownership at the point it is
-            # read, so the name stops counting as a flag at all.
-            rebound.add(target.id)
+            canonical.add(id(target))
+    rebound = {
+        node.id
+        for node in _own_body(fn)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Store)
+        and id(node) not in canonical
+    }
     return flags - rebound
 
 
@@ -883,24 +893,30 @@ def _failure_cleanup_lineno(fn: ast.AST, helpers: _Helpers = _DEFAULT_HELPERS) -
     to be verified instead is that some handler rolls back. Both spellings
     count, the method and the SQL, and it has to be inside an ``except``:
     a rollback on the success path is a different statement entirely.
+
+    It has to be a *call*, and on a connection this writer actually ends a
+    transaction on. ``cleanup = db.rollback`` stored for later and
+    ``other.rollback()`` both read as cleanup to a check that only looks for
+    the name, and neither closes this writer's transaction.
     """
+    # The connection this writer *commits* — deliberately not every ender, or
+    # the stray ``other.rollback()`` being judged would enter the set it is
+    # judged against and vouch for itself.
+    owned = {
+        name
+        for name in (
+            _ender_receiver(node)
+            for node in _transaction_ending_nodes(fn)
+            if _is_commit_ender(node)
+        )
+        if name is not None
+    }
     for node in _own_body(fn):
         if not isinstance(node, ast.ExceptHandler):
             continue
-        for stmt in node.body:
-            for sub in ast.walk(stmt):
-                if isinstance(sub, ast.Attribute) and (
-                    sub.attr == "rollback" or sub.attr in helpers.rollback_cms
-                ):
-                    return node.lineno
-                if (
-                    isinstance(sub, ast.Call)
-                    and isinstance(sub.func, ast.Attribute)
-                    and sub.func.attr in {"execute", "executescript"}
-                    and sub.args
-                    and _sql_leading_keyword(sub.args[0]) == "ROLLBACK"
-                ):
-                    return node.lineno
+        cleaned = _rolled_back_connections(node.body, helpers)
+        if cleaned & owned or (cleaned and not owned):
+            return node.lineno
     return None
 
 
@@ -977,6 +993,12 @@ def _rollback_try_regions(
     and rolls back ``other`` protects nothing, and across *every* handler, so a
     second ``except`` that returns without rolling back cannot leave one path
     stranded while the first path looks compliant.
+
+    The handlers are held to the context manager's other promise too: it
+    re-raises. A handler that rolls back and then ``return``s swallows the
+    failure and reports success, and it cannot be caught by the swallowing
+    check that covers the *body* of a region — the handler is what defines
+    this region, so it has to be checked right here.
     """
     regions: list[tuple[str, set[int]]] = []
     for node in _own_body(fn):
@@ -984,6 +1006,14 @@ def _rollback_try_regions(
             continue
         cleaned: set[str] | None = None
         for handler in node.handlers:
+            if not any(isinstance(stmt, ast.Raise) for stmt in handler.body) or any(
+                isinstance(sub, (ast.Return, ast.Break, ast.Continue))
+                for stmt in handler.body
+                for sub in ast.walk(stmt)
+            ):
+                # Swallows, or leaves by a normal exit: not a region at all.
+                cleaned = set()
+                break
             names = _rolled_back_connections(handler.body, helpers)
             cleaned = names if cleaned is None else (cleaned & names)
         if not cleaned:
@@ -1078,46 +1108,76 @@ def _child_blocks(stmt: ast.AST) -> list[list[ast.stmt]]:
     return blocks
 
 
-def _pending_transaction_refusal(test: ast.AST, flags: frozenset[str] = frozenset()) -> str | None:
+def _ownership_gate_keys(test: ast.AST, flags: frozenset[str]) -> tuple[set[str], set[str]]:
+    """``(keys in effect in the body, keys in effect in the orelse)`` for an ``if``.
+
+    A key names the ownership predicate a branch runs under: an ownership flag
+    by name, or ``"self"`` for the inline ``self._in_transaction`` spelling.
+    Both are recorded in the polarity that means *this writer is standalone*,
+    which is the only branch where taking a BEGIN is this writer's business.
+    """
+    if isinstance(test, ast.Name) and test.id in flags:
+        return ({test.id}, set())
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        operand = test.operand
+        if isinstance(operand, ast.Name) and operand.id in flags:
+            return (set(), {operand.id})
+        if _is_self_ownership_read(operand):
+            return ({"self"}, set())
+    if _is_self_ownership_read(test):
+        return (set(), {"self"})
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        body: set[str] = set()
+        for value in test.values:
+            body |= _ownership_gate_keys(value, flags)[0]
+        return (body, set())
+    return (set(), set())
+
+
+def _pending_transaction_refusal(
+    test: ast.AST, flags: frozenset[str] = frozenset()
+) -> tuple[str, frozenset[str]] | None:
     """The connection an ``if`` test asks "is a transaction already open?" about.
 
-    ``and``-ed operands count, but only ownership ones:
-    ``if owns_txn and db.in_transaction:`` asks the same question on the only
-    path where it matters, while ``if fast_path and db.in_transaction:``
-    narrows the refusal to some unrelated condition and leaves the other path
-    taking a blind BEGIN. Anything under a ``not`` does not count either:
-    ``if not db.in_transaction:`` is the opposite question, and its body is
-    where the BEGIN goes, not where the refusal goes.
+    Returns the connection and the ownership keys the refusal runs under — an
+    empty set meaning it runs unconditionally.
+
+    ``and``-ed operands count, but only ownership ones, and only in the
+    standalone polarity: ``if owns_txn and db.in_transaction:`` asks the same
+    question on the only path that takes the BEGIN, while
+    ``if fast_path and db.in_transaction:`` narrows the refusal to an unrelated
+    condition and ``if self._in_transaction and db.in_transaction:`` narrows it
+    to the borrowed path — leaving the standalone one, the path that actually
+    runs a BEGIN, refusing nothing. Anything under a ``not`` is not a refusal
+    either: ``if not db.in_transaction:`` is the opposite question, and its
+    body is where the BEGIN goes.
     """
     if (
         isinstance(test, ast.Attribute)
         and test.attr == "in_transaction"
         and isinstance(test.value, ast.Name)
     ):
-        return test.value.id
+        return (test.value.id, frozenset())
     if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
         found: str | None = None
+        keys: set[str] = set()
         for value in test.values:
-            conn = _pending_transaction_refusal(value, flags)
-            if conn is not None:
-                found = conn
-            elif not (
-                (isinstance(value, ast.Name) and value.id in flags)
-                or _is_self_ownership_read(value)
-                or (
-                    isinstance(value, ast.UnaryOp)
-                    and isinstance(value.op, ast.Not)
-                    and _is_self_ownership_read(value.operand)
-                )
-            ):
-                # Narrowed by something that is not an ownership test, so the
-                # refusal no longer covers every path to the BEGIN.
+            nested = _pending_transaction_refusal(value, flags)
+            if nested is not None:
+                found = nested[0]
+                keys |= nested[1]
+                continue
+            narrowing = _ownership_gate_keys(value, flags)[0]
+            if not narrowing:
+                # Narrowed by something that is not a standalone-path ownership
+                # test, so the refusal no longer covers every path to the BEGIN.
                 return None
-        return found
+            keys |= narrowing
+        return None if found is None else (found, frozenset(keys))
     return None
 
 
-def _blind_begins(fn: ast.AST) -> list[int]:
+def _blind_begins(fn: ast.AST, consts: dict[str, str] | None = None) -> list[int]:
     """``BEGIN`` statements with no refusal of an unowned pending transaction.
 
     Ownership is task-affine (``self._in_transaction``), which says nothing
@@ -1131,37 +1191,70 @@ def _blind_begins(fn: ast.AST) -> list[int]:
     same block, or in a block enclosing it. A refusal inside some other branch
     is not on the path that reaches the ``BEGIN``, and one below it is too
     late.
+
+    A refusal narrowed by an ownership predicate covers only the BEGINs that
+    run under that same predicate, which is why the branch keys are carried
+    down rather than collapsed into "a refusal appeared somewhere above".
     """
     out: list[int] = []
     flags = frozenset(_ownership_flags(fn))
 
-    def visit(stmts: list[ast.stmt], refused: frozenset[str]) -> None:
+    def begins(stmt: ast.stmt) -> list[ast.Call]:
+        found: list[ast.Call] = []
+        for node in ast.walk(stmt):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"execute", "executescript"}
+                and node.args
+            ):
+                continue
+            keyword = _sql_leading_keyword(node.args[0])
+            if keyword is None and isinstance(node.args[0], ast.Name):
+                # Hoisted into a local or a module constant: the same statement,
+                # one indirection away from a literal-only check.
+                keyword = _resolve_local_sql(fn, node.args[0].id) or (consts or {}).get(
+                    node.args[0].id
+                )
+            if keyword == "BEGIN":
+                found.append(node)
+        return found
+
+    def visit(
+        stmts: list[ast.stmt],
+        refused: dict[str, frozenset[str]],
+        active: frozenset[str],
+    ) -> None:
         for stmt in stmts:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue  # its own function; checked on its own
             blocks = _child_blocks(stmt)
             if blocks:
+                body_keys, orelse_keys = (
+                    _ownership_gate_keys(stmt.test, flags)
+                    if isinstance(stmt, ast.If)
+                    else (set(), set())
+                )
                 for block in blocks:
-                    visit(block, refused)
+                    if isinstance(stmt, ast.If) and block is stmt.body:
+                        visit(block, refused, active | frozenset(body_keys))
+                    elif isinstance(stmt, ast.If) and block is stmt.orelse:
+                        visit(block, refused, active | frozenset(orelse_keys))
+                    else:
+                        visit(block, refused, active)
             else:
-                for node in ast.walk(stmt):
-                    if (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and node.func.attr in {"execute", "executescript"}
-                        and node.args
-                        and isinstance(node.args[0], ast.Constant)
-                        and isinstance(node.args[0].value, str)
-                        and node.args[0].value.strip().upper().startswith("BEGIN")
-                        and _ender_receiver(node) not in refused
-                    ):
+                for node in begins(stmt):
+                    conn = _ender_receiver(node)
+                    keys = refused.get(conn) if conn is not None else None
+                    if keys is None or not keys <= active:
                         out.append(node.lineno)
             if isinstance(stmt, ast.If) and any(isinstance(sub, ast.Raise) for sub in stmt.body):
-                conn = _pending_transaction_refusal(stmt.test, flags)
-                if conn is not None:
-                    refused = refused | {conn}
+                refusal = _pending_transaction_refusal(stmt.test, flags)
+                if refusal is not None:
+                    refused_conn, refused_keys = refusal
+                    refused = {**refused, refused_conn: refused_keys}
 
-    visit(list(fn.body), frozenset())  # type: ignore[attr-defined]
+    visit(list(fn.body), {}, frozenset())  # type: ignore[attr-defined]
     return sorted(set(out))
 
 
@@ -1179,6 +1272,7 @@ def _private_connection_violations(
     keeps the premise's *shape* and loses its meaning.
     """
     own: set[str] = set()
+    canonical: set[int] = set()
     for node in _own_body(fn):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
@@ -1186,11 +1280,25 @@ def _private_connection_violations(
         if not isinstance(target, ast.Name) or not isinstance(value, ast.Call):
             continue
         func = value.func
-        connects = (isinstance(func, ast.Attribute) and func.attr == "connect") or (
-            isinstance(func, ast.Name) and func.id == "connect"
-        )
-        if connects:
+        # ``sqlite3.connect(...)`` specifically: any method named ``connect``
+        # could hand back the shared connection under a private-looking name.
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "connect"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "sqlite3"
+        ):
             own.add(target.id)
+            canonical.add(id(target))
+    # Rebinding the name to anything else — ``conn = self._get_db()`` a line
+    # later — makes every use below it a use of that other connection.
+    own -= {
+        node.id
+        for node in _own_body(fn)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Store)
+        and id(node) not in canonical
+    }
     if not own:
         return [getattr(fn, "lineno", -1)]
     offending = {
@@ -1415,10 +1523,10 @@ class TestEveryMixinWriterCommitsThroughOwnership:
         writers gate BEGIN on their ownership flag alone, which is follow-up.
         """
         offenders = {}
-        for (filename, qualname), (fn, _, _) in _scanned_functions().items():
+        for (filename, qualname), (fn, consts, _) in _scanned_functions().items():
             if filename not in _BACKEND_FILES:
                 continue
-            lines = _blind_begins(fn)
+            lines = _blind_begins(fn, consts)
             if lines:
                 offenders[(filename, qualname)] = lines
         assert not offenders, (
@@ -1490,7 +1598,7 @@ class TestEveryMixinWriterCommitsThroughOwnership:
         caller's transaction again (#2175, fix 1).
         """
         source = (_STORAGE / "sqlite_backend.py").read_text(encoding="utf-8")
-        injected: set[str] = set()
+        constructions: list[tuple[int, set[str]]] = []
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.Call):
                 continue
@@ -1498,14 +1606,25 @@ class TestEveryMixinWriterCommitsThroughOwnership:
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             if name != "MetaManager":
                 continue
-            for kw in node.keywords:
-                value = kw.value
-                if kw.arg in {"commit", "write_guard"} and isinstance(value, ast.Attribute):
-                    injected.add(f"{kw.arg}={value.attr}")
-        assert injected == {
-            f"commit={_COMMIT_HELPER}",
-            f"write_guard={_ROLLBACK_CM}",
-        }, f"MetaManager is no longer built with the backend's ownership-aware pair: {injected}"
+            injected = {
+                f"{kw.arg}={kw.value.attr}"
+                for kw in node.keywords
+                if kw.arg in {"commit", "write_guard"} and isinstance(kw.value, ast.Attribute)
+            }
+            constructions.append((node.lineno, injected))
+        assert constructions, "no MetaManager construction found in sqlite_backend.py"
+        # Every construction, not the union of them: a second, uninjected
+        # MetaManager would otherwise ride on the first one's keywords while
+        # committing through sqlite_meta's ownership-blind default.
+        wrong = [
+            lineno
+            for lineno, injected in constructions
+            if injected != {f"commit={_COMMIT_HELPER}", f"write_guard={_ROLLBACK_CM}"}
+        ]
+        assert not wrong, (
+            "MetaManager built without the backend's ownership-aware pair at "
+            f"sqlite_backend.py lines {wrong}"
+        )
 
     def test_the_meta_manager_still_binds_the_injected_helpers(self) -> None:
         """``sqlite_meta.py``'s helper aliases are matched by attribute name, so
@@ -2435,6 +2554,131 @@ class TestBackendGuardHelpersRejectFakeCompliance:
         )
         assert "C.outer.later" in found
         assert _ends_transaction_directly(found["C.outer.later"])
+
+    # ---- shapes a review pass found accepted (round two) --------------------
+
+    def test_a_flag_from_another_object_is_not_an_ownership_flag(self) -> None:
+        """``owns = not other._in_transaction`` reads like the real thing and
+        answers a question about a different backend."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    owns = not other._in_transaction\n"
+            "    if owns:\n"
+            "        db.commit()\n"
+        )
+        assert _ungated_transaction_enders(fn) == [4]
+
+    def test_a_flag_rebound_by_any_form_stops_counting(self) -> None:
+        """Not just ``owns = True``: a walrus, a loop target or an augmented
+        assignment leaves the same name meaning something else at the commit."""
+        for rebinding in ("    owns += 1\n", "    for owns in things:\n        pass\n"):
+            fn = self._fn(
+                "async def w(self):\n"
+                "    owns = not self._in_transaction\n" + rebinding + "    if owns:\n"
+                "        db.commit()\n"
+            )
+            assert _ungated_transaction_enders(fn), rebinding
+
+    def test_a_handler_that_returns_instead_of_reraising_is_not_a_region(self) -> None:
+        """The handler defines the region, so the swallowing check that covers
+        a region's *body* can never reach it — it is checked here instead."""
+        source = self._GATED.replace("        raise\n", "        return 0\n")
+        fn = self._fn(source)
+        assert _rollback_try_regions(fn) == []
+        assert "writes or commits outside a rollback-protected region" in (
+            _gated_writer_violations(fn)
+        )
+
+    def test_an_uncalled_rollback_is_not_failure_cleanup(self) -> None:
+        """``cleanup = db.rollback`` stashes the method; nothing rolls back."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    try:\n"
+            "        db.commit()\n"
+            "    except Exception:\n"
+            "        cleanup = db.rollback\n"
+            "        raise\n"
+        )
+        assert _failure_cleanup_lineno(fn) is None
+
+    def test_cleanup_on_another_connection_is_not_failure_cleanup(self) -> None:
+        fn = self._fn(
+            "async def w(self):\n"
+            "    try:\n"
+            "        db.commit()\n"
+            "    except Exception:\n"
+            "        other.rollback()\n"
+            "        raise\n"
+        )
+        assert _failure_cleanup_lineno(fn) is None
+
+    def test_a_refusal_narrowed_to_the_borrowed_path_clears_nothing(self) -> None:
+        """``if self._in_transaction and db.in_transaction: raise`` refuses on
+        the path that never takes a BEGIN, and the standalone path below it —
+        the one that does — refuses nothing."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    if self._in_transaction and db.in_transaction:\n"
+            "        raise StorageError('refused')\n"
+            "    if not self._in_transaction:\n"
+            '        db.execute("BEGIN IMMEDIATE")\n'
+        )
+        assert _blind_begins(fn) == [6]
+
+    def test_a_narrowed_refusal_covers_only_its_own_predicate(self) -> None:
+        """The flag-narrowed refusal clears the BEGIN under that same flag, and
+        an ungated BEGIN elsewhere in the function still counts."""
+        cleared = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    owns = not self._in_transaction\n"
+            "    if owns and db.in_transaction:\n"
+            "        raise StorageError('refused')\n"
+            "    if owns:\n"
+            '        db.execute("BEGIN IMMEDIATE")\n'
+        )
+        assert _blind_begins(cleared) == []
+        elsewhere = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    owns = not self._in_transaction\n"
+            "    if owns and db.in_transaction:\n"
+            "        raise StorageError('refused')\n"
+            '    db.execute("BEGIN IMMEDIATE")\n'
+        )
+        assert _blind_begins(elsewhere) == [6]
+
+    def test_a_begin_hoisted_into_a_constant_is_still_a_begin(self) -> None:
+        local = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    sql = "BEGIN IMMEDIATE"\n'
+            "    db.execute(sql)\n"
+        )
+        assert _blind_begins(local) == [4]
+        module = self._fn("async def w(self):\n    db = self._get_db()\n    db.execute(_BEGIN)\n")
+        assert _blind_begins(module, {"_BEGIN": "BEGIN"}) == [3]
+
+    def test_a_private_connection_rebound_to_the_shared_one_is_caught(self) -> None:
+        fn = self._fn(
+            "def _run(self):\n"
+            "    conn = sqlite3.connect(p)\n"
+            "    conn = self._get_db()\n"
+            '    conn.execute("DELETE FROM t")\n'
+            "    conn.commit()\n"
+        )
+        assert _private_connection_violations(fn) == [1]
+
+    def test_a_connect_that_is_not_sqlite3s_is_not_a_private_connection(self) -> None:
+        """Any method named ``connect`` could hand back the shared connection."""
+        fn = self._fn(
+            "def _run(self):\n"
+            "    conn = self._pool.connect()\n"
+            '    conn.execute("DELETE FROM t")\n'
+            "    conn.commit()\n"
+        )
+        assert _private_connection_violations(fn) == [1]
 
     def test_the_meta_helper_aliases_are_scoped_to_that_file(self) -> None:
         """``_commit`` is generic enough that a mixin method by that name must
