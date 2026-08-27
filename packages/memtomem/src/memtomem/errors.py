@@ -37,6 +37,17 @@ class NamespaceConflictError(StorageError):
         self.reason_code = reason_code
 
 
+class TransactionOwnedError(StorageError):
+    """The writer connection is held by another task's in-flight transaction.
+
+    A routine condition, not a broken database: the owning task commits and the
+    connection frees up. A distinct subclass so a caller reporting *health* can
+    tell "busy right now" from "the store is damaged" without sniffing the
+    message — ``check_sqlite_connectivity`` reported every ``StorageError`` as
+    critical, turning a normal concurrent write into a database alarm (#2185).
+    """
+
+
 class QueryEmbeddingDimensionError(StorageError, ValueError):
     """A query embedding's width disagrees with the stored vector width.
 

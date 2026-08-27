@@ -1136,3 +1136,36 @@ async def test_ns_prefix_counters_see_own_uncommitted_writes_inside_a_transactio
         total, by_prefix = await storage.count_chunks_by_ns_prefix_detail(["agent-runtime:"])
         assert total == 1
         assert by_prefix == {"agent-runtime:": 1}
+
+
+async def test_foreign_task_refusal_is_a_typed_error(storage):
+    """The ownership refusal carries its own type, not just a message (#2185).
+
+    ``check_sqlite_connectivity`` has to tell "another task is mid-write" apart
+    from "the database is damaged", and it reports the second as critical. A
+    message substring is the wrong seam for that; pin the type at the raise
+    site so the health check's branch cannot go quietly dead.
+    """
+    from memtomem.errors import TransactionOwnedError
+
+    assert issubclass(TransactionOwnedError, StorageError)
+
+    owner_ready = asyncio.Event()
+    release_owner = asyncio.Event()
+
+    async def owner() -> None:
+        async with storage.transaction():
+            owner_ready.set()
+            await release_owner.wait()
+
+    owner_task = asyncio.create_task(owner())
+    await owner_ready.wait()
+    try:
+        with pytest.raises(TransactionOwnedError):
+            storage._get_db()
+        with pytest.raises(TransactionOwnedError):
+            async with storage.transaction():
+                pass
+    finally:
+        release_owner.set()
+        await owner_task
