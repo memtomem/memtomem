@@ -902,20 +902,19 @@ def _failure_cleanup_lineno(fn: ast.AST, helpers: _Helpers = _DEFAULT_HELPERS) -
     # The connection this writer *commits* — deliberately not every ender, or
     # the stray ``other.rollback()`` being judged would enter the set it is
     # judged against and vouch for itself.
-    owned = {
-        name
-        for name in (
-            _ender_receiver(node)
-            for node in _transaction_ending_nodes(fn)
-            if _is_commit_ender(node)
-        )
-        if name is not None
-    }
+    #
+    # A commit whose receiver is not a plain name (``self._get_db().commit()``)
+    # leaves nothing to match cleanup against. That is not "no constraint": it
+    # is a shape this check cannot verify, so it reports no cleanup rather than
+    # accepting a rollback on any connection at all.
+    commits = [node for node in _transaction_ending_nodes(fn) if _is_commit_ender(node)]
+    if any(_ender_receiver(node) is None for node in commits):
+        return None
+    owned = {name for name in (_ender_receiver(node) for node in commits) if name is not None}
     for node in _own_body(fn):
         if not isinstance(node, ast.ExceptHandler):
             continue
-        cleaned = _rolled_back_connections(node.body, helpers)
-        if cleaned & owned or (cleaned and not owned):
+        if _rolled_back_connections(node.body, helpers, frozenset(_ownership_flags(fn))) & owned:
             return node.lineno
     return None
 
@@ -955,31 +954,75 @@ def _is_commit_ender(node: ast.AST) -> bool:
     return False
 
 
-def _rolled_back_connections(stmts: list[ast.stmt], helpers: _Helpers) -> set[str]:
+def _rolled_back_connections(
+    stmts: list[ast.stmt], helpers: _Helpers, flags: frozenset[str] = frozenset()
+) -> set[str]:
     """Connection names these statements actually roll back.
 
     A *call*, not a reference: ``db.rollback`` mentioned but never called is
-    the shape a containment check should refuse to read as cleanup.
+    the shape a containment check should refuse to read as cleanup. The
+    rollback context manager is the one exception in the other direction —
+    calling ``self._rolls_back_if_standalone(db)`` without a ``with`` builds a
+    generator and rolls nothing back — so it counts only when entered.
+
+    Only statements that run unconditionally are read. A rollback under an
+    ``if cleanup_enabled:`` runs on one path and not the other, and cleanup
+    that happens sometimes is what the #2167 stranding looks like. Two
+    conditions are not that: the ownership gate, which is the condition the
+    whole contract is written in terms of (on the other branch the owner
+    decides what the failure means), and ``if <db>.in_transaction:``, which
+    only skips a rollback when there is nothing left to roll back.
     """
     names: set[str] = set()
-    for stmt in stmts:
-        for sub in ast.walk(stmt):
-            if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
+
+    def scan(block: list[ast.stmt]) -> None:
+        for stmt in block:
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                for item in stmt.items:
+                    call = item.context_expr
+                    if (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Attribute)
+                        and call.func.attr in helpers.rollback_cms
+                    ):
+                        db_name = _db_argument(call)
+                        if db_name is not None:
+                            names.add(db_name)
+                scan(stmt.body)
                 continue
-            attr = sub.func.attr
-            if attr == "rollback" and isinstance(sub.func.value, ast.Name):
-                names.add(sub.func.value.id)
-            elif attr in helpers.rollback_cms or attr == _ROLLBACK_HELPER:
-                db_name = _db_argument(sub)
-                if db_name is not None:
-                    names.add(db_name)
-            elif (
-                attr in {"execute", "executescript"}
-                and sub.args
-                and _sql_leading_keyword(sub.args[0]) == "ROLLBACK"
-                and isinstance(sub.func.value, ast.Name)
-            ):
-                names.add(sub.func.value.id)
+            if isinstance(stmt, ast.If):
+                body_keys, orelse_keys = _ownership_gate_keys(stmt.test, flags)
+                if body_keys or _pending_transaction_refusal(stmt.test, flags) is not None:
+                    scan(stmt.body)
+                elif orelse_keys:
+                    scan(stmt.orelse)
+                continue
+            if isinstance(stmt, ast.Try):
+                # ``try: db.rollback() except: log`` — the preservation shape the
+                # helpers use; the rollback itself still runs unconditionally.
+                scan(stmt.body)
+                continue
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for sub in ast.walk(stmt):
+                if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
+                    continue
+                attr = sub.func.attr
+                if attr == "rollback" and isinstance(sub.func.value, ast.Name):
+                    names.add(sub.func.value.id)
+                elif attr == _ROLLBACK_HELPER:
+                    db_name = _db_argument(sub)
+                    if db_name is not None:
+                        names.add(db_name)
+                elif (
+                    attr in {"execute", "executescript"}
+                    and sub.args
+                    and _sql_leading_keyword(sub.args[0]) == "ROLLBACK"
+                    and isinstance(sub.func.value, ast.Name)
+                ):
+                    names.add(sub.func.value.id)
+
+    scan(list(stmts))
     return names
 
 
@@ -1001,6 +1044,7 @@ def _rollback_try_regions(
     this region, so it has to be checked right here.
     """
     regions: list[tuple[str, set[int]]] = []
+    flags = frozenset(_ownership_flags(fn))
     for node in _own_body(fn):
         if not isinstance(node, ast.Try) or not node.handlers:
             continue
@@ -1014,7 +1058,7 @@ def _rollback_try_regions(
                 # Swallows, or leaves by a normal exit: not a region at all.
                 cleaned = set()
                 break
-            names = _rolled_back_connections(handler.body, helpers)
+            names = _rolled_back_connections(handler.body, helpers, flags)
             cleaned = names if cleaned is None else (cleaned & names)
         if not cleaned:
             continue
@@ -1159,12 +1203,12 @@ def _pending_transaction_refusal(
     ):
         return (test.value.id, frozenset())
     if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
-        found: str | None = None
+        conns: set[str] = set()
         keys: set[str] = set()
         for value in test.values:
             nested = _pending_transaction_refusal(value, flags)
             if nested is not None:
-                found = nested[0]
+                conns.add(nested[0])
                 keys |= nested[1]
                 continue
             narrowing = _ownership_gate_keys(value, flags)[0]
@@ -1173,8 +1217,29 @@ def _pending_transaction_refusal(
                 # test, so the refusal no longer covers every path to the BEGIN.
                 return None
             keys |= narrowing
-        return None if found is None else (found, frozenset(keys))
+        if len(conns) != 1:
+            # Two connections ``and``-ed together refuse only when *both* have a
+            # transaction open, which proves nothing about either one alone.
+            return None
+        return (conns.pop(), frozenset(keys))
     return None
+
+
+def _may_bind_begin(fn: ast.AST, name: str) -> bool:
+    """Whether any binding of ``name`` in ``fn`` is a ``BEGIN`` statement.
+
+    Read when the resolver cannot name one keyword for the local. "Which
+    binding reaches the execute" is a control-flow question this guard does not
+    answer, so a local that is a BEGIN on *any* path is treated as one.
+    """
+    for node in _own_body(fn):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id == name:
+            if _sql_leading_keyword(node.value) == "BEGIN":
+                return True
+    return False
 
 
 def _blind_begins(fn: ast.AST, consts: dict[str, str] | None = None) -> list[int]:
@@ -1212,10 +1277,14 @@ def _blind_begins(fn: ast.AST, consts: dict[str, str] | None = None) -> list[int
             keyword = _sql_leading_keyword(node.args[0])
             if keyword is None and isinstance(node.args[0], ast.Name):
                 # Hoisted into a local or a module constant: the same statement,
-                # one indirection away from a literal-only check.
-                keyword = _resolve_local_sql(fn, node.args[0].id) or (consts or {}).get(
-                    node.args[0].id
-                )
+                # one indirection away from a literal-only check. When the local
+                # is bound more than once and the bindings disagree,
+                # ``_resolve_local_sql`` answers ``None`` — one of those paths
+                # may still run a BEGIN, so the ambiguity is read as one.
+                name = node.args[0].id
+                keyword = _resolve_local_sql(fn, name) or (consts or {}).get(name)
+                if keyword is None and _may_bind_begin(fn, name):
+                    keyword = "BEGIN"
             if keyword == "BEGIN":
                 found.append(node)
         return found
@@ -1606,24 +1675,34 @@ class TestEveryMixinWriterCommitsThroughOwnership:
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             if name != "MetaManager":
                 continue
+            # The receiver matters as much as the method: another backend's
+            # ``_commit_if_standalone`` consults *its* ownership state, so it
+            # would happily commit this backend's owned transaction.
             injected = {
-                f"{kw.arg}={kw.value.attr}"
+                f"{kw.arg}={kw.value.value.id}.{kw.value.attr}"
                 for kw in node.keywords
-                if kw.arg in {"commit", "write_guard"} and isinstance(kw.value, ast.Attribute)
+                if kw.arg in {"commit", "write_guard"}
+                and isinstance(kw.value, ast.Attribute)
+                and isinstance(kw.value.value, ast.Name)
             }
+            if node.args and isinstance(node.args[0], ast.Attribute):
+                first = node.args[0]
+                if isinstance(first.value, ast.Name):
+                    injected.add(f"get_db={first.value.id}.{first.attr}")
             constructions.append((node.lineno, injected))
         assert constructions, "no MetaManager construction found in sqlite_backend.py"
         # Every construction, not the union of them: a second, uninjected
         # MetaManager would otherwise ride on the first one's keywords while
         # committing through sqlite_meta's ownership-blind default.
-        wrong = [
-            lineno
-            for lineno, injected in constructions
-            if injected != {f"commit={_COMMIT_HELPER}", f"write_guard={_ROLLBACK_CM}"}
-        ]
+        expected = {
+            "get_db=self._get_db",
+            f"commit=self.{_COMMIT_HELPER}",
+            f"write_guard=self.{_ROLLBACK_CM}",
+        }
+        wrong = [lineno for lineno, injected in constructions if injected != expected]
         assert not wrong, (
-            "MetaManager built without the backend's ownership-aware pair at "
-            f"sqlite_backend.py lines {wrong}"
+            "MetaManager built without this backend's own ownership-aware "
+            f"triple at sqlite_backend.py lines {wrong}"
         )
 
     def test_the_meta_manager_still_binds_the_injected_helpers(self) -> None:
@@ -2679,6 +2758,98 @@ class TestBackendGuardHelpersRejectFakeCompliance:
             "    conn.commit()\n"
         )
         assert _private_connection_violations(fn) == [1]
+
+    # ---- shapes a review pass found accepted (round three) ------------------
+
+    def test_a_commit_on_an_unresolvable_receiver_admits_no_cleanup(self) -> None:
+        """``self._get_db().commit()`` leaves no name for cleanup to be matched
+        against. That is a shape this check cannot verify, not a shape with no
+        constraint — reading it as the latter let any rollback certify it."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    try:\n"
+            "        self._get_db().commit()\n"
+            "    except Exception:\n"
+            "        other.rollback()\n"
+            "        raise\n"
+        )
+        assert _failure_cleanup_lineno(fn) is None
+
+    def test_two_connections_anded_together_refuse_neither(self) -> None:
+        """``if other.in_transaction and db.in_transaction: raise`` fires only
+        when both are busy, which proves nothing about ``db`` alone."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    if other.in_transaction and db.in_transaction:\n"
+            "        raise StorageError('refused')\n"
+            '    db.execute("BEGIN IMMEDIATE")\n'
+        )
+        assert _blind_begins(fn) == [5]
+
+    def test_cleanup_under_an_unrelated_condition_does_not_count(self) -> None:
+        """Cleanup that happens sometimes is what the stranding looks like."""
+        source = self._GATED.replace(
+            "        if not self._in_transaction:\n            db.rollback()\n",
+            "        if cleanup_enabled:\n            db.rollback()\n",
+        )
+        assert _rollback_try_regions(self._fn(source)) == []
+
+    def test_cleanup_under_the_ownership_gate_still_counts(self) -> None:
+        """The gate the whole contract is written in terms of, in both of its
+        spellings — the inline read and a proven ownership flag."""
+        assert _rollback_try_regions(self._fn(self._GATED)) != []
+        by_flag = (
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            "    owns = not self._in_transaction\n"
+            "    try:\n"
+            '        db.execute("DELETE FROM t")\n'
+            "        if owns:\n"
+            "            db.commit()\n"
+            "    except Exception:\n"
+            "        if owns:\n"
+            "            db.rollback()\n"
+            "        raise\n"
+        )
+        assert _rollback_try_regions(self._fn(by_flag)) != []
+
+    def test_cleanup_skipped_only_when_there_is_nothing_to_roll_back_counts(self) -> None:
+        """``if db.in_transaction:`` guards a no-op, not a path."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    db.execute("BEGIN IMMEDIATE")\n'
+            "    try:\n"
+            "        db.commit()\n"
+            "    except Exception:\n"
+            "        if db.in_transaction:\n"
+            "            db.rollback()\n"
+            "        raise\n"
+        )
+        assert _failure_cleanup_lineno(fn) == 6
+
+    def test_the_rollback_context_manager_must_be_entered(self) -> None:
+        """Called without a ``with``, the factory builds a generator and rolls
+        nothing back — while reading exactly like the sanctioned cleanup."""
+        source = self._GATED.replace(
+            "        if not self._in_transaction:\n            db.rollback()\n",
+            "        self._rolls_back_if_standalone(db)\n",
+        )
+        assert _rollback_try_regions(self._fn(source)) == []
+
+    def test_an_ambiguous_local_begin_is_read_as_a_begin(self) -> None:
+        """Which binding reaches the execute is a control-flow question this
+        guard does not answer, so a local that is a BEGIN on any path is one."""
+        fn = self._fn(
+            "async def w(self):\n"
+            "    db = self._get_db()\n"
+            '    sql = "BEGIN IMMEDIATE"\n'
+            "    if rewrite:\n"
+            "        sql = choose_sql()\n"
+            "    db.execute(sql)\n"
+        )
+        assert _blind_begins(fn) == [6]
 
     def test_the_meta_helper_aliases_are_scoped_to_that_file(self) -> None:
         """``_commit`` is generic enough that a mixin method by that name must
