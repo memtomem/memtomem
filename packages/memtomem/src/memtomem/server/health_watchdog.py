@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import suppress
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from memtomem.scheduler.jobs import JOB_KINDS
+from memtomem.server.background import loop_task_error_cb, stop_loop_task
 from memtomem.server.health_checks import (
     DEEP_CHECKS,
     DIAGNOSTIC_CHECKS,
@@ -60,7 +60,8 @@ class HealthWatchdog:
         self._store = HealthStore(db_path, self._config.max_snapshots)
         self._store.initialize()
         self._maintenance = MaintenanceExecutor(self._app, self._config)
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run_loop(), name="memtomem-health-watchdog")
+        self._task.add_done_callback(loop_task_error_cb)
         logger.info(
             "Health watchdog started (heartbeat: %.0fs, diagnostic: %.0fs, deep: %.0fs)",
             self._config.heartbeat_interval_seconds,
@@ -70,9 +71,7 @@ class HealthWatchdog:
 
     async def stop(self) -> None:
         if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            await stop_loop_task(self._task)
             self._task = None
         if self._store:
             self._store.close()

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import suppress
 from typing import TYPE_CHECKING
+
+from memtomem.server.background import loop_task_error_cb, stop_loop_task
 
 if TYPE_CHECKING:
     from memtomem.config import ConsolidationScheduleConfig, PolicyConfig
@@ -26,7 +27,8 @@ class ConsolidationScheduler:
         """Start the periodic scan loop."""
         if not self._config.enabled:
             return
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run_loop(), name="memtomem-consolidation-scheduler")
+        self._task.add_done_callback(loop_task_error_cb)
         logger.info(
             "Consolidation scheduler started (interval: %.1fh)", self._config.interval_hours
         )
@@ -34,9 +36,7 @@ class ConsolidationScheduler:
     async def stop(self) -> None:
         """Stop the scan loop."""
         if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            await stop_loop_task(self._task)
             self._task = None
 
     async def _run_loop(self) -> None:
@@ -84,7 +84,8 @@ class PolicyScheduler:
         """Start the periodic policy loop."""
         if not self._config.enabled:
             return
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run_loop(), name="memtomem-policy-scheduler")
+        self._task.add_done_callback(loop_task_error_cb)
         logger.info(
             "Policy scheduler started (interval: %.1fm, max_actions: %d)",
             self._config.scheduler_interval_minutes,
@@ -94,16 +95,21 @@ class PolicyScheduler:
     async def stop(self) -> None:
         """Stop the policy loop."""
         if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            await stop_loop_task(self._task)
             self._task = None
 
     async def _run_loop(self) -> None:
         interval_seconds = self._config.scheduler_interval_minutes * 60
         while True:
             await asyncio.sleep(interval_seconds)
-            await self._run_policies()
+            # ``_run_policies`` swallows its own ``Exception``, but a bug outside
+            # that inner try — or in a future edit to it — would otherwise end the
+            # loop for the life of the process. ``CancelledError`` is a
+            # ``BaseException`` and still propagates, so ``stop()`` keeps working.
+            try:
+                await self._run_policies()
+            except Exception:
+                logger.error("Policy scheduler run failed", exc_info=True)
 
     async def _run_policies(self) -> None:
         """Execute all enabled policies and invalidate cache if needed."""
