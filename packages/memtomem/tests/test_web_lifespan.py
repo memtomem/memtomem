@@ -794,6 +794,110 @@ async def test_lifespan_cancels_summary_regen_before_closing_components():
     assert not hasattr(app.state, "summary_regen_task")
 
 
+async def test_lifespan_settles_fts_rebuild_before_closing_components():
+    """The FTS rebuild is *waited out*, not cancelled, before storage closes (#2214).
+
+    ``rebuild_fts`` does its work in ``asyncio.to_thread`` through a writer
+    connection the worker opens itself, so cancelling the awaiting task would
+    leave that thread writing into a store ``close_components`` is closing.
+    """
+    import asyncio
+
+    comp = _make_components(embedding_broken=None, stored_info=None)
+    order: list[str] = []
+    running, release = asyncio.Event(), asyncio.Event()
+
+    async def _rebuild() -> None:
+        running.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:  # pragma: no cover - the bug this pins
+            order.append("rebuild cancelled")
+            raise
+        order.append("rebuild finished")
+
+    async def _close(_comp):
+        # The pin, and it does not depend on scheduling luck: reaching here
+        # while the rebuild is still gated *is* the bug.
+        assert rebuild.done(), "close_components ran while the FTS rebuild was still writing"
+        order.append("close_components")
+        return MagicMock(storage_closed=True)
+
+    app = FastAPI()
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+    body_done = asyncio.Event()
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch("memtomem.server.component_factory.close_components", _close),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        rebuild = asyncio.create_task(_rebuild())
+
+        async def _serve() -> None:
+            async with _lifespan(app):
+                app.state.fts_rebuild_task = rebuild
+                await running.wait()
+                body_done.set()  # teardown starts from here
+
+        server = asyncio.create_task(_serve())
+        await body_done.wait()
+        release.set()  # only now may the rebuild finish
+        await server
+
+    assert order == ["rebuild finished", "close_components"], order
+    assert not hasattr(app.state, "fts_rebuild_task")
+
+
+async def test_lifespan_retains_the_barrier_when_the_fts_rebuild_will_not_settle():
+    """An unsettled rebuild denies the confirmed close the barrier needs (#2214, #1936).
+
+    ``close_components`` can only speak for the connections it owns; the
+    rebuild's worker holds one it does not. Releasing the barrier there would
+    let an uninstall start against a store still being written.
+    """
+    import asyncio
+
+    comp = _make_components(embedding_broken=None, stored_info=None)
+    running = asyncio.Event()
+    barrier = MagicMock()
+    barrier.path = "/tmp/fake-barrier"
+
+    async def _rebuild() -> None:
+        running.set()
+        await asyncio.Event().wait()  # never settles within the timeout
+
+    app = FastAPI()
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch(
+            "memtomem.server.component_factory.close_components",
+            AsyncMock(return_value=MagicMock(storage_closed=True)),
+        ),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+        patch(
+            "memtomem.web.app._acquire_lifecycle_barrier_settled",
+            AsyncMock(return_value=barrier),
+        ),
+        patch("memtomem.web.hot_reload.FTS_SETTLE_TIMEOUT_S", 0.05),
+    ):
+        rebuild = asyncio.create_task(_rebuild())
+        try:
+            async with _lifespan(app):
+                app.state.fts_rebuild_task = rebuild
+                await running.wait()
+        finally:
+            rebuild.cancel()
+
+    barrier.release.assert_not_called()
+
+
 async def test_lifespan_finishes_teardown_when_the_regen_drain_is_cancelled():
     """A cancel landing *in* the drain must not skip the rest of teardown (#2213).
 
