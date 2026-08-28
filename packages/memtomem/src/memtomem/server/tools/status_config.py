@@ -743,9 +743,10 @@ async def _revert_to_stored(app: AppContext) -> str:
     before the swap holds the old generation, so the close waits for its last
     release instead of pulling the embedder out from under it. With nothing in
     flight the close still runs inline here — retirement never waits on a
-    timeout. Embedder users outside the pipeline and the engine (the dedup
-    scanner, ``mem_conflicts``, formation, export/import) are not lease-counted
-    and keep the pre-#2180 exposure.
+    timeout. The embedder users outside the pipeline and the engine — the dedup
+    scanner, ``mem_conflicts``, formation, bundle import, and model warmup —
+    count into the same handle since #2199, so the accounting covers every
+    production path that reaches the embedder.
 
     Serialized on ``app._config_lock``: without it, two concurrent reverts
     both observe the mismatch, both publish a generation, and the loser
@@ -854,7 +855,13 @@ async def _revert_to_stored_locked(
     if watcher is not None:
         watcher.rebind(comp.index_engine, comp.search_pipeline)
     if app.dedup_scanner is not None:
-        app._dedup_scanner = DedupScanner(storage=storage, embedder=new_embedder)
+        app._dedup_scanner = DedupScanner(
+            storage=storage,
+            embedder=new_embedder,
+            # The freshly published generation, not the retired one: this
+            # scanner's scans must count into what the *next* revert retires.
+            generation=new_generation,
+        )
 
     # Publication is complete: clear the mismatch in the same synchronous
     # phase, before the first retirement ``await``, so a concurrent caller

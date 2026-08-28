@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from memtomem.generation import hold_app_generation
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -144,17 +145,21 @@ async def mem_import(
         return f"File not found: {source}"
 
     try:
-        stats = await import_chunks(
-            app.storage,
-            app.embedder,
-            source,
-            namespace=namespace,
-            on_conflict=on_conflict,  # type: ignore[arg-type]
-            preserve_ids=preserve_ids,
-            force_unsafe=force_unsafe,
-            surface="mem_import",
-            extract_entities=app.config.indexing.extract_entities,
-        )
+        # Embeds every record in the bundle, so it holds the generation for the
+        # whole import — a revert must not close the embedder underneath it
+        # (#2180/#2199).
+        with hold_app_generation(app):
+            stats = await import_chunks(
+                app.storage,
+                app.embedder,
+                source,
+                namespace=namespace,
+                on_conflict=on_conflict,  # type: ignore[arg-type]
+                preserve_ids=preserve_ids,
+                force_unsafe=force_unsafe,
+                surface="mem_import",
+                extract_entities=app.config.indexing.extract_entities,
+            )
     except ImportPrivacyError as exc:
         return (
             f"Error: {exc.blocked_records} bundle record(s) match privacy "

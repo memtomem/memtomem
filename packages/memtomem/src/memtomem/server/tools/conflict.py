@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from memtomem.generation import hold_app_generation
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -35,13 +36,16 @@ async def mem_conflict_check(
     # MCP read surface.
     project_context_root = _resolve_project_context_root(app)
 
-    conflicts = await detect_conflicts(
-        content,
-        app.storage,
-        app.embedder,
-        threshold=threshold,
-        project_context_root=project_context_root,
-    )
+    # Short, but it reaches the embedder — so it counts into the generation
+    # like every other embedder user (#2180/#2199).
+    with hold_app_generation(app):
+        conflicts = await detect_conflicts(
+            content,
+            app.storage,
+            app.embedder,
+            threshold=threshold,
+            project_context_root=project_context_root,
+        )
 
     if not conflicts:
         return "No conflicts detected."
