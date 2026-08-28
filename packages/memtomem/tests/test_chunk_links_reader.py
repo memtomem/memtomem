@@ -212,6 +212,35 @@ class TestGetChunksSharedFromBatch:
         assert await backend.get_chunks_shared_from_batch([src], link_type="summarizes") == {}
 
     @pytest.mark.asyncio
+    async def test_large_batch_exceeds_historic_sqlite_variable_limit(self, backend):
+        """1100 source ids in one call. Membership binds a single JSON
+        array through ``json_each`` — an ``IN (?,?,…)`` list would break
+        on builds compiled with the historic 999 bound-variable default
+        (the floor the repo supports), so a regression back to
+        placeholders must not slip past this at scale."""
+        sources = [uuid4() for _ in range(1100)]
+        targets = [uuid4() for _ in range(1100)]
+        db = backend._get_db()
+        db.executemany(
+            "INSERT INTO chunks (id, content, content_hash, source_file, namespace, "
+            "tags, created_at, updated_at) "
+            "VALUES (?, '', ?, '', 'default', '[]', "
+            "'2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+            [(str(c), str(c)) for c in sources + targets],
+        )
+        db.executemany(
+            "INSERT INTO chunk_links "
+            "(source_id, target_id, link_type, namespace_target, created_at) "
+            "VALUES (?, ?, 'shared', 'shared', '2026-01-01T00:00:00')",
+            [(str(s), str(t)) for s, t in zip(sources, targets, strict=True)],
+        )
+        db.commit()
+
+        out = await backend.get_chunks_shared_from_batch(sources)
+        assert set(out) == set(sources)
+        assert all(len(links) == 1 for links in out.values())
+
+    @pytest.mark.asyncio
     async def test_unknown_source_absent_from_result(self, backend):
         """Ids with no fanout are absent, not mapped to [] — mirrors the
         ``get_chunks_batch`` missing-id contract."""

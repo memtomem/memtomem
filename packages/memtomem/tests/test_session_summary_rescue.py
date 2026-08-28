@@ -59,13 +59,13 @@ def _apply_source_exact(hits: list[SearchResult], metadata_filter) -> list[Searc
     The rescue BM25 leg pushes its source restriction into storage, so a
     dispatch double serving both the organic and the rescue call must
     honor the filter or organic-only chunks would leak into the rescue
-    leg. Fixture paths don't exist on disk, so ``norm_path`` is identity
-    and plain string membership is exact here.
+    leg. Both sides normalize through ``norm_path``, matching the real
+    ``_metadata_filter_sql`` behavior.
     """
     if metadata_filter is None or not metadata_filter.source_exact:
         return hits
-    allowed = set(metadata_filter.source_exact)
-    return [r for r in hits if str(r.chunk.metadata.source_file) in allowed]
+    allowed = {norm_path(Path(v)) for v in metadata_filter.source_exact}
+    return [r for r in hits if norm_path(r.chunk.metadata.source_file) in allowed]
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +736,50 @@ class TestRescueSourceFilterPushdown:
         )
 
         assert captured["metadata_filter"].source_exact == (norm_path(Path(canonical)),)
+
+    @pytest.mark.asyncio
+    async def test_dense_leg_does_not_receive_boost_source_filter(self):
+        """M2 pin (Codex design review): the dense leg must NOT receive the
+        boost-source filter — a selective ``source_exact`` set makes
+        ``dense_search`` escalate its inner KNN K up to a full
+        vector-table scan. Dense gets exactly the outer filter, or no
+        ``metadata_filter`` kwarg at all when none was supplied."""
+        storage = _async_storage()
+        dense_captured: list[dict] = []
+
+        async def dense_dispatch(
+            embedding,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            **kwargs,
+        ):
+            dense_captured.append(kwargs)
+            return []
+
+        storage.dense_search = AsyncMock(side_effect=dense_dispatch)
+        pipeline = _make_pipeline(storage, session_summary_config=SessionSummaryConfig())
+        src = f"/{_CHUNK_SOURCE_BASE}/src/old_session.md"
+
+        # No outer filter → dense gets no metadata_filter kwarg at all.
+        await pipeline._rescue_retrieval("q", [0.1] * 8, 10, {src}, use_bm25=True, use_dense=True)
+        assert "metadata_filter" not in dense_captured[0]
+
+        # Outer filter present → dense gets it verbatim, not the
+        # boost-source-augmented bm25 filter.
+        outer = SearchMetadataFilter(chunk_types=("code",))
+        await pipeline._rescue_retrieval(
+            "q",
+            [0.1] * 8,
+            10,
+            {src},
+            use_bm25=True,
+            use_dense=True,
+            metadata_filter=outer,
+        )
+        assert dense_captured[1]["metadata_filter"] is outer
+        assert dense_captured[1]["metadata_filter"].source_exact == ()
 
     @pytest.mark.asyncio
     async def test_disjoint_outer_source_pin_skips_rescue_without_storage_call(self):
