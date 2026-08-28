@@ -555,6 +555,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # decision below — bailing out here would leave storage open
                 # *and* the barrier held under a shutdown that looked orderly.
                 drain_cancelled = exc
+        # Also before ``close_components``: an FTS rebuild writes through a
+        # *second* writer connection its own worker thread opened, so it is
+        # waited out rather than cancelled — cancelling the awaiting task would
+        # not stop the thread (#2214).
+        fts_settled, fts_cancelled = await hot_reload.settle_fts_rebuild(app)
+        if drain_cancelled is None:
+            drain_cancelled = fts_cancelled
         # Release the barrier only on a *confirmed* storage close (#1936
         # polarity): an unconfirmed close leaves a possibly-open store, which
         # must keep blocking uninstall until this process exits. Default to
@@ -568,10 +575,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # ordering: the kernel frees the flock exactly when the process — and
         # thus storage — is gone. Matches ``AppContext.close``'s no-components
         # default.
+        # An unsettled FTS rebuild denies that confirmation for the same
+        # reason: ``close_components`` can only speak for the connections it
+        # owns, and the rebuild's worker holds one it does not.
         storage_closed = False
         if comp is not None:
             teardown = await close_components(comp)
-            storage_closed = bool(teardown.storage_closed)
+            storage_closed = bool(teardown.storage_closed) and fts_settled
         if barrier is not None:
             if storage_closed:
                 barrier.release()
@@ -591,6 +601,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "dedup_scanner",
                 "summary_regen",
                 "summary_regen_task",
+                "fts_rebuild_task",
+                "fts_rebuild_pending",
                 "llm",
                 "file_watcher",
                 "config_signature",
