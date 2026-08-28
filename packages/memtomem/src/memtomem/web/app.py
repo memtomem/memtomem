@@ -509,7 +509,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.embedder = comp.embedder
         app.state.search_pipeline = comp.search_pipeline
         app.state.index_engine = comp.index_engine
-        app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
+        app.state.dedup_scanner = DedupScanner(
+            comp.storage, comp.embedder, getattr(comp, "generation", None)
+        )
         app.state.summary_regen = None
         app.state.llm = comp.llm
         # Whether this process started without a watcher because the embedding

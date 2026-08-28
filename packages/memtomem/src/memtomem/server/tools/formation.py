@@ -13,6 +13,7 @@ from memtomem.formation import (
     scan_session_candidates,
 )
 from memtomem.pinned import PinnedContextStore
+from memtomem.generation import hold_app_generation
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -154,16 +155,18 @@ async def mem_candidate_evidence(candidate_id: str, top_k: int = 5, ctx: CtxType
     from memtomem.server.formatters import _display_path
     from memtomem.server.tools.search import _resolve_project_context_root
 
-    evidence = await candidate_neighbour_evidence(
-        app.storage,
-        app.embedder,
-        candidate,
-        top_k=top_k,
-        project_context_root=_resolve_project_context_root(app),
-        # Same path formatter mem_search results go through, so this surface
-        # discloses no more than the existing MCP read surface does.
-        display_path=_display_path,
-    )
+    # Reaches the embedder, so it counts into the generation (#2180/#2199).
+    with hold_app_generation(app):
+        evidence = await candidate_neighbour_evidence(
+            app.storage,
+            app.embedder,
+            candidate,
+            top_k=top_k,
+            project_context_root=_resolve_project_context_root(app),
+            # Same path formatter mem_search results go through, so this surface
+            # discloses no more than the existing MCP read surface does.
+            display_path=_display_path,
+        )
     return json.dumps({"ok": True, **evidence}, ensure_ascii=False)
 
 

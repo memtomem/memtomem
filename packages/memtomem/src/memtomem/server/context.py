@@ -543,7 +543,15 @@ class AppContext:
                 if self.register_server_instance:
                     await self._acquire_instance_registration(comp)
 
-                dedup = DedupScanner(storage=comp.storage, embedder=comp.embedder)
+                dedup = DedupScanner(
+                    storage=comp.storage,
+                    embedder=comp.embedder,
+                    # ``getattr``: callers hand in their own ``Components``
+                    # (``from_components``, CLI, focused tests), and a
+                    # stand-in without the field should leave the scanner
+                    # unleased rather than fail construction.
+                    generation=getattr(comp, "generation", None),
+                )
 
                 # Skip background loops in degraded mode (issue #349) — the
                 # watcher/schedulers/watchdog walk the index or re-embed
@@ -1042,7 +1050,11 @@ class AppContext:
         ctx = cls(config=components.config)
         ctx._components = components
         ctx._owns_components = False
-        ctx._dedup_scanner = DedupScanner(storage=components.storage, embedder=components.embedder)
+        ctx._dedup_scanner = DedupScanner(
+            storage=components.storage,
+            embedder=components.embedder,
+            generation=getattr(components, "generation", None),
+        )
         return ctx
 
     async def close(self) -> None:

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from memtomem._settlement import settle_shielded
+from memtomem.generation import hold_components_generation
 
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
@@ -85,17 +86,23 @@ async def warm_models(components: Components) -> list[WarmupOutcome]:
     logs-and-continues, ``mm warmup`` surfaces the error.
     """
     cfg = components.config
-    return [
-        await _warm_one(
-            "embedder", cfg.embedding.provider, cfg.embedding.model, components.embedder
-        ),
-        await _warm_one(
-            "reranker",
-            cfg.rerank.provider,
-            cfg.rerank.model,
-            getattr(components.search_pipeline, "_reranker", None),
-        ),
-    ]
+    # Both targets are read *before* the first await, and the lease is taken
+    # over the same snapshot. ``revert_to_stored`` swaps its new triple onto
+    # this very ``Components`` object (it mutates the container in place), so
+    # reading ``components.search_pipeline`` after warming the embedder could
+    # otherwise hand the second load a pipeline belonging to the *new*
+    # generation while this span still leases the retired one (#2199).
+    embedder = components.embedder
+    reranker = getattr(components.search_pipeline, "_reranker", None)
+    # Warmup forces the *load* of the very embedder a revert may retire, and a
+    # cold ONNX load is the longest span in the process. Leasing it defers the
+    # retired generation's close until the load finishes instead of closing the
+    # embedder mid-load (#2180/#2199); the revert itself still returns at once.
+    with hold_components_generation(components):
+        return [
+            await _warm_one("embedder", cfg.embedding.provider, cfg.embedding.model, embedder),
+            await _warm_one("reranker", cfg.rerank.provider, cfg.rerank.model, reranker),
+        ]
 
 
 def spawn_warmup(ctx: AppContext) -> asyncio.Task[None]:

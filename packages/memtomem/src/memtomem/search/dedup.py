@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from memtomem.generation import ComponentGeneration
 from memtomem.models import Chunk
 
 if TYPE_CHECKING:
@@ -24,9 +25,23 @@ class DedupCandidate:
 
 
 class DedupScanner:
-    def __init__(self, storage: StorageBackend, embedder: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        storage: StorageBackend,
+        embedder: EmbeddingProvider,
+        generation: ComponentGeneration | None = None,
+    ) -> None:
         self._storage = storage
         self._embedder = embedder
+        # The embedder/pipeline/engine generation this scanner belongs to
+        # (#2180/#2199). ``revert_to_stored`` rebuilds the scanner on swap, but
+        # that only redirects the *next* scan — one already running keeps the
+        # embedder it captured here, and a 500-chunk batch embed is not a short
+        # operation. Holding the generation for the scan is what makes the
+        # retired embedder's close wait for it. Left unset (focused tests,
+        # callers with no published generation) it gets a private handle nobody
+        # retires, so the lease is a no-op rather than a crash.
+        self._generation = generation or ComponentGeneration()
 
     # ------------------------------------------------------------------
     # Public API
@@ -44,16 +59,23 @@ class DedupScanner:
         Phase 2 re-embeds up to *max_scan* chunks and queries dense_search.
         Results are sorted: exact duplicates first, then by score descending.
         """
-        all_chunks = await self._get_all_chunks(max_scan)
+        # The whole scan is the operation, not just the batch embed: phase 2
+        # reaches ``self._embedder``, and a lease taken only around that call
+        # would leave a scan that entered before a revert to pick the hold up
+        # after the retired embedder had already closed (#2199).
+        with self._generation.hold():
+            all_chunks = await self._get_all_chunks(max_scan)
 
-        seen: set[frozenset] = set()
-        candidates: list[DedupCandidate] = []
+            seen: set[frozenset] = set()
+            candidates: list[DedupCandidate] = []
 
-        # Phase 1: exact duplicates
-        candidates.extend(self._find_exact_duplicates(all_chunks, seen))
+            # Phase 1: exact duplicates
+            candidates.extend(self._find_exact_duplicates(all_chunks, seen))
 
-        # Phase 2: near duplicates (limited to max_scan chunks)
-        candidates.extend(await self._find_near_duplicates(all_chunks[:max_scan], threshold, seen))
+            # Phase 2: near duplicates (limited to max_scan chunks)
+            candidates.extend(
+                await self._find_near_duplicates(all_chunks[:max_scan], threshold, seen)
+            )
 
         # Exact first, then by score descending
         candidates.sort(key=lambda c: (not c.exact, -c.score))

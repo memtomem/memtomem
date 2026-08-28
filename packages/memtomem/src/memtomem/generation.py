@@ -42,6 +42,41 @@ def _deferred_close_error_cb(task: asyncio.Task) -> None:
         logger.warning("Deferred close of a retired component generation failed: %s", exc)
 
 
+@contextlib.contextmanager
+def hold_components_generation(components: object) -> Iterator[None]:
+    """Pin the generation a ``Components`` publishes, for one span.
+
+    Reads the handle defensively rather than requiring the field: callers hand
+    in their own ``Components`` (``from_components``, the CLI, focused tests),
+    and a stand-in without one should leave the span unleased instead of
+    failing. The ``isinstance`` check is what keeps that tolerance honest — a
+    stand-in whose attributes are auto-created cannot pass a stub off as a real
+    lease and have the hold silently do nothing.
+    """
+    generation = getattr(components, "generation", None)
+    if not isinstance(generation, ComponentGeneration):
+        yield
+        return
+    with generation.hold():
+        yield
+
+
+@contextlib.contextmanager
+def hold_app_generation(app: object) -> Iterator[None]:
+    """Pin the generation an ``AppContext`` has published, for one span.
+
+    Tool call sites reach the embedder through ``app.embedder`` and hand it to
+    helpers that take an embedder, not a generation — so the lease belongs
+    around the *call*, not threaded through the helper (#2199).
+
+    Reads the handle off the app rather than requiring a method on it, so the
+    ad-hoc stand-ins tool tests build keep working; see
+    :func:`hold_components_generation` for the tolerance rule.
+    """
+    with hold_components_generation(getattr(app, "_components", None)):
+        yield
+
+
 class ComponentGeneration:
     """Lease counter for one published embedder/pipeline/engine generation.
 
