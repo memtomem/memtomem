@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import sqlite3
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -270,6 +271,13 @@ class TestSearchMetadataFilters:
         boost-source set through here) must not break the query."""
         included = _make_chunk("shared marker", source="inside.md")
         await storage.upsert_chunks([included])
+
+        # Make the pin real (Codex review): this runtime's default
+        # bound-variable limit is 32766, which would let an ``IN (?,…)``
+        # regression pass at 1201 values — lower the limit below the
+        # input size on every connection the query can run on.
+        for conn in [storage._get_db(), *storage._read_pool]:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
 
         decoys = tuple(f"/nowhere/decoy_{i}.md" for i in range(1200))
         results = await storage.bm25_search(

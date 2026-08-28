@@ -11,6 +11,7 @@ full indexer.
 
 from __future__ import annotations
 
+import sqlite3
 from uuid import UUID, uuid4
 
 import pytest
@@ -235,6 +236,13 @@ class TestGetChunksSharedFromBatch:
             [(str(s), str(t)) for s, t in zip(sources, targets, strict=True)],
         )
         db.commit()
+
+        # Make the pin real (Codex review): this runtime's default
+        # bound-variable limit is 32766, which would let an ``IN (?,…)``
+        # regression pass at 1100 inputs — lower the limit below the
+        # input size on every connection the query can run on.
+        for conn in [backend._get_db(), *backend._read_pool]:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
 
         out = await backend.get_chunks_shared_from_batch(sources)
         assert set(out) == set(sources)
