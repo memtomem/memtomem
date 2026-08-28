@@ -7,9 +7,13 @@ runtime look nonexistent.
 
 Two later attempts were also unsound, and each is pinned below:
 
-* ``mem_search`` tag filters — the pipeline applies the tag filter *after*
-  the ranked candidate pool is capped (CLAUDE.md stage order), so enough
-  higher-ranked wrong-target records still evict the valid one.
+* ``mem_search`` tag filters — resume still must not use them, but the
+  reason changed with #2191. The pipeline used to apply the tag filter
+  *after* the ranked candidate pool was capped, so higher-ranked
+  wrong-target records evicted the valid one outright; the filter now runs
+  at retrieval, and the pin below asserts that. What remains disqualifying
+  is the ordering: search returns the most *relevant* eligible record, not
+  the newest, and its dense leg only sees tags inside its KNN pool.
 * Separate ``handoff`` / ``to-<runtime>`` tags — ``tag_filter`` matches ANY
   of the tags it is given, so ``to-<runtime>,to-any`` also admits
   non-handoff memories that happen to live in this shared namespace.
@@ -298,16 +302,17 @@ async def test_mem_recall_structured_exposes_created_at_and_orders_newest_first(
     assert ids[0] == str(newer.id)
 
 
-async def test_search_applies_tag_filter_after_the_candidate_cap() -> None:
-    """Pin WHY resume does not use ``mem_search``: its tag filter is post-cap.
+async def test_search_applies_tag_filter_before_the_candidate_cap() -> None:
+    """#2191: the tag reaches retrieval, so the cap can no longer evict it.
 
     Driven by mocked retrieval so the outcome depends on the pipeline's
     stage order rather than on which retrieval legs the ambient config
     happens to wire up — an earlier version of this test asserted absence
     against real retrieval and was green file-locally while red in the full
-    suite. Here BM25 returns wrong-target rows ahead of the eligible one;
-    if the tag filter ever moves before the cap, the eligible row survives
-    and this test fails loudly.
+    suite. The BM25 mock applies ``tags_any`` the way the SQL does; without
+    that it would return the wrong-target rows too and the eligible row
+    would fall outside ``top_k`` for the wrong reason, leaving this
+    regression green whatever the pipeline did.
     """
     from memtomem.config import SearchConfig
     from memtomem.models import SearchResult
@@ -323,8 +328,20 @@ async def test_search_applies_tag_filter_after_the_candidate_cap() -> None:
         for rank, chunk in enumerate([*wrong, eligible])
     ]
 
+    bm25_calls: list[object] = []
+
+    async def _bm25(*_args, **kwargs):
+        # Stand in for ``_metadata_filter_sql``: the tag predicate selects
+        # candidates, it does not trim them afterwards.
+        metadata_filter = kwargs.get("metadata_filter")
+        bm25_calls.append(metadata_filter)
+        wanted = set(getattr(metadata_filter, "tags_any", ()) or ())
+        if not wanted:
+            return ranked
+        return [r for r in ranked if wanted & set(r.chunk.metadata.tags)]
+
     storage = AsyncMock()
-    storage.bm25_search = AsyncMock(return_value=ranked)
+    storage.bm25_search = _bm25
     storage.dense_search = AsyncMock(return_value=[])
     storage.increment_access = AsyncMock()
     storage.save_query_history = AsyncMock()
@@ -346,8 +363,14 @@ async def test_search_applies_tag_filter_after_the_candidate_cap() -> None:
         tag_filter="handoff-to-claude-code,handoff-to-any",
     )
 
-    assert eligible.id not in {r.chunk.id for r in results}, (
-        "mem_search filtered before the candidate cap — re-read "
+    assert bm25_calls and bm25_calls[0] is not None, "tag filter never reached retrieval"
+    assert bm25_calls[0].tags_any == (
+        "handoff-to-any",
+        "handoff-to-claude-code",
+    )
+    assert eligible.id in {r.chunk.id for r in results}, (
+        "the tag filter stopped selecting before the candidate cap — resume "
+        "still uses mem_recall for newest-first ordering, but re-read "
         "packages/memtomem-plugin-assets/workflows/handoff.md before "
         "changing this test"
     )

@@ -9,10 +9,11 @@ model's context on every turn, so rationale belongs in the source:
   need one combined tag rather than two tags — the handoff workflow's
   ``handoff-to-<runtime>`` is that shape, because ``handoff,to-<runtime>``
   would also admit non-handoff memories.
-* The filter is applied in SQL *before* ``limit``, unlike ``mem_search``, whose
-  tag filter runs after the ranked candidate pool is capped (the search
-  pipeline's stage order is fixed). That is the difference that lets a caller
-  select "the newest tagged row" from one bounded page.
+* The filter is applied in SQL *before* ``limit``. ``mem_search`` now selects
+  on the same tag before its ranking cap too (#2191), so a tagged match is no
+  longer crowded out of either tool; what still separates them is the
+  ordering — recall pages the newest tagged rows, search ranks by relevance,
+  and search's dense leg can only see tags within its KNN pool.
 """
 
 from __future__ import annotations

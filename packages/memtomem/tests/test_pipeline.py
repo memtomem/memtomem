@@ -1810,7 +1810,7 @@ class TestPipelineEntityBoost:
         )
         pipeline._storage.recall_chunks = AsyncMock(return_value=[r.chunk for r in results_in])
 
-        results, _ = await pipeline.search("", top_k=5, tag_filter=["notes"])
+        results, _ = await pipeline.search("", top_k=5, tag_filter="notes")
 
         # Pin that this really took the filter-only branch, so the assertion
         # below is about that path rather than an empty result set.
@@ -1833,3 +1833,205 @@ class TestPipelineEntityBoost:
 
         _, kwargs = pipeline._storage.get_matching_entities.call_args
         assert kwargs["min_confidence"] == pytest.approx(0.6)
+
+
+def _pipeline_chunk(content: str, source: str, tags: tuple[str, ...] = ()) -> Chunk:
+    return Chunk(
+        content=content,
+        metadata=ChunkMetadata(source_file=Path(f"/tmp/{source}"), tags=tags),
+        id=uuid4(),
+        embedding=[],
+    )
+
+
+class TestTagFilterThreading:
+    """#2191: ``tag_filter`` reaches the retrievers instead of trimming the
+    ranked pool after the cap."""
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+    _make_pipeline = TestScoreScale._make_pipeline
+
+    @staticmethod
+    def _tagged(result: SearchResult, *tags: str) -> SearchResult:
+        import dataclasses
+
+        result.chunk.metadata = dataclasses.replace(result.chunk.metadata, tags=tags)
+        return result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("enable_dense", "apply_rerank"),
+        [(False, False), (True, False), (True, True)],
+        ids=["bm25-only", "hybrid", "hybrid-reranked"],
+    )
+    async def test_both_legs_receive_the_parsed_tags(self, enable_dense, apply_rerank):
+        """Each retriever gets ``tags_any`` — how it honors the field is its
+        own business (SQL for BM25, post-KNN Python for dense), but neither
+        may be handed a silently tags-free filter."""
+        reranker = rerank_config = None
+        if apply_rerank:
+            from memtomem.config import RerankConfig
+
+            reranker = TestRerankCandidatePool._probe_reranker([])
+            rerank_config = RerankConfig(enabled=True)
+
+        hits = [self._tagged(self._make_result(f"c{i}", rank=i + 1), "alpha") for i in range(3)]
+        pipeline = self._make_pipeline(
+            hits,
+            hits if enable_dense else None,
+            enable_dense=enable_dense,
+            reranker=reranker,
+            rerank_config=rerank_config,
+        )
+
+        await pipeline.search("anything", top_k=5, tag_filter=" beta , alpha ,alpha")
+
+        bm25_filter = pipeline._storage.bm25_search.await_args.kwargs["metadata_filter"]
+        assert bm25_filter.tags_any == ("alpha", "beta"), "sorted + de-duplicated"
+        if enable_dense:
+            dense_filter = pipeline._storage.dense_search.await_args.kwargs["metadata_filter"]
+            assert dense_filter.tags_any == ("alpha", "beta")
+
+    @pytest.mark.asyncio
+    async def test_a_tagged_hit_outside_the_old_pool_now_survives(self):
+        """The headline regression, from the pipeline's side.
+
+        Retrieval returns only the tagged row because the filter ran in
+        storage. The old post-rerank filter could not have produced this:
+        it only ever removed rows from a pool already capped at ``top_k``.
+        """
+        tagged = self._tagged(self._make_result("needle", rank=1), "needle")
+        pipeline = self._make_pipeline([tagged])
+
+        results, stats = await pipeline.search("shared", top_k=3, tag_filter="needle")
+
+        assert [r.chunk.content for r in results] == ["needle"]
+        assert stats.fused_total == 1
+
+    @pytest.mark.asyncio
+    async def test_an_untagged_hit_from_a_retriever_is_not_re_filtered(self):
+        """The pipeline no longer second-guesses the retrievers.
+
+        A row that came back from storage is by definition tag-eligible;
+        re-filtering here would just be the old post-cap stage under a new
+        name, and would hide a retriever that ignored the field.
+        """
+        pipeline = self._make_pipeline([self._make_result("untagged", rank=1)])
+
+        results, _ = await pipeline.search("shared", top_k=3, tag_filter="needle")
+
+        assert [r.chunk.content for r in results] == ["untagged"]
+
+    @pytest.mark.asyncio
+    async def test_a_comma_only_tag_filter_is_a_no_op(self):
+        hits = [self._make_result("c0", rank=1)]
+        pipeline = self._make_pipeline(hits)
+
+        results, _ = await pipeline.search("anything", top_k=5, tag_filter=" , ")
+
+        assert pipeline._storage.bm25_search.await_args.kwargs.get("metadata_filter") is None
+        assert [r.chunk.content for r in results] == ["c0"]
+
+    @pytest.mark.asyncio
+    async def test_a_tag_only_search_is_not_recorded_as_a_metadata_filter(self):
+        """The retrieval filter is not the request filter (#2191 review).
+
+        Rebinding one onto the other would make every tag-only query claim
+        ``has_metadata_filter``, and quality runs read that flag to decide
+        whether an observation is replayable.
+        """
+        from unittest.mock import AsyncMock
+
+        pipeline = self._make_pipeline([self._make_result("c0", rank=1)])
+        pipeline._storage.save_search_observation = AsyncMock(return_value="run-1")
+        pipeline._embedder.dimension = 8
+        pipeline._embedder.model_name = "test-model"
+
+        _, stats = await pipeline.search("anything", top_k=5, tag_filter="alpha")
+
+        # The observation write runs off the response path (#2183).
+        await pipeline.flush_observation(stats.query_run_id)
+        observation = pipeline._storage.save_search_observation.call_args.kwargs["observation"]
+        assert observation["filters"]["has_tag_filter"] is True
+        assert observation["filters"]["has_metadata_filter"] is False
+
+    @pytest.mark.asyncio
+    async def test_the_rescue_leg_carries_the_tags_into_both_of_its_legs(self):
+        """The rescue BM25 leg replaces ``source_exact``; ``tags_any`` must
+        survive that replace rather than being dropped on the floor."""
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import SearchConfig, SessionSummaryConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        boost_source = Path("/tmp/boosted.md")
+        rescue_hit = self._tagged(
+            self._make_result("rescued", rank=1, source_file=boost_source), "alpha"
+        )
+        storage = AsyncMock()
+        storage.bm25_search = AsyncMock(return_value=[rescue_hit])
+        storage.dense_search = AsyncMock(return_value=[rescue_hit])
+        storage.increment_access = AsyncMock()
+        storage.save_query_history = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_embeddings_for_chunks = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=True),
+            reranker=None,
+            session_summary_config=SessionSummaryConfig(
+                expansion_lookup_top_k=3, expansion_score_threshold=0.3
+            ),
+        )
+        pipeline._session_summary_boost_sources = AsyncMock(return_value={str(boost_source)})
+
+        await pipeline.search("anything", top_k=5, tag_filter="alpha")
+
+        rescue_bm25 = storage.bm25_search.await_args_list[-1].kwargs["metadata_filter"]
+        assert rescue_bm25.tags_any == ("alpha",)
+        assert rescue_bm25.source_exact  # the leg still pins the boost sources
+        rescue_dense = storage.dense_search.await_args_list[-1].kwargs["metadata_filter"]
+        assert rescue_dense.tags_any == ("alpha",)
+
+    @pytest.mark.asyncio
+    async def test_a_rare_tag_survives_a_crowded_pool_against_real_storage(self, storage):
+        """#2191 end to end, on real SQLite and BM25 — the mocked tests above
+        cannot show this, because the bug was in which rows retrieval was
+        allowed to return.
+
+        The tagged chunk is a weak keyword match under a pile of strong ones
+        and ``top_k`` is smaller than that pile, so the old post-cap filter
+        emptied the result set.
+        """
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        for i in range(8):
+            await storage.upsert_chunks(
+                [_pipeline_chunk(f"caching caching caching tradeoffs {i}", f"decoy{i}.md")]
+            )
+        rare = _pipeline_chunk("caching, briefly", "rare.md", tags=("needle",))
+        await storage.upsert_chunks([rare])
+
+        embedder = AsyncMock()
+        embedder.dimension = 8
+        embedder.model_name = "test-model"
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=False),
+            reranker=None,
+        )
+
+        results, _ = await pipeline.search("caching", top_k=3, tag_filter="needle")
+
+        assert [r.chunk.id for r in results] == [rare.id], (
+            "the tagged chunk ranked outside the candidate cap and was lost"
+        )
