@@ -778,7 +778,7 @@ async def mem_context_generate(
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
     if "settings" in inc:
-        from memtomem.context.settings import generate_all_settings
+        from memtomem.context.settings import generate_all_settings, pinned_host_homes
 
         # Resolve settings scope lazily: _resolve_mcp_scope builds
         # Mem2MemConfig and applies env/file overrides, which can fail
@@ -787,10 +787,18 @@ async def mem_context_generate(
         settings_scope = _resolve_mcp_scope(scope.strip() or None)
         # Surface cross-tier duplicate-hook warnings, matching the CLI
         # ``_print_settings_generate`` which prints them before the results.
-        results.extend(_settings_dup_tier_warnings(root, settings_scope))
-        settings_results = await asyncio.to_thread(
-            generate_all_settings, root, scope=settings_scope, allow_host_writes=allow_host_writes
-        )
+        # Pin the host homes across the duplicate warnings and the hand-off:
+        # ``asyncio.to_thread`` copies this context into the worker, so a
+        # worker that outlives this call still writes to the homes resolved
+        # here rather than to whatever ``$HOME`` says when it lands (#2211).
+        with pinned_host_homes():
+            results.extend(_settings_dup_tier_warnings(root, settings_scope))
+            settings_results = await asyncio.to_thread(
+                generate_all_settings,
+                root,
+                scope=settings_scope,
+                allow_host_writes=allow_host_writes,
+            )
         # Settings reasons embed absolute ``canonical_path`` / ``target_path``
         # values (context/settings.py f-strings), and the ok-row target is an
         # absolute path (``$HOME`` for user scope) — same MCP wire boundary as
@@ -1137,7 +1145,7 @@ async def mem_context_sync(
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
     if "settings" in inc:
-        from memtomem.context.settings import generate_all_settings
+        from memtomem.context.settings import generate_all_settings, pinned_host_homes
 
         # Resolve settings scope lazily (see mem_context_generate note):
         # _resolve_mcp_scope builds Mem2MemConfig and applies env/file
@@ -1146,10 +1154,18 @@ async def mem_context_sync(
         settings_scope = _resolve_mcp_scope(scope.strip() or None)
         # Surface cross-tier duplicate-hook warnings, matching the CLI
         # ``_print_settings_generate`` which prints them before the results.
-        results.extend(_settings_dup_tier_warnings(root, settings_scope))
-        settings_results = await asyncio.to_thread(
-            generate_all_settings, root, scope=settings_scope, allow_host_writes=allow_host_writes
-        )
+        # Pin the host homes across the duplicate warnings and the hand-off:
+        # ``asyncio.to_thread`` copies this context into the worker, so a
+        # worker that outlives this call still writes to the homes resolved
+        # here rather than to whatever ``$HOME`` says when it lands (#2211).
+        with pinned_host_homes():
+            results.extend(_settings_dup_tier_warnings(root, settings_scope))
+            settings_results = await asyncio.to_thread(
+                generate_all_settings,
+                root,
+                scope=settings_scope,
+                allow_host_writes=allow_host_writes,
+            )
         # Same MCP wire-boundary redaction as the generate settings loop —
         # reasons embed absolute canonical/target paths, the ok-row target is
         # absolute (``$HOME`` for user scope).

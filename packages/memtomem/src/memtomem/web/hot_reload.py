@@ -52,8 +52,8 @@ from memtomem.config_signature import (
     get_config_mtime_ns as _get_config_mtime_ns,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
+from memtomem._settlement import settle_shielded_result
 from memtomem.search.reranker.base import close_reranker_safely
-from memtomem.server.background import track_task
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -63,8 +63,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Strong references to FTS rebuilds started without an app to hang them on.
-_BG_TASKS: set[asyncio.Task] = set()
+# How long teardown waits for an in-flight FTS rebuild to settle. The rebuild
+# streams in batches, so this bounds a shutdown behind a large corpus rather
+# than the whole rebuild: on expiry the lifespan warns and treats the storage
+# close as unconfirmed (see ``settle_fts_rebuild``).
+FTS_SETTLE_TIMEOUT_S = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -259,8 +262,8 @@ async def apply_runtime_config_changes(
 ) -> None:
     """Propagate runtime-mutable config changes to live components.
 
-    * ``search.tokenizer`` changed → re-register global tokenizer + schedule
-      ``storage.rebuild_fts()`` (async, fire-and-forget on current loop).
+    * ``search.tokenizer`` changed → re-register global tokenizer + run
+      ``storage.rebuild_fts()`` (backgrounded when there is an ``app``).
     * ``rerank`` changed → rebuild the live reranker attached to the search
       pipeline.
     * ``embedding.onnx_batch_size`` changed → publish it to the live ONNX
@@ -273,9 +276,10 @@ async def apply_runtime_config_changes(
 
     ``app`` is optional: when provided, the FTS rebuild is tracked on
     ``app.state.fts_rebuild_task`` so back-to-back tokenizer changes coalesce
-    (issue #278) instead of spawning overlapping rebuilds. When omitted, the
-    rebuild is fire-and-forget without coalescing — preserved for non-web
-    callers and focused unit tests.
+    (issue #278) instead of spawning overlapping rebuilds, and the lifespan can
+    settle that handle at shutdown. When omitted there is nothing that could
+    settle it, so the rebuild runs inline and this call does not return until it
+    finishes (#2214) — non-web callers and focused unit tests.
     """
     try:
         tokenizer_changed = old_cfg.search.tokenizer != new_cfg.search.tokenizer
@@ -295,7 +299,7 @@ async def apply_runtime_config_changes(
         from memtomem.storage.fts_tokenizer import set_tokenizer
 
         set_tokenizer(new_cfg.search.tokenizer)
-        _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
+        await _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
 
     if search_pipeline is not None:
         await _sync_reranker(old_cfg, new_cfg, search_pipeline, app=app)
@@ -383,18 +387,13 @@ async def _close_reranker_safely(reranker: object) -> None:
     await close_reranker_safely(reranker)
 
 
-def _schedule_fts_rebuild(
+async def _schedule_fts_rebuild(
     storage: SqliteBackend,
     tokenizer: str,
     *,
     app: FastAPI | None = None,
 ) -> None:
-    """Kick off ``storage.rebuild_fts()`` as a background task if possible.
-
-    When called from an async request handler the rebuild runs on the current
-    loop; when called from a sync context without a running loop, it falls
-    back to ``asyncio.run`` so non-web callers (tests, future CLIs) still
-    work.
+    """Run ``storage.rebuild_fts()``, in the background when there is an app.
 
     When ``app`` is provided, enforces a per-app singleton: at most one
     rebuild task runs at a time (tracked on ``app.state.fts_rebuild_task``).
@@ -402,7 +401,16 @@ def _schedule_fts_rebuild(
     tokenizer on ``app.state.fts_rebuild_pending`` — the running task picks
     it up and runs one follow-up rebuild once the current pass completes.
     Rapid back-to-back changes therefore collapse to at most two sequential
-    rebuilds (issue #278).
+    rebuilds (issue #278). Teardown settles that handle via
+    :func:`settle_fts_rebuild`.
+
+    Without an ``app`` there is nowhere to hang the handle and so nothing that
+    can settle it at shutdown, and the rebuild's worker thread opens *its own*
+    writer connection — a background task there would keep writing through a
+    file the process is closing, with no way to wait for it (#2214). So that
+    path runs the rebuild inline instead: the caller's await *is* the
+    settlement. Only the web hot-reload passes an app; this branch is for
+    focused tests and non-web callers.
     """
 
     async def _run_one(target: str) -> None:
@@ -412,19 +420,11 @@ def _schedule_fts_rebuild(
         except Exception:
             logger.warning("FTS rebuild after tokenizer change failed", exc_info=True)
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(_run_one(tokenizer))
-        return
-
     if app is None:
-        # No app.state to hang the handle on, so a module-level set keeps the
-        # strong reference ``create_task`` does not: an untracked task can be
-        # garbage-collected mid-rebuild (#2185).
-        track_task(loop.create_task(_run_one(tokenizer), name="memtomem-fts-rebuild"), _BG_TASKS)
+        await _run_one(tokenizer)
         return
 
+    loop = asyncio.get_running_loop()
     in_flight = getattr(app.state, "fts_rebuild_task", None)
     if in_flight is not None and not in_flight.done():
         app.state.fts_rebuild_pending = tokenizer
@@ -443,4 +443,50 @@ def _schedule_fts_rebuild(
             logger.info("FTS rebuild coalesce: running with pending tokenizer=%s", current)
 
     app.state.fts_rebuild_pending = None
-    app.state.fts_rebuild_task = loop.create_task(_run_with_coalesce())
+    app.state.fts_rebuild_task = loop.create_task(_run_with_coalesce(), name="memtomem-fts-rebuild")
+
+
+async def settle_fts_rebuild(
+    app: FastAPI, *, timeout: float | None = None
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """Wait for an in-flight FTS rebuild to finish. Returns ``(settled, cancelled)``.
+
+    Cancelling is *not* the tool here. ``SqliteBackend.rebuild_fts`` does its
+    work in ``asyncio.to_thread`` and the worker opens its own writer
+    connection against the same SQLite file, so cancelling the awaiting task
+    would leave the thread writing anyway — through a store that
+    ``close_components`` is about to close. The rebuild is waited out instead;
+    ``asyncio.wait`` is what makes that a wait rather than a cancel.
+
+    "Settled" means the *coalescing loop* returned, not that one pass
+    finished: a queued follow-up pass writes through the same connection.
+
+    ``timeout`` bounds the wait (``None`` resolves to
+    :data:`FTS_SETTLE_TIMEOUT_S` *at call time*, so tests can patch the
+    constant), and a caller that gets ``settled=False`` must treat the storage
+    close as unconfirmed — a worker still writing is exactly the state #1936's
+    barrier polarity refuses to release on. The caught cancellation is handed
+    back rather than raised so the caller can order its remaining teardown
+    before propagating it.
+
+    A *cancelled* rebuild counts as unsettled, not as finished. Cancellation
+    ends the asyncio task while leaving its ``to_thread`` worker running, which
+    is the precise state this function exists to refuse to confirm.
+    """
+    timeout = FTS_SETTLE_TIMEOUT_S if timeout is None else timeout
+    task = getattr(app.state, "fts_rebuild_task", None)
+    if task is None:
+        return True, None
+    if task.done():
+        return not task.cancelled(), None
+    waiter = asyncio.ensure_future(asyncio.wait({task}, timeout=timeout))
+    result, cancelled = await settle_shielded_result(waiter, what="FTS rebuild settle")
+    timed_out = not (isinstance(result, tuple) and not result[1])
+    settled = not timed_out and not task.cancelled()
+    if timed_out:
+        logger.warning(
+            "FTS rebuild did not settle within %.0fs; its worker may still be writing", timeout
+        )
+    elif not settled:
+        logger.warning("FTS rebuild was cancelled; its worker may still be writing")
+    return settled, cancelled

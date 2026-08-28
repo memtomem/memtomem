@@ -1228,7 +1228,7 @@ class TestScheduleFtsRebuildCoalescing:
         app = self._make_app()
 
         # First call → starts a real task (gated).
-        _hot_reload._schedule_fts_rebuild(storage, "unicode61", app=app)
+        await _hot_reload._schedule_fts_rebuild(storage, "unicode61", app=app)
         await asyncio.sleep(0)  # let task start + enter wait()
 
         first_task = app.state.fts_rebuild_task
@@ -1236,12 +1236,12 @@ class TestScheduleFtsRebuildCoalescing:
         assert not first_task.done()
 
         # Second call lands while first is in flight → should coalesce.
-        _hot_reload._schedule_fts_rebuild(storage, "kiwipiepy", app=app)
+        await _hot_reload._schedule_fts_rebuild(storage, "kiwipiepy", app=app)
         assert app.state.fts_rebuild_task is first_task, "must not replace in-flight task"
         assert app.state.fts_rebuild_pending == "kiwipiepy"
 
         # Third call also coalesces — overwriting pending with the latest.
-        _hot_reload._schedule_fts_rebuild(storage, "unicode61", app=app)
+        await _hot_reload._schedule_fts_rebuild(storage, "unicode61", app=app)
         assert app.state.fts_rebuild_task is first_task
         assert app.state.fts_rebuild_pending == "unicode61"
 
@@ -1271,7 +1271,7 @@ class TestScheduleFtsRebuildCoalescing:
         app = self._make_app()
 
         for tok in ("a", "b", "c", "d"):
-            _hot_reload._schedule_fts_rebuild(storage, tok, app=app)
+            await _hot_reload._schedule_fts_rebuild(storage, tok, app=app)
             await asyncio.sleep(0)
 
         # Wait for the running task chain to complete.
@@ -1301,36 +1301,100 @@ class TestScheduleFtsRebuildCoalescing:
 
         app = self._make_app()
 
-        _hot_reload._schedule_fts_rebuild(storage, "a", app=app)
+        await _hot_reload._schedule_fts_rebuild(storage, "a", app=app)
         await asyncio.wait_for(app.state.fts_rebuild_task, timeout=1.0)
         assert count == 1
         first_task = app.state.fts_rebuild_task
 
-        _hot_reload._schedule_fts_rebuild(storage, "b", app=app)
+        await _hot_reload._schedule_fts_rebuild(storage, "b", app=app)
         await asyncio.wait_for(app.state.fts_rebuild_task, timeout=1.0)
         assert count == 2
         assert app.state.fts_rebuild_task is not first_task
 
-    async def test_legacy_call_without_app_preserves_fire_and_forget(self):
-        """Callers that don't pass ``app`` still get the old non-tracked behavior."""
+    async def test_settle_treats_a_cancelled_rebuild_as_unsettled(self):
+        """Cancellation ends the task but not its worker thread (#2214).
+
+        ``rebuild_fts`` runs in ``asyncio.to_thread`` through a connection the
+        worker opened itself, so a cancelled task is precisely the state that
+        must *not* be reported as settled — reporting it would release the
+        lifecycle barrier over a store still being written.
+        """
+        app = self._make_app()
+
+        async def _rebuild() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_rebuild())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        app.state.fts_rebuild_task = task
+
+        settled, cancelled = await _hot_reload.settle_fts_rebuild(app)
+        assert settled is False, "a cancelled rebuild is not a settled one"
+        assert cancelled is None
+
+    async def test_settle_returns_true_when_the_rebuild_finished(self):
+        app = self._make_app()
+
+        async def _rebuild() -> None:
+            return None
+
+        task = asyncio.create_task(_rebuild())
+        await task
+        app.state.fts_rebuild_task = task
+
+        assert await _hot_reload.settle_fts_rebuild(app) == (True, None)
+
+    async def test_settle_times_out_without_cancelling_the_rebuild(self):
+        """On expiry the rebuild is left alone — cancelling it would not stop
+        the worker thread, and the caller downgrades the close instead."""
+        app = self._make_app()
+        started = asyncio.Event()
+
+        async def _rebuild() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_rebuild())
+        await started.wait()
+        app.state.fts_rebuild_task = task
+        try:
+            settled, cancelled = await _hot_reload.settle_fts_rebuild(app, timeout=0.01)
+            assert settled is False
+            assert cancelled is None
+            assert not task.cancelled(), "settling must wait, never cancel"
+            assert not task.done()
+        finally:
+            task.cancel()
+
+    async def test_call_without_app_runs_inline(self):
+        """No app means no handle to settle at shutdown, so it runs inline (#2214).
+
+        The rebuild's worker thread opens its own writer connection, so a
+        background task nobody can await would keep writing through a closing
+        store. Without an ``app`` the caller's own await is the settlement —
+        each call has finished by the time it returns.
+        """
         calls = []
+        finished = []
 
         async def _rebuild():
             calls.append(1)
+            await asyncio.sleep(0)  # a real rebuild yields; make that visible
+            finished.append(1)
             return 0
 
         storage = AsyncMock()
         storage.rebuild_fts = _rebuild
 
-        _hot_reload._schedule_fts_rebuild(storage, "x")
-        _hot_reload._schedule_fts_rebuild(storage, "y")
-        # Let both scheduled tasks run.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        await _hot_reload._schedule_fts_rebuild(storage, "x")
+        assert finished == [1], "the rebuild must be complete when the call returns"
+        await _hot_reload._schedule_fts_rebuild(storage, "y")
 
-        # Without coalescing both run — acceptable as legacy behavior.
+        # Still no coalescing on this path: both requested rebuilds run.
         assert len(calls) == 2
+        assert not _hot_reload.__dict__.get("_BG_TASKS"), "no untracked task set should remain"
 
 
 # ---------------------------------------------------------------------------
