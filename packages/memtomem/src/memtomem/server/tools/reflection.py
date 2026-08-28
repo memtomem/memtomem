@@ -69,6 +69,10 @@ async def mem_reflect(
         lines.append("")
 
     # 4. Knowledge gaps (queries with no results)
+    # Zero-result searches are exactly what this section counts, and their
+    # history rows are written in the background (#2183) — settle them so a
+    # reflection run right after a failed search sees it.
+    await app.search_pipeline.flush_observation()
     gaps = await storage.get_knowledge_gaps(limit=min(limit, 10))
     if gaps:
         lines.append("### Knowledge Gaps (frequent queries with no results)")

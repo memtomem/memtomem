@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from unittest.mock import AsyncMock
+from unittest.mock import DEFAULT, AsyncMock
 
 from memtomem.errors import FeedbackConflictError
 from memtomem.web.app import create_app
@@ -60,9 +60,22 @@ FEEDBACK_ROW = {
 @pytest.fixture
 def app():
     application = create_app(lifespan=None, mode="dev")
+    # Every handler settles in-flight observation writes before reading, so
+    # a run this process just answered is never missing (#2183). The order is
+    # recorded here because a flush *after* the read would look identical in
+    # a mock-based test while 404-ing in production.
+    call_order: list[str] = []
+
+    def _record(name: str):
+        def side_effect(*args, **kwargs):
+            call_order.append(name)
+            return DEFAULT
+
+        return side_effect
+
     storage = AsyncMock()
-    storage.get_search_runs = AsyncMock(return_value=[RUN_SUMMARY])
-    storage.get_search_run = AsyncMock(return_value=RUN_DETAIL)
+    storage.get_search_runs = AsyncMock(return_value=[RUN_SUMMARY], side_effect=_record("storage"))
+    storage.get_search_run = AsyncMock(return_value=RUN_DETAIL, side_effect=_record("storage"))
     storage.get_search_feedback = AsyncMock(
         return_value=[
             {
@@ -71,10 +84,17 @@ def app():
                 "created_at": "2026-07-17T00:00:00.000001+00:00",
                 "updated_at": "2026-07-17T00:00:00.000002+00:00",
             }
-        ]
+        ],
+        side_effect=_record("storage"),
     )
-    storage.save_search_feedback = AsyncMock(return_value=FEEDBACK_ROW)
+    storage.save_search_feedback = AsyncMock(
+        return_value=FEEDBACK_ROW, side_effect=_record("storage")
+    )
+    pipeline = AsyncMock()
+    pipeline.flush_observation = AsyncMock(side_effect=_record("flush"))
     application.state.storage = storage
+    application.state.search_pipeline = pipeline
+    application.state.call_order = call_order
     return application
 
 
@@ -221,3 +241,32 @@ class TestDevOnlyPin:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.request(method, path, json={"chunk_id": "c1", "judgment": "relevant"})
         assert resp.status_code == 404
+
+
+class TestObservationFlush:
+    """#2183: the search path returns its run ID before the row commits.
+
+    Each handler must settle the pending write *before* it reads, or a run
+    the same process just answered 404s from its own detail endpoint.
+    """
+
+    async def test_list_flushes_all_pending_before_reading(self, app, client):
+        resp = await client.get("/api/search/runs")
+        assert resp.status_code == 200
+        app.state.search_pipeline.flush_observation.assert_awaited_once_with()
+        assert app.state.call_order[0] == "flush"
+
+    async def test_detail_flushes_its_run_before_reading(self, app, client):
+        resp = await client.get(f"/api/search/runs/{RUN_ID}")
+        assert resp.status_code == 200
+        app.state.search_pipeline.flush_observation.assert_awaited_once_with(RUN_ID)
+        assert app.state.call_order[0] == "flush"
+
+    async def test_feedback_flushes_its_run_before_writing(self, app, client):
+        resp = await client.post(
+            f"/api/search/runs/{RUN_ID}/feedback",
+            json={"chunk_id": "c1", "judgment": "relevant"},
+        )
+        assert resp.status_code == 200
+        app.state.search_pipeline.flush_observation.assert_awaited_once_with(RUN_ID)
+        assert app.state.call_order == ["flush", "storage"]

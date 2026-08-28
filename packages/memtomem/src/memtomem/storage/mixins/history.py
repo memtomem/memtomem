@@ -90,11 +90,18 @@ class HistoryMixin:
         observation: dict,
         result_snapshot: list[dict],
     ) -> str:
-        """Persist one ranked-search invocation and return its durable run ID.
+        """Persist one ranked-search invocation and return its run ID.
 
         This is intentionally separate from ``save_query_history`` so storage
         backends that only implement the legacy history contract remain usable.
-        The pipeline advertises a run ID only after this local commit succeeds.
+
+        The run ID is minted by the caller, and since #2183 the pipeline
+        advertises it before this commit and runs the call in the background —
+        so this method (and the periodic prune below it) is off the search
+        response path, and a run ID can be in a caller's hands before its row
+        exists. ``SearchPipeline.flush_observation`` is how a reader that needs
+        the row waits for it; a write that fails leaves the ID unresolvable,
+        and feedback on it is rejected by the ``run_id`` foreign key.
         """
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
