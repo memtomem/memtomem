@@ -41,11 +41,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import logging
 import math
 import time
 from collections.abc import Callable, Iterator
+from functools import lru_cache
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -124,6 +126,29 @@ def _log_mmr_no_dense_once() -> None:
         "retrieval is off (search.enable_dense=False) — MMR is skipped. "
         "mem_status reports this as a `mmr_disabled_no_dense` warning.",
     )
+
+
+@lru_cache(maxsize=32)
+def _signature_accepts_created_at(func: Callable) -> bool:
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        # Un-introspectable callable (some builtins, exotic proxies): assume
+        # the older contract, which only costs a drain-time timestamp.
+        return False
+    if "created_at" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _saver_takes_created_at(saver: Callable) -> bool:
+    """Whether an observation saver accepts the #2183 ``created_at`` keyword.
+
+    Cached on the underlying function, not the bound method: a bound method is
+    a fresh object per attribute access, so caching on it would grow without
+    bound and never hit.
+    """
+    return _signature_accepts_created_at(getattr(saver, "__func__", saver))
 
 
 def _bg_task_error_cb(task: asyncio.Task) -> None:
@@ -612,6 +637,19 @@ class SearchPipeline:
         result_ids = [str(result.chunk.id) for result in results[:top_k]]
         result_scores = [result.score for result in results[:top_k]]
         embedding_snapshot = list(query_embedding)
+        # Stamped here, not in the writer: history is ordered and filtered on
+        # created_at, so a backlogged or retried write must still say when the
+        # search actually ran. Stamps are second-precision and the listing
+        # breaks ties on insertion id, so this pins chronology to the second —
+        # two searches inside one second can still be listed in the order their
+        # writes drained.
+        created_at = datetime.now(UTC).isoformat(timespec="seconds")
+        # ``save_search_observation`` is a duck-typed capability, not an ABC
+        # method (see the probe above), so a backend may implement the
+        # pre-#2183 signature. Passing an unknown keyword would TypeError
+        # inside the background task and strand the run ID; such a backend
+        # simply keeps stamping the write itself, as it did before.
+        extra_kwargs = {"created_at": created_at} if _saver_takes_created_at(saver) else {}
 
         async def _persist() -> None:
             try:
@@ -625,6 +663,7 @@ class SearchPipeline:
                             run_id=run_id,
                             observation=observation,
                             result_snapshot=result_snapshot,
+                            **extra_kwargs,
                         )
                         return
                     except TransactionOwnedError:

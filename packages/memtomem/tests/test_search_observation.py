@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -542,3 +543,97 @@ async def test_reflection_sees_the_zero_result_search_it_just_answered(bm25_only
     report = await mem_reflect(ctx=ctx)  # type: ignore[arg-type]
 
     assert "term-that-does-not-exist-xyz" in report
+
+
+async def test_created_at_records_the_search_not_the_write(bm25_only_components, monkeypatch):
+    """History is ordered and ``since``-filtered on ``created_at`` (#2183).
+
+    The write is backlogged and may retry, so stamping it inside the writer
+    would order runs by when the queue drained rather than when they ran.
+    """
+    components, memory_dir = bm25_only_components
+    await _index_quality_note(components, memory_dir)
+
+    # A controlled clock, not a time window: a drain-time stamp usually lands
+    # in the same second as the search, so a window assertion would pass even
+    # if the pipeline stopped stamping. Here the two times cannot collide.
+    search_time = datetime(2031, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+    class FrozenAtSearch:
+        @staticmethod
+        def now(tz=None):
+            return search_time
+
+    monkeypatch.setattr("memtomem.search.pipeline.datetime", FrozenAtSearch)
+
+    gate = asyncio.Event()
+    real_save = components.storage.save_search_observation
+
+    async def gated_save(*args, **kwargs):
+        await gate.wait()
+        return await real_save(*args, **kwargs)
+
+    monkeypatch.setattr(components.storage, "save_search_observation", gated_save)
+
+    _, stats = await components.search_pipeline.search("telemetry", origin="web")
+
+    gate.set()
+    await components.search_pipeline.flush_observation(stats.query_run_id)
+
+    row = await components.storage.get_search_run(stats.query_run_id)
+    assert row["created_at"] == search_time.isoformat(timespec="seconds")
+
+
+async def test_backend_on_the_old_saver_signature_still_works(bm25_only_components):
+    """``save_search_observation`` is duck-typed, not an ABC method (#2183).
+
+    A backend written against the pre-``created_at`` signature must keep
+    working — passing it an unknown keyword would raise inside the background
+    task and strand the run ID it had already handed out.
+    """
+    components, memory_dir = bm25_only_components
+    await _index_quality_note(components, memory_dir)
+    delegate = components.storage
+    received: list[dict] = []
+
+    class OldSignatureBackend:
+        def __init__(self, inner):
+            self._inner = inner
+
+        async def save_search_observation(
+            self,
+            query_text,
+            query_embedding,
+            result_chunk_ids,
+            result_scores,
+            *,
+            run_id,
+            observation,
+            result_snapshot,
+        ):
+            received.append({"run_id": run_id})
+            return await self._inner.save_search_observation(
+                query_text,
+                query_embedding,
+                result_chunk_ids,
+                result_scores,
+                run_id=run_id,
+                observation=observation,
+                result_snapshot=result_snapshot,
+            )
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    pipeline = SearchPipeline(
+        storage=OldSignatureBackend(delegate),  # type: ignore[arg-type]
+        embedder=components.embedder,
+        config=components.config.search,
+    )
+
+    _, stats = await pipeline.search("telemetry", origin="internal")
+    await pipeline.flush_observation(stats.query_run_id)
+
+    assert received == [{"run_id": stats.query_run_id}]
+    row = await delegate.get_search_run(stats.query_run_id)
+    assert row["run_id"] == stats.query_run_id
