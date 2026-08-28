@@ -215,9 +215,13 @@ def _metadata_filter_sql(
     conditions: list[str] = []
     params: list[object] = []
     if metadata_filter.source_exact:
+        # ``json_each`` over one bound JSON array, not ``IN (?,?,…)`` — the
+        # rescue leg can push a whole boost-source set through here (#2184)
+        # and an IN-list would blow past SQLite's bound-variable limit on a
+        # large set. Mirrors ``_chunk_ids_sql`` above.
         values = [norm_path(Path(value)) for value in metadata_filter.source_exact]
-        conditions.append(f"{column_alias}source_file IN ({placeholders(len(values))})")
-        params.extend(values)
+        conditions.append(f"{column_alias}source_file IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(values))
     if metadata_filter.chunk_types:
         conditions.append(
             f"{column_alias}chunk_type IN ({placeholders(len(metadata_filter.chunk_types))})"

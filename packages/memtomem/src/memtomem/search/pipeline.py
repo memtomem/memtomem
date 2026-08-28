@@ -10,11 +10,13 @@ expansion.
 Stage 1 enrichment (session-summary rescue, RFC P1 Phase C): between
 retrieval and fusion, when ``namespace is None`` and a
 ``SessionSummaryConfig`` with ``expansion_lookup_top_k > 0`` is wired,
-an ``archive:session:*`` summary lookup + ``summarizes`` chunk-links
-walk builds a boost-source set and a retrieval restricted to those
-sources joins RRF as a third input list weighted by
-``expansion_rescue_weight``. Failures degrade to two-leg fusion (loud
-once — see ``_log_rescue_failure``).
+an ``archive:session:*`` summary lookup + one batched ``summarizes``
+chunk-links walk builds a boost-source set and a retrieval restricted
+to those sources joins RRF as a third input list weighted by
+``expansion_rescue_weight`` (#2184: the BM25 leg pushes the restriction
+into storage SQL via ``SearchMetadataFilter.source_exact``; the dense
+leg post-filters in Python — see ``_rescue_retrieval``). Failures
+degrade to two-leg fusion (loud once — see ``_log_rescue_failure``).
 
 The scope-context filter is applied **at the BM25 + dense storage
 calls** (not as a post-fusion stage) because the SQL fragment is the
@@ -902,10 +904,11 @@ class SearchPipeline:
         """Stage-1 enrichment lookup against ``archive:session:*``.
 
         Runs a small BM25 lookup against the session-summary namespace
-        (top-k = ``expansion_lookup_top_k``) and, for each hit above
-        ``expansion_score_threshold``, follows ``chunk_links`` of type
-        ``"summarizes"`` from the summary chunk back to the source
-        chunks it summarized. The set of source files spanned by those
+        (top-k = ``expansion_lookup_top_k``) and, in one batched
+        ``chunk_links`` walk over every hit above
+        ``expansion_score_threshold``, follows links of type
+        ``"summarizes"`` from the summary chunks back to the source
+        chunks they summarized. The set of source files spanned by those
         chunks becomes the boost-sources list.
 
         ADR-0011 PR-D review: ``scope_filter`` / ``project_context_root``
@@ -945,25 +948,26 @@ class SearchPipeline:
         if not candidate_summaries:
             return set()
 
-        # For each above-threshold summary, walk chunk_links(summarizes)
-        # to reach the original source chunks, then collect their
-        # source_file paths. Failures on any one summary are logged and
-        # skipped — we never let a single bad summary mute the rescue.
-        target_chunk_ids: list[UUID] = []
-        for r in candidate_summaries:
-            try:
-                links = await self._storage.get_chunks_shared_from(
-                    r.chunk.id, link_type="summarizes"
-                )
-            except Exception:
-                _log_rescue_failure(
-                    "links_walk", "get_chunks_shared_from failed for summary %s", r.chunk.id
-                )
-                if report_failure is not None:
-                    report_failure()
-                continue
-            for link in links:
-                target_chunk_ids.append(link.target_id)
+        # Walk chunk_links(summarizes) for every above-threshold summary
+        # in one batched query (#2184) to reach the original source
+        # chunks, then collect their source_file paths. The batch is
+        # all-or-nothing: a SQLite failure on the statement would fail
+        # every summary identically, so per-summary isolation bought
+        # nothing — on failure, log loudly and degrade to organic.
+        try:
+            links_by_source = await self._storage.get_chunks_shared_from_batch(
+                [r.chunk.id for r in candidate_summaries], link_type="summarizes"
+            )
+        except Exception:
+            _log_rescue_failure(
+                "links_walk",
+                "get_chunks_shared_from_batch failed for %d summaries",
+                len(candidate_summaries),
+            )
+            if report_failure is not None:
+                report_failure()
+            return set()
+        target_chunk_ids = [link.target_id for links in links_by_source.values() for link in links]
 
         if not target_chunk_ids:
             return set()
@@ -994,11 +998,24 @@ class SearchPipeline:
     ) -> list[SearchResult]:
         """Parallel BM25+dense retrieval restricted to boost_sources.
 
-        Runs unrestricted retrievals and post-filters by source_file
-        membership rather than threading a new parameter through the
-        storage primitives — keeps ``bm25_search`` / ``dense_search``
-        signatures clean. The leg is merged into RRF as a third input
-        list, weighted by ``expansion_rescue_weight``.
+        The BM25 leg pushes the source restriction into storage SQL via
+        the existing ``SearchMetadataFilter.source_exact`` field (#2184):
+        no new storage parameter, and the FTS candidate selection stops
+        fetching rows that would be discarded. When the outer
+        ``metadata_filter`` already pins sources, the leg runs on the
+        intersection (normalized on both sides) and returns nothing when
+        that intersection is empty — an outer source pin disjoint from
+        the boost set is a valid "no rescue", not a failure.
+
+        The dense leg deliberately stays unrestricted + Python
+        post-filtered: ``dense_search`` reacts to a selective metadata
+        filter by adaptively escalating its inner KNN K up to a full
+        vector-table scan, so pushing a sparse boost-source set into it
+        would trade one bounded KNN for up to three escalating passes
+        (Codex design review). Revisit with a rowid-restricted KNN.
+
+        The leg is merged into RRF as a third input list, weighted by
+        ``expansion_rescue_weight``.
 
         ADR-0011 PR-D review: scope context is threaded through so the
         rescue legs honor the same always-on scope filter the primary
@@ -1008,10 +1025,22 @@ class SearchPipeline:
         """
         if not boost_sources:
             return []
-        # Cast a slightly wider net so source filtering still leaves a
-        # useful candidate pool. Bounded by existing candidate caps.
+        normalized_boost = {norm_path(Path(s)) for s in boost_sources}
+        if metadata_filter is not None and metadata_filter.source_exact:
+            outer_norm = {norm_path(Path(v)) for v in metadata_filter.source_exact}
+            allowed_sources = outer_norm & normalized_boost
+            if not allowed_sources:
+                return []
+        else:
+            allowed_sources = normalized_boost
+        base_filter = metadata_filter if metadata_filter is not None else SearchMetadataFilter()
+        # Sorted for deterministic SQL params (replay stability); outer
+        # chunk_type / created_* bounds survive the replace.
+        bm25_filter = dataclass_replace(base_filter, source_exact=tuple(sorted(allowed_sources)))
+        # Headroom for RRF and downstream validity/decay/MMR attrition.
+        # Bounded by existing candidate caps.
         oversample = max(top_k, self._config.bm25_candidates)
-        metadata_kwargs = (
+        dense_metadata_kwargs = (
             {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
         )
 
@@ -1019,20 +1048,19 @@ class SearchPipeline:
             if not use_bm25:
                 return []
             try:
-                hits = await self._storage.bm25_search(
+                return await self._storage.bm25_search(
                     query,
                     top_k=oversample,
                     namespace_filter=None,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
-                    **metadata_kwargs,
+                    metadata_filter=bm25_filter,
                 )
             except Exception:
                 _log_rescue_failure("bm25_leg", "rescue bm25 leg failed")
                 if report_failure is not None:
                     report_failure()
                 return []
-            return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
 
         async def _dense_leg() -> list[SearchResult]:
             if not use_dense or not query_embedding:
@@ -1045,7 +1073,7 @@ class SearchPipeline:
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
                     exhaustive=exhaustive,
-                    **metadata_kwargs,
+                    **dense_metadata_kwargs,
                 )
             except Exception:
                 _log_rescue_failure("dense_leg", "rescue dense leg failed")
@@ -1629,7 +1657,8 @@ class SearchPipeline:
             # BM25+dense retrieval restricted to those files and merge the
             # result as a third RRF input. This brings past-session chunks
             # into ranking contention without changing the retrieval
-            # primitives' signatures — keeping ``bm25_search`` /
+            # primitives' signatures — the restriction rides the existing
+            # ``SearchMetadataFilter`` parameter, keeping ``bm25_search`` /
             # ``dense_search`` archive-agnostic. (Pure post-fusion score
             # multiplier was rejected: it can only re-rank candidates that
             # already surfaced organically; "ranking contention" requires

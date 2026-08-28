@@ -11,6 +11,7 @@ full indexer.
 
 from __future__ import annotations
 
+import sqlite3
 from uuid import UUID, uuid4
 
 import pytest
@@ -161,6 +162,105 @@ class TestGetChunksSharedFrom:
 
         assert await backend.get_chunks_shared_from(src, link_type="shared") != []
         assert await backend.get_chunks_shared_from(src, link_type="consolidated_from") == []
+
+
+class TestGetChunksSharedFromBatch:
+    """Batch sibling of ``get_chunks_shared_from`` (#2184) — one round trip
+    for N sources, grouped by source id."""
+
+    @pytest.mark.asyncio
+    async def test_empty_input_returns_empty_dict(self, backend):
+        """The empty set must be expressible (json_each, not IN (?,…))."""
+        assert await backend.get_chunks_shared_from_batch([]) == {}
+
+    @pytest.mark.asyncio
+    async def test_multi_source_grouping_matches_single_row_method(self, backend):
+        src_a = uuid4()
+        src_b = uuid4()
+        tgt_a1 = uuid4()
+        tgt_a2 = uuid4()
+        tgt_b1 = uuid4()
+        for cid in (src_a, src_b, tgt_a1, tgt_a2, tgt_b1):
+            _seed_chunk(backend, cid)
+
+        _raw_insert_link(
+            backend, source_id=src_a, target_id=tgt_a1, created_at="2026-01-01T00:00:00"
+        )
+        _raw_insert_link(
+            backend, source_id=src_a, target_id=tgt_a2, created_at="2026-01-01T00:00:01"
+        )
+        _raw_insert_link(
+            backend, source_id=src_b, target_id=tgt_b1, created_at="2026-01-01T00:00:02"
+        )
+
+        out = await backend.get_chunks_shared_from_batch([src_a, src_b])
+        assert set(out) == {src_a, src_b}
+        # Per-source fanout and ordering are identical to the single-row method.
+        assert [link.target_id for link in out[src_a]] == [tgt_a1, tgt_a2]
+        assert out[src_a] == await backend.get_chunks_shared_from(src_a)
+        assert out[src_b] == await backend.get_chunks_shared_from(src_b)
+
+    @pytest.mark.asyncio
+    async def test_link_type_filter_narrows_fanout(self, backend):
+        src = uuid4()
+        tgt = uuid4()
+        _seed_chunk(backend, src)
+        _seed_chunk(backend, tgt, namespace="shared")
+        _raw_insert_link(backend, source_id=src, target_id=tgt, link_type="shared")
+
+        narrowed = await backend.get_chunks_shared_from_batch([src], link_type="shared")
+        assert [link.target_id for link in narrowed[src]] == [tgt]
+        assert await backend.get_chunks_shared_from_batch([src], link_type="summarizes") == {}
+
+    @pytest.mark.asyncio
+    async def test_large_batch_exceeds_historic_sqlite_variable_limit(self, backend):
+        """1100 source ids in one call. Membership binds a single JSON
+        array through ``json_each`` — an ``IN (?,?,…)`` list would break
+        on builds compiled with the historic 999 bound-variable default
+        (the floor the repo supports), so a regression back to
+        placeholders must not slip past this at scale."""
+        sources = [uuid4() for _ in range(1100)]
+        targets = [uuid4() for _ in range(1100)]
+        db = backend._get_db()
+        db.executemany(
+            "INSERT INTO chunks (id, content, content_hash, source_file, namespace, "
+            "tags, created_at, updated_at) "
+            "VALUES (?, '', ?, '', 'default', '[]', "
+            "'2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+            [(str(c), str(c)) for c in sources + targets],
+        )
+        db.executemany(
+            "INSERT INTO chunk_links "
+            "(source_id, target_id, link_type, namespace_target, created_at) "
+            "VALUES (?, ?, 'shared', 'shared', '2026-01-01T00:00:00')",
+            [(str(s), str(t)) for s, t in zip(sources, targets, strict=True)],
+        )
+        db.commit()
+
+        # Make the pin real (Codex review): this runtime's default
+        # bound-variable limit is 32766, which would let an ``IN (?,…)``
+        # regression pass at 1100 inputs — lower the limit below the
+        # input size on every connection the query can run on.
+        for conn in [backend._get_db(), *backend._read_pool]:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+        out = await backend.get_chunks_shared_from_batch(sources)
+        assert set(out) == set(sources)
+        assert all(len(links) == 1 for links in out.values())
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_absent_from_result(self, backend):
+        """Ids with no fanout are absent, not mapped to [] — mirrors the
+        ``get_chunks_batch`` missing-id contract."""
+        src = uuid4()
+        tgt = uuid4()
+        unknown = uuid4()
+        _seed_chunk(backend, src)
+        _seed_chunk(backend, tgt, namespace="shared")
+        _raw_insert_link(backend, source_id=src, target_id=tgt)
+
+        out = await backend.get_chunks_shared_from_batch([src, unknown])
+        assert set(out) == {src}
 
 
 class TestWalkShareChain:

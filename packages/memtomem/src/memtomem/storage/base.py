@@ -305,6 +305,9 @@ class StorageBackend(Protocol):
     async def get_chunks_shared_from(
         self, source_id: UUID, link_type: str | None = None
     ) -> list[ChunkLink]: ...
+    async def get_chunks_shared_from_batch(
+        self, source_ids: Sequence[UUID], link_type: str | None = None
+    ) -> dict[UUID, list[ChunkLink]]: ...
     async def walk_share_chain(
         self,
         target_id: UUID,

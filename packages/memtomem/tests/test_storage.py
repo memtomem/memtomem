@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import sqlite3
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -257,6 +258,33 @@ class TestSearchMetadataFilters:
                 chunk_types=(ChunkType.MARKDOWN_SECTION.value,),
                 created_from=now - timedelta(days=1),
                 created_before=now + timedelta(days=1),
+            ),
+        )
+
+        assert [result.chunk.id for result in results] == [included.id]
+
+    @pytest.mark.asyncio
+    async def test_bm25_source_exact_accepts_sets_beyond_historic_variable_limit(self, storage):
+        """#2184: ``source_exact`` binds one JSON array through
+        ``json_each``, so a set larger than the historic 999
+        bound-variable default (the rescue leg can push a whole
+        boost-source set through here) must not break the query."""
+        included = _make_chunk("shared marker", source="inside.md")
+        await storage.upsert_chunks([included])
+
+        # Make the pin real (Codex review): this runtime's default
+        # bound-variable limit is 32766, which would let an ``IN (?,…)``
+        # regression pass at 1201 values — lower the limit below the
+        # input size on every connection the query can run on.
+        for conn in [storage._get_db(), *storage._read_pool]:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+        decoys = tuple(f"/nowhere/decoy_{i}.md" for i in range(1200))
+        results = await storage.bm25_search(
+            "shared",
+            top_k=5,
+            metadata_filter=SearchMetadataFilter(
+                source_exact=decoys + (str(included.metadata.source_file),)
             ),
         )
 

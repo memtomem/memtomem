@@ -14,6 +14,8 @@ references, consolidation, reflection. A share link is directed
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -52,7 +54,11 @@ def _row_to_link(row: tuple) -> ChunkLink:
 
 
 class ShareLinkMixin:
-    """Mixin providing ``chunk_links`` writer + reader. Requires ``self._get_db()``."""
+    """Mixin providing ``chunk_links`` writer + reader.
+
+    Requires ``self._get_db()`` (writers, single-row readers) and
+    ``self._get_read_db()`` (batch reader).
+    """
 
     async def add_chunk_link(
         self,
@@ -153,6 +159,41 @@ class ShareLinkMixin:
                 (str(source_id), link_type),
             ).fetchall()
         return [_row_to_link(r) for r in rows]
+
+    async def get_chunks_shared_from_batch(
+        self,
+        source_ids: Sequence[UUID],
+        link_type: str | None = None,
+    ) -> dict[UUID, list[ChunkLink]]:
+        """Batch form of :meth:`get_chunks_shared_from` — one round trip.
+
+        Returns fanouts grouped by source id; ids with no matching link
+        are absent from the dict (mirrors ``get_chunks_batch``). Per-source
+        ordering (``created_at, target_id``) matches the single-row method.
+        Membership goes through ``json_each`` over one bound JSON array
+        rather than an ``IN (?,?,…)`` list, so the empty set is expressible
+        and a large id set cannot blow past SQLite's bound-variable limit.
+        """
+        if not source_ids:
+            return {}
+        ids_param = json.dumps([str(sid) for sid in dict.fromkeys(source_ids)])
+        sql = (
+            "SELECT source_id, target_id, link_type, namespace_target, created_at "
+            "FROM chunk_links "
+            "WHERE source_id IN (SELECT value FROM json_each(?)) "
+        )
+        params: list[str] = [ids_param]
+        if link_type is not None:
+            sql += "AND link_type = ? "
+            params.append(link_type)
+        sql += "ORDER BY source_id, created_at, target_id"
+        rows = self._get_read_db().execute(sql, params).fetchall()
+        out: dict[UUID, list[ChunkLink]] = {}
+        for row in rows:
+            # Key from the raw column: rows matched the IN list, so
+            # ``source_id`` is never NULL here (unlike the model field).
+            out.setdefault(UUID(row[0]), []).append(_row_to_link(row))
+        return out
 
     async def walk_share_chain(
         self,
