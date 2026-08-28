@@ -35,8 +35,13 @@ class ConsolidationScheduler:
 
     async def stop(self) -> None:
         """Stop the scan loop."""
-        if self._task:
-            await stop_loop_task(self._task)
+        # ``finally``: a cancellation aimed at the caller propagates out of
+        # ``stop_loop_task`` (#2213), and a stale handle left behind would make
+        # ``get_status()`` report a loop that is gone.
+        try:
+            if self._task:
+                await stop_loop_task(self._task)
+        finally:
             self._task = None
 
     async def _run_loop(self) -> None:
@@ -94,8 +99,11 @@ class PolicyScheduler:
 
     async def stop(self) -> None:
         """Stop the policy loop."""
-        if self._task:
-            await stop_loop_task(self._task)
+        # ``finally`` for the same reason as ``ConsolidationScheduler.stop``.
+        try:
+            if self._task:
+                await stop_loop_task(self._task)
+        finally:
             self._task = None
 
     async def _run_loop(self) -> None:
