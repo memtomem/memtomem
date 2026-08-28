@@ -5,6 +5,13 @@ one run's observation metadata and ranked snapshot, and attach relevance
 judgments. Validation lives in storage; the app-level handlers translate
 ``KeyError``→404 and ``ValueError``→400, so this router only maps the
 explicit-replacement conflict to 409.
+
+Every handler here settles in-flight observation writes first (#2183): the
+search path returns its run ID before the ``query_history`` row commits, so a
+read that skipped the flush could 404 a run the same process just answered.
+The flush is per-pipeline, so a run answered by a *different* process (the MCP
+server against the same database) can still be briefly invisible here; that
+window is bounded by one background write and surfaces as a clean 404.
 """
 
 from __future__ import annotations
@@ -12,7 +19,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.errors import FeedbackConflictError
-from memtomem.web.deps import get_storage
+from memtomem.web.deps import get_search_pipeline, get_storage
 from memtomem.web.schemas.search_runs import (
     FeedbackIn,
     FeedbackOut,
@@ -30,8 +37,10 @@ async def list_search_runs(
     limit: int = Query(50, ge=1, le=200),
     since: str | None = Query(None, description="ISO timestamp filter"),
     storage=Depends(get_storage),
+    pipeline=Depends(get_search_pipeline),
 ) -> SearchRunListResponse:
     """Newest-first summaries of observed search runs."""
+    await pipeline.flush_observation()
     rows = await storage.get_search_runs(limit=limit, since=since)
     runs = [SearchRunSummary(**r) for r in rows]
     return SearchRunListResponse(runs=runs, total=len(runs))
@@ -41,8 +50,10 @@ async def list_search_runs(
 async def get_search_run(
     run_id: str,
     storage=Depends(get_storage),
+    pipeline=Depends(get_search_pipeline),
 ) -> SearchRunDetailResponse:
     """One run: query, observation metadata, ranked snapshot + judgments."""
+    await pipeline.flush_observation(run_id)
     run = await storage.get_search_run(run_id)
     judgments = {j["chunk_id"]: j for j in await storage.get_search_feedback(run_id)}
     results = []
@@ -69,8 +80,10 @@ async def save_search_feedback(
     run_id: str,
     body: FeedbackIn,
     storage=Depends(get_storage),
+    pipeline=Depends(get_search_pipeline),
 ) -> FeedbackOut:
     """Record one relevance judgment for a snapshotted result."""
+    await pipeline.flush_observation(run_id)
     try:
         saved = await storage.save_search_feedback(
             run_id, body.chunk_id, body.judgment, replace=body.replace

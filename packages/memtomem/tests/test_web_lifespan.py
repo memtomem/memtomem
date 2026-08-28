@@ -792,3 +792,124 @@ async def test_lifespan_cancels_summary_regen_before_closing_components():
     # The handle is also cleared off app.state with the rest of the published
     # state, so a second startup cannot inherit a dead task.
     assert not hasattr(app.state, "summary_regen_task")
+
+
+async def test_lifespan_finishes_teardown_when_the_regen_drain_is_cancelled():
+    """A cancel landing *in* the drain must not skip the rest of teardown (#2213).
+
+    ``stop_loop_task`` now propagates a cancellation aimed at its caller, so
+    the drain at the top of the ``finally`` can raise. Bailing out there would
+    leave storage open and the lifecycle barrier held by a shutdown that looked
+    orderly — the exact confirmation #1936's polarity exists to give. The
+    cancellation is deferred to the end of teardown instead.
+    """
+    import asyncio
+
+    comp = _make_components(embedding_broken=None, stored_info=None)
+    order: list[str] = []
+    running, in_cleanup, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def _regen() -> None:
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            in_cleanup.set()
+            await released.wait()  # cleanup outlives the cancel request
+            raise
+
+    async def _close(_comp):
+        order.append("close_components")
+        return MagicMock(storage_closed=True)
+
+    app = FastAPI()
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+
+    async def _serve() -> None:
+        async with _lifespan(app):
+            app.state.summary_regen_task = asyncio.create_task(_regen())
+            await running.wait()
+            await asyncio.Event().wait()  # held open until cancelled
+
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch("memtomem.server.component_factory.close_components", _close),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        server = asyncio.create_task(_serve())
+        await running.wait()
+        server.cancel("first")  # shutdown begins
+        await in_cleanup.wait()  # the drain is now awaiting the regen's cleanup
+        server.cancel("second")  # a second cancel, aimed at the teardown itself
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert order == [], "teardown must not reach close_components before the drain settles"
+        released.set()
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await server
+
+    assert order == ["close_components"], "the deferred cancel must not skip storage close"
+    assert server.cancelled(), "the cancellation must still reach the caller"
+    # First-cancellation-wins (``_settlement``): deferring the drain's
+    # cancellation must not overwrite the one already unwinding through the
+    # lifespan body.
+    assert excinfo.value.args == ("first",), excinfo.value.args
+    assert not hasattr(app.state, "summary_regen_task")
+
+
+async def test_lifespan_propagates_a_drain_cancel_after_a_clean_body_exit():
+    """The deferred cancellation is the only one when the body exited cleanly (#2213).
+
+    Companion to the test above: there the lifespan body was already unwinding
+    a cancellation, which wins. Here shutdown reaches teardown normally and the
+    cancel lands purely inside the drain, so it is that cancellation — message
+    intact — the caller has to observe once teardown has finished.
+    """
+    import asyncio
+
+    comp = _make_components(embedding_broken=None, stored_info=None)
+    order: list[str] = []
+    running, in_cleanup, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def _regen() -> None:
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            in_cleanup.set()
+            await released.wait()
+            raise
+
+    async def _close(_comp):
+        order.append("close_components")
+        return MagicMock(storage_closed=True)
+
+    app = FastAPI()
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+
+    async def _serve() -> None:
+        async with _lifespan(app):
+            app.state.summary_regen_task = asyncio.create_task(_regen())
+            await running.wait()
+        # Leaves the block normally: teardown runs with no exception in flight.
+
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch("memtomem.server.component_factory.close_components", _close),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        server = asyncio.create_task(_serve())
+        await in_cleanup.wait()  # teardown began on its own; the drain is waiting
+        server.cancel("during drain")
+        released.set()
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await server
+
+    assert order == ["close_components"], "the deferred cancel must not skip storage close"
+    assert excinfo.value.args == ("during drain",), excinfo.value.args

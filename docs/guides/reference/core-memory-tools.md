@@ -288,10 +288,19 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > per-item `score_scale` / `reranker` keys.
 
 > **Quality Lab run ID**: every ranked search persisted by the local SQLite
-> backend receives a durable `query_run_id`. MCP structured output and the Web
-> search API expose it only after the observation commit succeeds, so it can be
-> used to attach later feedback without guessing which invocation produced a
-> result set. Cache hits receive distinct IDs. Filter-only browsing does not
+> backend receives a `query_run_id`. MCP structured output and the Web search
+> API expose it as soon as the search answers — the observation row is written
+> in the background, off the response path — so it can be used to attach later
+> feedback without guessing which invocation produced a result set. The ID is
+> provisional in the narrow sense that a failed observation write leaves it
+> unresolvable: history listings never show it and feedback on it is rejected.
+> The tools and endpoints that read a run (`mem_search_feedback`,
+> `mem_search_history`, the Quality Lab run routes) settle that write first, so
+> a run ID is usable in the very next call to the same server process. A run
+> answered by a *different* process against the same database (the MCP server
+> while you read the Web UI) can be briefly invisible, which surfaces as a 404
+> rather than a wrong answer.
+> Cache hits receive distinct IDs. Filter-only browsing does not
 > create an observation, and an observation write failure never fails search. A
 > call passing `record=false` creates none either: it returns no `query_run_id`
 > and writes no history row, which is the point of the switch.
