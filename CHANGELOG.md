@@ -109,6 +109,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mem_search`'s `tag_filter` now selects at retrieval instead of trimming
+  the ranked results.** The filter ran as a post-rerank stage, after fusion had
+  already capped the pool, so a tag rare enough that its chunks ranked below
+  `search.bm25_candidates` / `search.dense_candidates` returned fewer than
+  `top_k` results — often zero — while matching chunks sat in the store
+  unreachable. `mem_recall` never had this: it filtered in SQL before its
+  limit. The tag now rides `SearchMetadataFilter.tags_any` into the retrievers,
+  which BM25 and recall compile into one SQL predicate over a single bound JSON
+  array (guarded so a legacy corrupt or non-array `tags` value is skipped
+  rather than aborting the query — `mem_recall` previously raised on those).
+  Dense is a deliberate exception: it applies the same field in Python after
+  its bounded KNN pass, because a sparse tag inside the KNN subquery makes the
+  adaptive over-fetch escalate to a full vector-table scan, so a dense-only
+  search can still miss a match outside its KNN pool. Because the filter now
+  precedes fusion, within-leg ranks, RRF scores, the rerank pool and
+  `fused_total` all describe the tagged pool; the empty-result hint
+  correspondingly no longer suggests removing `tag_filter`, which by then
+  cannot be the cause. Comma-separated tags still match ANY, and an empty or
+  comma-only value is still a no-op on both tools. (#2191)
+
 - **Skills now refuse instead of stalling when nobody can answer.** Every
   input-taking skill told the model to ask when the request was ambiguous, but
   a subagent or a scripted run has nobody to ask — leaving only a stall on a

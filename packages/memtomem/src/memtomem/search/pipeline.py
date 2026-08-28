@@ -2,10 +2,10 @@
 
 Stage order (keyword path, fixed — see ``CLAUDE.md`` invariants):
 expansion → BM25 + dense (parallel, with always-on scope-context filter
-per ADR-0011 §6) → RRF fusion → cross-encoder rerank (optional) →
-source/tag filter → validity filter → time-decay → MMR → access-freq
-boost → importance boost → entity-match boost → context-window
-expansion.
+per ADR-0011 §6 and the tag filter per #2191) → RRF fusion →
+cross-encoder rerank (optional) → source filter → validity filter →
+time-decay → MMR → access-freq boost → importance boost → entity-match
+boost → context-window expansion.
 
 Stage 1 enrichment (session-summary rescue, RFC P1 Phase C): between
 retrieval and fusion, when ``namespace is None`` and a
@@ -26,6 +26,18 @@ reaches the pipeline that the project-context boundary would have
 excluded. Tie-break ordering ``project_local > project_shared > user``
 applies at the same site (storage ORDER BY) so same-relevance ranks
 surface freshest-context-first.
+
+``tag_filter`` moved to the same site for the same reason (#2191): as a
+post-rerank stage it could only trim an already-capped pool, so a tag
+rare enough to rank outside ``bm25_candidates``/``dense_candidates``
+returned nothing. It rides ``SearchMetadataFilter.tags_any``, which BM25
+and recall compile into SQL. Dense is the deliberate exception — it
+applies the same field in Python after its bounded KNN pass, because a
+sparse tag inside the KNN subquery escalates the adaptive over-fetch
+into a full vector-table scan (#2184/#2221). A dense-only search can
+therefore still miss a match outside its KNN pool; note that FTS does
+not index tag text, so the BM25 guarantee covers tagged chunks that
+also match the query lexically.
 
 Empty-query path (``query=""`` / ``None`` with ``tag_filter`` /
 ``source_filter`` set, #750) routes through ``_filter_only_search``
@@ -77,7 +89,7 @@ from memtomem.generation import ComponentGeneration
 from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.reranker.base import close_reranker_safely
-from memtomem.storage.base import SearchMetadataFilter
+from memtomem.storage.base import SearchMetadataFilter, parse_tag_filter
 from memtomem.storage.sqlite_helpers import norm_path
 
 logger = logging.getLogger(__name__)
@@ -282,6 +294,9 @@ def _matches_metadata(result: SearchResult, metadata_filter: SearchMetadataFilte
     if metadata_filter.chunk_types:
         if str(chunk.metadata.chunk_type) not in set(metadata_filter.chunk_types):
             return False
+    if metadata_filter.tags_any:
+        if not set(metadata_filter.tags_any) & set(chunk.metadata.tags):
+            return False
     created_at = chunk.created_at
     if created_at.tzinfo is None:
         # Legacy/imported rows may carry an offset-less ISO timestamp. The
@@ -326,7 +341,7 @@ def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list
     (RFC §Comparison semantics — opt-in default for chunks without a window).
 
     Order is preserved. The function returns a new list so callers can
-    chain it after source/tag filter without mutating the input.
+    chain it after the source filter without mutating the input.
 
     Granularity note: when the pipeline falls back to the default
     ``int(time.time())``, results may be served from the search-result TTL
@@ -1014,6 +1029,11 @@ class SearchPipeline:
         would trade one bounded KNN for up to three escalating passes
         (Codex design review). Revisit with a rowid-restricted KNN.
 
+        ``tags_any`` on the incoming filter needs no special handling on
+        either leg: it survives the ``source_exact`` replace for BM25, and
+        ``dense_search`` applies it after its own KNN pass for the same
+        escalation reason described above (#2191).
+
         The leg is merged into RRF as a third input list, weighted by
         ``expansion_rescue_weight``.
 
@@ -1337,6 +1357,7 @@ class SearchPipeline:
             )
         ):
             metadata_filter = None
+        required_tags = parse_tag_filter(tag_filter)
         query = (query or "").strip()
         if not query:
             if not (tag_filter or source_filter or metadata_filter):
@@ -1509,8 +1530,23 @@ class SearchPipeline:
             use_dense = self._config.enable_dense and not isinstance(mismatch, dict)
             use_bm25 = use_bm25 and bm25_weight > 0
             use_dense = use_dense and dense_weight > 0
+            # ``tag_filter`` rides the metadata filter into the retrievers so
+            # tagged chunks are selected *before* the ranking cap instead of
+            # being trimmed out of a pool they never entered (#2191). The
+            # request filter stays separate from this retrieval filter: the
+            # cache key and the recorded observation must keep describing what
+            # the caller asked for, or a tag-only search would report
+            # ``has_metadata_filter`` (#2191 design review).
+            retrieval_metadata_filter = metadata_filter
+            if required_tags:
+                retrieval_metadata_filter = dataclass_replace(
+                    metadata_filter if metadata_filter is not None else SearchMetadataFilter(),
+                    tags_any=required_tags,
+                )
             metadata_kwargs = (
-                {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
+                {"metadata_filter": retrieval_metadata_filter}
+                if retrieval_metadata_filter is not None
+                else {}
             )
 
             # ``use_bm25 or use_dense`` guards the auxiliary retrieval
@@ -1695,7 +1731,7 @@ class SearchPipeline:
                             use_dense=use_dense,
                             scope_filter=scope_filter,
                             project_context_root=project_context_root,
-                            metadata_filter=metadata_filter,
+                            metadata_filter=retrieval_metadata_filter,
                             exhaustive=not record,
                             report_failure=_mark_rescue_failed,
                         )
@@ -1820,7 +1856,8 @@ class SearchPipeline:
                         stats.score_scale = "rerank"
                         stats.reranker_model = rerank_cfg.model
 
-            # Filter by source file if requested
+            # Stage 3c: source filter (glob/substring, so it cannot be an
+            # exact-match SQL conjunct the way ``source_exact`` is).
             if source_filter:
                 fused = [
                     r
@@ -1828,16 +1865,14 @@ class SearchPipeline:
                     if match_source_filter(source_filter, str(r.chunk.metadata.source_file))
                 ]
 
-            # Filter by tag if requested (comma-separated = OR matching)
-            if tag_filter:
-                required = {t.strip() for t in tag_filter.split(",") if t.strip()}
-                fused = [r for r in fused if required & set(r.chunk.metadata.tags)]
-
+            # No tag filter here: ``tag_filter`` is enforced at the retrievers
+            # (SQL for BM25, post-KNN inside ``dense_search``) so a rare tag
+            # can reach the ranked pool at all (#2191).
             if metadata_filter is not None:
                 fused = [r for r in fused if _matches_metadata(r, metadata_filter)]
 
             # Stage β': temporal-validity filter (RFC §Pipeline integration).
-            # AND-combined with source/tag filter via sequential application —
+            # AND-combined with the source filter via sequential application —
             # a chunk must pass both to survive. Default ``as_of`` is the
             # current wall-clock; explicit values bypass the result cache so
             # historical queries don't poison default-path cache slots.

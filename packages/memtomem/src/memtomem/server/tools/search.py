@@ -174,11 +174,15 @@ async def mem_search(
         # empty-result text. For structured mode these are surfaced through
         # the JSON ``hints`` array so machine consumers get the same notice.
         empty_hints: list[str] = []
-        if (source_filter or tag_filter) and stats.fused_total > 0:
+        # ``tag_filter`` is not named here: it is enforced at the retrievers
+        # now (#2191), so anything counted in ``fused_total`` already carries
+        # the tag and telling the caller to drop it would be false advice.
+        # A tag that matches nothing yields ``fused_total == 0`` and no hint.
+        if source_filter and stats.fused_total > 0:
             empty_hints.append(
                 f"No results match your filters "
                 f"({stats.fused_total} results found before filtering). "
-                f"Try broader filters or remove source_filter/tag_filter."
+                f"Try a broader filter or remove source_filter."
             )
         if stats.bm25_error and stats.dense_error:
             empty_hints.append(
@@ -201,11 +205,11 @@ async def mem_search(
         # dimension notice, which this call already consumed, so a branch
         # that returns without it doesn't just skip a line — it destroys the
         # only announcement the process was ever going to make.
-        if (source_filter or tag_filter) and stats.fused_total > 0:
+        if source_filter and stats.fused_total > 0:
             message = (
                 f"No results match your filters "
                 f"({stats.fused_total} results found before filtering). "
-                f"Try broader filters or remove source_filter/tag_filter."
+                f"Try a broader filter or remove source_filter."
             )
         elif stats.bm25_error and stats.dense_error:
             message = (

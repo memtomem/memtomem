@@ -657,7 +657,7 @@ any leftover source the exclude rules don't cover, remove it directly with
 | `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
 | `MEMTOMEM_RERANK__TIMEOUT_S` | `30.0` | Wall-clock bound on one rerank call; on timeout the search falls back to the fused order (read at load time — restart to change) |
 
-Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before source/tag filters. The candidate pool passed to the cross-encoder is
+Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before the source filter. (The tag filter is not a post-fusion stage: it is applied at retrieval, so the pool the reranker sees already carries the tag.) The candidate pool passed to the cross-encoder is
 
 ```
 pool = max(min_pool, min(max_pool, int(oversample * response_top_k)))

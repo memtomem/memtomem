@@ -91,12 +91,40 @@ class NamespaceChunkCandidate:
 
 @dataclass(frozen=True, slots=True)
 class SearchMetadataFilter:
-    """Exact metadata constraints applied before retrieval limits."""
+    """Exact metadata constraints applied before retrieval limits.
+
+    ``tags_any`` is the one field whose *enforcement point* differs per
+    retriever (#2191). BM25 and recall compile it into SQL, so a matching
+    chunk is reachable regardless of how it ranks. ``dense_search`` applies
+    it in Python after its bounded KNN pass instead: pushing a sparse tag
+    into the KNN subquery would make the adaptive over-fetch escalate to a
+    full vector-table scan (#2184/#2221). Every retriever therefore returns
+    only matching rows, but dense cannot see a match outside its KNN pool.
+    """
 
     source_exact: tuple[str, ...] = ()
     chunk_types: tuple[str, ...] = ()
     created_from: datetime | None = None
     created_before: datetime | None = None
+    # OR semantics: a chunk passes when it carries ANY of these tags.
+    # Byte-exact, case-sensitive — SQLite compares json_each values under
+    # BINARY collation, matching Python's set intersection.
+    tags_any: tuple[str, ...] = ()
+
+
+def parse_tag_filter(tag_filter: str | None) -> tuple[str, ...]:
+    """Parse the public comma-separated ``tag_filter`` into ``tags_any``.
+
+    Shared by the search pipeline and ``recall_chunks`` so both entry points
+    agree on the edge cases: surrounding whitespace is stripped, empty
+    segments are dropped, and a value that yields no tags at all (``""``,
+    ``","``, ``" , "``) is a no-op filter rather than a filter that matches
+    nothing — the historical behaviour of both paths. Sorted and
+    de-duplicated so the bound SQL parameter is deterministic for replay.
+    """
+    if not tag_filter:
+        return ()
+    return tuple(sorted({t.strip() for t in tag_filter.split(",") if t.strip()}))
 
 
 class StorageBackend(Protocol):

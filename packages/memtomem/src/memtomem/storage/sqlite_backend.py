@@ -11,6 +11,7 @@ import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Sequence
 from uuid import UUID
@@ -32,6 +33,7 @@ from memtomem.storage.base import (
     NamespaceChunkCandidate,
     NamespaceRenameResult,
     SearchMetadataFilter,
+    parse_tag_filter,
 )
 from memtomem.models import (
     Chunk,
@@ -205,6 +207,38 @@ def _chunk_ids_param(chunk_ids: Sequence[UUID]) -> str:
     return json.dumps([str(cid) for cid in chunk_ids])
 
 
+def _tags_any_sql(column_alias: str = "") -> str:
+    """SQL fragment matching rows carrying ANY tag from a bound JSON array.
+
+    Two guards, both load-bearing (#2191):
+
+    * ``CASE WHEN json_valid(...)`` rather than ``json_valid(...) AND ...``.
+      SQLite does not promise left-to-right short-circuit evaluation of
+      ``AND`` terms once the planner has rewritten the query, and
+      ``json_each`` on malformed input raises rather than yielding no rows —
+      a single legacy corrupt ``tags`` value would turn every search into an
+      ``OperationalError``. ``CASE`` makes the laziness explicit.
+    * ``json_type(...) = 'array'``. ``json_valid`` accepts a bare string or
+      object, and ``json_each`` would then iterate its characters or its
+      values — matching tags that ``_row_to_chunk`` does not see. Both sides
+      degrade a non-array shape to "no tags" instead.
+
+    The requested tags ride a single bound JSON array (as ``_chunk_ids_sql``
+    does) so a large tag set cannot exceed SQLite's bound-variable limit.
+    """
+    return (
+        f"CASE WHEN json_valid({column_alias}tags) "
+        f"THEN json_type({column_alias}tags) = 'array' AND EXISTS ("
+        f"SELECT 1 FROM json_each({column_alias}tags) AS ct "
+        f"WHERE ct.value IN (SELECT wt.value FROM json_each(?) AS wt)) "
+        f"ELSE 0 END"
+    )
+
+
+def _tags_any_param(tags: Sequence[str]) -> str:
+    return json.dumps(list(tags))
+
+
 def _metadata_filter_sql(
     metadata_filter: SearchMetadataFilter | None,
     *,
@@ -214,6 +248,12 @@ def _metadata_filter_sql(
         return "", []
     conditions: list[str] = []
     params: list[object] = []
+    if metadata_filter.tags_any:
+        # Callers that cannot afford this in SQL strip the field first —
+        # ``dense_search`` does, because a sparse tag would escalate its
+        # adaptive KNN over-fetch into a full vector scan (#2184/#2191).
+        conditions.append(f"({_tags_any_sql(column_alias)})")
+        params.append(_tags_any_param(metadata_filter.tags_any))
     if metadata_filter.source_exact:
         # ``json_each`` over one bound JSON array, not ``IN (?,?,…)`` — the
         # rescue leg can push a whole boost-source set through here (#2184)
@@ -2134,7 +2174,22 @@ class SqliteBackend(
         )
         scope_clause = f"AND ({scope_frag})"
         tie_break = scope_sort_priority_case("c.")
-        metadata_frag, metadata_params = _metadata_filter_sql(metadata_filter, column_alias="c.")
+        # ``tags_any`` is honored, but never in SQL here (#2191). The tag
+        # predicate would sit in the outer join below, so the escalation loop
+        # further down would keep retrying with a larger inner K until enough
+        # tagged rows survived — for a rare tag that means a full vector-table
+        # scan per query (#2184/#2221). Filter the KNN result in Python
+        # instead: the contract still holds (callers get only matching rows),
+        # at the cost of not seeing a match outside the KNN pool.
+        required_tags = set(metadata_filter.tags_any) if metadata_filter is not None else set()
+        sql_metadata_filter = (
+            dataclass_replace(metadata_filter, tags_any=())
+            if metadata_filter is not None and metadata_filter.tags_any
+            else metadata_filter
+        )
+        metadata_frag, metadata_params = _metadata_filter_sql(
+            sql_metadata_filter, column_alias="c."
+        )
         metadata_clause = f"AND ({metadata_frag})" if metadata_frag else ""
 
         import sqlite3 as _sqlite3
@@ -2238,13 +2293,22 @@ class SqliteBackend(
         rows: list = []
         for inner_k in attempts:
             try:
+                # With a tag filter the outer ``LIMIT`` must not be ``top_k``:
+                # the Python tag pass runs after this query, so truncating
+                # here would drop a tagged row sitting at rank ``top_k + 1``
+                # of the untagged order — the dense half of the very bug this
+                # change fixes. Take the whole bounded candidate set instead
+                # and truncate after filtering. ``inner_k`` still bounds it,
+                # and the escalation check below still counts *untagged* rows,
+                # so a rare tag cannot drive another KNN attempt.
+                outer_limit = inner_k if required_tags else top_k
                 rows = db.execute(
                     sql,
                     [serialize_f32(embedding), inner_k]
                     + ns_params
                     + scope_params
                     + metadata_params
-                    + [top_k],
+                    + [outer_limit],
                 ).fetchall()
             except _sqlite3.OperationalError as exc:
                 if "Dimension mismatch" in str(exc):
@@ -2277,14 +2341,24 @@ class SqliteBackend(
             if len(rows) >= top_k or inner_k >= knn_ceiling:
                 break
 
+        # Tag filtering happens here rather than in the SQL above (see the
+        # ``required_tags`` comment): the escalation loop must judge its
+        # attempts on the unfiltered row count, or a rare tag reintroduces the
+        # full-scan escalation the pushdown avoids. ``top_k`` is applied after
+        # the filter — the query above deliberately did not apply it — and
+        # ranks are assigned last so the returned list stays 1..n contiguous.
+        chunks = [(self._row_to_chunk(row[:-1]), row[-1]) for row in rows]
+        if required_tags:
+            chunks = [pair for pair in chunks if required_tags & set(pair[0].metadata.tags)]
+            chunks = chunks[:top_k]
         return [
             SearchResult(
-                chunk=self._row_to_chunk(row[:-1]),
-                score=1.0 / (1.0 + row[-1]),
+                chunk=chunk,
+                score=1.0 / (1.0 + distance),
                 rank=rank_idx + 1,
                 source="dense",
             )
-            for rank_idx, row in enumerate(rows)
+            for rank_idx, (chunk, distance) in enumerate(chunks)
         ]
 
     # ---- query helpers -------------------------------------------------------
@@ -2639,18 +2713,16 @@ class SqliteBackend(
                 conditions.append(frag)
                 params.extend(ns_params)
         if tag_filter is not None:
-            # Comma-separated tags = OR matching, mirroring the
-            # post-fusion semantics in ``SearchPipeline.search`` so the
-            # tag-only path (#750) ranks the same set the keyword path
-            # would have filtered down to.
-            tags = [t.strip() for t in tag_filter.split(",") if t.strip()]
+            # Comma-separated tags = OR matching, the same semantics
+            # ``SearchPipeline.search`` now pushes into BM25 (#750, #2191) so
+            # the tag-only path ranks the set the keyword path retrieves.
+            # Emitted as its own conjunct rather than folded into
+            # ``metadata_filter``: a caller may pass both, and the two
+            # constraints AND together like every other pair of filters.
+            tags = parse_tag_filter(tag_filter)
             if tags:
-                placeholders = ",".join("?" for _ in tags)
-                conditions.append(
-                    f"EXISTS (SELECT 1 FROM json_each(chunks.tags) "
-                    f"WHERE json_each.value IN ({placeholders}))"
-                )
-                params.extend(tags)
+                conditions.append(f"({_tags_any_sql('chunks.')})")
+                params.append(_tags_any_param(tags))
 
         metadata_frag, metadata_params = _metadata_filter_sql(metadata_filter)
         if metadata_frag:
@@ -3076,9 +3148,18 @@ class SqliteBackend(
             ct = ChunkType.RAW_TEXT
 
         # --- tags ---
+        # A non-list shape is corruption too, not just unparseable text: a
+        # bare JSON string would decode into its characters and an object
+        # into its keys, so this reader would "carry" tags that the SQL tag
+        # filter (which requires ``json_type = 'array'``) excludes (#2191).
+        # Both sides degrade the same way — to no tags at all.
         try:
-            parsed_tags = tuple(json.loads(tags))
+            decoded = json.loads(tags)
         except (json.JSONDecodeError, TypeError):
+            decoded = None
+        if isinstance(decoded, list):
+            parsed_tags = tuple(decoded)
+        else:
             logger.warning("Corrupted tags for chunk %s", chunk_id)
             parsed_tags = ()
 

@@ -46,12 +46,17 @@ for `memtomem` and both resolve to `memtomem.cli:cli`.
 - **`mm` ≡ `memtomem`.** Both `project.scripts` entries in
   `packages/memtomem/pyproject.toml` resolve to `memtomem.cli:cli` — keep them
   in sync, don't diverge behavior or add flags to only one name.
-- **Search pipeline order is fixed**: query expansion → BM25 + dense (parallel)
-  → RRF fusion → cross-encoder rerank (optional) → source/tag filter →
-  validity filter → time-decay → MMR → access-freq boost → importance boost →
-  entity-match boost → context-window expansion. Don't reorder stages in
+- **Search pipeline order is fixed**: query expansion → BM25 + dense (parallel,
+  both carrying the scope-context and tag filters) → RRF fusion →
+  cross-encoder rerank (optional) → source filter → validity filter →
+  time-decay → MMR → access-freq boost → importance boost → entity-match boost
+  → context-window expansion. Don't reorder stages in
   `packages/memtomem/src/memtomem/search/pipeline.py` without updating the
-  Stage comments in that file.
+  Stage comments in that file. Filters that select at retrieval belong on
+  `SearchMetadataFilter`; before pushing a new one into a leg's SQL, check
+  that leg's reaction to selectivity — `dense_search`'s adaptive KNN
+  over-fetch escalates to a full vector scan on a sparse filter, which is why
+  `tags_any` is SQL for BM25/recall but post-KNN Python inside `dense_search`.
 - **MCP tools go through the registry.** New tools use `@register` from
   `server/tool_registry.py` + `@tool_handler`. The core-9 tools (`mem_search`,
   `mem_add`, `mem_index`, `mem_recall`, `mem_status`, `mem_stats`, `mem_list`,

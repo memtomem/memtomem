@@ -247,13 +247,31 @@ class TestEmptyResults:
             app=_fake_app(),
             results=[],
             stats=RetrievalStats(fused_total=5),
-            tag_filter="redis",
+            source_filter="notes.md",
         )
 
         assert out == (
             "No results match your filters (5 results found before filtering). "
-            "Try broader filters or remove source_filter/tag_filter."
+            "Try a broader filter or remove source_filter."
         )
+
+    async def test_a_tag_filter_alone_does_not_trigger_the_filter_hint(self, monkeypatch):
+        """#2191: the tag is enforced at retrieval, so it cannot be the cause.
+
+        Everything counted in ``fused_total`` already carries the tag —
+        whatever emptied the result set (validity, source, metadata) is
+        downstream of it, and advising the caller to drop ``tag_filter``
+        would send them after the wrong parameter.
+        """
+        out = await _call(
+            monkeypatch,
+            app=_fake_app(),
+            results=[],
+            stats=RetrievalStats(fused_total=5),
+            tag_filter="redis",
+        )
+
+        assert out == "No results found."
 
     async def test_both_retrievers_failed(self, monkeypatch):
         out = await _call(
@@ -319,12 +337,12 @@ class TestEmptyResults:
             stats=RetrievalStats(fused_total=5),
             hints=["hint one"],
             dim_notice="embedding dim changed",
-            tag_filter="redis",
+            source_filter="notes.md",
         )
 
         assert out == (
             "No results match your filters (5 results found before filtering). "
-            "Try broader filters or remove source_filter/tag_filter."
+            "Try a broader filter or remove source_filter."
             "\n\n(hint one)\n(embedding dim changed)"
         )
 
@@ -382,12 +400,12 @@ class TestEmptyResults:
             app=_fake_app(),
             results=[],
             stats=RetrievalStats(fused_total=5, bm25_error="fts down"),
-            tag_filter="redis",
+            source_filter="notes.md",
         )
 
         assert out == (
             "No results match your filters (5 results found before filtering). "
-            "Try broader filters or remove source_filter/tag_filter."
+            "Try a broader filter or remove source_filter."
         )
 
     async def test_a_retriever_failure_still_carries_the_one_shot_notice(self, monkeypatch):
@@ -420,13 +438,13 @@ class TestEmptyResults:
             stats=RetrievalStats(fused_total=5, bm25_error="fts down"),
             hints=["core hint"],
             output_format="structured",
-            tag_filter="redis",
+            source_filter="notes.md",
         )
 
         assert json.loads(out)["hints"] == [
             "core hint",
             "No results match your filters (5 results found before filtering). "
-            "Try broader filters or remove source_filter/tag_filter.",
+            "Try a broader filter or remove source_filter.",
             "keyword search unavailable: fts down",
         ]
 

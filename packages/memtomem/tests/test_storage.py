@@ -291,6 +291,262 @@ class TestSearchMetadataFilters:
         assert [result.chunk.id for result in results] == [included.id]
 
 
+class TestTagsAnyFilter:
+    """#2191: ``tag_filter`` selects at retrieval instead of after the cap."""
+
+    @pytest.mark.asyncio
+    async def test_bm25_selects_a_rare_tag_the_ranking_cap_would_have_dropped(self, storage):
+        """The regression the issue exists for.
+
+        The tagged chunk matches the query only weakly, so it ranks below
+        every decoy. Filtering after a ``top_k=3`` cap returned nothing;
+        selecting in SQL returns the one matching row.
+        """
+        decoys = [
+            _make_chunk(f"shared shared shared marker {i}", source=f"decoy{i}.md")
+            for i in range(10)
+        ]
+        rare = _make_chunk("shared", source="rare.md", tags=("needle",))
+        await storage.upsert_chunks([*decoys, rare])
+
+        results = await storage.bm25_search(
+            "shared",
+            top_k=3,
+            metadata_filter=SearchMetadataFilter(tags_any=("needle",)),
+        )
+
+        assert [result.chunk.id for result in results] == [rare.id]
+
+    @pytest.mark.asyncio
+    async def test_bm25_tags_any_matches_any_of_the_requested_tags(self, storage):
+        alpha = _make_chunk("shared marker", source="a.md", tags=("alpha",))
+        beta = _make_chunk("shared marker", source="b.md", tags=("beta",))
+        gamma = _make_chunk("shared marker", source="c.md", tags=("gamma",))
+        await storage.upsert_chunks([alpha, beta, gamma])
+
+        results = await storage.bm25_search(
+            "shared",
+            top_k=10,
+            metadata_filter=SearchMetadataFilter(tags_any=("alpha", "beta")),
+        )
+
+        assert {result.chunk.id for result in results} == {alpha.id, beta.id}
+
+    @pytest.mark.asyncio
+    async def test_bm25_empty_tags_any_does_not_filter(self, storage):
+        """``tag_filter=","`` parses to no tags and must stay a no-op."""
+        tagged = _make_chunk("shared marker", source="a.md", tags=("alpha",))
+        untagged = _make_chunk("shared marker", source="b.md")
+        await storage.upsert_chunks([tagged, untagged])
+
+        results = await storage.bm25_search(
+            "shared", top_k=10, metadata_filter=SearchMetadataFilter(tags_any=())
+        )
+
+        assert {result.chunk.id for result in results} == {tagged.id, untagged.id}
+
+    @pytest.mark.asyncio
+    async def test_bm25_tags_any_composes_with_source_exact(self, storage):
+        wanted = _make_chunk("shared marker", source="inside.md", tags=("alpha",))
+        wrong_source = _make_chunk("shared marker", source="outside.md", tags=("alpha",))
+        wrong_tag = _make_chunk("shared marker", source="inside.md", tags=("beta",))
+        await storage.upsert_chunks([wanted, wrong_source, wrong_tag])
+
+        results = await storage.bm25_search(
+            "shared",
+            top_k=10,
+            metadata_filter=SearchMetadataFilter(
+                source_exact=(str(wanted.metadata.source_file),), tags_any=("alpha",)
+            ),
+        )
+
+        assert [result.chunk.id for result in results] == [wanted.id]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored",
+        ["not json at all", '"alpha"', '{"key": "alpha"}', "null", "123"],
+        ids=["malformed", "scalar-string", "object", "null", "number"],
+    )
+    async def test_a_non_array_tags_column_is_excluded_not_raised(self, storage, stored):
+        """``json_each`` aborts on malformed input and mis-iterates valid
+        non-arrays (a string by character, an object by value), so the SQL
+        guards both shapes — matching ``_row_to_chunk``, which degrades
+        anything that is not a JSON array to no tags at all."""
+        corrupt = _make_chunk("shared marker", source="corrupt.md")
+        healthy = _make_chunk("shared marker", source="healthy.md", tags=("alpha",))
+        await storage.upsert_chunks([corrupt, healthy])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET tags=? WHERE id=?", (stored, str(corrupt.id)))
+        db.commit()
+
+        results = await storage.bm25_search(
+            "shared", top_k=10, metadata_filter=SearchMetadataFilter(tags_any=("alpha",))
+        )
+
+        assert [result.chunk.id for result in results] == [healthy.id]
+        recalled = await storage.recall_chunks(limit=10, tag_filter="alpha")
+        assert [chunk.id for chunk in recalled] == [healthy.id]
+        # The SQL guard alone would leave the reader untested — it excludes
+        # the row before ``_row_to_chunk`` ever decodes it. Read the row
+        # directly: the two sides have to agree on what "no tags" means, or
+        # dense (which intersects in Python) would match a shape BM25 skips.
+        assert (await storage.get_chunk(corrupt.id)).metadata.tags == ()
+
+    @pytest.mark.asyncio
+    async def test_tags_any_accepts_sets_beyond_historic_variable_limit(self, storage):
+        """One bound JSON array, like ``source_exact`` (#2184) — not one
+        placeholder per tag, which ``recall_chunks`` used to emit."""
+        included = _make_chunk("shared marker", source="inside.md", tags=("needle",))
+        await storage.upsert_chunks([included])
+        for conn in [storage._get_db(), *storage._read_pool]:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+        decoys = tuple(f"decoy-{i}" for i in range(1200))
+        results = await storage.bm25_search(
+            "shared",
+            top_k=5,
+            metadata_filter=SearchMetadataFilter(tags_any=decoys + ("needle",)),
+        )
+        recalled = await storage.recall_chunks(limit=5, tag_filter=",".join(decoys + ("needle",)))
+
+        assert [result.chunk.id for result in results] == [included.id]
+        assert [chunk.id for chunk in recalled] == [included.id]
+
+    @pytest.mark.asyncio
+    async def test_recall_ands_its_tag_filter_with_a_metadata_filter(self, storage):
+        """Both carry tags; a caller passing both means "and", as every
+        other pair of filters does. Folding one into the other would
+        silently drop a constraint."""
+        both = _make_chunk("marker", source="a.md", tags=("alpha", "beta"))
+        only_alpha = _make_chunk("marker", source="b.md", tags=("alpha",))
+        only_beta = _make_chunk("marker", source="c.md", tags=("beta",))
+        await storage.upsert_chunks([both, only_alpha, only_beta])
+
+        recalled = await storage.recall_chunks(
+            limit=10,
+            tag_filter="alpha",
+            metadata_filter=SearchMetadataFilter(tags_any=("beta",)),
+        )
+
+        assert [chunk.id for chunk in recalled] == [both.id]
+
+    @pytest.mark.asyncio
+    async def test_dense_applies_tags_any_without_pushing_it_into_the_knn_sql(
+        self, storage, monkeypatch
+    ):
+        """The #2221 asymmetry, for tags.
+
+        A tag predicate inside the KNN subquery would make the adaptive
+        over-fetch escalate until enough tagged rows survived — a full
+        vector-table scan for exactly the rare tag this feature targets.
+        Dense therefore filters after its bounded pass: the SQL must not
+        mention tags, and the caller must still get only matching rows.
+        """
+        import memtomem.storage.sqlite_backend as backend
+
+        compiled: list[str] = []
+        original = backend._metadata_filter_sql
+
+        def _spy(metadata_filter, *, column_alias=""):
+            frag, params = original(metadata_filter, column_alias=column_alias)
+            compiled.append(frag)
+            return frag, params
+
+        monkeypatch.setattr(backend, "_metadata_filter_sql", _spy)
+
+        tagged = _make_chunk("marker", source="a.md", tags=("alpha",))
+        untagged = _make_chunk("marker", source="b.md")
+        dim = storage._dimension
+        tagged.embedding = [0.1] * dim
+        untagged.embedding = [0.1] * dim
+        await storage.upsert_chunks([tagged, untagged])
+
+        results = await storage.dense_search(
+            [0.1] * dim,
+            top_k=10,
+            metadata_filter=SearchMetadataFilter(tags_any=("alpha",)),
+        )
+
+        assert [result.chunk.id for result in results] == [tagged.id]
+        assert compiled, "dense_search did not compile a metadata fragment"
+        assert all("tags" not in frag for frag in compiled), (
+            "the tag predicate reached the dense SQL — it would escalate the "
+            "adaptive KNN over-fetch into a full vector scan (#2184/#2191)"
+        )
+        # Ranks are re-numbered after filtering, not left with the gaps the
+        # dropped rows would otherwise leave behind.
+        assert [result.rank for result in results] == [1]
+
+    @pytest.mark.asyncio
+    async def test_dense_keeps_a_tagged_row_ranked_past_top_k(self, storage):
+        """The dense half of #2191, and the reason the outer ``LIMIT`` moved.
+
+        Nearer untagged rows fill the whole response window, so a ``LIMIT
+        top_k`` in SQL would cut the tagged row before the Python tag pass
+        ever saw it — the same "trimmed a pool it never entered" failure,
+        one layer down. The row stays well inside the first inner KNN pass,
+        so no escalation is needed to find it.
+        """
+        dim = storage._dimension
+        top_k = 3
+        chunks = []
+        for i in range(8):
+            near = _make_chunk(f"near {i}", source=f"near{i}.md")
+            near.embedding = [0.1] * dim
+            chunks.append(near)
+        # Slightly farther, so it sorts behind every untagged row above.
+        tagged = _make_chunk("far", source="far.md", tags=("needle",))
+        tagged.embedding = [0.2] + [0.1] * (dim - 1)
+        chunks.append(tagged)
+        await storage.upsert_chunks(chunks)
+
+        knn_statements: list[str] = []
+
+        def _trace(statement: str) -> None:
+            if "chunks_vec" in statement and "MATCH" in statement:
+                knn_statements.append(statement)
+
+        # Any connection in the read pool can serve the query.
+        traced = [storage._get_db(), *storage._read_pool]
+        for conn in traced:
+            conn.set_trace_callback(_trace)
+        try:
+            results = await storage.dense_search(
+                [0.1] * dim,
+                top_k=top_k,
+                metadata_filter=SearchMetadataFilter(tags_any=("needle",)),
+            )
+        finally:
+            for conn in traced:
+                conn.set_trace_callback(None)
+
+        assert [result.chunk.id for result in results] == [tagged.id]
+        assert len(knn_statements) == 1, (
+            "the tag filter drove another KNN attempt — escalation must be "
+            "judged on the untagged candidate count (#2184/#2221)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dense_still_caps_a_tagged_result_at_top_k(self, storage):
+        """Lifting the SQL ``LIMIT`` for tagged searches must not widen the
+        response: the cap moves after the filter, it does not disappear."""
+        dim = storage._dimension
+        chunks = []
+        for i in range(6):
+            chunk = _make_chunk(f"tagged {i}", source=f"t{i}.md", tags=("needle",))
+            chunk.embedding = [0.1] * dim
+            chunks.append(chunk)
+        await storage.upsert_chunks(chunks)
+
+        results = await storage.dense_search(
+            [0.1] * dim, top_k=2, metadata_filter=SearchMetadataFilter(tags_any=("needle",))
+        )
+
+        assert len(results) == 2
+        assert [result.rank for result in results] == [1, 2]
+
+
 class TestStorageStartupClassification:
     @pytest.mark.parametrize(
         ("error", "stage", "reason", "retryable"),
