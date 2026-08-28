@@ -8,6 +8,8 @@ closed, and search itself stays independent of feedback availability.
 
 from __future__ import annotations
 
+import asyncio
+
 from helpers import StubCtx
 from memtomem.server.context import AppContext
 from memtomem.server.tools.search_history import mem_search_feedback
@@ -130,3 +132,45 @@ async def test_search_stays_independent_of_feedback(bm25_only_components):
         .fetchall()
     )
     assert after == before
+
+
+async def test_feedback_settles_the_run_write_it_races(bm25_only_components, monkeypatch):
+    """#2183: an agent posts feedback in the call right after its search.
+
+    The observation write is backgrounded, so the tool has to settle it
+    first — otherwise the ``run_id`` foreign key rejects an ID the same
+    server handed out moments earlier. The saver here parks until the
+    flush runs it, so a tool that skipped the flush would fail outright
+    rather than pass on timing.
+    """
+    components, memory_dir = bm25_only_components
+    note = memory_dir / "quality.md"
+    note.write_text("# Quality\n\nRelevance feedback loop for search runs.\n", encoding="utf-8")
+    await components.index_engine.index_file(note)
+
+    real_save = components.storage.save_search_observation
+    started = asyncio.Event()
+
+    async def slow_save(*args, **kwargs):
+        started.set()
+        # Yield repeatedly: without the tool's flush, the feedback write
+        # reaches storage while this is still parked.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        return await real_save(*args, **kwargs)
+
+    monkeypatch.setattr(components.storage, "save_search_observation", slow_save)
+
+    results, stats = await components.search_pipeline.search("relevance feedback", top_k=5)
+    assert results and stats.query_run_id is not None
+    await started.wait()
+
+    ctx = StubCtx(AppContext.from_components(components))
+    recorded = await mem_search_feedback(  # type: ignore[arg-type]
+        run_id=stats.query_run_id,
+        chunk_id=str(results[0].chunk.id),
+        judgment="relevant",
+        ctx=ctx,
+    )
+
+    assert recorded.startswith("Feedback recorded:")

@@ -89,15 +89,37 @@ class HistoryMixin:
         run_id: str,
         observation: dict,
         result_snapshot: list[dict],
+        created_at: str | None = None,
     ) -> str:
-        """Persist one ranked-search invocation and return its durable run ID.
+        """Persist one ranked-search invocation and return its run ID.
 
         This is intentionally separate from ``save_query_history`` so storage
         backends that only implement the legacy history contract remain usable.
-        The pipeline advertises a run ID only after this local commit succeeds.
+
+        The run ID is minted by the caller, and since #2183 the pipeline
+        advertises it before this commit and runs the call in the background —
+        so this method (and the periodic prune below it) is off the search
+        response path, and a run ID can be in a caller's hands before its row
+        exists. ``SearchPipeline.flush_observation`` is how a reader that needs
+        the row waits for it; a write that fails leaves the ID unresolvable,
+        and feedback on it is rejected by the ``run_id`` foreign key.
+
+        ``created_at`` is passed in for the same reason: history is ordered and
+        ``since``-filtered on it, so it has to record when the search ran, not
+        when its backlogged (possibly retried) write reached the connection.
+        It defaults to now for callers that persist inline, and a backend on
+        the older signature (the keyword is negotiated, see
+        ``_saver_takes_created_at``) keeps stamping the write.
+
+        The stamp is second-precision and ``get_search_runs`` breaks ties on
+        insertion ``id``, so the recorded chronology is exact to the second:
+        two searches within one second can still be listed in the order their
+        writes landed rather than the order they ran. Nothing keys off that
+        ordering — runs are addressed by ``run_id`` — so the listing contract
+        is deliberately second-level rather than paying for finer stamps.
         """
         db = self._get_db()
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
         emb_blob = (
             struct.pack(f"{len(query_embedding)}f", *query_embedding) if query_embedding else b""
         )

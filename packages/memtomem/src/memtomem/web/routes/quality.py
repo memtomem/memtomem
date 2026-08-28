@@ -62,6 +62,7 @@ async def promote_quality_case(
     body: PromoteCaseIn,
     storage=Depends(get_storage),
     config=Depends(get_config),
+    pipeline=Depends(get_search_pipeline),
 ) -> PromoteCaseOut:
     """Promote a labeled search run into a durable evaluation case.
 
@@ -72,6 +73,10 @@ async def promote_quality_case(
     returns 409.
     """
     name = body.name or f"run-{body.run_id}"
+    # Promotion reads the run's history row, which the search path writes in
+    # the background (#2183): without this, promoting a fresh run could 404
+    # instead of reporting the real state (usually "no feedback yet").
+    await pipeline.flush_observation(body.run_id)
     fingerprints, _ = current_fingerprints(storage, config)
     try:
         case = await storage.promote_search_run(

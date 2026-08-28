@@ -41,11 +41,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import logging
 import math
 import time
 from collections.abc import Callable, Iterator
+from functools import lru_cache
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -68,6 +70,7 @@ from memtomem.config import (
     SessionSummaryConfig,
 )
 from memtomem.constants import SearchOrigin, normalize_search_origin
+from memtomem.errors import TransactionOwnedError
 from memtomem.generation import ComponentGeneration
 from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
@@ -81,6 +84,16 @@ logger = logging.getLogger(__name__)
 # is wired. Mirrors ``SessionSummaryConfig.expansion_rescue_weight``'s
 # default (config.py) — keep the two in sync.
 _DEFAULT_RESCUE_WEIGHT = 0.5
+
+# A backgrounded observation write (#2183) can find the writer connection held
+# by another task's ``transaction()``. It is off the response path, so it can
+# afford to wait — but only briefly: a bounded ~100ms of retries covers the
+# short transactions it realistically collides with, and a longer one (a bulk
+# index run) exhausts the budget and leaves the run ID unresolvable. That is
+# the pre-#2183 outcome for the same collision, which dropped the row with no
+# retry at all.
+_OBSERVATION_WRITE_ATTEMPTS = 3
+_OBSERVATION_WRITE_RETRY_DELAY_S = 0.05
 
 # Rescue-leg failures silently degrade search to two-leg fusion, which
 # is invisible in production — loud (warning, not debug) on the first
@@ -113,6 +126,29 @@ def _log_mmr_no_dense_once() -> None:
         "retrieval is off (search.enable_dense=False) — MMR is skipped. "
         "mem_status reports this as a `mmr_disabled_no_dense` warning.",
     )
+
+
+@lru_cache(maxsize=32)
+def _signature_accepts_created_at(func: Callable) -> bool:
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        # Un-introspectable callable (some builtins, exotic proxies): assume
+        # the older contract, which only costs a drain-time timestamp.
+        return False
+    if "created_at" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _saver_takes_created_at(saver: Callable) -> bool:
+    """Whether an observation saver accepts the #2183 ``created_at`` keyword.
+
+    Cached on the underlying function, not the bound method: a bound method is
+    a fresh object per attribute access, so caching on it would grow without
+    bound and never hit.
+    """
+    return _signature_accepts_created_at(getattr(saver, "__func__", saver))
 
 
 def _bg_task_error_cb(task: asyncio.Task) -> None:
@@ -365,9 +401,12 @@ class RetrievalStats:
     # logits, Cohere emits [0, 1] relevance), so clients calibrating a
     # threshold need the model, not just the scale family.
     reranker_model: str | None = None
-    # Quality Lab observation envelope. ``query_run_id`` is present only when
-    # the local history commit succeeded; search availability never depends on
-    # observation persistence.
+    # Quality Lab observation envelope. ``query_run_id`` is present once the
+    # local history write is *scheduled* — the write itself runs in the
+    # background (#2183), so the ID is provisional: a failed write leaves it
+    # unresolvable. Search availability never depends on observation
+    # persistence, and ``SearchPipeline.flush_observation`` settles a run
+    # before a reader that needs its row.
     query_run_id: str | None = None
     cache_hit: bool = False
     latency_ms: float | None = None
@@ -456,6 +495,10 @@ class SearchPipeline:
         self._cache_ttl = config.cache_ttl
         self._cache_version = 0
         self._bg_tasks: set[asyncio.Task] = set()
+        # In-flight observation writes, keyed by the run ID already advertised to
+        # the caller (#2183). ``flush_observation`` settles one before a reader
+        # that needs the row — feedback, run detail, history listings.
+        self._pending_observations: dict[str, asyncio.Task] = {}
 
         # LLM query expansion cache (cleared on invalidate_cache)
         self._expansion_cache: dict[str, str] = {}
@@ -477,7 +520,17 @@ class SearchPipeline:
         as_of_unix: int | None,
         rrf_weights: list[float],
     ) -> str | None:
-        """Persist a content-minimized ranked-search observation when supported.
+        """Schedule a content-minimized ranked-search observation when supported.
+
+        The run ID is minted here, not by the database, so it is advertised to
+        the caller as soon as the write is *scheduled* rather than after it
+        commits (#2183): the INSERT, its commit, and the periodic history prune
+        all ran on the response path before, cache hits included. The write
+        itself lands on the background-task set, so a returned ID is provisional
+        — if persistence ultimately fails, the ID stays unresolvable and later
+        feedback on it is rejected, which is the same outcome as the pre-#2183
+        ``None`` for a failed write, one step later. Callers that must read the
+        row back await :meth:`flush_observation` first.
 
         Alternate storage backends that only implement legacy query history
         keep the old fire-and-forget behavior and receive no public run ID.
@@ -542,8 +595,11 @@ class SearchPipeline:
             "query_language": query_language,
             "top_k": top_k,
             "filters": {
-                "namespace": namespace,
-                "scope": scope,
+                # Copied, not referenced: the write now runs after ``search()``
+                # returns, and a caller reusing its filter list would otherwise
+                # rewrite the observation out from under it (#2183).
+                "namespace": list(namespace) if isinstance(namespace, list) else namespace,
+                "scope": list(scope) if isinstance(scope, list) else scope,
                 "has_source_filter": source_filter is not None,
                 "has_tag_filter": tag_filter is not None,
                 "has_metadata_filter": metadata_filter is not None,
@@ -575,19 +631,90 @@ class SearchPipeline:
             for result in results[:top_k]
         ]
         run_id = str(uuid4())
-        try:
-            return await saver(
-                query,
-                query_embedding,
-                [str(result.chunk.id) for result in results[:top_k]],
-                [result.score for result in results[:top_k]],
-                run_id=run_id,
-                observation=observation,
-                result_snapshot=result_snapshot,
-            )
-        except Exception:
-            logger.debug("search observation persistence failed", exc_info=True)
-            return None
+        # Every saver argument is materialized here, on the response path, so the
+        # row reflects the search as it was answered even if the caller mutates
+        # its lists before the background write runs (#2183).
+        result_ids = [str(result.chunk.id) for result in results[:top_k]]
+        result_scores = [result.score for result in results[:top_k]]
+        embedding_snapshot = list(query_embedding)
+        # Stamped here, not in the writer: history is ordered and filtered on
+        # created_at, so a backlogged or retried write must still say when the
+        # search actually ran. Stamps are second-precision and the listing
+        # breaks ties on insertion id, so this pins chronology to the second —
+        # two searches inside one second can still be listed in the order their
+        # writes drained.
+        created_at = datetime.now(UTC).isoformat(timespec="seconds")
+        # ``save_search_observation`` is a duck-typed capability, not an ABC
+        # method (see the probe above), so a backend may implement the
+        # pre-#2183 signature. Passing an unknown keyword would TypeError
+        # inside the background task and strand the run ID; such a backend
+        # simply keeps stamping the write itself, as it did before.
+        extra_kwargs = {"created_at": created_at} if _saver_takes_created_at(saver) else {}
+
+        async def _persist() -> None:
+            try:
+                for attempt in range(_OBSERVATION_WRITE_ATTEMPTS):
+                    try:
+                        await saver(
+                            query,
+                            embedding_snapshot,
+                            result_ids,
+                            result_scores,
+                            run_id=run_id,
+                            observation=observation,
+                            result_snapshot=result_snapshot,
+                            **extra_kwargs,
+                        )
+                        return
+                    except TransactionOwnedError:
+                        # A busy writer, not a broken one (#2185): the owning
+                        # task commits and the connection frees up. Off the
+                        # response path there is no reason not to wait for it.
+                        if attempt == _OBSERVATION_WRITE_ATTEMPTS - 1:
+                            raise
+                        await asyncio.sleep(_OBSERVATION_WRITE_RETRY_DELAY_S)
+            except Exception:
+                logger.warning(
+                    "search observation persistence failed for run %s; the run ID "
+                    "stays unresolvable",
+                    run_id,
+                    exc_info=True,
+                )
+            finally:
+                self._pending_observations.pop(run_id, None)
+
+        task = asyncio.create_task(_persist())
+        task.add_done_callback(_bg_task_error_cb)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        self._pending_observations[run_id] = task
+        return run_id
+
+    async def flush_observation(self, run_id: str | None = None) -> None:
+        """Wait for scheduled observation writes to settle (#2183).
+
+        Readers that need the ``query_history`` row — feedback, run detail,
+        history listings — call this first so a run ID handed out by a search in
+        this process is never missing from its own follow-up. An unknown ``run_id``
+        (already written, never scheduled, or failed) is a no-op, as is a flush
+        with nothing pending; a failed write is logged by the writer, so this
+        never raises.
+
+        ``asyncio.wait`` rather than ``gather``: a cancelled feedback request must
+        not cancel the persistence task and strand the ID it already advertised.
+
+        Cross-instance caveat: the map is per-pipeline. After a component swap
+        (``revert_to_stored``) the replacement cannot flush the retired
+        pipeline's writes; those land when the old instance is closed and drained.
+        """
+        if run_id is None:
+            tasks = set(self._pending_observations.values())
+        else:
+            pending = self._pending_observations.get(run_id)
+            tasks = {pending} if pending is not None else set()
+        if not tasks:
+            return
+        await asyncio.wait(tasks)
 
     @property
     def rerank_active(self) -> bool:
@@ -1921,5 +2048,8 @@ class SearchPipeline:
         if self._bg_tasks:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             self._bg_tasks.clear()
+        # Drained above (observation writes are registered in both sets), so
+        # anything left is a stale key from a cancelled task (#2183).
+        self._pending_observations.clear()
         if self._reranker is not None and hasattr(self._reranker, "close"):
             await self._reranker.close()

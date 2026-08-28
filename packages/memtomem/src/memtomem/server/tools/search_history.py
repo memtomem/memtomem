@@ -26,6 +26,9 @@ async def mem_search_history(
         return f"Error: limit must be between 1 and 200, got {limit}."
 
     app = await _get_app_initialized(ctx)
+    # Searches persist their observation in the background (#2183); settle the
+    # in-flight ones so this listing includes runs this process just answered.
+    await app.search_pipeline.flush_observation()
     rows = await app.storage.get_query_history(limit=limit, since=since)
     if not rows:
         return "No search history found."
@@ -68,6 +71,8 @@ async def mem_search_feedback(
         if replace:
             return "Error: replace is only valid when judgment is given."
         app = await _get_app_initialized(ctx)
+        # The run's own write may still be in flight (#2183).
+        await app.search_pipeline.flush_observation(run_id)
         judgments = await app.storage.get_search_feedback(run_id)
         if not judgments:
             return f"No feedback recorded for run {run_id}."
@@ -79,6 +84,10 @@ async def mem_search_feedback(
     if chunk_id is None:
         return "Error: chunk_id is required when judgment is given."
     app = await _get_app_initialized(ctx)
+    # An agent posts feedback in the tool call right after its search, so the
+    # run's backgrounded history row may not be committed yet (#2183); without
+    # this the foreign key rejects a run ID that is entirely valid.
+    await app.search_pipeline.flush_observation(run_id)
     saved = await app.storage.save_search_feedback(run_id, chunk_id, judgment, replace=replace)
     if saved["created"]:
         return (
@@ -114,6 +123,9 @@ async def mem_search_suggest(
         return "Error: prefix cannot be empty."
 
     app = await _get_app_initialized(ctx)
+    # Suggestions read the same history table the search path writes in the
+    # background (#2183).
+    await app.search_pipeline.flush_observation()
     suggestions = await app.storage.suggest_queries(prefix=prefix, limit=limit)
     if not suggestions:
         return f'No suggestions for "{prefix}".'
