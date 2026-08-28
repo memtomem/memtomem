@@ -24,6 +24,7 @@ from memtomem.context.projects import compute_scope_id
 from memtomem.context.settings import (
     _SETTINGS_LOCK_BUDGET_S,
     CANONICAL_SETTINGS_FILE,
+    pinned_host_homes,
     resolve_scope_path,
     _drop_nonstring_matchers,
     _normalize_matcher,
@@ -587,23 +588,38 @@ async def _sync_settings_core(
     from firing (its callback is scheduled on the blocked loop).
     The lock waits share a single whole-call budget
     (``_SETTINGS_LOCK_BUDGET_S``, below every caller's timeout, across
-    all runtime targets, not per target), so the worker self-aborts with
-    an ``aborted`` status rather than running past the timeout —
-    ``asyncio.to_thread`` cannot cancel a thread, so without the
-    budget a timed-out request would orphan a thread that writes
-    after the 503 (#1145 review).
+    all runtime targets, not per target), so a target that cannot get
+    its lock self-aborts with an ``aborted`` status instead of waiting
+    past the timeout (#1145 review).
+
+    That budget bounds lock *contention only*. Once a target holds its
+    lock, the reread/merge/write runs to completion, and
+    ``asyncio.to_thread`` cannot cancel a thread — so a timed-out
+    request can still land its write after the 503. What the
+    ``pinned_host_homes`` block below guarantees is only that such a
+    late write goes to the homes *this* request resolved, never to
+    whichever ``$HOME`` happens to be current when it lands (#2211).
+    Suppressing the late write itself needs cooperative cancellation
+    and is tracked separately.
 
     Refusals stay in-band by design: host-target generators report a
     ``needs_confirmation`` *result row* instead of raising (the
     ``_confirm.py`` hold-out), so this core raises no ``SyncPhaseError``.
     """
-    duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
-    results = await asyncio.to_thread(
-        generate_all_settings,
-        project_root,
-        scope=target_scope,
-        allow_host_writes=allow_host_writes,
-    )
+    # Pin the host homes before the hand-off, and keep duplicate detection
+    # inside the same pin so the warning and the write agree on one set of
+    # paths. ``asyncio.to_thread`` copies this context into the worker, so a
+    # worker orphaned by the caller's timeout still writes to the homes this
+    # request resolved rather than to whatever ``$HOME`` says once it lands
+    # (#2211).
+    with pinned_host_homes():
+        duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
+        results = await asyncio.to_thread(
+            generate_all_settings,
+            project_root,
+            scope=target_scope,
+            allow_host_writes=allow_host_writes,
+        )
     # Settings reasons embed absolute ``canonical_path`` / ``target_path``
     # values (context/settings.py f-strings), and the ok-row target is an
     # absolute path ($HOME-anchored for user scope) — the settings axis of the
