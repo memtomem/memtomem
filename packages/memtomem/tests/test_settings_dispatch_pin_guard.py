@@ -40,7 +40,11 @@ def _thread_dispatch_sites(tree: ast.AST) -> list[ast.Call]:
         if not isinstance(node, ast.Call):
             continue
         for arg in node.args:
-            if isinstance(arg, ast.Name) and arg.id == _DISPATCHED:
+            # Both spellings: the bare name, and a qualified reference such as
+            # ``settings.generate_all_settings``. Matching only the bare name
+            # would let one import-style hop carry a dispatcher out of view.
+            name = arg.id if isinstance(arg, ast.Name) else getattr(arg, "attr", None)
+            if name == _DISPATCHED:
                 sites.append(node)
                 break
     return sites
@@ -56,7 +60,19 @@ def _propagates_context(site: ast.Call) -> bool:
     environment, so being pinned proves nothing there and the guard must reject
     it rather than wave it through on position alone.
     """
-    return (getattr(site.func, "attr", None) or getattr(site.func, "id", None)) == "to_thread"
+    func = site.func
+    # Specifically ``asyncio.to_thread``. Accepting any ``*.to_thread`` would
+    # approve an executor wrapper of the same name whose propagation is
+    # unknown; requiring the module qualifier keeps the rule to the one API
+    # whose contract is documented. A future ``from asyncio import to_thread``
+    # would fail here — loudly, which is the right direction for a guard to be
+    # wrong in.
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "to_thread"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "asyncio"
+    )
 
 
 def _pinned_spans(tree: ast.AST) -> list[tuple[int, int]]:
@@ -146,6 +162,20 @@ def _guard_accepts(source: str) -> bool:
             "    with pinned_host_homes():\n"
             "        await loop.run_in_executor(None, generate_all_settings, r)\n",
         ),
+        (
+            # A qualified reference is the same dispatch one import hop away.
+            "unpinned qualified dispatch",
+            "import asyncio\nasync def f():\n"
+            "    await asyncio.to_thread(settings.generate_all_settings, r)\n",
+        ),
+        (
+            # Same method name, different object: propagation is not asyncio's
+            # to promise.
+            "pinned executor.to_thread",
+            "import asyncio\nasync def f():\n"
+            "    with pinned_host_homes():\n"
+            "        await executor.to_thread(generate_all_settings, r)\n",
+        ),
     ],
 )
 def test_guard_rejects_shapes_that_lose_the_pin(label, source):
@@ -153,10 +183,19 @@ def test_guard_rejects_shapes_that_lose_the_pin(label, source):
     assert not _guard_accepts(source), f"guard would have accepted: {label}"
 
 
-def test_guard_accepts_the_correct_shape():
-    """Rejecting everything would also pass the tests above — pin the positive."""
-    assert _guard_accepts(
+@pytest.mark.parametrize(
+    "source",
+    [
         "import asyncio\nasync def f():\n"
         "    with pinned_host_homes():\n"
-        "        await asyncio.to_thread(generate_all_settings, r)\n"
-    )
+        "        await asyncio.to_thread(generate_all_settings, r)\n",
+        # The qualified spelling is fine too, as long as it is pinned and
+        # dispatched through asyncio.
+        "import asyncio\nasync def f():\n"
+        "    with pinned_host_homes():\n"
+        "        await asyncio.to_thread(settings.generate_all_settings, r)\n",
+    ],
+)
+def test_guard_accepts_the_correct_shape(source):
+    """Rejecting everything would also pass the tests above — pin the positive."""
+    assert _guard_accepts(source)
