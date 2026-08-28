@@ -123,7 +123,7 @@ def _async_storage() -> AsyncMock:
     s.get_embeddings_for_chunks = AsyncMock(return_value={})
     s.get_importance_scores = AsyncMock(return_value={})
     s.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
-    s.get_chunks_shared_from = AsyncMock(return_value=[])
+    s.get_chunks_shared_from_batch = AsyncMock(return_value={})
     s.get_chunks_batch = AsyncMock(return_value={})
     return s
 
@@ -156,7 +156,7 @@ class TestBoostSourcesHelper:
         )
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         assert await pipeline._session_summary_boost_sources("q") == set()
-        storage.get_chunks_shared_from.assert_not_called()
+        storage.get_chunks_shared_from_batch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_above_threshold_walks_chunk_links_to_source_files(self):
@@ -169,23 +169,25 @@ class TestBoostSourcesHelper:
         storage.bm25_search = AsyncMock(
             return_value=[_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
         )
-        storage.get_chunks_shared_from = AsyncMock(
-            return_value=[
-                ChunkLink(
-                    target_id=target1.id,
-                    link_type="summarizes",
-                    namespace_target="default",
-                    created_at=datetime.now(timezone.utc),
-                    source_id=summary_chunk.id,
-                ),
-                ChunkLink(
-                    target_id=target2.id,
-                    link_type="summarizes",
-                    namespace_target="default",
-                    created_at=datetime.now(timezone.utc),
-                    source_id=summary_chunk.id,
-                ),
-            ]
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            return_value={
+                summary_chunk.id: [
+                    ChunkLink(
+                        target_id=target1.id,
+                        link_type="summarizes",
+                        namespace_target="default",
+                        created_at=datetime.now(timezone.utc),
+                        source_id=summary_chunk.id,
+                    ),
+                    ChunkLink(
+                        target_id=target2.id,
+                        link_type="summarizes",
+                        namespace_target="default",
+                        created_at=datetime.now(timezone.utc),
+                        source_id=summary_chunk.id,
+                    ),
+                ]
+            }
         )
         storage.get_chunks_batch = AsyncMock(
             return_value={target1.id: target1, target2.id: target2}
@@ -198,8 +200,49 @@ class TestBoostSourcesHelper:
             f"/{_CHUNK_SOURCE_BASE}/src/b.md",
         }
         # Walk used the correct link_type
-        call_args = storage.get_chunks_shared_from.await_args
+        call_args = storage.get_chunks_shared_from_batch.await_args
         assert call_args.kwargs.get("link_type") == "summarizes"
+
+    @pytest.mark.asyncio
+    async def test_link_walk_is_one_round_trip_for_many_summaries(self):
+        """#2184: N above-threshold summaries must cost exactly one
+        ``chunk_links`` round trip, not N — the batch call receives every
+        summary id at once."""
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summaries = [_chunk(f"summary {i}", namespace="archive:session:abc") for i in range(3)]
+        storage = _async_storage()
+        storage.bm25_search = AsyncMock(
+            return_value=[
+                _sr(c, score=0.9, rank=i + 1, source="bm25") for i, c in enumerate(summaries)
+            ]
+        )
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+        await pipeline._session_summary_boost_sources("q")
+
+        assert storage.get_chunks_shared_from_batch.await_count == 1
+        (batch_ids,) = storage.get_chunks_shared_from_batch.await_args.args
+        assert set(batch_ids) == {c.id for c in summaries}
+
+    @pytest.mark.asyncio
+    async def test_batch_failure_degrades_all_summaries_to_organic(self):
+        """#2184 error-semantics pin: the batched walk is all-or-nothing.
+        A failure on the single statement mutes the rescue for every
+        summary (degrade to organic) rather than isolating per summary —
+        a SQLite failure would have failed each id identically anyway."""
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summaries = [_chunk(f"summary {i}", namespace="archive:session:abc") for i in range(3)]
+        storage = _async_storage()
+        storage.bm25_search = AsyncMock(
+            return_value=[
+                _sr(c, score=0.9, rank=i + 1, source="bm25") for i, c in enumerate(summaries)
+            ]
+        )
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            side_effect=RuntimeError("links table gone")
+        )
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+        assert await pipeline._session_summary_boost_sources("q") == set()
+        storage.get_chunks_batch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_links_yields_empty(self):
@@ -209,7 +252,7 @@ class TestBoostSourcesHelper:
         storage.bm25_search = AsyncMock(
             return_value=[_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
         )
-        storage.get_chunks_shared_from = AsyncMock(return_value=[])
+        storage.get_chunks_shared_from_batch = AsyncMock(return_value={})
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         assert await pipeline._session_summary_boost_sources("q") == set()
 
@@ -277,16 +320,18 @@ class TestPipelineEndToEndRescue:
             ]
 
         storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
-        storage.get_chunks_shared_from = AsyncMock(
-            return_value=[
-                ChunkLink(
-                    target_id=rescued.id,
-                    link_type="summarizes",
-                    namespace_target="default",
-                    created_at=datetime.now(timezone.utc),
-                    source_id=summary_chunk.id,
-                )
-            ]
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            return_value={
+                summary_chunk.id: [
+                    ChunkLink(
+                        target_id=rescued.id,
+                        link_type="summarizes",
+                        namespace_target="default",
+                        created_at=datetime.now(timezone.utc),
+                        source_id=summary_chunk.id,
+                    )
+                ]
+            }
         )
         storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
 
@@ -330,16 +375,18 @@ class TestPipelineEndToEndRescue:
             return [_sr(rescued, score=0.4, rank=1, source="bm25")]
 
         storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
-        storage.get_chunks_shared_from = AsyncMock(
-            return_value=[
-                ChunkLink(
-                    target_id=rescued.id,
-                    link_type="summarizes",
-                    namespace_target="default",
-                    created_at=datetime.now(timezone.utc),
-                    source_id=summary_chunk.id,
-                )
-            ]
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            return_value={
+                summary_chunk.id: [
+                    ChunkLink(
+                        target_id=rescued.id,
+                        link_type="summarizes",
+                        namespace_target="default",
+                        created_at=datetime.now(timezone.utc),
+                        source_id=summary_chunk.id,
+                    )
+                ]
+            }
         )
         storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
 
@@ -402,16 +449,18 @@ class TestPipelineEndToEndRescue:
             return [_sr(rescued, score=0.5, rank=1, source="bm25")]
 
         storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
-        storage.get_chunks_shared_from = AsyncMock(
-            return_value=[
-                ChunkLink(
-                    target_id=rescued.id,
-                    link_type="summarizes",
-                    namespace_target="default",
-                    created_at=datetime.now(timezone.utc),
-                    source_id=summary_chunk.id,
-                )
-            ]
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            return_value={
+                summary_chunk.id: [
+                    ChunkLink(
+                        target_id=rescued.id,
+                        link_type="summarizes",
+                        namespace_target="default",
+                        created_at=datetime.now(timezone.utc),
+                        source_id=summary_chunk.id,
+                    )
+                ]
+            }
         )
         storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
 
@@ -478,16 +527,18 @@ class TestPipelineEndToEndRescue:
 
         storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
         storage.dense_search = AsyncMock(side_effect=dense_dispatch)
-        storage.get_chunks_shared_from = AsyncMock(
-            return_value=[
-                ChunkLink(
-                    target_id=rescued.id,
-                    link_type="summarizes",
-                    namespace_target="default",
-                    created_at=datetime.now(timezone.utc),
-                    source_id=summary_chunk.id,
-                )
-            ]
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            return_value={
+                summary_chunk.id: [
+                    ChunkLink(
+                        target_id=rescued.id,
+                        link_type="summarizes",
+                        namespace_target="default",
+                        created_at=datetime.now(timezone.utc),
+                        source_id=summary_chunk.id,
+                    )
+                ]
+            }
         )
         storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
 
@@ -607,7 +658,9 @@ class TestRescueLegLoudness:
             return [_sr(organic, score=1.0, rank=1, source="bm25")]
 
         storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
-        storage.get_chunks_shared_from = AsyncMock(side_effect=RuntimeError("links table gone"))
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            side_effect=RuntimeError("links table gone")
+        )
         return storage, organic
 
     @pytest.mark.asyncio
@@ -624,7 +677,7 @@ class TestRescueLegLoudness:
         warnings = [
             r
             for r in caplog.records
-            if r.levelno == logging.WARNING and "get_chunks_shared_from failed" in r.message
+            if r.levelno == logging.WARNING and "get_chunks_shared_from_batch failed" in r.message
         ]
         assert len(warnings) == 1, "first rescue failure must be loud (WARNING, not DEBUG)"
 
@@ -640,7 +693,7 @@ class TestRescueLegLoudness:
             await pipeline.search("q", top_k=10)
             await pipeline.search("q2", top_k=10)
 
-        records = [r for r in caplog.records if "get_chunks_shared_from failed" in r.message]
+        records = [r for r in caplog.records if "get_chunks_shared_from_batch failed" in r.message]
         assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG]
 
     @pytest.mark.asyncio

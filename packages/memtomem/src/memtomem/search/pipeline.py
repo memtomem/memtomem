@@ -902,10 +902,11 @@ class SearchPipeline:
         """Stage-1 enrichment lookup against ``archive:session:*``.
 
         Runs a small BM25 lookup against the session-summary namespace
-        (top-k = ``expansion_lookup_top_k``) and, for each hit above
-        ``expansion_score_threshold``, follows ``chunk_links`` of type
-        ``"summarizes"`` from the summary chunk back to the source
-        chunks it summarized. The set of source files spanned by those
+        (top-k = ``expansion_lookup_top_k``) and, in one batched
+        ``chunk_links`` walk over every hit above
+        ``expansion_score_threshold``, follows links of type
+        ``"summarizes"`` from the summary chunks back to the source
+        chunks they summarized. The set of source files spanned by those
         chunks becomes the boost-sources list.
 
         ADR-0011 PR-D review: ``scope_filter`` / ``project_context_root``
@@ -945,25 +946,26 @@ class SearchPipeline:
         if not candidate_summaries:
             return set()
 
-        # For each above-threshold summary, walk chunk_links(summarizes)
-        # to reach the original source chunks, then collect their
-        # source_file paths. Failures on any one summary are logged and
-        # skipped — we never let a single bad summary mute the rescue.
-        target_chunk_ids: list[UUID] = []
-        for r in candidate_summaries:
-            try:
-                links = await self._storage.get_chunks_shared_from(
-                    r.chunk.id, link_type="summarizes"
-                )
-            except Exception:
-                _log_rescue_failure(
-                    "links_walk", "get_chunks_shared_from failed for summary %s", r.chunk.id
-                )
-                if report_failure is not None:
-                    report_failure()
-                continue
-            for link in links:
-                target_chunk_ids.append(link.target_id)
+        # Walk chunk_links(summarizes) for every above-threshold summary
+        # in one batched query (#2184) to reach the original source
+        # chunks, then collect their source_file paths. The batch is
+        # all-or-nothing: a SQLite failure on the statement would fail
+        # every summary identically, so per-summary isolation bought
+        # nothing — on failure, log loudly and degrade to organic.
+        try:
+            links_by_source = await self._storage.get_chunks_shared_from_batch(
+                [r.chunk.id for r in candidate_summaries], link_type="summarizes"
+            )
+        except Exception:
+            _log_rescue_failure(
+                "links_walk",
+                "get_chunks_shared_from_batch failed for %d summaries",
+                len(candidate_summaries),
+            )
+            if report_failure is not None:
+                report_failure()
+            return set()
+        target_chunk_ids = [link.target_id for links in links_by_source.values() for link in links]
 
         if not target_chunk_ids:
             return set()
