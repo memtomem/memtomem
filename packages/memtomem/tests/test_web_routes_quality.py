@@ -109,6 +109,13 @@ class TestListCases:
 
 
 class TestPromote:
+    async def test_promotion_settles_the_run_write_first(self, app, client):
+        """#2183: promotion reads the run's history row, which the search
+        path writes in the background — a fresh run must not 404 here."""
+        resp = await client.post("/api/quality/cases", json={"run_id": RUN_ID})
+        assert resp.status_code == 200
+        app.state.search_pipeline.flush_observation.assert_awaited_once_with(RUN_ID)
+
     async def test_default_name_uses_full_run_id(self, app, client):
         resp = await client.post("/api/quality/cases", json={"run_id": RUN_ID})
         assert resp.status_code == 200

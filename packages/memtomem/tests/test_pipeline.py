@@ -1130,6 +1130,8 @@ class TestZeroWeightExcludesLeg:
 
         pipeline._storage.bm25_search.assert_awaited_once()
         assert stats.score_scale == "rrf"
+        # The observation write runs off the response path (#2183).
+        await pipeline.flush_observation(stats.query_run_id)
         observation = pipeline._storage.save_search_observation.call_args.kwargs["observation"]
         assert observation["profile"]["rrf_weights"] == [1.0, 1.0]
 
