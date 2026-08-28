@@ -70,12 +70,26 @@ class HealthWatchdog:
         )
 
     async def stop(self) -> None:
-        if self._task:
-            await stop_loop_task(self._task)
+        # ``finally``: ``stop_loop_task`` propagates a cancellation aimed at the
+        # caller (#2213), and this watchdog's own cleanup — dropping the task
+        # handle, closing the health store — must still finish before that
+        # cancellation travels on, or shutdown leaks an open SQLite connection.
+        try:
+            if self._task:
+                await stop_loop_task(self._task)
+        finally:
             self._task = None
-        if self._store:
-            self._store.close()
-            self._store = None
+            if self._store:
+                try:
+                    self._store.close()
+                except Exception:
+                    # Raising out of a ``finally`` would *replace* a propagating
+                    # cancellation with an ordinary exception, which
+                    # ``_stop_quietly`` then swallows — turning a cancelled
+                    # shutdown back into one that looks orderly. Log and let the
+                    # cancellation carry on.
+                    logger.warning("Health store close failed", exc_info=True)
+                self._store = None
 
     async def _run_loop(self) -> None:
         last_heartbeat = 0.0

@@ -403,6 +403,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     watcher: FileWatcher | None = None
     published = False
     failed = False
+    body_cancelled = False
     app.state.startup_state = "starting"
     app.state.startup_reason_code = None
 
@@ -528,6 +529,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     except BaseException as exc:
         failed = True
+        # A cancellation already unwinding through here is the *first* one, and
+        # first-cancellation-wins (``_settlement``): the drain below must not
+        # overwrite it with a later cancel's message.
+        body_cancelled = isinstance(exc, asyncio.CancelledError)
         app.state.startup_state = "failed"
         app.state.startup_reason_code = getattr(exc, "reason_code", "startup_unavailable")
         raise
@@ -541,8 +546,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # flight would otherwise keep writing through storage that is about to
         # close (#2185).
         regen_task = getattr(app.state, "summary_regen_task", None)
+        drain_cancelled: asyncio.CancelledError | None = None
         if regen_task is not None:
-            await stop_loop_task(regen_task)
+            try:
+                await stop_loop_task(regen_task)
+            except asyncio.CancelledError as exc:
+                # A cancellation aimed at this lifespan now propagates out of
+                # the drain (#2213). Defer it to the end of teardown rather
+                # than letting it skip ``close_components`` and the barrier
+                # decision below — bailing out here would leave storage open
+                # *and* the barrier held under a shutdown that looked orderly.
+                drain_cancelled = exc
         # Release the barrier only on a *confirmed* storage close (#1936
         # polarity): an unconfirmed close leaves a possibly-open store, which
         # must keep blocking uninstall until this process exits. Default to
@@ -589,6 +603,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if not failed:
             app.state.startup_state = "not_started"
             app.state.startup_reason_code = None
+        if drain_cancelled is not None and not body_cancelled:
+            # Teardown finished; hand the deferred cancellation on, message
+            # intact, so the caller still observes a cancelled shutdown. When
+            # the body was already cancelled, that earlier exception is still
+            # propagating on its own and wins — raising here would replace it.
+            raise drain_cancelled
 
 
 _app_singleton: FastAPI | None = None
