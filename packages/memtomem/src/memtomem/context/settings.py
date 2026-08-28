@@ -53,9 +53,11 @@ import logging
 import re
 import time
 import tomllib
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Iterator, Protocol
 
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context._kimi_home import kimi_code_home
@@ -137,6 +139,72 @@ _KIMI_END = "# END memtomem managed hooks"
 _SETTINGS_LOCK_BUDGET_S = 30.0
 
 
+@dataclass(frozen=True)
+class HostHomes:
+    """The host directories a settings sync may write to, resolved once.
+
+    Every user-scope target is anchored on ``$HOME`` (and Kimi additionally on
+    ``$KIMI_CODE_HOME``), and both are read from the *ambient process
+    environment*. That is safe on a caller's own thread and unsafe the moment
+    the work moves to ``asyncio.to_thread``: cancelling the awaiting task
+    cannot stop the worker, so a worker that resolves its target later reads
+    whatever the environment says *then* — which is how a cancelled sync came
+    to write a settings file outside the home its caller intended (#2211).
+    """
+
+    home: Path
+    kimi_home: Path
+
+    @classmethod
+    def capture(cls) -> HostHomes:
+        """Snapshot the current environment's host homes."""
+        return cls(home=Path.home(), kimi_home=kimi_code_home())
+
+
+_pinned_homes: ContextVar[HostHomes | None] = ContextVar(
+    "memtomem_settings_host_homes", default=None
+)
+
+
+@contextmanager
+def pinned_host_homes(homes: HostHomes | None = None) -> Iterator[HostHomes]:
+    """Pin the host homes for everything run inside this context.
+
+    Dispatchers that hand settings work to a worker thread enter this
+    *before* the hand-off. ``asyncio.to_thread`` copies the caller's
+    ``contextvars`` context into the worker, so the worker keeps the pinned
+    snapshot even after the caller's ``with`` block — or the whole request —
+    is gone. The token reset keeps the pin scoped to this context rather than
+    leaking into whatever the loop runs next.
+    """
+    token = _pinned_homes.set(homes or HostHomes.capture())
+    try:
+        yield _pinned_homes.get()  # type: ignore[misc]
+    finally:
+        _pinned_homes.reset(token)
+
+
+def host_home() -> Path:
+    """The pinned ``$HOME``, or the live one when nothing pinned it.
+
+    The live fallback keeps synchronous callers (CLI, detectors) reading the
+    environment exactly as before; only the threaded dispatch paths pin.
+    """
+    pinned = _pinned_homes.get()
+    return pinned.home if pinned is not None else Path.home()
+
+
+def host_kimi_home() -> Path:
+    """The pinned Kimi home, or the live one when nothing pinned it.
+
+    Snapshotted separately because ``kimi_code_home`` consults
+    ``$KIMI_CODE_HOME`` first, so deriving it from :func:`host_home` would
+    miss an override and resolve a different directory than the caller saw.
+    """
+    pinned = _pinned_homes.get()
+    return pinned.kimi_home if pinned is not None else kimi_code_home()
+
+
 def resolve_scope_path(project_root: Path, scope: str) -> Path:
     """Resolve ``hooks.target_scope`` to the runtime settings file path.
 
@@ -147,7 +215,7 @@ def resolve_scope_path(project_root: Path, scope: str) -> Path:
     fallback path.
     """
     if scope == "user":
-        return Path.home() / ".claude" / "settings.json"
+        return host_home() / ".claude" / "settings.json"
     if scope == "project_shared":
         return project_root / ".claude" / "settings.json"
     if scope == "project_local":
@@ -677,7 +745,7 @@ class ClaudeSettingsGenerator:
     def is_available(self, project_root: Path) -> bool:
         # Loosened per ADR-0010 §3: tile shows up if Claude Code has any
         # settings home for this project — user-tier or project-tier.
-        return (Path.home() / ".claude").is_dir() or (project_root / ".claude").is_dir()
+        return (host_home() / ".claude").is_dir() or (project_root / ".claude").is_dir()
 
     def target_file(self, project_root: Path, scope: str) -> Path:
         return resolve_scope_path(project_root, scope)
@@ -776,7 +844,7 @@ _GEMINI_TOOL_MAP: dict[str, str] = {
 def _codex_target_file(project_root: Path, scope: str) -> Path | None:
     """Codex hooks file per scope. ``project_local`` has no fan-out (``None``)."""
     if scope == "user":
-        return Path.home() / ".codex" / "hooks.json"
+        return host_home() / ".codex" / "hooks.json"
     if scope == "project_shared":
         return project_root / ".codex" / "hooks.json"
     if scope == "project_local":
@@ -787,7 +855,7 @@ def _codex_target_file(project_root: Path, scope: str) -> Path | None:
 def _gemini_target_file(project_root: Path, scope: str) -> Path | None:
     """Gemini settings file per scope. ``project_local`` has no fan-out (``None``)."""
     if scope == "user":
-        return Path.home() / ".gemini" / "settings.json"
+        return host_home() / ".gemini" / "settings.json"
     if scope == "project_shared":
         return project_root / ".gemini" / "settings.json"
     if scope == "project_local":
@@ -798,7 +866,7 @@ def _gemini_target_file(project_root: Path, scope: str) -> Path | None:
 def _kimi_target_file(project_root: Path, scope: str) -> Path | None:
     """Kimi config file per scope. ``project_local`` has no fan-out."""
     if scope == "user":
-        return kimi_code_home() / "config.toml"
+        return host_kimi_home() / "config.toml"
     if scope == "project_shared":
         return project_root / ".kimi" / "config.toml"
     if scope == "project_local":
@@ -1201,7 +1269,7 @@ class CodexSettingsGenerator:
     name: str = "codex_settings"
 
     def is_available(self, project_root: Path) -> bool:
-        return (Path.home() / ".codex").is_dir() or (project_root / ".codex").is_dir()
+        return (host_home() / ".codex").is_dir() or (project_root / ".codex").is_dir()
 
     def target_file(self, project_root: Path, scope: str) -> Path | None:
         return _codex_target_file(project_root, scope)
@@ -1237,7 +1305,7 @@ class GeminiSettingsGenerator:
     name: str = "gemini_settings"
 
     def is_available(self, project_root: Path) -> bool:
-        return (Path.home() / ".gemini").is_dir() or (project_root / ".gemini").is_dir()
+        return (host_home() / ".gemini").is_dir() or (project_root / ".gemini").is_dir()
 
     def target_file(self, project_root: Path, scope: str) -> Path | None:
         return _gemini_target_file(project_root, scope)
@@ -1270,7 +1338,7 @@ class KimiSettingsGenerator:
     name: str = "kimi_settings"
 
     def is_available(self, project_root: Path) -> bool:
-        return kimi_code_home().is_dir() or (project_root / ".kimi").is_dir()
+        return host_kimi_home().is_dir() or (project_root / ".kimi").is_dir()
 
     def target_file(self, project_root: Path, scope: str) -> Path | None:
         return _kimi_target_file(project_root, scope)
@@ -1453,12 +1521,18 @@ def generate_all_settings(
     """
     results: dict[str, SettingsSyncResult] = {}
 
-    # One shared deadline for ALL per-target sidecar-lock waits, so the whole
-    # call — not each target — is bounded by ``_SETTINGS_LOCK_BUDGET_S``. With
-    # N runtimes a per-target bound would let the cumulative wait reach
-    # ``N × bound`` and overrun the web handler's 60s ``asyncio.timeout``,
-    # re-opening the orphaned-worker window (#1145 review). Each target waits
-    # only the time left on this budget.
+    # One shared deadline for ALL per-target sidecar-lock *waits*, so lock
+    # contention across the whole call — not per target — is bounded by
+    # ``_SETTINGS_LOCK_BUDGET_S``. With N runtimes a per-target bound would let
+    # the cumulative wait reach ``N × bound`` and overrun the web handler's 60s
+    # ``asyncio.timeout`` (#1145 review). Each target waits only the time left
+    # on this budget.
+    #
+    # The budget bounds waiting only: once a target holds its lock, the
+    # reread/merge/write runs to completion even if the caller has already been
+    # cancelled, so this does not close the orphaned-writer window. What keeps
+    # such a late write harmless is the caller-side ``pinned_host_homes``
+    # snapshot, which stops it from following ``$HOME`` somewhere else (#2211).
     lock_deadline = time.monotonic() + _SETTINGS_LOCK_BUDGET_S
 
     for name, gen in SETTINGS_GENERATORS.items():
@@ -1599,7 +1673,10 @@ def generate_all_settings(
         except TimeoutError:
             # Another process held the lock past the shared budget. Abort this
             # target cleanly so the (possibly thread-offloaded) caller never
-            # blocks indefinitely and never orphans a late writer (#1145 review).
+            # blocks indefinitely (#1145 review). This bounds the *wait*; a
+            # target that did acquire its lock still finishes its write, so it
+            # is the pinned host homes — not this abort — that keeps a late
+            # write pointed at the caller's own target (#2211).
             results[name] = SettingsSyncResult(
                 status="aborted",
                 reason=f"{target_path}: another process held the lock past the "
@@ -1705,9 +1782,13 @@ __all__ = [
     "GeminiSettingsGenerator",
     "KimiSettingsGenerator",
     "MalformedSettingsError",
+    "HostHomes",
     "SETTINGS_GENERATORS",
     "SettingsGenerator",
     "SettingsSyncResult",
+    "host_home",
+    "host_kimi_home",
+    "pinned_host_homes",
     "resolve_scope_path",
     "diff_settings",
     "generate_all_settings",
