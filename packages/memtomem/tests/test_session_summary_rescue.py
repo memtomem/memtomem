@@ -25,6 +25,8 @@ from memtomem.models import Chunk, ChunkLink, ChunkMetadata, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.server.formatters import _format_structured_results
+from memtomem.storage.base import SearchMetadataFilter
+from memtomem.storage.sqlite_helpers import norm_path
 
 
 # Symbolic anchor for chunk source paths. Tests use AsyncMock storage
@@ -49,6 +51,21 @@ def _chunk(content: str = "x", source: str = "a.md", namespace: str = "default")
 
 def _sr(chunk: Chunk, score: float, rank: int, source: str = "bm25", *, via=False) -> SearchResult:
     return SearchResult(chunk=chunk, score=score, rank=rank, source=source, via_session_summary=via)
+
+
+def _apply_source_exact(hits: list[SearchResult], metadata_filter) -> list[SearchResult]:
+    """Emulate the storage-level ``source_exact`` SQL filter (#2184).
+
+    The rescue BM25 leg pushes its source restriction into storage, so a
+    dispatch double serving both the organic and the rescue call must
+    honor the filter or organic-only chunks would leak into the rescue
+    leg. Fixture paths don't exist on disk, so ``norm_path`` is identity
+    and plain string membership is exact here.
+    """
+    if metadata_filter is None or not metadata_filter.source_exact:
+        return hits
+    allowed = set(metadata_filter.source_exact)
+    return [r for r in hits if str(r.chunk.metadata.source_file) in allowed]
 
 
 # ---------------------------------------------------------------------------
@@ -307,17 +324,23 @@ class TestPipelineEndToEndRescue:
             namespace_filter=None,
             scope_filter=None,
             project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             # Archive lookup pattern
             if namespace_filter is not None and getattr(namespace_filter, "pattern", None) == (
                 "archive:session:*"
             ):
                 return [_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
-            # Organic + rescue (unrestricted) pool — both chunks visible
-            return [
-                _sr(organic, score=1.0, rank=1, source="bm25"),
-                _sr(rescued, score=0.4, rank=2, source="bm25"),
-            ]
+            # Organic pool — both chunks visible; the rescue call carries
+            # a source_exact filter that strips the organic chunk.
+            return _apply_source_exact(
+                [
+                    _sr(organic, score=1.0, rank=1, source="bm25"),
+                    _sr(rescued, score=0.4, rank=2, source="bm25"),
+                ],
+                metadata_filter,
+            )
 
         storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
         storage.get_chunks_shared_from_batch = AsyncMock(
@@ -367,6 +390,8 @@ class TestPipelineEndToEndRescue:
             namespace_filter=None,
             scope_filter=None,
             project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             if namespace_filter is not None and getattr(namespace_filter, "pattern", None) == (
                 "archive:session:*"
@@ -436,6 +461,8 @@ class TestPipelineEndToEndRescue:
             namespace_filter=None,
             scope_filter=None,
             project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             bm25_calls.append(
                 {
@@ -499,6 +526,8 @@ class TestPipelineEndToEndRescue:
             namespace_filter=None,
             scope_filter=None,
             project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             if getattr(namespace_filter, "pattern", None) == "archive:session:*":
                 return [_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
@@ -582,6 +611,8 @@ class TestPipelineEndToEndRescue:
             namespace_filter=None,
             scope_filter=None,
             project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             label = _label(namespace_filter)
             bm25_calls.append(label)
@@ -609,7 +640,13 @@ class TestPipelineEndToEndRescue:
         archive_lookup_called = False
 
         async def bm25_dispatch(
-            query, top_k, namespace_filter=None, scope_filter=None, project_context_root=None
+            query,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             nonlocal archive_lookup_called
             if getattr(namespace_filter, "pattern", None) == "archive:session:*":
@@ -621,6 +658,145 @@ class TestPipelineEndToEndRescue:
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         await pipeline.search("q", top_k=10, namespace="agent-runtime:planner")
         assert archive_lookup_called is False
+
+
+# ---------------------------------------------------------------------------
+# 3a. Rescue BM25 leg pushes the source filter into storage SQL (#2184)
+# ---------------------------------------------------------------------------
+
+
+class TestRescueSourceFilterPushdown:
+    """#2184: the rescue BM25 leg passes ``SearchMetadataFilter.source_exact``
+    to storage instead of post-filtering in Python; the dense leg stays
+    Python-filtered (see ``_rescue_retrieval`` docstring)."""
+
+    @pytest.mark.asyncio
+    async def test_rescue_leg_pushes_source_filter_into_storage(self):
+        storage = _async_storage()
+        captured: dict = {}
+
+        async def bm25_dispatch(
+            query,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
+        ):
+            captured["metadata_filter"] = metadata_filter
+            captured["namespace_filter"] = namespace_filter
+            return []
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        pipeline = _make_pipeline(storage, session_summary_config=SessionSummaryConfig())
+
+        src = f"/{_CHUNK_SOURCE_BASE}/src/old_session.md"
+        await pipeline._rescue_retrieval("q", [0.1] * 8, 10, {src}, use_bm25=True, use_dense=False)
+
+        assert captured["namespace_filter"] is None
+        # Expected value computed through the same normalizer the pipeline
+        # uses — a literal POSIX string would fail on Windows.
+        assert captured["metadata_filter"].source_exact == (norm_path(Path(src)),)
+
+    @pytest.mark.asyncio
+    async def test_outer_source_pin_intersects_after_normalization(self):
+        """An outer ``source_exact`` pin composes by intersection, and both
+        sides normalize first — a lexically different but canonically equal
+        path (``src/../src/…``) must still intersect."""
+        storage = _async_storage()
+        captured: dict = {}
+
+        async def bm25_dispatch(
+            query,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
+        ):
+            captured["metadata_filter"] = metadata_filter
+            return []
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        pipeline = _make_pipeline(storage, session_summary_config=SessionSummaryConfig())
+
+        canonical = f"/{_CHUNK_SOURCE_BASE}/src/old_session.md"
+        detoured = f"/{_CHUNK_SOURCE_BASE}/src/../src/old_session.md"
+        outer = SearchMetadataFilter(source_exact=(detoured, f"/{_CHUNK_SOURCE_BASE}/other.md"))
+        await pipeline._rescue_retrieval(
+            "q",
+            [0.1] * 8,
+            10,
+            {canonical},
+            use_bm25=True,
+            use_dense=False,
+            metadata_filter=outer,
+        )
+
+        assert captured["metadata_filter"].source_exact == (norm_path(Path(canonical)),)
+
+    @pytest.mark.asyncio
+    async def test_disjoint_outer_source_pin_skips_rescue_without_storage_call(self):
+        storage = _async_storage()
+        pipeline = _make_pipeline(storage, session_summary_config=SessionSummaryConfig())
+
+        outer = SearchMetadataFilter(source_exact=(f"/{_CHUNK_SOURCE_BASE}/other.md",))
+        result = await pipeline._rescue_retrieval(
+            "q",
+            [0.1] * 8,
+            10,
+            {f"/{_CHUNK_SOURCE_BASE}/src/old_session.md"},
+            use_bm25=True,
+            use_dense=True,
+            metadata_filter=outer,
+        )
+
+        assert result == []
+        storage.bm25_search.assert_not_called()
+        storage.dense_search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rescue_preserves_outer_time_and_type_bounds(self):
+        """Outer ``chunk_types`` / ``created_from`` bounds must survive into
+        the rescue-leg filter — the source pushdown replaces only
+        ``source_exact``."""
+        storage = _async_storage()
+        captured: dict = {}
+
+        async def bm25_dispatch(
+            query,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
+        ):
+            captured["metadata_filter"] = metadata_filter
+            return []
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        pipeline = _make_pipeline(storage, session_summary_config=SessionSummaryConfig())
+
+        bound = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        outer = SearchMetadataFilter(chunk_types=("code",), created_from=bound)
+        src = f"/{_CHUNK_SOURCE_BASE}/src/old_session.md"
+        await pipeline._rescue_retrieval(
+            "q",
+            [0.1] * 8,
+            10,
+            {src},
+            use_bm25=True,
+            use_dense=False,
+            metadata_filter=outer,
+        )
+
+        got = captured["metadata_filter"]
+        assert got.chunk_types == ("code",)
+        assert got.created_from == bound
+        assert got.source_exact == (norm_path(Path(src)),)
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +827,13 @@ class TestRescueLegLoudness:
         storage = _async_storage()
 
         async def bm25_dispatch(
-            query, top_k, namespace_filter=None, scope_filter=None, project_context_root=None
+            query,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             if getattr(namespace_filter, "pattern", None) == "archive:session:*":
                 return [_sr(cfg_summary, score=0.9, rank=1, source="bm25")]
@@ -705,7 +887,13 @@ class TestRescueLegLoudness:
         storage = _async_storage()
 
         async def bm25_dispatch(
-            query, top_k, namespace_filter=None, scope_filter=None, project_context_root=None
+            query,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
         ):
             if getattr(namespace_filter, "pattern", None) == "archive:session:*":
                 raise RuntimeError("archive namespace unreadable")
