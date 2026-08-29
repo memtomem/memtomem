@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
+from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
 from memtomem.context._names import InvalidNameError, validate_name
@@ -406,6 +407,14 @@ async def create_artifact(
     path = artifact_dir / spec.dir_filename
 
     def _create_locked() -> None:
+        # The queued-worker checkpoint — twin of the one in ``_delete_locked``.
+        # ``asyncio.to_thread`` QUEUES this closure, so the caller can be
+        # cancelled before the body starts running, and only a check here can
+        # leave no trace at all: the post-lock one below has already acquired
+        # the lock, which creates a sidecar nothing removes (#2247).
+        if sync_is_abandoned():
+            return
+
         # ADR-0030 §6: cross-process canonical lock (name-keyed) so a concurrent
         # Pull / transfer / migrate / version op on this artifact can't race the
         # create. One shared budget spans the canonical lock and create_version's
@@ -416,6 +425,12 @@ async def create_artifact(
         # never self-contends.
         budget = new_lock_budget()
         with canonical_sidecar_lock(canonical_root, name, timeout=budget()):
+            # Waiting for this lock is the longest the create can take, so it
+            # is where the request most plausibly timed out. Returning here
+            # creates nothing; the caller is gone by construction, so the
+            # ``None`` it never reads needs no distinct arm (#2247).
+            if sync_is_abandoned():
+                return
             # ADR-0030 §6: re-resolve BOTH layouts inside C0. The pre-lock check
             # (outside the canonical lock) can go stale — a concurrent create /
             # Pull / flat→dir migrate can land a flat OR dir canonical while we
@@ -464,7 +479,10 @@ async def create_artifact(
                         f"{spec.kind.capitalize()} '{name}' already exists",
                         reason_code="already_exists",
                     )
-                await asyncio.to_thread(_create_locked)
+                # Scoped so a create this request can no longer wait for
+                # stops before it touches the canonical root (#2247).
+                with abandon_sync_on_exit():
+                    await asyncio.to_thread(_create_locked)
     except TimeoutError:
         raise _error(
             503,
@@ -512,6 +530,14 @@ async def update_artifact(
     canonical_root = _artifacts_root(spec, project_root, scope=target_scope)
 
     def _update_locked() -> tuple[str, int]:
+        # The queued-worker checkpoint — twin of the one in ``_delete_locked``.
+        # ``asyncio.to_thread`` QUEUES this closure, so the caller can be
+        # cancelled before the body starts running, and only a check here can
+        # leave no trace at all: the post-lock one below has already acquired
+        # the lock, which creates a sidecar nothing removes (#2247).
+        if sync_is_abandoned():
+            return "gone", 0
+
         # ADR-0030 §6: re-resolve, mtime re-check, AND write all under the
         # cross-process canonical lock. Re-resolving inside C0 is load-bearing —
         # a concurrent flat→dir migrate could have moved the working file since
@@ -522,6 +548,12 @@ async def update_artifact(
         # lock-only — no auto-snapshot on edit save (that stays an explicit
         # "create version" action; ADR-0030 §6).
         with canonical_sidecar_lock(canonical_root, name, timeout=new_lock_budget()()):
+            # Waiting for this lock is the longest the update can take, so it
+            # is where the request most plausibly timed out. Reported as the
+            # no-write arm — nothing reads it, since reaching here means the
+            # caller already returned 503 (#2247).
+            if sync_is_abandoned():
+                return "gone", 0
             _n, re_resolved = _resolve_existing(spec, project_root, name, scope=target_scope)
             if re_resolved is None:
                 return "gone", 0
@@ -542,7 +574,10 @@ async def update_artifact(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                status, mtime_ns = await asyncio.to_thread(_update_locked)
+                # Scoped so an update this request can no longer wait for
+                # stops before it rewrites the working file (#2247).
+                with abandon_sync_on_exit():
+                    status, mtime_ns = await asyncio.to_thread(_update_locked)
     except TimeoutError:
         raise _error(
             503,
@@ -604,6 +639,15 @@ async def delete_artifact(
         # Recompute the host targets from the CURRENT state and re-gate — a
         # needs-confirmation envelope aborts the delete.
         cascade_targets: list[Path] = []
+
+        # The queued-worker checkpoint. ``asyncio.to_thread`` QUEUES the
+        # closure, so the caller can be cancelled before this body ever starts
+        # running — a window the post-lock check below cannot see, because
+        # reaching it already means acquiring the lock and leaving the sidecar
+        # that acquisition creates. Cheap, and the only check that can leave
+        # literally no trace (#2247).
+        if sync_is_abandoned():
+            return None, [], []
         with canonical_sidecar_lock(canonical_root, name, timeout=new_lock_budget()()):
             _n, re_resolved = _resolve_existing(spec, project_root, name, scope=target_scope)
             locked_pending: list[Path] = [re_resolved[0]] if re_resolved is not None else []
@@ -621,6 +665,17 @@ async def delete_artifact(
             )
             if locked_gate is not None:
                 return locked_gate, removed, skipped
+
+            # The delete's one abort checkpoint, placed after the lock is
+            # held because that wait is what the request timed out on — a
+            # pre-lock check would sit in a window nothing can reach. Safe
+            # because NOTHING has been removed yet: what follows is one removal
+            # sequence, the canonical under the lock and the runtime cascade
+            # outside it, and stopping between them would strand the fan-out
+            # copies with no canonical left to prune them. So the delete either
+            # has not started when its caller gives up, or it finishes (#2247).
+            if sync_is_abandoned():
+                return None, [], []
 
             if re_resolved is not None:
                 cur_path, _cur_layout = re_resolved
@@ -648,7 +703,12 @@ async def delete_artifact(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
+                # Scoped so a delete this request can no longer wait for
+                # stops before it starts removing (#2247). Its checkpoint
+                # sits before the first removal: a delete that has begun must
+                # finish its cascade.
+                with abandon_sync_on_exit():
+                    gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
     except TimeoutError:
         raise _error(
             503,

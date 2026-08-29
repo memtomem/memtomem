@@ -26,9 +26,21 @@ NO_PROJECT_FANOUT_FOR_RUNTIME: Final = "no_project_fanout_for_runtime"
 
 # Another process held a destination sidecar lock past the engine's whole-call
 # acquisition budget (``skills._SKILLS_LOCK_BUDGET_S``). Emitted instead of
-# blocking indefinitely so an async web caller offloading to a thread can never
-# orphan a worker that writes after its request already timed out (#1145 shape).
+# blocking indefinitely so an async web caller offloading to a thread never
+# waits on a stuck cross-process holder past its own timeout (#1145 shape).
+# The budget bounds that *wait* only — what a worker does once it holds the
+# lock is ``ABANDONED``'s job, below.
 LOCK_TIMEOUT: Final = "lock_timeout"
+
+# The caller that dispatched this work gave up before this item was written —
+# a web request whose ``asyncio.timeout`` fired and returned 503, or a
+# cancelled MCP call. ``asyncio.to_thread`` cannot be cancelled, so the worker
+# polls ``_abandon.sync_is_abandoned`` at points its engine chose and reports
+# the items it declined to touch (#2247). Distinct from ``LOCK_TIMEOUT``: that
+# one means nobody could get the lock, this one means nobody is still waiting
+# for the answer. Cooperative, so items completed before the caller gave up
+# are reported as generated/imported, not as skips.
+ABANDONED: Final = "abandoned"
 
 # The fan-out destination already holds non-skill content — a directory with
 # files but no SKILL.md manifest, or a plain file — that
@@ -195,6 +207,7 @@ SkipCode = Literal[
     "parse_error",
     "no_project_fanout_for_runtime",
     "lock_timeout",
+    "abandoned",
     "target_conflict",
     "duplicate_name",
     "in_sync",
