@@ -12,6 +12,7 @@ import click
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
 from memtomem.context._dir_swap import (
@@ -361,6 +362,14 @@ async def create_skill(
         raise _error(400, "validation", "Skill content is not valid UTF-8") from exc
 
     def _create_locked() -> None:
+        # The queued-worker checkpoint — twin of the one in ``_delete_locked``.
+        # ``asyncio.to_thread`` QUEUES this closure, so the caller can be
+        # cancelled before the body starts running, and only a check here can
+        # leave no trace at all: the post-lock one below has already acquired
+        # the lock, which creates a sidecar nothing removes (#2247).
+        if sync_is_abandoned():
+            return
+
         # ADR-0030 §6: cross-process canonical lock (the same
         # ``<root>/.{name}.lock`` the skills importer takes) so a concurrent
         # Pull / transfer / migrate can't race the create. Worker-thread only
@@ -371,6 +380,15 @@ async def create_skill(
             # recovery is about to roll back would otherwise 409 as "already
             # exists" while its tree is on its way out.
             run_swap_prelude(skill_dir.parent, body.name, kind="skills")
+            # Waiting for this lock is the longest the create can take, so it
+            # is where the request most plausibly timed out. After the prelude,
+            # not before it: recovery repairs an interrupted swap for everyone,
+            # and skipping it would leave the next caller to find the same
+            # wreckage. Returning here creates nothing; the caller is gone by
+            # construction, so the ``None`` it never reads needs no distinct
+            # arm (#2247).
+            if sync_is_abandoned():
+                return
             if skill_dir.exists():
                 # 409 Conflict, matching create_agent / create_command.
                 raise _error(
@@ -393,7 +411,10 @@ async def create_skill(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                await asyncio.to_thread(_create_locked)
+                # Scoped so a create this request can no longer wait for
+                # stops before it touches the canonical root (#2247).
+                with abandon_sync_on_exit():
+                    await asyncio.to_thread(_create_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill create timed out — another sync may be in progress")
     except SwapRecoveryError as exc:
@@ -464,6 +485,14 @@ async def update_skill(
         return JSONResponse(content=gate)
 
     def _update_locked() -> tuple[str, int]:
+        # The queued-worker checkpoint — twin of the one in ``_delete_locked``.
+        # ``asyncio.to_thread`` QUEUES this closure, so the caller can be
+        # cancelled before the body starts running, and only a check here can
+        # leave no trace at all: the post-lock one below has already acquired
+        # the lock, which creates a sidecar nothing removes (#2247).
+        if sync_is_abandoned():
+            return "gone", 0
+
         # ADR-0030 §6: existence + mtime re-check AND write under the
         # cross-process canonical lock (lock-only in B2a — no auto-snapshot on
         # edit save). The manifest existence is re-checked INSIDE C0 — a
@@ -475,6 +504,14 @@ async def update_skill(
             # mid-swap canonical would otherwise report "gone" (404) or a bogus
             # mtime conflict against bytes that are about to be replaced.
             run_swap_prelude(skill_dir.parent, name, kind="skills")
+            # Waiting for this lock is the longest the update can take, so it
+            # is where the request most plausibly timed out. After the prelude
+            # (see create): recovery is repair everyone benefits from, and the
+            # abort only declines THIS write. Reported as the no-write arm —
+            # nothing reads it, since reaching here means the caller already
+            # returned 503 (#2247).
+            if sync_is_abandoned():
+                return "gone", 0
             if not manifest.is_file():
                 return "gone", 0
             current_mtime_ns = manifest.stat().st_mtime_ns
@@ -493,7 +530,10 @@ async def update_skill(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                status, mtime_ns = await asyncio.to_thread(_update_locked)
+                # Scoped so an update this request can no longer wait for
+                # stops before it rewrites the manifest (#2247).
+                with abandon_sync_on_exit():
+                    status, mtime_ns = await asyncio.to_thread(_update_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill update timed out — another sync may be in progress")
     except SwapRecoveryError as exc:
@@ -579,6 +619,16 @@ async def delete_skill(
         # envelope aborts the delete (returned to the caller) rather than
         # silently removing an unconfirmed user-tier artifact.
         cascade_targets: list[Path] = []
+
+        # The queued-worker checkpoint. ``asyncio.to_thread`` QUEUES the
+        # closure, so the caller can be cancelled before this body ever starts
+        # running — a window the post-lock check below cannot see, because
+        # reaching it already means acquiring the lock and leaving the sidecar
+        # that acquisition creates (and, here, running swap recovery). Cheap,
+        # and the only check that can leave literally no trace (#2247).
+        if sync_is_abandoned():
+            return None, [], []
+
         with canonical_sidecar_lock(skill_dir.parent, name, timeout=new_lock_budget()()):
             # Same marker-aware disclosure as the pre-lock list, and it runs
             # BEFORE the prelude: recovery writes under the host root, so a
@@ -616,6 +666,18 @@ async def delete_skill(
             # problem.
             run_swap_prelude(skill_dir.parent, name, kind="skills")
 
+            # The delete's second checkpoint, and the last one it gets. Placed
+            # after the lock because the wait for it is what the request timed
+            # out on — the pre-lock check above covers only the narrower window
+            # where the closure had not started at all. Safe because NOTHING
+            # has been removed yet: what follows is one removal sequence, the
+            # canonical under the lock and the runtime cascade outside it, and
+            # stopping between them would strand the fan-out copies with no
+            # canonical left to prune them. So the delete either has not
+            # started when its caller gives up, or it finishes (#2247).
+            if sync_is_abandoned():
+                return None, [], []
+
             if skill_dir.exists():
                 try:
                     shutil.rmtree(skill_dir)
@@ -641,7 +703,12 @@ async def delete_skill(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
+                # Scoped so a delete this request can no longer wait for
+                # stops before it starts removing (#2247). Both its
+                # checkpoints sit before the first removal: a delete that has
+                # begun must finish its cascade.
+                with abandon_sync_on_exit():
+                    gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill delete timed out — another sync may be in progress")
     except SwapRecoveryError as exc:
@@ -760,21 +827,32 @@ async def _sync_skills_core(
     from firing (its expiry callback runs on the very loop that is
     blocked) — the exact shape #1145 fixed for settings. The engine's own
     ``_SKILLS_LOCK_BUDGET_S`` (30s, below every caller's timeout) bounds
-    the lock waits, so a timed-out request cannot orphan a worker thread
-    that writes after the 503 already went out.
+    the lock *waits*, so no destination can park the worker past the
+    request window.
+
+    That budget does not stop the worker writing: a destination whose lock
+    is held is on no deadline, and ``asyncio.to_thread`` cannot be
+    cancelled, so a timed-out request used to return 503 and then fan
+    skills out anyway. ``abandon_sync_on_exit`` sets the flag the engine
+    polls — between destinations, and again inside each one just before its
+    promote — so a caller that gave up leaves the destinations it had not
+    reached untouched (#2247). Cooperative, not transactional: destinations
+    promoted before the timeout stay promoted, and in ``project_shared``
+    the all-or-nothing batch either promotes every destination or none.
 
     Engine errors are raised as :class:`SyncPhaseError` — the standalone
     route's historical status/detail pair (privacy 422 keeps its STRING
     detail, issue-pinned) plus the envelope attributes sync-all renders.
     """
     try:
-        result = await asyncio.to_thread(
-            generate_all_skills,
-            project_root,
-            scope=target_scope,
-            surface=surface,
-            force_unsafe=force_unsafe,
-        )
+        with abandon_sync_on_exit():
+            result = await asyncio.to_thread(
+                generate_all_skills,
+                project_root,
+                scope=target_scope,
+                surface=surface,
+                force_unsafe=force_unsafe,
+            )
     except PrivacyScanError as exc:
         # Path-free detail — ``exc.message`` embeds the absolute canonical path
         # (#1385 finding 1). The chained ``exc`` keeps the full text for logs.
@@ -937,16 +1015,20 @@ async def import_skills(
                 # Thread offload (#1247 id 18): the import engine now blocks
                 # on the destination sidecar flock (budget-bounded), and
                 # ``asyncio.timeout`` cannot fire while the loop thread
-                # itself is blocked — same shape as the sync route above.
-                return await asyncio.to_thread(
-                    extract_skills_to_canonical,
-                    project_root,
-                    overwrite=overwrite,
-                    dry_run=dry,
-                    scope=target_scope,
-                    force_unsafe_import=force_unsafe_import,
-                    surface="web_context_skills_import",
-                )
+                # itself is blocked — same shape as the sync route above, and
+                # so is the abort flag: the budget bounds the wait, and this
+                # scope is what stops a worker importing the remaining skills
+                # behind a 503 this request already sent (#2247).
+                with abandon_sync_on_exit():
+                    return await asyncio.to_thread(
+                        extract_skills_to_canonical,
+                        project_root,
+                        overwrite=overwrite,
+                        dry_run=dry,
+                        scope=target_scope,
+                        force_unsafe_import=force_unsafe_import,
+                        surface="web_context_skills_import",
+                    )
 
     try:
         if not dry_run and target_scope == "user" and not allow_host_writes:
@@ -1018,17 +1100,19 @@ async def import_skill(
     async def _run(dry: bool) -> ExtractResult:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                # Thread offload (#1247 id 18): see import_skills above.
-                return await asyncio.to_thread(
-                    extract_skills_to_canonical,
-                    project_root,
-                    overwrite=overwrite,
-                    only_name=name,
-                    dry_run=dry,
-                    scope=target_scope,
-                    force_unsafe_import=force_unsafe_import,
-                    surface="web_context_skills_import",
-                )
+                # Thread offload + abort scope (#1247 id 18, #2247): see
+                # import_skills above.
+                with abandon_sync_on_exit():
+                    return await asyncio.to_thread(
+                        extract_skills_to_canonical,
+                        project_root,
+                        overwrite=overwrite,
+                        only_name=name,
+                        dry_run=dry,
+                        scope=target_scope,
+                        force_unsafe_import=force_unsafe_import,
+                        surface="web_context_skills_import",
+                    )
 
     try:
         if target_scope == "user" and not allow_host_writes:
@@ -1099,20 +1183,22 @@ async def import_skill_to_user(
     async def _run(dry: bool) -> ExtractResult:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                # Thread offload (#1247 id 18): see import_skills above. Reads
-                # the project runtime, writes the user canonical — the only
-                # call site that decouples source_scope from the dest scope.
-                return await asyncio.to_thread(
-                    extract_skills_to_canonical,
-                    project_root,
-                    overwrite=overwrite,
-                    only_name=name,
-                    dry_run=dry,
-                    scope="user",
-                    source_scope="project_shared",
-                    force_unsafe_import=force_unsafe_import,
-                    surface="web_context_skills_import_to_user",
-                )
+                # Thread offload + abort scope (#1247 id 18, #2247): see
+                # import_skills above. Reads the project runtime, writes the
+                # user canonical — the only call site that decouples
+                # source_scope from the dest scope.
+                with abandon_sync_on_exit():
+                    return await asyncio.to_thread(
+                        extract_skills_to_canonical,
+                        project_root,
+                        overwrite=overwrite,
+                        only_name=name,
+                        dry_run=dry,
+                        scope="user",
+                        source_scope="project_shared",
+                        force_unsafe_import=force_unsafe_import,
+                        surface="web_context_skills_import_to_user",
+                    )
 
     try:
         if not allow_host_writes:

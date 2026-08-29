@@ -410,15 +410,20 @@ async def mem_context_init(
         try:
             # Thread offload (#1247 id 18): the skills import engine blocks
             # on the destination sidecar flock (budget-bounded) — keep that
-            # wait off the event loop.
-            skill_result = await asyncio.to_thread(
-                extract_skills_to_canonical,
-                root,
-                overwrite=overwrite,
-                scope=artifact_scope,
-                force_unsafe_import=force_unsafe_import,
-                surface="mcp_context_init",
-            )
+            # wait off the event loop. The scope hands the worker the abort
+            # flag, so a cancelled call stops importing rather than finishing
+            # into a caller that is gone (#2247).
+            from memtomem.context._abandon import abandon_sync_on_exit
+
+            with abandon_sync_on_exit():
+                skill_result = await asyncio.to_thread(
+                    extract_skills_to_canonical,
+                    root,
+                    overwrite=overwrite,
+                    scope=artifact_scope,
+                    force_unsafe_import=force_unsafe_import,
+                    surface="mcp_context_init",
+                )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         except click.ClickException as exc:
@@ -702,10 +707,15 @@ async def mem_context_generate(
         try:
             # Thread offload: ``generate_all_skills`` blocks on destination
             # sidecar flocks since #1229 — keep the (budget-bounded) wait
-            # off the event loop (#1247 id 18 sweep).
-            skill_result = await asyncio.to_thread(
-                generate_all_skills, root, scope=artifact_scope, surface="mcp_context_generate"
-            )
+            # off the event loop (#1247 id 18 sweep). The scope hands the
+            # worker the abort flag so a cancelled call stops fanning out
+            # (#2247).
+            from memtomem.context._abandon import abandon_sync_on_exit
+
+            with abandon_sync_on_exit():
+                skill_result = await asyncio.to_thread(
+                    generate_all_skills, root, scope=artifact_scope, surface="mcp_context_generate"
+                )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         if skill_result.generated:
@@ -1073,10 +1083,14 @@ async def mem_context_sync(
 
     if "skills" in inc:
         try:
-            # Thread offload: same rationale as mem_context_generate.
-            skill_result = await asyncio.to_thread(
-                generate_all_skills, root, scope=artifact_scope, surface="mcp_context_sync"
-            )
+            # Thread offload + abort scope: same rationale as
+            # mem_context_generate (#1247 id 18, #2247).
+            from memtomem.context._abandon import abandon_sync_on_exit
+
+            with abandon_sync_on_exit():
+                skill_result = await asyncio.to_thread(
+                    generate_all_skills, root, scope=artifact_scope, surface="mcp_context_sync"
+                )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         if skill_result.generated:
