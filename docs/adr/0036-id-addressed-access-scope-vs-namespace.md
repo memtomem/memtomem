@@ -128,6 +128,21 @@ The threat this addresses is accident: an id that arrives from a maintenance
 listing, a stale note, or another agent's output, pasted into `mem_read` or
 `mem_delete` from a session that has no business with that project.
 
+**It is not a race-tight check on every write.** Where a write path already
+holds the source file's lock — `mem_edit`, `mem_delete`, and the web
+`PATCH`/`DELETE` routes, through `_locked_chunk` / `locked_source_chunk` — the
+boundary is judged on the chunk re-fetched under that lock, so a concurrent
+`memory-migrate` cannot slip between the check and the write. The remaining
+write surfaces are check-then-act: `mem_link` / `mem_unlink`,
+`mem_reflect_save`'s relation writes, `mem_increment_access`, the LangGraph
+store's `delete`, and per-chunk tag replacement. A migration landing in that
+window can re-scope a chunk after it was judged. Closing those needs
+boundary-qualified atomic operations in the storage layer (and, for tags, fixes
+a separate pre-existing staleness bug — #2241), which is a write-integrity
+change rather than a visibility one. Consistent with the threat model above,
+the accident case is covered; a caller who can time a migration is not the
+adversary this rule is defending against.
+
 ## Consequences
 
 - A server started outside any project can no longer `mem_read` a project-tier

@@ -101,8 +101,22 @@ async def mem_reflect(
             # (ADR-0036).
             if chunk is not None and not in_boundary(chunk, boundary):
                 continue
+            # ``get_most_connected`` counts every edge in the store, so a
+            # visible hub's degree would report how many of its neighbours
+            # the caller may not see. Recount over the screened edges — at
+            # most five rows reach here, so the per-row relation read is
+            # affordable, and a hub whose visible degree is zero drops out.
+            visible_links = row["link_count"]
+            if chunk is not None:
+                visible_links = 0
+                for related_id, _rel in await storage.get_related(chunk.id):
+                    neighbour = await storage.get_chunk(related_id)
+                    if neighbour is None or in_boundary(neighbour, boundary):
+                        visible_links += 1
+                if not visible_links:
+                    continue
             preview = chunk.content[:50].replace("\n", " ") if chunk else row["chunk_id"][:8]
-            rendered.append(f"  {row['link_count']} links — {preview}...")
+            rendered.append(f"  {visible_links} links — {preview}...")
         if rendered:
             lines.append("### Most Connected Memories")
             lines.extend(rendered)

@@ -426,8 +426,12 @@ async def mem_increment_access(
     by 1 per chunk; the search pipeline applies a logarithmic transform with
     ``max_boost`` capping (default 1.5×) so this never produces runaway scores.
 
-    Idempotency / per-event capping is the caller's responsibility — this
-    action just forwards the IDs to storage.
+    Idempotency / per-event capping is the caller's responsibility.
+
+    Ids outside the caller's project boundary are dropped (ADR-0036) —
+    boosting a foreign chunk's ranking is a write to it. The reported count
+    is of ids accepted for submission, not rows changed, so a caller cannot
+    read the difference as "that id exists elsewhere".
 
     Args:
         chunk_ids: List of chunk UUIDs (strings) to boost
@@ -448,7 +452,9 @@ async def mem_increment_access(
     if not valid:
         return f"Error: no valid UUIDs in chunk_ids (rejected: {len(invalid)})."
 
-    await app.storage.increment_access(valid)
+    in_boundary_ids = [cid for cid in valid if await resolve_chunk(app, cid) is not None]
+    if in_boundary_ids:
+        await app.storage.increment_access(in_boundary_ids)
 
     msg = f"Incremented access_count for {len(valid)} chunk(s)."
     if invalid:
