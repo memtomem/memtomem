@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context._atomic import _file_lock, _lock_path_for
 from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
 from memtomem.context.settings import (
@@ -596,15 +597,40 @@ def apply_hook_copy(
     files refuse their leg loudly and are never rewritten — a malformed
     CANONICAL also skips the tier leg (a tier-only write is the
     self-destructing copy this module exists to prevent).
-    """
-    gate_a_scan(plan, surface)
 
+    A caller that dispatched this through ``abandon_sync_on_exit`` (a web
+    route offloading it to ``asyncio.to_thread``) can give up while it runs,
+    and the lock budget below bounds only the *wait*. The three checks that
+    answer that all sit **before the first write**: at entry, once more with
+    both locks held, and a last one after both legs have been read and
+    validated — that one precedes the canonical *classification* rather than
+    the canonical write, because a canonical that classifies ``exact`` makes
+    the tier write the first mutation. There is deliberately none between the legs —
+    the canonical and tier writes are one transaction, and a tier-only or
+    canonical-only outcome is exactly the self-destructing state the cross-leg
+    rule exists to prevent, so once the canonical write lands the tier write
+    must follow even for an abandoned caller (#2247).
+    """
     result = HookCopyResult(
         plan=plan,
         needs_sync=True,
         sync_command=_sync_followup_command(plan.dst_project_root, plan.dst_scope),
     )
     retry_hint = "Re-run the copy to retry."
+    abandoned_warning = (
+        "the copy was abandoned by its caller (request timeout or "
+        "cancellation) before either destination was written; nothing was "
+        f"written. {retry_hint}"
+    )
+
+    # Checked before Gate A so an abandoned copy stops without scanning the
+    # rule or creating a lock sidecar — no filesystem trace at all.
+    if sync_is_abandoned():
+        result.needs_sync = False
+        result.warnings.append(abandoned_warning)
+        return result
+
+    gate_a_scan(plan, surface)
 
     lock_deadline = time.monotonic() + _SETTINGS_LOCK_BUDGET_S
 
@@ -619,6 +645,15 @@ def apply_hook_copy(
         with ExitStack() as stack:
             for lock_path in lock_paths:
                 stack.enter_context(_file_lock(lock_path, timeout=_lock_timeout()))
+
+            # Waiting for these locks is the longest this call can take, so it
+            # is where a caller most plausibly gave up. Last chance to stop:
+            # everything below is one transaction (#2247). ``return`` releases
+            # both locks on the way out.
+            if sync_is_abandoned():
+                result.needs_sync = False
+                result.warnings.append(abandoned_warning)
+                return result
 
             # ── canonical leg ────────────────────────────────────────
             canonical_raw, canonical_mtime_ns = _read_with_mtime(plan.dst_canonical_path)
@@ -653,6 +688,17 @@ def apply_hook_copy(
                 )
             if malformed:
                 result.warnings.append(str(MalformedHookMatcherError(malformed)))
+                return result
+
+            # Reading and validating both legs above can take long enough for
+            # the caller to give up in between, so re-check rather than trust
+            # the post-lock answer. This is the LAST suppression point: it sits
+            # after every read and before the first classification, so neither
+            # leg has been written yet whichever way they classify. Past it the
+            # canonical and tier writes are one transaction (#2247).
+            if sync_is_abandoned():
+                result.needs_sync = False
+                result.warnings.append(abandoned_warning)
                 return result
 
             state, reason = _classify_leg(

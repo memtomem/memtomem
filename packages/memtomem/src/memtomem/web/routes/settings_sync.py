@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from memtomem.config import TargetScope
 from memtomem.context._atomic import _file_lock, _lock_path_for
+from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context.privacy_scan import (
     PrivacyBlockedError,
     format_scan_block_message,
@@ -133,12 +134,23 @@ def _locked_cas_write(
 
     Run via ``asyncio.to_thread`` so the bounded ``portalocker`` wait never
     stalls the event loop (the #1145 shape — mirrors ``apply_settings_sync`` /
-    ``copy_hook_to_project``). ``expected_mtime_ns=None`` means the file was
-    absent at read time (a fresh canonical create); a file appearing
-    cross-process between the read and the lock is then also caught.
+    ``copy_hook_to_project``). That bounds the *wait* only, and a thread cannot
+    be cancelled, so a route whose ``asyncio.timeout`` fired is gone while this
+    is still running; the ``sync_is_abandoned`` check below is what stops the
+    write from landing behind its 503 (#2247). ``expected_mtime_ns=None`` means
+    the file was absent at read time (a fresh canonical create); a file
+    appearing cross-process between the read and the lock is then also caught.
     """
     with _file_lock(_lock_path_for(path), timeout=_SETTINGS_LOCK_BUDGET_S):
+        # Waiting for this lock is the longest this call can take, so it is
+        # where a caller most plausibly gave up (#2247). One write, no legs to
+        # leave half-done: checking here suppresses it entirely.
         current = path.stat().st_mtime_ns if path.is_file() else None
+        if sync_is_abandoned():
+            # Reported as the no-write arm. Nothing reads it — the only way to
+            # reach here is a caller that already returned 503 — so inventing a
+            # third arm for a value no one can observe buys nothing.
+            return False, current
         if current != expected_mtime_ns:
             return False, current
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -859,10 +871,14 @@ async def resolve_conflict(
                 # write landing after our read is detected here and refused
                 # (409) — HTTP 409 with the Skills/Commands/Agents stale-write
                 # envelope shape (#1229). Offloaded so the portalocker wait
-                # never stalls the event loop (#1145).
-                wrote, current_mtime_ns = await asyncio.to_thread(
-                    _locked_cas_write, target_path, mtime_ns, target
-                )
+                # never stalls the event loop (#1145), and scoped so a worker
+                # this request can no longer wait for stops before it writes
+                # (#2247). No ``pinned_host_homes``: ``target_path`` was
+                # resolved on the loop above, so the worker follows no ``$HOME``.
+                with abandon_sync_on_exit():
+                    wrote, current_mtime_ns = await asyncio.to_thread(
+                        _locked_cas_write, target_path, mtime_ns, target
+                    )
                 if not wrote:
                     return _stale_mtime_response(current_mtime_ns)
                 return {
@@ -1035,10 +1051,13 @@ async def delete_target_rule(
                 # Cross-process sidecar lock + mtime CAS: a concurrent
                 # ``mm context sync`` writing this target between our read and
                 # write must not be silently clobbered (the in-process
-                # ``_gateway_lock`` can't see it).
-                wrote, current_mtime_ns = await asyncio.to_thread(
-                    _locked_cas_write, target_path, target_mtime_ns, target
-                )
+                # ``_gateway_lock`` can't see it). Scoped so a worker outliving
+                # this request's timeout stops before writing (#2247);
+                # ``target_path`` is loop-resolved, so no home pin is needed.
+                with abandon_sync_on_exit():
+                    wrote, current_mtime_ns = await asyncio.to_thread(
+                        _locked_cas_write, target_path, target_mtime_ns, target
+                    )
                 if not wrote:
                     return _stale_mtime_response(current_mtime_ns)
                 return _ok_envelope(
@@ -1189,10 +1208,13 @@ async def promote_target_rule(
                 # copy) does a locked read-merge-write of this same canonical,
                 # so a lock-free write here could drop its appended rule. The
                 # CAS (baseline captured at the canonical read above) refuses
-                # rather than clobber.
-                wrote, current_mtime_ns = await asyncio.to_thread(
-                    _locked_cas_write, canonical_path, canonical_mtime_ns, canonical
-                )
+                # rather than clobber. Scoped so a worker outliving this
+                # request's timeout stops before writing (#2247);
+                # ``canonical_path`` is loop-resolved, so no home pin is needed.
+                with abandon_sync_on_exit():
+                    wrote, current_mtime_ns = await asyncio.to_thread(
+                        _locked_cas_write, canonical_path, canonical_mtime_ns, canonical
+                    )
                 if not wrote:
                     return _stale_mtime_response(current_mtime_ns)
                 return _ok_envelope(
@@ -1406,14 +1428,31 @@ async def copy_hook_to_project(
             async with _gateway_lock:
                 # Worker thread: the engine takes cross-process sidecar
                 # locks (canonical + tier pair) with its own 30s budget
-                # (< 60s), so a cross-process holder cannot leave an
-                # un-cancellable worker writing after the 503.
-                result = await asyncio.to_thread(
-                    apply_hook_copy, plan, surface="web_context_settings_hook_copy"
-                )
+                # (< 60s), so a cross-process holder cannot park the worker
+                # past this window. That bounds the *wait* only — a thread
+                # cannot be cancelled — so what stops the worker writing
+                # behind the 503 is the abort flag it polls before its first
+                # write (#2247). Its two writes are one transaction, so it
+                # can only stop before them, never between; both landing
+                # despite a timeout is the intended outcome, not a leak. No
+                # home pin: ``plan`` carries paths resolved on the loop.
+                with abandon_sync_on_exit():
+                    result = await asyncio.to_thread(
+                        apply_hook_copy, plan, surface="web_context_settings_hook_copy"
+                    )
     except TimeoutError:
+        # Honest about what the timeout does and does not undo (the
+        # ``apply_settings_sync`` wording, adapted): the worker cannot be
+        # cancelled, so the abort is cooperative. Unlike the sync it is
+        # all-or-nothing — the copy is one transaction, stopped before its
+        # first write or finished — so there is no partial state to warn about,
+        # only an unknown one.
         raise _error(
-            503, "busy", "Copy timed out — another sync or settings write may be in progress"
+            503,
+            "busy",
+            "Copy timed out — another sync or settings write may be in progress. "
+            "The copy was either abandoned unwritten or completed in full; "
+            "re-run it to see which.",
         )
     except PrivacyBlockedError as exc:
         raise HTTPException(422, _PRIVACY_BLOCK_DETAIL) from exc
