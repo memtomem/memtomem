@@ -28,6 +28,7 @@ from memtomem.wiki import (
 )
 from memtomem.wiki.commit import (
     ResolvedTarget,
+    WikiLockUnavailableError,
     WikiTargetChangedError,
     commit_targets,
 )
@@ -398,6 +399,12 @@ def _run_commit(
         raise click.ClickException(
             "wiki commit timed out — another wiki operation may be in progress; retry shortly"
         ) from exc
+    except WikiLockUnavailableError as exc:
+        # Not contention — the lock's runtime dir is unusable (wrong owner, group
+        # or world bits, a symlink). Retrying will not help, so surface the
+        # engine message: it carries ensure_runtime_dir's removal hint, and this
+        # is a local CLI where the absolute path is the actionable part.
+        raise click.ClickException(f"wiki commit could not acquire its lock: {exc}") from exc
     except RuntimeError as exc:
         # Covers WikiDetachedHeadError (its str() IS the friendly, actionable
         # "check out a branch" message — the push/pull precedent) and any git
@@ -489,6 +496,14 @@ def _run_promote(
         # concurrent `mm wiki commit` / `mm web` commit held the lock too long.
         raise click.ClickException(
             "wiki commit timed out — another wiki operation may be in progress; retry shortly"
+        ) from exc
+    except WikiLockUnavailableError as exc:
+        # Must precede the RuntimeError arm below (it is a RuntimeError subclass)
+        # or an unusable runtime dir would be reported as a git error. str(exc)
+        # *is* surfaced here, unlike that arm: what it embeds is the runtime-dir
+        # path plus its removal hint, not the wiki path that arm withholds.
+        raise click.ClickException(
+            f"promoting {asset_type}/{name} could not acquire the wiki lock: {exc}"
         ) from exc
     except RuntimeError as exc:
         # Any other git failure (identity/config/index). Unlike `mm wiki commit`
