@@ -17,6 +17,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import OutputFormat, _VALID_OUTPUT_FORMATS
 from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import not_found, resolve_chunk
 from memtomem.services.search_service import run_search
 
 logger = logging.getLogger(__name__)
@@ -414,9 +415,13 @@ async def mem_agent_share(
         except (ValueError, TypeError):
             return await _fail(f"Error: invalid chunk ID format: {chunk_id}")
 
-        chunk = await app.storage.get_chunk(uid)
+        # Screened, not just fetched: this path does not show a chunk, it
+        # *republishes* one into a shared namespace where it outlives the
+        # boundary check entirely. Of every id-addressed surface it is the
+        # one where a foreign-project row does lasting damage (ADR-0036).
+        chunk = await resolve_chunk(app, uid)
         if chunk is None:
-            return await _fail(f"Chunk {chunk_id} not found.")
+            return await _fail(not_found(chunk_id))
 
         inherited_tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
     except Exception:

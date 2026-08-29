@@ -866,14 +866,57 @@ class TestGetDelete:
     async def test_delete_reports_whether_rows_were_deleted(self, deleted_rows, expected):
         from memtomem.integrations.langgraph import MemtomemStore
 
+        from memtomem.models import Chunk, ChunkMetadata
+
         cid = uuid4()
         comp = MagicMock()
+        # Delete screens the chunk first (ADR-0036), so the row has to exist
+        # and be in-boundary before ``delete_chunks`` is reached at all.
+        comp.storage.get_chunk = AsyncMock(
+            return_value=Chunk(
+                content="c",
+                metadata=ChunkMetadata(source_file=Path("n/a.md")),
+                id=cid,
+            )
+        )
         comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
         store = MemtomemStore()
         store._components = comp
 
         assert await store.delete(str(cid)) is expected
         comp.storage.delete_chunks.assert_awaited_once_with([cid])
+
+    @pytest.mark.asyncio
+    async def test_delete_refuses_an_out_of_boundary_id(self):
+        """ADR-0036: what cannot be read here cannot be deleted here either.
+
+        ``False`` is the same answer a nonexistent id gets, and
+        ``delete_chunks`` is never reached.
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+        from memtomem.models import Chunk, ChunkMetadata
+
+        cid = uuid4()
+        comp = MagicMock()
+        comp.config.indexing.project_memory_dirs = []
+        comp.storage.get_chunk = AsyncMock(
+            return_value=Chunk(
+                content="another project's note",
+                metadata=ChunkMetadata(
+                    source_file=Path("/elsewhere/.memtomem/memories/n.md"),
+                    scope="project_shared",
+                    project_root=Path("/elsewhere"),
+                ),
+                id=cid,
+            )
+        )
+        comp.storage.delete_chunks = AsyncMock(return_value=1)
+        store = MemtomemStore()
+        store._components = comp
+
+        assert await store.delete(str(cid)) is False
+        assert await store.get(str(cid)) is None
+        comp.storage.delete_chunks.assert_not_awaited()
 
 
 class TestStartSessionLowLevel:

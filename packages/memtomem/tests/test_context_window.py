@@ -396,6 +396,14 @@ class TestMemExpand:
 
         Out of project context, the ADR-0011 boundary admits ``user`` rows
         only, whatever project the addressed chunk belongs to.
+
+        ADR-0036 carried that one step further: the *anchor* is screened by
+        the same boundary too, so the case this test was written for — a
+        project-tier chunk addressed from outside its project — now stops at
+        the anchor and never reaches the neighbour rule. Pinned here in that
+        stronger form; the neighbour half moved to
+        ``test_expand_in_context_still_hides_other_projects``, which keeps it
+        measurable with an anchor that does resolve.
         """
         from memtomem.server.tools.search import mem_expand
 
@@ -436,9 +444,62 @@ class TestMemExpand:
 
         result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
 
-        assert "same project" not in result
-        assert "foreign project" not in result
+        # The anchor itself does not resolve, so nothing around it is reached
+        # — and the answer is the one a nonexistent id gets.
+        assert result == f"Chunk {chunks[1].id} not found."
+
+    async def test_expand_in_context_still_hides_other_projects(self, monkeypatch):
+        """In-project, the boundary keeps a neighbour from another project out.
+
+        The other half of the rule above, with an anchor that resolves: a
+        caller working in ``/mine`` expands one of its chunks and sees its own
+        project's rows and ``user`` rows, never ``/elsewhere``'s — even though
+        all of them share one source file.
+        """
+        from memtomem.server.tools.search import mem_expand
+
+        chunks = [
+            _make_chunk(
+                "foreign project",
+                source="/tmp/s.md",
+                start_line=0,
+                scope="project_shared",
+                project_root=Path("/elsewhere"),
+            ),
+            _make_chunk(
+                "anchor",
+                source="/tmp/s.md",
+                start_line=10,
+                scope="project_shared",
+                project_root=Path("/mine"),
+            ),
+            _make_chunk(
+                "same project",
+                source="/tmp/s.md",
+                start_line=20,
+                scope="project_shared",
+                project_root=Path("/mine"),
+            ),
+            _make_chunk("user row", source="/tmp/s.md", start_line=30),
+        ]
+        app = MagicMock()
+        app.config.search.system_namespace_prefixes = []
+        app.storage.get_chunk = AsyncMock(return_value=chunks[1])
+        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root",
+            lambda _app: Path("/mine"),
+        )
+
+        result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
+
+        assert "anchor" in result
+        assert "same project" in result
         assert "user row" in result
+        assert "foreign project" not in result
 
     async def test_expand_counts_an_expired_anchor_in_its_own_position(self, monkeypatch):
         """The named chunk is returned, so it must be part of the accounting."""
@@ -547,15 +608,22 @@ class TestMemIncrementAccess:
 
         app = MagicMock()
         app.storage.increment_access = AsyncMock()
-
+        # Ids are screened before the boost lands (ADR-0036), so the mock
+        # has to answer the lookup with an in-boundary chunk.
         ids = [str(uuid4()), str(uuid4()), str(uuid4())]
+        app.storage.get_chunks_batch = AsyncMock(
+            return_value={UUID(i): _make_chunk("in boundary") for i in ids}
+        )
         with pytest.MonkeyPatch.context() as m:
             m.setattr(
                 "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
             )
+            m.setattr(
+                "memtomem.server.tools.search._resolve_project_context_root", lambda _app: None
+            )
             result = await mem_increment_access(chunk_ids=ids, ctx=SimpleNamespace())
 
-        assert "3 chunk(s)" in result
+        assert "Accepted 3 chunk id(s)" in result
         app.storage.increment_access.assert_awaited_once()
         called_ids = app.storage.increment_access.call_args.args[0]
         assert len(called_ids) == 3
@@ -567,22 +635,61 @@ class TestMemIncrementAccess:
 
         app = MagicMock()
         app.storage.increment_access = AsyncMock()
-
         valid_id = str(uuid4())
+        app.storage.get_chunks_batch = AsyncMock(
+            return_value={UUID(valid_id): _make_chunk("in boundary")}
+        )
         with pytest.MonkeyPatch.context() as m:
             m.setattr(
                 "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
+            m.setattr(
+                "memtomem.server.tools.search._resolve_project_context_root", lambda _app: None
             )
             result = await mem_increment_access(
                 chunk_ids=[valid_id, "not-a-uuid"],
                 ctx=SimpleNamespace(),
             )
 
-        assert "1 chunk(s)" in result
+        assert "Accepted 1 chunk id(s)" in result
         assert "Skipped 1 invalid" in result
         app.storage.increment_access.assert_awaited_once()
         called_ids = app.storage.increment_access.call_args.args[0]
         assert len(called_ids) == 1
+
+    async def test_out_of_boundary_ids_are_not_boosted(self):
+        """ADR-0036: raising a foreign chunk's ranking is a write to it.
+
+        The reported count stays the number of ids accepted for submission,
+        so the response does not reveal which of them existed elsewhere.
+        """
+        from memtomem.server.tools.search import mem_increment_access
+
+        app = MagicMock()
+        app.storage.increment_access = AsyncMock()
+        foreign_id = uuid4()
+        app.storage.get_chunks_batch = AsyncMock(
+            return_value={
+                foreign_id: _make_chunk(
+                    "another project's note",
+                    scope="project_shared",
+                    project_root=Path("/elsewhere"),
+                )
+            }
+        )
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+            )
+            m.setattr(
+                "memtomem.server.tools.search._resolve_project_context_root",
+                lambda _app: Path("/mine"),
+            )
+            result = await mem_increment_access(chunk_ids=[str(foreign_id)], ctx=SimpleNamespace())
+
+        assert "Accepted 1 chunk id(s)" in result
+        app.storage.increment_access.assert_not_awaited()
 
 
 # ── Formatter tests ─────────────────────────────────────────────────────

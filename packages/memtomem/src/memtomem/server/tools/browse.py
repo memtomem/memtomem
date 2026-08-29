@@ -1,4 +1,15 @@
-"""Tools: mem_list, mem_read."""
+"""Tools: mem_list, mem_read.
+
+``mem_read`` resolves its id through the ADR-0011 project boundary
+(``_id_access.resolve_chunk``): outside a project only user-scope chunks
+resolve, inside one user-scope plus that project's, and an id from another
+project answers exactly as a nonexistent one — knowing an id is not
+authorization. It deliberately does *not* screen system namespaces or
+temporal validity: those are search-relevance defaults an explicit
+``namespace=`` already lifts, so reading an archived or expired chunk by id
+keeps working (ADR-0036). The tool's own description says this in one line,
+because the core-tool description budget is a hard test.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +19,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path
+from memtomem.server.tools._id_access import not_found, resolve_chunk
 
 
 @mcp.tool()
@@ -66,13 +78,14 @@ async def mem_read(
     chunk_id: str,
     ctx: CtxType = None,
 ) -> str:
-    """Read the full content and metadata of a specific chunk by its UUID.
+    """Read a chunk's content and metadata by UUID.
 
-    Use this to inspect a chunk before editing or deleting it,
-    or to see the full content after a search result preview.
+    Inspect a chunk before editing, or see the text behind a search
+    preview. Ids resolve in the current project's scope; another's
+    reads as not found.
 
     Args:
-        chunk_id: The UUID of the chunk (shown in mem_search results)
+        chunk_id: The chunk's UUID (from mem_search results)
     """
     app = await _get_app_initialized(ctx)
 
@@ -81,9 +94,9 @@ async def mem_read(
     except (ValueError, TypeError):
         return f"Error: invalid chunk ID format: {chunk_id}"
 
-    chunk = await app.storage.get_chunk(uid)
+    chunk = await resolve_chunk(app, uid)
     if chunk is None:
-        return f"Chunk {chunk_id} not found."
+        return not_found(chunk_id)
 
     meta = chunk.metadata
     parts = [

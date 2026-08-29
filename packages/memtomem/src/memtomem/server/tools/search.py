@@ -15,7 +15,7 @@ from memtomem.models import (
     NamespaceFilter,
     ScopeFilter,
 )
-from memtomem.search.visibility import neighbor_visible
+from memtomem.search.visibility import chunk_in_scope_boundary, neighbor_visible
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
 # LangGraph adapter; re-exported from this module so the long-standing
@@ -36,6 +36,7 @@ from memtomem.server.formatters import (
 )
 from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import not_found, resolve_chunk
 from memtomem.services.search_service import (
     InvalidRrfWeightError,
     InvalidTemporalBoundError,
@@ -336,6 +337,11 @@ async def mem_expand(
     chunk in a hidden namespace returns the chunk with little or no context.
     Use mem_search(namespace=..., context_window=N) to read around one.
 
+    The addressed chunk must itself be inside the caller's project boundary
+    (ADR-0011); an id from another project reads as not-found. A hidden or
+    expired anchor still expands — those axes are search-relevance defaults,
+    not boundaries (ADR-0036).
+
     Args:
         chunk_id: The UUID of the chunk to expand (from mem_search results)
         window: Number of adjacent chunks before and after (default 2, max 10)
@@ -348,9 +354,9 @@ async def mem_expand(
     except (ValueError, TypeError):
         return f"Error: invalid chunk ID format: {chunk_id}"
 
-    chunk = await app.storage.get_chunk(uid)
+    chunk = await resolve_chunk(app, uid)
     if chunk is None:
-        return f"Chunk {chunk_id} not found."
+        return not_found(chunk_id)
 
     source_file = chunk.metadata.source_file
     all_chunks = await app.storage.list_chunks_by_source(source_file, limit=10000)
@@ -420,8 +426,12 @@ async def mem_increment_access(
     by 1 per chunk; the search pipeline applies a logarithmic transform with
     ``max_boost`` capping (default 1.5×) so this never produces runaway scores.
 
-    Idempotency / per-event capping is the caller's responsibility — this
-    action just forwards the IDs to storage.
+    Idempotency / per-event capping is the caller's responsibility.
+
+    Ids outside the caller's project boundary are dropped (ADR-0036) —
+    boosting a foreign chunk's ranking is a write to it. The reported count
+    is of ids accepted for submission, not rows changed, so a caller cannot
+    read the difference as "that id exists elsewhere".
 
     Args:
         chunk_ids: List of chunk UUIDs (strings) to boost
@@ -442,9 +452,22 @@ async def mem_increment_access(
     if not valid:
         return f"Error: no valid UUIDs in chunk_ids (rejected: {len(invalid)})."
 
-    await app.storage.increment_access(valid)
+    # One batched read rather than a fetch per id: the argument is an
+    # unbounded list, and this is a boost, not a page the caller is reading.
+    rows = await app.storage.get_chunks_batch(valid)
+    project_context_root = _resolve_project_context_root(app)
+    in_boundary_ids = [
+        cid
+        for cid in valid
+        if (row := rows.get(cid)) is not None
+        and chunk_in_scope_boundary(row.metadata, project_context_root)
+    ]
+    if in_boundary_ids:
+        await app.storage.increment_access(in_boundary_ids)
 
-    msg = f"Incremented access_count for {len(valid)} chunk(s)."
+    # Counts ids accepted for submission, not rows changed — reporting the
+    # difference would tell the caller which of their ids live elsewhere.
+    msg = f"Accepted {len(valid)} chunk id(s) for an access boost."
     if invalid:
         msg += f" Skipped {len(invalid)} invalid id(s)."
     return msg

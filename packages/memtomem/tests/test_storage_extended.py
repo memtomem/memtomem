@@ -1465,3 +1465,89 @@ class TestSumChunkContentChars:
         await storage.upsert_chunks([make_chunk(content="present")])
 
         assert await storage.sum_chunk_content_chars([]) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_get_chunks_batch_splits_into_statements_of_the_configured_size(storage, monkeypatch):
+    """The split is asserted on the statements issued, not on a large input.
+
+    A size-only test is false-green on any SQLite built with the modern 32766
+    host-parameter ceiling: an unbatched query of a few thousand ids succeeds
+    there and the test passes with the batching removed. Counting statements
+    pins the behaviour on every build.
+    """
+    from memtomem.storage import sqlite_backend
+
+    stored = [make_chunk(f"row {i}", source="/tmp/batch.md") for i in range(7)]
+    await storage.upsert_chunks(stored)
+
+    monkeypatch.setattr(sqlite_backend, "_SQL_MAX_PARAMS", 3)
+    real_db = storage._get_read_db()
+    seen: list[int] = []
+
+    class _Counting:
+        def __getattr__(self, name):
+            return getattr(real_db, name)
+
+        def execute(self, sql, params=()):
+            if "FROM chunks WHERE id IN" in sql:
+                seen.append(len(params))
+            return real_db.execute(sql, params)
+
+    monkeypatch.setattr(storage, "_get_read_db", lambda: _Counting())
+
+    found = await storage.get_chunks_batch([c.id for c in stored])
+
+    assert set(found) == {c.id for c in stored}
+    assert seen == [3, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_get_chunks_batch_binds_repeated_ids_once(storage, monkeypatch):
+    """Repeats cost a placeholder each, so they collapse before binding.
+
+    Also asserted on the bound parameters: with batching in place a repeated
+    list still *returns* the right row either way, so only the statement shows
+    whether the duplicates were carried into the query.
+    """
+    from memtomem.storage import sqlite_backend
+
+    chunk = make_chunk("one row", source="/tmp/dupes.md")
+    await storage.upsert_chunks([chunk])
+
+    monkeypatch.setattr(sqlite_backend, "_SQL_MAX_PARAMS", 900)
+    real_db = storage._get_read_db()
+    seen: list[int] = []
+
+    class _Counting:
+        def __getattr__(self, name):
+            return getattr(real_db, name)
+
+        def execute(self, sql, params=()):
+            if "FROM chunks WHERE id IN" in sql:
+                seen.append(len(params))
+            return real_db.execute(sql, params)
+
+    monkeypatch.setattr(storage, "_get_read_db", lambda: _Counting())
+
+    found = await storage.get_chunks_batch([chunk.id] * 2000)
+
+    assert set(found) == {chunk.id}
+    assert seen == [1]
+
+
+@pytest.mark.asyncio
+async def test_get_chunks_batch_survives_an_input_past_every_sqlite_ceiling(storage):
+    """End-to-end proof that the configured batch size is actually low enough.
+
+    40000 ids exceeds the 32766 ceiling of modern builds as well as the 999 of
+    older ones, so this fails as an OperationalError if the constant is ever
+    raised past what the runtime accepts.
+    """
+    stored = [make_chunk("only row", source="/tmp/huge.md")]
+    await storage.upsert_chunks(stored)
+
+    absent = [uuid.uuid4() for _ in range(40000)]
+    found = await storage.get_chunks_batch([stored[0].id] + absent)
+
+    assert set(found) == {stored[0].id}

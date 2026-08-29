@@ -2,22 +2,35 @@
 
 The retrievers enforce namespace visibility, the ADR-0011 project boundary,
 and temporal validity in SQL, so every *hit* already respects them. Chunks
-that reach a caller by adjacency rather than by matching — the context-window
-neighbours of a hit, and ``mem_expand``'s window — bypass those queries
-entirely: they are read in bulk by source file. This module is the one place
-that rule is re-stated for such chunks, so the two expansion surfaces cannot
-drift apart.
+reach a caller two other ways, and this module is the one place the rules are
+re-stated for both, so the surfaces cannot drift apart:
 
-The split is between *visibility* and *selection*. Visibility filters say
-what the caller may see and apply to neighbours; selection filters (chunk
-types, tags, created-date bounds) say what the caller searched for, and a
-neighbour is deliberately exempt from them — "show me what surrounds this
+- **By adjacency** — the context-window neighbours of a hit, and
+  ``mem_expand``'s window. Read in bulk by source file, so no filtered query
+  ever touches them. :func:`neighbor_visible` (#2192, #2233).
+- **By id** — ``mem_read`` and every other surface that takes a chunk id.
+  :func:`resolve_visible_chunk` (ADR-0036, #2238).
+
+The two get different rules, and the difference is the point. Adjacency
+inherits all three axes: a neighbour arrived because something near it
+matched, so the defaults that shaped the search still apply. An id carries no
+query to inherit from, and the caller named the chunk, so only the ADR-0011
+boundary survives there — the other two axes are relevance defaults an
+explicit ``namespace=`` already lifts, and a rule a caller can switch off is
+not one to enforce against them.
+
+Within adjacency the split is between *visibility* and *selection*. Visibility
+filters say what the caller may see and apply to neighbours; selection filters
+(chunk types, tags, created-date bounds) say what the caller searched for, and
+a neighbour is deliberately exempt from them — "show me what surrounds this
 match" is not a claim that the surroundings also match.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
+from uuid import UUID
 
 from memtomem.models import (
     Chunk,
@@ -26,6 +39,12 @@ from memtomem.models import (
     ScopeFilter,
     has_namespace_prefix,
 )
+
+
+class _ChunkSource(Protocol):
+    """The one storage method :func:`resolve_visible_chunk` needs."""
+
+    async def get_chunk(self, chunk_id: UUID) -> Chunk | None: ...
 
 
 def chunk_valid_at(metadata: ChunkMetadata, as_of_unix: int) -> bool:
@@ -73,6 +92,59 @@ def neighbor_visible(
     return as_of_unix is None or chunk_valid_at(meta, as_of_unix)
 
 
+def chunk_in_scope_boundary(
+    meta: ChunkMetadata,
+    project_context_root: Path | None,
+) -> bool:
+    """Whether a chunk is inside the caller's ADR-0011 project boundary.
+
+    The Python twin of ``scope_context_sql``'s no-filter fragment: inside
+    project ``<X>``, ``scope = 'user' OR project_root = <X>``; outside one,
+    ``scope = 'user'``. No explicit filter widens it — this is the boundary
+    itself, not the widened form :func:`_scope_visible` builds on top.
+
+    ADR-0036 makes this the rule for chunks reached by **id**, where there is
+    no filter to widen with: an id outside the boundary resolves exactly as a
+    nonexistent one. Note what it deliberately does not test — system
+    namespaces and temporal validity. Those are retrieval-relevance defaults
+    an explicit ``namespace=`` already lifts and one config line switches off,
+    so id-addressed access reads an ``archive:*`` or expired chunk on purpose.
+    """
+    return meta.scope == "user" or (
+        project_context_root is not None
+        and meta.project_root is not None
+        and str(meta.project_root) == str(project_context_root)
+    )
+
+
+async def resolve_visible_chunk(
+    storage: _ChunkSource,
+    chunk_id: UUID,
+    *,
+    project_context_root: Path | None,
+) -> Chunk | None:
+    """Fetch a chunk by id, or ``None`` if it is outside the caller's boundary.
+
+    The single resolver for ADR-0036's rule on the id-addressed surface. The
+    two answers are deliberately indistinguishable: a caller cannot tell an id
+    that does not exist from one belonging to another project, so callers must
+    render both with the same message. Ids address rows; they do not certify
+    that the holder may read one.
+
+    ``storage`` is duck-typed to whatever provides ``get_chunk`` so this module
+    stays free of a storage import, and so the mutation paths can screen the
+    chunk they re-fetch **under the lock** rather than only the probe before
+    it — a scope change that lands while the lock is held has to be judged on
+    the value that will actually be written.
+    """
+    chunk = await storage.get_chunk(chunk_id)
+    if chunk is None:
+        return None
+    if not chunk_in_scope_boundary(chunk.metadata, project_context_root):
+        return None
+    return chunk
+
+
 def _scope_visible(
     meta: ChunkMetadata,
     scope_filter: ScopeFilter | None,
@@ -87,12 +159,7 @@ def _scope_visible(
     reveals project-tier neighbours from any project while the boundary keeps
     user-tier ones visible too.
     """
-    in_boundary = meta.scope == "user" or (
-        project_context_root is not None
-        and meta.project_root is not None
-        and str(meta.project_root) == str(project_context_root)
-    )
-    if in_boundary:
+    if chunk_in_scope_boundary(meta, project_context_root):
         return True
     # An empty filter carries no intent, and ``scope_context_sql`` falls back
     # to the no-filter rule for it. Reading its ``matches()`` — which admits

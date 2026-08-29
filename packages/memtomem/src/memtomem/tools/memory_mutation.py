@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_file_lock, memory_lock_path
+from memtomem.search.visibility import chunk_in_scope_boundary
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -38,6 +39,7 @@ async def locked_source_chunk(
     storage,
     chunk_id: UUID,
     *,
+    project_context_root: Path | None,
     budget: float | None = None,
 ) -> AsyncIterator[tuple[Chunk | None, str | None]]:
     """Yield ``(chunk, None)`` with the chunk's source-file sidecar (L2) held and
@@ -53,12 +55,21 @@ async def locked_source_chunk(
     caller to retry — web/CLI callers re-issue the request rather than looping.
     ``"locked"`` means the sidecar acquire timed out. Exactly one ``yield`` runs
     on every path.
+
+    ``project_context_root`` is the caller's ADR-0011 boundary and is required
+    — there is no value that safely means "skip the check", so a caller with no
+    project context passes ``None`` to say exactly that. The boundary is
+    applied at both fetches and the **second** one decides (ADR-0036):
+    ``memory-migrate`` can re-scope a chunk while we wait for the sidecar, and
+    a check on the discarded probe would be a check on a value the write never
+    uses. An out-of-boundary chunk reports ``"not_found"``, the same reason a
+    missing id gets, so callers cannot tell them apart.
     """
     if budget is None:
         # Resolve at call time so tests can monkeypatch the module constant.
         budget = _atomic._CRUD_SIDECAR_LOCK_BUDGET_S
     chunk = await storage.get_chunk(chunk_id)
-    if chunk is None:
+    if chunk is None or not chunk_in_scope_boundary(chunk.metadata, project_context_root):
         yield None, "not_found"
         return
     resolved = chunk.metadata.source_file.expanduser().resolve()
@@ -71,7 +82,7 @@ async def locked_source_chunk(
         async with async_file_lock(memory_lock_path(resolved), timeout=budget):
             acquired = True
             fresh = await storage.get_chunk(chunk_id)
-            if fresh is None:
+            if fresh is None or not chunk_in_scope_boundary(fresh.metadata, project_context_root):
                 yield None, "not_found"
                 return
             if fresh.metadata.source_file.expanduser().resolve() != resolved:

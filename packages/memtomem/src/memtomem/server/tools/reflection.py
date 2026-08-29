@@ -8,6 +8,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary, in_boundary, resolve_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +82,21 @@ async def mem_reflect(
         lines.append("")
 
     # 5. Cross-reference clusters
-    connected = await storage.get_most_connected(limit=min(limit, 5))
+    #
+    # ``get_most_connected`` ranks by whole-store degree, so its order is not
+    # the caller's order: a hub with ten edges of which one is visible would
+    # outrank a hub with nine visible ones. Taking the first survivors of that
+    # ranking would both hide the genuinely most-connected visible hub and let
+    # the hidden edges decide what gets listed — the ranking itself becomes a
+    # channel. So every over-fetched candidate is scored on its *visible*
+    # degree and the page is cut after that re-ranking. Candidates beyond the
+    # over-fetch window are still lost, which needs a boundary-aware aggregate
+    # in SQL (#2244).
+    want = min(limit, 5)
+    connected = await storage.get_most_connected(limit=max(want * 4, want))
     if connected:
-        lines.append("### Most Connected Memories")
+        boundary = caller_boundary(app)
+        scored: list[tuple[int, str]] = []
         for row in connected:
             chunk = None
             try:
@@ -93,9 +106,32 @@ async def mem_reflect(
                 chunk = await storage.get_chunk(row["chunk_id"])
             except (ValueError, TypeError):
                 pass
-            preview = chunk.content[:50].replace("\n", " ") if chunk else row["chunk_id"][:8]
-            lines.append(f"  {row['link_count']} links — {preview}...")
-        lines.append("")
+            # An unresolved hub is dropped, never degraded to its id prefix.
+            # That fallback would print the uuid of a row the caller may not
+            # be allowed to know about, next to a whole-store degree — the
+            # two things ADR-0036 says a listing must not carry.
+            if chunk is None or not in_boundary(chunk, boundary):
+                continue
+            related = await storage.get_related(chunk.id)
+            neighbours = await storage.get_chunks_batch([rid for rid, _ in related])
+            visible_links = sum(
+                1
+                for related_id, _rel in related
+                if (n := neighbours.get(related_id)) is None or in_boundary(n, boundary)
+            )
+            if not visible_links:
+                continue
+            preview = chunk.content[:50].replace("\n", " ")
+            scored.append((visible_links, f"  {visible_links} links — {preview}..."))
+
+        # Stable sort, so hubs tied on visible degree keep the store's own
+        # ordering rather than an arbitrary one.
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        rendered = [line for _count, line in scored[:want]]
+        if rendered:
+            lines.append("### Most Connected Memories")
+            lines.extend(rendered)
+            lines.append("")
 
     # If no data was found at all, give helpful guidance
     if len(lines) == 1:  # Only the header
@@ -164,6 +200,14 @@ async def mem_reflect_save(
             insight_id = recent[0].id
             for cid in related_chunks:
                 try:
+                    # Linking is a write, and the same boundary applies:
+                    # a caller who may not read a chunk may not attach a
+                    # reflection to it (ADR-0036). Skipped silently, like the
+                    # invalid-UUID case below — a reflection is a summary, not
+                    # a query, so one unusable id should not fail the save.
+                    if await resolve_chunk(app, UUID(cid)) is None:
+                        logger.debug("Skipping out-of-boundary chunk in related_chunks: %s", cid)
+                        continue
                     await app.storage.add_relation(
                         UUID(cid),
                         insight_id,
