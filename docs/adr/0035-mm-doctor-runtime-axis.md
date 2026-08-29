@@ -105,9 +105,24 @@ depend on (`CLAUDE.md`).
 
 ## Known limitation
 
-The report is only as complete as the registry. A server that failed to register
-is invisible to it, and registration is best-effort: failures are logged and
-dropped so that a coordination problem never blocks startup. Running this
-command on the 29-server machine surfaced exactly that gap — only 2 sentinels
-existed for 29 live servers — which is tracked separately. This ADR does not
-change registration; it makes the discrepancy observable for the first time.
+The report is only as complete as the registry, and the registry's population
+rule is narrower than "servers that exist": it is **servers that have done
+work**. Registration runs inside `AppContext.ensure_initialized`, which is lazy
+by design (#399) so that a handshake-only MCP session — `initialize` plus
+`tools/list` — does not open a store. A client that connects and never calls a
+memory tool therefore leaves a running, memory-holding server that the registry
+has never heard of.
+
+That is not a marginal case. Running this command on the machine described above
+reported **1** live server while `ps` showed **35**; checked for an open store
+handle, the one registered server held ten and all 34 unregistered ones held
+none, with no counterexample either way. The population that accumulates —
+idle sessions holding a server they never used — is precisely the population the
+registry cannot see.
+
+So `mm doctor` faithfully reports the registry, and on a machine like that one
+the registry answers a narrower question than #2226 asked. Closing the gap means
+either registering at lifespan startup or writing a lighter presence marker
+before first use; both trade against #399's reason for being lazy, and the
+decision is tracked in #2230 rather than settled here. This ADR does not change
+registration — it made the discrepancy observable for the first time.

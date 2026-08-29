@@ -320,10 +320,15 @@ Reading the output:
   occurs on POSIX; it means the server was launched by init directly (a service
   or a deliberately daemonized process) *or* that its original parent exited and
   it was reparented — the recorded value alone does not distinguish the two.
-- **The report covers servers that registered.** Registration is best-effort so
-  that a coordination problem cannot block startup, which means a server that
-  failed to register does not appear. If `ps` shows more `memtomem-server`
-  processes than `mm doctor` does, that gap is the reason.
+- **The report covers servers that have done work, not every server running.**
+  A server registers when it first opens the store, which happens on the first
+  memory tool call — a client that connects and only lists tools never gets
+  that far. Such a server is running and holding memory, but no command here can
+  see it. So if `ps` shows more `memtomem-server` processes than `mm doctor`
+  does, the difference is sessions that have not used memory yet, and the
+  difference can be large: on one machine `mm doctor` reported 1 while `ps`
+  showed 35. Tracked in
+  [#2230](https://github.com/memtomem/memtomem/issues/2230).
 
 Exit status is `0` unless the runtime directory itself is unusable (wrong
 ownership or permissions, or replaced by a symlink). Accumulated servers and an
