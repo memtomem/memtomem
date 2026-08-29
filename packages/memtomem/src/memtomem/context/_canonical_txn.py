@@ -119,9 +119,11 @@ def new_lock_budget() -> Callable[[], float]:
     One monotonic deadline of ``_CANONICAL_LOCK_BUDGET_S`` for the WHOLE extract
     call — the closure returns the seconds left on each acquisition, so a batch
     import of N artifacts is bounded by one budget, not N·budget (the
-    ``skills._SKILLS_LOCK_BUDGET_S`` shape; #1145 orphan-thread guard). A
-    thread-offloaded web/MCP caller can never be wedged past its route timeout
-    by a stuck cross-process holder.
+    ``skills._SKILLS_LOCK_BUDGET_S`` shape; #1145). A thread-offloaded web/MCP
+    caller can never be wedged past its route timeout by a stuck cross-process
+    holder. That is a bound on *waiting*, not a guard against an orphaned
+    write: a caller that acquires the lock proceeds regardless of whether its
+    own caller is still there (see ``context/_abandon.py``, #2247).
     """
     deadline = time.monotonic() + _CANONICAL_LOCK_BUDGET_S
 

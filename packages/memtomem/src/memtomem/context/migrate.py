@@ -779,10 +779,12 @@ def _acquire_pair_lock(
     having acquired nothing (the first lock, if already held, is
     released by its own context manager on unwind), so a timed-out
     caller has committed no filesystem change. Added for the web
-    transfer route (A-5 #1276), whose un-cancellable worker thread must
-    self-abort inside the route's ``asyncio.timeout`` window — the
-    #1145 orphan-thread shape ``_SETTINGS_LOCK_BUDGET_S`` /
-    ``_SKILLS_LOCK_BUDGET_S`` close for their engines.
+    transfer route (A-5 #1276), whose un-cancellable worker thread must not
+    park on a lock past the route's ``asyncio.timeout`` window — the #1145
+    shape ``_SETTINGS_LOCK_BUDGET_S`` / ``_SKILLS_LOCK_BUDGET_S`` bound for
+    their engines. Bounding the wait is all it does; what stops a worker
+    writing behind a caller that already gave up is a cooperative abort
+    (``context/_abandon.py``, #2247), which this path has not adopted.
     """
     lock_a = _lock_path_for(path_a)
     lock_b = _lock_path_for(path_b)

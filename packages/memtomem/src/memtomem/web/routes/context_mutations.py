@@ -65,9 +65,13 @@ router = APIRouter(tags=["context-mutations"])
 #: forwarded to ``install_*`` / ``update_*`` → ``Lockfile.upsert_entry``. Kept
 #: below the route's ``asyncio.timeout(60)`` so a contended lock makes the
 #: worker thread self-abort (``_file_lock`` raises ``TimeoutError``) INSIDE the
-#: request window — never an orphaned thread that writes ``.memtomem/`` after
-#: the handler already returned 503 (the ``context_transfer`` lock-budget
-#: precedent; #1145 / the ``_file_lock`` docstring).
+#: request window rather than parking on the lock past it (the
+#: ``context_transfer`` lock-budget precedent; #1145 / the ``_file_lock``
+#: docstring). It bounds the *wait*, not the write: a worker that holds the
+#: lock finishes its upsert even if the handler already returned 503, so this
+#: route can still land a late write. Closing that needs the cooperative abort
+#: the context engines poll (``context/_abandon.py``, #2247), which this one
+#: has not adopted.
 _INSTALL_LOCK_BUDGET_S = 30.0
 
 

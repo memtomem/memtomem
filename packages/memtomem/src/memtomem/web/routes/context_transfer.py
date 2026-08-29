@@ -38,10 +38,13 @@ Contracts pinned in ADR-0023 §10:
 - **Engine offload.** The transfer core runs in a worker thread under
   ``_gateway_lock`` + ``asyncio.timeout(60)``, with the engine's
   pair-lock waits bounded by ``_TRANSFER_LOCK_BUDGET_S`` (whole-call
-  deadline, 30s < 60s) so a cross-process lock holder cannot leave an
-  un-cancellable worker writing after the 503 (#1145 shape). The outer
-  timeout can still expire mid-write — the 503 wording deliberately
-  makes no no-commit claim.
+  deadline, 30s < 60s) so a cross-process lock holder cannot park the
+  worker past the request window (#1145 shape). That budget bounds the
+  *wait* only — an un-cancellable worker that holds its locks writes
+  whether or not the 503 already went out — which is why the 503 wording
+  deliberately makes no no-commit claim. Suppressing the late write needs
+  the cooperative abort the context engines poll
+  (``context/_abandon.py``, #2247); this core has not adopted one.
 """
 
 from __future__ import annotations
@@ -88,9 +91,11 @@ router = APIRouter(tags=["context-transfer"])
 
 #: Whole-call pair-lock acquisition budget forwarded to the engine
 #: (``transfer_artifact(lock_timeout=…)``). Must stay below the route's
-#: ``asyncio.timeout(60)`` so the worker self-aborts inside the request
-#: window — the ``_SETTINGS_LOCK_BUDGET_S`` / ``_SKILLS_LOCK_BUDGET_S``
-#: precedent.
+#: ``asyncio.timeout(60)`` so a contended lock cannot park the worker past
+#: the request window — the ``_SETTINGS_LOCK_BUDGET_S`` /
+#: ``_SKILLS_LOCK_BUDGET_S`` precedent. Waiting is all it bounds; see the
+#: module docstring for what that does and does not promise about a late
+#: write.
 _TRANSFER_LOCK_BUDGET_S = 30.0
 
 

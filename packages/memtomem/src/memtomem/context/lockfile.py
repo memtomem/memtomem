@@ -358,10 +358,15 @@ class Lockfile:
         ``lock_timeout`` (seconds) bounds the sidecar-lock acquisition: ``None``
         (default) blocks indefinitely, matching the narrow CLI write window;
         an async web handler offloading this to a worker thread MUST pass a
-        bound below its own request timeout so the thread self-aborts in-window
-        rather than orphaning a late write after the handler returned (#1145,
-        the ``_file_lock`` docstring). On expiry ``_file_lock`` raises
-        ``TimeoutError`` having written nothing.
+        bound below its own request timeout so a contended lock cannot park the
+        thread past the request window (#1145, the ``_file_lock`` docstring).
+        On expiry ``_file_lock`` raises ``TimeoutError`` having written nothing.
+        The bound covers the *wait* only: a thread that acquires the lock runs
+        this triple to completion whether or not anyone is still waiting for
+        it, so it does not by itself stop a write landing after the handler
+        returned. Suppressing that needs a cooperative abort the way the
+        context engines do it (``context/_abandon.py``, #2247); this writer has
+        not adopted one.
         Preserves all unknown sibling and per-entry keys verbatim — only
         the mandated fields are written, anything else under
         ``doc[asset_type][name]`` survives.
