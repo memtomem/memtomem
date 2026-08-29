@@ -108,8 +108,9 @@ depend on (`CLAUDE.md`).
 ## Known limitation
 
 The report is only as complete as the registry, and the registry's population
-rule is narrower than "servers that exist": it is **servers that have done
-work**. Registration runs inside `AppContext.ensure_initialized`, which is lazy
+rule is narrower than "servers that exist": it is **servers that opened a store
+and then registered successfully**. Registration runs inside
+`AppContext.ensure_initialized`, which is lazy
 by design (#399) so that a handshake-only MCP session — `initialize` plus
 `tools/list` — does not open a store. Initialization is reached by the first
 request that needs the store (a memory tool call or a resource read), or at
