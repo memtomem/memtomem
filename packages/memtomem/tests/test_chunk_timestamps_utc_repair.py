@@ -206,6 +206,19 @@ class TestRepairNonUtcChunkTimestamps:
         finally:
             db.close()
 
+    def test_an_out_of_range_value_is_left_untouched(self) -> None:
+        """``0001-01-01T00:00:00+01:00`` parses and then overflows shifting to
+        UTC — it moves before ``datetime.min``. Uncaught, one such row would
+        fail every startup, not just skip itself."""
+        db = _connect()
+        try:
+            _initialize(db)
+            _insert_chunk(db, "edge-1", created_at="0001-01-01T00:00:00+01:00")
+            _rerun_migration(db)  # must not raise
+            assert _stored(db, "edge-1")[0] == "0001-01-01T00:00:00+01:00"
+        finally:
+            db.close()
+
     def test_idempotent_marker_short_circuits(self) -> None:
         """Rows added after the run are not re-scanned — later writes go
         through the fixed writer, not a re-scan."""

@@ -1262,46 +1262,93 @@ def _repair_non_utc_chunk_timestamps(db: sqlite3.Connection, meta: MetaManager) 
     otherwise pull every id and both timestamps into memory before the first
     write.
 
+    **Concurrency**: the scan and its rewrites take ``BEGIN IMMEDIATE`` and
+    re-check the marker under the lock, mirroring
+    ``_migrate_entity_uniqueness``. Two repairs racing would converge — they
+    compute the same canonical value — but the read-then-write window is also
+    open to an ordinary writer on another process, whose fresh ``updated_at``
+    would be overwritten by this pass's canonicalized *snapshot* of the old
+    one. The ``in_transaction`` branch composes into a caller that wrapped
+    ``create_tables`` itself, the same rule the storage mixins follow.
+
+    **No SCHEMA_VERSION bump**: additive and idempotent. The residual is that
+    an older binary can still write a non-canonical row after this ran, and
+    the marker keeps a newer binary from re-scanning; that is the same
+    envelope the ``chunks``-tags repair accepted, and the fence exists to stop
+    an older binary corrupting a newer store — refusing to open the database
+    outright is the heavier failure of the two (see
+    ``_migrate_entity_uniqueness``).
+
     Returns the number of rows rewritten on this call (0 once recorded).
     """
+    # Cheap fast-path so already-repaired DBs don't take the lock.
     if meta.get_meta(_CHUNK_TS_UTC_REPAIR_KEY) == "done":
         return 0
 
-    repaired = 0
-    after = 0
-    while True:
-        rows = db.execute(
-            "SELECT rowid, id, created_at, updated_at FROM chunks "
-            "WHERE rowid > ? ORDER BY rowid LIMIT ?",
-            (after, _TS_REPAIR_BATCH),
-        ).fetchall()
-        if not rows:
-            break
-        after = rows[-1][0]
-        for _rowid, chunk_id, created_at, updated_at in rows:
-            new_created = _canonical_utc_or_none(created_at)
-            new_updated = _canonical_utc_or_none(updated_at)
-            if new_created is None and new_updated is None:
-                continue
-            db.execute(
-                "UPDATE chunks SET created_at=?, updated_at=? WHERE id=?",
-                (new_created or created_at, new_updated or updated_at, chunk_id),
-            )
-            repaired += 1
+    owns_txn = not db.in_transaction
+    if owns_txn:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-check under the lock: another startup may have completed the
+        # repair between the fast-path read and the lock acquisition.
+        if meta.get_meta(_CHUNK_TS_UTC_REPAIR_KEY) == "done":
+            if owns_txn:
+                db.execute("COMMIT")
+            return 0
 
-    meta.set_meta(_CHUNK_TS_UTC_REPAIR_KEY, "done")
-    return repaired
+        repaired = 0
+        after = 0
+        while True:
+            rows = db.execute(
+                "SELECT rowid, id, created_at, updated_at FROM chunks "
+                "WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (after, _TS_REPAIR_BATCH),
+            ).fetchall()
+            if not rows:
+                break
+            after = rows[-1][0]
+            for _rowid, chunk_id, created_at, updated_at in rows:
+                new_created = _canonical_utc_or_none(created_at)
+                new_updated = _canonical_utc_or_none(updated_at)
+                if new_created is None and new_updated is None:
+                    continue
+                db.execute(
+                    "UPDATE chunks SET created_at=?, updated_at=? WHERE id=?",
+                    (new_created or created_at, new_updated or updated_at, chunk_id),
+                )
+                repaired += 1
+
+        # Written inline rather than through ``meta.set_meta``, which commits:
+        # the marker has to land in the same transaction as the rewrites, or a
+        # crash between them would record the repair as done with rows still
+        # unrepaired and no second chance to reach them.
+        db.execute(
+            "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+            (_CHUNK_TS_UTC_REPAIR_KEY, "done"),
+        )
+        if owns_txn:
+            db.execute("COMMIT")
+        return repaired
+    except Exception:
+        if owns_txn:
+            db.rollback()
+        raise
 
 
 def _canonical_utc_or_none(value: str) -> str | None:
     """Return *value*'s canonical UTC rendering, or ``None`` to leave it be.
 
     ``None`` means "no rewrite": either the value is already canonical, or it
-    is unparsable and must be left untouched rather than crash startup.
+    cannot be rendered and must be left untouched rather than crash startup.
+
+    ``OverflowError`` is one of those: a value at the very edge of the
+    representable range parses fine and then overflows when shifted to UTC
+    (``0001-01-01T00:00:00+01:00`` moves before ``datetime.min``). Uncaught,
+    a single such row would fail every startup.
     """
     try:
         rendered = utc_stamp(datetime.fromisoformat(value))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
     return None if rendered == value else rendered
 
