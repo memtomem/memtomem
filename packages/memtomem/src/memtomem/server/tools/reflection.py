@@ -8,6 +8,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary, in_boundary, resolve_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,8 @@ async def mem_reflect(
     # 5. Cross-reference clusters
     connected = await storage.get_most_connected(limit=min(limit, 5))
     if connected:
-        lines.append("### Most Connected Memories")
+        boundary = caller_boundary(app)
+        rendered = []
         for row in connected:
             chunk = None
             try:
@@ -93,9 +95,18 @@ async def mem_reflect(
                 chunk = await storage.get_chunk(row["chunk_id"])
             except (ValueError, TypeError):
                 pass
+            # A screened row is dropped, not degraded to its id prefix: that
+            # fallback would name the chunk while claiming it is unreadable,
+            # and the link count beside it says a chunk is there at all
+            # (ADR-0036).
+            if chunk is not None and not in_boundary(chunk, boundary):
+                continue
             preview = chunk.content[:50].replace("\n", " ") if chunk else row["chunk_id"][:8]
-            lines.append(f"  {row['link_count']} links — {preview}...")
-        lines.append("")
+            rendered.append(f"  {row['link_count']} links — {preview}...")
+        if rendered:
+            lines.append("### Most Connected Memories")
+            lines.extend(rendered)
+            lines.append("")
 
     # If no data was found at all, give helpful guidance
     if len(lines) == 1:  # Only the header
@@ -164,6 +175,14 @@ async def mem_reflect_save(
             insight_id = recent[0].id
             for cid in related_chunks:
                 try:
+                    # Linking is a write, and the same boundary applies:
+                    # a caller who may not read a chunk may not attach a
+                    # reflection to it (ADR-0036). Skipped silently, like the
+                    # invalid-UUID case below — a reflection is a summary, not
+                    # a query, so one unusable id should not fail the save.
+                    if await resolve_chunk(app, UUID(cid)) is None:
+                        logger.debug("Skipping out-of-boundary chunk in related_chunks: %s", cid)
+                        continue
                     await app.storage.add_relation(
                         UUID(cid),
                         insight_id,

@@ -7,6 +7,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Breaking
 
+- **Chunks reached by id now honour the project boundary.** `mem_read`,
+  `mem_expand`, `mem_related` / `mem_link` / `mem_unlink`, `mem_agent_share`,
+  `mem_edit` / `mem_delete`, `mm agent share`, the
+  `memtomem://chunks/{id}` resource, the LangGraph store's `get` / `delete`,
+  and the web `PATCH` / `DELETE` / tags / similar routes all resolve a chunk id
+  through the same always-on ADR-0011 scope fragment that search and web
+  `GET /chunks/{id}` have always applied: outside a project only `scope='user'`
+  chunks resolve; inside project `<X>`, user chunks and `<X>`'s. An id from
+  another project answers exactly as one that does not exist — knowing an id is
+  not authorization. Reaching another project's chunk by id now means running
+  from that project's directory, the same requirement search has always had.
+  Unchanged: archived (`archive:*`), agent-runtime and expired chunks still
+  read normally by id — those are search-relevance defaults, not boundaries.
+  Maintenance and browse surfaces (`mem_dedup_*`, `mem_decay_*`,
+  `mem_cleanup_orphans`, export/import, consolidation, `GET /chunks?source=`,
+  `GET /sources`) remain whole-store by design. See ADR-0036 for the split and
+  for what the guarantee does *not* claim. (#2238)
+
 - **`--force` no longer re-resolves namespaces; use `--reassign-namespaces`.**
   A forced re-index used to re-run every file's namespace through the current
   path rules, so the documented embedding-reset recovery

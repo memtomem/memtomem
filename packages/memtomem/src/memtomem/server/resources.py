@@ -11,6 +11,7 @@ from memtomem.server.context import (
     _get_active_app_initialized,
     _get_app_initialized,
 )
+from memtomem.server.tools._id_access import resolve_chunk
 
 # The 2.0 SDK injects ``Context`` into templated resource handlers only —
 # a static URI carries no request, and declaring the parameter there is a
@@ -66,9 +67,14 @@ async def stats_resource() -> str:
 
 @mcp.resource("memtomem://chunks/{chunk_id}")
 async def chunk_resource(chunk_id: str, ctx: CtxType = None) -> str:
-    """Read a specific chunk by UUID."""
+    """Read a specific chunk by UUID, inside the caller's project boundary.
+
+    Same rule as ``mem_read`` — an id from another project reads as not-found
+    (ADR-0036). The resource is a second door onto the same read; leaving it
+    open would make the tool's screen decorative.
+    """
     app = await _get_app_initialized(ctx)
-    chunk = await app.storage.get_chunk(UUID(chunk_id))
+    chunk = await resolve_chunk(app, UUID(chunk_id))
     if chunk is None:
         return json.dumps({"error": f"Chunk {chunk_id} not found"})
     meta = chunk.metadata

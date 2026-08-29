@@ -332,7 +332,18 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         raise click.ClickException(f"invalid chunk ID format: {chunk_id}") from exc
 
     async with cli_components() as comp:
-        chunk = await comp.storage.get_chunk(uid)
+        # CLI twin of ``mem_agent_share``, screened the same way: this copies
+        # a chunk's content into a shared namespace, so a foreign-project id
+        # would republish it past the boundary (ADR-0036). Out-of-boundary
+        # reports the same "not found" as a missing id.
+        from memtomem.runtime.project_context import _resolve_project_context_root
+        from memtomem.search.visibility import resolve_visible_chunk
+
+        chunk = await resolve_visible_chunk(
+            comp.storage,
+            uid,
+            project_context_root=_resolve_project_context_root(comp),
+        )
         if chunk is None:
             raise click.ClickException(f"Chunk {chunk_id} not found.")
 

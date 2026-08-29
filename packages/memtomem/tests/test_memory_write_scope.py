@@ -173,6 +173,13 @@ async def test_mem_edit_inferred_scope_blocks_project_shared_force_unsafe(
         embedding=[0.1] * 1024,
     )
     monkeypatch.setattr(comp.storage, "get_chunk", AsyncMock(return_value=fake_chunk))
+    # Gate A is only reachable for a chunk the caller may address: since
+    # ADR-0036 ``mem_edit`` resolves ids inside the ADR-0011 boundary, so a
+    # project_shared chunk answers "not found" unless the server runs in that
+    # project. Pin the context so this test still measures the gate.
+    monkeypatch.setattr(
+        "memtomem.server.tools.search._resolve_project_context_root", lambda _app: proj
+    )
 
     out = await memory_crud.mem_edit(
         chunk_id=str(chunk_id),

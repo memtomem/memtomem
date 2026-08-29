@@ -388,7 +388,7 @@ async def test_replace_chunk_tags_mutates_and_invalidates(storage):
     spy = _SearchPipelineSpy()
 
     updated = await svc.replace_chunk_tags(
-        storage, c1.id, ["new", "extra", "extra"], search_pipeline=spy
+        storage, c1.id, ["new", "extra", "extra"], project_context_root=None, search_pipeline=spy
     )
 
     assert updated is not None
@@ -405,7 +405,9 @@ async def test_replace_chunk_tags_returns_none_when_chunk_missing(storage):
     from uuid import uuid4
 
     spy = _SearchPipelineSpy()
-    result = await svc.replace_chunk_tags(storage, uuid4(), ["x"], search_pipeline=spy)
+    result = await svc.replace_chunk_tags(
+        storage, uuid4(), ["x"], project_context_root=None, search_pipeline=spy
+    )
     assert result is None
     assert spy.invalidate_count == 0
 
@@ -421,7 +423,9 @@ async def test_replace_chunk_tags_no_op_when_unchanged(storage):
     before = await storage.get_chunk(c1.id)
     spy = _SearchPipelineSpy()
 
-    result = await svc.replace_chunk_tags(storage, c1.id, ["a", "b"], search_pipeline=spy)
+    result = await svc.replace_chunk_tags(
+        storage, c1.id, ["a", "b"], project_context_root=None, search_pipeline=spy
+    )
 
     assert result is not None
     assert tuple(result.metadata.tags) == ("a", "b")
@@ -454,7 +458,9 @@ async def test_replace_chunk_tags_acquires_tag_write_lock(storage):
     holder = asyncio.create_task(hold_lock())
     await held.wait()
 
-    svc_task = asyncio.create_task(svc.replace_chunk_tags(storage, c1.id, ["new"]))
+    svc_task = asyncio.create_task(
+        svc.replace_chunk_tags(storage, c1.id, ["new"], project_context_root=None)
+    )
     try:
         await asyncio.wait_for(asyncio.shield(svc_task), timeout=0.05)
     except asyncio.TimeoutError:
@@ -528,7 +534,7 @@ async def test_replace_chunk_tags_preserves_content_embedding_hash_created_at(st
     await storage.upsert_chunks([c1])
     before = _snapshot_invariants(await storage.get_chunk(c1.id))
 
-    await svc.replace_chunk_tags(storage, c1.id, ["a", "b"])
+    await svc.replace_chunk_tags(storage, c1.id, ["a", "b"], project_context_root=None)
 
     after = _snapshot_invariants(await storage.get_chunk(c1.id))
     assert after == before

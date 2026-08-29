@@ -522,12 +522,26 @@ class TestCliAgentShareTargetOverride:
         those happy-path checks could regress to false-pass on the
         gate's behavior — extend the mock to cover the new step at
         that point.
+
+        ADR-0036 added exactly such a step: the share path resolves its id
+        through the ADR-0011 boundary, which reads
+        ``comp.config.indexing.project_memory_dirs``. ``_share_comp`` below
+        supplies it, and the happy-path assertion still holds because the
+        boundary resolves before the fetch, not instead of it.
         """
         return SimpleNamespace(get_chunk=AsyncMock(return_value=None))
 
+    @staticmethod
+    def _share_comp(storage_mock):
+        """Components stub with the config axis the boundary lookup reads."""
+        return SimpleNamespace(
+            storage=storage_mock,
+            config=SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[])),
+        )
+
     @pytest.mark.parametrize("target", CLI_HOSTILE_NAMESPACES)
     def test_hostile_targets_all_rejected(self, runner, monkeypatch, share_storage_mock, target):
-        comp = SimpleNamespace(storage=share_storage_mock)
+        comp = self._share_comp(share_storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
 
         result = runner.invoke(
@@ -553,7 +567,7 @@ class TestCliAgentShareTargetOverride:
         parametrize so failures here surface the bypass directly rather
         than under one of N parametrized IDs.
         """
-        comp = SimpleNamespace(storage=share_storage_mock)
+        comp = self._share_comp(share_storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
 
         result = runner.invoke(
@@ -579,7 +593,7 @@ class TestCliAgentShareTargetOverride:
         after validation; asserting on the validator-error fragment
         keeps the test focused on the gate's contract.
         """
-        comp = SimpleNamespace(storage=share_storage_mock)
+        comp = self._share_comp(share_storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
 
         result = runner.invoke(
@@ -601,7 +615,7 @@ class TestCliAgentShareTargetOverride:
         validator unchanged — the gate's whole point is to reject
         hostile shapes without touching the documented in-tree ones.
         """
-        comp = SimpleNamespace(storage=share_storage_mock)
+        comp = self._share_comp(share_storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
 
         result = runner.invoke(

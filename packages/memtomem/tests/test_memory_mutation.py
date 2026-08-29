@@ -39,7 +39,7 @@ def _stats() -> IndexingStats:
 async def test_locked_source_chunk_not_found():
     storage = AsyncMock()
     storage.get_chunk = AsyncMock(return_value=None)
-    async with locked_source_chunk(storage, uuid4()) as (chunk, reason):
+    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (chunk, reason):
         assert chunk is None
         assert reason == "not_found"
 
@@ -57,7 +57,10 @@ async def test_locked_source_chunk_times_out(tmp_path, monkeypatch):
     monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
     async with async_file_lock(_lock_path_for(src.resolve()), timeout=5.0):
-        async with locked_source_chunk(storage, uuid4()) as (fresh, reason):
+        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+            fresh,
+            reason,
+        ):
             assert fresh is None
             assert reason == "locked"
 
@@ -76,7 +79,10 @@ async def test_locked_source_chunk_propagates_body_timeout(tmp_path):
     storage.get_chunk = AsyncMock(return_value=chunk)
 
     with pytest.raises(TimeoutError, match="from body"):
-        async with locked_source_chunk(storage, uuid4()) as (fresh, reason):
+        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+            fresh,
+            reason,
+        ):
             assert reason is None
             raise TimeoutError("from body")
 

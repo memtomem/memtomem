@@ -2408,7 +2408,7 @@ class TestDeleteChunk:
         assert resp.status_code == 404
 
     async def test_delete_project_shared_chunk_requires_confirm(
-        self, app, client: AsyncClient, tmp_path: Path
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
     ):
         """ADR-0011 PR-D review round 7 pin: web DELETE on a project_shared
         chunk MUST refuse without ``confirm_project_shared=true`` query
@@ -2440,6 +2440,13 @@ class TestDeleteChunk:
             updated_at=chunk.updated_at,
         )
         app.state.storage.get_chunk.return_value = chunk
+        from memtomem.web.routes import chunks as chunks_route
+
+        # Gate B only comes up for a chunk the caller may reach at all: since
+        # ADR-0036 the route resolves ids inside the project boundary, so a
+        # project_shared chunk is a 404 unless the server is running in that
+        # project. Pin the context here so this test still measures the gate.
+        monkeypatch.setattr(chunks_route, "_boundary", lambda _config: proj)
 
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
         assert resp.status_code == 403, resp.text
@@ -2451,7 +2458,7 @@ class TestDeleteChunk:
         assert detail.get("surface") == "web_api_chunk_delete"
 
     async def test_delete_project_shared_chunk_with_confirm_proceeds(
-        self, app, client: AsyncClient, tmp_path: Path
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
     ):
         """``confirm_project_shared=true`` lets the delete succeed."""
         proj = tmp_path / "proj"
@@ -2477,7 +2484,10 @@ class TestDeleteChunk:
             created_at=chunk.created_at,
             updated_at=chunk.updated_at,
         )
+        from memtomem.web.routes import chunks as chunks_route
+
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, None])
+        monkeypatch.setattr(chunks_route, "_boundary", lambda _config: proj)
 
         resp = await client.delete(
             f"/api/chunks/{CHUNK_ID}",
@@ -2623,7 +2633,7 @@ class TestEditChunkRedaction:
         assert snap["bypassed"] == 1
 
     async def test_force_unsafe_on_project_shared_chunk_blocks(
-        self, app, client: AsyncClient, tmp_path: Path
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
     ):
         """ADR-0011 PR-D review round 7 pin: PATCH on a project_shared
         chunk must infer scope from the loaded metadata so Gate A's
@@ -2658,7 +2668,12 @@ class TestEditChunkRedaction:
             created_at=chunk.created_at,
             updated_at=chunk.updated_at,
         )
+        from memtomem.web.routes import chunks as chunks_route
+
         app.state.storage.get_chunk.return_value = chunk
+        # Same precondition as the delete gate: since ADR-0036 a
+        # project_shared chunk only resolves by id from inside its project.
+        monkeypatch.setattr(chunks_route, "_boundary", lambda _config: proj)
 
         resp = await client.patch(
             f"/api/chunks/{CHUNK_ID}",
@@ -2892,10 +2907,13 @@ class TestChunkValidityFields:
 
         captured: dict = {}
 
-        async def fake_replace(storage, chunk_id, tags, *, search_pipeline=None):
+        async def fake_replace(
+            storage, chunk_id, tags, *, project_context_root, search_pipeline=None
+        ):
             captured["storage"] = storage
             captured["chunk_id"] = chunk_id
             captured["tags"] = list(tags)
+            captured["project_context_root"] = project_context_root
             captured["search_pipeline"] = search_pipeline
             return chunk
 
@@ -2911,6 +2929,9 @@ class TestChunkValidityFields:
         assert captured["chunk_id"] == CHUNK_ID
         assert captured["tags"] == ["new"]
         assert captured["search_pipeline"] is app.state.search_pipeline
+        # The route must hand the service its ADR-0011 boundary; the service
+        # cannot resolve one for itself and has no safe default (ADR-0036).
+        assert "project_context_root" in captured
 
 
 # ---------------------------------------------------------------------------

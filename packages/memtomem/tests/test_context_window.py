@@ -396,6 +396,14 @@ class TestMemExpand:
 
         Out of project context, the ADR-0011 boundary admits ``user`` rows
         only, whatever project the addressed chunk belongs to.
+
+        ADR-0036 carried that one step further: the *anchor* is screened by
+        the same boundary too, so the case this test was written for — a
+        project-tier chunk addressed from outside its project — now stops at
+        the anchor and never reaches the neighbour rule. Pinned here in that
+        stronger form; the neighbour half moved to
+        ``test_expand_in_context_still_hides_other_projects``, which keeps it
+        measurable with an anchor that does resolve.
         """
         from memtomem.server.tools.search import mem_expand
 
@@ -436,9 +444,62 @@ class TestMemExpand:
 
         result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
 
-        assert "same project" not in result
-        assert "foreign project" not in result
+        # The anchor itself does not resolve, so nothing around it is reached
+        # — and the answer is the one a nonexistent id gets.
+        assert result == f"Chunk {chunks[1].id} not found."
+
+    async def test_expand_in_context_still_hides_other_projects(self, monkeypatch):
+        """In-project, the boundary keeps a neighbour from another project out.
+
+        The other half of the rule above, with an anchor that resolves: a
+        caller working in ``/mine`` expands one of its chunks and sees its own
+        project's rows and ``user`` rows, never ``/elsewhere``'s — even though
+        all of them share one source file.
+        """
+        from memtomem.server.tools.search import mem_expand
+
+        chunks = [
+            _make_chunk(
+                "foreign project",
+                source="/tmp/s.md",
+                start_line=0,
+                scope="project_shared",
+                project_root=Path("/elsewhere"),
+            ),
+            _make_chunk(
+                "anchor",
+                source="/tmp/s.md",
+                start_line=10,
+                scope="project_shared",
+                project_root=Path("/mine"),
+            ),
+            _make_chunk(
+                "same project",
+                source="/tmp/s.md",
+                start_line=20,
+                scope="project_shared",
+                project_root=Path("/mine"),
+            ),
+            _make_chunk("user row", source="/tmp/s.md", start_line=30),
+        ]
+        app = MagicMock()
+        app.config.search.system_namespace_prefixes = []
+        app.storage.get_chunk = AsyncMock(return_value=chunks[1])
+        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root",
+            lambda _app: Path("/mine"),
+        )
+
+        result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
+
+        assert "anchor" in result
+        assert "same project" in result
         assert "user row" in result
+        assert "foreign project" not in result
 
     async def test_expand_counts_an_expired_anchor_in_its_own_position(self, monkeypatch):
         """The named chunk is returned, so it must be part of the accounting."""
