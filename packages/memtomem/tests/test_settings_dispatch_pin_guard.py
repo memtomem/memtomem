@@ -1,23 +1,31 @@
-"""Every threaded ``generate_all_settings`` dispatch carries both worker guards.
+"""Every threaded settings-engine dispatch carries the guards its worker needs.
 
 ``asyncio.to_thread`` cannot be cancelled, so a worker outlives the request
-that started it, and the two context managers here are what keep that worker
+that started it, and the context managers here are what keep that worker
 accountable to the caller it has already outlived. ``pinned_host_homes()``
-decides *where* a late write lands (#2211): every user-scope target is
+decides *where* a late write lands (#2211): every user-scope settings target is
 anchored on the ambient ``$HOME`` / ``$KIMI_CODE_HOME``, so a dispatch that
 forgets it lets the write follow the environment to a home its caller never
 chose — which is how a cancelled sync came to write the developer's real
 ``~/.claude/settings.json`` mid-suite. ``abandon_sync_on_exit()`` decides
 *whether* it happens at all (#2218): without it a timed-out request returns
-503 and then mutates the user's settings seconds later. Sitting inside both is
+503 and then mutates the user's settings seconds later. Sitting inside them is
 necessary but not sufficient: the hand-off must also be one that copies the
 caller's context, which ``asyncio.to_thread`` does and ``run_in_executor``
 does not.
 
+Which guards apply is **per callable**, not global (#2247). Only
+``generate_all_settings`` resolves host homes inside the worker, so only it
+owes the pin; the sibling engines that adopted the abort take pre-resolved
+paths, and demanding a pin of them would be cargo-culting a rule whose
+rationale does not reach them. Hence :data:`_DISPATCH_RULES` rather than one
+list of scopes — and a callable's presence in that table is itself the claim
+that its engine has abort checks to honour the flag.
+
 Per-site regression tests cannot cover a dispatcher that does not exist yet, so
 the rule is enforced lexically over the tree instead: the guard finds the call
-sites itself rather than reading a hand-kept list that a new dispatcher would
-silently sit outside of.
+sites itself rather than reading a hand-kept list of *sites* that a new
+dispatcher would silently sit outside of.
 """
 
 from __future__ import annotations
@@ -28,18 +36,33 @@ from pathlib import Path
 import pytest
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "memtomem"
-_DISPATCHED = "generate_all_settings"
-#: Context managers a threaded dispatch must sit inside, with the issue that
-#: put each one there — the offender line names it so a failure points at the
-#: rationale rather than just the missing call.
-_REQUIRED_SCOPES = (("pinned_host_homes", "#2211"), ("abandon_sync_on_exit", "#2218"))
+
+_ABANDON = ("abandon_sync_on_exit", "#2218")
+_PIN = ("pinned_host_homes", "#2211")
+
+#: Dispatched callable → the context managers a threaded hand-off of it must
+#: sit inside, each with the issue that put it there (the offender line names
+#: the issue so a failure points at the rationale, not just a missing call).
+#:
+#: ``generate_all_settings`` is the only entry that owes the pin: it resolves
+#: ``$HOME``-anchored targets inside the worker. The rest take paths their
+#: caller already resolved on the event loop, so they owe only the abort flag.
+_DISPATCH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
+    "generate_all_settings": (_PIN, _ABANDON),
+    "apply_hook_copy": (_ABANDON,),
+    # No threaded dispatcher today (CLI only). Listed so the first one that
+    # appears fails here until it is wrapped, rather than shipping a pair-lock
+    # transaction that can write behind a 503 (#2247).
+    "apply_migration": (_ABANDON,),
+    "_locked_cas_write": (_ABANDON,),
+}
 
 
-def _thread_dispatch_sites(tree: ast.AST) -> list[ast.Call]:
-    """Calls that hand ``generate_all_settings`` to a thread.
+def _thread_dispatch_sites(tree: ast.AST) -> list[tuple[ast.Call, str]]:
+    """Calls that hand a guarded callable to a thread, with the name matched.
 
     Matched by the *argument*, not the callee, so every hand-off spelling is
-    found — including the ones the pin cannot rescue (see
+    found — including the ones no scope can rescue (see
     :func:`_propagates_context`).
     """
     sites = []
@@ -51,8 +74,8 @@ def _thread_dispatch_sites(tree: ast.AST) -> list[ast.Call]:
             # ``settings.generate_all_settings``. Matching only the bare name
             # would let one import-style hop carry a dispatcher out of view.
             name = arg.id if isinstance(arg, ast.Name) else getattr(arg, "attr", None)
-            if name == _DISPATCHED:
-                sites.append(node)
+            if name in _DISPATCH_RULES:
+                sites.append((node, name))
                 break
     return sites
 
@@ -107,41 +130,62 @@ def _python_files() -> list[Path]:
     return sorted(p for p in _SRC.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+#: Dispatch sites each callable is known to have today. A per-callable floor,
+#: not one total: a matcher regression that stopped seeing (say) the CAS writer
+#: would still clear a global ``>= 3`` on the settings dispatchers alone.
+#: ``apply_migration`` is 0 by design — it has no threaded dispatcher yet.
+_MIN_SITES = {
+    "generate_all_settings": 3,  # web sync + two MCP context tools
+    "apply_hook_copy": 1,  # the web copy route
+    "apply_migration": 0,
+    "_locked_cas_write": 3,  # resolve / delete / promote
+}
+
+
 def test_the_guard_finds_the_known_dispatchers():
     """A guard that matches nothing would pass forever — pin the lower bound."""
-    found = 0
+    found: dict[str, int] = dict.fromkeys(_DISPATCH_RULES, 0)
     for path in _python_files():
-        found += len(_thread_dispatch_sites(ast.parse(path.read_text(encoding="utf-8"))))
-    assert found >= 3, (
-        f"expected at least the web + two MCP dispatchers, found {found} — "
-        "if a dispatcher was intentionally removed, lower this bound deliberately"
+        for _site, name in _thread_dispatch_sites(ast.parse(path.read_text(encoding="utf-8"))):
+            found[name] += 1
+    short = {
+        name: (found[name], floor) for name, floor in _MIN_SITES.items() if found[name] < floor
+    }
+    assert not short, (
+        f"fewer dispatch sites than expected (found, expected-at-least): {short} — "
+        "either the matcher stopped seeing a spelling, or a dispatcher was "
+        "removed and this floor should be lowered deliberately"
+    )
+    assert set(_MIN_SITES) == set(_DISPATCH_RULES), (
+        "every guarded callable needs a floor, or a matcher regression on it goes unnoticed"
     )
 
 
-def test_every_threaded_settings_dispatch_is_inside_both_scopes():
+def test_every_threaded_settings_dispatch_is_inside_its_scopes():
     offenders: list[str] = []
     for path in _python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         sites = _thread_dispatch_sites(tree)
         if not sites:
             continue
-        for site in sites:
-            where = f"{path.relative_to(_SRC)}:{site.lineno}"
+        for site, name in sites:
+            where = f"{path.relative_to(_SRC)}:{site.lineno} ({name})"
             if not _propagates_context(site):
                 offenders.append(f"{where} — hand-off does not copy the caller's context")
                 continue
-            for scope, issue in _REQUIRED_SCOPES:
+            for scope, issue in _DISPATCH_RULES[name]:
                 spans = _scope_spans(tree, scope)
                 if not any(start <= site.lineno <= end for start, end in spans):
                     offenders.append(f"{where} — outside `with {scope}():` ({issue})")
     assert not offenders, (
         "settings work handed to a thread without the guards its worker needs:\n  "
         + "\n  ".join(offenders)
-        + "\nA worker outlives its caller, so it must carry the homes the caller "
-        "resolved (#2211) and the abort flag that stops it writing behind a "
-        "response that already failed (#2218). Use `asyncio.to_thread` inside "
-        "both scopes, or dispatch through `contextvars.copy_context().run` "
-        "explicitly."
+        + "\nA worker outlives its caller, so it must carry the abort flag that "
+        "stops it writing behind a response that already failed (#2218, #2247) "
+        "and — where it resolves host homes itself — the homes the caller "
+        "resolved (#2211). Use `asyncio.to_thread` inside the scopes that "
+        "callable's rule names, or dispatch through "
+        "`contextvars.copy_context().run` explicitly."
     )
 
 
@@ -154,9 +198,9 @@ def _guard_accepts(source: str) -> bool:
         _propagates_context(site)
         and all(
             any(start <= site.lineno <= end for start, end in _scope_spans(tree, scope))
-            for scope, _issue in _REQUIRED_SCOPES
+            for scope, _issue in _DISPATCH_RULES[name]
         )
-        for site in sites
+        for site, name in sites
     )
 
 
@@ -210,6 +254,21 @@ def _guard_accepts(source: str) -> bool:
             "    with abandon_sync_on_exit():\n"
             "        await asyncio.to_thread(generate_all_settings, r)\n",
         ),
+        (
+            # A sibling engine owes the abort flag even though it owes no pin
+            # — the half the per-callable table must not turn into "anything
+            # goes for the new entries" (#2247).
+            "sibling engine outside the abort scope",
+            "import asyncio\nasync def f():\n    await asyncio.to_thread(apply_hook_copy, plan)\n",
+        ),
+        (
+            # Pinning a sibling engine does not substitute for the flag: the
+            # pin answers *where*, and nothing here answers *whether*.
+            "sibling engine pinned instead of abort-scoped",
+            "import asyncio\nasync def f():\n"
+            "    with pinned_host_homes():\n"
+            "        await asyncio.to_thread(_locked_cas_write, p, m, doc)\n",
+        ),
     ],
 )
 def test_guard_rejects_shapes_that_lose_a_guard(label, source):
@@ -234,6 +293,12 @@ def test_guard_rejects_shapes_that_lose_a_guard(label, source):
         "    with pinned_host_homes():\n"
         "        with abandon_sync_on_exit():\n"
         "            await asyncio.to_thread(generate_all_settings, r)\n",
+        # A sibling engine needs the abort flag and NOT the pin: it writes
+        # paths its caller resolved. Demanding a pin here would be a rule
+        # applied past its rationale, so the guard must accept this (#2247).
+        "import asyncio\nasync def f():\n"
+        "    with abandon_sync_on_exit():\n"
+        "        await asyncio.to_thread(apply_hook_copy, plan)\n",
     ],
 )
 def test_guard_accepts_the_correct_shape(source):

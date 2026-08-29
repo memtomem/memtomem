@@ -51,7 +51,6 @@ import hashlib
 import json
 import logging
 import re
-import threading
 import time
 import tomllib
 from contextlib import contextmanager
@@ -60,6 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Protocol
 
+from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context._kimi_home import kimi_code_home
 from memtomem.context.error_redact import redact_secret_value
@@ -208,51 +208,13 @@ def host_kimi_home() -> Path:
     return pinned.kimi_home if pinned is not None else kimi_code_home()
 
 
-_sync_abandoned: ContextVar[threading.Event | None] = ContextVar(
-    "memtomem_settings_sync_abandoned", default=None
-)
-
-
-@contextmanager
-def abandon_sync_on_exit() -> Iterator[threading.Event]:
-    """Signal a worker thread that the caller which dispatched it is gone (#2218).
-
-    The twin of :func:`pinned_host_homes`, and entered at the same place —
-    immediately before an ``asyncio.to_thread`` hand-off. The pin decides
-    *where* a late write lands; this decides whether it happens at all. A
-    timed-out request returned 503 and then mutated the user's settings
-    seconds later with nothing in the response saying so.
-
-    Setting the event in ``finally`` needs no ``except CancelledError``: on a
-    normal exit the worker has already returned, so the set is a no-op, and
-    every abnormal exit — the route's ``asyncio.timeout``, an MCP caller's
-    cancellation — is exactly the case where the worker is still running and
-    must stop. ``asyncio.to_thread`` copies the caller's context, and copying
-    a context copies the *binding*, not the ``Event``, so the worker polls the
-    same object the caller sets.
-
-    Cooperative by nature: the worker stops between targets, so a cancellation
-    landing inside one target's write still completes that write (the pin
-    keeps it pointed at the caller's own home).
-    """
-    event = threading.Event()
-    token = _sync_abandoned.set(event)
-    try:
-        yield event
-    finally:
-        event.set()
-        _sync_abandoned.reset(token)
-
-
-def _sync_is_abandoned() -> bool:
-    """Whether the caller that dispatched this work has already given up.
-
-    ``False`` when nothing entered :func:`abandon_sync_on_exit`, which keeps
-    synchronous callers (CLI, detectors) running exactly as before — only the
-    threaded dispatch paths can be abandoned.
-    """
-    event = _sync_abandoned.get()
-    return event is not None and event.is_set()
+#: The abort flag moved to ``context/_abandon.py`` when the sibling engines
+#: adopted it (#2247) — ``skills`` and ``mcp_servers`` import nothing else from
+#: this module, and one 40-line primitive is not worth that dependency. The
+#: names stay re-exported here: ``abandon_sync_on_exit`` is in ``__all__`` and
+#: is the name the dispatch guard looks for, and ``_sync_is_abandoned`` is what
+#: this module's own checks read.
+_sync_is_abandoned = sync_is_abandoned
 
 
 def resolve_scope_path(project_root: Path, scope: str) -> Path:

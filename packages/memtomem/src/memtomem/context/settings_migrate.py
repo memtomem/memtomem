@@ -28,6 +28,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
@@ -575,19 +576,46 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
     is a strict single-lock holder (it never waits while holding), so no
     wait cycle can form. Acquisition shares one ``_SETTINGS_LOCK_BUDGET_S``
     budget across both locks (#1145 shape); on expiry the apply is refused
-    with a warning instead of blocking forever. The ``st_mtime_ns`` recheck
+    with a warning instead of blocking forever. That budget bounds the
+    *wait* only — an apply that holds the pair is on no deadline, so it does
+    not by itself stop a write landing behind a caller that already gave up
+    (see Abandonment below). The ``st_mtime_ns`` recheck
     before each write is the same second layer ``generate_all_settings``
     keeps: it catches a non-gateway direct disk edit that bypasses the
     sidecar lock entirely. A tier that exists but is not readable as a JSON
     object is refused loudly rather than treated as empty — rewriting it
     would destroy the user's file (the apply-side analogue of the sync
     engine's ``MalformedSettingsError`` contract).
+
+    Abandonment: a caller that dispatched this through
+    ``abandon_sync_on_exit`` can give up while it runs, and the lock budget
+    bounds only the *wait*. Both checks below therefore sit **before the
+    target write**: at entry and with both locks held. None sits between the
+    two writes — target-first-then-source is the transaction whose interruption
+    this function's whole locking discipline exists to survive, so once the
+    target write lands the source clean-up must follow even for a caller that
+    is gone; stopping in between is the duplicate state, and doing it under an
+    abandoned pair-lock is how an entry ends up in both tiers or neither
+    (#2247). Today every caller is synchronous (the CLI), which never enters
+    the scope and so never sees a set flag; the checks are here so the first
+    threaded dispatcher inherits the placement instead of choosing its own.
     """
     result = MigrateResult(plan=plan)
     if plan.is_noop:
         return result
 
     retry_hint = "Re-run `mm context settings-migrate --apply` to retry."
+    abandoned_warning = (
+        "the migration was abandoned by its caller (request timeout or "
+        "cancellation) before either tier was written; nothing was written. "
+        f"{retry_hint}"
+    )
+
+    # Checked before any lock so an abandoned apply leaves no sidecar behind.
+    if sync_is_abandoned():
+        result.warnings.append(abandoned_warning)
+        return result
+
     heal_hint = (
         "Re-run `mm context settings-migrate --apply` to finish the "
         "clean-up (the target already carries the entries)."
@@ -612,6 +640,13 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
         with ExitStack() as stack:
             for lock_path in lock_paths:
                 stack.enter_context(_file_lock(lock_path, timeout=_lock_timeout()))
+
+            # Waiting for the pair is the longest this apply can take, so it
+            # is where a caller most plausibly gave up — and the last point
+            # where stopping is safe (#2247). ``return`` releases both locks.
+            if sync_is_abandoned():
+                result.warnings.append(abandoned_warning)
+                return result
 
             # --- Target read-modify-write -------------------------------
             # Re-read + re-classify the target against its current on-disk
@@ -701,6 +736,15 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
                     f"{plan.target_path} was modified by another process "
                     f"during apply; nothing was written. {retry_hint}"
                 )
+                return result
+
+            # The reads and re-classification above can take long enough for
+            # the caller to give up in between, so re-check rather than trust
+            # the post-lock answer. This is the LAST suppression point: past
+            # it the target write and the source clean-up are one transaction
+            # (#2247).
+            if sync_is_abandoned():
+                result.warnings.append(abandoned_warning)
                 return result
 
             if moves_to_write:
