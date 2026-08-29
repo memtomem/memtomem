@@ -4,17 +4,20 @@ Diagnostics need to distinguish "that process is gone" from "I could not tell",
 which a boolean cannot express: an access-denied probe means the process
 *exists* and is merely not ours to inspect, while a failed query means we
 learned nothing at all. Collapsing either into ``False`` is what turns a live
-server into a reported-dead one, so every uncertain answer is ``"unknown"`` and
-callers are expected to render it as such rather than pick a side.
+recorded parent into a reported-missing one, so every uncertain answer is
+``"unknown"`` and callers are expected to render it as such rather than pick a
+side.
 
-This deliberately does not reuse ``cli/web.py:_pid_alive``. That helper opens
-the Windows handle with ``SYNCHRONIZE`` alone and then calls
-``GetExitCodeProcess``, which is documented to require
-``PROCESS_QUERY_INFORMATION`` or ``PROCESS_QUERY_LIMITED_INFORMATION`` — so the
-query can fail on a perfectly live process and be read as dead. It also treats a
-NULL handle as dead without inspecting ``GetLastError``, folding access-denied
-into the same answer. Both are why this module exists rather than a third copy;
-migrating ``cli/web.py`` and ``cli/upgrade_cmd.py`` onto it is follow-up work.
+This deliberately does not reuse ``cli/web.py:_pid_alive``. That helper opens the
+Windows handle with ``SYNCHRONIZE`` alone and then calls ``GetExitCodeProcess``,
+which is documented to require ``PROCESS_QUERY_INFORMATION`` or
+``PROCESS_QUERY_LIMITED_INFORMATION``, so the query can fail on a live process
+and be read as dead; it also treats a NULL handle as dead without inspecting
+``GetLastError``, folding access-denied into the same answer. Neither misfires
+today — its only call site (``web.py:598``) sits in the POSIX branch, leaving
+that Windows code unreachable — but copying it here would have made a latent
+defect a live one, since this module's caller runs on every platform. Migrating
+``cli/web.py`` and ``cli/upgrade_cmd.py`` onto this probe is follow-up work.
 """
 
 from __future__ import annotations

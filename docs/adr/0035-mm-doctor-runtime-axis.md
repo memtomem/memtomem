@@ -21,9 +21,11 @@ commands"; the naming question was left open.
 
 #2226 then produced a class of problem none of the three can host. A host
 accumulates `memtomem-server` processes — 88 holding 3.7 GB on one machine, 29
-on another — and nothing in memtomem can see it. The data already exists: the
-instance registry writes one flock-held sentinel per live server carrying pid,
-parent pid, and store digest. What is missing is a consumer that reads it
+on another — and nothing in memtomem can see it. Some of the data already
+exists: the instance registry writes one flock-held sentinel per *registered*
+server — one that has opened its store — carrying pid, parent pid, and store
+digest. (That qualifier turns out to matter a great deal; see "Known
+limitation".) What is missing is a consumer that reads it
 *without* narrowing. `mm status` asks only about the current store;
 `probe_all_for_uninstall` is all-store but reduces to a boolean refusal. Dozens
 of servers spread across several stores therefore produce no output anywhere.
@@ -85,13 +87,13 @@ depend on (`CLAUDE.md`).
 
 - **Count and age are reported unconditionally**, never gated on a
   "looks abandoned" heuristic. The 29-live-parent machine is the reason: gating
-  would have hidden the common case entirely.
+  would have hidden all 29 of them.
 - **Parent liveness is an annotation, not a verdict.** The field is named
   `recorded_parent` because a registration-time PPID proves less than
   "orphaned": on Windows the parent pid is never reparented, persists stale, and
   is aggressively reused, so an "alive" parent may be an unrelated process. A
-  recorded PPID of 1 is inherently POSIX-only (Windows pids are multiples of
-  four).
+  recorded PPID of 1 is not expected on Windows, whose pids are allocated as
+  multiples of four.
 - **A live parent does not mean a server is in use.** An idle session holds one
   as firmly as an active one. Anything that later acts on this report needs
   idleness as its signal, not parenthood.
@@ -105,9 +107,33 @@ depend on (`CLAUDE.md`).
 
 ## Known limitation
 
-The report is only as complete as the registry. A server that failed to register
-is invisible to it, and registration is best-effort: failures are logged and
-dropped so that a coordination problem never blocks startup. Running this
-command on the 29-server machine surfaced exactly that gap — only 2 sentinels
-existed for 29 live servers — which is tracked separately. This ADR does not
-change registration; it makes the discrepancy observable for the first time.
+The report is only as complete as the registry, and the registry's population
+rule is narrower than "servers that exist": it is **servers that opened a store
+and then registered successfully**. Registration runs inside
+`AppContext.ensure_initialized`, which is lazy
+by design (#399) so that a handshake-only MCP session — `initialize` plus
+`tools/list` — does not open a store. Initialization is reached by the first
+request that needs the store (a memory tool call or a resource read), or at
+startup when `warmup.enabled` is set; with warmup off, a client that connects
+and asks for nothing beyond the handshake leaves a running, memory-holding
+server the registry has never heard of. Registration can also fail outright —
+`register_instance` returns `None` on a non-file store, a lock timeout, or a
+permission error, deliberately never raising, so that a coordination problem
+cannot block startup. Both routes end in an unreported server; only the first
+was observed here.
+
+On the machine described above the effect was near-total. Running this command
+reported **1** live server while `ps` showed **35**; checked for an open store
+handle, the one registered server held ten and all 34 unregistered ones held
+none. That is consistent with lazy initialization rather than registration
+failure — though not conclusive on its own, since an initialization that failed
+before registering would also have released its handles; distinguishing them
+would need the servers' own logs. Either way, a population the registry cannot
+see was larger than the one it could.
+
+So `mm doctor` faithfully reports the registry, and on a machine like that one
+the registry answers a narrower question than #2226 asked. Closing the gap means
+either registering at lifespan startup or writing a lighter presence marker
+before first use; both trade against #399's reason for being lazy, and the
+decision is tracked in #2230 rather than settled here. This ADR does not change
+registration — it made the discrepancy observable for the first time.

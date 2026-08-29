@@ -266,8 +266,10 @@ delete.
 ### Runtime health — `mm doctor`
 
 `mm doctor` checks the memtomem *runtime on this machine*: the server processes
-that are running and the runtime directory they coordinate through. It needs no
-configured store and answers even when none exists.
+registered in the instance registry, and the runtime directory they coordinate
+through. It needs no configured store and answers even when none exists. Note
+"registered", not "running" — the difference is explained under "Reading the
+output" below, and it can be large.
 
 Which doctor to run:
 
@@ -311,7 +313,7 @@ you: stopping the client that owns a server is the reliable way to release it.
 Reading the output:
 
 - **A live parent does not mean the server is in use.** It means some process
-  still holds it — very often an idle session. Do not read "all recorded parents
+  still holds it, which may be an idle session. Do not read "all recorded parents
   alive" as "nothing to clean up"; the count and ages are the signal.
 - **`PARENT STATE` is about the parent pid recorded when the server
   registered**, not a live relationship. On Windows a parent pid is never
@@ -320,10 +322,23 @@ Reading the output:
   occurs on POSIX; it means the server was launched by init directly (a service
   or a deliberately daemonized process) *or* that its original parent exited and
   it was reparented — the recorded value alone does not distinguish the two.
-- **The report covers servers that registered.** Registration is best-effort so
-  that a coordination problem cannot block startup, which means a server that
-  failed to register does not appear. If `ps` shows more `memtomem-server`
-  processes than `mm doctor` does, that gap is the reason.
+- **The report covers successfully registered servers, not every server
+  running.** A server registers after it opens its store, which happens on the
+  first request that needs it — a memory tool call or a resource read — or at
+  startup when `warmup.enabled` is set. Two things therefore keep a running
+  server out of the report: it never opened the store (a client that connects,
+  lists tools, and asks for nothing else), or it opened the store but its
+  registration failed — that step is best-effort by design, so a coordination
+  problem cannot block startup. Either way the server is running and holding
+  memory while no command here can see it.
+
+  So `ps` can show more `memtomem-server` processes than `mm doctor` does, and
+  the gap can be most of them: on one machine `mm doctor` reported 1 while `ps`
+  showed 35, and none of the 34 missing ones had an open store handle, which is
+  consistent with the first cause on *that* machine (though a registration that
+  failed after opening the store would also have released its handles). How the
+  two causes divide in general is not established. Tracked in
+  [#2230](https://github.com/memtomem/memtomem/issues/2230).
 
 Exit status is `0` unless the runtime directory itself is unusable (wrong
 ownership or permissions, or replaced by a symlink). Accumulated servers and an
