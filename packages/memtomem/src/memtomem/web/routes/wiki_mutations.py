@@ -51,6 +51,7 @@ from memtomem import privacy
 from memtomem.context._names import OVERRIDE_FORMATS, renderable_vendors
 from memtomem.wiki.commit import (
     ResolvedTarget,
+    WikiLockUnavailableError,
     WikiTargetChangedError,
     commit_targets,
 )
@@ -770,6 +771,20 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
     except TimeoutError as exc:
         raise _error(
             503, "busy", "wiki commit timed out — another wiki operation may be in progress"
+        ) from exc
+    except WikiLockUnavailableError as exc:
+        # Deliberately NOT "busy": nothing is holding the lock, its runtime dir
+        # is unusable, so a retry loop would spin forever on a 503. 500 with its
+        # own reason_code, and the message stays path-free — str(exc) embeds the
+        # absolute runtime dir and its `rm -rf` hint, which belongs in the server
+        # log, not in a browser response. Precedes the RuntimeError arm below,
+        # which it subclasses, so it is not misreported as a git failure.
+        logger.warning("wiki commit lock unavailable for %s/%s: %s", asset_type, name, exc)
+        raise _error(
+            500,
+            "internal",
+            "the wiki commit lock is unavailable; check the server log",
+            reason_code="lock_unavailable",
         ) from exc
     except RuntimeError as exc:
         # git failure: the raw stderr (store.py:_git) embeds the absolute wiki

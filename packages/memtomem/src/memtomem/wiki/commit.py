@@ -20,9 +20,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import tempfile
+import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from memtomem._runtime_paths import _test_runtime_dir_override, ensure_runtime_dir
 from memtomem.context._atomic import _file_lock
 from memtomem.wiki.store import WikiNothingToCommitError, WikiStore
 
@@ -41,10 +45,35 @@ commit before giving up.
 __all__ = [
     "CommitOutcome",
     "ResolvedTarget",
+    "WikiLockUnavailableError",
     "WikiTargetChangedError",
     "commit_targets",
+    "legacy_wiki_commit_lock_path",
+    "wiki_commit_lock",
     "wiki_commit_lock_path",
 ]
+
+
+class WikiLockUnavailableError(RuntimeError):
+    """The commit lock could not be *established* — distinct from contention.
+
+    Contention is :class:`TimeoutError` ("someone else holds it, retry"); this is
+    "the lock's own home is unusable", which retrying will not fix: a runtime dir
+    owned by another uid, carrying group/world bits, or replaced by a symlink or
+    junction (:func:`~memtomem._runtime_paths.ensure_runtime_dir` refuses all
+    three), or the ``mkdir``/``open`` of the lock file failing outright.
+
+    Routing the lock through the runtime dir (#2225) made those validation
+    refusals reachable from a wiki commit for the first time, and an unclassified
+    ``OSError`` here would surface as a CLI traceback or a bare 500. Subclassing
+    ``RuntimeError`` means the ``except RuntimeError`` arms every adapter already
+    has catch it as a backstop even if a future call site forgets a dedicated arm;
+    the dedicated arms exist so the *message* is right rather than "git failed".
+
+    ``__str__`` is the underlying message, which for a validation refusal carries
+    the actionable removal hint. It embeds an absolute path, so the **web** route
+    must log it rather than echo it — see the path-free envelope there.
+    """
 
 
 class WikiTargetChangedError(RuntimeError):
@@ -95,20 +124,118 @@ class CommitOutcome:
 
 
 def wiki_commit_lock_path(root: Path) -> Path:
-    """Cross-process commit lock path, in system-temp keyed by the wiki root.
+    """Cross-process commit lock path, in the runtime dir keyed by the wiki root.
 
     Kept **outside** the wiki tree on purpose: ``_file_lock`` ``mkdir``s the lock
     file's parent, so a lock under ``<wiki>/.git/`` could forge a bogus ``.git/``
     if the wiki were removed (``WikiStore.exists()`` only checks ``.git`` is a
-    dir). A system-temp path also can never show up in ``git status``.
+    dir). A runtime-dir path also can never show up in ``git status``.
 
     ``root`` is ``.resolve()``-d here so callers can pass the raw ``store.root``
     (which ``WikiStore.at_default`` leaves un-resolved): two processes deriving
     the path from the same wiki — even via a symlink — land on the **same** lock
     file, which is what makes the web↔CLI exclusion genuinely cross-process.
+
+    The parent is the :mod:`memtomem._runtime_paths` runtime dir rather than a
+    raw ``tempfile.gettempdir()`` leaf (#2225): that honours the pytest
+    runtime-dir override, so a test's ``tmp_path`` wiki no longer strands a lock
+    file in the developer's real temp — one per root, unbounded and never
+    unlinked. Unlike the pid helpers this *creates* the directory rather than
+    returning a bare path, because ``_file_lock`` would otherwise ``mkdir`` it at
+    umask mode and :func:`ensure_runtime_dir` rejects a runtime dir with any
+    group/world bit set — leaving a later server start to fail on a directory
+    this function made.
     """
     digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+    return ensure_runtime_dir() / f"wiki-commit-{digest}.lock"
+
+
+def legacy_wiki_commit_lock_path(root: Path) -> Path:
+    """Pre-#2225 lock path, held transitionally so an upgrade stays exclusive.
+
+    Moving the lock (above) means a process from the previous release and one
+    from this release key the same wiki to *different* files and stop excluding
+    each other. That window is real, not theoretical: ``mm web`` routinely
+    outlives the client that started it (#2226), so a pre-upgrade server can
+    still be committing when a freshly installed CLI runs. ``promote_asset``'s
+    failure path is the sharp edge — its ``shutil.rmtree(dest_dir)`` rollback is
+    only safe because the lock proves the directory is this invocation's alone.
+
+    So :func:`wiki_commit_lock` takes **both**. Retiring this leg is *not* a
+    matter of counting releases: a user can skip the transitional release
+    entirely, and the very lifecycle that motivates this bridge — a ``mm web``
+    that outlives its client — is what makes "surely nobody is still running it"
+    unprovable from a version number. It comes out once the support window
+    declares pre-#2225 versions unsupported, or once a process that old can no
+    longer reach a wiki at all (e.g. an intervening schema/protocol break that
+    fences it). Until one of those holds, dropping it re-opens the window.
+
+    Under pytest this is redirected into the runtime-dir override — the whole
+    point of #2225 was that the raw ``tempfile.gettempdir()`` leaf stranded one
+    never-unlinked file per ``tmp_path`` wiki root in the developer's real temp,
+    and re-acquiring it here would have reintroduced exactly that leak. The
+    ``legacy/`` subdirectory keeps it a *distinct* file from the canonical lock:
+    ``_file_lock`` contends with itself across two open file descriptions in one
+    process, so collapsing the pair onto one path would self-deadlock.
+
+    That redirect is also why this goes through :func:`ensure_runtime_dir` rather
+    than the bare override path: nested under the runtime dir, ``_file_lock``'s
+    ``mkdir(parents=True)`` would otherwise create the runtime dir itself at
+    umask, and the next :func:`ensure_runtime_dir` would refuse the 0o755
+    directory as unsafe. Ensuring in *both* derivations makes the pair
+    order-independent, so a future caller cannot reintroduce that trap by
+    acquiring the legacy lock first.
+    """
+    digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+    if _test_runtime_dir_override() is not None:
+        return ensure_runtime_dir() / "legacy" / f"wiki-commit-{digest}.lock"
     return Path(tempfile.gettempdir()) / "memtomem" / f"wiki-commit-{digest}.lock"
+
+
+@contextmanager
+def wiki_commit_lock(root: Path, *, timeout: float) -> Iterator[None]:
+    """Hold the wiki's cross-process mutation lock for *root*.
+
+    The single acquisition point for both ``commit_targets`` and
+    ``promote_asset``. Nesting order — legacy outer, canonical inner — is fixed
+    here rather than repeated at each call site precisely because two call sites
+    ordering the pair differently would deadlock ABBA.
+
+    *timeout* is the budget for the **pair**, not per lock: the canonical
+    acquisition gets whatever the legacy one left of the deadline. Splitting it
+    keeps the ``_COMMIT_LOCK_TIMEOUT`` guarantee that the wait stays bounded
+    below the web handler's ``asyncio.timeout(60)``, which a naive nesting of two
+    30s waits would have doubled straight through. Expiry raises
+    :class:`TimeoutError` from whichever acquisition ran out, having acquired
+    nothing that it does not release — the callers' existing "busy, retry" arms
+    need no new clause.
+
+    A failure to *establish* either lock — as opposed to losing a race for it —
+    becomes :class:`WikiLockUnavailableError`, so no adapter can leak a raw
+    ``OSError``. ``TimeoutError`` is itself an ``OSError`` and must keep its own
+    meaning, hence the re-raise before the wrap.
+    """
+    with ExitStack() as stack:
+        try:
+            # Derivation sits inside the guard because it is
+            # ``ensure_runtime_dir`` — the validation refusals — and not merely
+            # the lock open that can fail here. ``_file_lock`` is a generator
+            # context manager, so the ``mkdir``/``open`` runs on entry, not on
+            # the call: only ``enter_context`` is actually guarded.
+            canonical = wiki_commit_lock_path(root)
+            legacy = legacy_wiki_commit_lock_path(root)
+            deadline = time.monotonic() + timeout
+            stack.enter_context(_file_lock(legacy, timeout=timeout))
+            remaining = max(deadline - time.monotonic(), 0.0)
+            stack.enter_context(_file_lock(canonical, timeout=remaining))
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            raise WikiLockUnavailableError(str(exc)) from exc
+        # Outside the try on purpose: an ``OSError`` raised by the *caller's*
+        # body (a failed write under the lock) must keep its own type rather
+        # than be reclassified as a lock-establishment failure.
+        yield
 
 
 def commit_targets(
@@ -152,12 +279,14 @@ def commit_targets(
     onto — propagated; the message is fixed and path-free),
     :class:`TimeoutError` (the cross-process lock is held past
     ``_COMMIT_LOCK_TIMEOUT`` by a concurrent committer — the web route maps it to
-    a 503, the CLI to a retry hint), or :class:`RuntimeError` (git failure — the
-    caller MUST surface a fixed message; the raw stderr embeds the absolute wiki
-    path).
+    a 503, the CLI to a retry hint), :class:`WikiLockUnavailableError` (the
+    lock's runtime dir is unusable — **not** contention, so a caller must not
+    offer "retry"; it subclasses ``RuntimeError``, so an arm for it MUST precede
+    the one below or it is misreported as a git failure), or
+    :class:`RuntimeError` (git failure — the caller MUST surface a fixed message;
+    the raw stderr embeds the absolute wiki path).
     """
-    lock_path = wiki_commit_lock_path(store.root)
-    with _file_lock(lock_path, timeout=_COMMIT_LOCK_TIMEOUT):
+    with wiki_commit_lock(store.root, timeout=_COMMIT_LOCK_TIMEOUT):
         # Read HEAD inside the lock when the caller supplied no CAS token, so the
         # CLI commits onto the freshest HEAD rather than a value snapshotted
         # before acquiring the lock. commit_paths re-validates the shape.

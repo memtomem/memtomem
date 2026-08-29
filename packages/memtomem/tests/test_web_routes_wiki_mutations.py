@@ -1162,6 +1162,33 @@ async def test_commit_git_failure_is_fixed_message_no_path_leak(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owner/mode validation")
+async def test_commit_lock_home_unusable_is_500_not_busy_and_leaks_no_path(
+    dev_client, seeded_wiki: Path
+) -> None:
+    # #2225 put the lock in the runtime dir, so its validation refusals now reach
+    # a commit. Not 503 "busy" — nothing holds the lock and a retrying client
+    # would spin forever — and the runtime-dir path in the engine message (with
+    # its rm -rf hint) belongs in the server log, not a browser response.
+    from memtomem._runtime_paths import runtime_dir
+
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    runtime_dir().mkdir(parents=True, exist_ok=True)
+    runtime_dir().chmod(0o755)
+
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["reason_code"] == "lock_unavailable"
+    assert resp.json()["detail"]["error_kind"] != "busy"
+    assert str(runtime_dir()) not in resp.text
+    assert "rm -rf" not in resp.text
+
+
+@pytest.mark.asyncio
 async def test_commit_detached_head_is_409_not_500(dev_client, seeded_wiki: Path) -> None:
     # A detached-HEAD wiki has no branch ref to CAS-advance — a wiki-state
     # precondition, not a git failure. It must map to a 409 conflict envelope
