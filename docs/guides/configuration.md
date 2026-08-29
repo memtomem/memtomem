@@ -428,6 +428,15 @@ The `llm` strategy uses an LLM to generate semantic synonyms (requires `MEMTOMEM
 
 When enabled, search results include surrounding chunks from the same source file. Also available per-call via `mem_search(context_window=N)` or `mem_do(action="expand", params={"chunk_id": "...", "window": 2})`.
 
+Surrounding chunks are screened by the same visibility rules as the results
+themselves: chunks in a hidden system namespace (`search.system_namespace_prefixes`),
+outside the current project scope, or outside their validity window are not
+returned as context. Naming a namespace or scope explicitly makes its chunks
+visible as context too, and `mem_do(action="expand", ...)` treats the chunk id it
+is given the same way — neighbours sharing that chunk's namespace, or its project
+root, stay visible. Selection filters — `tag_filter`, chunk types, created-date
+bounds — apply only to the matched result, not to what surrounds it.
+
 ## Indexing
 
 ### `memory_dirs` — reactive watch vs one-shot seed

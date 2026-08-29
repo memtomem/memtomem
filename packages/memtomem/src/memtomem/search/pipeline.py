@@ -86,8 +86,15 @@ from memtomem.config import (
 from memtomem.constants import SearchOrigin, normalize_search_origin
 from memtomem.errors import TransactionOwnedError
 from memtomem.generation import ComponentGeneration
-from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
+from memtomem.models import (
+    Chunk,
+    ContextInfo,
+    NamespaceFilter,
+    ScopeFilter,
+    SearchResult,
+)
 from memtomem.search.fusion import reciprocal_rank_fusion
+from memtomem.search.visibility import chunk_valid_at, neighbor_visible
 from memtomem.search.reranker.base import close_reranker_safely
 from memtomem.storage.base import SearchMetadataFilter, parse_tag_filter
 from memtomem.storage.sqlite_helpers import norm_path
@@ -351,18 +358,7 @@ def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list
     already operate at 24h granularity; sub-minute drift is invisible at
     that resolution.
     """
-    filtered: list[SearchResult] = []
-    for r in results:
-        vfrom = r.chunk.metadata.valid_from_unix
-        vto = r.chunk.metadata.valid_to_unix
-        if vfrom is None and vto is None:
-            filtered.append(r)
-            continue
-        lower = vfrom if vfrom is not None else float("-inf")
-        upper = vto if vto is not None else float("inf")
-        if lower <= as_of_unix <= upper:
-            filtered.append(r)
-    return filtered
+    return [r for r in results if chunk_valid_at(r.chunk.metadata, as_of_unix)]
 
 
 # Closed vocabulary for ``RetrievalStats.score_scale`` (#1767) — typing the
@@ -1116,18 +1112,57 @@ class SearchPipeline:
                 seen[r.chunk.id] = r
         return sorted(seen.values(), key=lambda r: r.score, reverse=True)[:oversample]
 
-    async def _expand_context(self, results: list[SearchResult], window: int) -> list[SearchResult]:
-        """Attach ±window adjacent chunks to each result (batch, single DB call)."""
+    async def _expand_context(
+        self,
+        results: list[SearchResult],
+        window: int,
+        *,
+        ns_filter: NamespaceFilter | None = None,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
+        as_of_unix: int | None = None,
+    ) -> list[SearchResult]:
+        """Attach ±window adjacent chunks to each result (batch, single DB call).
+
+        Neighbours are taken from the file's true chunk order and then
+        screened by :func:`memtomem.search.visibility.neighbor_visible`, so a
+        hidden chunk shrinks the
+        window rather than being replaced by a distant one — what is returned
+        is always genuinely adjacent to the match. ``chunk_position`` and
+        ``total_chunks_in_file``, by contrast, are counted over the visible
+        chunks only: reporting the raw total would leak how many chunks the
+        caller is not allowed to see.
+        """
         if not results or window <= 0:
             return results
 
         source_files = list({r.chunk.metadata.source_file for r in results})
         chunks_by_source = await self._storage.list_chunks_by_sources(source_files)
+        system_prefixes = tuple(self._config.system_namespace_prefixes or ())
 
-        # Build per-file index: {chunk_id -> position}
+        def visible(chunk: Chunk) -> bool:
+            return neighbor_visible(
+                chunk,
+                ns_filter=ns_filter,
+                system_prefixes=system_prefixes,
+                scope_filter=scope_filter,
+                project_context_root=project_context_root,
+                as_of_unix=as_of_unix,
+            )
+
+        # Build per-file index: {chunk_id -> position}. Positions index the
+        # raw order (adjacency is physical); ranks over the visible subset are
+        # what gets reported. Visibility is decided once per chunk here and
+        # read back by id when the windows are sliced.
         file_indexes: dict[str, dict[str, int]] = {}
+        visible_ranks: dict[str, dict[str, int]] = {}
         for sf, chunks in chunks_by_source.items():
             file_indexes[str(sf)] = {str(c.id): i for i, c in enumerate(chunks)}
+            ranks: dict[str, int] = {}
+            for c in chunks:
+                if visible(c):
+                    ranks[str(c.id)] = len(ranks) + 1
+            visible_ranks[str(sf)] = ranks
 
         expanded: list[SearchResult] = []
         for r in results:
@@ -1142,8 +1177,23 @@ class SearchPipeline:
                 continue
 
             file_chunks = chunks_by_source[r.chunk.metadata.source_file]
-            before = file_chunks[max(0, pos - window) : pos]
-            after = file_chunks[pos + 1 : pos + 1 + window]
+            ranks = visible_ranks[sf_key]
+            before = [c for c in file_chunks[max(0, pos - window) : pos] if str(c.id) in ranks]
+            after = [c for c in file_chunks[pos + 1 : pos + 1 + window] if str(c.id) in ranks]
+            # The anchor normally passed these filters upstream and is in the
+            # visible set. It can still be missing: a re-index between
+            # retrieval and this bulk read keeps the id but may change the
+            # metadata screened on, and a hand-built result (tests, callers
+            # bypassing retrieval) never passed them at all. The result is
+            # returned either way, so count it in — but derive its ordinal
+            # from the visible chunks ahead of it rather than falling back to
+            # the raw position, which would publish where it sits among the
+            # hidden ones.
+            anchor_rank = ranks.get(str(r.chunk.id))
+            visible_total = len(ranks)
+            if anchor_rank is None:
+                anchor_rank = sum(1 for c in file_chunks[:pos] if str(c.id) in ranks) + 1
+                visible_total += 1
 
             expanded.append(
                 SearchResult(
@@ -1154,8 +1204,8 @@ class SearchPipeline:
                     context=ContextInfo(
                         window_before=tuple(before),
                         window_after=tuple(after),
-                        chunk_position=pos + 1,
-                        total_chunks_in_file=len(file_chunks),
+                        chunk_position=anchor_rank,
+                        total_chunks_in_file=max(visible_total, anchor_rank),
                         context_tier_used="standard",
                     ),
                 )
@@ -1279,7 +1329,14 @@ class SearchPipeline:
 
         ctx_win = self._resolve_context_window(context_window)
         if ctx_win > 0 and fused:
-            fused = await self._expand_context(fused, ctx_win)
+            fused = await self._expand_context(
+                fused,
+                ctx_win,
+                ns_filter=ns_filter,
+                scope_filter=scope_filter,
+                project_context_root=project_context_root,
+                as_of_unix=effective_as_of,
+            )
             fused = _exclude_source_roots(fused, exclude_source_roots)
 
         stats.final_total = len(fused)
@@ -1975,10 +2032,22 @@ class SearchPipeline:
                             max_boost=getattr(self._entity_boost_config, "max_boost", 1.5),
                         )
 
-            # Stage 8: Context window expansion (post-scoring, does not affect ranking)
+            # Stage 8: Context window expansion (post-scoring, does not affect
+            # ranking). Neighbours inherit the visibility filters — system
+            # namespaces, the ADR-0011 project boundary, temporal validity —
+            # but not the selection filters (chunk types, tags, created-date
+            # bounds), which say what the caller searched for rather than what
+            # they may see. See ``_neighbor_visible``.
             ctx_win = self._resolve_context_window(context_window)
             if ctx_win > 0 and fused:
-                fused = await self._expand_context(fused, ctx_win)
+                fused = await self._expand_context(
+                    fused,
+                    ctx_win,
+                    ns_filter=ns_filter,
+                    scope_filter=scope_filter,
+                    project_context_root=project_context_root,
+                    as_of_unix=effective_as_of,
+                )
                 fused = _exclude_source_roots(fused, normalized_exclusion_roots)
                 if metadata_filter is not None and metadata_filter.source_exact:
                     # Context neighbors belong to the selected source but may have

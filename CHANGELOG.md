@@ -306,6 +306,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Context-window neighbours no longer leak chunks the search itself would
+  hide.** Expanding a result with `context_window` (or `mem_expand`) reads the
+  matched chunk's neighbours in bulk from the source file, so none of the
+  filters the retrievers apply in SQL reached them: on a file whose chunks
+  span several namespaces, a default search — which hides `archive:*` and
+  `agent-runtime:*` — still rendered a hidden-namespace chunk as context, and
+  formatters print neighbours without a namespace badge, so nothing marked
+  where it came from. Neighbours in another project's scope (ADR-0011) and
+  chunks outside their validity window leaked the same way. Neighbours now
+  inherit the *visibility* filters — system-namespace hiding, the project
+  boundary, temporal validity — while the *selection* filters (`tag_filter`,
+  chunk types, created-date bounds) stay matched-chunk-only, since "show me
+  what surrounds this match" is not a claim that the surroundings match too.
+  Naming a namespace or scope explicitly still reveals it as context; it never
+  hides the ordinary chunks around a hit. A hidden neighbour now shrinks the
+  window rather than being replaced by a more distant chunk, so what is
+  returned is always genuinely adjacent, and the reported position/total count
+  only visible chunks so the number of hidden ones does not leak. Searches run
+  from outside a project, against files that also hold project-tier chunks,
+  will see fewer context neighbours than before. (#2192)
 - **The MCP server now notices memory dirs added or removed while it is
   running.** It built its file watcher once, at startup, and nothing ever
   reconciled it afterwards — so a directory registered by `mm init`, `mm mem

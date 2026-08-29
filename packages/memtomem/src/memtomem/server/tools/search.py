@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
+from typing import Any
 from uuid import UUID
 
 from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
-from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
+from memtomem.models import (
+    Chunk,
+    InvalidFilterSyntaxError,
+    NamespaceFilter,
+    ScopeFilter,
+    has_namespace_prefix,
+)
+from memtomem.search.visibility import chunk_valid_at, neighbor_visible
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
 # LangGraph adapter; re-exported from this module so the long-standing
@@ -71,13 +81,15 @@ async def mem_search(
             naming one includes it.
         as_of: Temporal bound for retroactive search — ``YYYY-MM-DD`` or
             ``YYYY-QN``, default now. Chunks whose ``valid_from`` /
-            ``valid_to`` frontmatter excludes that point are filtered out;
-            chunks without those keys are always valid. Time-decay scoring
-            anchors to this instant, not the wall clock.
+            ``valid_to`` frontmatter excludes that point drop out; chunks
+            without those keys are always valid. Time decay anchors here,
+            not to the wall clock.
         bm25_weight: RRF weight for keyword matches (default 1.0; raise to favor)
         dense_weight: RRF weight for meaning matches (default 1.0). Both must be
             finite and >= 0, not both zero; 0 disables that leg
-        context_window: Expand each result with ±N adjacent chunks (0 = off)
+        context_window: Expand each result with ±N adjacent chunks (0 = off).
+            Neighbours follow the namespace/scope/validity visibility rules,
+            not the tag/type/date filters
         verbose: Deprecated — use output_format="verbose"
         output_format: "compact" (default), "verbose" (adds UUID / pipeline stats),
             or "structured" (JSON). A non-default value overrides ``verbose``.
@@ -86,11 +98,11 @@ async def mem_search(
             applies: inside a project ``user`` + that project's tiers, outside
             one ``user`` only. Pass ``project_shared`` from outside a project to
             search across projects.
-        rerank: ``false`` skips the cross-encoder rerank stage — the fast path
-            for latency-bounded callers — and collapses the candidate pool to
-            ``top_k``, so it narrows recall as well as changing the score scale.
-            Omitted/``true`` follows server config; ``true`` cannot enable
-            reranking on a server that has it disabled.
+        rerank: ``false`` skips the cross-encoder stage and collapses the pool
+            to ``top_k`` — the fast path for latency-bounded callers, so it
+            narrows recall as well as changing the score scale. Omitted/``true``
+            follows server config; ``true`` cannot enable reranking a server has
+            disabled.
         record: ``false`` = background read, for fan-out callers: no
             access-count increments, no query history, caches neither read
             nor written, dense retrieval exhaustive — so results can differ.
@@ -100,11 +112,10 @@ async def mem_search(
     more results.
 
     ``output_format="structured"`` adds a top-level ``score_scale`` naming the
-    scale ``score`` is on: ``rerank`` (model-dependent range; the ``reranker``
-    field names the model), ``rrf``, ``bm25``/``dense``, or ``none``
-    (filter-only enumeration — no relevance scale). Compare scores only within
-    one scale, and only across servers with the same optional modifier stages
-    (time decay, access/importance/entity boosts) enabled.
+    scale ``score`` is on: ``rerank`` (model-dependent range; ``reranker`` names
+    the model), ``rrf``, ``bm25``/``dense``, or ``none`` (filter-only — no
+    relevance scale). Compare scores only within one scale, and only across
+    servers with the same optional modifier stages enabled.
     """
     if not query.strip():
         return "Error: query cannot be empty."
@@ -269,6 +280,54 @@ async def mem_search(
     return output
 
 
+def _expand_visibility_predicate(app: Any, anchor: Chunk) -> Callable[[Chunk], bool]:
+    """Build the neighbour-visibility test ``mem_expand`` screens with.
+
+    Same rule the search pipeline applies to ``context_window`` neighbours
+    (:func:`memtomem.search.visibility.neighbor_visible`), with the anchor chunk itself as
+    the opt-in: naming a chunk id asks for *that* chunk's surroundings, so
+    neighbours sharing its namespace or its project scope are visible even
+    when the default filters would hide them.
+    """
+    config = app.config.search
+    system_prefixes = tuple(config.system_namespace_prefixes or ())
+    ns_filter = NamespaceFilter(namespaces=(anchor.metadata.namespace,))
+    project_context_root = _resolve_project_context_root(app)
+    anchor_root = anchor.metadata.project_root
+    as_of_unix = int(time.time())
+
+    def visible(candidate: Chunk) -> bool:
+        # No scope filter: the opt-in below is pinned to the anchor's own
+        # project root, so passing the anchor's tier as a filter here would
+        # widen it into "this tier from any project" whenever the caller is
+        # outside a project context.
+        if neighbor_visible(
+            candidate,
+            ns_filter=ns_filter,
+            system_prefixes=system_prefixes,
+            scope_filter=None,
+            project_context_root=project_context_root,
+            as_of_unix=as_of_unix,
+        ):
+            return True
+        # The anchor's own project: an anchor pinned to a root outside the
+        # current context still makes that project's chunks legitimate
+        # context for it, but only that project's.
+        return (
+            candidate.metadata.scope == anchor.metadata.scope
+            and candidate.metadata.project_root is not None
+            and anchor_root is not None
+            and str(candidate.metadata.project_root) == str(anchor_root)
+            and chunk_valid_at(candidate.metadata, as_of_unix)
+            and (
+                not has_namespace_prefix(candidate.metadata.namespace, system_prefixes)
+                or ns_filter.matches(candidate.metadata.namespace)
+            )
+        )
+
+    return visible
+
+
 @mcp.tool()
 @tool_handler
 @register("search")
@@ -281,6 +340,13 @@ async def mem_expand(
 
     Use this after mem_search when you need more surrounding context for
     a specific result. Returns ±N adjacent chunks ordered by line number.
+
+    Neighbours inherit the same visibility rules as mem_search's
+    context_window: system namespaces, the project-scope boundary, and
+    temporal validity are enforced, so a hidden neighbour shrinks the window
+    rather than surfacing. Naming a chunk id is an explicit request for that
+    chunk's surroundings, so neighbours sharing its namespace or its project
+    scope stay visible even when a plain search would hide them.
 
     Args:
         chunk_id: The UUID of the chunk to expand (from mem_search results)
@@ -307,11 +373,19 @@ async def mem_expand(
     if pos is None:
         return f"Chunk {chunk_id} not found in source file listing."
 
-    before = all_chunks[max(0, pos - window) : pos]
-    after = all_chunks[pos + 1 : pos + 1 + window]
+    visible = _expand_visibility_predicate(app, chunk)
+    before = [c for c in all_chunks[max(0, pos - window) : pos] if visible(c)]
+    after = [c for c in all_chunks[pos + 1 : pos + 1 + window] if visible(c)]
+    # The addressed chunk is always part of the accounting set: it is being
+    # returned as the match, so counting around it as if it were hidden would
+    # report a position that does not describe what the caller is reading.
+    # (An expired anchor still surfaces here — the id was named explicitly —
+    # while expired *neighbours* stay filtered out.)
+    visible_ids = [str(c.id) for c in all_chunks if str(c.id) == chunk_id or visible(c)]
+    anchor_rank = visible_ids.index(chunk_id) + 1
 
     parts = [
-        f"## Expand: chunk {pos + 1}/{len(all_chunks)} in {_display_path(source_file)}",
+        f"## Expand: chunk {anchor_rank}/{len(visible_ids)} in {_display_path(source_file)}",
         f"Window: ±{window} chunks\n",
     ]
 

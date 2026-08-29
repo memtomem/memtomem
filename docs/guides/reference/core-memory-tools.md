@@ -250,7 +250,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `namespace` | Scope to namespace | `"work"` |
 | `as_of` | Temporal validity query — only return chunks valid on this date (default = current time). Date-only `YYYY-MM-DD` or quarter `YYYY-QN`. Chunks without `valid_from`/`valid_to` frontmatter are always-valid and unaffected. | `"2024-Q3"` |
 | `bm25_weight` / `dense_weight` | Override RRF weights (default `1.0`) | `2.0` |
-| `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled) | `1` |
+| `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled). Neighbours inherit the visibility filters — hidden system namespaces, the project-scope boundary, temporal validity — but not the selection filters (`tag_filter`, chunk types, created-date bounds), so a hidden neighbour shrinks the window instead of surfacing | `1` |
 | `output_format` | `"compact"` (default), `"verbose"`, or `"structured"` (JSON with `hints` field) | `"structured"` |
 | `scope` | Memory tier filter: one value, comma list, or glob; omitted uses user plus current-project tiers | `"user,project_local"`, `"project_*"` |
 | `rerank` | Per-call rerank control: `false` skips the cross-encoder rerank stage (fast path for latency-bounded callers); omitted/`true` follows server config — `true` cannot enable reranking the server has disabled | `false` |
