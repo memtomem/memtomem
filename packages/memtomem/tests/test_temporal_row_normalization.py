@@ -124,3 +124,20 @@ class TestScopeMoveTimestamp:
         parsed = datetime.fromisoformat(updated)
         assert updated == utc_stamp(parsed)
         assert parsed.tzinfo is not None
+
+
+@_asyncio
+class TestTagMutationTimestamp:
+    async def test_a_tag_rename_writes_the_same_precision_as_the_indexer(self, storage):
+        """The tag writers stamped their own UTC ``now`` at second precision
+        while ``upsert_chunks`` writes microseconds. Both are UTC, but the
+        comparison is lexical and ``'+' < '.'``, so a renamed row sorted
+        before every indexed row inside its own second."""
+        chunk = make_chunk(content="tagged row", tags=("before",))
+        await storage.upsert_chunks([chunk])
+
+        renamed = await storage.rename_tag("before", "after")
+        assert renamed == 1
+
+        _, updated = _stored_timestamps(storage, chunk.id)
+        assert updated == utc_stamp(datetime.fromisoformat(updated))

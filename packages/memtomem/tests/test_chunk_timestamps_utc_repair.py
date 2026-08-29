@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 import sqlite_vec
 
 from memtomem.storage.sqlite_meta import MetaManager
-from memtomem.storage.sqlite_schema import create_tables
+from memtomem.storage.sqlite_schema import _TS_REPAIR_BATCH, create_tables
 
 _MARKER_KEY = "chunk_timestamps_utc_repair_v1"
 
@@ -167,6 +167,42 @@ class TestRepairNonUtcChunkTimestamps:
                 "SELECT value FROM _memtomem_meta WHERE key=?", (_MARKER_KEY,)
             ).fetchone()
             assert marker is not None and marker[0] == "done"
+        finally:
+            db.close()
+
+    def test_a_corrupt_sibling_column_does_not_deny_the_other_its_repair(self) -> None:
+        """Sharing one parse between the two columns meant a corrupt
+        ``updated_at`` left a fixable ``created_at`` lexically wrong — and the
+        marker is set either way, so that row would never be revisited."""
+        db = _connect()
+        try:
+            _initialize(db)
+            _insert_chunk(
+                db, "mixed-1", created_at="2026-01-01T00:00:00+09:00", updated_at="garbage"
+            )
+            _rerun_migration(db)
+            created, updated = _stored(db, "mixed-1")
+            assert created == "2025-12-31T15:00:00.000000+00:00"
+            assert updated == "garbage"
+        finally:
+            db.close()
+
+    def test_repairs_beyond_one_batch(self) -> None:
+        """The walk is batched by rowid, so a store larger than one batch must
+        still be repaired end to end — an off-by-one in the cursor would
+        silently leave the tail behind."""
+        db = _connect()
+        try:
+            _initialize(db)
+            total = _TS_REPAIR_BATCH + 5
+            for i in range(total):
+                _insert_chunk(db, f"batch-{i}", created_at="2026-01-01T00:00:00+09:00")
+            _rerun_migration(db)
+            remaining = db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE created_at != ?",
+                ("2025-12-31T15:00:00.000000+00:00",),
+            ).fetchone()[0]
+            assert remaining == 0
         finally:
             db.close()
 

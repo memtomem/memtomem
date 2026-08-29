@@ -38,6 +38,11 @@ _TAGS_UNICODE_REPAIR_KEY = "tags_unicode_repair_v1"
 # scope-move UPDATE. Bump (``..._v2``) to force a re-run. (#2203)
 _CHUNK_TS_UTC_REPAIR_KEY = "chunk_timestamps_utc_repair_v1"
 
+# Rows per batch in that repair's rowid walk. It has no pre-filter to narrow
+# it, so the batch is what keeps a large store's startup off a full
+# materialization of the table's timestamp columns.
+_TS_REPAIR_BATCH = 1000
+
 # One-shot adoption key for consolidation summaries written before
 # ``chunks.origin`` existed (#2161). Bump (``..._v2``) to re-run.
 _ORIGIN_BACKFILL_KEY = "origin_backfill_v1"
@@ -1245,36 +1250,60 @@ def _repair_non_utc_chunk_timestamps(db: sqlite3.Connection, meta: MetaManager) 
     e.g. a space-separated ``+00:00`` row once the marker is set.
 
     A naive value is read as UTC (matching ``utc_stamp``); the instant of an
-    offset-aware value is preserved, not restamped. An unparsable value leaves
-    the whole row untouched rather than crash startup. Scope: the ``chunks``
-    timestamp columns only — ``last_accessed_at`` is always stamped
-    internally in UTC, and bad pre-fix ``query_history`` rows are ephemeral
-    and age out under retention.
+    offset-aware value is preserved, not restamped. The two columns are parsed
+    independently, so one unparsable value does not deny its sibling the
+    repair — the marker is set either way, and a row skipped here would never
+    be revisited. Scope: the ``chunks`` timestamp columns only —
+    ``last_accessed_at`` is always stamped internally in UTC, and bad pre-fix
+    ``query_history`` rows are ephemeral and age out under retention.
+
+    Rows are walked in rowid batches rather than materialized at once: this
+    runs at startup with no pre-filter to narrow it, so a large store would
+    otherwise pull every id and both timestamps into memory before the first
+    write.
 
     Returns the number of rows rewritten on this call (0 once recorded).
     """
     if meta.get_meta(_CHUNK_TS_UTC_REPAIR_KEY) == "done":
         return 0
 
-    rows = db.execute("SELECT id, created_at, updated_at FROM chunks").fetchall()
-
     repaired = 0
-    for chunk_id, created_at, updated_at in rows:
-        try:
-            new_created = utc_stamp(datetime.fromisoformat(created_at))
-            new_updated = utc_stamp(datetime.fromisoformat(updated_at))
-        except (ValueError, TypeError):
-            continue
-        if new_created == created_at and new_updated == updated_at:
-            continue
-        db.execute(
-            "UPDATE chunks SET created_at=?, updated_at=? WHERE id=?",
-            (new_created, new_updated, chunk_id),
-        )
-        repaired += 1
+    after = 0
+    while True:
+        rows = db.execute(
+            "SELECT rowid, id, created_at, updated_at FROM chunks "
+            "WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            (after, _TS_REPAIR_BATCH),
+        ).fetchall()
+        if not rows:
+            break
+        after = rows[-1][0]
+        for _rowid, chunk_id, created_at, updated_at in rows:
+            new_created = _canonical_utc_or_none(created_at)
+            new_updated = _canonical_utc_or_none(updated_at)
+            if new_created is None and new_updated is None:
+                continue
+            db.execute(
+                "UPDATE chunks SET created_at=?, updated_at=? WHERE id=?",
+                (new_created or created_at, new_updated or updated_at, chunk_id),
+            )
+            repaired += 1
 
     meta.set_meta(_CHUNK_TS_UTC_REPAIR_KEY, "done")
     return repaired
+
+
+def _canonical_utc_or_none(value: str) -> str | None:
+    """Return *value*'s canonical UTC rendering, or ``None`` to leave it be.
+
+    ``None`` means "no rewrite": either the value is already canonical, or it
+    is unparsable and must be left untouched rather than crash startup.
+    """
+    try:
+        rendered = utc_stamp(datetime.fromisoformat(value))
+    except (ValueError, TypeError):
+        return None
+    return None if rendered == value else rendered
 
 
 def _migrate_chunks_uniqueness(db: sqlite3.Connection, *, has_vec_table: bool) -> None:
