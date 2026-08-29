@@ -83,20 +83,21 @@ async def mem_reflect(
 
     # 5. Cross-reference clusters
     #
-    # ``get_most_connected`` ranks by whole-store degree, so screening its
-    # output is filtering after the cut: hubs the caller cannot see would
-    # otherwise consume the top-N and hide the ones they can. Over-fetch and
-    # take the first ``want`` survivors instead. That is a mitigation, not a
-    # fix — a store dominated by one project can still starve the list, which
-    # needs a boundary-aware aggregate in SQL (#2244).
+    # ``get_most_connected`` ranks by whole-store degree, so its order is not
+    # the caller's order: a hub with ten edges of which one is visible would
+    # outrank a hub with nine visible ones. Taking the first survivors of that
+    # ranking would both hide the genuinely most-connected visible hub and let
+    # the hidden edges decide what gets listed — the ranking itself becomes a
+    # channel. So every over-fetched candidate is scored on its *visible*
+    # degree and the page is cut after that re-ranking. Candidates beyond the
+    # over-fetch window are still lost, which needs a boundary-aware aggregate
+    # in SQL (#2244).
     want = min(limit, 5)
     connected = await storage.get_most_connected(limit=max(want * 4, want))
     if connected:
         boundary = caller_boundary(app)
-        rendered = []
+        scored: list[tuple[int, str]] = []
         for row in connected:
-            if len(rendered) >= want:
-                break
             chunk = None
             try:
                 from uuid import UUID
@@ -111,10 +112,6 @@ async def mem_reflect(
             # two things ADR-0036 says a listing must not carry.
             if chunk is None or not in_boundary(chunk, boundary):
                 continue
-            # The stored degree counts every edge, so it would report how many
-            # neighbours the caller cannot see. Recount over screened edges;
-            # a hub whose visible degree is zero drops out. Bounded work: at
-            # most ``want`` hubs are rendered, one batched neighbour read each.
             related = await storage.get_related(chunk.id)
             neighbours = await storage.get_chunks_batch([rid for rid, _ in related])
             visible_links = sum(
@@ -125,7 +122,12 @@ async def mem_reflect(
             if not visible_links:
                 continue
             preview = chunk.content[:50].replace("\n", " ")
-            rendered.append(f"  {visible_links} links — {preview}...")
+            scored.append((visible_links, f"  {visible_links} links — {preview}..."))
+
+        # Stable sort, so hubs tied on visible degree keep the store's own
+        # ordering rather than an arbitrary one.
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        rendered = [line for _count, line in scored[:want]]
         if rendered:
             lines.append("### Most Connected Memories")
             lines.extend(rendered)

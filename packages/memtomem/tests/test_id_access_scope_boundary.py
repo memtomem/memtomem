@@ -374,6 +374,39 @@ class TestReflect:
         assert str(vanished_id)[:8] not in result
         assert "7 links" not in result
 
+    async def test_ranking_uses_visible_degree_not_the_stored_one(self, monkeypatch):
+        """Hidden edges must not decide which hubs get listed.
+
+        A hub with ten edges of which one is visible outranks, in the store's
+        own ordering, a hub with nine visible ones. Cutting the page on that
+        ordering would list the wrong hub *and* let the hidden edges choose
+        it — the ranking becomes a channel for what the caller cannot see.
+        """
+        thin = _chunk("thin hub")  # high stored degree, one visible edge
+        thick = _chunk("thick hub")  # lower stored degree, all visible
+        thin_neighbour = _chunk("thin neighbour")
+        thick_neighbours = [_chunk(f"thick neighbour {i}") for i in range(3)]
+        foreign_edges = [_foreign() for _ in range(9)]
+        chunks = {c.id: c for c in [thin, thick, thin_neighbour, *thick_neighbours, *foreign_edges]}
+        reflection = self._reflect_app(
+            monkeypatch,
+            hubs=[
+                {"chunk_id": str(thin.id), "link_count": 10},
+                {"chunk_id": str(thick.id), "link_count": 3},
+            ],
+            related_by_hub={
+                thin.id: [(thin_neighbour.id, "related")]
+                + [(f.id, "related") for f in foreign_edges],
+                thick.id: [(n.id, "related") for n in thick_neighbours],
+            },
+            chunks=chunks,
+        )
+
+        result = await reflection.mem_reflect(limit=1, ctx=None)
+
+        assert "3 links — thick hub" in result
+        assert "thin hub" not in result
+
     async def test_visible_hubs_survive_a_screen_that_cuts_the_top_of_the_list(self, monkeypatch):
         """Screening after the LIMIT would let foreign hubs eat the whole list.
 

@@ -83,6 +83,11 @@ from memtomem.storage.sqlite_schema import check_schema_downgrade, create_tables
 
 logger = logging.getLogger(__name__)
 
+# Ids per ``IN (...)`` batch. SQLite's default host-parameter ceiling is 999
+# before 3.32 and 32766 after; staying under the lower one keeps the query
+# valid on every runtime this package supports rather than on the newest.
+_SQL_MAX_PARAMS = 900
+
 __all__ = ["SqliteBackend"]
 
 
@@ -1519,16 +1524,30 @@ class SqliteBackend(
         return self._row_to_chunk(row)
 
     async def get_chunks_batch(self, chunk_ids: Sequence[UUID]) -> dict[UUID, Chunk]:
-        """Fetch multiple chunks by ID in a single query."""
+        """Fetch multiple chunks by ID.
+
+        One query where the id list fits SQLite's host-parameter ceiling, and
+        several where it does not. Callers reach this with lists they did not
+        choose the length of — an MCP argument, a chunk's relation fan-out —
+        so a single ``IN (...)`` would turn a large input into a hard error
+        rather than a slow call. Ids are deduplicated first: repeats cost a
+        placeholder each and collapse in the returned mapping anyway.
+        """
         if not chunk_ids:
             return {}
         db = self._get_read_db()
-        ids_str = [str(cid) for cid in chunk_ids]
-        rows = db.execute(
-            f"SELECT * FROM chunks WHERE id IN ({placeholders(len(ids_str))})",
-            ids_str,
-        ).fetchall()
-        return {UUID(row[0]): self._row_to_chunk(row) for row in rows}
+        # ``dict.fromkeys`` rather than ``set`` so the query sees a stable
+        # order — same rows either way, but reproducible in a log or a trace.
+        ids_str = list(dict.fromkeys(str(cid) for cid in chunk_ids))
+        out: dict[UUID, Chunk] = {}
+        for start in range(0, len(ids_str), _SQL_MAX_PARAMS):
+            batch = ids_str[start : start + _SQL_MAX_PARAMS]
+            rows = db.execute(
+                f"SELECT * FROM chunks WHERE id IN ({placeholders(len(batch))})",
+                batch,
+            ).fetchall()
+            out.update({UUID(row[0]): self._row_to_chunk(row) for row in rows})
+        return out
 
     async def delete_chunks(self, chunk_ids: Sequence[UUID]) -> int:
         if not chunk_ids:
