@@ -139,9 +139,17 @@ store's `delete`, and per-chunk tag replacement. A migration landing in that
 window can re-scope a chunk after it was judged. Closing those needs
 boundary-qualified atomic operations in the storage layer (and, for tags, fixes
 a separate pre-existing staleness bug — #2241), which is a write-integrity
-change rather than a visibility one. Consistent with the threat model above,
-the accident case is covered; a caller who can time a migration is not the
-adversary this rule is defending against.
+change rather than a visibility one. So the accident this rule was written
+for — a stale id reused in a session with no concurrent migration — is
+covered, and an accident that coincides with a migration is not. Neither is a
+caller who can time one deliberately, but that caller was never the adversary
+here.
+
+**It is a boundary on chunk ids, not on every identifier.** `run_id` — the
+handle `mem_search_feedback` and the history tools take — has no boundary of
+its own, so one caller's run and its judgments are readable by another.
+Recording feedback about a chunk is screened, because that names a chunk id;
+scoping the run axis itself is a separate decision, tracked in #2243.
 
 ## Consequences
 

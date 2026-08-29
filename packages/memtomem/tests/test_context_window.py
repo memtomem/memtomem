@@ -610,9 +610,10 @@ class TestMemIncrementAccess:
         app.storage.increment_access = AsyncMock()
         # Ids are screened before the boost lands (ADR-0036), so the mock
         # has to answer the lookup with an in-boundary chunk.
-        app.storage.get_chunk = AsyncMock(return_value=_make_chunk("in boundary"))
-
         ids = [str(uuid4()), str(uuid4()), str(uuid4())]
+        app.storage.get_chunks_batch = AsyncMock(
+            return_value={UUID(i): _make_chunk("in boundary") for i in ids}
+        )
         with pytest.MonkeyPatch.context() as m:
             m.setattr(
                 "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
@@ -622,7 +623,7 @@ class TestMemIncrementAccess:
             )
             result = await mem_increment_access(chunk_ids=ids, ctx=SimpleNamespace())
 
-        assert "3 chunk(s)" in result
+        assert "Accepted 3 chunk id(s)" in result
         app.storage.increment_access.assert_awaited_once()
         called_ids = app.storage.increment_access.call_args.args[0]
         assert len(called_ids) == 3
@@ -634,9 +635,10 @@ class TestMemIncrementAccess:
 
         app = MagicMock()
         app.storage.increment_access = AsyncMock()
-        app.storage.get_chunk = AsyncMock(return_value=_make_chunk("in boundary"))
-
         valid_id = str(uuid4())
+        app.storage.get_chunks_batch = AsyncMock(
+            return_value={UUID(valid_id): _make_chunk("in boundary")}
+        )
         with pytest.MonkeyPatch.context() as m:
             m.setattr(
                 "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
@@ -649,7 +651,7 @@ class TestMemIncrementAccess:
                 ctx=SimpleNamespace(),
             )
 
-        assert "1 chunk(s)" in result
+        assert "Accepted 1 chunk id(s)" in result
         assert "Skipped 1 invalid" in result
         app.storage.increment_access.assert_awaited_once()
         called_ids = app.storage.increment_access.call_args.args[0]
@@ -665,12 +667,15 @@ class TestMemIncrementAccess:
 
         app = MagicMock()
         app.storage.increment_access = AsyncMock()
-        app.storage.get_chunk = AsyncMock(
-            return_value=_make_chunk(
-                "another project's note",
-                scope="project_shared",
-                project_root=Path("/elsewhere"),
-            )
+        foreign_id = uuid4()
+        app.storage.get_chunks_batch = AsyncMock(
+            return_value={
+                foreign_id: _make_chunk(
+                    "another project's note",
+                    scope="project_shared",
+                    project_root=Path("/elsewhere"),
+                )
+            }
         )
 
         with pytest.MonkeyPatch.context() as m:
@@ -681,9 +686,9 @@ class TestMemIncrementAccess:
                 "memtomem.server.tools.search._resolve_project_context_root",
                 lambda _app: Path("/mine"),
             )
-            result = await mem_increment_access(chunk_ids=[str(uuid4())], ctx=SimpleNamespace())
+            result = await mem_increment_access(chunk_ids=[str(foreign_id)], ctx=SimpleNamespace())
 
-        assert "1 chunk(s)" in result
+        assert "Accepted 1 chunk id(s)" in result
         app.storage.increment_access.assert_not_awaited()
 
 

@@ -82,11 +82,21 @@ async def mem_reflect(
         lines.append("")
 
     # 5. Cross-reference clusters
-    connected = await storage.get_most_connected(limit=min(limit, 5))
+    #
+    # ``get_most_connected`` ranks by whole-store degree, so screening its
+    # output is filtering after the cut: hubs the caller cannot see would
+    # otherwise consume the top-N and hide the ones they can. Over-fetch and
+    # take the first ``want`` survivors instead. That is a mitigation, not a
+    # fix — a store dominated by one project can still starve the list, which
+    # needs a boundary-aware aggregate in SQL (#2244).
+    want = min(limit, 5)
+    connected = await storage.get_most_connected(limit=max(want * 4, want))
     if connected:
         boundary = caller_boundary(app)
         rendered = []
         for row in connected:
+            if len(rendered) >= want:
+                break
             chunk = None
             try:
                 from uuid import UUID
@@ -95,27 +105,26 @@ async def mem_reflect(
                 chunk = await storage.get_chunk(row["chunk_id"])
             except (ValueError, TypeError):
                 pass
-            # A screened row is dropped, not degraded to its id prefix: that
-            # fallback would name the chunk while claiming it is unreadable,
-            # and the link count beside it says a chunk is there at all
-            # (ADR-0036).
-            if chunk is not None and not in_boundary(chunk, boundary):
+            # An unresolved hub is dropped, never degraded to its id prefix.
+            # That fallback would print the uuid of a row the caller may not
+            # be allowed to know about, next to a whole-store degree — the
+            # two things ADR-0036 says a listing must not carry.
+            if chunk is None or not in_boundary(chunk, boundary):
                 continue
-            # ``get_most_connected`` counts every edge in the store, so a
-            # visible hub's degree would report how many of its neighbours
-            # the caller may not see. Recount over the screened edges — at
-            # most five rows reach here, so the per-row relation read is
-            # affordable, and a hub whose visible degree is zero drops out.
-            visible_links = row["link_count"]
-            if chunk is not None:
-                visible_links = 0
-                for related_id, _rel in await storage.get_related(chunk.id):
-                    neighbour = await storage.get_chunk(related_id)
-                    if neighbour is None or in_boundary(neighbour, boundary):
-                        visible_links += 1
-                if not visible_links:
-                    continue
-            preview = chunk.content[:50].replace("\n", " ") if chunk else row["chunk_id"][:8]
+            # The stored degree counts every edge, so it would report how many
+            # neighbours the caller cannot see. Recount over screened edges;
+            # a hub whose visible degree is zero drops out. Bounded work: at
+            # most ``want`` hubs are rendered, one batched neighbour read each.
+            related = await storage.get_related(chunk.id)
+            neighbours = await storage.get_chunks_batch([rid for rid, _ in related])
+            visible_links = sum(
+                1
+                for related_id, _rel in related
+                if (n := neighbours.get(related_id)) is None or in_boundary(n, boundary)
+            )
+            if not visible_links:
+                continue
+            preview = chunk.content[:50].replace("\n", " ")
             rendered.append(f"  {visible_links} links — {preview}...")
         if rendered:
             lines.append("### Most Connected Memories")
