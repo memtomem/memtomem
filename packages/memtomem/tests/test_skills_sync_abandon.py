@@ -164,20 +164,30 @@ class TestGenerateProjectShared:
         assert _abandoned_rows(result), result.skipped
 
     def test_no_staging_trees_are_left_behind(self, project, monkeypatch):
-        """The abort returns from inside the ``try``, so the reaper still runs."""
+        """The abort returns from inside the ``try``, so the reaper still runs.
+
+        The trees are recorded as ``_stage_skill`` hands them back rather than
+        matched by name afterwards: the name is
+        ``.staging-<dst>-<pid>-<hex>.tmp`` (``skills._stage_skill``), and a
+        pattern guessed at from the test would go quietly vacuous the day that
+        grammar changed — which is exactly what it did.
+        """
         real_stage = skills_mod._stage_skill
+        staged: list = []
 
         with abandon_sync_on_exit() as abandoned:
 
             def _stage_then_abandon(*args, **kwargs):
                 staging = real_stage(*args, **kwargs)
+                staged.append(staging)
                 abandoned.set()
                 return staging
 
             monkeypatch.setattr(skills_mod, "_stage_skill", _stage_then_abandon)
             generate_all_skills(project, scope="project_shared")
 
-        leftovers = [p for p in project.rglob("*") if p.is_dir() and ".mm-" in p.name]
+        assert staged, "the batch never staged anything — this proves nothing"
+        leftovers = [p for p in staged if p.exists()]
         assert leftovers == [], f"abandoned batch left staging trees: {leftovers}"
 
     def test_a_sync_nobody_abandoned_fans_out_normally(self, project):

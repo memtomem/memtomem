@@ -20,6 +20,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from memtomem.context import skills as skills_mod
 from memtomem.web.routes import context_skills
@@ -250,13 +251,15 @@ class TestCrudClosures:
         )
 
     async def test_a_cancelled_delete_removes_nothing(self, tmp_path, monkeypatch):
-        """The delete's checkpoint sits before its first removal.
+        """Both of the delete's checkpoints sit before its first removal.
 
         The canonical removal and the runtime cascade are one sequence with no
         lock spanning both, so stopping partway would orphan the runtime
         copies. Either it has not started, or it finishes — which is why the
-        one check sits after the lock is held (the wait the request timed out
-        on) and before anything is removed, never inside the sequence.
+        checks bracket the lock (one before the closure body runs at all, one
+        after the lock is held, which is the wait the request timed out on) and
+        neither sits inside the sequence. This test drives the post-lock one;
+        the queued-worker test below drives the other.
         """
         project_root = _project(tmp_path)
         skill_dir = project_root / ".memtomem" / "skills" / "alpha"
@@ -333,9 +336,13 @@ async def test_a_worker_abandoned_while_queued_leaves_no_trace(tmp_path, monkeyp
 
     try:
         await coro
-    except Exception:
-        # The route may still raise its own envelope off the no-op arm; what is
-        # under test is the filesystem, not the response.
+    except HTTPException:
+        # The route turns the closure's no-op arm into its own 404/409
+        # envelope. That is expected; the filesystem is what is under test.
+        # Deliberately NOT ``except Exception``: that would also swallow the
+        # harness's own assertion that the route entered
+        # ``abandon_sync_on_exit``, turning "the scope wrapper is gone" into a
+        # 20-second wait and a misattributed failure about the closure.
         pass
     assert await asyncio.to_thread(worker_done.wait, 20), "the closure never ran"
 
