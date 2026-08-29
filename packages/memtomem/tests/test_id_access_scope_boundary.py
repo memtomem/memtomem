@@ -250,6 +250,46 @@ class TestRelations:
         assert "(2 links)" in result
 
 
+class TestReflect:
+    async def test_link_counts_exclude_hidden_edges(self, monkeypatch):
+        """A visible hub's degree must not count neighbours the caller can't see.
+
+        ``get_most_connected`` counts every edge in the store, so rendering
+        its number would report how many foreign-project neighbours a chunk
+        has — the same existence leak as printing their ids, only quieter.
+        """
+        from memtomem.server.tools import reflection
+
+        hub = _chunk("connected hub")
+        visible = _chunk("visible neighbour")
+        foreign = _foreign()
+
+        app = _app_returning(None, context=MINE)
+        app.storage.get_most_connected = AsyncMock(
+            return_value=[{"chunk_id": str(hub.id), "link_count": 2}]
+        )
+        app.storage.get_related = AsyncMock(
+            return_value=[(visible.id, "related"), (foreign.id, "related")]
+        )
+        app.storage.get_chunk = AsyncMock(side_effect=[hub, visible, foreign])
+        for empty in (
+            "get_frequently_accessed",
+            "get_agent_sessions",
+            "get_tag_counts",
+            "get_knowledge_gaps",
+        ):
+            setattr(app.storage, empty, AsyncMock(return_value=[]))
+        app.search_pipeline.flush_observation = AsyncMock()
+        _pin_context(monkeypatch, MINE)
+        monkeypatch.setattr(reflection, "_get_app_initialized", AsyncMock(return_value=app))
+
+        result = await reflection.mem_reflect(ctx=None)
+
+        assert "connected hub" in result
+        assert "1 links — connected hub" in result
+        assert "2 links" not in result
+
+
 class TestAgentShare:
     async def test_share_refuses_to_republish_a_foreign_chunk(self, monkeypatch):
         """The one id path that copies content rather than showing it."""
