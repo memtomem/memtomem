@@ -15,7 +15,7 @@ from memtomem.models import (
     NamespaceFilter,
     ScopeFilter,
 )
-from memtomem.search.visibility import neighbor_visible
+from memtomem.search.visibility import chunk_in_scope_boundary, neighbor_visible
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
 # LangGraph adapter; re-exported from this module so the long-standing
@@ -452,11 +452,22 @@ async def mem_increment_access(
     if not valid:
         return f"Error: no valid UUIDs in chunk_ids (rejected: {len(invalid)})."
 
-    in_boundary_ids = [cid for cid in valid if await resolve_chunk(app, cid) is not None]
+    # One batched read rather than a fetch per id: the argument is an
+    # unbounded list, and this is a boost, not a page the caller is reading.
+    rows = await app.storage.get_chunks_batch(valid)
+    project_context_root = _resolve_project_context_root(app)
+    in_boundary_ids = [
+        cid
+        for cid in valid
+        if (row := rows.get(cid)) is not None
+        and chunk_in_scope_boundary(row.metadata, project_context_root)
+    ]
     if in_boundary_ids:
         await app.storage.increment_access(in_boundary_ids)
 
-    msg = f"Incremented access_count for {len(valid)} chunk(s)."
+    # Counts ids accepted for submission, not rows changed — reporting the
+    # difference would tell the caller which of their ids live elsewhere.
+    msg = f"Accepted {len(valid)} chunk id(s) for an access boost."
     if invalid:
         msg += f" Skipped {len(invalid)} invalid id(s)."
     return msg

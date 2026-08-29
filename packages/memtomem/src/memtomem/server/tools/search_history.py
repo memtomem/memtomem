@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import not_found, resolve_chunk
 
 
 @mcp.tool()
@@ -84,6 +87,21 @@ async def mem_search_feedback(
     if chunk_id is None:
         return "Error: chunk_id is required when judgment is given."
     app = await _get_app_initialized(ctx)
+    # Recording a judgment is a write about that chunk, so the same boundary
+    # applies as everywhere else a chunk id is named (ADR-0036). Snapshot
+    # membership is not a substitute: it proves the id was in *some* run's
+    # results, not that this caller may address it. The run-id axis itself is
+    # unscoped and out of ADR-0036's scope — see #2243.
+    try:
+        uid: UUID | None = UUID(chunk_id)
+    except (ValueError, TypeError):
+        # A malformed id cannot name a chunk, so there is nothing to screen.
+        # Left to storage's existing snapshot-membership error rather than
+        # given a new message — this change is about the boundary, not about
+        # how a typo is reported.
+        uid = None
+    if uid is not None and await resolve_chunk(app, uid) is None:
+        return not_found(chunk_id)
     # An agent posts feedback in the tool call right after its search, so the
     # run's backgrounded history row may not be committed yet (#2183); without
     # this the foreign key rejects a run ID that is entirely valid.
