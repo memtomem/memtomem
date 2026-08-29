@@ -17,10 +17,15 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
 import sqlite_vec
 
 from memtomem.storage.sqlite_meta import MetaManager
-from memtomem.storage.sqlite_schema import _TS_REPAIR_BATCH, create_tables
+from memtomem.storage.sqlite_schema import (
+    _TS_REPAIR_BATCH,
+    _repair_non_utc_chunk_timestamps,
+    create_tables,
+)
 
 _MARKER_KEY = "chunk_timestamps_utc_repair_v1"
 
@@ -60,6 +65,30 @@ def _rerun_migration(db: sqlite3.Connection) -> None:
 def _stored(db: sqlite3.Connection, chunk_id: str) -> tuple[str, str]:
     row = db.execute("SELECT created_at, updated_at FROM chunks WHERE id=?", (chunk_id,)).fetchone()
     return row[0], row[1]
+
+
+class FailOnUpdate:
+    """Proxy that lets the repair's Nth ``UPDATE`` through, then raises.
+
+    Failing on the *second* update is what makes the rollback observable: the
+    first one has already been applied inside the transaction, so a missing
+    rollback leaves that row rewritten.
+    """
+
+    def __init__(self, db: sqlite3.Connection, *, fail_on: int = 2) -> None:
+        self._db = db
+        self._fail_on = fail_on
+        self.updates = 0
+
+    def execute(self, sql: str, *args):
+        if sql.startswith("UPDATE chunks SET created_at"):
+            self.updates += 1
+            if self.updates >= self._fail_on:
+                raise sqlite3.OperationalError("boom")
+        return self._db.execute(sql, *args)
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
 
 
 class TestRepairNonUtcChunkTimestamps:
@@ -232,6 +261,46 @@ class TestRepairNonUtcChunkTimestamps:
             db.commit()
             _initialize(db)  # marker still "done" → no-op
             assert _stored(db, "late-1")[0] == "2026-06-01T00:00:00+09:00"
+        finally:
+            db.close()
+
+    def test_a_failure_mid_repair_rolls_back_rows_and_marker(self) -> None:
+        """The marker is written inline rather than through ``set_meta``
+        (which commits), so it lands in the same transaction as the rewrites.
+        A crash between the two would otherwise record the repair as done with
+        rows still unrepaired — and the marker denies them a second chance."""
+        db = _connect()
+        try:
+            _initialize(db)
+            _insert_chunk(db, "rollback-1", created_at="2026-01-01T00:00:00+09:00")
+            _insert_chunk(db, "rollback-2", created_at="2026-01-01T00:00:00+09:00")
+            db.execute("DELETE FROM _memtomem_meta WHERE key=?", (_MARKER_KEY,))
+            db.commit()
+
+            # A proxy, not a monkeypatch: ``sqlite3.Connection.execute`` is
+            # read-only, and every statement other than the failing one still
+            # has to reach the real connection for the rollback to mean
+            # anything.
+            failed = FailOnUpdate(db)
+            meta = MetaManager(lambda: failed)
+            with pytest.raises(sqlite3.OperationalError):
+                _repair_non_utc_chunk_timestamps(failed, meta)
+
+            assert failed.updates == 2
+            # Neither the already-applied row nor the marker survived.
+            assert _stored(db, "rollback-1")[0] == "2026-01-01T00:00:00+09:00"
+            assert _stored(db, "rollback-2")[0] == "2026-01-01T00:00:00+09:00"
+            assert (
+                db.execute(
+                    "SELECT value FROM _memtomem_meta WHERE key=?", (_MARKER_KEY,)
+                ).fetchone()
+                is None
+            )
+
+            # And the next startup still repairs it.
+            _initialize(db)
+            assert _stored(db, "rollback-1")[0] == "2025-12-31T15:00:00.000000+00:00"
+            assert _stored(db, "rollback-2")[0] == "2025-12-31T15:00:00.000000+00:00"
         finally:
             db.close()
 

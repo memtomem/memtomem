@@ -1268,8 +1268,18 @@ def _repair_non_utc_chunk_timestamps(db: sqlite3.Connection, meta: MetaManager) 
     compute the same canonical value — but the read-then-write window is also
     open to an ordinary writer on another process, whose fresh ``updated_at``
     would be overwritten by this pass's canonicalized *snapshot* of the old
-    one. The ``in_transaction`` branch composes into a caller that wrapped
-    ``create_tables`` itself, the same rule the storage mixins follow.
+    one. Every production path reaches this with no transaction open, so that
+    is the path that serializes.
+
+    The ``in_transaction`` branch exists only so a caller that wrapped
+    ``create_tables`` itself does not get "cannot start a transaction within a
+    transaction". It does **not** compose into that caller's transaction the
+    way a storage mixin does: ``create_tables`` ends with an unconditional
+    ``db.commit()``, so a wrapping transaction is committed on the way out
+    whatever this pass does, and rows written here are not revertible by the
+    caller's rollback. Borrowing also inherits the caller's isolation, so a
+    caller opening a *deferred* transaction is not serialized against a
+    concurrent startup by the under-lock re-check alone.
 
     **No SCHEMA_VERSION bump**: additive and idempotent. The residual is that
     an older binary can still write a non-canonical row after this ran, and
