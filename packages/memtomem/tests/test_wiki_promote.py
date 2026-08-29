@@ -342,6 +342,32 @@ def test_cli_promote_happy(wiki_root: Path, tmp_path: Path) -> None:
     assert "mm context install command demo" in result.output
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owner/mode validation")
+def test_cli_promote_unusable_lock_home_is_not_reported_as_a_git_error(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    # WikiLockUnavailableError subclasses RuntimeError, so without its own arm
+    # ahead of the broad one an unusable runtime dir (#2225) would be reported as
+    # "git error — check git status", sending the user to the wrong place.
+    from memtomem._runtime_paths import runtime_dir
+
+    _init_wiki()
+    project = tmp_path / "proj"
+    _seed_project_asset(project, "commands", "demo", "command.md")
+    runtime_dir().mkdir(parents=True, exist_ok=True)
+    runtime_dir().chmod(0o755)
+
+    result = CliRunner().invoke(
+        wiki_group, ["command", "promote", "demo", "--project", str(project)]
+    )
+
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, OSError)  # classified, not raw
+    out = _combined(result)
+    assert "could not acquire the wiki lock" in out
+    assert "git error" not in out
+
+
 def test_cli_promote_privacy_blocked_exit1(wiki_root: Path, tmp_path: Path) -> None:
     _init_wiki()
     project = tmp_path / "proj"

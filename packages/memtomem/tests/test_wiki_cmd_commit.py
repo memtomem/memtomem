@@ -11,12 +11,14 @@ warning on the commit message.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
+from memtomem._runtime_paths import runtime_dir
 from memtomem.cli.wiki_cmd import wiki as wiki_group
 from memtomem.context._atomic import _file_lock
 from memtomem.wiki import commit as wiki_commit
@@ -327,6 +329,25 @@ def test_busy_lock_is_classified(wiki_root: Path, monkeypatch: pytest.MonkeyPatc
     assert result.exit_code != 0
     assert not isinstance(result.exception, TimeoutError)  # classified, not raw
     assert "timed out" in result.output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owner/mode validation")
+def test_unusable_lock_home_is_classified_and_not_reported_as_busy(wiki_root: Path) -> None:
+    # #2225 routed the lock through the runtime dir, so its validation refusals
+    # (wrong owner, group/world bits, symlink) can now fail a wiki commit. That
+    # is NOT contention — a "retry shortly" message would send the user in
+    # circles — and it must not surface as a traceback either.
+    _init_wiki()
+    _seed_skill(wiki_root)
+    (wiki_root / "skills/demo/SKILL.md").write_bytes(b"# edited\n")
+    runtime_dir().mkdir(parents=True, exist_ok=True)
+    runtime_dir().chmod(0o755)
+    result = CliRunner().invoke(wiki_group, ["skill", "commit", "demo", "-c"])
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, OSError)  # classified, not raw
+    assert "could not acquire its lock" in result.output
+    assert "timed out" not in result.output
+    assert "rm -rf" in result.output  # the actionable remediation hint survives
 
 
 # ── agent / command parity (the shared helper covers all three types) ──────

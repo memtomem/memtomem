@@ -11,16 +11,25 @@ the stale-token / TOCTOU guards, the ``expected_head`` CAS, and the race-guarded
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
+from memtomem._runtime_paths import runtime_dir
+from memtomem.context._atomic import _file_lock
+from memtomem.wiki import commit as wiki_commit
 from memtomem.wiki.commit import (
     ResolvedTarget,
+    WikiLockUnavailableError,
     WikiTargetChangedError,
     commit_targets,
+    legacy_wiki_commit_lock_path,
+    wiki_commit_lock,
     wiki_commit_lock_path,
 )
 from memtomem.wiki.store import WikiHeadMovedError, WikiStore
@@ -50,6 +59,24 @@ def _target(store: WikiStore, rel: str, expected_mtime_ns: int | None = None) ->
     return ResolvedTarget(rel=rel, path=store.root / rel, expected_mtime_ns=expected_mtime_ns)
 
 
+class _ClockAfterFirstRead:
+    """Stand-in for the ``time`` module that jumps after the deadline is set.
+
+    ``wiki_commit_lock`` reads ``monotonic()`` twice: once to fix the deadline,
+    once to compute what is left for the canonical leg. Returning *first* then
+    *later* forces the ``remaining == 0.0`` branch with no wall-clock waiting.
+    Only the name bound in ``wiki.commit`` is replaced, so ``_file_lock``'s own
+    timing (a different module's import) keeps using the real clock.
+    """
+
+    def __init__(self, first: float, later: float) -> None:
+        self._readings = [first]
+        self._later = later
+
+    def monotonic(self) -> float:
+        return self._readings.pop(0) if self._readings else self._later
+
+
 # ── lock path determinism (the web↔CLI mutual-exclusion contract) ──────────
 
 
@@ -71,6 +98,138 @@ def test_lock_path_is_outside_the_wiki_tree(tmp_path: Path) -> None:
     # bogus .git/ if the wiki were removed.
     root = tmp_path / "wiki"
     assert root not in wiki_commit_lock_path(root).parents
+
+
+def test_lock_path_honours_the_runtime_dir_override(tmp_path: Path) -> None:
+    # #2225: the lock used to be a raw tempfile.gettempdir() leaf, so every
+    # tmp_path wiki root stranded a never-unlinked file in the developer's real
+    # temp. Routing it through the runtime dir puts it where conftest's autouse
+    # isolation (and, in production, the 0o700-validated runtime dir) can hold it.
+    lock = wiki_commit_lock_path(tmp_path / "wiki")
+    assert lock.parent == runtime_dir()
+    assert Path(tempfile.gettempdir()) / "memtomem" not in lock.parents
+
+
+def test_legacy_lock_path_is_also_isolated_under_pytest(tmp_path: Path) -> None:
+    # The transitional legacy lock must not reintroduce the #2225 leak: it is
+    # still acquired (so an upgrade stays exclusive) but redirected under test.
+    legacy = legacy_wiki_commit_lock_path(tmp_path / "wiki")
+    assert runtime_dir() in legacy.parents
+    assert Path(tempfile.gettempdir()) / "memtomem" not in legacy.parents
+
+
+def test_legacy_and_canonical_locks_are_distinct_files(tmp_path: Path) -> None:
+    # _file_lock contends with itself across two open file descriptions in one
+    # process, so collapsing the pair onto one path would self-deadlock.
+    root = tmp_path / "wiki"
+    assert legacy_wiki_commit_lock_path(root) != wiki_commit_lock_path(root)
+
+
+def test_wiki_commit_lock_excludes_a_holder_of_the_pre_2225_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-#2225 process still excludes a new one — against the *literal* old path.
+
+    Deriving the "old" process's lock from ``legacy_wiki_commit_lock_path`` would
+    prove nothing: under pytest that takes the redirected branch, so the test
+    would agree with itself no matter what the production formula said. Here the
+    path is rebuilt from the pre-#2225 source verbatim, and the redirect is
+    disabled for the legacy leg only (patching the name *commit.py* holds, not
+    the one ``ensure_runtime_dir`` reads) so the canonical leg stays isolated.
+    ``tempfile.tempdir`` is redirected so this still writes nothing to real temp.
+    """
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "fake-tmp"))
+    monkeypatch.setattr(wiki_commit, "_test_runtime_dir_override", lambda: None)
+    root = tmp_path / "wiki"
+    root.mkdir()
+
+    # The pre-#2225 formula, copied from the commit that introduced this fix.
+    digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+    old_path = Path(tempfile.gettempdir()) / "memtomem" / f"wiki-commit-{digest}.lock"
+    assert old_path == legacy_wiki_commit_lock_path(root), "legacy leg drifted from the old path"
+
+    with _file_lock(old_path, timeout=None):
+        with pytest.raises(TimeoutError):
+            with wiki_commit_lock(root, timeout=0.1):
+                pytest.fail("acquired while a pre-#2225 process held the lock")
+
+
+def test_wiki_commit_lock_budget_is_shared_not_doubled(tmp_path: Path) -> None:
+    # The pair must stay bounded below the web handler's asyncio.timeout(60);
+    # nesting two full-budget waits would have doubled it.
+    root = tmp_path / "wiki"
+    root.mkdir()
+    with _file_lock(wiki_commit_lock_path(root), timeout=None):
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            with wiki_commit_lock(root, timeout=0.4):
+                pytest.fail("acquired while the canonical lock was held")
+        # The legacy leg acquires instantly, so essentially the whole budget is
+        # spent on the canonical leg — never 2x it.
+        assert time.monotonic() - started < 0.8
+
+
+def test_exhausted_budget_still_attempts_the_canonical_leg_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # remaining == 0.0 must mean "one non-blocking attempt", not "skip" and not
+    # "wait forever". A fake clock pins the branch deterministically rather than
+    # racing a real deadline.
+    root = tmp_path / "wiki"
+    root.mkdir()
+    monkeypatch.setattr(wiki_commit, "time", _ClockAfterFirstRead(0.0, 1_000.0))
+    with wiki_commit_lock(root, timeout=0.4):
+        pass  # uncontended: the single LOCK_NB attempt succeeds
+
+
+def test_exhausted_budget_raises_rather_than_waiting_when_contended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    with _file_lock(wiki_commit_lock_path(root), timeout=None):
+        monkeypatch.setattr(wiki_commit, "time", _ClockAfterFirstRead(0.0, 1_000.0))
+        with pytest.raises(TimeoutError):
+            with wiki_commit_lock(root, timeout=0.4):
+                pytest.fail("acquired on an exhausted budget")
+
+
+# ── an unusable lock home is classified, never a raw OSError ───────────────
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owner/mode validation")
+def test_unsafe_runtime_dir_becomes_a_classified_lock_error(tmp_path: Path) -> None:
+    # Routing the lock through the runtime dir (#2225) made ensure_runtime_dir's
+    # validation refusals reachable from a wiki commit for the first time. They
+    # must not escape as a bare OSError to the CLI/web adapters.
+    runtime_dir().mkdir(parents=True, exist_ok=True)
+    runtime_dir().chmod(0o755)  # group/world bits — ensure_runtime_dir refuses
+    root = tmp_path / "wiki"
+    root.mkdir()
+    with pytest.raises(WikiLockUnavailableError):
+        with wiki_commit_lock(root, timeout=0.1):
+            pytest.fail("acquired against an unsafe runtime dir")
+
+
+def test_contention_is_not_reclassified_as_unavailable(tmp_path: Path) -> None:
+    # TimeoutError is itself an OSError; the wrap must let it through with its
+    # own meaning or "someone is committing, retry" becomes "your dir is broken".
+    root = tmp_path / "wiki"
+    root.mkdir()
+    with _file_lock(wiki_commit_lock_path(root), timeout=None):
+        with pytest.raises(TimeoutError):
+            with wiki_commit_lock(root, timeout=0.1):
+                pytest.fail("acquired while contended")
+
+
+def test_caller_oserror_keeps_its_own_type(tmp_path: Path) -> None:
+    # The yield sits outside the guard: a failed write *under* the lock is the
+    # caller's error, not a lock-establishment failure.
+    root = tmp_path / "wiki"
+    root.mkdir()
+    with pytest.raises(FileNotFoundError):
+        with wiki_commit_lock(root, timeout=1.0):
+            (tmp_path / "absent-dir" / "f").write_text("x", encoding="utf-8")
 
 
 # ── expected_head=None (CLI) commits onto current HEAD, isolated ───────────

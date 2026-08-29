@@ -53,10 +53,10 @@ from pathlib import Path
 from typing import Literal
 
 from memtomem import privacy
-from memtomem.context._atomic import _file_lock, atomic_write_bytes, iter_installed_files
+from memtomem.context._atomic import atomic_write_bytes, iter_installed_files
 from memtomem.context._names import validate_name
 from memtomem.context.scope_resolver import canonical_artifact_dir
-from memtomem.wiki.commit import wiki_commit_lock_path
+from memtomem.wiki.commit import wiki_commit_lock
 from memtomem.wiki.inspect import LintReport, lint_asset
 from memtomem.wiki.store import WikiStore
 
@@ -186,9 +186,12 @@ def promote_asset(
         PromotePrivacyError: A source file tripped Gate A.
         PromoteLintError: The copied asset failed lint (copy rolled back).
         WikiHeadMovedError / WikiDetachedHeadError / WikiNothingToCommitError /
-        TimeoutError / RuntimeError: propagated from the commit (copy rolled
-        back). ``TimeoutError`` means a concurrent committer held the lock past
-        the budget.
+        TimeoutError / WikiLockUnavailableError / RuntimeError: propagated from
+        the commit (copy rolled back). ``TimeoutError`` means a concurrent
+        committer held the lock past the budget;
+        ``WikiLockUnavailableError`` means the lock's runtime dir is unusable —
+        a distinct, retry-proof failure that subclasses ``RuntimeError``, so a
+        caller's arm for it must precede its arm for the git-failure case.
     """
     validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     store.require_exists()
@@ -263,8 +266,7 @@ def promote_asset(
     # Critical section under the wiki commit lock: absent re-check → copy →
     # lint → commit, so a concurrent promote of the same name serializes and the
     # rollback below can only ever remove this invocation's own copied dir.
-    lock_path = wiki_commit_lock_path(store.root)
-    with _file_lock(lock_path, timeout=_PROMOTE_LOCK_TIMEOUT):
+    with wiki_commit_lock(store.root, timeout=_PROMOTE_LOCK_TIMEOUT):
         head = store.current_commit()
         if dest_dir.exists():
             raise WikiAssetExistsError(
