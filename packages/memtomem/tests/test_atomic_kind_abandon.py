@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from memtomem.web.routes import context_agents
 
@@ -195,11 +196,12 @@ async def test_a_cancelled_update_leaves_the_file_alone(tmp_path, monkeypatch):
 
 
 async def test_a_cancelled_delete_removes_nothing(tmp_path, monkeypatch):
-    """The checkpoint sits after the lock is held and before any removal.
+    """The post-lock checkpoint: after the lock is held, before any removal.
 
-    After, because the lock wait is what the request timed out on; before,
-    because the canonical removal and the runtime cascade are one sequence
-    that must not be stopped partway.
+    After, because the lock wait is what the request timed out on (the
+    queued-worker test below covers the pre-lock one); before, because the
+    canonical removal and the runtime cascade are one sequence that must not
+    be stopped partway.
     """
     project_root, path = _seeded(tmp_path)
 
@@ -255,9 +257,13 @@ async def test_a_worker_abandoned_while_queued_leaves_no_trace(tmp_path, monkeyp
 
     try:
         await coro
-    except Exception:
-        # The route may still raise its own 404/409 envelope off the no-op
-        # arm; what is under test is the filesystem, not the response.
+    except HTTPException:
+        # The route turns the closure's no-op arm into its own 404/409
+        # envelope. That is expected; the filesystem is what is under test.
+        # Deliberately NOT ``except Exception``: that would also swallow the
+        # harness's own assertion that the route entered
+        # ``abandon_sync_on_exit``, turning "the scope wrapper is gone" into a
+        # 20-second wait and a misattributed failure about the closure.
         pass
     assert await asyncio.to_thread(worker_done.wait, 20), "the closure never ran"
 

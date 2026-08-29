@@ -666,14 +666,15 @@ async def delete_artifact(
             if locked_gate is not None:
                 return locked_gate, removed, skipped
 
-            # The delete's one abort checkpoint, placed after the lock is
-            # held because that wait is what the request timed out on — a
-            # pre-lock check would sit in a window nothing can reach. Safe
-            # because NOTHING has been removed yet: what follows is one removal
-            # sequence, the canonical under the lock and the runtime cascade
-            # outside it, and stopping between them would strand the fan-out
-            # copies with no canonical left to prune them. So the delete either
-            # has not started when its caller gives up, or it finishes (#2247).
+            # The delete's second checkpoint, and the last one it gets. Placed
+            # after the lock because the wait for it is what the request timed
+            # out on — the pre-lock check above covers only the narrower window
+            # where the closure had not started at all. Safe because NOTHING
+            # has been removed yet: what follows is one removal sequence, the
+            # canonical under the lock and the runtime cascade outside it, and
+            # stopping between them would strand the fan-out copies with no
+            # canonical left to prune them. So the delete either has not
+            # started when its caller gives up, or it finishes (#2247).
             if sync_is_abandoned():
                 return None, [], []
 
@@ -704,9 +705,9 @@ async def delete_artifact(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 # Scoped so a delete this request can no longer wait for
-                # stops before it starts removing (#2247). Its checkpoint
-                # sits before the first removal: a delete that has begun must
-                # finish its cascade.
+                # stops before it starts removing (#2247). Both its
+                # checkpoints sit before the first removal: a delete that has
+                # begun must finish its cascade.
                 with abandon_sync_on_exit():
                     gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
     except TimeoutError:
