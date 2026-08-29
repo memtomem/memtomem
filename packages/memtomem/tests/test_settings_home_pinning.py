@@ -1,15 +1,24 @@
-"""A settings write may not follow ``$HOME`` after its caller is gone (#2211).
+"""What a settings worker may do once its caller is gone (#2211, #2218).
 
-``generate_all_settings`` runs in ``asyncio.to_thread``, and every user-scope
-target is anchored on the ambient ``$HOME``. ``asyncio.to_thread`` cannot be
-cancelled, so a request that times out leaves the worker running — and before
-the fix that worker resolved its target *when it got there*, which meant a
-different home than the caller had. In the suite that showed up as the #1903
-home guard reporting a write to the developer's real ``~/.claude/settings.json``
-and blaming whichever unrelated test happened to be running when it landed.
+``generate_all_settings`` runs in ``asyncio.to_thread``, which cannot be
+cancelled, so a request that times out leaves the worker running. Two
+guards answer the two questions that raises.
+
+*Where* would a late write land? Every user-scope target is anchored on the
+ambient ``$HOME``, and before #2211 the worker resolved its target *when it
+got there* — a different home than the caller had. In the suite that showed
+up as the #1903 home guard reporting a write to the developer's real
+``~/.claude/settings.json`` and blaming whichever unrelated test happened to
+be running when it landed.
+
+*Should it happen at all?* No: #2218 made the worker poll an abort flag, so
+a sync whose caller has given up leaves its remaining targets untouched
+instead of mutating settings behind a response that already said 503. The
+pin still matters for the one write that can outrun the flag — a
+cancellation landing inside a target's write.
 
 These tests move a stand-in "later" home into place while the worker is
-blocked, so nothing here can touch a real home even if the pin regresses.
+blocked, so nothing here can touch a real home even if a guard regresses.
 """
 
 from __future__ import annotations
@@ -96,7 +105,7 @@ class TestHostHomeSnapshot:
             assert dispatch_home in target.parents, f"{target} escaped the pinned home"
 
 
-class TestOrphanedWorkerWritesToTheDispatchHome:
+class TestAbandonedWorkerAbortsItsRemainingWrites:
     """The end-to-end shape: cancel the caller, move ``$HOME``, release the worker."""
 
     @staticmethod
@@ -114,9 +123,7 @@ class TestOrphanedWorkerWritesToTheDispatchHome:
 
         return real, _patched
 
-    async def test_a_cancelled_sync_writes_to_the_home_it_dispatched_with(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_a_cancelled_sync_does_not_write(self, tmp_path, monkeypatch):
         from memtomem.web.routes import settings_sync
 
         dispatch_home = tmp_path / "dispatch-home"
@@ -141,14 +148,30 @@ class TestOrphanedWorkerWritesToTheDispatchHome:
         # says every generator has chosen its target.
         worker_done = threading.Event()
         real_generate = settings_mod.generate_all_settings
+        worker_results: list[dict] = []
 
         def _generate_and_signal(*args, **kwargs):
             try:
-                return real_generate(*args, **kwargs)
+                results = real_generate(*args, **kwargs)
+                worker_results.append(results)
+                return results
             finally:
                 worker_done.set()
 
         monkeypatch.setattr(settings_sync, "generate_all_settings", _generate_and_signal)
+
+        # Which abort check stopped it matters. The worker is past the
+        # between-targets one before it parks, so reaching a merge would mean
+        # the post-lock check let it through and only the pre-write check
+        # caught it — the two are not interchangeable here.
+        merges: list[str] = []
+        real_merge = settings_mod.ClaudeSettingsGenerator.merge
+
+        def _recording_merge(self, existing, contributions):
+            merges.append("claude_settings")
+            return real_merge(self, existing, contributions)
+
+        monkeypatch.setattr(settings_mod.ClaudeSettingsGenerator, "merge", _recording_merge)
 
         task = asyncio.create_task(
             settings_sync._sync_settings_core(project_root, "user", allow_host_writes=True)
@@ -177,4 +200,31 @@ class TestOrphanedWorkerWritesToTheDispatchHome:
             "the orphaned worker followed $HOME after its caller was cancelled — "
             "this is the write the home guard reports against an innocent test"
         )
-        assert written.exists(), "the write should still land, just in the dispatch-time home"
+        # The worker resolves its target *after* $HOME moves (it is parked
+        # inside ``target_file`` when the move happens), so which home it then
+        # locks is the pin's doing, not the abort's. Without that assertion the
+        # abort alone would keep both settings files absent and this test would
+        # pass with the pin removed (#2211 regression coverage).
+        assert (dispatch_home / ".claude" / ".settings.json.lock").exists(), (
+            "the worker never locked the target it resolved at dispatch time"
+        )
+        assert not (later_home / ".claude" / ".settings.json.lock").exists(), (
+            "the worker resolved its target from the moved $HOME — the pin is gone"
+        )
+        assert merges == [], (
+            "the abort let the worker reach the merge; the post-lock check "
+            "(not just the pre-write one) is what stops it here"
+        )
+        # #2218: the worker had not written this target when the caller gave
+        # up, so it must leave it alone rather than mutate settings behind a
+        # request that already failed. The pin (asserted above) covers only
+        # the write that outruns the flag.
+        assert not written.exists(), (
+            "an abandoned sync wrote its target anyway — the caller was told "
+            "the sync failed and the settings changed regardless"
+        )
+
+        assert worker_results, "the worker never returned a result mapping"
+        claude = worker_results[0]["claude_settings"]
+        assert claude.status == "aborted", f"expected aborted, got {claude.status}"
+        assert "abandoned by its caller" in (claude.reason or "")

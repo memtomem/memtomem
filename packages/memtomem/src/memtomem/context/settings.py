@@ -51,6 +51,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 import tomllib
 from contextlib import contextmanager
@@ -128,8 +129,10 @@ _KIMI_END = "# END memtomem managed hooks"
 # Whole-call budget for sidecar-lock acquisition across ALL targets (#1145
 # review). The web handler offloads ``generate_all_settings`` to a worker
 # thread under a 60s ``asyncio.timeout``; an unbounded ``portalocker`` wait
-# there would leave an un-cancellable thread writing after the handler already
-# returned 503. This budget is shared across the per-target locks (claude /
+# there would leave an un-cancellable thread parked long after the handler
+# already returned 503 (what that thread does when it wakes is bounded
+# separately, by ``abandon_sync_on_exit`` — #2218). This budget is shared
+# across the per-target locks (claude /
 # codex / gemini), NOT per target — a single deadline is computed once and each
 # target waits only the remaining time — so the total wait can never approach
 # ``N_targets × bound`` and stays comfortably under the handler's 60s no matter
@@ -203,6 +206,53 @@ def host_kimi_home() -> Path:
     """
     pinned = _pinned_homes.get()
     return pinned.kimi_home if pinned is not None else kimi_code_home()
+
+
+_sync_abandoned: ContextVar[threading.Event | None] = ContextVar(
+    "memtomem_settings_sync_abandoned", default=None
+)
+
+
+@contextmanager
+def abandon_sync_on_exit() -> Iterator[threading.Event]:
+    """Signal a worker thread that the caller which dispatched it is gone (#2218).
+
+    The twin of :func:`pinned_host_homes`, and entered at the same place —
+    immediately before an ``asyncio.to_thread`` hand-off. The pin decides
+    *where* a late write lands; this decides whether it happens at all. A
+    timed-out request returned 503 and then mutated the user's settings
+    seconds later with nothing in the response saying so.
+
+    Setting the event in ``finally`` needs no ``except CancelledError``: on a
+    normal exit the worker has already returned, so the set is a no-op, and
+    every abnormal exit — the route's ``asyncio.timeout``, an MCP caller's
+    cancellation — is exactly the case where the worker is still running and
+    must stop. ``asyncio.to_thread`` copies the caller's context, and copying
+    a context copies the *binding*, not the ``Event``, so the worker polls the
+    same object the caller sets.
+
+    Cooperative by nature: the worker stops between targets, so a cancellation
+    landing inside one target's write still completes that write (the pin
+    keeps it pointed at the caller's own home).
+    """
+    event = threading.Event()
+    token = _sync_abandoned.set(event)
+    try:
+        yield event
+    finally:
+        event.set()
+        _sync_abandoned.reset(token)
+
+
+def _sync_is_abandoned() -> bool:
+    """Whether the caller that dispatched this work has already given up.
+
+    ``False`` when nothing entered :func:`abandon_sync_on_exit`, which keeps
+    synchronous callers (CLI, detectors) running exactly as before — only the
+    threaded dispatch paths can be abandoned.
+    """
+    event = _sync_abandoned.get()
+    return event is not None and event.is_set()
 
 
 def resolve_scope_path(project_root: Path, scope: str) -> Path:
@@ -1518,8 +1568,25 @@ def generate_all_settings(
     restores the previous behavior. Project-scope writes (``scope`` is
     ``project_shared`` or ``project_local``) stay inside the project
     root and never trigger the gate.
+
+    A caller that dispatched this through :func:`abandon_sync_on_exit` can
+    give up while the work is still running (a web route's ``asyncio.timeout``
+    cannot cancel the worker thread it is waiting on). The flag it sets is
+    read between targets and once more just before each write, so every
+    target still short of that last check comes back ``status="aborted"``
+    rather than being written behind the failed response (#2218). At most one
+    target — the one already past its check — can still write.
     """
     results: dict[str, SettingsSyncResult] = {}
+
+    def _abandoned() -> SettingsSyncResult:
+        return SettingsSyncResult(
+            status="aborted",
+            reason="the sync was abandoned by its caller (request timeout or "
+            "cancellation) before this target was written; the target settings "
+            "file was left untouched. Re-run "
+            "`mm context sync --include=settings` to retry.",
+        )
 
     # One shared deadline for ALL per-target sidecar-lock *waits*, so lock
     # contention across the whole call — not per target — is bounded by
@@ -1528,14 +1595,22 @@ def generate_all_settings(
     # ``asyncio.timeout`` (#1145 review). Each target waits only the time left
     # on this budget.
     #
-    # The budget bounds waiting only: once a target holds its lock, the
-    # reread/merge/write runs to completion even if the caller has already been
-    # cancelled, so this does not close the orphaned-writer window. What keeps
-    # such a late write harmless is the caller-side ``pinned_host_homes``
-    # snapshot, which stops it from following ``$HOME`` somewhere else (#2211).
+    # The budget bounds waiting only — a target that holds its lock is not on
+    # any deadline. What stops it writing behind a caller that already gave up
+    # is the ``_sync_is_abandoned`` check between targets and before the write
+    # (#2218); what keeps the one write that can still slip through — a
+    # cancellation landing inside Step 4 — pointed at the caller's own target
+    # is the ``pinned_host_homes`` snapshot (#2211).
     lock_deadline = time.monotonic() + _SETTINGS_LOCK_BUDGET_S
 
     for name, gen in SETTINGS_GENERATORS.items():
+        # Checked before the availability probe so an abandoned sync stops
+        # touching the filesystem entirely — including the parent directory
+        # and sidecar that acquiring a target's lock would create.
+        if _sync_is_abandoned():
+            results[name] = _abandoned()
+            continue
+
         if not gen.is_available(project_root):
             results[name] = SettingsSyncResult(
                 status="skipped",
@@ -1597,6 +1672,13 @@ def generate_all_settings(
             # non-blocking attempt: acquire iff instantly free, else abort.
             lock_timeout = max(0.0, lock_deadline - time.monotonic())
             with _file_lock(_lock_path_for(target_path), timeout=lock_timeout):
+                # Waiting for this lock is the longest a target can take, so
+                # it is where a caller most plausibly gave up. ``continue``
+                # releases the lock on the way out (#2218).
+                if _sync_is_abandoned():
+                    results[name] = _abandoned()
+                    continue
+
                 # Step 0: re-read the canonical under the target lock (#1281).
                 # The pre-lock read above only decides the no-write early
                 # exits (skipped / error / needs_confirmation) WITHOUT
@@ -1663,6 +1745,15 @@ def generate_all_settings(
                     )
                     continue
 
+                # The reread and merge above can take long enough for the
+                # caller to give up in between, so re-check rather than trust
+                # the pre-lock answer. This is the last point a write can be
+                # suppressed; a cancellation arriving after it is the residual
+                # race the pinned homes cover instead (#2218).
+                if _sync_is_abandoned():
+                    results[name] = _abandoned()
+                    continue
+
                 # Step 4: write
                 _write_settings_target(name, target_path, merged)
                 results[name] = SettingsSyncResult(
@@ -1673,10 +1764,11 @@ def generate_all_settings(
         except TimeoutError:
             # Another process held the lock past the shared budget. Abort this
             # target cleanly so the (possibly thread-offloaded) caller never
-            # blocks indefinitely (#1145 review). This bounds the *wait*; a
-            # target that did acquire its lock still finishes its write, so it
-            # is the pinned host homes — not this abort — that keeps a late
-            # write pointed at the caller's own target (#2211).
+            # blocks indefinitely (#1145 review). This bounds the *wait* only;
+            # suppressing the write a target would otherwise land behind an
+            # abandoned caller is the ``_sync_is_abandoned`` check's job
+            # (#2218), and pointing the residual one at the caller's own
+            # target is the pinned host homes' (#2211).
             results[name] = SettingsSyncResult(
                 status="aborted",
                 reason=f"{target_path}: another process held the lock past the "
@@ -1786,6 +1878,7 @@ __all__ = [
     "SETTINGS_GENERATORS",
     "SettingsGenerator",
     "SettingsSyncResult",
+    "abandon_sync_on_exit",
     "host_home",
     "host_kimi_home",
     "pinned_host_homes",

@@ -1,14 +1,18 @@
-"""Every threaded ``generate_all_settings`` dispatch must pin the host homes (#2211).
+"""Every threaded ``generate_all_settings`` dispatch carries both worker guards.
 
 ``asyncio.to_thread`` cannot be cancelled, so a worker outlives the request
-that started it, and every user-scope settings target is anchored on the
-ambient ``$HOME`` / ``$KIMI_CODE_HOME``. A dispatch that forgets
-``pinned_host_homes()`` therefore lets a late write follow the environment to a
-home its caller never chose — which is how a cancelled sync came to write the
-developer's real ``~/.claude/settings.json`` mid-suite. Sitting inside the pin
-is necessary but not sufficient: the hand-off must also be one that copies the
-caller's context, which ``asyncio.to_thread`` does and ``run_in_executor`` does
-not.
+that started it, and the two context managers here are what keep that worker
+accountable to the caller it has already outlived. ``pinned_host_homes()``
+decides *where* a late write lands (#2211): every user-scope target is
+anchored on the ambient ``$HOME`` / ``$KIMI_CODE_HOME``, so a dispatch that
+forgets it lets the write follow the environment to a home its caller never
+chose — which is how a cancelled sync came to write the developer's real
+``~/.claude/settings.json`` mid-suite. ``abandon_sync_on_exit()`` decides
+*whether* it happens at all (#2218): without it a timed-out request returns
+503 and then mutates the user's settings seconds later. Sitting inside both is
+necessary but not sufficient: the hand-off must also be one that copies the
+caller's context, which ``asyncio.to_thread`` does and ``run_in_executor``
+does not.
 
 Per-site regression tests cannot cover a dispatcher that does not exist yet, so
 the rule is enforced lexically over the tree instead: the guard finds the call
@@ -24,8 +28,11 @@ from pathlib import Path
 import pytest
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "memtomem"
-_PIN = "pinned_host_homes"
 _DISPATCHED = "generate_all_settings"
+#: Context managers a threaded dispatch must sit inside, with the issue that
+#: put each one there — the offender line names it so a failure points at the
+#: rationale rather than just the missing call.
+_REQUIRED_SCOPES = (("pinned_host_homes", "#2211"), ("abandon_sync_on_exit", "#2218"))
 
 
 def _thread_dispatch_sites(tree: ast.AST) -> list[ast.Call]:
@@ -75,8 +82,13 @@ def _propagates_context(site: ast.Call) -> bool:
     )
 
 
-def _pinned_spans(tree: ast.AST) -> list[tuple[int, int]]:
-    """Line spans of every ``with pinned_host_homes(...)`` block."""
+def _scope_spans(tree: ast.AST, scope: str) -> list[tuple[int, int]]:
+    """Line spans of every ``with <scope>(...)`` block.
+
+    Parameterized over the name so both guards read the same ``with``
+    statement: ``with pinned_host_homes(), abandon_sync_on_exit():`` is one
+    node whose ``items`` carry both, and each lookup finds its own.
+    """
     spans = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.With, ast.AsyncWith)):
@@ -86,7 +98,7 @@ def _pinned_spans(tree: ast.AST) -> list[tuple[int, int]]:
             if not isinstance(call, ast.Call):
                 continue
             name = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
-            if name == _PIN:
+            if name == scope:
                 spans.append((node.lineno, node.end_lineno or node.lineno))
     return spans
 
@@ -106,26 +118,30 @@ def test_the_guard_finds_the_known_dispatchers():
     )
 
 
-def test_every_threaded_settings_dispatch_is_inside_a_pin():
+def test_every_threaded_settings_dispatch_is_inside_both_scopes():
     offenders: list[str] = []
     for path in _python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         sites = _thread_dispatch_sites(tree)
         if not sites:
             continue
-        spans = _pinned_spans(tree)
         for site in sites:
             where = f"{path.relative_to(_SRC)}:{site.lineno}"
             if not _propagates_context(site):
-                offenders.append(f"{where} — hand-off does not copy the pinned context")
-            elif not any(start <= site.lineno <= end for start, end in spans):
-                offenders.append(f"{where} — outside `with pinned_host_homes():`")
+                offenders.append(f"{where} — hand-off does not copy the caller's context")
+                continue
+            for scope, issue in _REQUIRED_SCOPES:
+                spans = _scope_spans(tree, scope)
+                if not any(start <= site.lineno <= end for start, end in spans):
+                    offenders.append(f"{where} — outside `with {scope}():` ({issue})")
     assert not offenders, (
-        "settings work handed to a thread without carrying the caller's homes:\n  "
+        "settings work handed to a thread without the guards its worker needs:\n  "
         + "\n  ".join(offenders)
         + "\nA worker outlives its caller, so it must carry the homes the caller "
-        "resolved (#2211). Use `asyncio.to_thread` inside the pin, or dispatch "
-        "through `contextvars.copy_context().run` explicitly."
+        "resolved (#2211) and the abort flag that stops it writing behind a "
+        "response that already failed (#2218). Use `asyncio.to_thread` inside "
+        "both scopes, or dispatch through `contextvars.copy_context().run` "
+        "explicitly."
     )
 
 
@@ -133,10 +149,13 @@ def _guard_accepts(source: str) -> bool:
     """Run the guard's own rule over a snippet."""
     tree = ast.parse(source)
     sites = _thread_dispatch_sites(tree)
-    spans = _pinned_spans(tree)
     assert sites, "fixture should contain a dispatch"
     return all(
-        _propagates_context(site) and any(start <= site.lineno <= end for start, end in spans)
+        _propagates_context(site)
+        and all(
+            any(start <= site.lineno <= end for start, end in _scope_spans(tree, scope))
+            for scope, _issue in _REQUIRED_SCOPES
+        )
         for site in sites
     )
 
@@ -145,40 +164,55 @@ def _guard_accepts(source: str) -> bool:
     ("label", "source"),
     [
         (
-            "unpinned to_thread",
+            "unguarded to_thread",
             "import asyncio\nasync def f():\n    await asyncio.to_thread(generate_all_settings, r)\n",
         ),
         (
-            "dispatch after the pin has exited",
+            "dispatch after the scopes have exited",
             "import asyncio\nasync def f():\n"
-            "    with pinned_host_homes():\n        pass\n"
+            "    with pinned_host_homes(), abandon_sync_on_exit():\n        pass\n"
             "    await asyncio.to_thread(generate_all_settings, r)\n",
         ),
         (
-            # Inside the pin, yet still broken: run_in_executor does not copy
-            # the context, so the ContextVar never reaches the worker.
-            "pinned run_in_executor",
+            # Inside the scopes, yet still broken: run_in_executor does not
+            # copy the context, so neither ContextVar reaches the worker.
+            "guarded run_in_executor",
             "import asyncio\nasync def f():\n"
-            "    with pinned_host_homes():\n"
+            "    with pinned_host_homes(), abandon_sync_on_exit():\n"
             "        await loop.run_in_executor(None, generate_all_settings, r)\n",
         ),
         (
             # A qualified reference is the same dispatch one import hop away.
-            "unpinned qualified dispatch",
+            "unguarded qualified dispatch",
             "import asyncio\nasync def f():\n"
             "    await asyncio.to_thread(settings.generate_all_settings, r)\n",
         ),
         (
             # Same method name, different object: propagation is not asyncio's
             # to promise.
-            "pinned executor.to_thread",
+            "guarded executor.to_thread",
+            "import asyncio\nasync def f():\n"
+            "    with pinned_host_homes(), abandon_sync_on_exit():\n"
+            "        await executor.to_thread(generate_all_settings, r)\n",
+        ),
+        (
+            # The half-guarded shape the #2218 half of the rule exists for:
+            # the write goes to the right home and still should not happen.
+            "pinned but not abandon-scoped",
             "import asyncio\nasync def f():\n"
             "    with pinned_host_homes():\n"
-            "        await executor.to_thread(generate_all_settings, r)\n",
+            "        await asyncio.to_thread(generate_all_settings, r)\n",
+        ),
+        (
+            # And the mirror: cancellable, but free to follow $HOME.
+            "abandon-scoped but not pinned",
+            "import asyncio\nasync def f():\n"
+            "    with abandon_sync_on_exit():\n"
+            "        await asyncio.to_thread(generate_all_settings, r)\n",
         ),
     ],
 )
-def test_guard_rejects_shapes_that_lose_the_pin(label, source):
+def test_guard_rejects_shapes_that_lose_a_guard(label, source):
     """The guard must fail on the shapes it claims to catch, not just pass today."""
     assert not _guard_accepts(source), f"guard would have accepted: {label}"
 
@@ -187,13 +221,19 @@ def test_guard_rejects_shapes_that_lose_the_pin(label, source):
     "source",
     [
         "import asyncio\nasync def f():\n"
-        "    with pinned_host_homes():\n"
+        "    with pinned_host_homes(), abandon_sync_on_exit():\n"
         "        await asyncio.to_thread(generate_all_settings, r)\n",
-        # The qualified spelling is fine too, as long as it is pinned and
+        # The qualified spelling is fine too, as long as it is guarded and
         # dispatched through asyncio.
         "import asyncio\nasync def f():\n"
-        "    with pinned_host_homes():\n"
+        "    with pinned_host_homes(), abandon_sync_on_exit():\n"
         "        await asyncio.to_thread(settings.generate_all_settings, r)\n",
+        # Nested rather than stacked: two `with` statements express the same
+        # two spans, and the rule is about the spans, not the spelling.
+        "import asyncio\nasync def f():\n"
+        "    with pinned_host_homes():\n"
+        "        with abandon_sync_on_exit():\n"
+        "            await asyncio.to_thread(generate_all_settings, r)\n",
     ],
 )
 def test_guard_accepts_the_correct_shape(source):

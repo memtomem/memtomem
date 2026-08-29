@@ -24,6 +24,7 @@ from memtomem.context.projects import compute_scope_id
 from memtomem.context.settings import (
     _SETTINGS_LOCK_BUDGET_S,
     CANONICAL_SETTINGS_FILE,
+    abandon_sync_on_exit,
     pinned_host_homes,
     resolve_scope_path,
     _drop_nonstring_matchers,
@@ -592,15 +593,19 @@ async def _sync_settings_core(
     its lock self-aborts with an ``aborted`` status instead of waiting
     past the timeout (#1145 review).
 
-    That budget bounds lock *contention only*. Once a target holds its
-    lock, the reread/merge/write runs to completion, and
-    ``asyncio.to_thread`` cannot cancel a thread — so a timed-out
-    request can still land its write after the 503. What the
-    ``pinned_host_homes`` block below guarantees is only that such a
-    late write goes to the homes *this* request resolved, never to
-    whichever ``$HOME`` happens to be current when it lands (#2211).
-    Suppressing the late write itself needs cooperative cancellation
-    and is tracked separately.
+    That budget bounds lock *contention only*, and ``asyncio.to_thread``
+    cannot cancel a thread, so the worker outlives a timed-out request.
+    Two things limit what that worker can do. ``abandon_sync_on_exit``
+    sets an abort flag when this block exits abnormally, which the worker
+    polls between targets and again just before each write, so every
+    target still short of its last check comes back ``aborted`` rather
+    than mutating the user's settings behind a failed response (#2218).
+    The abort is cooperative, not transactional: the flag is read at
+    points, not enforced continuously, so the one target already past its
+    last check writes anyway, and targets written earlier stay written.
+    ``pinned_host_homes`` covers exactly that residue by keeping it in the
+    homes *this* request resolved rather than whichever ``$HOME`` is
+    current when it lands (#2211).
 
     Refusals stay in-band by design: host-target generators report a
     ``needs_confirmation`` *result row* instead of raising (the
@@ -611,8 +616,9 @@ async def _sync_settings_core(
     # paths. ``asyncio.to_thread`` copies this context into the worker, so a
     # worker orphaned by the caller's timeout still writes to the homes this
     # request resolved rather than to whatever ``$HOME`` says once it lands
-    # (#2211).
-    with pinned_host_homes():
+    # (#2211) — and, leaving abnormally, hands that worker the abort flag
+    # that stops it writing at all (#2218).
+    with pinned_host_homes(), abandon_sync_on_exit():
         duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
         results = await asyncio.to_thread(
             generate_all_settings,
@@ -670,7 +676,18 @@ async def apply_settings_sync(
                     project_root, target_scope, allow_host_writes=allow_host_writes
                 )
     except TimeoutError:
-        raise _error(503, "busy", "Settings sync timed out — another sync may be in progress")
+        # Honest about what the timeout does and does not undo: the worker
+        # thread cannot be cancelled, so the abort is cooperative — it stops
+        # the targets that had not reached their write, and a write already
+        # underway finishes (#2218).
+        raise _error(
+            503,
+            "busy",
+            "Settings sync timed out — another sync may be in progress. Most "
+            "targets were aborted unwritten, but one may have been too far "
+            "along to stop, and any written before the timeout stay written. "
+            "Re-run the sync to see the current state.",
+        )
 
 
 class ResolveRequest(BaseModel):
