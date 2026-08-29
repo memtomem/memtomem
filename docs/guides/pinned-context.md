@@ -35,7 +35,9 @@ never cut in the middle and omitted ids are returned explicitly.
 
 `mem_context_compose` schema 2 accepts the same optional `namespace` and
 `context_window` retrieval controls used by search. Schema 3 additionally
-returns adjacent chunks under each retrieved item's optional `context` object.
+returns adjacent chunks under each retrieved item's optional `context` object;
+those neighbours obey the same visibility rules as the hits (hidden namespaces,
+project scope, temporal validity) while selection filters stay hit-only.
 Schema 4 additionally names the retrieval leg's score scale at the top level
 of the bundle: `score_scale` (`rrf`, `bm25`, `dense`, `none`, or `rerank` —
 the same labels `mem_search` reports) plus `reranker` with the rerank model id

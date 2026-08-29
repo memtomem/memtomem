@@ -174,7 +174,9 @@ async def mem_context_compose(
         max_chars: Total character budget for the bundle (default 12,000)
         top_k: Number of retrieval results to consider (default 10)
         namespace: Namespace scope for retrieval
-        context_window: Expand each retrieved hit with ±N adjacent chunks
+        context_window: Expand each retrieved hit with ±N adjacent chunks.
+            Neighbours obey visibility rules (hidden namespaces, project
+            scope, validity) but not tag/type/date filters
         rerank: Per-call rerank control for the retrieval leg. ``false`` = skip
             the cross-encoder rerank stage — the fast path for latency-bounded
             callers. Omitted/``true`` = follow server config (``rerank.enabled``);

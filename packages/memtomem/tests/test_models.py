@@ -18,6 +18,7 @@ from memtomem.models import (
     InvalidScopeFilterError,
     NamespaceFilter,
     ScopeFilter,
+    has_namespace_prefix,
     SearchResult,
 )
 
@@ -248,3 +249,113 @@ class TestIndexingStats:
         )
         with pytest.raises(FrozenInstanceError):
             stats.total_files = 2  # type: ignore[misc]
+
+
+class TestFilterMatchesSqlParity:
+    """``matches()`` must decide exactly what the SQL emitter decides (#2192).
+
+    Context-window neighbours are screened in Python because they are read in
+    bulk by source file, never through a filtered query. The two evaluators
+    therefore have to agree, including on the SQLite ``LIKE`` quirks the
+    emitters inherit: ASCII-only case folding, a user-typed ``%`` staying a
+    wildcard, and ``_`` being escaped to a literal.
+    """
+
+    NAMESPACE_VALUES = (
+        "default",
+        "archive:x",
+        "ARCHIVE:x",
+        "archive_x",
+        "archiveYx",
+        "agent-runtime:planner",
+        "a%b",
+        "aZZb",
+        "ünïx:a",
+        "Ünïx:a",
+        "back\\slash",
+        "back\\\\slash",
+        "trailing\\",
+    )
+
+    NAMESPACE_FILTERS = (
+        NamespaceFilter(namespaces=("archive:x",)),
+        NamespaceFilter(namespaces=("default", "archive:x")),
+        NamespaceFilter(pattern="archive:*"),
+        NamespaceFilter(pattern="ARCHIVE:*"),
+        NamespaceFilter(pattern="archive_*"),
+        NamespaceFilter(pattern="a%b"),
+        NamespaceFilter(pattern="Ünïx:*"),
+        NamespaceFilter(pattern="back\\slash"),
+        NamespaceFilter(pattern="back\\\\slash"),
+        NamespaceFilter(pattern="*\\"),
+        NamespaceFilter(exclude_prefixes=("back\\",)),
+        NamespaceFilter(exclude_prefixes=("archive:", "agent-runtime:")),
+        NamespaceFilter(exclude_prefixes=("ARCHIVE:",)),
+        NamespaceFilter(),
+    )
+
+    @staticmethod
+    def _sql_admits(column: str, fragment: str, params: list, value: str) -> bool:
+        import sqlite3
+
+        db = sqlite3.connect(":memory:")
+        db.execute(f"CREATE TABLE t ({column} TEXT)")
+        db.execute("INSERT INTO t VALUES (?)", (value,))
+        sql = f"SELECT COUNT(*) FROM t WHERE {fragment}" if fragment else "SELECT COUNT(*) FROM t"
+        return bool(db.execute(sql, params).fetchone()[0])
+
+    @pytest.mark.parametrize("ns_filter", NAMESPACE_FILTERS, ids=lambda f: repr(f))
+    def test_namespace_matches_agrees_with_namespace_sql(self, ns_filter):
+        from memtomem.storage.sqlite_helpers import namespace_sql
+
+        fragment, params = namespace_sql(ns_filter)
+        for value in self.NAMESPACE_VALUES:
+            assert ns_filter.matches(value) == self._sql_admits(
+                "namespace", fragment, list(params), value
+            ), f"{ns_filter!r} disagrees with SQL on {value!r}"
+
+    @pytest.mark.parametrize(
+        "scope_filter",
+        (
+            ScopeFilter(scopes=("user",)),
+            ScopeFilter(scopes=("project_shared", "project_local")),
+            ScopeFilter(pattern="project_*"),
+            ScopeFilter(pattern="PROJECT_*"),
+        ),
+        ids=lambda f: repr(f),
+    )
+    def test_scope_matches_agrees_with_scope_context_sql(self, scope_filter):
+        from memtomem.storage.sqlite_scope import scope_context_sql
+
+        # No project context: the emitted fragment is the explicit clause
+        # alone, which is the part ``matches()`` is responsible for.
+        fragment, params = scope_context_sql(scope_filter, None)
+        for value in ("user", "project_shared", "project_local", "projectXshared"):
+            assert scope_filter.matches(value) == self._sql_admits(
+                "scope", fragment, list(params), value
+            ), f"{scope_filter!r} disagrees with SQL on {value!r}"
+
+    def test_literal_underscore_is_not_a_wildcard(self):
+        """``fnmatch`` would get this wrong; the SQL escapes ``_``."""
+        assert NamespaceFilter(pattern="archive_*").matches("archive_x")
+        assert not NamespaceFilter(pattern="archive_*").matches("archiveYx")
+
+    def test_trailing_escape_matches_nothing(self):
+        """SQLite has nothing to escape there and matches no row."""
+        assert not NamespaceFilter(pattern="*\\").matches("trailing\\")
+
+    def test_case_folding_is_ascii_only(self):
+        assert NamespaceFilter(pattern="ARCHIVE:*").matches("archive:x")
+        assert not NamespaceFilter(pattern="Ünïx:*").matches("ünïx:a")
+
+
+class TestHasNamespacePrefix:
+    def test_folds_ascii_case(self):
+        assert has_namespace_prefix("ARCHIVE:2024", ("archive:",))
+
+    def test_prefix_specials_are_literal(self):
+        assert has_namespace_prefix("a%b:x", ("a%b:",))
+        assert not has_namespace_prefix("aZb:x", ("a%b:",))
+
+    def test_empty_prefixes_match_nothing(self):
+        assert not has_namespace_prefix("archive:x", ())

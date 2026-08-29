@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -26,6 +27,11 @@ def _make_chunk(
     end_line: int = 10,
     heading: tuple[str, ...] = (),
     chunk_id: UUID | None = None,
+    namespace: str = "default",
+    scope: str = "user",
+    project_root: Path | None = None,
+    valid_from_unix: int | None = None,
+    valid_to_unix: int | None = None,
 ) -> Chunk:
     return Chunk(
         content=content,
@@ -34,6 +40,11 @@ def _make_chunk(
             start_line=start_line,
             end_line=end_line,
             heading_hierarchy=heading,
+            namespace=namespace,
+            scope=scope,
+            project_root=project_root,
+            valid_from_unix=valid_from_unix,
+            valid_to_unix=valid_to_unix,
         ),
         id=chunk_id or uuid4(),
         content_hash=f"hash-{uuid4().hex[:8]}",
@@ -63,6 +74,7 @@ def _make_pipeline(
     chunks_by_source: dict[Path, list[Chunk]],
     bm25_results: list[SearchResult] | None = None,
     context_window_config: ContextWindowConfig | None = None,
+    search_config: SearchConfig | None = None,
 ) -> SearchPipeline:
     """Create a pipeline with mocked storage and embedder."""
     storage = AsyncMock()
@@ -78,7 +90,7 @@ def _make_pipeline(
     embedder = AsyncMock()
     embedder.embed_query = AsyncMock(return_value=[0.1] * 768)
 
-    config = SearchConfig(enable_bm25=True, enable_dense=False)
+    config = search_config or SearchConfig(enable_bm25=True, enable_dense=False)
 
     return SearchPipeline(
         storage=storage,
@@ -307,6 +319,161 @@ class TestMemExpand:
 
         assert "not found" in result
 
+    async def _expand_mixed(self, anchor_index: int, monkeypatch, prefixes=None):
+        """Run mem_expand over the mixed-namespace file, anchored at N."""
+        from memtomem.server.tools.search import mem_expand
+
+        chunks = _mixed_namespace_file()
+        app = MagicMock()
+        app.config.search.system_namespace_prefixes = (
+            ["archive:", "agent-runtime:"] if prefixes is None else prefixes
+        )
+        app.storage.get_chunk = AsyncMock(return_value=chunks[anchor_index])
+        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda _app: None
+        )
+        result = await mem_expand(chunk_id=str(chunks[anchor_index].id), window=2, ctx=None)
+        return chunks, result
+
+    async def test_expand_hides_system_namespace_neighbors(self, monkeypatch):
+        """#2192: the id-addressed path enforces the same visibility rule."""
+        chunks, result = await self._expand_mixed(2, monkeypatch)
+
+        assert chunks[0].content in result
+        assert chunks[4].content in result
+        assert chunks[1].content not in result
+        assert chunks[3].content not in result
+        # Positions count only what the caller may see.
+        assert "chunk 2/3" in result
+
+    async def test_expand_from_hidden_anchor_keeps_its_own_namespace(self, monkeypatch):
+        """Naming a hidden chunk's id opts into that namespace's context."""
+        chunks = _mixed_namespace_file()
+        chunks.insert(
+            2,
+            _make_chunk(
+                "sibling archive",
+                source="/tmp/mixed.md",
+                start_line=15,
+                namespace="archive:2024",
+            ),
+        )
+        from memtomem.server.tools.search import mem_expand
+
+        app = MagicMock()
+        app.config.search.system_namespace_prefixes = ["archive:", "agent-runtime:"]
+        app.storage.get_chunk = AsyncMock(return_value=chunks[1])
+        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda _app: None
+        )
+
+        result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
+
+        assert "sibling archive" in result
+        assert chunks[0].content in result
+        # A different system namespace is still not opted into.
+        assert "hidden after" not in result
+
+    async def test_expand_anchor_opt_in_stays_inside_its_own_project(self, monkeypatch):
+        """The anchor's tier is not a licence to read every project's rows."""
+        from memtomem.server.tools.search import mem_expand
+
+        chunks = [
+            _make_chunk(
+                "foreign project",
+                source="/tmp/s.md",
+                start_line=0,
+                scope="project_shared",
+                project_root=Path("/elsewhere"),
+            ),
+            _make_chunk(
+                "anchor",
+                source="/tmp/s.md",
+                start_line=10,
+                scope="project_shared",
+                project_root=Path("/mine"),
+            ),
+            _make_chunk(
+                "same project",
+                source="/tmp/s.md",
+                start_line=20,
+                scope="project_shared",
+                project_root=Path("/mine"),
+            ),
+        ]
+        app = MagicMock()
+        app.config.search.system_namespace_prefixes = []
+        app.storage.get_chunk = AsyncMock(return_value=chunks[1])
+        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda _app: None
+        )
+
+        result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
+
+        assert "same project" in result
+        assert "foreign project" not in result
+
+    async def test_expand_counts_an_expired_anchor_in_its_own_position(self, monkeypatch):
+        """The named chunk is returned, so it must be part of the accounting."""
+        from memtomem.server.tools.search import mem_expand
+
+        chunks = [
+            _make_chunk("live before", source="/tmp/v.md", start_line=0),
+            _make_chunk("anchor", source="/tmp/v.md", start_line=10, valid_to_unix=1_000),
+            _make_chunk("live after", source="/tmp/v.md", start_line=20),
+        ]
+        app = MagicMock()
+        app.config.search.system_namespace_prefixes = []
+        app.storage.get_chunk = AsyncMock(return_value=chunks[1])
+        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda _app: None
+        )
+
+        result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
+
+        assert "chunk 2/3" in result
+
+    async def test_expand_drops_expired_neighbor(self, monkeypatch):
+        from memtomem.server.tools.search import mem_expand
+
+        chunks = [
+            _make_chunk("expired", source="/tmp/v.md", start_line=0, valid_to_unix=1_000),
+            _make_chunk("anchor", source="/tmp/v.md", start_line=10),
+            _make_chunk("live", source="/tmp/v.md", start_line=20),
+        ]
+        app = MagicMock()
+        app.config.search.system_namespace_prefixes = []
+        app.storage.get_chunk = AsyncMock(return_value=chunks[1])
+        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda _app: None
+        )
+
+        result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
+
+        assert "expired" not in result
+        assert "live" in result
+
 
 # ── mem_increment_access action tests ──────────────────────────────────
 
@@ -509,3 +676,312 @@ class TestPipelineIntegration:
         assert results[0].context is not None
         assert results[0].context.window_before == (chunks[0],)
         assert results[0].context.window_after == (chunks[2],)
+
+
+# ── Neighbour visibility (#2192) ────────────────────────────────────────
+
+
+def _mixed_namespace_file() -> list[Chunk]:
+    """A source file whose chunks straddle the system-namespace boundary."""
+    specs = [
+        ("visible before", "default"),
+        ("hidden before", "archive:2024"),
+        ("anchor", "default"),
+        ("hidden after", "agent-runtime:planner"),
+        ("visible after", "default"),
+    ]
+    return [
+        _make_chunk(
+            content=content,
+            source="/tmp/mixed.md",
+            start_line=i * 10,
+            end_line=i * 10 + 9,
+            namespace=ns,
+        )
+        for i, (content, ns) in enumerate(specs)
+    ]
+
+
+def _pipeline_for(chunks, anchor, *, window=2, search_config=None):
+    return _make_pipeline(
+        {Path(str(chunks[0].metadata.source_file)): chunks},
+        bm25_results=[SearchResult(chunk=anchor, score=0.9, rank=1, source="bm25")],
+        context_window_config=ContextWindowConfig(enabled=True, window_size=window),
+        search_config=search_config,
+    )
+
+
+class TestNeighborVisibility:
+    """Neighbours inherit visibility filters, not selection filters (#2192)."""
+
+    async def test_default_search_drops_system_namespace_neighbors(self):
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2])
+
+        results, _ = await pipeline.search("test")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == (chunks[0],)
+        assert ctx.window_after == (chunks[4],)
+
+    async def test_hidden_neighbor_shrinks_window_instead_of_backfilling(self):
+        """Adjacency is physical: a hidden chunk is dropped, not replaced.
+
+        With window=1 the only neighbours in range are the hidden ones, so
+        both sides come back empty rather than reaching past them to the
+        visible chunks two positions away.
+        """
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2], window=1)
+
+        results, _ = await pipeline.search("test")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == ()
+        assert ctx.window_after == ()
+
+    async def test_position_and_total_count_visible_chunks_only(self):
+        """Reporting the raw total would leak how many chunks are hidden."""
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2])
+
+        results, _ = await pipeline.search("test")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.total_chunks_in_file == 3
+        assert ctx.chunk_position == 2
+
+    async def test_explicit_namespace_surfaces_that_namespace_and_ordinary_ones(self):
+        """Naming a namespace widens visibility; it does not narrow neighbours."""
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2])
+
+        results, _ = await pipeline.search("test", namespace="archive:2024")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == (chunks[0], chunks[1])
+        # agent-runtime:planner was never asked for, so it stays hidden.
+        assert ctx.window_after == (chunks[4],)
+
+    async def test_namespace_glob_surfaces_matching_system_namespace(self):
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2])
+
+        results, _ = await pipeline.search("test", namespace="archive:*")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert chunks[1] in ctx.window_before
+
+    async def test_empty_system_prefixes_hide_nothing(self):
+        """``system_namespace_prefixes: []`` makes the parsed filter None."""
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(
+            chunks,
+            chunks[2],
+            search_config=SearchConfig(
+                enable_bm25=True, enable_dense=False, system_namespace_prefixes=[]
+            ),
+        )
+
+        results, _ = await pipeline.search("test")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == (chunks[0], chunks[1])
+        assert ctx.window_after == (chunks[3], chunks[4])
+
+    async def test_expired_neighbor_is_dropped(self):
+        chunks = [
+            _make_chunk("before", source="/tmp/v.md", start_line=0, valid_to_unix=1_000),
+            _make_chunk("anchor", source="/tmp/v.md", start_line=10),
+            _make_chunk("after", source="/tmp/v.md", start_line=20),
+        ]
+        pipeline = _pipeline_for(chunks, chunks[1], window=1)
+
+        results, _ = await pipeline.search("test", as_of_unix=5_000)
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == ()
+        assert ctx.window_after == (chunks[2],)
+
+    async def test_in_project_drops_other_projects_neighbors(self):
+        chunks = [
+            _make_chunk(
+                "other project",
+                source="/tmp/s.md",
+                start_line=0,
+                scope="project_shared",
+                project_root=Path("/other"),
+            ),
+            _make_chunk("anchor", source="/tmp/s.md", start_line=10),
+            _make_chunk(
+                "this project",
+                source="/tmp/s.md",
+                start_line=20,
+                scope="project_shared",
+                project_root=Path("/proj"),
+            ),
+        ]
+        pipeline = _pipeline_for(chunks, chunks[1], window=1)
+
+        results, _ = await pipeline.search("test", project_context_root=Path("/proj"))
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == ()
+        assert ctx.window_after == (chunks[2],)
+
+    async def test_out_of_project_drops_project_tier_neighbors(self):
+        chunks = [
+            _make_chunk(
+                "project row",
+                source="/tmp/s.md",
+                start_line=0,
+                scope="project_local",
+                project_root=Path("/proj"),
+            ),
+            _make_chunk("anchor", source="/tmp/s.md", start_line=10),
+        ]
+        pipeline = _pipeline_for(chunks, chunks[1], window=1)
+
+        results, _ = await pipeline.search("test")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == ()
+
+    async def test_explicit_out_of_project_scope_opts_into_cross_project(self):
+        """``scope=project_shared`` outside a project is the documented opt-in."""
+        chunks = [
+            _make_chunk(
+                "other project",
+                source="/tmp/s.md",
+                start_line=0,
+                scope="project_shared",
+                project_root=Path("/other"),
+            ),
+            _make_chunk("anchor", source="/tmp/s.md", start_line=10),
+            _make_chunk("user row", source="/tmp/s.md", start_line=20),
+        ]
+        pipeline = _pipeline_for(chunks, chunks[1], window=1)
+
+        results, _ = await pipeline.search("test", scope="project_shared")
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == (chunks[0],)
+        # The boundary still keeps user-tier neighbours visible.
+        assert ctx.window_after == (chunks[2],)
+
+    async def test_empty_scope_filter_keeps_the_boundary(self):
+        """``scope=[]`` carries no intent — SQL answers it with ``scope='user'``.
+
+        Reading the empty filter's permissive ``matches()`` as an opt-in would
+        hand out other projects' chunks as context.
+        """
+        chunks = [
+            _make_chunk(
+                "other project",
+                source="/tmp/s.md",
+                start_line=0,
+                scope="project_shared",
+                project_root=Path("/other"),
+            ),
+            _make_chunk("anchor", source="/tmp/s.md", start_line=10),
+        ]
+        pipeline = _pipeline_for(chunks, chunks[1], window=1)
+
+        results, _ = await pipeline.search("test", scope=[])
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == ()
+
+    @pytest.mark.parametrize(
+        ("kwargs", "neighbor_created"),
+        [
+            ({"tag_filter": "anchor-only"}, datetime(2025, 1, 1, tzinfo=UTC)),
+            # Neighbours predate the lower bound; the anchor clears it.
+            ({"created_from": datetime(2020, 1, 1, tzinfo=UTC)}, datetime(2010, 1, 1, tzinfo=UTC)),
+            # Neighbours postdate the upper bound; the anchor clears it. Dating
+            # them 2010 instead would satisfy the bound, and an implementation
+            # that wrongly screened neighbours on it would still pass.
+            (
+                {"created_before": datetime(2030, 1, 1, tzinfo=UTC)},
+                datetime(2035, 1, 1, tzinfo=UTC),
+            ),
+        ],
+        ids=["tags", "created_from", "created_before"],
+    )
+    async def test_selection_filters_do_not_constrain_neighbors(self, kwargs, neighbor_created):
+        """Selection filters say what was searched for, not what may be seen.
+
+        Each case is built so only the anchor satisfies the filter — the
+        neighbours carry no tags, or fall on the wrong side of the bound — so
+        applying it to them would empty the window.
+        """
+        chunks = _make_file_chunks("/tmp/doc.md", 3)
+        for i in (0, 2):
+            chunks[i].created_at = neighbor_created
+        chunks[1].created_at = datetime(2025, 1, 1, tzinfo=UTC)
+        chunks[1].metadata = dataclasses.replace(chunks[1].metadata, tags=("anchor-only",))
+        pipeline = _pipeline_for(chunks, chunks[1], window=1)
+
+        results, _ = await pipeline.search("test", **kwargs)
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == (chunks[0],)
+        assert ctx.window_after == (chunks[2],)
+
+    async def test_anchor_hidden_by_a_concurrent_reindex_reports_no_raw_ordinal(self):
+        """A re-index between retrieval and expansion keeps the id, not the row.
+
+        The hit is still returned, so it has to be counted — but its position
+        must come from the visible chunks ahead of it. The raw index would
+        publish where it sits among the hidden ones.
+        """
+        chunks = _mixed_namespace_file()
+        # The stored row for the anchor has moved into a hidden namespace
+        # since the retrievers matched it; the SearchResult still holds the
+        # copy that passed them.
+        stale_anchor = chunks[2]
+        chunks[2] = _make_chunk(
+            stale_anchor.content,
+            source="/tmp/mixed.md",
+            start_line=stale_anchor.metadata.start_line,
+            namespace="archive:2024",
+            chunk_id=stale_anchor.id,
+        )
+        pipeline = _pipeline_for(chunks, stale_anchor, window=2)
+
+        results, _ = await pipeline.search("test")
+
+        ctx = results[0].context
+        assert ctx is not None
+        # Two visible chunks in the file (positions 0 and 4) plus the anchor.
+        assert ctx.chunk_position == 2
+        assert ctx.total_chunks_in_file == 3
+
+    async def test_filter_only_path_applies_the_same_rule(self):
+        """Empty query enumerates via recall_chunks but expands identically."""
+        chunks = _mixed_namespace_file()
+        pipeline = _make_pipeline(
+            {Path("/tmp/mixed.md"): chunks},
+            context_window_config=ContextWindowConfig(enabled=True, window_size=2),
+        )
+        pipeline._storage.recall_chunks = AsyncMock(return_value=[chunks[2]])
+
+        results, _ = await pipeline.search("", tag_filter="anything")
+
+        assert len(results) == 1
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == (chunks[0],)
+        assert ctx.window_after == (chunks[4],)

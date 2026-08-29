@@ -29,7 +29,16 @@ async def search(
     created_before: datetime | None = Query(None),
     tag_filter: str | None = Query(None),
     namespace: str | None = Query(None),
-    context_window: int = Query(0, ge=0, le=10, description="Expand ±N adjacent chunks"),
+    context_window: int = Query(
+        0,
+        ge=0,
+        le=10,
+        description=(
+            "Expand ±N adjacent chunks. Neighbours obey visibility rules "
+            "(hidden namespaces, project scope, validity) but not the "
+            "tag/type/date selection filters"
+        ),
+    ),
     pipeline=Depends(get_search_pipeline),
     config=Depends(get_config),
 ) -> SearchResponse:

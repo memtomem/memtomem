@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -66,6 +68,69 @@ class ChunkMetadata:
     # it. Ownership over the virtual summary path is decided on this field
     # rather than on a namespace/tag combination a user chunk can reproduce.
     origin: str | None = None
+
+
+def _like_glob_matches(pattern: str, value: str) -> bool:
+    """Evaluate a user glob the way the SQL layer's ``LIKE`` would.
+
+    The namespace/scope SQL emitters translate a user pattern by escaping
+    ``_`` and turning ``*`` into ``%``, then compare with
+    ``LIKE ? ESCAPE '\\'`` (:func:`memtomem.storage.sqlite_helpers.
+    namespace_sql`, :func:`memtomem.storage.sqlite_scope._scopes_glob_clause`).
+    Three consequences of that contract are easy to get wrong in Python and
+    are pinned by the parity tests:
+
+    - A literal ``%`` the user typed is **not** escaped by the emitter, so it
+      is a wildcard here too.
+    - ``_`` is escaped, so it matches only itself — unlike ``fnmatch``, which
+      would also read ``?`` and ``[…]`` as wildcards. Never use ``fnmatch``.
+    - SQLite's default ``LIKE`` folds case for **ASCII only**, so ``Ü`` does
+      not match ``ü``.
+
+    A pattern ending in a lone escape character has nothing to escape and
+    matches nothing in SQLite, so it returns ``False`` here rather than
+    falling back to a literal backslash.
+    """
+    sql_pattern = _ascii_fold(pattern.replace("_", r"\_").replace("*", "%"))
+    regex_parts: list[str] = []
+    i = 0
+    while i < len(sql_pattern):
+        ch = sql_pattern[i]
+        if ch == "\\":
+            if i + 1 >= len(sql_pattern):
+                return False
+            regex_parts.append(re.escape(sql_pattern[i + 1]))
+            i += 2
+            continue
+        if ch == "%":
+            regex_parts.append(".*")
+        elif ch == "_":
+            regex_parts.append(".")
+        else:
+            regex_parts.append(re.escape(ch))
+        i += 1
+    regex = re.compile("".join(regex_parts), re.DOTALL)
+    return regex.fullmatch(_ascii_fold(value)) is not None
+
+
+def _ascii_fold(value: str) -> str:
+    """Lowercase ASCII letters only, matching SQLite ``LIKE`` case folding."""
+    return "".join(c.lower() if "A" <= c <= "Z" else c for c in value)
+
+
+def has_namespace_prefix(namespace: str, prefixes: Sequence[str]) -> bool:
+    """Whether ``namespace`` starts with any of ``prefixes``.
+
+    The Python twin of the ``namespace NOT LIKE ? ESCAPE '\\'`` conjuncts
+    :func:`memtomem.storage.sqlite_helpers.namespace_sql` emits for
+    ``exclude_prefixes``: the prefix is escaped there, so ``%`` and ``_``
+    inside one are literal, and the comparison folds ASCII case. Callers that
+    need "is this a system namespace" — context-window expansion, which has
+    to answer that for a chunk it already holds — share this instead of
+    re-deriving the rule.
+    """
+    folded = _ascii_fold(namespace)
+    return any(folded.startswith(_ascii_fold(p)) for p in prefixes)
 
 
 class InvalidFilterSyntaxError(ValueError):
@@ -149,6 +214,24 @@ class NamespaceFilter:
             return NamespaceFilter(namespaces=tuple(v.strip() for v in value.split(",")))
         return NamespaceFilter(namespaces=(value,))
 
+    def matches(self, namespace: str) -> bool:
+        """Evaluate this filter in Python, mirroring :func:`namespace_sql`.
+
+        Used where a chunk has already been fetched and the filter has to be
+        applied without a second query — context-window neighbours, which are
+        read in bulk per source file. The branch order and comparison
+        semantics must stay identical to the SQL emitter (exact ``IN`` is
+        case-sensitive, ``LIKE`` folds ASCII case); the parity tests execute
+        both against the same value matrix.
+        """
+        if self.namespaces:
+            return namespace in self.namespaces
+        if self.pattern:
+            return _like_glob_matches(self.pattern, namespace)
+        if self.exclude_prefixes:
+            return not has_namespace_prefix(namespace, self.exclude_prefixes)
+        return True
+
 
 @dataclass(frozen=True, slots=True)
 class ScopeFilter:
@@ -205,6 +288,23 @@ class ScopeFilter:
         if "," in value:
             return ScopeFilter(scopes=tuple(v.strip() for v in value.split(",")))
         return ScopeFilter(scopes=(value,))
+
+    def matches(self, scope: str) -> bool:
+        """Evaluate the *explicit* part of this filter in Python.
+
+        Mirrors the scope clause :func:`memtomem.storage.sqlite_scope.
+        scope_context_sql` builds from the filter itself — **not** the
+        always-on context boundary it wraps that clause in. Callers that need
+        the boundary too (context-window neighbours) must apply the
+        project-root rule alongside this predicate, exactly as the SQL does.
+        An empty filter matches everything, mirroring the emitter's fallback
+        to the no-filter context rule.
+        """
+        if self.scopes:
+            return scope in self.scopes
+        if self.pattern:
+            return _like_glob_matches(self.pattern, scope)
+        return True
 
 
 @dataclass(slots=True)
