@@ -87,13 +87,13 @@ depend on (`CLAUDE.md`).
 
 - **Count and age are reported unconditionally**, never gated on a
   "looks abandoned" heuristic. The 29-live-parent machine is the reason: gating
-  would have hidden the common case entirely.
+  would have hidden all 29 of them.
 - **Parent liveness is an annotation, not a verdict.** The field is named
   `recorded_parent` because a registration-time PPID proves less than
   "orphaned": on Windows the parent pid is never reparented, persists stale, and
   is aggressively reused, so an "alive" parent may be an unrelated process. A
-  recorded PPID of 1 is inherently POSIX-only (Windows pids are multiples of
-  four).
+  recorded PPID of 1 is not expected on Windows, whose pids are allocated as
+  multiples of four.
 - **A live parent does not mean a server is in use.** An idle session holds one
   as firmly as an active one. Anything that later acts on this report needs
   idleness as its signal, not parenthood.
@@ -122,13 +122,14 @@ permission error, deliberately never raising, so that a coordination problem
 cannot block startup. Both routes end in an unreported server; only the first
 was observed here.
 
-That is not a marginal case. Running this command on the machine described above
+On the machine described above the effect was near-total. Running this command
 reported **1** live server while `ps` showed **35**; checked for an open store
 handle, the one registered server held ten and all 34 unregistered ones held
-none, with no counterexample either way — which is what identifies lazy
-initialization, not registration failure, as the cause on that machine. The
-population that accumulates — idle sessions holding a server they never used —
-is precisely the population the registry cannot see.
+none. That is consistent with lazy initialization rather than registration
+failure — though not conclusive on its own, since an initialization that failed
+before registering would also have released its handles; distinguishing them
+would need the servers' own logs. Either way, a population the registry cannot
+see was larger than the one it could.
 
 So `mm doctor` faithfully reports the registry, and on a machine like that one
 the registry answers a narrower question than #2226 asked. Closing the gap means

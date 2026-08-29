@@ -4,8 +4,9 @@ Diagnostics need to distinguish "that process is gone" from "I could not tell",
 which a boolean cannot express: an access-denied probe means the process
 *exists* and is merely not ours to inspect, while a failed query means we
 learned nothing at all. Collapsing either into ``False`` is what turns a live
-server into a reported-dead one, so every uncertain answer is ``"unknown"`` and
-callers are expected to render it as such rather than pick a side.
+recorded parent into a reported-missing one, so every uncertain answer is
+``"unknown"`` and callers are expected to render it as such rather than pick a
+side.
 
 This deliberately does not reuse ``cli/web.py:_pid_alive``. That helper opens the
 Windows handle with ``SYNCHRONIZE`` alone and then calls ``GetExitCodeProcess``,

@@ -313,7 +313,7 @@ you: stopping the client that owns a server is the reliable way to release it.
 Reading the output:
 
 - **A live parent does not mean the server is in use.** It means some process
-  still holds it — very often an idle session. Do not read "all recorded parents
+  still holds it, which may be an idle session. Do not read "all recorded parents
   alive" as "nothing to clean up"; the count and ages are the signal.
 - **`PARENT STATE` is about the parent pid recorded when the server
   registered**, not a live relationship. On Windows a parent pid is never
@@ -334,9 +334,10 @@ Reading the output:
 
   So `ps` can show more `memtomem-server` processes than `mm doctor` does, and
   the gap can be most of them: on one machine `mm doctor` reported 1 while `ps`
-  showed 35, and none of the 34 missing ones had an open store handle — which
-  identifies the first cause on *that* machine. How the two causes divide in
-  general is not established. Tracked in
+  showed 35, and none of the 34 missing ones had an open store handle, which is
+  consistent with the first cause on *that* machine (though a registration that
+  failed after opening the store would also have released its handles). How the
+  two causes divide in general is not established. Tracked in
   [#2230](https://github.com/memtomem/memtomem/issues/2230).
 
 Exit status is `0` unless the runtime directory itself is unusable (wrong
