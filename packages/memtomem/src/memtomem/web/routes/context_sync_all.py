@@ -126,8 +126,11 @@ _SYNC_ALL_PROJECTS_SURFACE = "web_context_sync_all_projects"
 #: One outer window = five sequential phases × the standalone routes' 60s
 #: budget. The engine-internal cross-process lock budgets
 #: (``_SKILLS_LOCK_BUDGET_S`` / ``_SETTINGS_LOCK_BUDGET_S``, 30s) stay far
-#: below it, so a timed-out request cannot orphan a worker thread that
-#: writes after the 503 went out (#1145 shape).
+#: below it, so no phase can sit on a lock past this window (#1145 shape).
+#: The budgets bound *waiting* only, so they do not by themselves stop an
+#: orphaned worker from writing after the 503 — for the settings phase that
+#: is the abort flag ``abandon_sync_on_exit`` installs (#2218); the phases
+#: whose engines have not yet adopted it can still land a late write.
 _SYNC_ALL_TIMEOUT_S = 300
 
 

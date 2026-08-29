@@ -778,7 +778,11 @@ async def mem_context_generate(
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
     if "settings" in inc:
-        from memtomem.context.settings import generate_all_settings, pinned_host_homes
+        from memtomem.context.settings import (
+            abandon_sync_on_exit,
+            generate_all_settings,
+            pinned_host_homes,
+        )
 
         # Resolve settings scope lazily: _resolve_mcp_scope builds
         # Mem2MemConfig and applies env/file overrides, which can fail
@@ -791,7 +795,9 @@ async def mem_context_generate(
         # ``asyncio.to_thread`` copies this context into the worker, so a
         # worker that outlives this call still writes to the homes resolved
         # here rather than to whatever ``$HOME`` says when it lands (#2211).
-        with pinned_host_homes():
+        # The same copied context carries the abort flag, so a worker whose
+        # caller was cancelled stops before its remaining writes (#2218).
+        with pinned_host_homes(), abandon_sync_on_exit():
             results.extend(_settings_dup_tier_warnings(root, settings_scope))
             settings_results = await asyncio.to_thread(
                 generate_all_settings,
@@ -1145,7 +1151,11 @@ async def mem_context_sync(
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
     if "settings" in inc:
-        from memtomem.context.settings import generate_all_settings, pinned_host_homes
+        from memtomem.context.settings import (
+            abandon_sync_on_exit,
+            generate_all_settings,
+            pinned_host_homes,
+        )
 
         # Resolve settings scope lazily (see mem_context_generate note):
         # _resolve_mcp_scope builds Mem2MemConfig and applies env/file
@@ -1158,7 +1168,9 @@ async def mem_context_sync(
         # ``asyncio.to_thread`` copies this context into the worker, so a
         # worker that outlives this call still writes to the homes resolved
         # here rather than to whatever ``$HOME`` says when it lands (#2211).
-        with pinned_host_homes():
+        # The same copied context carries the abort flag, so a worker whose
+        # caller was cancelled stops before its remaining writes (#2218).
+        with pinned_host_homes(), abandon_sync_on_exit():
             results.extend(_settings_dup_tier_warnings(root, settings_scope))
             settings_results = await asyncio.to_thread(
                 generate_all_settings,
