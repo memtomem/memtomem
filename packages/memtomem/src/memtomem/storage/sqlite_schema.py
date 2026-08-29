@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from memtomem.errors import EmbeddingDimensionMismatchError, SchemaDowngradeError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+from memtomem.storage.sqlite_helpers import utc_stamp
 from memtomem.storage.sqlite_meta import MetaManager
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,12 @@ _SHARED_FROM_TAG_PREFIX = "shared-from="
 # escape text instead of the characters they encode (pre ``ensure_ascii=False``
 # memory_writer fix). Bump (``..._v2``) to force a re-run.
 _TAGS_UNICODE_REPAIR_KEY = "tags_unicode_repair_v1"
+
+# One-shot repair key for chunk timestamps stored in a non-canonical form —
+# an offset other than ``+00:00`` (imported bundles), a naive value, or the
+# space-separated shape SQLite's ``CURRENT_TIMESTAMP`` emitted from the old
+# scope-move UPDATE. Bump (``..._v2``) to force a re-run. (#2203)
+_CHUNK_TS_UTC_REPAIR_KEY = "chunk_timestamps_utc_repair_v1"
 
 # One-shot adoption key for consolidation summaries written before
 # ``chunks.origin`` existed (#2161). Bump (``..._v2``) to re-run.
@@ -700,6 +707,7 @@ def create_tables(
 
     _backfill_chunk_links(db, meta)
     _repair_unicode_escaped_tags(db, meta)
+    _repair_non_utc_chunk_timestamps(db, meta)
 
     # --- Entity extraction table ---
     db.execute("""
@@ -1215,6 +1223,57 @@ def _repair_unicode_escaped_tags(db: sqlite3.Connection, meta: MetaManager) -> i
         repaired += 1
 
     meta.set_meta(_TAGS_UNICODE_REPAIR_KEY, "done")
+    return repaired
+
+
+def _repair_non_utc_chunk_timestamps(db: sqlite3.Connection, meta: MetaManager) -> int:
+    """Rewrite chunk timestamps stored in a non-canonical form as UTC (#2203).
+
+    ``created_at`` / ``updated_at`` are compared lexically, so a stored value
+    must be UTC in the exact shape ``utc_stamp`` renders. Rows written before
+    the write-boundary fix could carry an imported bundle's offset
+    (``...+09:00``), no offset at all (a naive bundle value), or the
+    space-separated seconds shape SQLite's ``CURRENT_TIMESTAMP`` produced in
+    the old scope-move UPDATE — each of which sorts by its printed digits and
+    lands on the wrong side of correct bounds.
+
+    This pass walks every row once and re-renders both columns through
+    ``utc_stamp``; only rows whose rendering differs are updated, so the
+    canonical form cannot drift from what the writer emits. There is
+    deliberately no SQL pre-filter: a suffix test like ``LIKE '%+00:00'``
+    would prove the suffix but not the canonical shape, permanently skipping
+    e.g. a space-separated ``+00:00`` row once the marker is set.
+
+    A naive value is read as UTC (matching ``utc_stamp``); the instant of an
+    offset-aware value is preserved, not restamped. An unparsable value leaves
+    the whole row untouched rather than crash startup. Scope: the ``chunks``
+    timestamp columns only — ``last_accessed_at`` is always stamped
+    internally in UTC, and bad pre-fix ``query_history`` rows are ephemeral
+    and age out under retention.
+
+    Returns the number of rows rewritten on this call (0 once recorded).
+    """
+    if meta.get_meta(_CHUNK_TS_UTC_REPAIR_KEY) == "done":
+        return 0
+
+    rows = db.execute("SELECT id, created_at, updated_at FROM chunks").fetchall()
+
+    repaired = 0
+    for chunk_id, created_at, updated_at in rows:
+        try:
+            new_created = utc_stamp(datetime.fromisoformat(created_at))
+            new_updated = utc_stamp(datetime.fromisoformat(updated_at))
+        except (ValueError, TypeError):
+            continue
+        if new_created == created_at and new_updated == updated_at:
+            continue
+        db.execute(
+            "UPDATE chunks SET created_at=?, updated_at=? WHERE id=?",
+            (new_created, new_updated, chunk_id),
+        )
+        repaired += 1
+
+    meta.set_meta(_CHUNK_TS_UTC_REPAIR_KEY, "done")
     return repaired
 
 

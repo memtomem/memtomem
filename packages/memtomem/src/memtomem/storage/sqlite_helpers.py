@@ -67,9 +67,29 @@ def utc_bound(value: datetime) -> str:
     Use this for every datetime that becomes a bound on those columns; do not
     call ``.isoformat()`` directly at the call site.
     """
+    return utc_stamp(value, timespec="auto")
+
+
+def utc_stamp(value: datetime, *, timespec: str = "microseconds") -> str:
+    """Render a datetime as the canonical stored form of a timestamp column.
+
+    The ROW side of the invariant :func:`utc_bound` describes: bounds compare
+    lexically against stored values, so a *stored* timestamp must be UTC and
+    canonically rendered just as much as a bound. A row written with its
+    caller's offset intact (e.g. an imported bundle's ``+09:00``) sorts by its
+    wall-clock digits and lands on the wrong side of every correct bound.
+
+    A naive value is read as UTC, matching :func:`utc_bound`. The default
+    ``timespec="microseconds"`` is the precision the ``chunks`` timestamp
+    columns are written at; pass the target column's precision explicitly when
+    it differs.
+
+    Use this for every datetime that becomes a stored timestamp; do not call
+    ``.isoformat()`` directly at the call site.
+    """
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc).isoformat()
-    return value.astimezone(timezone.utc).isoformat()
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat(timespec=timespec)
 
 
 def utc_bound_from_iso(value: str, *, field: str, timespec: str = "auto") -> str:

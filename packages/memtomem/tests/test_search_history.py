@@ -93,3 +93,41 @@ class TestImportanceScores:
     async def test_empty_scores(self, storage):
         result = await storage.get_importance_scores([])
         assert result == {}
+
+
+class TestObservationCreatedAtNormalization:
+    """``save_search_observation`` takes ``created_at`` from the caller, and
+    the value becomes a lexically-compared row — so it needs the same UTC
+    treatment as a bound, at the column's second precision (#2203)."""
+
+    @staticmethod
+    async def _save(storage, created_at):
+        return await storage.save_search_observation(
+            "stamped query",
+            [],
+            [],
+            [],
+            run_id="9f1d0c3e-1111-4444-8888-abcdefabcdef",
+            observation={},
+            result_snapshot=[],
+            created_at=created_at,
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_offset_created_at_is_stored_as_utc_seconds(self, storage):
+        await self._save(storage, "2026-01-01T00:00:00+09:00")
+        row = storage._get_db().execute("SELECT created_at FROM query_history").fetchone()
+        assert row[0] == "2025-12-31T15:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_created_at_is_refused_by_name(self, storage):
+        with pytest.raises(ValueError, match="created_at must be an ISO-8601 timestamp"):
+            await self._save(storage, "yesterday")
+
+    @pytest.mark.asyncio
+    async def test_an_empty_created_at_is_refused_not_restamped(self, storage):
+        """An explicit empty string is a malformed argument, not an omitted
+        one — truthiness would silently stamp ``now`` and lose the chronology
+        the argument exists to record."""
+        with pytest.raises(ValueError, match="created_at must be an ISO-8601 timestamp"):
+            await self._save(storage, "")

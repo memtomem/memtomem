@@ -845,3 +845,71 @@ class TestOriginProvenance:
         finally:
             await close_components(comp_a)
             await close_components(comp_b)
+
+
+class TestImportTimestampNormalization:
+    """A bundle's ``created_at`` must land as canonical UTC (#2203).
+
+    The columns are compared lexically, so an imported row keeping its
+    bundle's offset — or arriving naive and storing with no offset at all —
+    sorts by its printed digits and falls on the wrong side of correct
+    bounds. Import reads a naive value as UTC and the storage boundary
+    renders every value canonically.
+    """
+
+    @staticmethod
+    def _bundle(created_at: str) -> dict:
+        return {
+            "version": "1",
+            "exported_at": "2026-01-02T00:00:00+00:00",
+            "total_chunks": 1,
+            "chunks": [
+                {
+                    "content": f"timestamped record {created_at}",
+                    "source_file": "stamped.md",
+                    "heading_hierarchy": [],
+                    "chunk_type": "raw_text",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "language": "en",
+                    "tags": [],
+                    "namespace": "default",
+                    "created_at": created_at,
+                }
+            ],
+        }
+
+    async def _import_and_read(self, tmp_path, tag: str, created_at: str) -> str:
+        import json
+
+        comp, _ = await _make_components(tmp_path, tag)
+        try:
+            bundle_path = tmp_path / f"{tag}.json"
+            bundle_path.write_text(json.dumps(self._bundle(created_at)), encoding="utf-8")
+            stats = await import_chunks(comp.storage, comp.embedder, bundle_path)
+            assert stats.imported_chunks == 1
+            row = comp.storage._get_db().execute("SELECT created_at FROM chunks LIMIT 1").fetchone()
+            return row[0]
+        finally:
+            await close_components(comp)
+
+    async def test_an_offset_created_at_is_stored_as_utc(self, tmp_path):
+        stored = await self._import_and_read(tmp_path, "ts_offset", "2026-01-01T00:00:00+09:00")
+        assert stored == "2025-12-31T15:00:00.000000+00:00"
+
+    async def test_a_naive_created_at_is_read_as_utc(self, tmp_path):
+        stored = await self._import_and_read(tmp_path, "ts_naive", "2026-01-01T00:00:00")
+        assert stored == "2026-01-01T00:00:00.000000+00:00"
+
+    def test_a_naive_bundle_value_becomes_an_aware_chunk(self):
+        """The in-memory invariant, pinned directly: ``Chunk`` timestamps are
+        always timezone-aware (see ``_row_to_chunk``). The storage boundary
+        would render a naive value as UTC anyway, so only this assertion
+        catches a regression in the parse step itself."""
+        from memtomem.tools.export_import import _dict_to_chunk
+
+        record = dict(self._bundle("2026-01-01T00:00:00")["chunks"][0])
+        chunk, _ = _dict_to_chunk(record)
+
+        assert chunk.created_at.tzinfo is not None
+        assert chunk.created_at.utcoffset().total_seconds() == 0
