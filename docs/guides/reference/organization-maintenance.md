@@ -322,12 +322,16 @@ Reading the output:
   it was reparented — the recorded value alone does not distinguish the two.
 - **The report covers servers that have done work, not every server running.**
   A server registers when it first opens the store, which happens on the first
-  memory tool call — a client that connects and only lists tools never gets
-  that far. Such a server is running and holding memory, but no command here can
-  see it. So if `ps` shows more `memtomem-server` processes than `mm doctor`
-  does, the difference is sessions that have not used memory yet, and the
-  difference can be large: on one machine `mm doctor` reported 1 while `ps`
-  showed 35. Tracked in
+  request that needs it — a memory tool call or a resource read — or at startup
+  if `warmup.enabled` is set. A client that connects, lists tools, and asks for
+  nothing else never gets that far, so its server is running and holding memory
+  while no command here can see it. Registration can also simply fail (it is
+  best-effort by design, so that a coordination problem cannot block startup),
+  which is a second and rarer way a running server goes unreported.
+  So if `ps` shows more `memtomem-server` processes than `mm doctor` does, idle
+  sessions are the likely explanation, and the difference can be large: on one
+  machine `mm doctor` reported 1 while `ps` showed 35 — none of the 34 had
+  opened the store. Tracked in
   [#2230](https://github.com/memtomem/memtomem/issues/2230).
 
 Exit status is `0` unless the runtime directory itself is unusable (wrong

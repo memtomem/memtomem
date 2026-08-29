@@ -21,9 +21,11 @@ commands"; the naming question was left open.
 
 #2226 then produced a class of problem none of the three can host. A host
 accumulates `memtomem-server` processes — 88 holding 3.7 GB on one machine, 29
-on another — and nothing in memtomem can see it. The data already exists: the
-instance registry writes one flock-held sentinel per live server carrying pid,
-parent pid, and store digest. What is missing is a consumer that reads it
+on another — and nothing in memtomem can see it. Some of the data already
+exists: the instance registry writes one flock-held sentinel per *registered*
+server — one that has opened its store — carrying pid, parent pid, and store
+digest. (That qualifier turns out to matter a great deal; see "Known
+limitation".) What is missing is a consumer that reads it
 *without* narrowing. `mm status` asks only about the current store;
 `probe_all_for_uninstall` is all-store but reduces to a boolean refusal. Dozens
 of servers spread across several stores therefore produce no output anywhere.
@@ -109,16 +111,23 @@ The report is only as complete as the registry, and the registry's population
 rule is narrower than "servers that exist": it is **servers that have done
 work**. Registration runs inside `AppContext.ensure_initialized`, which is lazy
 by design (#399) so that a handshake-only MCP session — `initialize` plus
-`tools/list` — does not open a store. A client that connects and never calls a
-memory tool therefore leaves a running, memory-holding server that the registry
-has never heard of.
+`tools/list` — does not open a store. Initialization is reached by the first
+request that needs the store (a memory tool call or a resource read), or at
+startup when `warmup.enabled` is set; with warmup off, a client that connects
+and asks for nothing beyond the handshake leaves a running, memory-holding
+server the registry has never heard of. Registration can also fail outright —
+`register_instance` returns `None` on a non-file store, a lock timeout, or a
+permission error, deliberately never raising, so that a coordination problem
+cannot block startup. Both routes end in an unreported server; only the first
+was observed here.
 
 That is not a marginal case. Running this command on the machine described above
 reported **1** live server while `ps` showed **35**; checked for an open store
 handle, the one registered server held ten and all 34 unregistered ones held
-none, with no counterexample either way. The population that accumulates —
-idle sessions holding a server they never used — is precisely the population the
-registry cannot see.
+none, with no counterexample either way — which is what identifies lazy
+initialization, not registration failure, as the cause on that machine. The
+population that accumulates — idle sessions holding a server they never used —
+is precisely the population the registry cannot see.
 
 So `mm doctor` faithfully reports the registry, and on a machine like that one
 the registry answers a narrower question than #2226 asked. Closing the gap means
