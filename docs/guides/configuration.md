@@ -432,9 +432,10 @@ Surrounding chunks are screened by the same visibility rules as the results
 themselves: chunks in a hidden system namespace (`search.system_namespace_prefixes`),
 outside the current project scope, or outside their validity window are not
 returned as context. Naming a namespace or scope explicitly makes its chunks
-visible as context too, and `mem_do(action="expand", ...)` treats the chunk id it
-is given the same way — neighbours sharing that chunk's namespace, or its project
-root, stay visible. Selection filters — `tag_filter`, chunk types, created-date
+visible as context too. `mem_do(action="expand", ...)` applies the default rules
+regardless of which chunk id it is given, so expanding a chunk in a hidden
+namespace returns that chunk with little or no context — reach for
+`mem_search(namespace=...)` instead. Selection filters — `tag_filter`, chunk types, created-date
 bounds — apply only to the matched result, not to what surrounds it.
 
 ## Indexing

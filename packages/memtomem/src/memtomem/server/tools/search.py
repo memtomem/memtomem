@@ -14,9 +14,8 @@ from memtomem.models import (
     InvalidFilterSyntaxError,
     NamespaceFilter,
     ScopeFilter,
-    has_namespace_prefix,
 )
-from memtomem.search.visibility import chunk_valid_at, neighbor_visible
+from memtomem.search.visibility import neighbor_visible
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
 # LangGraph adapter; re-exported from this module so the long-standing
@@ -280,49 +279,38 @@ async def mem_search(
     return output
 
 
-def _expand_visibility_predicate(app: Any, anchor: Chunk) -> Callable[[Chunk], bool]:
+def _expand_visibility_predicate(app: Any) -> Callable[[Chunk], bool]:
     """Build the neighbour-visibility test ``mem_expand`` screens with.
 
-    Same rule the search pipeline applies to ``context_window`` neighbours
-    (:func:`memtomem.search.visibility.neighbor_visible`), with the anchor chunk itself as
-    the opt-in: naming a chunk id asks for *that* chunk's surroundings, so
-    neighbours sharing its namespace or its project scope are visible even
-    when the default filters would hide them.
+    The rule the search pipeline applies to ``context_window`` neighbours
+    (:func:`memtomem.search.visibility.neighbor_visible`), at its default
+    setting: system namespaces hidden, the ADR-0011 boundary pinned to the
+    caller's project context, expired chunks dropped.
+
+    Deliberately *not* keyed to the anchor chunk. Reading the id as an
+    opt-in — "you named this chunk, so its namespace and project are yours
+    to read around" — assumes possession of an id implies prior authorised
+    access, and that does not hold: several surfaces hand out full ids for
+    chunks the default rules hide, among them ``mem_dedup_scan``,
+    ``mem_export`` and the web ``/chunks`` route (#2236). Widening on that
+    basis would be inferring authorisation from something that carries
+    none. Callers who want that context ask for it through ``mem_search``,
+    whose ``namespace=`` and ``scope=`` are actual requests.
     """
     config = app.config.search
     system_prefixes = tuple(config.system_namespace_prefixes or ())
-    ns_filter = NamespaceFilter(namespaces=(anchor.metadata.namespace,))
+    ns_filter = NamespaceFilter.parse(None, system_prefixes=system_prefixes)
     project_context_root = _resolve_project_context_root(app)
-    anchor_root = anchor.metadata.project_root
     as_of_unix = int(time.time())
 
     def visible(candidate: Chunk) -> bool:
-        # No scope filter: the opt-in below is pinned to the anchor's own
-        # project root, so passing the anchor's tier as a filter here would
-        # widen it into "this tier from any project" whenever the caller is
-        # outside a project context.
-        if neighbor_visible(
+        return neighbor_visible(
             candidate,
             ns_filter=ns_filter,
             system_prefixes=system_prefixes,
             scope_filter=None,
             project_context_root=project_context_root,
             as_of_unix=as_of_unix,
-        ):
-            return True
-        # The anchor's own project: an anchor pinned to a root outside the
-        # current context still makes that project's chunks legitimate
-        # context for it, but only that project's.
-        return (
-            candidate.metadata.scope == anchor.metadata.scope
-            and candidate.metadata.project_root is not None
-            and anchor_root is not None
-            and str(candidate.metadata.project_root) == str(anchor_root)
-            and chunk_valid_at(candidate.metadata, as_of_unix)
-            and (
-                not has_namespace_prefix(candidate.metadata.namespace, system_prefixes)
-                or ns_filter.matches(candidate.metadata.namespace)
-            )
         )
 
     return visible
@@ -344,9 +332,9 @@ async def mem_expand(
     Neighbours inherit the same visibility rules as mem_search's
     context_window: system namespaces, the project-scope boundary, and
     temporal validity are enforced, so a hidden neighbour shrinks the window
-    rather than surfacing. Naming a chunk id is an explicit request for that
-    chunk's surroundings, so neighbours sharing its namespace or its project
-    scope stay visible even when a plain search would hide them.
+    rather than surfacing. The chunk id does not widen that — expanding a
+    chunk in a hidden namespace returns the chunk with little or no context.
+    Use mem_search(namespace=..., context_window=N) to read around one.
 
     Args:
         chunk_id: The UUID of the chunk to expand (from mem_search results)
@@ -373,7 +361,7 @@ async def mem_expand(
     if pos is None:
         return f"Chunk {chunk_id} not found in source file listing."
 
-    visible = _expand_visibility_predicate(app, chunk)
+    visible = _expand_visibility_predicate(app)
     before = [c for c in all_chunks[max(0, pos - window) : pos] if visible(c)]
     after = [c for c in all_chunks[pos + 1 : pos + 1 + window] if visible(c)]
     # The addressed chunk is always part of the accounting set: it is being

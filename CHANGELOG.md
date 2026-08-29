@@ -306,6 +306,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_expand` no longer treats a chunk id as permission to read around
+  that chunk.** The visibility rule added in #2192 made an exception for the
+  addressed chunk: neighbours sharing its namespace or its project root came
+  back even when the default rules hide them, on the reasoning that naming an
+  id is an explicit request for that chunk's surroundings. That reasoning
+  assumed possession of an id implies prior authorised access, and it does
+  not — `mem_dedup_scan`, `mem_export`, `mem_consolidate` (which persists
+  full ids to scratch) and the web `/chunks` and `/procedures` routes all
+  hand out full chunk ids with no namespace or scope filter, and none of
+  them take an argument to opt in with. Expansion now applies the default
+  rules whatever id it is given, so expanding a chunk in a hidden namespace
+  or another project's scope returns that chunk with little or no context.
+  Ask for that context through `mem_search`, which takes an actual request:
+  `namespace=` names a hidden namespace, and `scope=` opts into another
+  project's tier — from outside a project context, since in-project searches
+  stay pinned to the current root. Reading the addressed chunk itself is
+  unchanged. (#2236)
 - **Context-window neighbours no longer leak chunks the search itself would
   hide.** Expanding a result with `context_window` (or `mem_expand`) reads the
   matched chunk's neighbours in bulk from the source file, so none of the

@@ -351,8 +351,14 @@ class TestMemExpand:
         # Positions count only what the caller may see.
         assert "chunk 2/3" in result
 
-    async def test_expand_from_hidden_anchor_keeps_its_own_namespace(self, monkeypatch):
-        """Naming a hidden chunk's id opts into that namespace's context."""
+    async def test_expand_from_hidden_anchor_gets_no_hidden_context(self, monkeypatch):
+        """#2236: the id is not an opt-in into its own namespace.
+
+        Possessing an id does not imply the caller was allowed to see the
+        chunk — `mem_dedup_scan`, `mem_export` and the web `/chunks` route
+        all hand out ids for chunks the default rules hide — so the anchor's
+        namespace cannot be read as consent to its neighbours.
+        """
         chunks = _mixed_namespace_file()
         chunks.insert(
             2,
@@ -378,13 +384,19 @@ class TestMemExpand:
 
         result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
 
-        assert "sibling archive" in result
-        assert chunks[0].content in result
-        # A different system namespace is still not opted into.
+        # The addressed chunk is still returned — that read is mem_read's
+        # contract, unchanged here — but nothing hidden comes with it.
+        assert "sibling archive" not in result
         assert "hidden after" not in result
+        # The one visible neighbour in range is still context.
+        assert chunks[0].content in result
 
-    async def test_expand_anchor_opt_in_stays_inside_its_own_project(self, monkeypatch):
-        """The anchor's tier is not a licence to read every project's rows."""
+    async def test_expand_does_not_reach_into_the_anchors_project(self, monkeypatch):
+        """#2236: nor is the anchor's project root an opt-in.
+
+        Out of project context, the ADR-0011 boundary admits ``user`` rows
+        only, whatever project the addressed chunk belongs to.
+        """
         from memtomem.server.tools.search import mem_expand
 
         chunks = [
@@ -409,6 +421,7 @@ class TestMemExpand:
                 scope="project_shared",
                 project_root=Path("/mine"),
             ),
+            _make_chunk("user row", source="/tmp/s.md", start_line=30),
         ]
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
@@ -423,8 +436,9 @@ class TestMemExpand:
 
         result = await mem_expand(chunk_id=str(chunks[1].id), window=2, ctx=None)
 
-        assert "same project" in result
+        assert "same project" not in result
         assert "foreign project" not in result
+        assert "user row" in result
 
     async def test_expand_counts_an_expired_anchor_in_its_own_position(self, monkeypatch):
         """The named chunk is returned, so it must be part of the accounting."""
