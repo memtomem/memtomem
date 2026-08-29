@@ -31,14 +31,18 @@ import click
 
 from memtomem._instance_registry import RegistrySnapshot, snapshot_all_instances
 from memtomem._process_probe import probe_pid
-from memtomem._runtime_paths import runtime_dir, validate_runtime_dir
+from memtomem._runtime_paths import runtime_dir, scrub_text, validate_runtime_dir
 
 __all__ = ["CheckResult", "InstanceRow", "doctor"]
 
 Status = Literal["pass", "fail", "warn", "info"]
 
-_GLYPH = {"pass": "✓", "fail": "✗", "warn": "!", "info": "·"}
-_COLOR = {"pass": "green", "fail": "red", "warn": "yellow", "info": None}
+# Both dicts carry a "pass" key, which bandit's B105 reads as a hardcoded
+# password. They are status→glyph and status→colour maps, not credentials. The
+# identical pair in sync_doctor_cmd.py sits in the bandit baseline for the same
+# reason; marked inline here so the exemption stays visible at the source.
+_GLYPH = {"pass": "✓", "fail": "✗", "warn": "!", "info": "·"}  # nosec B105
+_COLOR = {"pass": "green", "fail": "red", "warn": "yellow", "info": None}  # nosec B105
 
 # At or above this many distinct server processes the report escalates from a
 # neutral observation to a warning. Chosen from field data (#2226: 88 on one
@@ -108,12 +112,15 @@ def _format_age(seconds: float | None) -> str:
 
 def _instance_rows(snapshot: RegistrySnapshot) -> list[InstanceRow]:
     rows: list[InstanceRow] = []
-    # One probe per process, not per registration. A process's registrations all
-    # record the same parent, so probing each separately buys nothing and can
-    # *disagree* — a parent exiting mid-report would leave one process holding
-    # rows that say both "alive" and "missing", and any summary over them would
-    # be picking one arbitrarily.
-    probed_by_procid: dict[str, Literal["alive", "missing", "unknown"]] = {}
+    # Probe each distinct (process, recorded parent) once. Keyed on the pair
+    # rather than the procid alone because registrations capture
+    # ``os.getppid()`` independently: a process reparented between two
+    # registrations legitimately records two different parents, and a
+    # procid-only cache would then pair one row's ppid with a state probed from
+    # the other's. Caching still removes the real hazard — probing the *same*
+    # ppid repeatedly, where a parent exiting mid-report would make one
+    # process's rows disagree with each other.
+    probed: dict[tuple[str, int], Literal["alive", "missing", "unknown"]] = {}
     for info in snapshot.instances:
         try:
             age: float | None = max(time.time() - info.path.stat().st_mtime, 0.0)
@@ -121,14 +128,15 @@ def _instance_rows(snapshot: RegistrySnapshot) -> list[InstanceRow]:
             # The sentinel vanished between enumeration and stat — the process
             # exited mid-report. Unknown age, not zero.
             age = None
-        parent = probed_by_procid.get(info.procid)
+        key = (info.procid, info.ppid)
+        parent = probed.get(key)
         if parent is None:
             # "dead" is the probe's vocabulary about a pid; this column reports
             # a *recorded* parent, so it says "missing" — we observed the pid is
             # not running, not that the client necessarily died (pids reused).
-            probed = probe_pid(info.ppid)
-            parent = "alive" if probed == "alive" else "missing" if probed == "dead" else "unknown"
-            probed_by_procid[info.procid] = parent
+            state = probe_pid(info.ppid)
+            parent = "alive" if state == "alive" else "missing" if state == "dead" else "unknown"
+            probed[key] = parent
         rows.append(
             InstanceRow(
                 pid=info.pid,
@@ -167,12 +175,16 @@ def _process_ages(rows: list[InstanceRow]) -> tuple[list[float], int]:
 
 def _check_runtime_dir(snapshot: RegistrySnapshot) -> CheckResult:
     """The host's coordination directory: does it exist and is it ours alone?"""
+    # Every path below reaches a terminal, and a runtime-dir candidate can be
+    # environment-derived, so it is scrubbed of control sequences before it is
+    # printed as prose. JSON keeps the raw value — a consumer needs the real
+    # path, and it is not being rendered to a tty.
     if snapshot.canonical_error is not None:
         return CheckResult(
             name="runtime-dir",
             status="fail",
             message="runtime directory is unusable",
-            detail=str(snapshot.canonical_error),
+            detail=scrub_text(str(snapshot.canonical_error)),
         )
     try:
         target = runtime_dir()
@@ -181,16 +193,17 @@ def _check_runtime_dir(snapshot: RegistrySnapshot) -> CheckResult:
             name="runtime-dir",
             status="fail",
             message="runtime directory could not be resolved",
-            detail=str(exc),
+            detail=scrub_text(str(exc)),
         )
+    safe_target = scrub_text(str(target))
     try:
         present = validate_runtime_dir(target)
     except OSError as exc:
         return CheckResult(
             name="runtime-dir",
             status="fail",
-            message=f"runtime directory is unusable: {target}",
-            detail=str(exc),
+            message=f"runtime directory is unusable: {safe_target}",
+            detail=scrub_text(str(exc)),
         )
     data: dict[str, object] = {"path": str(target), "present": present}
     if snapshot.refusal is not None:
@@ -198,8 +211,11 @@ def _check_runtime_dir(snapshot: RegistrySnapshot) -> CheckResult:
         return CheckResult(
             name="runtime-dir",
             status="warn",
-            message=f"runtime directory {target}",
-            detail=f"a historical runtime directory was refused: {refused} ({refusal_exc})",
+            message=f"runtime directory {safe_target}",
+            detail=(
+                "a historical runtime directory was refused: "
+                f"{scrub_text(str(refused))} ({scrub_text(str(refusal_exc))})"
+            ),
             data={**data, "refused": str(refused)},
         )
     if not present:
@@ -212,7 +228,7 @@ def _check_runtime_dir(snapshot: RegistrySnapshot) -> CheckResult:
             name="runtime-dir",
             status="pass",
             message=(
-                f"canonical runtime directory absent: {target}"
+                f"canonical runtime directory absent: {safe_target}"
                 + ("" if found else " (no server has registered here)")
             ),
             detail=(
@@ -223,7 +239,7 @@ def _check_runtime_dir(snapshot: RegistrySnapshot) -> CheckResult:
             data=data,
         )
     return CheckResult(
-        name="runtime-dir", status="pass", message=f"runtime directory {target}", data=data
+        name="runtime-dir", status="pass", message=f"runtime directory {safe_target}", data=data
     )
 
 
@@ -242,13 +258,22 @@ def _check_server_instances(snapshot: RegistrySnapshot, rows: list[InstanceRow])
     # holds: a server registered against three stores has one parent, and
     # counting it three times would inflate every tally against the process
     # counts printed beside them.
-    by_process: dict[str, InstanceRow] = {}
+    # A reparented process can hold registrations recording two different
+    # parents, so "the" state of a process is a reduction, not a pick: any live
+    # recorded parent means something that started it is still running, and
+    # "unknown" outranks "missing" because a failed probe is not evidence of
+    # absence. Picking the first row instead would make the answer depend on
+    # directory order.
+    rank = {"alive": 2, "unknown": 1, "missing": 0}
+    per_process: dict[str, str] = {}
     for row in rows:
-        by_process.setdefault(row.procid, row)
-    alive_parents = sum(1 for r in by_process.values() if r.recorded_parent == "alive")
-    missing_parents = sum(1 for r in by_process.values() if r.recorded_parent == "missing")
-    unknown_parents = sum(1 for r in by_process.values() if r.recorded_parent == "unknown")
-    ppid_one = sum(1 for r in by_process.values() if r.recorded_ppid_is_one)
+        current = per_process.get(row.procid)
+        if current is None or rank[row.recorded_parent] > rank[current]:
+            per_process[row.procid] = row.recorded_parent
+    alive_parents = sum(1 for s in per_process.values() if s == "alive")
+    missing_parents = sum(1 for s in per_process.values() if s == "missing")
+    unknown_parents = sum(1 for s in per_process.values() if s == "unknown")
+    ppid_one = len({r.procid for r in rows if r.recorded_ppid_is_one})
 
     data: dict[str, object] = {
         "processes": processes,
@@ -370,10 +395,16 @@ def _check_registry_hygiene(snapshot: RegistrySnapshot) -> CheckResult:
             parts.append(f"{snapshot.stale_seen} stale sentinel(s) awaiting collection")
         if snapshot.unlocked_fresh_seen:
             parts.append(f"{snapshot.unlocked_fresh_seen} registration(s) still starting up")
+        # Same rule as the sibling server count: an incomplete scan makes every
+        # figure it produced a lower bound, so say so here too rather than
+        # presenting these as settled.
         return CheckResult(
             name="registry-hygiene",
-            status="info",
+            status="info" if snapshot.complete else "warn",
             message="; ".join(parts),
+            detail=None
+            if snapshot.complete
+            else "the scan did not complete; these are lower bounds",
             data=data,
         )
     if not snapshot.complete:

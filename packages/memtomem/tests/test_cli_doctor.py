@@ -212,6 +212,38 @@ class TestParentAnnotation:
         states = {r["recorded_parent"] for r in payload["instances"]}
         assert states == {"alive"}, "a process's rows must not disagree with each other"
 
+    def test_mixed_ppids_for_one_process_pair_each_row_with_its_own_parent(
+        self, seeded, monkeypatch
+    ):
+        """Registrations capture os.getppid() independently.
+
+        A process reparented between two registrations records two different
+        parents, so a procid-only probe cache would pair one row's ppid with a
+        state probed from the other's.
+        """
+        rows = [
+            _info(1000, ppid=500, digest="a" * 16, procid="deadbeef"),
+            _info(1000, ppid=1, digest="b" * 16, procid="deadbeef"),
+        ]
+        seeded(_snapshot(rows))
+        monkeypatch.setattr(doctor_cmd, "probe_pid", lambda pid: "alive" if pid == 500 else "dead")
+        instances = _payload(_run(["--json"]))["instances"]
+        by_ppid = {r["recorded_ppid"]: r["recorded_parent"] for r in instances}
+        assert by_ppid == {500: "alive", 1: "missing"}
+
+    def test_a_process_with_one_live_recorded_parent_counts_as_alive(self, seeded, monkeypatch):
+        """The reduction must not depend on directory order."""
+        rows = [
+            _info(1000, ppid=1, digest="a" * 16, procid="deadbeef"),
+            _info(1000, ppid=500, digest="b" * 16, procid="deadbeef"),
+        ]
+        seeded(_snapshot(rows))
+        monkeypatch.setattr(doctor_cmd, "probe_pid", lambda pid: "alive" if pid == 500 else "dead")
+        data = _payload(_run(["--json"]))["checks"][1]["data"]
+        assert data["processes"] == 1
+        assert (data["alive_recorded_parents"], data["missing_recorded_parents"]) == (1, 0)
+        assert data["recorded_ppid_is_one"] == 1, "the ppid-1 flag still counts the process once"
+
     def test_alive_count_is_stated_when_some_parents_are_not(self, seeded, monkeypatch):
         seeded(_snapshot([_info(1000, ppid=10), _info(1001, ppid=11)]))
         monkeypatch.setattr(doctor_cmd, "probe_pid", lambda pid: "alive" if pid == 10 else "dead")
@@ -320,6 +352,22 @@ class TestDegradedScans:
         assert "instance registry clean" not in out
         assert "could not be fully assessed" in out
         assert _payload(_run(["--json"]))["checks"][2]["status"] == "warn"
+
+    def test_hygiene_counts_from_an_incomplete_scan_are_lower_bounds_too(self, seeded):
+        """The sibling server count says so; this check must not disagree."""
+        seeded(_snapshot([_info(1000)], stale_seen=2, complete=False))
+        out = _run().output
+        assert "lower bounds" in out
+        assert _payload(_run(["--json"]))["checks"][2]["status"] == "warn"
+
+    def test_environment_derived_paths_cannot_smuggle_terminal_escapes(self, seeded):
+        """A runtime-dir candidate is environment-derived and reaches a tty."""
+        seeded(_snapshot(refusal=(Path("/legacy\x1b[2Jrt"), OSError("symlink"))))
+        out = _run().output
+        assert "\x1b" not in out, "control sequences must be escaped before printing"
+        assert "\\x1b" in out
+        # JSON keeps the real path: a consumer needs it and is not a terminal.
+        assert "\x1b" in _payload(_run(["--json"]))["checks"][0]["data"]["refused"]
 
     def test_fresh_unlocked_sentinel_is_informational(self, seeded):
         seeded(_snapshot([_info(1000)], unlocked_fresh_seen=1))

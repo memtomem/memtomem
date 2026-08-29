@@ -296,7 +296,7 @@ mm doctor --json   # structured output for scripting / CI
 ! 29 live server processes across 7 stores (median age 1.6d, max 8.6d)
   all recorded parents alive
   29 is unusually many — check which clients and services still hold one
-· instance registry clean (1 root(s) consulted)
+✓ instance registry clean (1 root(s) consulted)
 
      PID    PARENT  STORE           AGE  PARENT STATE
    61732     61502  a2716fceee     8.6d  alive
