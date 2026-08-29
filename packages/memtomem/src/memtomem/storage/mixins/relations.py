@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Sequence
 from uuid import UUID
 
+from memtomem.storage.sqlite_helpers import utc_stamp
+
 
 class RelationMixin:
     """Mixin providing cross-reference and tag methods. Requires self._get_db()
@@ -65,7 +67,7 @@ class RelationMixin:
             "SELECT rowid, tags FROM chunks WHERE tags LIKE ?",
             (f'%"{old_tag}"%',),
         ).fetchall()
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = utc_stamp(datetime.now(timezone.utc))
         batch = []
         for row in rows:
             tags = json.loads(row[1]) if row[1] else []
@@ -86,7 +88,7 @@ class RelationMixin:
             "SELECT rowid, tags FROM chunks WHERE tags LIKE ?",
             (f'%"{tag}"%',),
         ).fetchall()
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = utc_stamp(datetime.now(timezone.utc))
         batch = []
         for row in rows:
             tags = json.loads(row[1]) if row[1] else []
@@ -123,7 +125,7 @@ class RelationMixin:
             f"SELECT rowid, tags FROM chunks WHERE {like_clauses}",
             params,
         ).fetchall()
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = utc_stamp(datetime.now(timezone.utc))
         batch = []
         for row in rows:
             tags = json.loads(row[1]) if row[1] else []

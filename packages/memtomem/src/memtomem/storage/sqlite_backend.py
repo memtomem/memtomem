@@ -53,6 +53,7 @@ from memtomem.storage.sqlite_helpers import (
     quote_ident,
     serialize_f32,
     utc_bound,
+    utc_stamp,
 )
 from memtomem.storage.orphan_gc import (
     OrphanProjectReport,
@@ -1215,7 +1216,7 @@ class SqliteBackend(
                             c.metadata.language,
                             json.dumps(list(c.metadata.tags)),
                             c.metadata.namespace,
-                            c.updated_at.isoformat(timespec="microseconds"),
+                            utc_stamp(c.updated_at),
                             c.metadata.valid_from_unix,
                             c.metadata.valid_to_unix,
                             c.metadata.scope,
@@ -1291,8 +1292,8 @@ class SqliteBackend(
                             c.metadata.language,
                             json.dumps(list(c.metadata.tags)),
                             c.metadata.namespace,
-                            c.created_at.isoformat(timespec="microseconds"),
-                            c.updated_at.isoformat(timespec="microseconds"),
+                            utc_stamp(c.created_at),
+                            utc_stamp(c.updated_at),
                             c.metadata.overlap_before,
                             c.metadata.overlap_after,
                             c.metadata.valid_from_unix,
@@ -1894,10 +1895,21 @@ class SqliteBackend(
                     db.commit()
                 return 0
             rowids = [row[0] for row in rows]
+            from datetime import datetime, timezone
+
+            # A bound parameter, not CURRENT_TIMESTAMP: SQLite renders that as
+            # a space-separated, offset-less string, which sorts before every
+            # canonical ISO row and skews lexical MAX(updated_at) orderings.
             db.execute(
                 "UPDATE chunks SET source_file=?, scope=?, project_root=?, "
-                "updated_at=CURRENT_TIMESTAMP WHERE source_file=?",
-                (new_norm, new_scope, project_root, old_norm),
+                "updated_at=? WHERE source_file=?",
+                (
+                    new_norm,
+                    new_scope,
+                    project_root,
+                    utc_stamp(datetime.now(timezone.utc)),
+                    old_norm,
+                ),
             )
             db.execute(
                 f"UPDATE chunks_fts SET source_file=? WHERE rowid IN ({placeholders(len(rowids))})",

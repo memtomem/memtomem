@@ -585,6 +585,12 @@ def _dict_to_chunk(
         if "created_at" in record
         else datetime.now(timezone.utc)
     )
+    # Chunk timestamps are always timezone-aware (see ``_row_to_chunk``); a
+    # naive bundle value is read as UTC, matching the storage layer. An
+    # offset-aware value stays as-is — it is correct in Python, and the
+    # storage boundary renders it in UTC.
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
     # content_hash recomputed by Chunk.__post_init__ if blank — trusting the
     # bundle here would skip NFC normalisation and let a tampered bundle
     # smuggle a hash/content mismatch past dedup. Always recompute.

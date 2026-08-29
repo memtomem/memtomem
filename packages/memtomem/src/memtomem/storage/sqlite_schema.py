@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from memtomem.errors import EmbeddingDimensionMismatchError, SchemaDowngradeError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+from memtomem.storage.sqlite_helpers import utc_stamp
 from memtomem.storage.sqlite_meta import MetaManager
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,17 @@ _SHARED_FROM_TAG_PREFIX = "shared-from="
 # escape text instead of the characters they encode (pre ``ensure_ascii=False``
 # memory_writer fix). Bump (``..._v2``) to force a re-run.
 _TAGS_UNICODE_REPAIR_KEY = "tags_unicode_repair_v1"
+
+# One-shot repair key for chunk timestamps stored in a non-canonical form —
+# an offset other than ``+00:00`` (imported bundles), a naive value, or the
+# space-separated shape SQLite's ``CURRENT_TIMESTAMP`` emitted from the old
+# scope-move UPDATE. Bump (``..._v2``) to force a re-run. (#2203)
+_CHUNK_TS_UTC_REPAIR_KEY = "chunk_timestamps_utc_repair_v1"
+
+# Rows per batch in that repair's rowid walk. It has no pre-filter to narrow
+# it, so the batch is what keeps a large store's startup off a full
+# materialization of the table's timestamp columns.
+_TS_REPAIR_BATCH = 1000
 
 # One-shot adoption key for consolidation summaries written before
 # ``chunks.origin`` existed (#2161). Bump (``..._v2``) to re-run.
@@ -700,6 +712,7 @@ def create_tables(
 
     _backfill_chunk_links(db, meta)
     _repair_unicode_escaped_tags(db, meta)
+    _repair_non_utc_chunk_timestamps(db, meta)
 
     # --- Entity extraction table ---
     db.execute("""
@@ -1216,6 +1229,138 @@ def _repair_unicode_escaped_tags(db: sqlite3.Connection, meta: MetaManager) -> i
 
     meta.set_meta(_TAGS_UNICODE_REPAIR_KEY, "done")
     return repaired
+
+
+def _repair_non_utc_chunk_timestamps(db: sqlite3.Connection, meta: MetaManager) -> int:
+    """Rewrite chunk timestamps stored in a non-canonical form as UTC (#2203).
+
+    ``created_at`` / ``updated_at`` are compared lexically, so a stored value
+    must be UTC in the exact shape ``utc_stamp`` renders. Rows written before
+    the write-boundary fix could carry an imported bundle's offset
+    (``...+09:00``), no offset at all (a naive bundle value), or the
+    space-separated seconds shape SQLite's ``CURRENT_TIMESTAMP`` produced in
+    the old scope-move UPDATE — each of which sorts by its printed digits and
+    lands on the wrong side of correct bounds.
+
+    This pass walks every row once and re-renders both columns through
+    ``utc_stamp``; only rows whose rendering differs are updated, so the
+    canonical form cannot drift from what the writer emits. There is
+    deliberately no SQL pre-filter: a suffix test like ``LIKE '%+00:00'``
+    would prove the suffix but not the canonical shape, permanently skipping
+    e.g. a space-separated ``+00:00`` row once the marker is set.
+
+    A naive value is read as UTC (matching ``utc_stamp``); the instant of an
+    offset-aware value is preserved, not restamped. The two columns are parsed
+    independently, so one unparsable value does not deny its sibling the
+    repair — the marker is set either way, and a row skipped here would never
+    be revisited. Scope: the ``chunks`` timestamp columns only —
+    ``last_accessed_at`` is always stamped internally in UTC, and bad pre-fix
+    ``query_history`` rows are ephemeral and age out under retention.
+
+    Rows are walked in rowid batches rather than materialized at once: this
+    runs at startup with no pre-filter to narrow it, so a large store would
+    otherwise pull every id and both timestamps into memory before the first
+    write.
+
+    **Concurrency**: the scan and its rewrites take ``BEGIN IMMEDIATE`` and
+    re-check the marker under the lock, mirroring
+    ``_migrate_entity_uniqueness``. Two repairs racing would converge — they
+    compute the same canonical value — but the read-then-write window is also
+    open to an ordinary writer on another process, whose fresh ``updated_at``
+    would be overwritten by this pass's canonicalized *snapshot* of the old
+    one. Every production path reaches this with no transaction open, so that
+    is the path that serializes.
+
+    The ``in_transaction`` branch exists only so a caller that wrapped
+    ``create_tables`` itself does not get "cannot start a transaction within a
+    transaction". It does **not** compose into that caller's transaction the
+    way a storage mixin does: ``create_tables`` ends with an unconditional
+    ``db.commit()``, so a wrapping transaction is committed on the way out
+    whatever this pass does, and rows written here are not revertible by the
+    caller's rollback. Borrowing also inherits the caller's isolation, so a
+    caller opening a *deferred* transaction is not serialized against a
+    concurrent startup by the under-lock re-check alone.
+
+    **No SCHEMA_VERSION bump**: additive and idempotent. The residual is that
+    an older binary can still write a non-canonical row after this ran, and
+    the marker keeps a newer binary from re-scanning; that is the same
+    envelope the ``chunks``-tags repair accepted, and the fence exists to stop
+    an older binary corrupting a newer store — refusing to open the database
+    outright is the heavier failure of the two (see
+    ``_migrate_entity_uniqueness``).
+
+    Returns the number of rows rewritten on this call (0 once recorded).
+    """
+    # Cheap fast-path so already-repaired DBs don't take the lock.
+    if meta.get_meta(_CHUNK_TS_UTC_REPAIR_KEY) == "done":
+        return 0
+
+    owns_txn = not db.in_transaction
+    if owns_txn:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-check under the lock: another startup may have completed the
+        # repair between the fast-path read and the lock acquisition.
+        if meta.get_meta(_CHUNK_TS_UTC_REPAIR_KEY) == "done":
+            if owns_txn:
+                db.execute("COMMIT")
+            return 0
+
+        repaired = 0
+        after = 0
+        while True:
+            rows = db.execute(
+                "SELECT rowid, id, created_at, updated_at FROM chunks "
+                "WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (after, _TS_REPAIR_BATCH),
+            ).fetchall()
+            if not rows:
+                break
+            after = rows[-1][0]
+            for _rowid, chunk_id, created_at, updated_at in rows:
+                new_created = _canonical_utc_or_none(created_at)
+                new_updated = _canonical_utc_or_none(updated_at)
+                if new_created is None and new_updated is None:
+                    continue
+                db.execute(
+                    "UPDATE chunks SET created_at=?, updated_at=? WHERE id=?",
+                    (new_created or created_at, new_updated or updated_at, chunk_id),
+                )
+                repaired += 1
+
+        # Written inline rather than through ``meta.set_meta``, which commits:
+        # the marker has to land in the same transaction as the rewrites, or a
+        # crash between them would record the repair as done with rows still
+        # unrepaired and no second chance to reach them.
+        db.execute(
+            "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+            (_CHUNK_TS_UTC_REPAIR_KEY, "done"),
+        )
+        if owns_txn:
+            db.execute("COMMIT")
+        return repaired
+    except Exception:
+        if owns_txn:
+            db.rollback()
+        raise
+
+
+def _canonical_utc_or_none(value: str) -> str | None:
+    """Return *value*'s canonical UTC rendering, or ``None`` to leave it be.
+
+    ``None`` means "no rewrite": either the value is already canonical, or it
+    cannot be rendered and must be left untouched rather than crash startup.
+
+    ``OverflowError`` is one of those: a value at the very edge of the
+    representable range parses fine and then overflows when shifted to UTC
+    (``0001-01-01T00:00:00+01:00`` moves before ``datetime.min``). Uncaught,
+    a single such row would fail every startup.
+    """
+    try:
+        rendered = utc_stamp(datetime.fromisoformat(value))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return None if rendered == value else rendered
 
 
 def _migrate_chunks_uniqueness(db: sqlite3.Connection, *, has_vec_table: bool) -> None:

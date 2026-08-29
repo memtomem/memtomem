@@ -119,7 +119,15 @@ class HistoryMixin:
         is deliberately second-level rather than paying for finer stamps.
         """
         db = self._get_db()
-        now = created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # ``is not None``, not truthiness: an explicit empty string is a
+        # malformed argument and must raise below, not be silently restamped.
+        # The value becomes a lexically-compared row, so it gets the same UTC
+        # treatment as a bound, floored to the column's second precision.
+        now = (
+            utc_bound_from_iso(created_at, field="created_at", timespec="seconds")
+            if created_at is not None
+            else datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
         emb_blob = (
             struct.pack(f"{len(query_embedding)}f", *query_embedding) if query_embedding else b""
         )
