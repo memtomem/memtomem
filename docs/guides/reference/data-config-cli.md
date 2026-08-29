@@ -245,7 +245,7 @@ The complete v0.4.0 top-level command catalog is grouped below. Run `mm
 | Area | Top-level commands |
 |---|---|
 | First use and core memory | `init`, `status`, `add`, `index`, `search`, `recall`, `memory`, `mem`, `pinned`, `review` |
-| Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `reset`, `purge`, `gc`, `uninstall` |
+| Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `reset`, `purge`, `gc`, `uninstall`, `doctor` |
 | Organization and automation | `tags`, `agent`, `session`, `activity`, `schedule`, `watchdog` |
 | Retrieval quality | `quality` |
 | Import and synchronization | `ingest`, `context`, `wiki`, `sync-doctor` |

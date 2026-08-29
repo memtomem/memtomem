@@ -263,6 +263,74 @@ Over MCP, the same cleanup is `mem_do(action="cleanup_orphans")` for the
 preview and `mem_do(action="cleanup_orphans", params={"dry_run": false})` to
 delete.
 
+### Runtime health — `mm doctor`
+
+`mm doctor` checks the memtomem *runtime on this machine*: the server processes
+that are running and the runtime directory they coordinate through. It needs no
+configured store and answers even when none exists.
+
+Which doctor to run:
+
+| To check | Run |
+|---|---|
+| server processes, runtime directory | `mm doctor` |
+| a store's disk / index / DB drift | `mm memory doctor` |
+| the private multi-device sync repo | `mm sync-doctor` |
+| client hook settings across tiers | `mm context settings-doctor` |
+
+The problem it exists for is accumulation. Every MCP client that starts memtomem
+gets its own `memtomem-server`, and that server lives as long as the client
+does. Clients that are merely *idle* — an editor window left open for days —
+hold theirs just as firmly as active ones, so a workstation can quietly
+accumulate dozens. No other command shows this: `mm status` reports only the
+store it is pointed at, so servers spread across several stores are invisible
+everywhere.
+
+```
+mm doctor          # human-readable report
+mm doctor --json   # structured output for scripting / CI
+```
+
+```
+✓ runtime directory /tmp/memtomem-501
+! 29 live server processes across 7 stores (median age 1.6d, max 8.6d)
+  all recorded parents alive
+  29 is unusually many — check which clients and services still hold one
+✓ instance registry clean (1 root(s) consulted)
+
+     PID    PARENT  STORE           AGE  PARENT STATE
+   61732     61502  a2716fceee     8.6d  alive
+   ...
+```
+
+It is **read-only and never terminates anything.** It also collects no stale
+sentinel and creates no runtime directory, so it is safe to run repeatedly and
+two runs are comparable. Deciding what to do about what it reports is left to
+you: stopping the client that owns a server is the reliable way to release it.
+
+Reading the output:
+
+- **A live parent does not mean the server is in use.** It means some process
+  still holds it — very often an idle session. Do not read "all recorded parents
+  alive" as "nothing to clean up"; the count and ages are the signal.
+- **`PARENT STATE` is about the parent pid recorded when the server
+  registered**, not a live relationship. On Windows a parent pid is never
+  reparented and can be reused by an unrelated process, so `alive` there is
+  weaker evidence than on Linux or macOS. A recorded parent pid of `1` only
+  occurs on POSIX; it means the server was launched by init directly (a service
+  or a deliberately daemonized process) *or* that its original parent exited and
+  it was reparented — the recorded value alone does not distinguish the two.
+- **The report covers servers that registered.** Registration is best-effort so
+  that a coordination problem cannot block startup, which means a server that
+  failed to register does not appear. If `ps` shows more `memtomem-server`
+  processes than `mm doctor` does, that gap is the reason.
+
+Exit status is `0` unless the runtime directory itself is unusable (wrong
+ownership or permissions, or replaced by a symlink). Accumulated servers and an
+incomplete scan are warnings, not failures — a count alone cannot tell an
+abandoned server from a busy machine. CI should read `--json` rather than the
+exit code.
+
 ### Memory hygiene — `mm memory doctor`
 
 A `memory_dir` can be *registered* yet barely indexed: the filesystem watcher

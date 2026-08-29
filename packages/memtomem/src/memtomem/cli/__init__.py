@@ -44,6 +44,7 @@ def _register() -> None:
     from memtomem.cli.agent_cmd import agent
     from memtomem.cli.config_cmd import config
     from memtomem.cli.context_cmd import context
+    from memtomem.cli.doctor_cmd import doctor
     from memtomem.cli.embedding_cmd import embedding_reset
     from memtomem.cli.gc_cmd import gc
     from memtomem.cli.indexing import index
@@ -84,6 +85,7 @@ def _register() -> None:
     cli.add_command(ingest)
     cli.add_command(config)
     cli.add_command(context)
+    cli.add_command(doctor)
     cli.add_command(embedding_reset)
     cli.add_command(gc)
     cli.add_command(purge)

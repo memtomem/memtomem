@@ -36,6 +36,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm doctor` reports the memtomem runtime on this machine, including
+  accumulated server processes.** Every MCP client starts its own
+  `memtomem-server` and holds it for as long as the client lives, so a
+  workstation quietly accumulates them — 88 processes holding 3.7 GB on one
+  machine, 29 with a median age of 1.6 days on another. Nothing could see it:
+  `mm status` reports only the store it is pointed at, so servers spread across
+  several stores were invisible everywhere. The new command reads the instance
+  registry across *all* stores and reports the count, per-store grouping, and
+  age distribution unconditionally, with parent-process state as an annotation
+  rather than a gate — on the second machine every server had a live parent (an
+  idle editor session), so an orphan-keyed report would have called it clean.
+  Read-only: it never terminates a process, collects no stale sentinel, and
+  creates no runtime directory, so repeated runs are comparable. Exits non-zero
+  only when the runtime directory itself is unusable; `--json` carries per
+  instance pid/parent/store/age for scripting. `mm doctor` covers the host
+  runtime; `mm memory doctor`, `mm sync-doctor` and `mm context settings-doctor`
+  keep their own axes. See
+  [ADR-0035](docs/adr/0035-mm-doctor-runtime-axis.md). (#2226)
+
 - **Stores indexed before index-time extraction are backfilled automatically at
   startup.** #2145 gave every *new* chunk write an entity-extraction attempt but
   deliberately left existing stores to `mem_entity_scan` — a maintenance command

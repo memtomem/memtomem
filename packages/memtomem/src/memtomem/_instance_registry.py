@@ -1207,6 +1207,184 @@ def _sorted(results: list[InstanceInfo]) -> tuple[InstanceInfo, ...]:
     return tuple(sorted(results, key=lambda i: (i.pid, i.procid)))
 
 
+@dataclass(frozen=True)
+class _RootScan:
+    """One root's read-only scan, carrying why it degraded rather than a bool."""
+
+    instances: tuple[InstanceInfo, ...]
+    complete: bool
+    stale_seen: int
+    unlocked_fresh_seen: int
+    unparseable_seen: int
+    error: OSError | None
+
+
+@dataclass(frozen=True)
+class RegistrySnapshot:
+    """Every live registration this host can see, across stores and roots.
+
+    The counterpart to :class:`EnumerationResult`, which answers "who else is
+    writing *my* store". A machine can hold dozens of servers spread over
+    several stores and every store-scoped view reports nothing, which is the
+    observability gap #2226 describes; this is the unfiltered read.
+
+    ``canonical_error`` is kept apart from ``refusal`` on purpose. A historical
+    root that fails the trust policy is a degraded scan (some entries may be
+    unseen); the *canonical* root failing means this host's coordination
+    directory is unusable, which is a finding in its own right and must be
+    reportable as a failure rather than dissolving into ``complete=False``.
+    """
+
+    instances: tuple[InstanceInfo, ...]
+    complete: bool
+    stale_seen: int
+    unlocked_fresh_seen: int
+    unparseable_seen: int
+    roots_consulted: int
+    canonical_error: OSError | None
+    refusal: tuple[Path, OSError] | None
+
+
+def _scan_registry_root(root: Path, deadline: float) -> _RootScan:
+    """Read one registry root without changing anything under it.
+
+    Deliberately not :func:`_enumerate_live_instances_at`. That walker garbage-
+    collects aged stale sentinels as it goes and takes the mutation sidecar,
+    which creates the runtime directory and the sidecar file when they are
+    absent. Both are wrong for a diagnostic: a report that deletes evidence
+    cannot be run twice to compare, and a tool asked to inspect a machine must
+    not leave new coordination state on it. So this takes no sidecar lock —
+    reads here are advisory, and each entry's flock probe remains individually
+    atomic, so the only cost is that a registration landing mid-walk may be
+    missed, which ``complete`` already exists to express.
+
+    Dropping the sidecar lock must not also drop the validation it implied:
+    ``_candidate_registry_roots`` admits the canonical root *unvalidated*, so
+    this checks every root itself before touching anything beneath it. Without
+    that, a symlinked or junctioned runtime dir would be traversed here.
+    """
+    try:
+        if not validate_runtime_dir(root):
+            # Absent is not a failure: a host that has never run a server has
+            # no registry, and creating one to look at it is exactly what this
+            # function must not do.
+            return _RootScan((), True, 0, 0, 0, None)
+    except OSError as exc:
+        return _RootScan((), False, 0, 0, 0, exc)
+
+    results: list[InstanceInfo] = []
+    complete = True
+    stale = 0
+    unlocked_fresh = 0
+    unparseable = 0
+    try:
+        canonical = runtime_dir()
+        with _state_guard:
+            own = _active_for_root(root)
+        for path in own:
+            info = _parse_entry(path)
+            if info is not None:
+                results.append(info)
+        directory = instances_dir() if root == canonical else instances_dir(root)
+        dir_state = _dir_state(directory)
+        if dir_state == "missing":
+            return _RootScan(_sorted(results), True, 0, 0, 0, None)
+        if dir_state == "untrusted":
+            return _RootScan(_sorted(results), False, 0, 0, 0, None)
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError as exc:
+            return _RootScan(_sorted(results), False, 0, 0, 0, exc)
+        for entry in entries:
+            if entry in own:
+                continue
+            if time.monotonic() >= deadline:
+                complete = False
+                break
+            info = _parse_entry(entry)
+            state = _probe_entry(entry)
+            if state == "live":
+                if info is not None:
+                    results.append(info)
+                else:
+                    # Held by someone, but we cannot attribute it to a pid or a
+                    # store. The count below is then a lower bound, so say so.
+                    unparseable += 1
+                    complete = False
+            elif state == "stale":
+                # An unlocked sentinel inside the grace window is a healthy
+                # registration caught between create and flock-acquire, not
+                # residue — counting it as stale would report a starting server
+                # as a problem. ``_aged`` cannot make that call here because it
+                # answers False for a stat failure too, which would file an
+                # entry we could not read as "still starting up".
+                try:
+                    age = time.time() - entry.stat().st_mtime
+                except FileNotFoundError:
+                    # Collected or released between probe and stat: it is simply
+                    # not there any more, which is not a hygiene observation.
+                    continue
+                except OSError:
+                    complete = False
+                    continue
+                if age > _STALE_GRACE_S:
+                    stale += 1
+                else:
+                    unlocked_fresh += 1
+            elif state in ("unknown", "untrusted"):
+                complete = False
+    except OSError as exc:
+        logger.debug("registry snapshot failed for %s", root, exc_info=True)
+        return _RootScan(_sorted(results), False, stale, unlocked_fresh, unparseable, exc)
+    except Exception:
+        logger.debug("registry snapshot failed for %s", root, exc_info=True)
+        return _RootScan(_sorted(results), False, stale, unlocked_fresh, unparseable, None)
+    return _RootScan(_sorted(results), complete, stale, unlocked_fresh, unparseable, None)
+
+
+def snapshot_all_instances() -> RegistrySnapshot:
+    """Read every live registration on this host, across all stores and roots.
+
+    Read-only (see :func:`_scan_registry_root`): nothing is created, nothing is
+    garbage-collected. Bounded by one shared deadline like
+    :func:`enumerate_live_instances`, and fails open the same way — an
+    incomplete pass yields a lower bound, never evidence of absence.
+    """
+    deadline = time.monotonic() + _LOCK_TIMEOUT_S
+    roots, refusal = _candidate_registry_roots()
+    if roots is None:
+        return RegistrySnapshot((), False, 0, 0, 0, 0, None, None)
+
+    try:
+        canonical: Path | None = runtime_dir()
+    except OSError:
+        canonical = None
+
+    results: list[InstanceInfo] = []
+    complete = refusal is None
+    stale = unlocked_fresh = unparseable = 0
+    canonical_error: OSError | None = None
+    for root in roots:
+        scan = _scan_registry_root(root, deadline)
+        results.extend(scan.instances)
+        complete = complete and scan.complete
+        stale += scan.stale_seen
+        unlocked_fresh += scan.unlocked_fresh_seen
+        unparseable += scan.unparseable_seen
+        if scan.error is not None and root == canonical and canonical_error is None:
+            canonical_error = scan.error
+    return RegistrySnapshot(
+        instances=_sorted(results),
+        complete=complete,
+        stale_seen=stale,
+        unlocked_fresh_seen=unlocked_fresh,
+        unparseable_seen=unparseable,
+        roots_consulted=len(roots),
+        canonical_error=canonical_error,
+        refusal=refusal,
+    )
+
+
 def _probe_registry_root_for_uninstall(root: Path, deadline: float) -> UninstallProbeResult:
     """Run the fail-closed all-store probe against one registry root."""
     try:
