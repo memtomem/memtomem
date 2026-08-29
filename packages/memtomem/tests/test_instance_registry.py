@@ -1247,3 +1247,123 @@ class TestUninstallProbeResultInvariant:
         result = reg.UninstallProbeResult(state)
         assert result.untrusted_path is None
         assert result.detail is None
+
+
+class TestSnapshotAllInstances:
+    """``snapshot_all_instances`` — the all-store, read-only view (#2226).
+
+    The store-scoped enumerator answers "who else writes my store"; this one
+    answers "what is running on this host", which is the question no existing
+    surface could ask. Its defining constraint is that it observes without
+    changing anything: a diagnostic that garbage-collects cannot be run twice
+    to compare, and one that creates coordination state alters the machine it
+    was asked to inspect.
+    """
+
+    @staticmethod
+    def _instances_dir(rt: Path) -> Path:
+        """Create the registry the way a real server would: 0o700 root.
+
+        ``mkdir(parents=True)`` would make the root at umask (0o755), which the
+        snapshot's own validation correctly refuses — the runtime dir is
+        owner-only by contract.
+        """
+        rt.mkdir(mode=0o700, exist_ok=True)
+        d = reg.instances_dir()
+        d.mkdir(exist_ok=True)
+        return d
+
+    def test_spans_stores_that_the_scoped_enumerator_filters_out(self, rt, db):
+        digest_a = reg.store_digest_for(db)
+        digest_b = "b" * 16
+        self._instances_dir(rt)
+        inst = reg.register_instance(db)
+        assert inst is not None
+        try:
+            snap = reg.snapshot_all_instances()
+            assert digest_a in {i.digest for i in snap.instances}
+            # The scoped view of an unrelated store sees nothing, which is
+            # exactly how 29 servers can be invisible on a real machine.
+            assert reg.enumerate_live_instances(digest_b).instances == ()
+        finally:
+            inst.cleanup()
+
+    def test_does_not_collect_an_aged_stale_sentinel(self, rt, db):
+        """Mutation-validation: the scoped enumerator GCs this same fixture."""
+        digest = reg.store_digest_for(db)
+        d = self._instances_dir(rt)
+        entry = d / f"12345-1-{digest}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+        aged = time.time() - reg._STALE_GRACE_S - 10
+        os.utime(entry, (aged, aged))
+
+        snap = reg.snapshot_all_instances()
+        assert entry.exists(), "snapshot must observe, not collect"
+        assert snap.stale_seen == 1
+        assert snap.unlocked_fresh_seen == 0
+
+        # The pin: the very same entry is collected by the scoped enumerator,
+        # so the assertion above is about this function, not about the fixture.
+        reg.enumerate_live_instances(digest)
+        assert not entry.exists()
+
+    def test_counts_a_fresh_unlocked_sentinel_separately_from_stale(self, rt, db):
+        digest = reg.store_digest_for(db)
+        d = self._instances_dir(rt)
+        entry = d / f"12345-1-{digest}-aaaaaaaa-bbbbbbbb.lock"
+        entry.touch()
+        snap = reg.snapshot_all_instances()
+        assert snap.unlocked_fresh_seen == 1
+        assert snap.stale_seen == 0
+        assert entry.exists()
+
+    def test_absent_runtime_dir_stays_absent(self, rt):
+        assert not rt.exists()
+        snap = reg.snapshot_all_instances()
+        assert snap.instances == ()
+        assert snap.complete
+        assert not rt.exists(), "a read must not create the runtime dir"
+
+    def test_does_not_create_the_mutation_sidecar(self, rt, db):
+        rt.mkdir(mode=0o700, exist_ok=True)
+        sidecar = reg.registry_sidecar_path()
+        assert not sidecar.exists()
+        reg.snapshot_all_instances()
+        assert not sidecar.exists(), "a read must not take (or create) the sidecar"
+
+    def test_untrusted_root_is_not_traversed(self, rt, db, tmp_path):
+        """A symlinked runtime dir must be refused before anything under it."""
+        real = tmp_path / "elsewhere"
+        (real / "instances").mkdir(parents=True)
+        digest = reg.store_digest_for(db)
+        (real / "instances" / f"999-1-{digest}-aaaaaaaa-bbbbbbbb.lock").touch()
+        rt.parent.mkdir(parents=True, exist_ok=True)
+        rt.symlink_to(real, target_is_directory=True)
+
+        snap = reg.snapshot_all_instances()
+        assert snap.instances == (), "a redirected root must not be read"
+        assert snap.canonical_error is not None
+        assert not snap.complete
+
+    def test_own_registration_included_without_probing(self, rt, db, monkeypatch):
+        inst = reg.register_instance(db)
+        assert inst is not None
+        try:
+            monkeypatch.setattr(
+                reg,
+                "_probe_entry",
+                lambda p: pytest.fail(f"own entry must not be probed: {p}"),
+            )
+            snap = reg.snapshot_all_instances()
+            assert [i.pid for i in snap.instances] == [os.getpid()]
+        finally:
+            inst.cleanup()
+
+    def test_unparseable_held_entry_makes_the_count_a_lower_bound(self, rt, db, monkeypatch):
+        d = self._instances_dir(rt)
+        entry = d / "not-a-valid-sentinel-name.lock"
+        entry.touch()
+        monkeypatch.setattr(reg, "_probe_entry", lambda p: "live")
+        snap = reg.snapshot_all_instances()
+        assert snap.unparseable_seen == 1
+        assert not snap.complete, "an unattributable holder means we counted low"

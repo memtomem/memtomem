@@ -674,8 +674,12 @@ class TestDocumentedCliExists:
             None,
         )
         assert current is not None, "CHANGELOG has no versioned section"
+        # ``Unreleased`` is walked too: skipping it let a bad command name sit in
+        # the notes until release day, which is exactly when nobody re-reads
+        # them. Entries land here first, so this is where the guard pays off.
+        unreleased = next((s for s in sections[1:] if s.startswith("Unreleased")), "")
         offenders: list[str] = []
-        for path in _doc_mm_paths(current):
+        for path in _doc_mm_paths(current + "\n" + unreleased):
             node: click.Command = _CLI
             walked: list[str] = []
             for tok in path:
