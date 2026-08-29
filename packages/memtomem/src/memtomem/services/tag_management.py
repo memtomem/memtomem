@@ -25,8 +25,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 from uuid import UUID
+
+from memtomem.search.visibility import chunk_in_scope_boundary
 
 if TYPE_CHECKING:
     from memtomem.models import Chunk
@@ -222,12 +225,19 @@ async def replace_chunk_tags(
     chunk_id: UUID,
     tags: Sequence[str],
     *,
+    project_context_root: Path | None,
     search_pipeline: SearchPipeline | None = None,
 ) -> Chunk | None:
     """Replace the tag list on a single chunk.
 
     Returns the updated ``Chunk`` on success or ``None`` if the chunk does
-    not exist. Routed through the same ``_tag_write_lock`` as the global
+    not exist **or lies outside ``project_context_root``'s ADR-0011 boundary**
+    — one return value for both, so a caller cannot use tagging to probe which
+    ids exist (ADR-0036). The parameter is required rather than defaulted:
+    there is no safe value to omit it with, and a caller that has no project
+    context passes ``None`` to say so.
+
+    Routed through the same ``_tag_write_lock`` as the global
     rename/delete/merge ops so a per-chunk edit cannot interleave with a
     bulk rewrite mid-flight, and shares cache invalidation so a follow-up
     ``GET /search`` cannot serve a stale tag-filter result.
@@ -241,8 +251,14 @@ async def replace_chunk_tags(
     deduped = tuple(dict.fromkeys(tags))
 
     async with storage._tag_write_lock:
+        # Fetched, screened and written inside one lock hold, so the scope
+        # this check reads is the scope the upsert writes back. The tag lock
+        # does not exclude ``memory-migrate``, which re-scopes under the
+        # source/index locks — that race can still restore stale scope
+        # metadata through this upsert, a pre-existing write-integrity gap
+        # this boundary neither creates nor closes (#2241).
         chunk = await storage.get_chunk(chunk_id)
-        if chunk is None:
+        if chunk is None or not chunk_in_scope_boundary(chunk.metadata, project_context_root):
             return None
 
         if tuple(chunk.metadata.tags) == deduped:

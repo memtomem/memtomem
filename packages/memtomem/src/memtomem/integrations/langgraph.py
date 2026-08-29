@@ -386,9 +386,21 @@ class MemtomemStore:
         }
 
     async def get(self, chunk_id: str) -> dict | None:
-        """Get a chunk by UUID. Returns dict or None."""
+        """Get a chunk by UUID, inside the caller's project boundary.
+
+        ``None`` covers both "no such chunk" and "belongs to another project"
+        (ADR-0011 §6, ADR-0036) — the same rule ``search`` on this adapter
+        already applies, and the same answer ``mem_read`` gives.
+        """
+        from memtomem.runtime.project_context import _resolve_project_context_root
+        from memtomem.search.visibility import resolve_visible_chunk
+
         comp = await self._ensure_init()
-        chunk = await comp.storage.get_chunk(UUID(chunk_id))
+        chunk = await resolve_visible_chunk(
+            comp.storage,
+            UUID(chunk_id),
+            project_context_root=_resolve_project_context_root(comp),
+        )
         if chunk is None:
             return None
         return {
@@ -400,8 +412,15 @@ class MemtomemStore:
         }
 
     async def delete(self, chunk_id: str) -> bool:
-        """Delete a chunk by UUID."""
+        """Delete a chunk by UUID, inside the caller's project boundary.
+
+        Returns ``False`` for an out-of-boundary id, exactly as for one that
+        does not exist. A caller who cannot read a chunk cannot delete it
+        either (ADR-0036).
+        """
         comp = await self._ensure_init()
+        if await self.get(chunk_id) is None:
+            return False
         deleted = await comp.storage.delete_chunks([UUID(chunk_id)])
         if deleted:
             comp.search_pipeline.invalidate_cache()

@@ -36,6 +36,7 @@ from memtomem.server.formatters import (
 )
 from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import not_found, resolve_chunk
 from memtomem.services.search_service import (
     InvalidRrfWeightError,
     InvalidTemporalBoundError,
@@ -336,6 +337,11 @@ async def mem_expand(
     chunk in a hidden namespace returns the chunk with little or no context.
     Use mem_search(namespace=..., context_window=N) to read around one.
 
+    The addressed chunk must itself be inside the caller's project boundary
+    (ADR-0011); an id from another project reads as not-found. A hidden or
+    expired anchor still expands — those axes are search-relevance defaults,
+    not boundaries (ADR-0036).
+
     Args:
         chunk_id: The UUID of the chunk to expand (from mem_search results)
         window: Number of adjacent chunks before and after (default 2, max 10)
@@ -348,9 +354,9 @@ async def mem_expand(
     except (ValueError, TypeError):
         return f"Error: invalid chunk ID format: {chunk_id}"
 
-    chunk = await app.storage.get_chunk(uid)
+    chunk = await resolve_chunk(app, uid)
     if chunk is None:
-        return f"Chunk {chunk_id} not found."
+        return not_found(chunk_id)
 
     source_file = chunk.metadata.source_file
     all_chunks = await app.storage.list_chunks_by_source(source_file, limit=10000)

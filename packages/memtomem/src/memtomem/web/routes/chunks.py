@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import stat
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.errors import NamespaceResolutionError
+from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.tools.memory_writer import remove_lines, replace_chunk_body
@@ -36,6 +38,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chunks", tags=["chunks"])
 
 
+def _boundary(config) -> Path | None:
+    """The caller's ADR-0011 project context root."""
+    return _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
+
+
+async def _screened_chunk(storage, chunk_id: UUID, config):
+    """Fetch a chunk by id, or raise the 404 an unknown id would raise.
+
+    ADR-0036: the id-addressed routes answer "no such chunk" and "not in your
+    project" identically. Every fetch on these routes that can influence a
+    response goes through here — a raw ``get_chunk`` used only as a preflight
+    still leaks, because reaching a *later* check (a 403 on a symlinked
+    source, say) tells the caller the row exists.
+    """
+    chunk = await resolve_visible_chunk(storage, chunk_id, project_context_root=_boundary(config))
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    return chunk
+
+
 @router.get("", response_model=ChunksListResponse)
 async def list_chunks(
     source: str = Query(..., description="Absolute path of the source file"),
@@ -59,11 +81,11 @@ async def get_chunk(
     # Knowing an id is not authorization. Hydrate through the same always-on
     # ADR-0011 scope fragment as search/recall: outside a project only user
     # rows are visible; inside one, user + that project's rows are visible.
-    project_context_root = _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
+    # ADR-0036 generalised this route's rule to every id-addressed surface.
     chunks = await storage.recall_chunks(
         chunk_ids=(chunk_id,),
         limit=1,
-        project_context_root=project_context_root,
+        project_context_root=_boundary(config),
     )
     if not chunks:
         raise HTTPException(status_code=404, detail="Chunk not found")
@@ -77,10 +99,9 @@ async def edit_chunk(
     storage=Depends(get_storage),
     index_engine=Depends(get_index_engine),
     search_pipeline=Depends(get_search_pipeline),
+    config=Depends(get_config),
 ) -> ChunkOut:
-    chunk = await storage.get_chunk(chunk_id)
-    if chunk is None:
-        raise HTTPException(status_code=404, detail="Chunk not found")
+    chunk = await _screened_chunk(storage, chunk_id, config)
     if chunk.metadata.source_file.is_symlink():
         raise HTTPException(status_code=403, detail="Cannot edit chunks from symlinked files.")
 
@@ -92,7 +113,10 @@ async def edit_chunk(
     # it, so a concurrent MCP CRUD / CLI write / memory-migrate cannot splice us
     # with a stale line range or lose this edit. ``mm web`` has no AppContext L1
     # lock; L2's in-process guard serializes concurrent web handlers too.
-    async with locked_source_chunk(storage, chunk_id) as (fresh, reason):
+    async with locked_source_chunk(storage, chunk_id, project_context_root=_boundary(config)) as (
+        fresh,
+        reason,
+    ):
         if reason == "not_found":
             raise HTTPException(status_code=404, detail="Chunk not found")
         if reason == "moved":
@@ -202,7 +226,11 @@ async def edit_chunk(
             logger.error("Chunk edit failed for %s: %s", chunk_id, exc, exc_info=True)
             raise HTTPException(status_code=500, detail="Edit failed. Check server logs.") from exc
 
-    updated = await storage.get_chunk(chunk_id)
+    # Screened like every other fetch on this route. The edit already
+    # succeeded, so this only decides whether the response echoes the fresh
+    # row or the pre-edit one; a chunk re-scoped out from under us during the
+    # write falls back rather than returning a row the caller may not read.
+    updated = await resolve_visible_chunk(storage, chunk_id, project_context_root=_boundary(config))
     return chunk_to_out(updated if updated is not None else chunk)
 
 
@@ -221,9 +249,11 @@ async def delete_chunk(
     config=Depends(get_config),
     search_pipeline=Depends(get_search_pipeline),
 ) -> DeleteResponse:
-    chunk = await storage.get_chunk(chunk_id)
-    if chunk is None:
-        raise HTTPException(status_code=404, detail="Chunk not found")
+    # Preflight, screened like every other fetch on this route, so an unknown
+    # or out-of-boundary id 404s before we take a lock. It is not the
+    # authoritative check — ``locked_source_chunk`` re-screens the chunk it
+    # re-fetches under the lock, which is the value the delete acts on.
+    await _screened_chunk(storage, chunk_id, config)
 
     import asyncio
 
@@ -233,7 +263,10 @@ async def delete_chunk(
     # remove-lines + reindex span (and the Gate-B probe, re-checked on the fresh
     # chunk under the lock) so a concurrent write cannot resurrect or corrupt the
     # rows we remove. ``mm web`` has no AppContext L1 lock; L2 covers it.
-    async with locked_source_chunk(storage, chunk_id) as (fresh, reason):
+    async with locked_source_chunk(storage, chunk_id, project_context_root=_boundary(config)) as (
+        fresh,
+        reason,
+    ):
         if reason == "not_found":
             raise HTTPException(status_code=404, detail="Chunk not found")
         if reason == "moved":
@@ -490,6 +523,7 @@ async def update_chunk_tags(
     body: TagsUpdateRequest,
     storage=Depends(get_storage),
     search_pipeline=Depends(get_search_pipeline),
+    config=Depends(get_config),
 ) -> TagsUpdateResponse:
     """Replace the tags on a chunk with the given list.
 
@@ -500,7 +534,11 @@ async def update_chunk_tags(
     and leave search-result tag filters cached against stale tags.
     """
     updated = await tag_svc.replace_chunk_tags(
-        storage, chunk_id, body.tags, search_pipeline=search_pipeline
+        storage,
+        chunk_id,
+        body.tags,
+        project_context_root=_boundary(config),
+        search_pipeline=search_pipeline,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
@@ -513,11 +551,10 @@ async def similar_chunks(
     top_k: int = Query(5, ge=1, le=50),
     storage=Depends(get_storage),
     embedder=Depends(get_embedder),
+    config=Depends(get_config),
 ) -> SimilarChunksResponse:
     """Find chunks semantically similar to the given chunk using dense search."""
-    chunk = await storage.get_chunk(chunk_id)
-    if chunk is None:
-        raise HTTPException(status_code=404, detail="Chunk not found")
+    chunk = await _screened_chunk(storage, chunk_id, config)
 
     embedding = await embedder.embed_query(chunk.content)
     # ADR-0011 PR-D round 11 (P2): pin similar-chunk dense search to

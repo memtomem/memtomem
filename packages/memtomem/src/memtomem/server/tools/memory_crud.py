@@ -18,6 +18,7 @@ from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embedding_mismatch
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary, in_boundary
 from memtomem.server.tools._provenance import (
     capture_session_and_namespace,
     capture_session_for_untracked_write,
@@ -180,6 +181,14 @@ async def _locked_chunk(
     A sidecar acquire that times out (another process holds it past the budget)
     surfaces a retryable error instead of blocking. Exactly one ``yield`` runs
     on every path so the ``@asynccontextmanager`` protocol holds.
+
+    The ADR-0011 project boundary is applied at **both** fetches, and the
+    second one is the one that decides (ADR-0036). Screening only the probe
+    would be a check on a value that is then thrown away: ``memory-migrate``
+    can re-scope a chunk into another project while we wait for L2, and the
+    write would land on the fresh chunk the screen never saw. Out-of-boundary
+    reports the same "not found" as a missing id — a caller must not be able
+    to tell the two apart.
     """
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
@@ -187,8 +196,9 @@ async def _locked_chunk(
         async_file_lock,
     )
 
+    boundary = caller_boundary(app)
     chunk = await app.storage.get_chunk(uid)
-    if chunk is None:
+    if chunk is None or not in_boundary(chunk, boundary):
         yield None, f"Error: chunk {chunk_id} not found."
         return
     source_file = chunk.metadata.source_file
@@ -199,7 +209,7 @@ async def _locked_chunk(
             async with app.get_memory_file_lock(key):
                 async with async_file_lock(sidecar, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
                     fresh = await app.storage.get_chunk(uid)
-                    if fresh is None:
+                    if fresh is None or not in_boundary(fresh, boundary):
                         yield None, f"Error: chunk {chunk_id} not found."
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
