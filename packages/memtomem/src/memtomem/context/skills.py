@@ -35,6 +35,7 @@ from typing import Protocol
 
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
+from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context._atomic import (
     COPY_SKIP_NAMES,
     _file_lock,
@@ -80,12 +81,15 @@ SKILL_MANIFEST = "SKILL.md"
 # Whole-call budget for destination sidecar-lock acquisition in
 # :func:`generate_all_skills` — one shared deadline across every lock, not a
 # fresh bound per destination (N dsts × per-lock bound could overrun the web
-# handler's 60s ``asyncio.timeout`` and re-open the orphaned-worker window —
-# the #1145 settings review shape; see ``settings._SETTINGS_LOCK_BUDGET_S``).
+# handler's 60s ``asyncio.timeout`` — the #1145 settings review shape; see
+# ``settings._SETTINGS_LOCK_BUDGET_S``).
 # The budget applies to EVERY caller (web, CLI, MCP) — matching the settings
 # precedent: a CLI run that would otherwise block forever now aborts with a
 # typed ``lock_timeout`` skip and a retry hint, and an ``asyncio.to_thread``
-# web caller can never be wedged by a stuck cross-process lock holder.
+# web caller can never be wedged by a stuck cross-process lock holder. What it
+# does NOT do is close the orphaned-worker window: it bounds waiting, and a
+# worker that holds its lock runs to completion regardless of whether anyone is
+# still waiting for the answer. That is ``sync_is_abandoned``'s job (#2247).
 _SKILLS_LOCK_BUDGET_S = 30.0
 # The canonical-side ``overrides/`` subdirectory (SOURCE of per-vendor
 # SKILL.md overrides — see :mod:`memtomem.context.override`) and the version
@@ -993,6 +997,23 @@ class SkillSyncResult:
     skipped: list[tuple[str, str, skip_codes.SkipCode]]
 
 
+def _abandoned_skip(item: str, *, remaining: bool = False) -> tuple[str, str, skip_codes.SkipCode]:
+    """One skip row for work declined because the caller gave up (#2247).
+
+    ``remaining=True`` is the multi-item form: the caller gave up partway, so
+    what is reported is everything the loop had not reached, not one named
+    item. Items completed earlier stay in ``generated`` / ``imported`` — the
+    abort suppresses, it does not roll back.
+    """
+    what = "the remaining items were" if remaining else "it was"
+    return (
+        item,
+        f"the run was abandoned by its caller (request timeout or cancellation); "
+        f"{what} not written. Re-run to retry.",
+        skip_codes.ABANDONED,
+    )
+
+
 def generate_all_skills(
     project_root: Path,
     runtimes: list[str] | None = None,
@@ -1041,14 +1062,21 @@ def generate_all_skills(
             skipped=[("<all>", "no canonical skills", skip_codes.NO_CANONICAL_ROOT)],
         )
 
+    # Checked before any lock or staging work, so a sync whose caller already
+    # gave up leaves no sidecar and no staging tree behind (#2247).
+    if sync_is_abandoned():
+        return SkillSyncResult(generated=generated, skipped=[_abandoned_skip("<all>")])
+
     targets = runtimes if runtimes is not None else list(SKILL_GENERATORS.keys())
 
     # One shared deadline for ALL destination sidecar-lock waits — the whole
     # call, not each destination, is bounded by ``_SKILLS_LOCK_BUDGET_S``.
     # A timed-out acquisition becomes a typed ``lock_timeout`` skip instead
-    # of blocking forever, so a thread-offloaded web caller can never be
-    # wedged (or orphaned past its own timeout) by a stuck cross-process
-    # holder (#1145 shape).
+    # of blocking forever, so a thread-offloaded web caller never waits on a
+    # stuck cross-process holder past its own timeout (#1145 shape). That
+    # bounds the *wait* only: a destination whose lock is held is on no
+    # deadline, so what stops it writing behind a caller that already gave up
+    # is the ``sync_is_abandoned`` checks below, not this budget (#2247).
     lock_deadline = time.monotonic() + _SKILLS_LOCK_BUDGET_S
 
     def _lock_timeout() -> float:
@@ -1101,6 +1129,7 @@ def generate_all_skills(
                         )
                     )
                     return SkillSyncResult(generated=generated, skipped=skipped)
+
                 # All destination locks held — safe point to recover any
                 # interrupted swap and reap crash leftovers before they collide
                 # with fresh staging work.
@@ -1126,6 +1155,18 @@ def generate_all_skills(
                             )
                         )
                         logger.warning("skip %s: %s", stale_dst, exc)
+
+                # Waiting for the whole set of destination locks is the longest
+                # this batch can take, so it is where a caller most plausibly
+                # gave up. Placed after the recovery pass, not before it
+                # (ADR-0030 §10): recovery repairs an interrupted swap for
+                # whoever comes next, while the abort only declines this run's
+                # own fan-out. Nothing has been staged or promoted yet, and the
+                # ``return`` releases every lock on the way out (#2247).
+                if sync_is_abandoned():
+                    skipped.append(_abandoned_skip("<all>"))
+                    return SkillSyncResult(generated=generated, skipped=skipped)
+
                 for target, _gen, skill_dir, dst in work:
                     if dst in blocked_dsts:
                         continue
@@ -1208,6 +1249,17 @@ def generate_all_skills(
                             artifact_name=skill_dir.name,
                         )
 
+                # Staging and scanning the whole batch is the other long
+                # stretch, and this is the LAST point an abandoned caller can
+                # be honoured: the promote loop below is the all-or-nothing
+                # phase this scope exists for, so stopping inside it would
+                # produce exactly the partial fan-out #1229 refuses. Returning
+                # here promotes nothing, and the ``finally`` reaps every
+                # staging tree (#2247).
+                if sync_is_abandoned():
+                    skipped.append(_abandoned_skip("<all>"))
+                    return SkillSyncResult(generated=generated, skipped=skipped)
+
                 for target, staging, dst in staged:
                     try:
                         _promote_staging(staging, dst, reap_move_aside=True)
@@ -1284,6 +1336,16 @@ def generate_all_skills(
             # destination becomes a typed per-item skip (the other
             # destinations still proceed — non-shared scopes have no
             # all-or-nothing batch contract).
+            #
+            # These scopes fan out one destination at a time, so the item — not
+            # the run — is the abort boundary: destinations already promoted
+            # stay promoted and reported, and everything the loop has not
+            # reached is declined in one row. Checked before the lock so an
+            # abandoned run leaves no further sidecars (#2247).
+            if sync_is_abandoned():
+                skipped.append(_abandoned_skip("<remaining>", remaining=True))
+                return SkillSyncResult(generated=generated, skipped=skipped)
+
             dst_lock = ExitStack()
             try:
                 dst_lock.enter_context(_file_lock(_lock_path_for(dst), timeout=_lock_timeout()))
@@ -1385,6 +1447,17 @@ def generate_all_skills(
                         # the preflight (the held sidecar lock serializes
                         # gateway writers only) — same typed-skip conversion.
                         # Non-race OSErrors re-raise loud (#1247 id 18).
+                        #
+                        # Last check before this item's only mutation, and the
+                        # one that covers the item's own long stretches — the
+                        # lock wait, recovery, staging, and the privacy scan all
+                        # happen after the pre-lock check, and a caller can give
+                        # up during any of them. ``promoted`` stays False, so
+                        # the ``finally`` reaps the staging tree and ``dst`` is
+                        # left exactly as it was (#2247).
+                        if sync_is_abandoned():
+                            skipped.append(_abandoned_skip("<remaining>", remaining=True))
+                            return SkillSyncResult(generated=generated, skipped=skipped)
                         try:
                             _promote_staging(staging, dst, reap_move_aside=True)
                         except OSError as exc:
@@ -1588,6 +1661,20 @@ def extract_skills_to_canonical(
                 # import them as skills.
                 logger.debug("skip internal artifact dir %s", skill_dir)
                 continue
+            # Per-item abort boundary: an import writes one canonical skill at
+            # a time, so skills already imported stay imported and reported,
+            # and everything not yet reached is declined in one row. Checked
+            # at the top of the item so an abandoned run skips the expensive
+            # Gate A walk too (#2247).
+            if sync_is_abandoned():
+                skipped.append(_abandoned_skip("<remaining>", remaining=True))
+                return ExtractResult(
+                    imported=imported,
+                    skipped=skipped,
+                    source_runtimes=source_runtimes,
+                    runtime_candidates=runtime_candidates,
+                )
+
             skill_name = skill_dir.name
             if only_name is not None and skill_name != only_name:
                 continue
@@ -1726,6 +1813,23 @@ def extract_skills_to_canonical(
                 seen[skill_name] = runtime_label
                 continue
 
+            # Gate A walks every file in the skill, so a caller can give up
+            # during it — and this is the last point before the import touches
+            # the filesystem at all. ``dst.parent.mkdir`` creates the canonical
+            # root and acquiring the destination lock leaves a sidecar that is
+            # never removed, so checking only after them would let an abandoned
+            # import report ``imported=0`` while still leaving both behind. The
+            # post-lock check below stays: it covers the lock wait, which
+            # starts after this one (#2247).
+            if sync_is_abandoned():
+                skipped.append(_abandoned_skip("<remaining>", remaining=True))
+                return ExtractResult(
+                    imported=imported,
+                    skipped=skipped,
+                    source_runtimes=source_runtimes,
+                    runtime_candidates=runtime_candidates,
+                )
+
             # All files clean — copy the whole tree (atomic at directory level).
             # ``dry_run`` records the would-import destination but skips the
             # mkdir + lock + copy so the preview never mutates disk (rank-10).
@@ -1807,6 +1911,20 @@ def extract_skills_to_canonical(
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                         seen[skill_name] = runtime_label
                         continue
+                    # Last check before this item's only mutation, and the one
+                    # that covers what the per-item check above cannot: the
+                    # Gate A walk, the lock wait, recovery, and the under-lock
+                    # re-check all run after it. Nothing is staged yet, and the
+                    # ``with dst_lock`` releases on the way out (#2247).
+                    if sync_is_abandoned():
+                        skipped.append(_abandoned_skip("<remaining>", remaining=True))
+                        return ExtractResult(
+                            imported=imported,
+                            skipped=skipped,
+                            source_runtimes=source_runtimes,
+                            runtime_candidates=runtime_candidates,
+                        )
+
                     # Inlined ``_stage_skill`` + ``_promote_staging`` (rather
                     # than ``copy_skill``) so each half converts to its own
                     # typed skip — sync-path parity. No ``seen`` mark on a
@@ -1830,6 +1948,24 @@ def extract_skills_to_canonical(
                         skipped.append((skill_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
                         continue
+                    # Staging copies the whole skill tree, which for a large
+                    # one is the longest stretch of the import — long enough
+                    # for the caller to give up inside it, and past every
+                    # earlier check. The promote below is this item's only
+                    # mutation of the canonical root, so this is the last point
+                    # it can be suppressed; the staging tree is reaped here
+                    # because nothing downstream will (the cleanup lives in the
+                    # promote's except arms) (#2247).
+                    if sync_is_abandoned():
+                        shutil.rmtree(staging, ignore_errors=True)
+                        skipped.append(_abandoned_skip("<remaining>", remaining=True))
+                        return ExtractResult(
+                            imported=imported,
+                            skipped=skipped,
+                            source_runtimes=source_runtimes,
+                            runtime_candidates=runtime_candidates,
+                        )
+
                     try:
                         # Every skill write that reaches this point is a NEW
                         # import: #1838 refuses existing-skill overwrites above,
