@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
+from memtomem.context._abandon import abandon_sync_on_exit
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import validate_name
 from memtomem.context.mcp_servers import (
@@ -462,20 +463,36 @@ async def _sync_mcp_servers_core(project_root: Path) -> dict:
     Shared by the standalone route below and ``POST /context/sync-all``
     (#1278), which runs every per-type core under ONE outer lock
     acquisition — the lock is a non-reentrant ``_LoopLocalLock``, so the
-    core must never acquire it itself. The engine call stays a direct
-    synchronous call (no worker thread): the ``.mcp.json`` write is one
-    full-content atomic ``os.replace`` with no cross-process file lock,
-    so there is no unbounded block to offload (the skills/settings cores
-    differ, see ``_sync_skills_core``). No ``target_scope`` parameter —
+    core must never acquire it itself. No ``target_scope`` parameter —
     MCP servers are single-tier by design (ADR-0016 §3 note); the
     standalone route rejects non-``project_shared`` tiers before calling.
+
+    Offloaded to a worker thread. This docstring used to argue the opposite —
+    that ``.mcp.json`` is one atomic ``os.replace`` with no cross-process file
+    lock, so there was nothing to offload — and that stopped being true when
+    the engine took the ``_MCP_LOCK_BUDGET_S`` sidecar lock around its
+    read-merge-write. A blocking ``portalocker`` wait on the event loop freezes
+    every request AND prevents this route's own ``asyncio.timeout`` from
+    firing, since the expiry callback runs on the very loop that is blocked —
+    the #1145 shape the skills and settings cores offload for.
+
+    The offload creates the orphaned-worker window in exchange: a thread
+    cannot be cancelled, so a timed-out request would return 503 and let the
+    worker write ``.mcp.json`` afterwards. ``abandon_sync_on_exit`` closes it —
+    the engine polls the flag at entry, after acquiring the lock, and once more
+    just before the write (#2247). One target, one write, so unlike the
+    multi-item engines there is no partial state to reason about: the sync
+    either writes or it does not.
 
     Engine errors are raised as :class:`SyncPhaseError` — the standalone
     route's historical 422 string details plus the envelope attributes
     sync-all renders.
     """
     try:
-        result = generate_all_mcp_servers(project_root, surface="web_context_mcp_servers_sync")
+        with abandon_sync_on_exit():
+            result = await asyncio.to_thread(
+                generate_all_mcp_servers, project_root, surface="web_context_mcp_servers_sync"
+            )
     except McpServerParseError as exc:
         # Path-free detail at the loopback boundary (#1412): the engine message
         # embeds the resolved canonical path. This single point covers BOTH the
