@@ -24,7 +24,6 @@ cache (``search/pipeline.py``) cannot serve stale tag-filter responses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 from uuid import UUID
@@ -246,17 +245,13 @@ async def replace_chunk_tags(
     matches the chunk's current tags, the call is a no-op: no upsert, no
     cache invalidation, no ``updated_at`` bump.
     """
-    from memtomem.models import Chunk as _Chunk
-
     deduped = tuple(dict.fromkeys(tags))
 
     async with storage._tag_write_lock:
-        # Fetched, screened and written inside one lock hold, so the scope
-        # this check reads is the scope the upsert writes back. The tag lock
-        # does not exclude ``memory-migrate``, which re-scopes under the
-        # source/index locks — that race can still restore stale scope
-        # metadata through this upsert, a pre-existing write-integrity gap
-        # this boundary neither creates nor closes (#2241).
+        # The initial read keeps the missing/out-of-boundary fast-fail and the
+        # exact no-op contract. The write below repeats the boundary in its
+        # atomic SQL predicate, because ``memory-migrate`` does not take this
+        # process-local tag lock and may re-scope the row after this fetch.
         chunk = await storage.get_chunk(chunk_id)
         if chunk is None or not chunk_in_scope_boundary(chunk.metadata, project_context_root):
             return None
@@ -266,21 +261,12 @@ async def replace_chunk_tags(
             # search TTL cache aren't disturbed by a no-op write.
             return chunk
 
-        new_meta = chunk.metadata.__class__(
-            **{
-                **{f: getattr(chunk.metadata, f) for f in chunk.metadata.__dataclass_fields__},
-                "tags": deduped,
-            }
+        updated = await storage.replace_chunk_tags(
+            chunk_id,
+            deduped,
+            project_context_root=project_context_root,
         )
-        updated = _Chunk(
-            content=chunk.content,
-            metadata=new_meta,
-            id=chunk.id,
-            content_hash=chunk.content_hash,
-            embedding=chunk.embedding,
-            created_at=chunk.created_at,
-            updated_at=datetime.now(timezone.utc),
-        )
-        await storage.upsert_chunks([updated])
+        if updated is None:
+            return None
         _invalidate(search_pipeline)
         return updated

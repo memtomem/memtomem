@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 from uuid import UUID
 
+from memtomem.errors import StorageError
+from memtomem.models import Chunk
 from memtomem.storage.sqlite_helpers import utc_stamp
+from memtomem.storage.sqlite_scope import scope_context_sql
 
 
 class RelationMixin:
@@ -139,3 +143,49 @@ class RelationMixin:
                 db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
                 self._commit_if_standalone(db)
         return len(batch)
+
+    async def replace_chunk_tags(
+        self,
+        chunk_id: UUID,
+        tags: Sequence[str],
+        *,
+        project_context_root: Path | None,
+    ) -> Chunk | None:
+        """Replace one visible chunk's tags without rewriting stale metadata.
+
+        The boundary predicate is part of the ``UPDATE`` rather than a prior
+        authorization read. SQLite therefore judges the row after any writer
+        it waited for has committed: a same-project migration still permits
+        the tag change, while a move outside the caller's ADR-0011 boundary
+        makes the statement match nothing. Only ``tags`` and ``updated_at``
+        are written, so a migration's source/scope metadata cannot be restored.
+
+        The service owns ``_tag_write_lock`` and performs the exact no-op
+        check. This raw primitive must not acquire that lock again.
+        """
+        db = self._get_db()
+        scope_fragment, scope_params = scope_context_sql(None, project_context_root)
+        now = datetime.now(timezone.utc)
+        updated: Chunk | None = None
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                f"UPDATE chunks SET tags=?, updated_at=? WHERE id=? AND {scope_fragment}",
+                [
+                    json.dumps(list(tags)),
+                    utc_stamp(now),
+                    str(chunk_id),
+                    *scope_params,
+                ],
+            )
+            if cursor.rowcount:
+                # Read through the writer connection before commit.
+                # ``get_chunk`` uses the read pool, which cannot see an
+                # enclosing transaction's uncommitted tag update.
+                row = db.execute("SELECT * FROM chunks WHERE id=?", (str(chunk_id),)).fetchone()
+                if row is None:
+                    raise StorageError(
+                        "replace_chunk_tags updated a row that could not be read back"
+                    )
+                updated = self._row_to_chunk(row)
+            self._commit_if_standalone(db)
+        return updated
