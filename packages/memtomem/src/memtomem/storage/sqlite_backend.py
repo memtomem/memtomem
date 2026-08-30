@@ -2746,6 +2746,52 @@ class SqliteBackend(
         ).fetchone()
         return int(row[0]) if row else 0
 
+    async def count_chunks_by_sources(self, source_files: Sequence[Path]) -> dict[Path, int]:
+        """How many chunks each of ``source_files`` holds, in one pass per batch.
+
+        The batch sibling of :meth:`count_chunks_by_source`, for callers holding
+        a set of paths that is not bounded by anything — ``mm purge`` matches
+        against every source in the store. Counting them by listing the chunks
+        and taking ``len()`` was what capped ``mm purge``'s preview at 10,000
+        per file (#2261) while the delete it previews had no such cap.
+
+        Two contract details worth stating, both from the ``norm_path``
+        round-trip that keys the result back to the caller's own ``Path``
+        objects:
+
+        - **Sparse.** A file with no chunks is absent rather than ``0``; read a
+          missing key as zero. Callers that want a total just ``sum(...)``.
+        - **Aliases collapse.** Two inputs that normalise to the same stored
+          path (symlink, NFC/NFD spelling) yield one entry, keyed by whichever
+          the caller passed last. Paths that came out of the store — the purge
+          case — are already canonical and distinct, so this cannot bite there.
+        """
+        if not source_files:
+            return {}
+
+        db = self._get_read_db()
+        norm_to_path = {norm_path(sf): sf for sf in source_files}
+        norm_paths = list(norm_to_path)
+
+        result: dict[Path, int] = {}
+        # Batched like ``get_chunks_batch``: ``source_files`` is caller-sized,
+        # and one ``IN`` clause per host-parameter ceiling is the difference
+        # between a purge that reports and one that raises "too many SQL
+        # variables" before printing anything.
+        for start in range(0, len(norm_paths), _SQL_MAX_PARAMS):
+            batch = norm_paths[start : start + _SQL_MAX_PARAMS]
+            rows = db.execute(
+                f"SELECT source_file, COUNT(*) FROM chunks "
+                f"WHERE source_file IN ({placeholders(len(batch))}) GROUP BY source_file",
+                batch,
+            ).fetchall()
+            for stored_path, count in rows:
+                sf_key = norm_to_path.get(str(stored_path))
+                if sf_key is not None:
+                    result[sf_key] = int(count)
+
+        return result
+
     async def count_chunk_links_for_source(self, source_file: Path) -> int:
         # ADR-0011 #886: `mm context memory-migrate` reports the size of the
         # chunk_links "neighborhood" attached to a moving source. For v1
@@ -2810,35 +2856,6 @@ class SqliteBackend(
             tuple(tags),
         ).fetchone()
         return int(row[0]) if row else 0
-
-    async def list_chunks_by_sources(
-        self,
-        source_files: Sequence[Path],
-        limit_per_file: int = 10000,
-    ) -> dict[Path, list[Chunk]]:
-        """Batch-fetch chunks for multiple source files in a single query."""
-        if not source_files:
-            return {}
-
-        db = self._get_read_db()
-        norm_paths = [norm_path(sf) for sf in source_files]
-
-        rows = db.execute(
-            f"SELECT * FROM chunks WHERE source_file IN ({placeholders(len(norm_paths))}) "
-            "ORDER BY source_file, start_line",
-            norm_paths,
-        ).fetchall()
-
-        result: dict[Path, list[Chunk]] = {sf: [] for sf in source_files}
-        norm_to_path = {norm_path(sf): sf for sf in source_files}
-
-        for row in rows:
-            chunk = self._row_to_chunk(row)
-            sf_key = norm_to_path.get(str(chunk.metadata.source_file))
-            if sf_key is not None and len(result[sf_key]) < limit_per_file:
-                result[sf_key].append(chunk)
-
-        return result
 
     async def recall_chunks(
         self,
