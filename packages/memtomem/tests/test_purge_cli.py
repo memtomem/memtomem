@@ -18,9 +18,7 @@ def _mock_components(matched_sources, indexing_exclude_patterns=(), memory_dirs=
     """Build a fake Components-like object where storage returns the given sources."""
     storage = SimpleNamespace(
         get_all_source_files=AsyncMock(return_value=set(matched_sources)),
-        list_chunks_by_sources=AsyncMock(
-            return_value={sf: [object(), object()] for sf in matched_sources}
-        ),
+        count_chunks_by_sources=AsyncMock(return_value={sf: 2 for sf in matched_sources}),
         delete_by_source=AsyncMock(return_value=2),
     )
     roots = list(memory_dirs)
@@ -188,6 +186,10 @@ class TestPurgeJson:
         data = json.loads(result.output)
         # delete_by_source is mocked to return 2 per file.
         assert data == {"ok": True, "apply": True, "files": 2, "chunks": 4}
+        # Apply reports what it deleted, so it must not pay for a preview count
+        # it never prints — the reason the count moved inside the dry-run
+        # branch rather than staying above it (#2261).
+        comp.storage.count_chunks_by_sources.assert_not_called()
 
     def test_no_matches_json_is_ok_noop(self, monkeypatch):
         comp = _mock_components([Path("/home/u/notes/day.md")])
