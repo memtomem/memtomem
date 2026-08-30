@@ -71,6 +71,9 @@ _DISPATCH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     # both engine entries here.
     "generate_all_skills": (_ABANDON,),
     "extract_skills_to_canonical": (_ABANDON,),
+    # One target, one write, and ``.mcp.json`` is project-rooted from an
+    # argument — abort-only, with nothing home-anchored to pin (#2247).
+    "generate_all_mcp_servers": (_ABANDON,),
     "_create_locked": (_ABANDON,),
     "_update_locked": (_ABANDON,),
     "_delete_locked": (_ABANDON,),
@@ -163,6 +166,7 @@ _MIN_SITES = {
     # Two each: the skills routes and the shared agents/commands routes in
     # ``_atomic_kind``. A floor of 1 would stay green with an entire mirror
     # gone, which is exactly the drift a shared-name closure invites.
+    "generate_all_mcp_servers": 1,  # the web sync core, shared with sync-all
     "_create_locked": 2,
     "_update_locked": 2,
     "_delete_locked": 2,

@@ -24,6 +24,7 @@ from typing import Any
 
 from memtomem import privacy
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context._runtime_targets import DiffRow
@@ -34,11 +35,25 @@ CANONICAL_MCP_SERVER_ROOT = ".memtomem/mcp-servers"
 PROJECT_MCP_CONFIG = ".mcp.json"
 MCP_RUNTIME = "project_mcp"
 
+
+def _abandoned_skip() -> tuple[str, str, skip_codes.SkipCode]:
+    """The skip row for a sync whose caller gave up before the write (#2247)."""
+    return (
+        MCP_RUNTIME,
+        "the sync was abandoned by its caller (request timeout or "
+        f"cancellation); {PROJECT_MCP_CONFIG} was left untouched. Re-run "
+        "`mm context sync --include=mcp-servers` to retry.",
+        skip_codes.ABANDONED,
+    )
+
+
 # Sidecar-lock acquisition budget for the ``.mcp.json`` read-merge-write
 # (the ``settings._SETTINGS_LOCK_BUDGET_S`` twin, #1145 review shape): a
 # bounded wait keeps a (possibly thread-offloaded) caller from blocking
 # indefinitely on a lock another process holds; on exhaustion the sync
-# self-aborts with a typed skip instead of hanging or orphaning a late write.
+# self-aborts with a typed skip instead of hanging. It bounds the *wait* only —
+# a sync that holds the lock is on no deadline — so what stops a write landing
+# behind a caller that already gave up is ``sync_is_abandoned`` (#2247).
 _MCP_LOCK_BUDGET_S = 30.0
 
 
@@ -303,6 +318,11 @@ def generate_all_mcp_servers(
     change the merge or write behavior. Callers pass their own surface so
     the privacy-scan audit trail names the real entry point.
     """
+    # Checked before the canonical scan so an abandoned sync neither reads the
+    # definitions nor creates the target's lock sidecar (#2247).
+    if sync_is_abandoned():
+        return McpServerSyncResult(generated=[], skipped=[_abandoned_skip()])
+
     paths = list_canonical_mcp_servers(project_root)
     if not paths:
         return McpServerSyncResult(
@@ -340,6 +360,12 @@ def generate_all_mcp_servers(
     # ``generate_all_settings``.
     try:
         with _file_lock(_lock_path_for(target), timeout=_MCP_LOCK_BUDGET_S):
+            # Waiting for this lock is the longest the sync can take, so it is
+            # where a caller most plausibly gave up. ``return`` releases it on
+            # the way out (#2247).
+            if sync_is_abandoned():
+                return McpServerSyncResult(generated=[], skipped=[_abandoned_skip()])
+
             current_text = target.read_text(encoding="utf-8") if target.exists() else None
             existing_mtime_ns = target.stat().st_mtime_ns if target.is_file() else 0
             config = _parse_project_mcp_text(current_text) if current_text is not None else {}
@@ -390,12 +416,21 @@ def generate_all_mcp_servers(
             # verbatim without scanning them, so widening a user's 0600 file
             # could expose unscanned secret env values, and forcing 0600 onto
             # a 0644 file was the original id 43 complaint.
+            # The read, merge and serialize above can take long enough for the
+            # caller to give up in between, so re-check rather than trust the
+            # post-lock answer. This is the last point the write can be
+            # suppressed — there is exactly one, and nothing after it to leave
+            # half-done (#2247).
+            if sync_is_abandoned():
+                return McpServerSyncResult(generated=[], skipped=[_abandoned_skip()])
+
             mode = 0o644 if current_text is None else stat.S_IMODE(target.stat().st_mode)
             atomic_write_text(target, merged_text, mode=mode)
     except TimeoutError:
         # Another process held the lock past the budget. Abort cleanly so a
-        # (possibly thread-offloaded) caller never blocks indefinitely and
-        # never orphans a late writer (#1145 review shape).
+        # (possibly thread-offloaded) caller never blocks indefinitely
+        # (#1145 review shape); suppressing a write behind a caller that has
+        # given up is the ``sync_is_abandoned`` checks' job (#2247).
         return McpServerSyncResult(
             generated=[],
             skipped=[
