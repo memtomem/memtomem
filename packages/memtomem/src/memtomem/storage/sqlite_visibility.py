@@ -90,11 +90,10 @@ def _namespace_sql(
     if not system_prefixes:
         return "", []
 
-    # Belt-and-suspenders cap, matching ``namespace_sql``: refuse to emit a
-    # pathologically long clause if a caller hand-builds the prefix tuple.
-    assert len(system_prefixes) <= 10, (
-        f"neighbor_visibility_sql: {len(system_prefixes)} system prefixes, cap is 10"
-    )
+    # No length cap of its own: ``SearchConfig.prefix_count_capped`` rejects
+    # more than 10 prefixes at startup, and both callers pass the validated
+    # config list, so the runaway N × M LIKE clause the cap exists to prevent
+    # cannot be reached from here.
     not_system = " AND ".join(f"{alias}namespace NOT LIKE ? ESCAPE '\\'" for _ in system_prefixes)
     params: list = [f"{escape_like(p)}%" for p in system_prefixes]
 
