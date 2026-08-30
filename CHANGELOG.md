@@ -324,6 +324,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Per-chunk tag edits no longer undo a concurrent memory scope migration.**
+  The tag service fetched a chunk, rebuilt the entire row with new tags, and
+  upserted that stale snapshot. If `memory-migrate` moved the row between the
+  fetch and upsert, the tag write silently restored its old `source_file`,
+  `scope`, and `project_root` (and the old FTS source path). Tag replacement now
+  uses an atomic storage update that writes only `tags` and `updated_at`, with
+  the caller's ADR-0011 project boundary in the `WHERE`: a migration within the
+  same project keeps its new location and receives the tags, while a move to a
+  foreign project makes the tag write fail as not-found. Existing no-op,
+  timestamp, cache-invalidation, and HTTP 404 behavior is unchanged. (#2241)
+
 - **An empty `namespace` list no longer disables system-namespace hiding.**
   `namespace=[]` parsed as an empty union: no SQL predicate was emitted and
   the Python-side neighbour screen admitted everything, so `archive:*` and

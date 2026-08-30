@@ -9,6 +9,8 @@ Covers the service-layer contracts on top of the storage helpers:
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from helpers import make_chunk as _make_chunk
@@ -385,6 +387,7 @@ async def test_service_acquires_tag_write_lock(storage):
 async def test_replace_chunk_tags_mutates_and_invalidates(storage):
     c1 = _make_chunk(content="alpha", tags=("old",))
     await storage.upsert_chunks([c1])
+    before = await storage.get_chunk(c1.id)
     spy = _SearchPipelineSpy()
 
     updated = await svc.replace_chunk_tags(
@@ -396,6 +399,7 @@ async def test_replace_chunk_tags_mutates_and_invalidates(storage):
     assert spy.invalidate_count == 1
     refreshed = await storage.get_chunk(c1.id)
     assert tuple(refreshed.metadata.tags) == ("new", "extra")
+    assert refreshed.updated_at > before.updated_at
 
 
 @pytest.mark.asyncio
@@ -410,6 +414,55 @@ async def test_replace_chunk_tags_returns_none_when_chunk_missing(storage):
     )
     assert result is None
     assert spy.invalidate_count == 0
+
+
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_does_not_resurrect_chunk_deleted_after_prefetch(
+    storage, monkeypatch
+):
+    """A stale prefetch must not turn a concurrent delete into an insert."""
+    c1 = _make_chunk(content="alpha", tags=("old",))
+    await storage.upsert_chunks([c1])
+    spy = _SearchPipelineSpy()
+    real_replace = storage.replace_chunk_tags
+
+    async def delete_then_replace(chunk_id, tags, *, project_context_root):
+        await storage.delete_chunks([chunk_id])
+        return await real_replace(
+            chunk_id,
+            tags,
+            project_context_root=project_context_root,
+        )
+
+    monkeypatch.setattr(storage, "replace_chunk_tags", delete_then_replace)
+
+    result = await svc.replace_chunk_tags(
+        storage,
+        c1.id,
+        ["new"],
+        project_context_root=None,
+        search_pipeline=spy,
+    )
+
+    assert result is None
+    assert await storage.get_chunk(c1.id) is None
+    assert spy.invalidate_count == 0
+
+
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_accepts_empty_tag_list(storage):
+    c1 = _make_chunk(content="alpha", tags=("old",))
+    await storage.upsert_chunks([c1])
+
+    updated = await svc.replace_chunk_tags(
+        storage,
+        c1.id,
+        [],
+        project_context_root=None,
+    )
+
+    assert updated is not None
+    assert updated.metadata.tags == ()
 
 
 @pytest.mark.asyncio
@@ -489,6 +542,7 @@ def _snapshot_invariants(chunk):
         "content_hash": chunk.content_hash,
         "embedding": tuple(chunk.embedding) if chunk.embedding is not None else None,
         "created_at": chunk.created_at,
+        "metadata_except_tags": dataclasses.replace(chunk.metadata, tags=()),
     }
 
 
@@ -538,3 +592,23 @@ async def test_replace_chunk_tags_preserves_content_embedding_hash_created_at(st
 
     after = _snapshot_invariants(await storage.get_chunk(c1.id))
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_storage_replace_chunk_tags_participates_in_transaction_rollback(storage):
+    """The primitive returns its uncommitted row without ending its owner's transaction."""
+    c1 = _make_chunk(content="alpha", tags=("old",))
+    await storage.upsert_chunks([c1])
+
+    with pytest.raises(RuntimeError, match="rollback tag replacement"):
+        async with storage.transaction():
+            updated = await storage.replace_chunk_tags(
+                c1.id,
+                ["new"],
+                project_context_root=None,
+            )
+            assert updated is not None
+            assert updated.metadata.tags == ("new",)
+            raise RuntimeError("rollback tag replacement")
+
+    assert (await storage.get_chunk(c1.id)).metadata.tags == ("old",)

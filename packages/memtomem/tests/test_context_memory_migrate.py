@@ -15,9 +15,10 @@ Pins for the chunk-id-stable single-DB rename:
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -185,6 +186,140 @@ async def test_memory_migrate_apply_user_to_project_shared_chunk_ids_preserved(
     assert refreshed.metadata.scope == "project_shared"
     assert refreshed.metadata.project_root == project_root
     assert refreshed.metadata.source_file == target
+
+
+@pytest.mark.parametrize("caller_inside_project", [True, False], ids=["same-boundary", "moved-out"])
+@pytest.mark.asyncio
+async def test_replace_chunk_tags_is_atomic_against_memory_migrate(
+    bm25_only_components,
+    monkeypatch,
+    tmp_path,
+    caller_inside_project,
+):
+    """#2241: migration may land after the service fetch but before its write.
+
+    The process-local tag lock deliberately does not serialize against the
+    migration's source/target sidecars. Events stop the tag task at the new
+    storage primitive, proving the migration commits in that exact window
+    without relying on sleeps.
+    """
+    from memtomem.cli.context_cmd import _memory_migrate_run
+    from memtomem.services import tag_management as tag_svc
+
+    comp, mem_dir = bm25_only_components
+    project_root = tmp_path / "tag_race_project"
+    proj_shared = project_root / ".memtomem" / "memories"
+    proj_shared.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+
+    src = mem_dir / "tag-race.md"
+    src.write_text("## Rule\n\nharmless body.\n", encoding="utf-8")
+    chunk = Chunk(
+        content="harmless body.",
+        metadata=ChunkMetadata(
+            source_file=src,
+            tags=("old",),
+            scope="user",
+            start_line=3,
+            end_line=3,
+        ),
+        embedding=[0.1] * 1024,
+    )
+    await comp.storage.upsert_chunks([chunk])
+    before = await comp.storage.get_chunk(chunk.id)
+    db = comp.storage._get_db()
+    rowid = db.execute("SELECT rowid FROM chunks WHERE id=?", (str(chunk.id),)).fetchone()[0]
+    vector_rows_before = db.execute(
+        "SELECT COUNT(*) FROM chunks_vec WHERE rowid=?", (rowid,)
+    ).fetchone()[0]
+
+    write_reached = asyncio.Event()
+    migration_committed = asyncio.Event()
+    real_replace = comp.storage.replace_chunk_tags
+
+    async def replace_after_migration(chunk_id, tags, *, project_context_root):
+        write_reached.set()
+        await migration_committed.wait()
+        return await real_replace(
+            chunk_id,
+            tags,
+            project_context_root=project_context_root,
+        )
+
+    monkeypatch.setattr(comp.storage, "replace_chunk_tags", replace_after_migration)
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(project_root)
+    search_pipeline = MagicMock()
+    caller_root = project_root if caller_inside_project else None
+    tag_task = asyncio.create_task(
+        tag_svc.replace_chunk_tags(
+            comp.storage,
+            chunk.id,
+            ["new"],
+            project_context_root=caller_root,
+            search_pipeline=search_pipeline,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(write_reached.wait(), timeout=5)
+        assert comp.storage._tag_write_lock.locked()
+
+        await _memory_migrate_run(
+            [src.resolve()],
+            from_scope="user",
+            to_scope="project_shared",
+            apply_=True,
+            yes=True,
+            confirm_project_shared=True,
+        )
+        target = (proj_shared / src.name).resolve()
+        migrated = await comp.storage.get_chunk(chunk.id)
+        assert migrated is not None
+        assert migrated.metadata.source_file == target
+        assert migrated.metadata.scope == "project_shared"
+        assert migrated.metadata.project_root == project_root
+        assert migrated.metadata.tags == ("old",)
+
+        migration_committed.set()
+        updated = await asyncio.wait_for(asyncio.shield(tag_task), timeout=5)
+    finally:
+        migration_committed.set()
+        if not tag_task.done():
+            tag_task.cancel()
+        await asyncio.gather(tag_task, return_exceptions=True)
+
+    stored = await comp.storage.get_chunk(chunk.id)
+    assert stored is not None
+    assert stored.metadata.source_file == target
+    assert stored.metadata.scope == "project_shared"
+    assert stored.metadata.project_root == project_root
+    assert stored.content == before.content
+    assert stored.content_hash == before.content_hash
+    assert stored.created_at == before.created_at
+
+    fts_source = db.execute(
+        "SELECT source_file FROM chunks_fts WHERE rowid=?", (rowid,)
+    ).fetchone()[0]
+    assert Path(fts_source) == target
+    assert (
+        db.execute("SELECT COUNT(*) FROM chunks_vec WHERE rowid=?", (rowid,)).fetchone()[0]
+        == vector_rows_before
+    )
+
+    if caller_inside_project:
+        assert updated is not None
+        assert updated.metadata.source_file == target
+        assert updated.metadata.scope == "project_shared"
+        assert updated.metadata.project_root == project_root
+        assert updated.metadata.tags == ("new",)
+        assert stored.metadata.tags == ("new",)
+        search_pipeline.invalidate_cache.assert_called_once_with()
+    else:
+        assert updated is None
+        assert stored.metadata.tags == ("old",)
+        search_pipeline.invalidate_cache.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
