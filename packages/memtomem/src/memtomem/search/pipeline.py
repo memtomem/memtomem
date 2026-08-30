@@ -96,7 +96,7 @@ from memtomem.models import (
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.visibility import chunk_valid_at, neighbor_visible
 from memtomem.search.reranker.base import close_reranker_safely
-from memtomem.storage.base import SearchMetadataFilter, parse_tag_filter
+from memtomem.storage.base import ContextWindowRows, SearchMetadataFilter, parse_tag_filter
 from memtomem.storage.sqlite_helpers import norm_path
 
 logger = logging.getLogger(__name__)
@@ -1122,7 +1122,7 @@ class SearchPipeline:
         project_context_root: Path | None = None,
         as_of_unix: int | None = None,
     ) -> list[SearchResult]:
-        """Attach ±window adjacent chunks to each result (batch, single DB call).
+        """Attach ±window adjacent chunks to each result (one query group per file).
 
         Neighbours are taken from the file's true chunk order and then
         screened by :func:`memtomem.search.visibility.neighbor_visible`, so a
@@ -1132,12 +1132,16 @@ class SearchPipeline:
         ``total_chunks_in_file``, by contrast, are counted over the visible
         chunks only: reporting the raw total would leak how many chunks the
         caller is not allowed to see.
+
+        Storage fetches the neighbours and counts the visible rows around the
+        anchor (#2237); reading the file into Python to slice it capped both
+        at 10,000 chunks, past which a hit came back with no context and a
+        total that understated its file. The counts arrive anchor-free, so the
+        anchor is added to both here — see below.
         """
         if not results or window <= 0:
             return results
 
-        source_files = list({r.chunk.metadata.source_file for r in results})
-        chunks_by_source = await self._storage.list_chunks_by_sources(source_files)
         system_prefixes = tuple(self._config.system_namespace_prefixes or ())
 
         def visible(chunk: Chunk) -> bool:
@@ -1150,50 +1154,46 @@ class SearchPipeline:
                 as_of_unix=as_of_unix,
             )
 
-        # Build per-file index: {chunk_id -> position}. Positions index the
-        # raw order (adjacency is physical); ranks over the visible subset are
-        # what gets reported. Visibility is decided once per chunk here and
-        # read back by id when the windows are sliced.
-        file_indexes: dict[str, dict[str, int]] = {}
-        visible_ranks: dict[str, dict[str, int]] = {}
-        for sf, chunks in chunks_by_source.items():
-            file_indexes[str(sf)] = {str(c.id): i for i, c in enumerate(chunks)}
-            ranks: dict[str, int] = {}
-            for c in chunks:
-                if visible(c):
-                    ranks[str(c.id)] = len(ranks) + 1
-            visible_ranks[str(sf)] = ranks
+        by_source: dict[Path, list[UUID]] = {}
+        for r in results:
+            by_source.setdefault(r.chunk.metadata.source_file, []).append(r.chunk.id)
+
+        windows: dict[UUID, ContextWindowRows | None] = {}
+        for source_file, anchor_ids in by_source.items():
+            windows.update(
+                await self._storage.get_context_windows(
+                    source_file,
+                    anchor_ids,
+                    window,
+                    ns_filter=ns_filter,
+                    system_prefixes=system_prefixes,
+                    scope_filter=scope_filter,
+                    project_context_root=project_context_root,
+                    as_of_unix=as_of_unix,
+                )
+            )
 
         expanded: list[SearchResult] = []
         for r in results:
-            sf_key = str(r.chunk.metadata.source_file)
-            idx_map = file_indexes.get(sf_key)
-            if idx_map is None:
-                expanded.append(r)
-                continue
-            pos = idx_map.get(str(r.chunk.id))
-            if pos is None:
+            rows = windows.get(r.chunk.id)
+            if rows is None:
                 expanded.append(r)
                 continue
 
-            file_chunks = chunks_by_source[r.chunk.metadata.source_file]
-            ranks = visible_ranks[sf_key]
-            before = [c for c in file_chunks[max(0, pos - window) : pos] if str(c.id) in ranks]
-            after = [c for c in file_chunks[pos + 1 : pos + 1 + window] if str(c.id) in ranks]
-            # The anchor normally passed these filters upstream and is in the
-            # visible set. It can still be missing: a re-index between
-            # retrieval and this bulk read keeps the id but may change the
-            # metadata screened on, and a hand-built result (tests, callers
-            # bypassing retrieval) never passed them at all. The result is
-            # returned either way, so count it in — but derive its ordinal
-            # from the visible chunks ahead of it rather than falling back to
-            # the raw position, which would publish where it sits among the
-            # hidden ones.
-            anchor_rank = ranks.get(str(r.chunk.id))
-            visible_total = len(ranks)
-            if anchor_rank is None:
-                anchor_rank = sum(1 for c in file_chunks[:pos] if str(c.id) in ranks) + 1
-                visible_total += 1
+            before = [c for c in rows.before if visible(c)]
+            after = [c for c in rows.after if visible(c)]
+            # The anchor is part of the accounting set whether or not the
+            # neighbour rules would hide it: it is being returned as the
+            # match, so counting around it as if it were absent would report a
+            # position that does not describe what the caller is reading. It
+            # can genuinely be hidden — a re-index between retrieval and here
+            # keeps the id but may change the metadata screened on, and a
+            # hand-built result (tests, callers bypassing retrieval) never
+            # passed the filters at all. Its ordinal still comes from the
+            # visible chunks ahead of it rather than its raw position, which
+            # would publish where it sits among the hidden ones.
+            anchor_rank = rows.visible_before + 1
+            visible_total = rows.visible_total_excluding_anchor + 1
 
             expanded.append(
                 SearchResult(
@@ -1205,7 +1205,7 @@ class SearchPipeline:
                         window_before=tuple(before),
                         window_after=tuple(after),
                         chunk_position=anchor_rank,
-                        total_chunks_in_file=max(visible_total, anchor_rank),
+                        total_chunks_in_file=visible_total,
                         context_tier_used="standard",
                     ),
                 )

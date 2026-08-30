@@ -411,6 +411,15 @@ def create_tables(
         CREATE INDEX IF NOT EXISTS idx_chunks_source
         ON chunks(source_file)
     """)
+    # Context-window expansion (#2237) seeks the rows adjacent to an anchor by
+    # ``(source_file, start_line, rowid)`` and counts a file's rows in that
+    # order. The single-column index above answers the equality but leaves
+    # both to a sort of every row of the file. Additive and idempotent, so no
+    # SCHEMA_VERSION bump.
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_source_start
+        ON chunks(source_file, start_line)
+    """)
     db.execute("""
         CREATE INDEX IF NOT EXISTS idx_chunks_hash
         ON chunks(content_hash)
