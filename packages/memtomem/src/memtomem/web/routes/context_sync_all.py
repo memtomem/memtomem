@@ -11,9 +11,10 @@ ADR-0024 resolves that deferral and records the contracts:
   handlers* (each acquires the lock). It acquires the lock ONCE and runs
   the five lock-free ``_sync_*_core`` helpers sequentially inside it, in
   the front-end's phase order. Each core keeps its standalone execution
-  mode (skills/settings offload to a worker thread for their
-  cross-process file locks; commands/agents/mcp-servers stay direct
-  calls — see ``_sync_skills_core``).
+  mode: settings, skills and mcp-servers offload to a worker thread for
+  their cross-process file locks (see ``_sync_skills_core``), while
+  commands and agents stay direct calls — they take no such lock, so
+  there is no unbounded wait to keep off the loop.
 - **Per-phase report, NOT cross-type all-or-nothing.** A failed phase is
   recorded and the run proceeds — skills use staging-dir promotion and
   the settings / MCP-server result shapes don't fit one atomic engine,
@@ -125,12 +126,15 @@ _SYNC_ALL_PROJECTS_SURFACE = "web_context_sync_all_projects"
 
 #: One outer window = five sequential phases × the standalone routes' 60s
 #: budget. The engine-internal cross-process lock budgets
-#: (``_SKILLS_LOCK_BUDGET_S`` / ``_SETTINGS_LOCK_BUDGET_S``, 30s) stay far
+#: (``_SKILLS_LOCK_BUDGET_S`` / ``_SETTINGS_LOCK_BUDGET_S`` /
+#: ``_MCP_LOCK_BUDGET_S``, 30s) stay far
 #: below it, so no phase can sit on a lock past this window (#1145 shape).
 #: The budgets bound *waiting* only, so they do not by themselves stop an
 #: orphaned worker from writing after the 503 — that is the abort flag
-#: ``abandon_sync_on_exit`` installs, which every phase now polls (#2218,
-#: #2247).
+#: ``abandon_sync_on_exit`` installs, which the three thread-offloaded phases
+#: poll (settings #2218, skills and mcp-servers #2247). The commands and
+#: agents phases run on the loop and have no worker to orphan, so the
+#: question does not arise for them.
 _SYNC_ALL_TIMEOUT_S = 300
 
 
