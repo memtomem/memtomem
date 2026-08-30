@@ -15,10 +15,12 @@ import hashlib
 import os
 import subprocess
 import tempfile
-import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from helpers import BUDGET_TOLERANCE_S
 
 from memtomem._runtime_paths import runtime_dir
 from memtomem.context._atomic import _file_lock
@@ -154,19 +156,72 @@ def test_wiki_commit_lock_excludes_a_holder_of_the_pre_2225_path(
                 pytest.fail("acquired while a pre-#2225 process held the lock")
 
 
-def test_wiki_commit_lock_budget_is_shared_not_doubled(tmp_path: Path) -> None:
-    # The pair must stay bounded below the web handler's asyncio.timeout(60);
-    # nesting two full-budget waits would have doubled it.
+def test_wiki_commit_lock_budget_is_shared_not_doubled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pair must stay bounded below the web handler's ``asyncio.timeout(60)``;
+    nesting two full-budget waits would have doubled it.
+
+    Pinned on the timeout each leg is *handed*, under a fake clock that makes the
+    legacy leg consume a known slice of the budget. Both halves matter (#2257):
+
+    - Asserting elapsed wall time instead measured the runner as much as the
+      lock, and flaked on loaded Windows CI at a ceiling deliberately set to the
+      doubling being ruled out, so it could not be loosened without unpinning
+      the bug.
+    - Spying the timeouts alone would not distinguish either: with the legacy
+      leg acquiring instantly the remaining budget still rounds to the whole
+      budget, so a canonical leg handed the raw ``timeout`` looks identical to
+      one handed the remainder. Only a legacy acquisition that visibly spends
+      part of the deadline separates them.
+    """
     root = tmp_path / "wiki"
     root.mkdir()
-    with _file_lock(wiki_commit_lock_path(root), timeout=None):
-        started = time.monotonic()
-        with pytest.raises(TimeoutError):
-            with wiki_commit_lock(root, timeout=0.4):
-                pytest.fail("acquired while the canonical lock was held")
-        # The legacy leg acquires instantly, so essentially the whole budget is
-        # spent on the canonical leg — never 2x it.
-        assert time.monotonic() - started < 0.8
+    budget = 30.0
+    legacy_spend = 7.5
+    legacy_path = legacy_wiki_commit_lock_path(root)
+    seen: list[tuple[Path, float | None]] = []
+    real_file_lock = wiki_commit._file_lock
+
+    class _FakeClock:
+        """Stands in for the ``time`` module inside ``wiki.commit``.
+
+        ``monotonic`` is the module's only use of it (both reads of the shared
+        deadline), so replacing the reference leaves nothing else stubbed.
+        """
+
+        def __init__(self, start: float) -> None:
+            self.now = start
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = _FakeClock(1_000.0)
+
+    @contextmanager
+    def _spy(path: Path, *, timeout: float | None = None) -> Iterator[None]:
+        seen.append((path, timeout))
+        if path == legacy_path:
+            # The legacy acquisition took this long; the canonical leg must be
+            # handed what is left of the deadline, not a fresh budget.
+            clock.now += legacy_spend
+        with real_file_lock(path, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(wiki_commit, "time", clock)
+    monkeypatch.setattr(wiki_commit, "_file_lock", _spy)
+
+    with wiki_commit_lock(root, timeout=budget):
+        pass
+
+    assert [path for path, _ in seen] == [legacy_path, wiki_commit_lock_path(root)]
+    legacy_timeout, canonical_timeout = seen[0][1], seen[1][1]
+    assert legacy_timeout == budget
+    assert canonical_timeout is not None
+    # The remainder, never a second full budget: the two waits together stay
+    # within the caller's budget however the time is split between them.
+    assert canonical_timeout == pytest.approx(budget - legacy_spend)
+    assert legacy_spend + canonical_timeout <= budget + BUDGET_TOLERANCE_S
 
 
 def test_exhausted_budget_still_attempts_the_canonical_leg_once(
