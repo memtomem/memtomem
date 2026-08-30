@@ -190,3 +190,52 @@ def make_chunk(
         content_hash=f"hash-{uuid4().hex[:8]}",
         embedding=embedding if embedding is not None else [0.1] * 1024,
     )
+
+
+def fake_context_windows(chunks: dict[Path, list[Chunk]] | list[Chunk]):
+    """In-memory stand-in for ``StorageBackend.get_context_windows``.
+
+    Takes either a ``{source_file: chunks}`` map or a flat list of one file's
+    chunks (grouped by their own ``source_file``).
+
+    Slices the physical order the caller hands it and counts with the real
+    :func:`memtomem.search.visibility.neighbor_visible`, so a test that fakes
+    storage still exercises the visibility rule rather than a second opinion
+    about it. What it cannot certify is that the SQL says the same thing —
+    ``test_context_window_storage.py`` runs both against one matrix for that.
+
+    Mirrors the contract exactly: neighbours come back **unfiltered** (the
+    caller screens them), and both counts **exclude the anchor**, which the
+    caller adds back (#2236).
+    """
+    from memtomem.search.visibility import neighbor_visible
+    from memtomem.storage.base import ContextWindowRows
+
+    if isinstance(chunks, dict):
+        chunks_by_source = {Path(k): v for k, v in chunks.items()}
+    else:
+        chunks_by_source = {}
+        for chunk in chunks:
+            chunks_by_source.setdefault(Path(chunk.metadata.source_file), []).append(chunk)
+
+    async def _get_context_windows(source_file, anchor_ids, window, **spec):
+        chunks = chunks_by_source.get(Path(source_file), [])
+        positions = {c.id: i for i, c in enumerate(chunks)}
+        visible = [neighbor_visible(c, **spec) for c in chunks]
+        out: dict = {}
+        for anchor_id in anchor_ids:
+            pos = positions.get(anchor_id)
+            if pos is None:
+                out[anchor_id] = None
+                continue
+            out[anchor_id] = ContextWindowRows(
+                before=list(chunks[max(0, pos - window) : pos]) if window > 0 else [],
+                after=list(chunks[pos + 1 : pos + 1 + window]) if window > 0 else [],
+                visible_before=sum(1 for i in range(pos) if visible[i]),
+                visible_total_excluding_anchor=sum(
+                    1 for i, v in enumerate(visible) if v and i != pos
+                ),
+            )
+        return out
+
+    return _get_context_windows

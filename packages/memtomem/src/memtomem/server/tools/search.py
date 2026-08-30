@@ -280,7 +280,26 @@ async def mem_search(
     return output
 
 
-def _expand_visibility_predicate(app: Any) -> Callable[[Chunk], bool]:
+def _expand_visibility_spec(app: Any) -> dict[str, Any]:
+    """The visibility axes ``mem_expand`` reads neighbours under.
+
+    One value, consumed twice: :func:`_expand_visibility_predicate` builds the
+    Python screen from it, and ``storage.get_context_windows`` takes it as
+    keyword arguments to count the same rows in SQL. Deriving them separately
+    is how the two would drift.
+    """
+    config = app.config.search
+    system_prefixes = tuple(config.system_namespace_prefixes or ())
+    return {
+        "ns_filter": NamespaceFilter.parse(None, system_prefixes=system_prefixes),
+        "system_prefixes": system_prefixes,
+        "scope_filter": None,
+        "project_context_root": _resolve_project_context_root(app),
+        "as_of_unix": int(time.time()),
+    }
+
+
+def _expand_visibility_predicate(spec: dict[str, Any]) -> Callable[[Chunk], bool]:
     """Build the neighbour-visibility test ``mem_expand`` screens with.
 
     The rule the search pipeline applies to ``context_window`` neighbours
@@ -298,21 +317,9 @@ def _expand_visibility_predicate(app: Any) -> Callable[[Chunk], bool]:
     none. Callers who want that context ask for it through ``mem_search``,
     whose ``namespace=`` and ``scope=`` are actual requests.
     """
-    config = app.config.search
-    system_prefixes = tuple(config.system_namespace_prefixes or ())
-    ns_filter = NamespaceFilter.parse(None, system_prefixes=system_prefixes)
-    project_context_root = _resolve_project_context_root(app)
-    as_of_unix = int(time.time())
 
     def visible(candidate: Chunk) -> bool:
-        return neighbor_visible(
-            candidate,
-            ns_filter=ns_filter,
-            system_prefixes=system_prefixes,
-            scope_filter=None,
-            project_context_root=project_context_root,
-            as_of_unix=as_of_unix,
-        )
+        return neighbor_visible(candidate, **spec)
 
     return visible
 
@@ -359,27 +366,26 @@ async def mem_expand(
         return not_found(chunk_id)
 
     source_file = chunk.metadata.source_file
-    all_chunks = await app.storage.list_chunks_by_source(source_file, limit=10000)
-
-    # Find position of this chunk
-    idx_map = {str(c.id): i for i, c in enumerate(all_chunks)}
-    pos = idx_map.get(chunk_id)
-    if pos is None:
+    spec = _expand_visibility_spec(app)
+    windows = await app.storage.get_context_windows(source_file, [uid], window, **spec)
+    rows = windows.get(uid)
+    if rows is None:
         return f"Chunk {chunk_id} not found in source file listing."
 
-    visible = _expand_visibility_predicate(app)
-    before = [c for c in all_chunks[max(0, pos - window) : pos] if visible(c)]
-    after = [c for c in all_chunks[pos + 1 : pos + 1 + window] if visible(c)]
+    visible = _expand_visibility_predicate(spec)
+    before = [c for c in rows.before if visible(c)]
+    after = [c for c in rows.after if visible(c)]
     # The addressed chunk is always part of the accounting set: it is being
     # returned as the match, so counting around it as if it were hidden would
     # report a position that does not describe what the caller is reading.
     # (An expired anchor still surfaces here — the id was named explicitly —
-    # while expired *neighbours* stay filtered out.)
-    visible_ids = [str(c.id) for c in all_chunks if str(c.id) == chunk_id or visible(c)]
-    anchor_rank = visible_ids.index(chunk_id) + 1
+    # while expired *neighbours* stay filtered out.) Storage leaves the anchor
+    # out of both counts for exactly this reason, so it is added back once.
+    anchor_rank = rows.visible_before + 1
+    visible_total = rows.visible_total_excluding_anchor + 1
 
     parts = [
-        f"## Expand: chunk {anchor_rank}/{len(visible_ids)} in {_display_path(source_file)}",
+        f"## Expand: chunk {anchor_rank}/{visible_total} in {_display_path(source_file)}",
         f"Window: ±{window} chunks\n",
     ]
 

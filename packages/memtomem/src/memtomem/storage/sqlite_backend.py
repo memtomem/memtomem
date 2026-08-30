@@ -29,6 +29,7 @@ from memtomem.errors import (
 )
 from memtomem.storage.base import (
     ChunkAuditRow,
+    ContextWindowRows,
     NamespaceAssignResult,
     NamespaceChunkCandidate,
     NamespaceRenameResult,
@@ -64,6 +65,7 @@ from memtomem.storage.orphan_gc import (
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_namespace import NamespaceOps
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
+from memtomem.storage.sqlite_visibility import neighbor_visibility_sql
 from memtomem.storage.mixins import (
     AnalyticsMixin,
     EntityMixin,
@@ -2593,6 +2595,135 @@ class SqliteBackend(
             (norm_path(source_file), -1 if limit is None else limit),
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
+
+    async def get_context_windows(
+        self,
+        source_file: Path,
+        anchor_ids: Sequence[UUID],
+        window: int,
+        *,
+        ns_filter: NamespaceFilter | None,
+        system_prefixes: Sequence[str],
+        scope_filter: ScopeFilter | None,
+        project_context_root: Path | None,
+        as_of_unix: int | None,
+    ) -> dict[UUID, ContextWindowRows | None]:
+        """Physical neighbours plus visible ordinal/total, without listing the file.
+
+        Two shapes of query, and the split is deliberate. The counts come from
+        one pass per *file* — a running ``SUM`` over the visibility predicate,
+        read off at each anchor's row — so several hits in one file do not
+        rescan it, and nothing is deserialised to count it. The neighbours are
+        a bounded seek per anchor on ``(start_line, rowid)``: at most
+        ``window`` rows each side, whatever the file's length. Neither grows
+        with the file, which is the whole point of #2237.
+
+        The counts exclude the anchor row itself (see
+        :class:`ContextWindowRows`), so the caller's unconditional ``+ 1``
+        carries the #2236 carve-out without either side second-guessing the
+        other about whether the anchor is visible.
+        """
+        if not anchor_ids:
+            return {}
+
+        db = self._get_read_db()
+        norm_source = norm_path(source_file)
+        vis_sql, vis_params = neighbor_visibility_sql(
+            ns_filter=ns_filter,
+            system_prefixes=system_prefixes,
+            scope_filter=scope_filter,
+            project_context_root=project_context_root,
+            as_of_unix=as_of_unix,
+        )
+
+        # One pass per file. ``ROWS BETWEEN UNBOUNDED PRECEDING AND 1
+        # PRECEDING`` is the "strictly before" the ordinal is defined on, and
+        # ``SUM(vis) OVER ()`` the file's visible total; subtracting the
+        # anchor's own ``vis`` is what leaves the count anchor-free. The
+        # ordering matches ``list_chunks_by_source`` exactly, ``rowid``
+        # tie-break included — chunks of a virtual source share a
+        # ``start_line``, and an ordinal that disagreed with the listing would
+        # be a different kind of wrong answer.
+        # Nested subqueries rather than a CTE: ``test_mixin_commit_guard``
+        # reads a leading ``WITH`` as a possible write, on the grounds that a
+        # CTE can end in an INSERT and it should not have to parse one to find
+        # out. This spelling is the same plan and is visibly a read.
+        wanted = [str(a) for a in anchor_ids]
+        rows = db.execute(
+            f"""
+            SELECT id, start_line, rid, vis, COALESCE(visible_before, 0), visible_all
+            FROM (
+                SELECT id, start_line, rid, vis,
+                       SUM(vis) OVER (
+                           ORDER BY start_line, rid
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                       ) AS visible_before,
+                       SUM(vis) OVER () AS visible_all
+                FROM (
+                    SELECT id, start_line, rowid AS rid,
+                           CASE WHEN {vis_sql} THEN 1 ELSE 0 END AS vis
+                    FROM chunks WHERE source_file=?
+                )
+            )
+            WHERE id IN ({placeholders(len(wanted))})
+            """,
+            (*vis_params, norm_source, *wanted),
+        ).fetchall()
+
+        located = {row[0]: row for row in rows}
+        result: dict[UUID, ContextWindowRows | None] = {}
+        for anchor_id in anchor_ids:
+            row = located.get(str(anchor_id))
+            if row is None:
+                # Not a row of this file: deleted, or re-indexed onto another
+                # source between retrieval and here. Callers render it as "no
+                # context", which is now the only way that answer happens.
+                result[anchor_id] = None
+                continue
+            _, start_line, rid, vis, visible_before, visible_all = row
+            key = (start_line, rid, str(anchor_id))
+            result[anchor_id] = ContextWindowRows(
+                before=self._neighbor_rows(db, norm_source, key, window, before=True),
+                after=self._neighbor_rows(db, norm_source, key, window, before=False),
+                visible_before=int(visible_before),
+                visible_total_excluding_anchor=int(visible_all or 0) - int(vis),
+            )
+        return result
+
+    def _neighbor_rows(
+        self,
+        db: sqlite3.Connection,
+        norm_source: str,
+        anchor: tuple[int, int, str],
+        window: int,
+        *,
+        before: bool,
+    ) -> list[Chunk]:
+        """The ``window`` rows physically adjacent to the anchor.
+
+        Row-value comparison against the composite key so the seek uses
+        ``idx_chunks_source_start`` instead of ordering the file. The
+        predecessors come back descending — nearest first, which is what the
+        ``LIMIT`` has to bound — and are reversed into reading order here.
+
+        The anchor is excluded by id as well as by position. Position alone
+        would not do it: this seek reads a later snapshot than the one that
+        placed the anchor, and ``upsert_chunks`` updates a row's
+        ``start_line`` in place, keeping its ``rowid``. A re-index landing in
+        between would move the anchor past its own key and hand it back as one
+        of its neighbours — the match rendered as its own context.
+        """
+        if window <= 0:
+            return []
+        start_line, rid, anchor_id = anchor
+        op, direction = ("<", "DESC") if before else (">", "ASC")
+        rows = db.execute(
+            f"SELECT * FROM chunks WHERE source_file=? AND (start_line, rowid) {op} (?, ?) "
+            f"AND id <> ? ORDER BY start_line {direction}, rowid {direction} LIMIT ?",
+            (norm_source, start_line, rid, anchor_id, window),
+        ).fetchall()
+        chunks = [self._row_to_chunk(row) for row in rows]
+        return list(reversed(chunks)) if before else chunks
 
     async def namespaces_for_source(self, source_file: Path) -> list[str]:
         # Issue #2005: the add surfaces refuse a write whose namespace differs

@@ -33,6 +33,35 @@ class ChunkAuditRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextWindowRows:
+    """One anchor's context window, from :meth:`StorageBackend.get_context_windows`.
+
+    ``before`` / ``after`` are the anchor's *physical* neighbours in
+    ``(start_line, rowid)`` order, unfiltered: adjacency is physical, and the
+    caller screens them with
+    :func:`memtomem.search.visibility.neighbor_visible` so a hidden neighbour
+    shrinks the window rather than being replaced by a distant one.
+
+    The two counts are the visibility-screened accounting the caller reports,
+    and both **exclude the anchor itself** — the caller adds it back
+    unconditionally, because a chunk that is being returned is part of the set
+    the position describes even when the neighbour rules would hide it (#2236).
+    Keeping the anchor out of the SQL count is what makes that carve-out
+    arithmetic rather than a second opinion: nothing can double-count it, and
+    the Python predicate never has to agree with the SQL about the anchor.
+    """
+
+    #: Physical predecessors, ascending, at most ``window`` of them.
+    before: list[Chunk]
+    #: Physical successors, ascending, at most ``window`` of them.
+    after: list[Chunk]
+    #: Visible chunks strictly before the anchor. Ordinal = this + 1.
+    visible_before: int
+    #: Visible chunks in the file, anchor excluded. Total = this + 1.
+    visible_total_excluding_anchor: int
+
+
+@dataclass(frozen=True, slots=True)
 class NamespaceRenameResult:
     """Outcome of :meth:`StorageBackend.rename_namespace`.
 
@@ -220,6 +249,24 @@ class StorageBackend(Protocol):
         source_files: Sequence[Path],
         limit_per_file: int = 10000,
     ) -> dict[Path, list[Chunk]]: ...
+    # Context-window expansion (#2237). Listing the file and slicing in Python
+    # could not survive a file longer than the listing cap: past it the anchor
+    # was simply absent and the hit came back with no context at all. The
+    # neighbours are a seek, and the counts are aggregates, so neither grows
+    # with the file. Returns one entry per requested anchor; ``None`` means
+    # that id is not a row of ``source_file`` (deleted, or re-indexed away).
+    async def get_context_windows(
+        self,
+        source_file: Path,
+        anchor_ids: Sequence[UUID],
+        window: int,
+        *,
+        ns_filter: NamespaceFilter | None,
+        system_prefixes: Sequence[str],
+        scope_filter: ScopeFilter | None,
+        project_context_root: Path | None,
+        as_of_unix: int | None,
+    ) -> dict[UUID, ContextWindowRows | None]: ...
     # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
     # set while keeping every other filter this method applies — notably the
     # always-on ADR-0011 scope fragment and the ``created_at DESC`` ordering.

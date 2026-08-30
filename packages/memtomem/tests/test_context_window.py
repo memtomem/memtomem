@@ -16,6 +16,8 @@ from memtomem.models import Chunk, ChunkMetadata, ChunkType, ContextInfo, Search
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.server.formatters import _format_single_result
 
+from helpers import fake_context_windows
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -78,7 +80,7 @@ def _make_pipeline(
 ) -> SearchPipeline:
     """Create a pipeline with mocked storage and embedder."""
     storage = AsyncMock()
-    storage.list_chunks_by_sources = AsyncMock(return_value=chunks_by_source)
+    storage.get_context_windows = AsyncMock(side_effect=fake_context_windows(chunks_by_source))
     storage.bm25_search = AsyncMock(return_value=bm25_results or [])
     storage.dense_search = AsyncMock(return_value=[])
     storage.increment_access = AsyncMock()
@@ -155,7 +157,7 @@ class TestExpandContext:
         assert ctx.chunk_position == 5
 
     async def test_same_file_multiple_results(self):
-        """Two results from same file: batch fetch called once."""
+        """Two results from the same file are fetched in one call, not one each."""
         chunks = _make_file_chunks("/tmp/doc.md", 5)
         results = [_make_result(chunks[1], rank=1), _make_result(chunks[3], rank=2)]
         pipeline = _make_pipeline({Path("/tmp/doc.md"): chunks})
@@ -170,8 +172,11 @@ class TestExpandContext:
         assert len(expanded[1].context.window_before) == 1
         assert len(expanded[1].context.window_after) == 1
 
-        # Verify storage was called once (batch)
-        pipeline._storage.list_chunks_by_sources.assert_called_once()
+        # One call per source file, carrying every anchor in it — the
+        # per-file count pass is what a second call would repeat.
+        pipeline._storage.get_context_windows.assert_called_once()
+        _, anchor_ids, _ = pipeline._storage.get_context_windows.call_args.args
+        assert list(anchor_ids) == [chunks[1].id, chunks[3].id]
 
     async def test_multiple_source_files(self):
         """Results from different files get correct context."""
@@ -266,7 +271,7 @@ class TestMemExpand:
 
         app = MagicMock()
         app.storage.get_chunk = AsyncMock(return_value=target)
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
 
         # Mock ctx
         ctx = SimpleNamespace()
@@ -291,7 +296,7 @@ class TestMemExpand:
 
         app = MagicMock()
         app.storage.get_chunk = AsyncMock(return_value=target)
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
 
         ctx = SimpleNamespace()
         with pytest.MonkeyPatch.context() as m:
@@ -329,7 +334,7 @@ class TestMemExpand:
             ["archive:", "agent-runtime:"] if prefixes is None else prefixes
         )
         app.storage.get_chunk = AsyncMock(return_value=chunks[anchor_index])
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
 
         monkeypatch.setattr(
             "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
@@ -374,7 +379,7 @@ class TestMemExpand:
         app = MagicMock()
         app.config.search.system_namespace_prefixes = ["archive:", "agent-runtime:"]
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
             "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
         )
@@ -434,7 +439,7 @@ class TestMemExpand:
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
             "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
         )
@@ -485,7 +490,7 @@ class TestMemExpand:
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
             "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
         )
@@ -513,7 +518,7 @@ class TestMemExpand:
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
             "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
         )
@@ -536,7 +541,7 @@ class TestMemExpand:
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
-        app.storage.list_chunks_by_source = AsyncMock(return_value=chunks)
+        app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
             "memtomem.server.tools.search._get_app_initialized", AsyncMock(return_value=app)
         )

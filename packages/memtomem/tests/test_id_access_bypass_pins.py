@@ -24,6 +24,8 @@ import pytest
 
 from memtomem.models import Chunk, ChunkMetadata
 
+from helpers import fake_context_windows
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -59,7 +61,7 @@ def _app_with(chunk: Chunk, *, listed: list[Chunk] | None = None) -> MagicMock:
     app = MagicMock()
     app.config.search.system_namespace_prefixes = ["archive:", "agent-runtime:"]
     app.storage.get_chunk = AsyncMock(return_value=chunk)
-    app.storage.list_chunks_by_source = AsyncMock(return_value=listed or [chunk])
+    app.storage.get_context_windows = fake_context_windows(listed or [chunk])
     return app
 
 
