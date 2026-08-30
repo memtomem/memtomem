@@ -132,18 +132,20 @@ listing, a stale note, or another agent's output, pasted into `mem_read` or
 holds the source file's lock — `mem_edit`, `mem_delete`, and the web
 `PATCH`/`DELETE` routes, through `_locked_chunk` / `locked_source_chunk` — the
 boundary is judged on the chunk re-fetched under that lock, so a concurrent
-`memory-migrate` cannot slip between the check and the write. The remaining
-write surfaces are check-then-act: `mem_link` / `mem_unlink`,
-`mem_reflect_save`'s relation writes, `mem_increment_access`, the LangGraph
-store's `delete`, and per-chunk tag replacement. A migration landing in that
-window can re-scope a chunk after it was judged. Closing those needs
-boundary-qualified atomic operations in the storage layer (and, for tags, fixes
-a separate pre-existing staleness bug — #2241), which is a write-integrity
-change rather than a visibility one. So the accident this rule was written
-for — a stale id reused in a session with no concurrent migration — is
-covered, and an accident that coincides with a migration is not. Neither is a
-caller who can time one deliberately, but that caller was never the adversary
-here.
+`memory-migrate` cannot slip between the check and the write. Per-chunk tag
+replacement is race-tight too: its storage update writes only `tags` and
+`updated_at`, and carries the project boundary in the same atomic statement, so
+a same-project migration preserves its new location while a move outside the
+caller boundary makes the update match nothing (#2241). The remaining write
+surfaces are check-then-act: `mem_link` / `mem_unlink`, `mem_reflect_save`'s
+relation writes, `mem_increment_access`, and the LangGraph store's `delete`. A
+migration landing in one of those windows can re-scope a chunk after it was
+judged. Closing them needs boundary-qualified atomic operations in the storage
+layer, which is a write-integrity change rather than a visibility one. So the
+accident this rule was written for — a stale id reused in a session with no
+concurrent migration — is covered, and an accident that coincides with one of
+the remaining check-then-act writes is not. Neither is a caller who can time
+one deliberately, but that caller was never the adversary here.
 
 **It is a boundary on chunk ids, not on every identifier.** `run_id` — the
 handle `mem_search_feedback` and the history tools take — has no boundary of

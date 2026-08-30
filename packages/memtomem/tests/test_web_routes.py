@@ -194,6 +194,17 @@ def app():
     storage.list_sessions = AsyncMock(return_value=[])
     storage.get_session_events = AsyncMock(return_value=[])
     storage.upsert_chunks = AsyncMock()
+
+    async def _replace_chunk_tags(chunk_id, tags, *, project_context_root):
+        current = await storage.get_chunk(chunk_id)
+        if current is None:
+            return None
+        return dataclasses.replace(
+            current,
+            metadata=dataclasses.replace(current.metadata, tags=tuple(tags)),
+        )
+
+    storage.replace_chunk_tags = AsyncMock(side_effect=_replace_chunk_tags)
     storage.stored_embedding_info = None
     storage.embedding_mismatch = None
     # Real ``asyncio.Lock`` so service-layer ``async with storage._tag_write_lock:``
@@ -2749,13 +2760,12 @@ class TestChunkValidityFields:
         assert data["valid_from_unix"] is None
         assert data["valid_to_unix"] is None
 
-    async def test_tag_update_preserves_validity(self, app, client: AsyncClient):
-        """Regression: PATCH /chunks/{id}/tags must not silently drop the
-        temporal-validity columns. Before Goal 7 the route reconstructed
-        ``ChunkMetadata`` with an explicit field list; with the
-        dict-spread fix every field — including ``valid_from_unix`` /
-        ``valid_to_unix`` and the long-broken ``overlap_*`` /
-        ``parent_context`` / ``file_context`` — round-trips intact.
+    async def test_tag_update_uses_tags_only_storage_primitive(self, app, client: AsyncClient):
+        """The route's real service path must not return to a full-row upsert.
+
+        The storage integration tests pin preservation of validity, overlap,
+        scope and source metadata; this route test pins delegation to that
+        tags-only writer.
         """
         from memtomem.models import Chunk, ChunkMetadata
 
@@ -2786,20 +2796,10 @@ class TestChunkValidityFields:
         )
         assert resp.status_code == 200
 
-        # Inspect the actual upsert call — that is what touches the DB and
-        # therefore what would silently drop fields on the way back.
-        upsert_call = app.state.storage.upsert_chunks.await_args
-        assert upsert_call is not None, "tag PATCH must call upsert_chunks"
-        upserted_chunks = upsert_call.args[0]
-        assert len(upserted_chunks) == 1
-        new_meta = upserted_chunks[0].metadata
-        assert new_meta.valid_from_unix == 1_734_220_800
-        assert new_meta.valid_to_unix == 1_743_465_599
-        # Sister-fields the old explicit-list shape would also have wiped
-        # — pinning them prevents the same bug returning if someone re-flattens.
-        assert new_meta.parent_context == "Section A"
-        assert new_meta.overlap_before == 42
-        assert tuple(new_meta.tags) == ("new-tag", "another")
+        replace_call = app.state.storage.replace_chunk_tags.await_args
+        assert replace_call is not None, "tag PATCH must call the tags-only storage primitive"
+        assert replace_call.args == (CHUNK_ID, ("new-tag", "another"))
+        assert app.state.storage.upsert_chunks.await_count == 0
 
     async def test_tag_update_invalidates_search_cache(self, app, client: AsyncClient):
         """Routing PATCH /chunks/{id}/tags through services.tag_management
@@ -2832,9 +2832,9 @@ class TestChunkValidityFields:
         assert resp.status_code == 200
         assert app.state.search_pipeline.invalidate_cache.call_count == 1
 
-    async def test_tag_update_no_op_skips_upsert_and_invalidate(self, app, client: AsyncClient):
+    async def test_tag_update_no_op_skips_write_and_invalidate(self, app, client: AsyncClient):
         """Idempotent guard: PATCH-ing the same tag list a chunk already
-        carries must not call ``upsert_chunks`` (no ``updated_at`` bump,
+        carries must not call the storage writer (no ``updated_at`` bump,
         no decay-timer reset) and must not flush the cache."""
         from memtomem.models import Chunk, ChunkMetadata
 
@@ -2852,6 +2852,7 @@ class TestChunkValidityFields:
             updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         app.state.storage.get_chunk.return_value = chunk
+        app.state.storage.replace_chunk_tags.reset_mock()
         app.state.storage.upsert_chunks.reset_mock()
         app.state.search_pipeline.invalidate_cache.reset_mock()
 
@@ -2860,11 +2861,13 @@ class TestChunkValidityFields:
             json={"tags": ["a", "b"]},
         )
         assert resp.status_code == 200
+        assert app.state.storage.replace_chunk_tags.await_count == 0
         assert app.state.storage.upsert_chunks.await_count == 0
         assert app.state.search_pipeline.invalidate_cache.call_count == 0
 
     async def test_tag_update_404_when_chunk_missing(self, app, client: AsyncClient):
         app.state.storage.get_chunk.return_value = None
+        app.state.storage.replace_chunk_tags.reset_mock()
         app.state.storage.upsert_chunks.reset_mock()
         app.state.search_pipeline.invalidate_cache.reset_mock()
 
@@ -2873,6 +2876,7 @@ class TestChunkValidityFields:
             json={"tags": ["new"]},
         )
         assert resp.status_code == 404
+        assert app.state.storage.replace_chunk_tags.await_count == 0
         assert app.state.storage.upsert_chunks.await_count == 0
         assert app.state.search_pipeline.invalidate_cache.call_count == 0
 
