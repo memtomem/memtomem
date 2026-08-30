@@ -61,17 +61,23 @@ from memtomem.web.routes.context_projects import resolve_project_shared_writable
 
 router = APIRouter(tags=["context-mutations"])
 
-#: Engine-side budget for acquiring the project lockfile's sidecar lock,
-#: forwarded to ``install_*`` / ``update_*`` → ``Lockfile.upsert_entry``. Kept
-#: below the route's ``asyncio.timeout(60)`` so a contended lock makes the
-#: worker thread self-abort (``_file_lock`` raises ``TimeoutError``) INSIDE the
-#: request window rather than parking on the lock past it (the
-#: ``context_transfer`` lock-budget precedent; #1145 / the ``_file_lock``
-#: docstring). It bounds the *wait*, not the write: a worker that holds the
-#: lock finishes its upsert even if the handler already returned 503, so this
-#: route can still land a late write. Closing that needs the cooperative abort
-#: the context engines poll (``context/_abandon.py``, #2247), which this one
-#: has not adopted.
+#: Engine-side lock budget forwarded to ``install_*`` / ``update_*``. It is
+#: ONE budget shared across the whole ``canonical_lock_shared_budget``
+#: transaction — the name-keyed canonical lock and the ``lock.json`` sidecar
+#: it later acquires — not a per-lock bound. Kept below the route's
+#: ``asyncio.timeout(60)`` so a contended lock makes the worker thread
+#: self-abort (``_file_lock`` raises ``TimeoutError``) INSIDE the request
+#: window rather than parking on the lock past it (the ``context_transfer``
+#: lock-budget precedent; #1145 / the ``_file_lock`` docstring).
+#:
+#: It bounds the *wait*, not the work. Once the canonical lock is held the
+#: install runs swap recovery, re-checks, extracts the asset tree from the
+#: pinned wiki commit (``install.copy_asset_at_commit``) and upserts the
+#: lockfile entry, none of it interruptible — so a request that timed out can
+#: still see an asset materialize and a lockfile entry appear afterwards. The
+#: window is the whole sequence, not just the upsert. Closing it needs the
+#: cooperative abort the context engines poll (``context/_abandon.py``,
+#: #2247), which this route has not adopted.
 _INSTALL_LOCK_BUDGET_S = 30.0
 
 

@@ -121,9 +121,15 @@ def new_lock_budget() -> Callable[[], float]:
     import of N artifacts is bounded by one budget, not N·budget (the
     ``skills._SKILLS_LOCK_BUDGET_S`` shape; #1145). A thread-offloaded web/MCP
     caller can never be wedged past its route timeout by a stuck cross-process
-    holder. That is a bound on *waiting*, not a guard against an orphaned
-    write: a caller that acquires the lock proceeds regardless of whether its
-    own caller is still there (see ``context/_abandon.py``, #2247).
+    holder.
+
+    That is a bound on *waiting* and nothing more: holding this lock confers no
+    protection against writing behind a caller that has already given up.
+    Whether a given holder stops is entirely its own doing — some poll
+    ``_abandon.sync_is_abandoned`` right after acquiring (the artifact CRUD
+    closures in ``web/routes/_atomic_kind.py`` and
+    ``web/routes/context_skills.py``, #2247) and some do not. Do not read this
+    budget as either guarantee.
     """
     deadline = time.monotonic() + _CANONICAL_LOCK_BUDGET_S
 
