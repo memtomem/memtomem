@@ -659,6 +659,40 @@ class TestPipelineEndToEndRescue:
         await pipeline.search("q", top_k=10, namespace="agent-runtime:planner")
         assert archive_lookup_called is False
 
+    @pytest.mark.asyncio
+    async def test_enabled_for_an_empty_namespace_list(self):
+        """#2232: ``namespace=[]`` names nothing, so it is not a pin.
+
+        The gate reads the parsed filter rather than the raw argument; on the
+        raw one an empty list is not ``None`` and silently suppressed rescue,
+        making it behave unlike the omission it is defined to equal.
+        """
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3)
+        organic = _chunk("organic")
+
+        storage = _async_storage()
+        archive_lookup_called = False
+
+        async def bm25_dispatch(
+            query,
+            top_k,
+            namespace_filter=None,
+            scope_filter=None,
+            project_context_root=None,
+            metadata_filter=None,
+            **kwargs,
+        ):
+            nonlocal archive_lookup_called
+            if getattr(namespace_filter, "pattern", None) == "archive:session:*":
+                archive_lookup_called = True
+                return []
+            return [_sr(organic, score=1.0, rank=1, source="bm25")]
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+        await pipeline.search("q", top_k=10, namespace=[])
+        assert archive_lookup_called is True
+
 
 # ---------------------------------------------------------------------------
 # 3a. Rescue BM25 leg pushes the source filter into storage SQL (#2184)

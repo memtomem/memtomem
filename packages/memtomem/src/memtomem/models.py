@@ -179,12 +179,19 @@ class NamespaceFilter:
     ) -> NamespaceFilter | None:
         """Parse a user-supplied namespace argument into a filter.
 
-        When ``value`` is ``None`` and ``system_prefixes`` is non-empty, the
-        returned filter carries ``exclude_prefixes`` so default searches
-        hide system-generated namespaces (``archive:*`` by default) without
-        affecting explicit queries. When ``value`` is any non-``None`` form
-        (exact string, comma list, glob), ``system_prefixes`` is ignored —
-        the caller explicitly opted into whatever namespace they named.
+        When ``value`` is ``None`` or an empty list, and ``system_prefixes``
+        is non-empty, the returned filter carries ``exclude_prefixes`` so
+        default searches hide system-generated namespaces (``archive:*`` by
+        default) without affecting explicit queries. When ``value`` names any
+        namespace (exact string, comma list, glob, non-empty list),
+        ``system_prefixes`` is ignored — the caller explicitly opted into
+        whatever namespace they named.
+
+        An empty list is normalised to the ``None`` path because it names no
+        namespace, so it is not an opt-in to anything. Read as a plain
+        filter it would emit no SQL predicate at all and ``matches`` would
+        admit everything, which turns "no namespace given" into "hide
+        nothing" — the opposite of the default.
 
         Raises:
             InvalidNamespaceFilterError: the value mixes a comma list with a
@@ -195,7 +202,7 @@ class NamespaceFilter:
         """
         prefixes = tuple(system_prefixes) if system_prefixes else ()
 
-        if value is None:
+        if value is None or (isinstance(value, list) and not value):
             if prefixes:
                 return NamespaceFilter(exclude_prefixes=prefixes)
             return None
@@ -258,7 +265,16 @@ class ScopeFilter:
         """Parse a user-supplied scope argument into a filter.
 
         ``None`` returns ``None`` (caller falls back to the always-on
-        context-boundary rule). ``"project_*"`` parses as a glob. Comma
+        context-boundary rule). An empty list is deliberately *not*
+        normalised to ``None`` the way :meth:`NamespaceFilter.parse` does
+        (#2232): both consumers of the resulting empty filter already read
+        it as "no intent" rather than "everything" —
+        :func:`memtomem.storage.sqlite_scope.scope_context_sql` falls back
+        to the boundary rule, and
+        :func:`memtomem.search.visibility.neighbor_visible` refuses to treat
+        it as an opt-in — so collapsing it here would change nothing and
+        would only make those two guards look like dead code.
+        ``"project_*"`` parses as a glob. Comma
         list and bare exact match work the same as for namespaces. The
         scope alphabet is small (3 values), so this parser deliberately
         does NOT validate against ``user`` / ``project_shared`` /

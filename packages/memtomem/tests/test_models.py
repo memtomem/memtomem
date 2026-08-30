@@ -96,6 +96,23 @@ class TestNamespaceFilterParse:
         assert f.namespaces == ("a", "b")
         assert f.pattern is None
 
+    def test_empty_list_with_system_prefixes_returns_exclude_filter(self):
+        """#2232: an empty list names no namespace, so it is not an opt-in.
+        Read as a plain union it produced a filter with nothing set, which
+        emits no SQL predicate and whose ``matches`` admits everything —
+        system namespaces came back as ranked hits."""
+        f = NamespaceFilter.parse([], system_prefixes=("archive:", "agent-runtime:"))
+
+        assert f is not None
+        assert f.exclude_prefixes == ("archive:", "agent-runtime:")
+        assert f.namespaces == ()
+        assert f.pattern is None
+        assert not f.matches("archive:summary")
+        assert f.matches("work")
+
+    def test_empty_list_without_system_prefixes_returns_none(self):
+        assert NamespaceFilter.parse([]) is None
+
     def test_explicit_value_ignores_system_prefixes(self):
         # Caller explicitly named a namespace → opt-in, don't shadow with excludes.
         f = NamespaceFilter.parse("archive:summary", system_prefixes=("archive:",))
@@ -135,6 +152,22 @@ class TestScopeFilterParse:
     def test_plain_glob_and_plain_comma_list_still_parse(self):
         assert ScopeFilter.parse("project_*").pattern == "project_*"
         assert ScopeFilter.parse("user,project_local").scopes == ("user", "project_local")
+
+    def test_empty_list_stays_an_empty_filter(self):
+        """#2232 collapsed ``namespace=[]`` to the default-hiding path; the
+        scope axis deliberately does not follow.
+
+        An empty scope filter is already read as "no intent" by both
+        consumers — ``scope_context_sql`` falls back to the boundary rule and
+        ``neighbor_visible`` refuses it as an opt-in — so there is no
+        equivalent hole to close, and collapsing it here would strand those
+        two guards.
+        """
+        f = ScopeFilter.parse([])
+
+        assert f is not None
+        assert f.scopes == ()
+        assert f.pattern is None
 
 
 class TestChunk:
