@@ -916,6 +916,24 @@ class TestNeighborVisibility:
         assert ctx.window_before == (chunks[0], chunks[1])
         assert ctx.window_after == (chunks[3], chunks[4])
 
+    async def test_empty_namespace_list_still_hides_system_neighbors(self):
+        """#2232: ``namespace=[]`` names nothing, so it is not an opt-in.
+
+        It used to parse as an empty union — no SQL predicate, and a
+        ``matches`` that admits everything — so the neighbour screen let
+        ``archive:*`` / ``agent-runtime:*`` through.
+        """
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2])
+
+        results, _ = await pipeline.search("test", namespace=[])
+
+        ctx = results[0].context
+        assert ctx is not None
+        assert ctx.window_before == (chunks[0],)
+        assert ctx.window_after == (chunks[4],)
+        assert ctx.total_chunks_in_file == 3
+
     async def test_expired_neighbor_is_dropped(self):
         chunks = [
             _make_chunk("before", source="/tmp/v.md", start_line=0, valid_to_unix=1_000),
@@ -1106,3 +1124,66 @@ class TestNeighborVisibility:
         assert ctx is not None
         assert ctx.window_before == (chunks[0],)
         assert ctx.window_after == (chunks[4],)
+
+
+# ── Empty namespace list at retrieval (#2232) ────────────────────────────
+
+
+class TestEmptyNamespaceListRetrieval:
+    """``namespace=[]`` must reach the retrievers as the default filter.
+
+    The neighbour screen is Python-side, but selection is SQL: the leg has
+    to be handed a filter carrying ``exclude_prefixes``, or the ranked hits
+    themselves come from system namespaces. ``mem_context_compose`` takes
+    ``namespace`` as a list, so an empty one is externally reachable.
+    """
+
+    def _prefixes(self, retriever_mock) -> tuple[str, ...]:
+        ns_filter = retriever_mock.await_args.kwargs["namespace_filter"]
+        assert ns_filter is not None
+        assert ns_filter.namespaces == ()
+        assert ns_filter.pattern is None
+        return ns_filter.exclude_prefixes
+
+    async def test_ranked_search_passes_the_exclude_filter_to_bm25(self):
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2])
+
+        await pipeline.search("test", namespace=[])
+
+        assert self._prefixes(pipeline._storage.bm25_search) == (
+            "archive:",
+            "agent-runtime:",
+        )
+
+    async def test_filter_only_search_passes_the_exclude_filter_to_recall(self):
+        chunks = _mixed_namespace_file()
+        pipeline = _make_pipeline({Path("/tmp/mixed.md"): chunks})
+        pipeline._storage.recall_chunks = AsyncMock(return_value=[chunks[2]])
+
+        await pipeline.search("", tag_filter="anything", namespace=[])
+
+        assert self._prefixes(pipeline._storage.recall_chunks) == (
+            "archive:",
+            "agent-runtime:",
+        )
+
+    async def test_hidden_count_is_collected_for_an_empty_list(self):
+        """The hidden-count stats follow the parsed default path.
+
+        This pins the pipeline's contract only. Whether a caller *sees* a
+        hint is a surface decision made above: ``search_service`` renders one,
+        ``ContextAssembler.compose`` discards search stats entirely — for
+        every namespace value, omitted included — which is a pre-existing gap
+        unrelated to #2232.
+        """
+        chunks = _mixed_namespace_file()
+        pipeline = _pipeline_for(chunks, chunks[2])
+        pipeline._storage.count_chunks_by_ns_prefix_detail = AsyncMock(
+            return_value=(7, {"archive:": 5, "agent-runtime:": 2})
+        )
+
+        _, stats = await pipeline.search("test", namespace=[])
+
+        assert stats.hidden_system_ns == 7
+        assert stats.hidden_by_prefix == {"archive:": 5, "agent-runtime:": 2}

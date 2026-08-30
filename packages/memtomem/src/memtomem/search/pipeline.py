@@ -8,7 +8,7 @@ time-decay → MMR → access-freq boost → importance boost → entity-match
 boost → context-window expansion.
 
 Stage 1 enrichment (session-summary rescue, RFC P1 Phase C): between
-retrieval and fusion, when ``namespace is None`` and a
+retrieval and fusion, when the caller named no namespace and a
 ``SessionSummaryConfig`` with ``expansion_lookup_top_k > 0`` is wired,
 an ``archive:session:*`` summary lookup + one batched ``summarizes``
 chunk-links walk builds a boost-source set and a retrieval restricted
@@ -1538,16 +1538,22 @@ class SearchPipeline:
 
             # When the caller did not pin a namespace, count how many chunks sit
             # behind a system-namespace prefix (e.g. archive:*) so the tool layer
-            # can hint "N hidden — pass namespace=... to include them".
+            # can hint "N hidden — pass namespace=... to include them". Gated on
+            # the parsed filter rather than on the raw argument so the count
+            # follows whatever the parser actually decided: every spelling that
+            # lands on the default-hiding path, including the empty list
+            # normalised in #2232, is counted. Exactly equivalent for the
+            # ``None`` case this replaces, since ``exclude_prefixes`` is built
+            # from ``system_namespace_prefixes`` and is empty when that is.
             hidden_system_ns = 0
             hidden_by_prefix: dict[str, int] = {}
-            if namespace is None and self._config.system_namespace_prefixes:
+            if ns_filter is not None and ns_filter.exclude_prefixes:
                 try:
                     (
                         hidden_system_ns,
                         hidden_by_prefix,
                     ) = await self._storage.count_chunks_by_ns_prefix_detail(
-                        list(self._config.system_namespace_prefixes)
+                        list(ns_filter.exclude_prefixes)
                     )
                 except Exception:
                     logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
@@ -1758,9 +1764,15 @@ class SearchPipeline:
             # injection.)
             rescue_results: list[SearchResult] = []
             rescue_chunk_ids: set[UUID] = set()
+            # "Named no namespace" is read off the parsed filter, not the raw
+            # argument: an empty list is normalised to the default path
+            # (#2232), and gating on ``namespace is None`` here would leave it
+            # skipping rescue while omission enables it. An exclude-prefixes
+            # filter carries no caller intent, so it does not suppress rescue.
+            ns_unpinned = ns_filter is None or not (ns_filter.namespaces or ns_filter.pattern)
             if (
                 any_leg_active
-                and namespace is None
+                and ns_unpinned
                 and self._session_summary_config is not None
                 and self._session_summary_config.expansion_lookup_top_k > 0
             ):

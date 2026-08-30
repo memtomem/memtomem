@@ -324,6 +324,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An empty `namespace` list no longer disables system-namespace hiding.**
+  `namespace=[]` parsed as an empty union: no SQL predicate was emitted and
+  the Python-side neighbour screen admitted everything, so `archive:*` and
+  `agent-runtime:*` chunks came back as ranked hits — the opposite of what
+  omitting `namespace` does. It is reachable through `mem_context_compose`,
+  which takes `namespace` as a list. An empty list names no namespace, so it
+  is now read the same as omitting the argument and system prefixes stay
+  hidden. The scope axis needs no equivalent change: `scope=[]` was already
+  read as "no intent" by both its SQL emitter and its neighbour screen.
+  (#2232)
+
 - **`mem_expand` no longer treats a chunk id as permission to read around
   that chunk.** The visibility rule added in #2192 made an exception for the
   addressed chunk: neighbours sharing its namespace or its project root came
