@@ -265,18 +265,15 @@ class NamespaceOps:
             # list_namespace_meta, so an early return here would leave it
             # undeletable through this API. Return value stays the chunk count, so
             # deleting a wholly nonexistent namespace remains a 0 no-op.
-            ids = [row[0] for row in rows]
-            rowids = [row[1] for row in rows]
             if rows:
-                db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
-                db.execute(
-                    f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                # Batched through the shared helper (#2265): a namespace's row
+                # count is data-sized, and one ``IN (...)`` made a namespace
+                # past the host-parameter ceiling undeletable.
+                self._delete_chunk_rows(
+                    db,
+                    ids=[row[0] for row in rows],
+                    rowids=[row[1] for row in rows],
                 )
-                if self._has_vec_table():
-                    db.execute(
-                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})",
-                        rowids,
-                    )
             db.execute("DELETE FROM namespace_metadata WHERE namespace=?", (namespace,))
             db.execute(f"RELEASE {_DELETE_SAVEPOINT}")
             if owns_txn:
@@ -637,11 +634,33 @@ class NamespaceOps:
             return 0
         pairs = [(plan.survivor_id, loser_id) for plan in plans for loser_id, _rowid in plan.losers]
         self._remap_chunk_references(db, pairs)
-        ids = [loser_id for loser_id, _rowid in losers]
-        rowids = [rowid for _loser_id, rowid in losers]
-        # Batched: a namespace-wide merge can carry more duplicates than
-        # SQLite's host-parameter limit (999 on older builds), and blowing
-        # that limit would fail the whole migration.
+        self._delete_chunk_rows(
+            db,
+            ids=[loser_id for loser_id, _rowid in losers],
+            rowids=[rowid for _loser_id, rowid in losers],
+        )
+        return len(losers)
+
+    def _delete_chunk_rows(
+        self,
+        db: sqlite3.Connection,
+        *,
+        ids: Sequence[str],
+        rowids: Sequence[int],
+    ) -> None:
+        """Delete chunks and their FTS/vec sidecars in host-parameter batches.
+
+        Both callers hand over a list sized by the data rather than by the
+        code — a namespace's whole row set, or a merge's duplicate set — so a
+        single ``IN (...)`` raises ``too many SQL variables`` above SQLite's
+        host-parameter ceiling (999 on builds older than 3.32) instead of
+        deleting (#2265). Caller-owned transaction throughout: the batches are
+        statements inside the caller's savepoint, so an undo still covers all
+        of them.
+
+        Sidecars first, so an interrupted run never leaves an FTS or vec row
+        pointing at a ``chunks.rowid`` that is gone.
+        """
         for start in range(0, len(ids), _DELETE_BATCH):
             batch_ids = ids[start : start + _DELETE_BATCH]
             batch_rowids = rowids[start : start + _DELETE_BATCH]
@@ -657,7 +676,6 @@ class NamespaceOps:
             db.execute(
                 f"DELETE FROM chunks WHERE id IN ({placeholders(len(batch_ids))})", batch_ids
             )
-        return len(losers)
 
     @staticmethod
     def _chunk_reference_columns(db: sqlite3.Connection) -> list[tuple[str, str]]:

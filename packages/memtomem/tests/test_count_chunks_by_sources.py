@@ -12,6 +12,7 @@ store, so the parameter count is bounded by the store rather than by the code.
 
 from __future__ import annotations
 
+import sqlite3
 import unicodedata
 from pathlib import Path
 from uuid import uuid4
@@ -121,21 +122,22 @@ class TestPastTheOldCap:
     async def test_the_preview_number_matches_what_apply_deletes(self, storage):
         """The whole point: what purge announces is what purge removes.
 
-        Deliberately small. ``delete_by_source`` binds every row id in one
-        statement, so driving this at a size that would exercise the old cap
-        would fail on any SQLite carrying the historical 999-variable limit —
-        the very limit ``_SQL_MAX_PARAMS`` exists because the project does not
-        assume away. That ceiling is ``delete_by_source``'s own defect, tracked
-        separately; this test pins the relationship, and
-        ``test_a_file_larger_than_the_old_cap_is_counted_whole`` pins the size.
+        Driven past the historical 999-variable ceiling, with the connections
+        forced down to it. This used to be held at 7 rows because
+        ``delete_by_source`` bound every row id in one statement and would
+        raise ``too many SQL variables`` before the parity could be observed;
+        #2265 batched it, so the pin can now run at the size the equality is
+        actually interesting at.
         """
         source = Path("/tmp/parity.md")
-        _insert_rows(storage, source, 7)
+        _insert_rows(storage, source, 1_200)
+        for conn in [storage._get_db(), *storage._read_pool]:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
 
         previewed = (await storage.count_chunks_by_sources([source]))[source]
         deleted = await storage.delete_by_source(source)
 
-        assert previewed == deleted == 7
+        assert previewed == deleted == 1_200
 
 
 class TestBatching:
