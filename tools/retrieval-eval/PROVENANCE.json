@@ -1,0 +1,30 @@
+{
+  "baselines": {
+    "baseline_v0.3.8.json": {
+      "command": "calibrate_portfolio.py --runs 10 --factor 0.85",
+      "sha256": "2ce5aa0c4207bdb3202a3a59976661dc7671e0fffd3c35ed46d656c4ae253953"
+    },
+    "baseline_v2.json": {
+      "command": "tune_rrf_v2.py",
+      "sha256": "077104535e482fe62e3846e20be0c1617a505cc37f6d5c2e8b152d0a15bc24c8"
+    }
+  },
+  "description": "Where the committed retrieval-eval baselines were produced. Regenerate with the CI workflow_dispatch input refresh_retrieval_baselines; see tools/retrieval-eval/README.md.",
+  "distributions": {
+    "fastembed": "0.8.0",
+    "kiwipiepy": "0.23.2",
+    "numpy": "2.4.4",
+    "onnxruntime": "1.24.4",
+    "tokenizers": "0.22.2"
+  },
+  "kind": "retrieval_baseline_provenance",
+  "platform": {
+    "machine": "x86_64",
+    "python": "3.12.3",
+    "release": "6.17.0-1022-azure",
+    "system": "Linux"
+  },
+  "schema_version": 1,
+  "source_commit": "d5d972f8d70e22e802ef4cbb5fac75bbf951f4a2",
+  "workflow_run_url": "https://github.com/memtomem/memtomem/actions/runs/33385875398"
+}

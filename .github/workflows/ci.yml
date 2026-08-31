@@ -153,6 +153,13 @@ jobs:
       - run: uv run pytest packages/memtomem/tests/test_golden_path.py --tb=short -q
       - name: Audit public synthetic retrieval corpus
         run: uv run python tools/retrieval-eval/audit_public_corpus.py
+      # A baseline edited without regenerating its manifest is exactly the
+      # shape the manifest exists to rule out, so the hashes are checked here
+      # rather than trusted.
+      - name: Verify baseline provenance
+        run: |
+          uv run python tools/retrieval-eval/write_provenance.py \
+            --output tools/retrieval-eval/PROVENANCE.json --check
       - name: Check public retrieval quality floors
         env:
           PYTHONHASHSEED: "0"

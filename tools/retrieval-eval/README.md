@@ -107,11 +107,23 @@ that was failing.
 
 Regenerate by running the CI workflow with `workflow_dispatch` and input
 `refresh_retrieval_baselines: true`, then download the
-`retrieval-eval-baselines` artifact (`baseline_v0.3.8.json`,
-`baseline_v2.json`, and a `versions.txt` recording the Python version) and
-commit those files as-is. The floor checks are skipped on that run, so a
+`retrieval-eval-baselines` artifact — `baseline_v0.3.8.json`,
+`baseline_v2.json` and `PROVENANCE.json` — and commit all three as-is. The
+refresh is its own job and nothing `needs:` the floor checks, so a
 currently-failing floor does not block its own refresh. This mirrors the
 quality gate's contract (`tools/quality-gate/README.md`).
+
+`PROVENANCE.json` is what makes a lowered floor auditable after the fact: the
+source commit, the workflow run, the runner platform, the versions of the
+packages that actually decide these numbers, the exact command behind each
+file, and a sha256 of each. CI re-checks those hashes on every run
+(`write_provenance.py --check`), so a baseline edited without regenerating its
+manifest fails rather than passing quietly.
+
+Run-to-run variance is real and bounded: two consecutive refreshes on the same
+runner and commit differed on exactly one floor, by one rounding step
+(`ko|genre_primary|mrr@10`, 0.25 vs 0.24). Do not read a difference that size
+as a change in behaviour.
 
 ### Recalibrated for #2224 — `genre_primary` measured path text
 
