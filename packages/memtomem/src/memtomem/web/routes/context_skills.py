@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
+from memtomem.context._host_homes import pinned_host_homes
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
 from memtomem.context._dir_swap import (
@@ -845,7 +846,7 @@ async def _sync_skills_core(
     detail, issue-pinned) plus the envelope attributes sync-all renders.
     """
     try:
-        with abandon_sync_on_exit():
+        with pinned_host_homes(), abandon_sync_on_exit():
             result = await asyncio.to_thread(
                 generate_all_skills,
                 project_root,
@@ -1019,7 +1020,7 @@ async def import_skills(
                 # so is the abort flag: the budget bounds the wait, and this
                 # scope is what stops a worker importing the remaining skills
                 # behind a 503 this request already sent (#2247).
-                with abandon_sync_on_exit():
+                with pinned_host_homes(), abandon_sync_on_exit():
                     return await asyncio.to_thread(
                         extract_skills_to_canonical,
                         project_root,
@@ -1102,7 +1103,7 @@ async def import_skill(
             async with _gateway_lock:
                 # Thread offload + abort scope (#1247 id 18, #2247): see
                 # import_skills above.
-                with abandon_sync_on_exit():
+                with pinned_host_homes(), abandon_sync_on_exit():
                     return await asyncio.to_thread(
                         extract_skills_to_canonical,
                         project_root,
@@ -1187,7 +1188,7 @@ async def import_skill_to_user(
                 # import_skills above. Reads the project runtime, writes the
                 # user canonical — the only call site that decouples
                 # source_scope from the dest scope.
-                with abandon_sync_on_exit():
+                with pinned_host_homes(), abandon_sync_on_exit():
                     return await asyncio.to_thread(
                         extract_skills_to_canonical,
                         project_root,

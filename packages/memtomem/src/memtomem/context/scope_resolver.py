@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Literal
 
 from memtomem.config import TargetScope
+from memtomem.context._host_homes import pin_expanduser
 
 
 ArtifactKind = Literal["agents", "skills", "commands"]
@@ -108,7 +109,11 @@ def canonical_artifact_dir(
             ``project_root`` is ``None``, or when ``scope`` is unknown.
     """
     if scope == "user":
-        return (user_base / artifact).expanduser().resolve()
+        # ``pin_expanduser``, not ``Path.expanduser``: this runs inside the
+        # worker thread the skills/settings dispatchers hand off to, so a
+        # request cancelled mid-flight must still resolve the home its
+        # caller chose rather than whatever ``$HOME`` says now (#2250).
+        return pin_expanduser(user_base / artifact).resolve()
     if project_root is None:
         raise ContextScopeError(
             f"scope='{scope}' requires a project context (cwd has no .memtomem ancestor)."
@@ -163,6 +168,9 @@ def project_root_from_artifact_path(path: Path) -> Path | None:
     The returned path is not resolved — callers that need symlink
     canonicalisation should ``.resolve()`` themselves.
     """
+    # Plain ``expanduser``: ``path`` is the caller's own argument, not a
+    # ``~``-anchored user-scope target, so there is no dispatch home to
+    # honour here (#2250).
     path = path.expanduser()
     for ancestor in (path, *path.parents):
         if ancestor.name == ".memtomem":

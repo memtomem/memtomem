@@ -19,11 +19,10 @@ the abort flag; the pin is owed only by a callable that resolves host homes
 inside its worker. ``generate_all_settings`` does, and is pinned. The settings
 siblings and the CRUD closures do not — they take paths their caller resolved
 on the event loop — so demanding a pin of them would be cargo-culting a rule
-whose rationale does not reach them. The skills engines are the awkward case:
-they *do* resolve user homes in the worker, so they will owe the pin, but
-there is nothing for them to carry yet — the resolvers ignore it — and that
-gap is tracked as its own #2211-shaped bug rather than silently implied by
-this table. Hence :data:`_DISPATCH_RULES` rather than one list of scopes.
+whose rationale does not reach them. The skills engines owe both: they
+resolve user homes in the worker through ``scope_resolver`` /
+``_runtime_targets``, which read the pin as of #2250. Hence
+:data:`_DISPATCH_RULES` rather than one list of scopes.
 
 A callable's presence in that table is itself a claim: that its engine has
 abort checks placed against its own transaction boundaries, so handing it the
@@ -51,10 +50,10 @@ _PIN = ("pinned_host_homes", "#2211")
 #: sit inside, each with the issue that put it there (the offender line names
 #: the issue so a failure points at the rationale, not just a missing call).
 #:
-#: ``generate_all_settings`` is the only entry that owes the pin today: it
-#: resolves ``$HOME``-anchored targets inside the worker AND reads the pin. See
-#: the module docstring for why the skills entries are abort-only despite
-#: resolving homes in the worker too.
+#: The pin is owed by the entries that resolve ``$HOME``-anchored targets
+#: inside the worker: ``generate_all_settings`` (#2211) and the two skills
+#: engines (#2250). The rest take paths their caller resolved on the event
+#: loop, so there is nothing for a pin to redirect.
 _DISPATCH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "generate_all_settings": (_PIN, _ABANDON),
     "apply_hook_copy": (_ABANDON,),
@@ -63,14 +62,12 @@ _DISPATCH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     # transaction that can write behind a 503 (#2247).
     "apply_migration": (_ABANDON,),
     "_locked_cas_write": (_ABANDON,),
-    # Skills engines and their CRUD closures (#2247). Abort-only for now, but
-    # for a different reason than the settings siblings: these DO resolve
-    # user-scope homes inside the worker (`scope_resolver` / `_runtime_targets`
-    # call `expanduser()` there), so they have the #2211 shape and no pin to
-    # carry yet. Tracked as its own issue; when it lands, `_PIN` belongs on
-    # both engine entries here.
-    "generate_all_skills": (_ABANDON,),
-    "extract_skills_to_canonical": (_ABANDON,),
+    # Skills engines (#2247 abort, #2250 pin). Both resolve user-scope homes
+    # inside the worker — `scope_resolver.canonical_artifact_dir` and
+    # `_runtime_targets.runtime_fanout_root` expand `~` there — so they carry
+    # the #2211 shape and, since #2250, the pin that answers it.
+    "generate_all_skills": (_PIN, _ABANDON),
+    "extract_skills_to_canonical": (_PIN, _ABANDON),
     # One target, one write, and ``.mcp.json`` is project-rooted from an
     # argument — abort-only, with nothing home-anchored to pin (#2247).
     "generate_all_mcp_servers": (_ABANDON,),
