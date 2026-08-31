@@ -30,8 +30,11 @@ reach it (see ``TestPipelineFusion``).
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
+from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_backend import _column_match
 
 from helpers import make_chunk as _make_chunk
@@ -161,27 +164,118 @@ class TestTheColumnFilterCannotBeEscaped:
     list is closed before the expression begins.
     """
 
-    @pytest.mark.parametrize(
-        "query",
-        [
-            "source_file : secret",
-            "{source_file} : secret",
-            "} : (source_file",
-            "content} OR {source_file",
-            "a}b",
-        ],
+    #: Queries that spell fts5 syntax, including the column filter itself.
+    _ADVERSARIAL = (
+        "source_file : secret",
+        "{source_file} : secret",
+        "} : (source_file",
+        "content} OR {source_file",
+        "a}b",
+        "secret) OR {source_file} : (secret",
+        '" OR "',
+        "NEAR(a b)",
+        "^anchor",
+        "a AND b OR NOT c",
     )
-    def test_a_column_shaped_query_stays_inside_the_content_filter(self, query):
-        expr = _column_match("content", query, use_or=False)
-        assert expr.startswith("{content} : ("), expr
-        assert expr.endswith(")"), expr
-        # Everything the caller supplied is quoted, so no bare brace or colon
-        # from the query can be read as syntax.
-        body = expr[len("{content} : (") : -1]
-        for ch in "{}:":
-            assert ch not in body.replace('"', "") or '"' in body, (
-                f"unquoted {ch!r} reached the expression: {body!r}"
+
+    @staticmethod
+    def _run(db, expr: str):
+        """``(rows, error)`` — fts5 rejecting an expression is data, not a crash."""
+        try:
+            return (
+                db.execute(
+                    "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?", (expr,)
+                ).fetchall(),
+                None,
             )
+        except sqlite3.OperationalError as exc:
+            return [], exc
+
+    @staticmethod
+    def _probe_db():
+        db = sqlite3.connect(":memory:")
+        db.execute(
+            "CREATE VIRTUAL TABLE chunks_fts USING fts5(content, source_file, tokenize='unicode61')"
+        )
+        db.execute(
+            "INSERT INTO chunks_fts VALUES (?, ?)",
+            ("a body that says secret once", "notes/secret-plan.md"),
+        )
+        return db
+
+    @pytest.mark.parametrize("query", _ADVERSARIAL)
+    @pytest.mark.parametrize("use_or", [False, True])
+    @pytest.mark.parametrize("column", ["content", "source_file"])
+    def test_the_filter_adds_no_parse_failure_and_no_new_match(self, query, use_or, column):
+        """Run the real expression, and compare it against the unfiltered one.
+
+        Two things have to hold, and only executing shows either. The filter
+        must not make fts5 reject an expression it would otherwise accept, and
+        it must not let the query reach a column it did not name. Both are
+        stated *relative to the bare expression* on purpose: some of these
+        queries are un-parsable either way (a bare ``AND`` was a syntax error
+        before this change too), and a test that forbade that outright would be
+        asserting a fix nobody made.
+
+        Asserting on the string was the weaker version this replaces — it
+        passed while permitting an unquoted brace as long as a quote appeared
+        anywhere else in the body.
+        """
+        bare = _fts.tokenize_for_fts(query, for_query=True, use_or=use_or)
+        expr = _column_match(column, query, use_or=use_or)
+        assert expr == "{" + column + "} : (" + bare + ")", (
+            "the filter rewrote the tokenizer's output instead of wrapping it"
+        )
+
+        db = self._probe_db()
+        try:
+            bare_rows, bare_error = self._run(db, bare)
+            filtered_rows, filtered_error = self._run(db, expr)
+        finally:
+            db.close()
+
+        if bare_error is not None:
+            assert filtered_error is not None, (
+                f"the filter made {query!r} parse where it did not before: {expr!r}"
+            )
+            return
+        assert filtered_error is None, (
+            f"the filter broke a query fts5 accepted bare: {expr!r} ({filtered_error})"
+        )
+        # The filtered result is the bare one restricted to this column: it may
+        # lose rows, never gain them. Gaining one would mean the query reached
+        # a column the filter did not name.
+        assert set(filtered_rows) <= set(bare_rows), (
+            f"{query!r} matched more with the {column} filter than without it: "
+            f"{filtered_rows} vs {bare_rows}"
+        )
+
+    def test_the_same_holds_under_the_morphological_tokenizer(self):
+        """The escaping lives in ``tokenize_for_fts``, which has two backends."""
+        pytest.importorskip("kiwipiepy", reason="the korean extra is not installed")
+        from memtomem.storage import fts_tokenizer
+
+        previous = fts_tokenizer.get_tokenizer()
+        fts_tokenizer.set_tokenizer("kiwipiepy")
+        try:
+            db = self._probe_db()
+            try:
+                for query in (*self._ADVERSARIAL, "비밀 } : (source_file"):
+                    for use_or in (False, True):
+                        bare = fts_tokenizer.tokenize_for_fts(query, for_query=True, use_or=use_or)
+                        expr = _column_match("content", query, use_or=use_or)
+                        assert expr == "{content} : (" + bare + ")", expr
+                        bare_rows, bare_error = self._run(db, bare)
+                        rows, error = self._run(db, expr)
+                        if bare_error is not None:
+                            assert error is not None, f"kiwi: filter fixed {query!r}"
+                            continue
+                        assert error is None, f"kiwi: filter broke {query!r}: {expr!r} ({error})"
+                        assert set(rows) <= set(bare_rows), f"kiwi: {query!r} gained rows"
+            finally:
+                db.close()
+        finally:
+            fts_tokenizer.set_tokenizer(previous)
 
     @pytest.mark.asyncio
     async def test_naming_the_column_does_not_reopen_it(self, storage):
@@ -203,4 +297,52 @@ class TestTheColumnFilterCannotBeEscaped:
         assert [r.chunk.id for r in results] == [content_hit.id], (
             "a column-shaped query pulled a path-only chunk while content matched: "
             f"{[str(r.chunk.metadata.source_file) for r in results]}"
+        )
+
+
+class TestTheOrFallbackUnderAMorphologicalTokenizer:
+    """Whitespace is not term multiplicity (#2224 review).
+
+    The OR pass used to be gated on ``" " in query.strip()`` — inherited
+    unchanged from before this issue. ``kiwipiepy`` expands one space-free
+    Korean word into several FTS terms (``했습니다`` → ``하* 었* 습니다*``), so
+    an AND query that misses had its OR fallback skipped for a query the raw
+    string said was a single term. The gate is now whether the two tokenized
+    expressions differ, which is the thing the pass actually depends on.
+    """
+
+    @pytest.fixture
+    def kiwi(self):
+        pytest.importorskip("kiwipiepy", reason="the korean extra is not installed")
+        from memtomem.storage import fts_tokenizer
+
+        previous = fts_tokenizer.get_tokenizer()
+        fts_tokenizer.set_tokenizer("kiwipiepy")
+        try:
+            yield fts_tokenizer
+        finally:
+            fts_tokenizer.set_tokenizer(previous)
+
+    def test_a_space_free_korean_word_still_has_an_or_pass(self, kiwi):
+        """The premise: one word, two different expressions."""
+        query = "했습니다"
+        assert " " not in query, "the fixture query must be the space-free case"
+        and_expr = _column_match("content", query, use_or=False)
+        or_expr = _column_match("content", query, use_or=True)
+        assert and_expr != or_expr, (
+            "kiwipiepy did not expand this word — pick one that it does, or the test proves nothing"
+        )
+        assert " OR " in or_expr
+
+    @pytest.mark.asyncio
+    async def test_the_or_pass_actually_answers(self, kiwi, storage):
+        """End of the argument: the AND form misses, the OR form finds it."""
+        chunk = _make_chunk("회의를 진행합니다", source="notes/ko.md")
+        await storage.upsert_chunks([chunk])
+
+        results = await storage.bm25_search("했습니다", top_k=5)
+
+        assert [r.chunk.id for r in results] == [chunk.id], (
+            "the OR fallback was skipped for a space-free query whose tokenizer "
+            "expands it into several terms"
         )

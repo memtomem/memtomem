@@ -2260,22 +2260,30 @@ class SqliteBackend(
             # ``db.execute`` from the literal its first argument is bound to,
             # and a closure hides that binding — which is the exact shape #2207
             # added the "unknowable statement" rule for.
+            #
+            # The OR pass is skipped when it would repeat the AND one, decided
+            # by comparing the two *tokenized* expressions rather than by
+            # looking for a space in the raw query. Whitespace is the wrong
+            # test under a morphological tokenizer: kiwipiepy expands one
+            # space-free Korean word into several terms, so a query like
+            # ``했습니다`` has an OR form that differs from its AND form and
+            # was losing the fallback entirely. Building both up front also
+            # analyses each query once instead of up to four times.
+            attempts = [
+                (column, _column_match(column, query, use_or=use_or))
+                for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN)
+                for use_or in (False, True)
+            ]
             rows: list = []
-            multi_term = " " in query.strip()
-            for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):
-                for use_or in (False, True):
-                    if use_or and not multi_term:
-                        continue
-                    rows = db.execute(
-                        sql,
-                        [_column_match(column, query, use_or=use_or)]
-                        + ns_params
-                        + scope_params
-                        + metadata_params
-                        + [top_k],
-                    ).fetchall()
-                    if rows:
-                        break
+            seen_exprs: set[str] = set()
+            for _column, expr in attempts:
+                if expr in seen_exprs:
+                    continue
+                seen_exprs.add(expr)
+                rows = db.execute(
+                    sql,
+                    [expr] + ns_params + scope_params + metadata_params + [top_k],
+                ).fetchall()
                 if rows:
                     break
 
