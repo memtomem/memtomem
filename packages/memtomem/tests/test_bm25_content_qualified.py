@@ -19,7 +19,13 @@ the leg-level ones pass under either design.
 
 The fallback is deliberate. Typing a filename into search is an undocumented
 but plausible habit, and it still works — the path phase runs only once the
-content phase has found nothing, so a path can never outrank prose.
+content phase has found nothing, so a path can never outrank prose *in this
+leg*.
+
+That last qualifier is the honest bound on the contract. When BM25-content
+finds nothing but the dense leg finds prose, the path fallback's rows and those
+dense rows do meet in RRF. Nothing here pins that case, and the fixture cannot
+reach it (see ``TestPipelineFusion``).
 """
 
 from __future__ import annotations
@@ -107,12 +113,21 @@ class TestBm25Leg:
         assert [r.chunk.id for r in results] == [weak.id]
 
 
-class TestHybridPipeline:
-    """The end-to-end shape — and the one that fails under 0.0-weighting.
+class TestPipelineFusion:
+    """Through fusion — the test that fails under 0.0-weighting.
 
     Zero-weighting demotes a path-only row inside the BM25 leg but still
     returns it, and RRF scores it by ordinal rank, so it reaches the fused
     results anyway. Only not retrieving it keeps it out.
+
+    Scope, stated because the class name used to overclaim it: the shared
+    ``components`` fixture leaves ``embedding.provider`` at its default
+    ``"none"``, so this runs one leg through RRF and the post-fusion stages,
+    not BM25 against a live dense leg. That is enough for what it pins — the
+    ordinal-rank point needs no second leg — and it is *not* enough to pin the
+    case where BM25-content finds nothing while dense finds prose, in which the
+    path fallback and a dense hit do meet in fusion. See the contract note in
+    the module docstring.
     """
 
     @pytest.mark.asyncio

@@ -136,16 +136,29 @@ are parsed from the file's path — the corpus is laid out
 `{language}/{topic}/{genre}.md`. A retriever that matched path tokens was
 matching the label definition itself.
 
-The Korean slices are the tell. `ko|genre_primary` queries are mixed-script and
-carry the English topic word literally (`postgres 절차 접속 수행`,
-`observability KST 원인 후속 조치`), so they leaked through the same English
-directory names; `ko|direct` queries, which name no path component, went *up*.
-The lost points measured the corpus's directory names, not retrieval quality.
+The Korean slices are the supporting evidence, not a proof. `ko|genre_primary`
+queries are mixed-script and carry the English topic word literally
+(`postgres 절차 접속 수행`, `observability KST 원인 후속 조치`), so an English
+directory name was reachable from a Korean query — and that is the same
+component the label is derived from. What separates `genre_primary` from the
+other types is not whether the query names a path word (`ko|direct` includes
+`Postgres 커넥션 풀 포화`, which names one too, and went *up*) but that its
+label is defined by **topic *and* genre**, and the path encodes both: the
+directory is the topic and the filename is the genre, so a path match supplied
+the entire qrel key rather than half of it.
+
+That is why the movement reads as removing a label-shaped signal rather than
+losing retrieval quality. It is an inference from where the metric moved, not a
+per-query audit; a stronger claim would need each lost result checked for
+whether it was reachable only through its path.
 
 Neither file was hand-edited. Both are regenerated wholesale by their tools,
 and `test_v2_committed_quality_bounds_match_generation_formula` recomputes
-every v2 bound from the committed per-query data, so a hand-tuned number fails
-the suite. The frozen holdout (`query_holdout_v2.py`) is untouched — the
+every v2 bound from the committed `aggregate` and `run_spreads` values, so a
+floor edited on its own fails the suite. Note the limit of that guard: it
+checks bounds against aggregates, not aggregates against the per-query rows, so
+a *coordinated* edit to both would still pass. The protection against that is
+the workflow producing the file, not the test reading it. The frozen holdout (`query_holdout_v2.py`) is untouched — the
 queries, their identifiers and the qrel rules are unchanged; only the measured
 baseline they are scored against moved.
 
