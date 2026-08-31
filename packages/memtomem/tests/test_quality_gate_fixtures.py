@@ -58,7 +58,10 @@ def test_cases_envelope_is_well_formed() -> None:
     cases = _load("cases.json")
     assert cases["schema_version"] == 1
     assert cases["kind"] == "eval_case_set"
-    assert len(cases["cases"]) == 12
+    fixture = _load("fixture.json")
+    # Tied to the fixture rather than a literal: a new case_def must show up
+    # here without editing a number, and a dropped one must fail.
+    assert len(cases["cases"]) == len(fixture["case_defs"])
     for case in cases["cases"]:
         judgments = {label["judgment"] for label in case["labels"]}
         assert judgments <= {"relevant", "not_relevant"}
@@ -77,6 +80,22 @@ def test_baseline_precision_cohort_is_complete() -> None:
     assert baseline["aggregate"]["mean_precision"]["incomplete"] == 0
 
 
+def _case_with_top_k_headroom(report: dict) -> dict:
+    """A case whose result list is shorter than its ``top_k``.
+
+    Both tests below append one extra result and expect it to land *inside*
+    ``top_k`` — which only holds for a case that did not fill its window.
+    ``cases[0]`` used to satisfy that by accident; the case set is sorted by
+    ``case_id``, so adding one that sorts first and returns a full window
+    (``qg-corpus-postmortem-path-token``, #2224) silently turned both tests
+    into no-ops that still passed. Pick by the property instead of by position.
+    """
+    for case in report["cases"]:
+        if len(case["retrieved"]) < case["top_k"]:
+            return case
+    raise AssertionError("no case has top_k headroom — these tests cannot append")
+
+
 def test_precision_floor_catches_appended_off_target_result() -> None:
     # The point of complete labels + the precision floor: a same-corpus candidate
     # that appends one labelled not_relevant result after the rank-1 hit leaves
@@ -84,7 +103,7 @@ def test_precision_floor_catches_appended_off_target_result() -> None:
     baseline = _load("baseline_replay.json")
     policy = load_policy(_load("policy.json"))
     candidate = copy.deepcopy(baseline)
-    case = candidate["cases"][0]
+    case = _case_with_top_k_headroom(candidate)
     retrieved_hashes = {r["content_hash"] for r in case["retrieved"]}
     appended = next(h for h in case["labels"]["not_relevant"] if h not in retrieved_hashes)
     case["retrieved"].append(
@@ -118,7 +137,7 @@ def test_committed_policy_catches_unlabelled_retrieved_chunk() -> None:
     baseline = _load("baseline_replay.json")
     policy = load_policy(_load("policy.json"))
     candidate = copy.deepcopy(baseline)
-    case = candidate["cases"][0]
+    case = _case_with_top_k_headroom(candidate)
     # A sha256-shaped hash that appears in no label -> genuinely unlabelled.
     unlabelled = "0" * 64
     labelled = set(case["labels"]["relevant"]) | set(case["labels"]["not_relevant"])

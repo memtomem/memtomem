@@ -95,6 +95,38 @@ the balanced `[1.0, 1.0]` BM25/dense weighting.
 - A calibration run is invalid unless all 48 files and 192 chunks index with
   zero privacy blocks and zero errors.
 
+### Recalibrated for #2224 — `genre_primary` measured path text
+
+`baseline_v2.json` was regenerated when BM25 stopped searching the
+`source_file` column while any chunk's `content` matches (#2224). Only the
+`genre_primary` floors moved materially, and only in the English tracks:
+
+| floor | before | after |
+|---|---|---|
+| `cross_language en\|genre_primary\|recall@10` | 0.2925 | 0.2475 |
+| `cross_language en\|genre_primary\|cross_language_relevant@10` | 1.44 | 1.26 |
+| `english en\|genre_primary\|recall@10` | 0.405 | 0.3825 |
+
+Everything else moved by at most ~0.003 in either direction, and the Korean
+`genre_primary` floors went **up**.
+
+That asymmetry is the point, and it is why these floors were lowered rather
+than the change reverted. `genre_primary` relevance is defined as
+"chunk's topic is a target topic **and** chunk's genre is the query's genre"
+(`benchmark_v2.py:build_qrels`), and both of those are parsed from the file's
+path — the corpus is laid out `{language}/{topic}/{genre}.md`. A retriever that
+matched path tokens was therefore matching the label definition itself, in
+English, which is also why the Korean queries — whose text never matched an
+English path component — are unaffected or better. The lost points were a
+measurement of the corpus's directory names, not of retrieval quality.
+
+The floors were **not** hand-edited: the file is regenerated wholesale by
+`tune_rrf_v2.py`, and `test_v2_committed_quality_bounds_match_generation_formula`
+recomputes every bound from the committed per-query data, so a hand-tuned
+number fails the suite. The frozen holdout (`query_holdout_v2.py`) is
+unchanged — the queries, their identifiers and the qrel rules are the same; only
+the measured baseline they are scored against moved.
+
 Methodology v2 keeps those topic metrics and adds intent-specific checks:
 
 - `genre_hit@1` and genre MRR use `topic AND expected genre` qrels.
