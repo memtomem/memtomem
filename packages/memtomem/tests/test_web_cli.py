@@ -582,6 +582,60 @@ def test_web_stop_signals_verified_pid_and_removes_metadata(
     assert not info_file.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the SIGKILL escalation is POSIX-only")
+@pytest.mark.parametrize(
+    ("probe", "expect_sigkill"),
+    [
+        # Positive evidence the process is still there: escalate.
+        ("alive", True),
+        # "could not tell" — the probe's third answer, which a boolean helper
+        # used to collapse into one side or the other. It must not become a
+        # SIGKILL: on a recycled pid that signal lands on someone else's
+        # process, and `mm web stop` reports the failure honestly instead
+        # (#2234).
+        ("unknown", False),
+        ("dead", False),
+    ],
+)
+def test_web_stop_escalates_only_on_a_live_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, probe: str, expect_sigkill: bool
+) -> None:
+    import portalocker
+
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    pid_file = runtime_dir / "web.pid"
+    pid_file.write_text("24680\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
+
+    # Hold the lock for the whole call so the pid file is never released and
+    # the stop reaches the escalation branch.
+    holder = pid_file.open("rb+")
+    portalocker.lock(holder, portalocker.LOCK_EX | portalocker.LOCK_NB)
+
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(web_cmd.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(web_cmd, "probe_pid", lambda _pid: probe)
+    monkeypatch.setattr(web_cmd, "_wait_for_pid_file_release", lambda _timeout: False)
+
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        with contextlib.suppress(Exception):
+            portalocker.unlock(holder)
+        holder.close()
+
+    sent = [sig for _pid, sig in signals]
+    assert web_cmd.signal.SIGTERM in sent, "the graceful signal is unconditional"
+    assert (web_cmd.signal.SIGKILL in sent) is expect_sigkill, (
+        f"probe={probe!r} produced signals {sent}"
+    )
+    # The process is still holding the file either way, so the command is
+    # honest about not having stopped it.
+    assert result.exit_code != 0
+    assert "failed to stop pid 24680" in result.output
+
+
 @pytest.mark.requires_symlinks
 def test_web_stop_refuses_symlinked_pid_without_signaling(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

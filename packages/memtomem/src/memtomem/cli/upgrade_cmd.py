@@ -37,6 +37,7 @@ from typing import NoReturn
 
 import click
 
+from memtomem._process_probe import probe_pid
 from memtomem._runtime_paths import legacy_server_pid_path
 from memtomem.cli._db_lock import check_db_lock
 from memtomem.cli._liveness import (
@@ -305,21 +306,6 @@ def _refuse_upgrade(
     sys.exit(1)
 
 
-def _pid_alive(pid: int) -> bool:
-    """POSIX liveness check via ``os.kill(pid, 0)``.
-
-    Unix-only; callers gate on ``sys.platform != "win32"``.
-    """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but we don't own it — for our purposes "alive".
-        return True
-    return True
-
-
 def _reprobe_process_state(state: ServerState) -> ServerState:
     """Re-probe the same lock path while preserving legacy classification."""
     if state.pid_file is None:
@@ -366,12 +352,19 @@ def _stop_server(
         # Poll for exit. server's ``_install_sigterm_handler`` (#439)
         # unlinks its own pid file on a clean SIGTERM, so the file may
         # vanish before grace expires — that's fine.
+        # The two collapses of the tri-state differ, which is why this reads
+        # the probe directly rather than through a boolean helper (#2234).
+        # Waiting: stop early only on positive evidence the process is gone —
+        # "unknown" keeps polling until the grace period expires, which costs
+        # time and nothing else.
         deadline = time.monotonic() + grace
         while pid is not None and time.monotonic() < deadline:
-            if not _pid_alive(pid):
+            if probe_pid(pid) == "dead":
                 break
             time.sleep(0.1)
-        if pid is not None and _pid_alive(pid):
+        # Escalating: SIGKILL only on positive evidence it is still alive.
+        # "unknown" must not become a signal sent to a pid we cannot vouch for.
+        if pid is not None and probe_pid(pid) == "alive":
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
