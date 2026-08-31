@@ -19,6 +19,8 @@ from typing import Any, Iterator, Literal, cast
 
 import click
 
+from memtomem._process_probe import probe_pid
+
 
 _WEB_MODE_CHOICES = ("prod", "dev")
 _LOOPBACK_BINDS = {"127.0.0.1", "::1", "localhost"}
@@ -483,29 +485,6 @@ def _spawn_background(config: _WebRunConfig, log_file: Path | None) -> None:
         webbrowser.open(f"http://{config.host}:{port}")
 
 
-def _pid_alive(pid: int) -> bool:
-    if os.name == "nt":
-        import ctypes
-
-        process = ctypes.windll.kernel32.OpenProcess(0x100000, False, pid)
-        if not process:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            if not ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(code)):
-                return False
-            return code.value == 259
-        finally:
-            ctypes.windll.kernel32.CloseHandle(process)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def _wait_for_pid_file_release(timeout: float) -> bool:
     from memtomem.cli._liveness import check_web_liveness
 
@@ -595,7 +574,12 @@ def _web_stop() -> None:
             pass
         except PermissionError as exc:
             raise click.ClickException(f"cannot signal pid {pid}: {exc}") from exc
-        if not _wait_for_pid_file_release(10) and _pid_alive(pid):
+        # ``== "alive"``, not ``!= "dead"``: this gates a SIGKILL, and the
+        # probe's third answer means "could not tell". Escalating on it would
+        # signal a pid we have no evidence is still the process we started —
+        # and on a recycled pid, someone else's (#2234). Failing to kill is
+        # reported honestly by the liveness re-check below.
+        if not _wait_for_pid_file_release(10) and probe_pid(pid) == "alive":
             os.kill(pid, signal.SIGKILL)
             _wait_for_pid_file_release(2)
 

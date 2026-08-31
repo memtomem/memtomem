@@ -5,19 +5,30 @@ which a boolean cannot express: an access-denied probe means the process
 *exists* and is merely not ours to inspect, while a failed query means we
 learned nothing at all. Collapsing either into ``False`` is what turns a live
 recorded parent into a reported-missing one, so every uncertain answer is
-``"unknown"`` and callers are expected to render it as such rather than pick a
-side.
+``"unknown"``.
 
-This deliberately does not reuse ``cli/web.py:_pid_alive``. That helper opens the
-Windows handle with ``SYNCHRONIZE`` alone and then calls ``GetExitCodeProcess``,
-which is documented to require ``PROCESS_QUERY_INFORMATION`` or
-``PROCESS_QUERY_LIMITED_INFORMATION``, so the query can fail on a live process
-and be read as dead; it also treats a NULL handle as dead without inspecting
-``GetLastError``, folding access-denied into the same answer. Neither misfires
-today — its only call site (``web.py:598``) sits in the POSIX branch, leaving
-that Windows code unreachable — but copying it here would have made a latent
-defect a live one, since this module's caller runs on every platform. Migrating
-``cli/web.py`` and ``cli/upgrade_cmd.py`` onto this probe is follow-up work.
+A *diagnostic* caller renders that third answer as itself rather than picking a
+side — a report that says "could not tell" is the whole point. A caller that
+must branch has to collapse it, and the collapse is a decision it owns and
+states: the two in ``cli/`` below fall opposite ways, because "keep waiting" is
+cheap and "send SIGKILL" is not.
+
+This replaced two hand-rolled liveness checks (#2234). ``cli/web.py:_pid_alive``
+opened the Windows handle with ``SYNCHRONIZE`` alone and then called
+``GetExitCodeProcess``, which is documented to require
+``PROCESS_QUERY_INFORMATION`` or ``PROCESS_QUERY_LIMITED_INFORMATION``, so the
+query could fail on a live process and be read as dead; it also treated a NULL
+handle as dead without inspecting ``GetLastError``, folding access-denied into
+the same answer. Neither misfired — its only call site sat in the POSIX branch,
+leaving that Windows code unreachable — but it gated a ``SIGKILL``, so a future
+Windows caller was one rename away from acting on "live process reported dead".
+``cli/upgrade_cmd.py`` held a third, POSIX-only copy.
+
+Both are gone. Their call sites read this probe directly rather than through a
+boolean, because the right collapse of ``"unknown"`` differs between them: a
+*wait* loop keeps waiting on it (costing time and nothing else), while a *kill*
+gate must decline — signalling a pid nothing vouches for lands on an unrelated
+process once the id has been recycled.
 """
 
 from __future__ import annotations
