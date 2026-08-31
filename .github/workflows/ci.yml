@@ -193,6 +193,11 @@ jobs:
     timeout-minutes: 45
     env:
       FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
+      # Job-level, not per-step: these are properties of the measurement, and
+      # the provenance step records them. Setting them only on the regenerate
+      # step made the manifest report "unset" for a run that had them set.
+      PYTHONHASHSEED: "0"
+      OMP_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -208,9 +213,6 @@ jobs:
       - run: uv python pin 3.12
       - run: uv sync --frozen
       - name: Regenerate both baselines
-        env:
-          PYTHONHASHSEED: "0"
-          OMP_NUM_THREADS: "1"
         run: |
           uv run python tools/retrieval-eval/calibrate_portfolio.py \
             --runs 10 --factor 0.85 --output tools/retrieval-eval/baseline_v0.3.8.json

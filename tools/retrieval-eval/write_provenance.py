@@ -103,6 +103,10 @@ def build() -> dict[str, object]:
             # SQLite build is as much a part of the measurement as the models.
             "sqlite": sqlite3.sqlite_version,
         },
+        # ``null`` here means the variable was genuinely unset when the
+        # baselines were produced, which makes the run non-reproducible in the
+        # way these two settings exist to prevent. Recorded rather than
+        # defaulted so that shows up in review instead of reading as fine.
         "measurement_env": {name: os.environ.get(name) for name in _MEASUREMENT_ENV},
         "distributions": _distribution_versions(),
         "baselines": {
@@ -139,6 +143,16 @@ def main() -> int:
             print(
                 f"provenance does not cover the canonical baselines "
                 f"(missing: {missing}; unexpected: {unexpected})",
+                file=sys.stderr,
+            )
+            return 1
+        unset = sorted(
+            name for name, value in recorded.get("measurement_env", {}).items() if value is None
+        )
+        if unset:
+            print(
+                "provenance records an unpinned measurement environment "
+                f"({', '.join(unset)} unset) — regenerate on a run that sets them",
                 file=sys.stderr,
             )
             return 1
