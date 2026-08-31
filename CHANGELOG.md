@@ -324,6 +324,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A source larger than SQLite's bound-variable limit can be deleted again.**
+  `delete_by_source` bound every one of a file's row ids into a single
+  `IN (...)`, so a source with more chunks than the connection's
+  `SQLITE_LIMIT_VARIABLE_NUMBER` (32,766 today; 999 on builds older than
+  SQLite 3.32, which an ordinary large document reaches) raised
+  `too many SQL variables` instead of deleting — cleanly rolled back, but the
+  file was then undeletable through `mm purge --matching-excluded`, the web
+  source tab, the health-maintenance sweep, `mm gc`, and re-index replacement
+  alike. Every write path whose `IN` clause is sized by a file's or a
+  namespace's own row count now batches under the existing `_SQL_MAX_PARAMS`
+  ceiling, inside the same transaction as before, so a failed batch still
+  rolls back the whole operation: `delete_by_source`, `delete_chunks`,
+  `upsert_chunks`, `update_chunk_line_ranges`, `update_chunk_metadata`,
+  `update_chunks_scope_for_source`, and `delete_by_namespace`. (#2265)
+
 - **Per-chunk tag edits no longer undo a concurrent memory scope migration.**
   The tag service fetched a chunk, rebuilt the entire row with new tags, and
   upserted that stale snapshot. If `memory-migrate` moved the row between the
