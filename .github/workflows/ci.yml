@@ -11,6 +11,10 @@ on:
         description: "Regenerate the quality-gate baseline (cases.json + baseline_replay.json) and upload it as an artifact instead of running the check."
         type: boolean
         default: false
+      refresh_retrieval_baselines:
+        description: "Regenerate the retrieval-eval baselines (baseline_v0.3.8.json + baseline_v2.json) on Ubuntu and upload them as an artifact instead of running the floor checks."
+        type: boolean
+        default: false
   # schedule:
   #   - cron: "17 5 * * *"   # nightly — enable once LLM secrets are provisioned
 
@@ -132,7 +136,10 @@ jobs:
   test-golden-path:
     name: golden-path (ONNX bge-m3)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 for the checks (kept as per-step bounds below); the ceiling is for the
+    # workflow_dispatch baseline refresh, which runs 10 calibration passes plus
+    # the v2 RRF grid.
+    timeout-minutes: 45
     env:
       FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     steps:
@@ -150,15 +157,45 @@ jobs:
       - name: Audit public synthetic retrieval corpus
         run: uv run python tools/retrieval-eval/audit_public_corpus.py
       - name: Check public retrieval quality floors
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.refresh_retrieval_baselines) }}
+        timeout-minutes: 15
         env:
           PYTHONHASHSEED: "0"
           OMP_NUM_THREADS: "1"
         run: uv run python tools/retrieval-eval/check_baseline.py --runs 1
       - name: Check language-separated retrieval v2 floors
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.refresh_retrieval_baselines) }}
+        timeout-minutes: 15
         env:
           PYTHONHASHSEED: "0"
           OMP_NUM_THREADS: "1"
         run: uv run python tools/retrieval-eval/check_baseline_v2.py
+      # Canonical refresh, same contract the quality gate already has: these
+      # floors are checked on Ubuntu, so they must be *produced* on Ubuntu.
+      # Calibrating them on a developer's machine is not a smaller version of
+      # this — the platform delta is the same size as the margins (#2224: a
+      # macOS recalibration RAISED ko|genre_primary|mrr@10 to 0.31 while the
+      # Ubuntu runner observed 0.291).
+      - name: Refresh canonical retrieval baselines
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_retrieval_baselines }}
+        env:
+          PYTHONHASHSEED: "0"
+          OMP_NUM_THREADS: "1"
+        run: |
+          uv run python tools/retrieval-eval/calibrate_portfolio.py \
+            --runs 10 --factor 0.85 --output tools/retrieval-eval/baseline_v0.3.8.json
+          uv run python tools/retrieval-eval/tune_rrf_v2.py \
+            --output tools/retrieval-eval/baseline_v2.json
+          uv run python -c "import sys; open('tools/retrieval-eval/versions.txt', 'w').write(f'python={sys.version.split()[0]}\n')"
+      - name: Upload regenerated retrieval baselines
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_retrieval_baselines }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: retrieval-eval-baselines
+          path: |
+            tools/retrieval-eval/baseline_v0.3.8.json
+            tools/retrieval-eval/baseline_v2.json
+            tools/retrieval-eval/versions.txt
 
   quality-gate:
     name: quality-gate (BM25 replay)

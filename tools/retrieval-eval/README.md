@@ -95,6 +95,24 @@ the balanced `[1.0, 1.0]` BM25/dense weighting.
 - A calibration run is invalid unless all 48 files and 192 chunks index with
   zero privacy blocks and zero errors.
 
+### Canonical producer: Ubuntu
+
+Both baselines are *checked* on the Ubuntu CI runner, so both must be
+*produced* there. Calibrating on a developer's machine is not a smaller version
+of the same thing: the platform delta is the same size as the margins these
+floors are built from. #2224 measured it — a macOS recalibration raised
+`ko|genre_primary|mrr@10` to `0.31` while the Ubuntu runner observed `0.291`,
+so the locally produced file would have made CI *stricter* on the very slice
+that was failing.
+
+Regenerate by running the CI workflow with `workflow_dispatch` and input
+`refresh_retrieval_baselines: true`, then download the
+`retrieval-eval-baselines` artifact (`baseline_v0.3.8.json`,
+`baseline_v2.json`, and a `versions.txt` recording the Python version) and
+commit those files as-is. The floor checks are skipped on that run, so a
+currently-failing floor does not block its own refresh. This mirrors the
+quality gate's contract (`tools/quality-gate/README.md`).
+
 ### Recalibrated for #2224 — `genre_primary` measured path text
 
 `baseline_v2.json` was regenerated when BM25 stopped searching the

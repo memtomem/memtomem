@@ -85,10 +85,12 @@ def _case_with_top_k_headroom(report: dict) -> dict:
 
     Both tests below append one extra result and expect it to land *inside*
     ``top_k`` — which only holds for a case that did not fill its window.
-    ``cases[0]`` used to satisfy that by accident; the case set is sorted by
-    ``case_id``, so adding one that sorts first and returns a full window
-    (``qg-corpus-postmortem-path-token``, #2224) silently turned both tests
-    into no-ops that still passed. Pick by the property instead of by position.
+    ``cases[0]`` satisfied that by accident, and the case set is sorted by
+    ``case_id``, so any future case that sorts first and returns a full window
+    turns both tests into no-ops that still pass. #2224 hit exactly that while
+    it was still trying to fix its problem by re-weighting the column: the new
+    first case returned five of five, both appends fell outside ``top_k``, and
+    the suite stayed green. Pick by the property instead of by position.
     """
     for case in report["cases"]:
         if len(case["retrieved"]) < case["top_k"]:
