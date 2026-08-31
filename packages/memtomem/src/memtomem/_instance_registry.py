@@ -102,6 +102,12 @@ from typing import IO, Literal, NoReturn
 
 import portalocker
 
+from memtomem._lock_errors import (
+    LOCK_CALL_ERRORS,
+    LOCK_CALL_ERRORS_WIDE,
+    is_lock_contention as _is_lock_contention,
+    raise_lock_io_failure,
+)
 from memtomem._runtime_paths import (
     candidate_runtime_dirs,
     ensure_runtime_dir,
@@ -133,16 +139,12 @@ _ENTRY_RE = re.compile(r"^(\d+)-(\d+)-([0-9a-f]{16})-([0-9a-f]{8})-([0-9a-f]{8})
 # Separate budget from ``_LOCK_TIMEOUT_S`` so the barrier's wait can be
 # tuned (and shortened in tests) without touching the mutation lock's.
 _BARRIER_TIMEOUT_S = 2.0
-
-# Exception tuple matching ``cli/_liveness.py:probe_pid_file`` (#817):
-# POSIX raises ``BlockingIOError``; portalocker's Windows backend wraps
-# Win32 errors as ``LockException``. This is the *catch* set — every shape a
-# non-blocking ``portalocker.lock`` can produce, contention or not, with one
-# documented hole: portalocker 3.x re-raises a non-``ERROR_LOCK_VIOLATION``
-# ``pywintypes.error`` raw, and that type derives from ``Exception``, not
-# ``OSError``. Only the barrier needs to survive it, and only the barrier
-# widens for it — see ``_BARRIER_LOCK_ERRORS`` below for why the other sites
-# keep the narrower catch.
+# Exception tuple matching ``cli/_liveness.py:probe_pid_file`` (#817), shared
+# with ``context/_atomic.py`` since #2229 — see
+# :data:`memtomem._lock_errors.LOCK_CALL_ERRORS` for every shape a
+# non-blocking ``portalocker.lock`` can produce and the one documented hole
+# (a raw 3.x ``pywintypes.error``, which only ``_BARRIER_LOCK_ERRORS`` below
+# widens for).
 # ``_acquire_barrier`` (#1957) and ``_mutation_lock`` (#1939) narrow it
 # further with ``_is_lock_contention``: both poll a held lock but must let
 # a lock-call I/O failure escape, because each has a caller that would
@@ -153,7 +155,7 @@ _BARRIER_TIMEOUT_S = 2.0
 # retries, and their fail-open/fail-closed contracts absorb a lock-call I/O
 # error exactly as they do contention, so splitting there would only add
 # noise.
-_LOCK_CONTENDED = (portalocker.LockException, BlockingIOError, OSError)
+_LOCK_CONTENDED = LOCK_CALL_ERRORS
 
 # Windows ``PermissionError.winerror`` codes that mean *transient*
 # contention, not durable denial: ERROR_SHARING_VIOLATION (32) and
@@ -162,49 +164,12 @@ _LOCK_CONTENDED = (portalocker.LockException, BlockingIOError, OSError)
 # clear it), unlike a mode-000 / root-owned entry (#1938).
 _WIN_TRANSIENT_SHARING = frozenset({32, 33})
 
-# Non-blocking-lock errnos that mean "held by someone else": POSIX
-# ``fcntl.flock`` documents both ``EACCES`` and ``EAGAIN`` for a held lock,
-# and the POSIX backend of every source-verified release (3.0 through 4.1)
-# maps exactly this pair to ``AlreadyLocked``. Scoped to POSIX on purpose —
-# the Windows msvcrt backend treats a wider errno set as contention, and the
-# floor is a floor, so a release past 4.1 is unverified by construction.
-# These errnos are therefore *not* the primary gate — they are the defensive
-# one, and the ``>=3.0`` range is what the pin allows, not what it proves.
-# Contention is judged by errno on the exception or its chained cause in
-# addition to ``isinstance(exc, AlreadyLocked)``, covering a raw ``OSError``
-# leaking out of some backend and a future version that regresses to a bare
-# ``LockException`` (the #1944 type-drift note).
-_CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
-
-# Windows ``ERROR_LOCK_VIOLATION`` — the one ``pywintypes.error`` code the
-# Win32 backend maps to contention. ``pywintypes.error`` carries
-# ``.winerror`` and *no* ``.errno`` (#1957 comment), so the errno gate
-# above cannot see it. Numeric on purpose: importing pywin32 here would
-# add a Windows-only dependency for a single integer.
-_WINERROR_LOCK_VIOLATION = 33
-
-# The barrier poll loop's catch set. On portalocker 3.x the Win32 backend
-# maps ``ERROR_LOCK_VIOLATION`` to ``AlreadyLocked`` but re-raises every
-# *other* ``pywintypes.error`` **raw** — and that type derives from
-# ``Exception``, not ``OSError``, so ``_LOCK_CONTENDED`` alone would let a
-# non-contention Win32 lock failure escape ``_acquire_barrier`` unhandled,
-# past the CLIs' ``except OSError`` repair branch (#1957). 4.0.0 closed that
-# upstream (the ``else`` branch now wraps in ``LockException``), but the
-# floor stays ``portalocker>=3.0``, so a 3.x install still needs this catch
-# — keep it until the floor moves. Barrier-only: the other
-# ``_LOCK_CONTENDED`` sites keep their narrower catch (a raw
-# ``pywintypes.error`` there is out of scope).
-# The ``import`` is Windows-only and best-effort — absent pywin32, portalocker
-# could not have raised it, so the POSIX tuple is complete.
-try:
-    import pywintypes as _pywintypes
-
-    _BARRIER_LOCK_ERRORS: tuple[type[BaseException], ...] = (
-        *_LOCK_CONTENDED,
-        _pywintypes.error,
-    )
-except ImportError:
-    _BARRIER_LOCK_ERRORS = _LOCK_CONTENDED
+# The barrier poll loop's catch set: the shared tuple widened for a raw
+# portalocker 3.x ``pywintypes.error`` (see
+# :data:`memtomem._lock_errors.LOCK_CALL_ERRORS_WIDE`). Barrier-only among
+# the registry's sites — the others keep the narrower ``_LOCK_CONTENDED``,
+# whose callers absorb a raw error through their own ``except``.
+_BARRIER_LOCK_ERRORS: tuple[type[BaseException], ...] = LOCK_CALL_ERRORS_WIDE
 
 
 def instances_dir(root: Path | None = None) -> Path:
@@ -510,83 +475,17 @@ class HeldBarrier:
                 fp.close()
 
 
-def _is_lock_contention(exc: BaseException) -> bool:
-    """True when a non-blocking ``portalocker.lock`` failure means "held by
-    someone else" rather than "the lock call itself failed" (#1957).
-
-    The lock-acquire sibling of :func:`_probe_entry`'s live/unknown split,
-    shared by :func:`_acquire_barrier` (#1957) and :func:`_mutation_lock`
-    (#1939): both poll on ``True`` and let a ``False`` escape unwrapped —
-    the barrier normalizes it to ``OSError`` via
-    :func:`_raise_lock_io_failure`, the mutation lock re-raises it straight
-    into ``register_instance``'s never-raise handler. It is *not* reusable
-    in ``_probe_entry`` as-is: that surface maps its own I/O uncertainty to
-    ``"unknown"``, so a bare ``False`` there would need that translation.
-
-    Across every source-verified release (portalocker 3.0/3.1/3.2 and
-    4.0/4.1 — the floor is ``>=3.0``, so anything past 4.1 is unverified by
-    construction) genuine contention is *always* the ``AlreadyLocked``
-    subclass — POSIX ``EACCES``/``EAGAIN`` and Windows
-    ``ERROR_LOCK_VIOLATION`` alike — so
-    the ``isinstance`` check below catches it regardless of how the
-    original error is chained. The errno/winerror probes are defensive:
-    the cause probes cover a future version that might raise a bare
-    ``LockException`` for a held lock (the #1944 type-drift note), and the
-    ``winerror``-on-``exc`` probe covers a *raw* ``pywintypes.error``
-    (which the Win32 backend only ever re-raises for non-lock-violation
-    codes, so in practice it is always non-contention — but a leaked raw
-    code 33 must still read as contention, not as a path to repair). A
-    lock-call I/O failure (``EIO``, ``ENOLCK``, ``EBADF``, an NFS
-    ``EOFError``, a non-33 ``pywintypes.error``) matches none of these.
-    """
-    if isinstance(exc, (portalocker.AlreadyLocked, BlockingIOError)):
-        return True
-    # A raw ``EACCES``/``EAGAIN`` ``OSError`` leaking straight out of some
-    # portalocker version is fcntl-documented contention; classify it as
-    # such rather than as a path to repair (a deliberate superset of the
-    # cause-based check below).
-    if isinstance(exc, OSError) and exc.errno in _CONTENTION_ERRNOS:
-        return True
-    # ``pywintypes.error`` exposes ``.winerror`` but no ``.errno`` (#1957
-    # comment): probe it on the raw exception and on the chained cause.
-    if getattr(exc, "winerror", None) == _WINERROR_LOCK_VIOLATION:
-        return True
-    cause = exc.__cause__
-    if isinstance(cause, OSError) and cause.errno in _CONTENTION_ERRNOS:
-        return True
-    return getattr(cause, "winerror", None) == _WINERROR_LOCK_VIOLATION
-
-
 def _raise_lock_io_failure(exc: BaseException, path: Path) -> NoReturn:
-    """Normalize a non-contention lock-call failure to ``OSError`` (#1957).
+    """Normalize a barrier lock-call failure to ``OSError`` (#1957).
 
-    The destructive CLIs route an ``OSError`` from barrier acquisition to
-    their repair-the-path remediation (#1951, #1959); any other type would
-    be flattened into :class:`BarrierTimeout`'s stop-the-holder advice,
-    sending the user hunting for a process that does not exist (#1870). A
-    chained ``OSError`` cause donates its errno/strerror/filename to a
-    *fresh* ``OSError`` rather than being re-raised itself: ``raise cause
-    from exc`` would make the pair each other's ``__cause__``/``__context__``
-    — a reference cycle the caller's log does not need.
-
-    ``path`` (the resolved barrier file) backfills the filename: a lock
-    syscall operates on a descriptor, so ``OSError.filename`` is usually
-    ``None`` and the ``EOFError`` fallback is always pathless — leaving the
-    CLI to advise "repair the reported path" without naming one. The
-    barrier path is the only actionable path there is.
+    Thin binding of the shared :func:`memtomem._lock_errors.raise_lock_io_failure`
+    that names *this* lock in the last-resort message. The destructive CLIs
+    route an ``OSError`` from barrier acquisition to their repair-the-path
+    remediation (#1951, #1959); any other type would be flattened into
+    :class:`BarrierTimeout`'s stop-the-holder advice, sending the user
+    hunting for a process that does not exist (#1870).
     """
-    if isinstance(exc, OSError):
-        # Mutate in place rather than re-wrap: keeps the precise subtype
-        # (``FileNotFoundError`` etc.) while naming the path in ``str(exc)``.
-        if exc.filename is None:
-            exc.filename = str(path)
-        raise exc
-    cause = exc.__cause__
-    if isinstance(cause, OSError) and cause.errno is not None:
-        err = OSError(cause.errno, cause.strerror or str(cause))
-        err.filename = cause.filename or str(path)
-        raise err from exc
-    raise OSError(f"lifecycle barrier lock failed at {path}: {exc}") from exc
+    raise_lock_io_failure(exc, path, label="lifecycle barrier")
 
 
 def _acquire_barrier_file(path: Path, flags: int, deadline: float, budget: float) -> IO[bytes]:

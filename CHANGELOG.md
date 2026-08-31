@@ -355,6 +355,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A failing lock is no longer reported as a busy one.** The shared
+  cross-process helper behind every sidecar lock (`.mcp.json`, settings, skills,
+  versions, the wiki commit lock, the memory files) treated *every*
+  `portalocker` failure as contention: it polled the whole acquisition budget
+  and then raised `TimeoutError` "held by another process". Only a held lock is
+  contention. A lock call that fails for its own reason — `EIO`, `ENOLCK`, an
+  NFS `EOFError`, a non-lock-violation Win32 error — can never be cleared by
+  retrying, so the wait was pure delay and the advice pointed at a holder that
+  does not exist: `mm wiki <kind> commit` said "another wiki operation may be in
+  progress; retry shortly" and the web route answered `503 busy`, inviting a
+  client to spin forever. Such a failure is now raised immediately as `OSError`,
+  the same type the lock's own `mkdir`/`open` already raise, so it reaches the
+  branches written for it — `mm wiki <kind> commit` reports an unavailable
+  lock, the web route answers `500 lock_unavailable`. Contention is unchanged:
+  still `TimeoutError`, still "held by another process", still retryable.
+  Applies to the sync and async helpers and to the unbounded (`timeout=None`)
+  acquire, and covers the raw `pywintypes.error` a portalocker 3.x install can
+  still raise. (#2229)
+
+- **An error inside a lock is no longer replaced by the failure to release it.**
+  The same helper released the lock in a bare `finally`, so if the guarded work
+  raised and the unlock then failed, the unlock's exception propagated and the
+  caller's own error survived only as `__context__` — a `WikiTargetChangedError`
+  or a git failure could surface as a raw `OSError` from the release, past every
+  arm written to classify it. The body's exception now always wins (including
+  `CancelledError` on the async path); a release failure while unwinding is
+  logged at warning with the lock path, and the descriptor close drops the lock
+  regardless — closing it is held to the same rule, so a failing `close` cannot
+  replace the body's error either. A release failure on the *success* path
+  still propagates unchanged — there the guarded work has already completed,
+  and relabelling it as a lock failure would report a finished commit as
+  failed. (#2229)
+
 - **A source larger than SQLite's bound-variable limit can be deleted again.**
   `delete_by_source` bound every one of a file's row ids into a single
   `IN (...)`, so a source with more chunks than the connection's

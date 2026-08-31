@@ -33,9 +33,15 @@ from collections.abc import Sequence
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import AsyncIterator, Callable, Iterator
+from typing import IO, AsyncIterator, Callable, Iterator
 
 import portalocker
+
+from memtomem._lock_errors import (
+    LOCK_CALL_ERRORS_WIDE,
+    is_lock_contention,
+    raise_lock_io_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +99,39 @@ update until the user manually deletes the ``.bak``.
 """
 
 
+def _release_quietly(fp: IO[bytes], lock_path: Path) -> None:
+    """Unlock *fp* on a failing exit, swallowing (but logging) an unlock error.
+
+    Only ever called while another exception is propagating. Suppressing here
+    is not "ignoring the error": ``portalocker.unlock`` raises a raw ``OSError``
+    on POSIX and a ``LockException`` on Windows, and either one replacing the
+    body's exception is exactly the masking #2229 is about — a caller's
+    ``except WikiTargetChangedError`` arm would instead see a release failure it
+    has no branch for. The lock is dropped anyway by the
+    :func:`_close_quietly` that follows — closing the descriptor releases it —
+    so the only thing lost is the report, which the warning below preserves.
+    """
+    try:
+        portalocker.unlock(fp)
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+        logger.warning("releasing %s failed while unwinding an error", lock_path, exc_info=True)
+
+
+def _close_quietly(fp: IO[bytes], lock_path: Path) -> None:
+    """Close *fp* while another exception propagates, reporting any failure.
+
+    The release twin of :func:`_release_quietly` — closing is what actually
+    drops the lock, so it must still happen, but a ``close`` that raises on
+    the way out would mask the error the caller is already handling (#2229).
+    On the success path the close is left bare, where its failure is the only
+    thing that went wrong and belongs to the caller.
+    """
+    try:
+        fp.close()
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+        logger.warning("closing %s failed while unwinding an error", lock_path, exc_info=True)
+
+
 @contextmanager
 def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[None]:
     """Cross-process exclusive lock on a sidecar lockfile.
@@ -124,6 +163,20 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
     handler's own timeout already returned (#1145 review). On expiry we raise
     ``TimeoutError`` having acquired nothing, so the caller can surface a
     clean "aborted, retry" instead of orphaning the thread.
+
+    Failure contract (#2229), three outcomes a caller can classify:
+
+    * ``TimeoutError`` — *contention*. Someone holds the lock; retrying is
+      the right advice ("busy", HTTP 503).
+    * ``OSError`` — the lock could not be *established or acquired*: its
+      directory/file could not be made or opened, or the lock call itself
+      failed (``EIO``, ``ENOLCK``, an NFS ``EOFError``, a non-lock-violation
+      Win32 error). Retry-proof, and raised as soon as it is seen rather
+      than after the budget expires. ``wiki.commit`` turns it into
+      :class:`~memtomem.wiki.commit.WikiLockUnavailableError` (#2227); the
+      destructive CLIs route it to their repair-the-path remediation.
+    * Whatever the caller's own body raised — never replaced by a failure to
+      release the lock on the way out.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # os.open + os.fdopen: pin 0o600 mode while still handing portalocker
@@ -137,7 +190,19 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
         raise
     try:
         if timeout is None:
-            portalocker.lock(fp, portalocker.LOCK_EX)
+            try:
+                portalocker.lock(fp, portalocker.LOCK_EX)
+            except LOCK_CALL_ERRORS_WIDE as exc:
+                # No budget to burn on this branch, but the classification
+                # still has to hold: a lock-call I/O failure arrives as
+                # ``OSError`` here exactly as it does on the bounded one
+                # (#2229). Contention keeps its own type — Windows'
+                # ``msvcrt.locking`` can report a held lock instead of waiting
+                # (#759) and an unbounded caller has no timeout to convert it
+                # into.
+                if not is_lock_contention(exc):
+                    raise_lock_io_failure(exc, lock_path, label="file")
+                raise
         else:
             # Non-blocking poll with exponential backoff until the deadline.
             # On expiry we have NOT acquired the lock (every attempt used
@@ -149,7 +214,15 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
                 try:
                     portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
                     break
-                except portalocker.LockException:
+                except LOCK_CALL_ERRORS_WIDE as exc:
+                    # Only genuine contention is worth polling. A lock-call
+                    # I/O failure (``EIO``, ``ENOLCK``, an NFS ``EOFError``, a
+                    # non-lock-violation Win32 error) is retry-proof, so
+                    # waiting out the budget and then reporting "held by
+                    # another process" would burn the caller's time and point
+                    # it at a holder that does not exist (#2229).
+                    if not is_lock_contention(exc):
+                        raise_lock_io_failure(exc, lock_path, label="file")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError(
@@ -160,10 +233,23 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
                     delay = min(delay * 2, 0.5)
         try:
             yield
-        finally:
-            portalocker.unlock(fp)
-    finally:
-        fp.close()
+        except BaseException:
+            # The body already failed; an unlock failure must not replace its
+            # exception, or a caller's classified ``except`` arms see a raw
+            # ``OSError`` from the release instead of what actually went wrong
+            # (#2229). ``fp.close()`` below drops the lock regardless.
+            # ``BaseException`` on purpose: ``CancelledError`` and
+            # ``KeyboardInterrupt`` must survive this too.
+            _release_quietly(fp, lock_path)
+            raise
+        portalocker.unlock(fp)
+    except BaseException:
+        # Same rule for the descriptor: a failing ``close`` must not become
+        # the exception the caller sees, whether that is the body's error, a
+        # classified acquisition failure, or a success-path unlock error.
+        _close_quietly(fp, lock_path)
+        raise
+    fp.close()
 
 
 def _lock_path_for(data_path: Path) -> Path:
@@ -339,7 +425,10 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
                 try:
                     portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
                     break
-                except portalocker.LockException:
+                except LOCK_CALL_ERRORS_WIDE as exc:
+                    # Same split as :func:`_file_lock` (#2229) — see there.
+                    if not is_lock_contention(exc):
+                        raise_lock_io_failure(exc, lock_path, label="file")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError(
@@ -350,10 +439,17 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
                     delay = min(delay * 2, 0.5)
             try:
                 yield
-            finally:
-                portalocker.unlock(fp)
-        finally:
-            fp.close()
+            except BaseException:
+                # See :func:`_file_lock` — the body's exception wins, and here
+                # that includes the ``CancelledError`` an awaiting caller was
+                # cancelled with (#2229).
+                _release_quietly(fp, lock_path)
+                raise
+            portalocker.unlock(fp)
+        except BaseException:
+            _close_quietly(fp, lock_path)
+            raise
+        fp.close()
     finally:
         intra.release()
 

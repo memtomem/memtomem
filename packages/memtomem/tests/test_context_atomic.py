@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
+import logging
 import os
 import stat
 import sys
 import time
 from pathlib import Path
 
+import portalocker
 import pytest
 
 from memtomem.context import _atomic as _atomic_mod
 from memtomem.context._atomic import (
     StrictTreeError,
     _file_lock,
+    async_file_lock,
     _fsync_fd,
     _lock_path_for,
     atomic_write_bytes,
@@ -198,6 +202,417 @@ class TestFileLockTimeout:
         lock = _lock_path_for(tmp_path / "data.json")
         with _file_lock(lock):
             pass
+
+
+class _BodyFailure(BaseException):
+    """Body exception outside the ``Exception`` hierarchy.
+
+    ``except Exception`` around the ``yield`` would let an unlock failure
+    replace this one, so using it (and ``CancelledError`` in the async twin)
+    is what makes the ``except BaseException`` contract mutation-proof.
+    """
+
+
+def _lock_exc(cause: BaseException | None) -> portalocker.LockException:
+    """A bare ``LockException`` chained to *cause*, the shape portalocker's
+    backends raise for a lock call that failed for a non-contention reason."""
+    exc = portalocker.LockException("lock failed")
+    exc.__cause__ = cause
+    return exc
+
+
+class _FakePywinError(Exception):
+    """``pywintypes.error`` stand-in: an ``Exception`` carrying ``winerror``.
+
+    pywin32 is absent on POSIX, so the real type cannot be raised here; what
+    matters is the *shape* portalocker 3.x re-raises raw — not an ``OSError``,
+    so only the widened catch set sees it at all.
+    """
+
+    def __init__(self, winerror: int) -> None:
+        super().__init__(winerror, "win32 lock failure")
+        self.winerror = winerror
+
+
+class _RaisingLock:
+    """``portalocker.lock`` replacement raising a fixed exception each call."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> None:
+        self.calls += 1
+        raise self.exc
+
+
+class _RecordingUnlock:
+    """``portalocker.unlock`` replacement: counts calls, optionally raises."""
+
+    def __init__(self, exc: BaseException | None = None) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> None:
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+
+
+class TestFileLockFailureClassification:
+    """A lock call can fail for two unrelated reasons and #2229 conflated them:
+    every ``LockException`` was polled to the deadline and then reported as
+    ``TimeoutError`` "held by another process". Contention is retryable;
+    an ``EIO``/``ENOLCK``/NFS-``EOFError`` lock-call failure never is, and
+    advertising it as busy sends a retrying client (and its operator) after a
+    holder that does not exist."""
+
+    def test_io_failure_raises_oserror_without_burning_the_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        cause = OSError(errno.EIO, "input/output error")
+        lock_stub = _RaisingLock(_lock_exc(cause))
+        unlock = _RecordingUnlock()
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", lock_stub)
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", unlock)
+
+        start = time.monotonic()
+        with pytest.raises(OSError) as excinfo:
+            with _file_lock(lock, timeout=30.0):
+                pytest.fail("body must not run when acquisition failed")
+        elapsed = time.monotonic() - start
+
+        assert not isinstance(excinfo.value, TimeoutError)
+        assert excinfo.value.errno == errno.EIO
+        assert excinfo.value.filename == str(lock)
+        # Raised on the first failure, not after the 30s budget.
+        assert elapsed < 5.0
+        assert lock_stub.calls == 1
+        # Nothing was acquired, so nothing may be released (#1145 contract).
+        assert unlock.calls == 0
+
+    def test_nfs_eoferror_becomes_a_pathful_oserror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The NFS shape carries no errno at all, so the message is the only
+        # thing an operator can act on — it must name the lock.
+        lock = _lock_path_for(tmp_path / "data.json")
+        unlock = _RecordingUnlock()
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", _RaisingLock(_lock_exc(EOFError())))
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", unlock)
+
+        with pytest.raises(OSError) as excinfo:
+            with _file_lock(lock, timeout=30.0):
+                pytest.fail("body must not run when acquisition failed")
+
+        assert not isinstance(excinfo.value, TimeoutError)
+        assert str(lock) in str(excinfo.value)
+        assert unlock.calls == 0
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(portalocker.AlreadyLocked("held"), id="already-locked"),
+            pytest.param(BlockingIOError(errno.EAGAIN, "would block"), id="raw-blockingioerror"),
+            pytest.param(OSError(errno.EACCES, "permission denied"), id="raw-eacces"),
+            pytest.param(_lock_exc(OSError(errno.EAGAIN, "would block")), id="bare-with-cause"),
+        ],
+    )
+    def test_contention_shapes_still_time_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        # Contention reaches the poll loop as more than one type across the
+        # supported portalocker range (the floor is >=3.0): the classifier, not
+        # the exception class, decides — so none of these may be reclassified
+        # into the retry-proof bucket.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", _RaisingLock(exc))
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock())
+
+        with pytest.raises(TimeoutError, match="held by another process"):
+            with _file_lock(lock, timeout=0.2):
+                pytest.fail("body must not run when acquisition failed")
+
+
+class TestFileLockReleaseDoesNotMaskBody:
+    """``finally: unlock(fp)`` let a release failure replace the body's
+    exception (#2229): the caller's classified ``except`` arms then saw a raw
+    ``OSError`` from the unlock instead of the error they were written for."""
+
+    @pytest.mark.parametrize(
+        "unlock_exc",
+        [
+            pytest.param(OSError(errno.EIO, "unlock failed"), id="posix-oserror"),
+            pytest.param(portalocker.LockException("unlock denied"), id="windows-lockexception"),
+        ],
+    )
+    def test_body_exception_survives_a_failing_unlock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unlock_exc: BaseException
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock(unlock_exc))
+
+        with pytest.raises(_BodyFailure):
+            with _file_lock(lock, timeout=5.0):
+                raise _BodyFailure("what the caller actually needs to see")
+
+    def test_the_suppressed_unlock_error_is_logged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Suppressing is not ignoring: the release failure still has to be
+        # findable in the log.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker, "unlock", _RecordingUnlock(OSError(errno.EIO, "unlock failed"))
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_atomic_mod.logger.name):
+            with pytest.raises(_BodyFailure):
+                with _file_lock(lock, timeout=5.0):
+                    raise _BodyFailure("boom")
+
+        assert any(str(lock) in record.getMessage() for record in caplog.records)
+
+    def test_body_exception_survives_a_failing_close(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Closing the descriptor is what actually drops the lock, so it always
+        # runs — but on the way out of a failed body it must not become the
+        # exception the caller sees any more than the unlock may.
+        lock = _lock_path_for(tmp_path / "data.json")
+        real_fdopen = os.fdopen
+
+        def _fdopen(*args: object, **kwargs: object):  # noqa: ANN202
+            fp = real_fdopen(*args, **kwargs)  # type: ignore[arg-type]
+            fp.close = _RecordingUnlock(OSError(errno.EIO, "close failed"))  # type: ignore[method-assign]
+            return fp
+
+        monkeypatch.setattr(_atomic_mod.os, "fdopen", _fdopen)
+
+        with pytest.raises(_BodyFailure):
+            with _file_lock(lock, timeout=5.0):
+                raise _BodyFailure("what the caller actually needs to see")
+
+    def test_unlock_failure_on_the_success_path_still_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Deliberately unchanged: the guarded work already succeeded, so there
+        # is no exception to protect and nothing to relabel — the release
+        # failure is the only thing that went wrong and must stay visible.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker, "unlock", _RecordingUnlock(OSError(errno.EIO, "unlock failed"))
+        )
+
+        with pytest.raises(OSError, match="unlock failed"):
+            with _file_lock(lock, timeout=5.0):
+                pass
+
+
+class TestAsyncFileLockClassification:
+    """``async_file_lock`` carried both defects character-for-character; its
+    contract is the sync one plus cancellation."""
+
+    @pytest.mark.asyncio
+    async def test_io_failure_raises_oserror_immediately(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        lock_stub = _RaisingLock(_lock_exc(OSError(errno.ENOLCK, "no locks available")))
+        unlock = _RecordingUnlock()
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", lock_stub)
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", unlock)
+
+        start = time.monotonic()
+        with pytest.raises(OSError) as excinfo:
+            async with async_file_lock(lock, timeout=30.0):
+                pytest.fail("body must not run when acquisition failed")
+        elapsed = time.monotonic() - start
+
+        assert not isinstance(excinfo.value, TimeoutError)
+        assert excinfo.value.errno == errno.ENOLCK
+        assert excinfo.value.filename == str(lock)
+        assert elapsed < 5.0
+        assert lock_stub.calls == 1
+        assert unlock.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_contention_still_times_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker, "lock", _RaisingLock(portalocker.AlreadyLocked("held"))
+        )
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock())
+
+        with pytest.raises(TimeoutError, match="held by another process"):
+            async with async_file_lock(lock, timeout=0.2):
+                pytest.fail("body must not run when acquisition failed")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "unlock_exc",
+        [
+            pytest.param(OSError(errno.EIO, "unlock failed"), id="posix-oserror"),
+            pytest.param(portalocker.LockException("unlock denied"), id="windows-lockexception"),
+        ],
+    )
+    async def test_body_exception_survives_a_failing_unlock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unlock_exc: BaseException
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock(unlock_exc))
+
+        with pytest.raises(_BodyFailure):
+            async with async_file_lock(lock, timeout=5.0):
+                raise _BodyFailure("what the caller actually needs to see")
+
+    @pytest.mark.asyncio
+    async def test_cancellation_survives_a_failing_unlock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``CancelledError`` is a ``BaseException``: an ``except Exception``
+        # around the ``yield`` would let the unlock error replace it, and the
+        # awaiting caller would see an I/O error instead of its own cancel.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker, "unlock", _RecordingUnlock(OSError(errno.EIO, "unlock failed"))
+        )
+        started = asyncio.Event()
+
+        async def holder() -> None:
+            async with async_file_lock(lock, timeout=5.0):
+                started.set()
+                await asyncio.sleep(60)
+
+        task = asyncio.create_task(holder())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_body_exception_survives_a_failing_close(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        real_fdopen = os.fdopen
+
+        def _fdopen(*args: object, **kwargs: object):  # noqa: ANN202
+            fp = real_fdopen(*args, **kwargs)  # type: ignore[arg-type]
+            fp.close = _RecordingUnlock(OSError(errno.EIO, "close failed"))  # type: ignore[method-assign]
+            return fp
+
+        monkeypatch.setattr(_atomic_mod.os, "fdopen", _fdopen)
+
+        with pytest.raises(_BodyFailure):
+            async with async_file_lock(lock, timeout=5.0):
+                raise _BodyFailure("what the caller actually needs to see")
+
+    @pytest.mark.asyncio
+    async def test_unlock_failure_on_the_success_path_still_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker, "unlock", _RecordingUnlock(OSError(errno.EIO, "unlock failed"))
+        )
+
+        with pytest.raises(OSError, match="unlock failed"):
+            async with async_file_lock(lock, timeout=5.0):
+                pass
+
+
+class TestFileLockBlockingBranchClassification:
+    """``timeout=None`` (the default, used by ``context/projects.py`` and the
+    memory-index doctor) hands the acquire to portalocker's own blocking mode.
+    It has no poll loop to protect, but the failure contract is the same one:
+    a lock-call I/O failure must still arrive as ``OSError``, not as the raw
+    ``LockException`` that no caller in the tree can catch."""
+
+    def test_io_failure_is_normalized_without_a_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        unlock = _RecordingUnlock()
+        monkeypatch.setattr(
+            _atomic_mod.portalocker,
+            "lock",
+            _RaisingLock(_lock_exc(OSError(errno.EIO, "input/output error"))),
+        )
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", unlock)
+
+        with pytest.raises(OSError) as excinfo:
+            with _file_lock(lock):
+                pytest.fail("body must not run when acquisition failed")
+
+        assert not isinstance(excinfo.value, portalocker.LockException)
+        assert excinfo.value.errno == errno.EIO
+        assert excinfo.value.filename == str(lock)
+        assert unlock.calls == 0
+
+    def test_contention_keeps_its_own_type_without_a_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Windows' msvcrt backend can report a held lock instead of waiting
+        # (#759). There is no budget here to turn that into a TimeoutError, and
+        # callers that must not fail on contention pass a bound — so it must
+        # pass through unchanged rather than be relabelled an I/O failure.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker, "lock", _RaisingLock(portalocker.AlreadyLocked("held"))
+        )
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock())
+
+        with pytest.raises(portalocker.AlreadyLocked):
+            with _file_lock(lock):
+                pytest.fail("body must not run when acquisition failed")
+
+
+class TestFileLockRawWin32Shape:
+    """portalocker 3.x — still inside the supported floor (``>=3.0``) —
+    re-raises a non-lock-violation ``pywintypes.error`` **raw**, and that type
+    is not an ``OSError``. The narrow catch set would let it escape
+    unclassified, which is the very outcome #2229 is about."""
+
+    def test_non_lock_violation_becomes_an_oserror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod,
+            "LOCK_CALL_ERRORS_WIDE",
+            (*_atomic_mod.LOCK_CALL_ERRORS_WIDE, _FakePywinError),
+        )
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", _RaisingLock(_FakePywinError(5)))
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock())
+
+        with pytest.raises(OSError) as excinfo:
+            with _file_lock(lock, timeout=30.0):
+                pytest.fail("body must not run when acquisition failed")
+
+        assert not isinstance(excinfo.value, TimeoutError)
+        assert str(lock) in str(excinfo.value)
+
+    def test_lock_violation_is_still_contention(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ERROR_LOCK_VIOLATION leaked raw still means "held": polled, then
+        # reported as contention, never as a path to repair.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod,
+            "LOCK_CALL_ERRORS_WIDE",
+            (*_atomic_mod.LOCK_CALL_ERRORS_WIDE, _FakePywinError),
+        )
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", _RaisingLock(_FakePywinError(33)))
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock())
+
+        with pytest.raises(TimeoutError, match="held by another process"):
+            with _file_lock(lock, timeout=0.2):
+                pytest.fail("body must not run when acquisition failed")
 
 
 class TestIsCopySkippedRel:
