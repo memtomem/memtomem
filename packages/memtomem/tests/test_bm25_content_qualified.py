@@ -14,7 +14,7 @@ rank* (``search/fusion.py``: ``w / (k + rank)``), not on its score, so a
 path-only row scored 0.0 still occupies a BM25 slot and still contributes
 positive fused relevance to the hybrid pipeline every caller actually uses. The
 row has to not be *retrieved*, which is why the MATCH is column-qualified
-instead. ``TestHybridPipeline`` below is the test that distinguishes the two:
+instead. ``TestPipelineFusion`` below is the test that distinguishes the two:
 the leg-level ones pass under either design.
 
 The fallback is deliberate. Typing a filename into search is an undocumented
@@ -346,3 +346,52 @@ class TestTheOrFallbackUnderAMorphologicalTokenizer:
             "the OR fallback was skipped for a space-free query whose tokenizer "
             "expands it into several terms"
         )
+
+
+class TestTheLadderAnalysesTheQueryTwiceAtMost:
+    """One analysis per *form*, not per (column, form) pair.
+
+    The ladder has four rungs, and asking each one to tokenize would run a
+    morphological backend four times for a query the first rung answers. An
+    earlier version of this fix did exactly that while its comment claimed the
+    opposite, which is why the count is pinned here rather than described.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_content_hit_tokenizes_once_per_form(self, storage, monkeypatch):
+        from memtomem.storage import fts_tokenizer
+
+        calls: list[tuple[str, bool]] = []
+        real = fts_tokenizer.tokenize_for_fts
+
+        def counting(text, *, for_query=False, use_or=False):
+            if for_query:
+                calls.append((text, use_or))
+            return real(text, for_query=for_query, use_or=use_or)
+
+        await storage.upsert_chunks([_make_chunk("a note about wombats", source="notes/a.md")])
+        monkeypatch.setattr("memtomem.storage.sqlite_backend._fts.tokenize_for_fts", counting)
+
+        results = await storage.bm25_search("wombats", top_k=5)
+
+        assert results, "the fixture query should match"
+        assert len(calls) <= 2, f"the query was analysed {len(calls)} times: {calls}"
+
+    @pytest.mark.asyncio
+    async def test_the_full_ladder_still_tokenizes_twice(self, storage, monkeypatch):
+        """Even the worst case — every rung tried, nothing found."""
+        from memtomem.storage import fts_tokenizer
+
+        calls: list[tuple[str, bool]] = []
+        real = fts_tokenizer.tokenize_for_fts
+
+        def counting(text, *, for_query=False, use_or=False):
+            if for_query:
+                calls.append((text, use_or))
+            return real(text, for_query=for_query, use_or=use_or)
+
+        await storage.upsert_chunks([_make_chunk("unrelated body", source="notes/a.md")])
+        monkeypatch.setattr("memtomem.storage.sqlite_backend._fts.tokenize_for_fts", counting)
+
+        assert await storage.bm25_search("aardvark quokka", top_k=5) == []
+        assert len(calls) <= 2, f"the query was analysed {len(calls)} times: {calls}"

@@ -149,6 +149,11 @@ jobs:
         with:
           path: ${{ env.FASTEMBED_CACHE_PATH }}
           key: ${{ runner.os }}-fastembed-retrieval-v2-bge-small-en-multilingual-minilm
+      # Same pin as the producer job below. `requires-python` is `>=3.12` and
+      # no `.python-version` is committed, so without this the runner could
+      # hand the *checks* a different interpreter — and a different SQLite —
+      # than the one that measured the floors they check.
+      - run: uv python pin 3.12
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_golden_path.py --tb=short -q
       - name: Audit public synthetic retrieval corpus

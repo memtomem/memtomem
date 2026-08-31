@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import platform
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -27,9 +28,18 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 #: The files this manifest vouches for, and the tools that produce them.
 _BASELINES = {
-    "baseline_v0.3.8.json": "calibrate_portfolio.py --runs 10 --factor 0.85",
-    "baseline_v2.json": "tune_rrf_v2.py",
+    "baseline_v0.3.8.json": (
+        "uv run python tools/retrieval-eval/calibrate_portfolio.py --runs 10 "
+        "--factor 0.85 --output tools/retrieval-eval/baseline_v0.3.8.json"
+    ),
+    "baseline_v2.json": (
+        "uv run python tools/retrieval-eval/tune_rrf_v2.py "
+        "--output tools/retrieval-eval/baseline_v2.json"
+    ),
 }
+#: Set for both commands by the workflow. Recorded because they are part of the
+#: measurement, not of the invocation's spelling.
+_MEASUREMENT_ENV = ("PYTHONHASHSEED", "OMP_NUM_THREADS")
 #: Pinned in the manifest because a floor is only comparable against the stack
 #: that measured it. Not a lockfile — the lockfile is `uv.lock`; this records
 #: what was actually importable at measurement time.
@@ -89,7 +99,11 @@ def build() -> dict[str, object]:
             "release": platform.release(),
             "machine": platform.machine(),
             "python": sys.version.split()[0],
+            # FTS5 computes the BM25 half of every one of these numbers, so the
+            # SQLite build is as much a part of the measurement as the models.
+            "sqlite": sqlite3.sqlite_version,
         },
+        "measurement_env": {name: os.environ.get(name) for name in _MEASUREMENT_ENV},
         "distributions": _distribution_versions(),
         "baselines": {
             name: {
@@ -113,6 +127,21 @@ def main() -> int:
 
     if args.check:
         recorded = json.loads(args.output.read_text(encoding="utf-8"))
+        # Coverage before hashes: iterating whatever the manifest happens to
+        # list is fail-open — an empty ``baselines`` object, or one with a file
+        # quietly dropped, verifies clean while checking nothing. The manifest
+        # has to describe exactly the canonical set.
+        covered = set(recorded.get("baselines", {}))
+        expected = set(_BASELINES)
+        if covered != expected:
+            missing = ", ".join(sorted(expected - covered)) or "none"
+            unexpected = ", ".join(sorted(covered - expected)) or "none"
+            print(
+                f"provenance does not cover the canonical baselines "
+                f"(missing: {missing}; unexpected: {unexpected})",
+                file=sys.stderr,
+            )
+            return 1
         drift = [
             name
             for name, entry in recorded["baselines"].items()

@@ -327,8 +327,8 @@ _FTS_CONTENT_COLUMN = "content"
 _FTS_SOURCE_COLUMN = "source_file"
 
 
-def _column_match(column: str, query: str, *, use_or: bool) -> str:
-    """Restrict a tokenized query to one ``chunks_fts`` column.
+def _restrict_to_column(column: str, body: str) -> str:
+    """Wrap an already-tokenized expression in one ``chunks_fts`` column filter.
 
     fts5 spells this ``{col} : (expr)``. The braces are what make it safe to
     build by concatenation: a *bare* ``col : expr`` prefix would be re-parsed
@@ -337,15 +337,24 @@ def _column_match(column: str, query: str, *, use_or: bool) -> str:
     user input — it is one of the two module constants above — so nothing
     interpolated here comes from the caller.
 
-    The expression is whatever ``tokenize_for_fts`` produced, unchanged:
-    quoted phrases, prefix wildcards and the ``OR`` fallback all survive being
+    ``body`` is whatever ``tokenize_for_fts`` produced, unchanged: quoted
+    phrases, prefix wildcards and the ``OR`` fallback all survive being
     parenthesised, which is exactly why the escaping stays that function's job
     and is not re-implemented here.
     """
     if column not in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):  # pragma: no cover - guard
         raise ValueError(f"not a chunks_fts column: {column!r}")
-    expr = _fts.tokenize_for_fts(query, for_query=True, use_or=use_or)
-    return "{" + column + "} : (" + expr + ")"
+    return "{" + column + "} : (" + body + ")"
+
+
+def _column_match(column: str, query: str, *, use_or: bool) -> str:
+    """Tokenize *query* and restrict it to one column — one call, one analysis.
+
+    The search path builds the bodies itself (it needs each form once, not once
+    per column); this is the convenience spelling the tests and any future
+    single-shot caller use.
+    """
+    return _restrict_to_column(column, _fts.tokenize_for_fts(query, for_query=True, use_or=use_or))
 
 
 class SqliteBackend(
@@ -2262,28 +2271,35 @@ class SqliteBackend(
             # added the "unknowable statement" rule for.
             #
             # The OR pass is skipped when it would repeat the AND one, decided
-            # by comparing the two *tokenized* expressions rather than by
-            # looking for a space in the raw query. Whitespace is the wrong
-            # test under a morphological tokenizer: kiwipiepy expands one
-            # space-free Korean word into several terms, so a query like
-            # ``했습니다`` has an OR form that differs from its AND form and
-            # was losing the fallback entirely. Building both up front also
-            # analyses each query once instead of up to four times.
-            attempts = [
-                (column, _column_match(column, query, use_or=use_or))
-                for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN)
-                for use_or in (False, True)
-            ]
+            # by comparing the two *tokenized* bodies rather than by looking for
+            # a space in the raw query. Whitespace is the wrong test under a
+            # morphological tokenizer: kiwipiepy expands one space-free Korean
+            # word into several terms, so a query like ``했습니다`` has an OR
+            # form that differs from its AND form and was losing the fallback
+            # entirely.
+            #
+            # The bodies are tokenized once each and then wrapped per column —
+            # two analyses per search at most, whatever the ladder does. Asking
+            # for the four ``(column, form)`` expressions directly would analyse
+            # the query once per expression, which for a morphological backend
+            # is the expensive half of the call.
+            and_body = _fts.tokenize_for_fts(query, for_query=True)
+            or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
+            bodies = [and_body] if or_body == and_body else [and_body, or_body]
+
             rows: list = []
-            seen_exprs: set[str] = set()
-            for _column, expr in attempts:
-                if expr in seen_exprs:
-                    continue
-                seen_exprs.add(expr)
-                rows = db.execute(
-                    sql,
-                    [expr] + ns_params + scope_params + metadata_params + [top_k],
-                ).fetchall()
+            for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):
+                for body in bodies:
+                    rows = db.execute(
+                        sql,
+                        [_restrict_to_column(column, body)]
+                        + ns_params
+                        + scope_params
+                        + metadata_params
+                        + [top_k],
+                    ).fetchall()
+                    if rows:
+                        break
                 if rows:
                     break
 

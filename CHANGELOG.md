@@ -160,8 +160,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   BM25 now runs its AND-then-OR ladder against `content` alone, and repeats it
   against `source_file` only when the content phase found nothing at all. So
   typing a filename into search still finds that file's chunks — an
-  undocumented but plausible habit that keeps working — while a path can never
-  outrank prose, because the two never compete.
+  undocumented but plausible habit that keeps working — while within the BM25
+  leg a path can never outrank prose, because the two never compete for a slot.
+  One case sits outside that guarantee and is worth knowing: when no chunk's
+  content matches but the dense leg does find prose, the path fallback's rows
+  and those dense rows are fused together, so a path match can appear among
+  them.
 
   Weighting the column 0.0 instead, which is the obvious smaller change, is not
   enough: RRF fuses on a result's *ordinal rank*, not its score, so a
