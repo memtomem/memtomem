@@ -19,10 +19,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+import portalocker
 import pytest
 from helpers import BUDGET_TOLERANCE_S
 
 from memtomem._runtime_paths import runtime_dir
+from memtomem.context import _atomic as _atomic_mod
 from memtomem.context._atomic import _file_lock
 from memtomem.wiki import commit as wiki_commit
 from memtomem.wiki.commit import (
@@ -275,6 +277,29 @@ def test_contention_is_not_reclassified_as_unavailable(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             with wiki_commit_lock(root, timeout=0.1):
                 pytest.fail("acquired while contended")
+
+
+def test_lock_backend_failure_is_classified_not_reported_as_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A lock *call* that fails for a non-contention reason (EIO here) used to be
+    # polled to the deadline and reported as TimeoutError "held by another
+    # process" (#2229) — i.e. as 503 busy, which a retrying client would spin on
+    # forever. It is an establishment failure and must reach the same arm as an
+    # unusable lock home.
+    root = tmp_path / "wiki"
+    root.mkdir()
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        exc = portalocker.LockException("lock failed")
+        exc.__cause__ = OSError(5, "input/output error")  # EIO
+        raise exc
+
+    monkeypatch.setattr(_atomic_mod.portalocker, "lock", _fail)
+
+    with pytest.raises(WikiLockUnavailableError):
+        with wiki_commit_lock(root, timeout=30.0):
+            pytest.fail("acquired against a failing lock backend")
 
 
 def test_caller_oserror_keeps_its_own_type(tmp_path: Path) -> None:

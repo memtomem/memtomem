@@ -34,6 +34,7 @@ import portalocker
 import pytest
 
 import memtomem._instance_registry as reg
+import memtomem._lock_errors as lock_errors
 
 _CTX = mp.get_context("spawn")
 
@@ -374,7 +375,7 @@ class _FakePywinError(Exception):
     one that calls that API — on this barrier, the ``LOCK_SH`` side."""
 
     def __init__(
-        self, winerror: int = reg._WINERROR_LOCK_VIOLATION, strerror: str = "lock violation"
+        self, winerror: int = lock_errors.WINERROR_LOCK_VIOLATION, strerror: str = "lock violation"
     ) -> None:
         super().__init__(winerror, "LockFileEx", strerror)
         self.winerror = winerror
@@ -520,7 +521,7 @@ class TestPollLoopClassifier:
         code reads as contention off the exception itself — the Win32 backend
         maps 33 to ``AlreadyLocked``, but a leaked raw 33 must not be sent to
         repair-the-path. Pure-function pin, so it runs on POSIX CI."""
-        assert reg._is_lock_contention(_FakePywinError(reg._WINERROR_LOCK_VIOLATION)) is True
+        assert reg._is_lock_contention(_FakePywinError(lock_errors.WINERROR_LOCK_VIOLATION)) is True
 
     def test_raw_non_violation_winerror_is_not_contention(self):
         """A raw non-33 ``pywintypes.error`` (portalocker 3.x re-raises these
@@ -559,7 +560,7 @@ class TestPollLoopClassifier:
         """The contention twin of the escape test: a raw lock-violation Win32
         error keeps polling and refuses as ``BarrierTimeout``, not repair."""
         monkeypatch.setattr(reg, "_BARRIER_LOCK_ERRORS", (*reg._LOCK_CONTENDED, _FakePywinError))
-        self._patch_lock(monkeypatch, _FakePywinError(reg._WINERROR_LOCK_VIOLATION))
+        self._patch_lock(monkeypatch, _FakePywinError(lock_errors.WINERROR_LOCK_VIOLATION))
         with pytest.raises(reg.BarrierTimeout):
             reg.acquire_uninstall_lifecycle_barrier(timeout_s=0.2)
 
