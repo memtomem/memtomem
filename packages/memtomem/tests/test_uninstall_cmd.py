@@ -3679,6 +3679,32 @@ class TestPresenceMarkerCleanup:
         presence.mkdir(mode=0o700, parents=True, exist_ok=True)
         assert _uninstall_cmd._real_presence_dir() == presence
 
+    def test_no_state_path_still_collects_an_abandoned_marker(self, home, registry_at_runtime_dir):
+        """The empty-state fast path is where residue is most likely to stay.
+
+        A handshake-only server killed with SIGKILL leaves a marker behind. On
+        a host with no store at all, nothing else ever comes along to collect
+        it — the next registration would, but there may be no next server.
+        """
+        reg = registry_at_runtime_dir
+        # The anchor must be owner-only or the probe refuses on *that*, which
+        # would pass this test for the wrong reason.
+        reg.presence_dir().parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, exist_ok=True)
+        residue = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        residue.touch()
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        os.utime(residue, (old, old))
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+
+        assert "No memtomem state to remove" in result.output, (
+            "an inert marker is not state that keeps this path from firing"
+        )
+        assert not residue.exists(), "but it is still collected on the way out"
+        assert not directory.exists(), "and the emptied directory is pruned"
+
     def test_a_live_marker_survives_uninstall(self, home, registry_at_runtime_dir):
         """An idle server does not block uninstall, so uninstall must not
         unregister it: staging a held marker would drop a running process from

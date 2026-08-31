@@ -1562,3 +1562,51 @@ class TestPresenceRegistrationBudget:
         budget = attempts[0] - started
         assert budget <= reg._PRESENCE_LOCK_TIMEOUT_S + 0.2
         assert budget < reg._LOCK_TIMEOUT_S
+
+    def test_gc_stops_at_the_deadline_instead_of_holding_the_lock(self, rt, db, monkeypatch):
+        """The budget must bound the work done *under* the lock, not only the
+        acquisition of it.
+
+        The sweep runs with the shared mutation lock held — the same lock that
+        serializes sentinel registration, the concurrent-writer enumeration and
+        the uninstall probe — on a startup path a client is waiting on. A host
+        with a large residue directory (exactly the host this feature is for)
+        would otherwise let one probe loop hold it for as long as the directory
+        is long.
+        """
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        residue = []
+        for i in range(40):
+            entry = directory / f"9{i:05d}-1-{'b' * 16}-{'c' * 8}-{i:08x}.lock"
+            entry.touch()
+            os.utime(entry, (old, old))
+            residue.append(entry)
+
+        probes = []
+        real_probe = reg._probe_entry
+
+        def _slow_probe(path):
+            probes.append(path)
+            # Burn the budget on the first entry, so every later one is past
+            # the deadline and must not be probed at all.
+            if len(probes) == 1:
+                monkeypatch.setattr(
+                    reg.time, "monotonic", lambda base=time.monotonic(): base + 3600
+                )
+            return real_probe(path)
+
+        monkeypatch.setattr(reg, "_probe_entry", _slow_probe)
+        inst = reg.register_server_presence(db)
+        try:
+            assert len(probes) == 1, f"the sweep must stop at the deadline, probed {len(probes)}"
+            assert sum(1 for e in residue if e.exists()) >= 39, (
+                "un-swept residue stays for the next registration; it is already inert"
+            )
+            # Registration itself is never skipped by a spent budget — the
+            # process must still be counted.
+            assert inst is not None and inst.path.exists()
+        finally:
+            if inst is not None:
+                inst.cleanup()

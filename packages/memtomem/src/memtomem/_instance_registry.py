@@ -871,8 +871,12 @@ def register_server_presence(db_path: Path | str | None) -> RegisteredInstance |
         with _state_guard:
             procid = _process_id_locked()
         name = f"{pid}-{os.getppid()}-{digest}-{procid}-{secrets.token_hex(4)}.lock"
+        # One budget for the whole lock-held span, not just for taking it:
+        # whatever acquisition leaves is what the sweep may spend, and
+        # publishing this process's own marker always happens regardless.
+        deadline = time.monotonic() + _PRESENCE_LOCK_TIMEOUT_S
         try:
-            with _mutation_lock(time.monotonic() + _PRESENCE_LOCK_TIMEOUT_S):
+            with _mutation_lock(deadline):
                 directory = presence_dir()
                 directory.mkdir(mode=0o700, exist_ok=True)
                 # ``exist_ok=True`` accepts a symlink-to-directory and the open
@@ -885,7 +889,7 @@ def register_server_presence(db_path: Path | str | None) -> RegisteredInstance |
                 # walks this directory with the mutation lock held, so
                 # registration is the one place that can collect them; the
                 # snapshot readers stay read-only by contract.
-                _gc_stale_presence(directory)
+                _gc_stale_presence(directory, deadline)
                 path = directory / name
                 # The nonce makes this filename fresh — never reuse or unlink
                 # an existing entry here; probe+grace GC above owns that.
@@ -950,8 +954,12 @@ def sweep_stale_presence() -> None:
             if _dir_state(directory) != "dir":
                 continue
             lock_root = None if root == canonical else root
-            with _mutation_lock(time.monotonic() + _LOCK_TIMEOUT_S, root=lock_root):
-                _gc_stale_presence(directory)
+            # One budget per root for acquiring the lock and sweeping under
+            # it, so a large residue directory cannot hold the shared lock
+            # for an unbounded time while a destructive command waits.
+            deadline = time.monotonic() + _LOCK_TIMEOUT_S
+            with _mutation_lock(deadline, root=lock_root):
+                _gc_stale_presence(directory, deadline)
         except (_MutationLockTimeout, OSError):
             continue
         except Exception:
@@ -959,19 +967,38 @@ def sweep_stale_presence() -> None:
             continue
 
 
-def _gc_stale_presence(directory: Path) -> None:
-    """Collect unlocked, aged presence markers. Caller holds the mutation lock."""
-    try:
-        entries = sorted(directory.iterdir())
-    except OSError:
-        return
+def _gc_stale_presence(directory: Path, deadline: float) -> None:
+    """Collect unlocked, aged presence markers, bounded by ``deadline``.
+
+    Runs with the shared mutation lock held, which is why the deadline is not
+    optional: that lock also serializes sentinel registration, the
+    concurrent-writer enumeration and the uninstall probe, and this sweep runs
+    on a startup path that a client is waiting on. An accumulated directory —
+    exactly what a host with this problem has — would otherwise let an
+    unbounded probe loop hold the lock for as long as it takes. Collecting
+    part of the residue and stopping is correct: the next registration
+    resumes, and the entries left behind are already inert.
+
+    Streamed with ``scandir`` rather than a sorted listing for the same
+    reason: order is irrelevant to collection, and materializing thousands of
+    paths before the first check is work done inside the lock for nothing.
+    """
     with _state_guard:
         own = set(_active_presence)
-    for entry in entries:
-        if entry in own or _ENTRY_RE.match(entry.name) is None:
-            continue
-        if _probe_entry(entry) == "stale" and _aged(entry):
-            _gc_stale_entry(entry)
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if time.monotonic() >= deadline:
+                    return
+                if _ENTRY_RE.match(entry.name) is None:
+                    continue
+                path = Path(entry.path)
+                if path in own:
+                    continue
+                if _probe_entry(path) == "stale" and _aged(path):
+                    _gc_stale_entry(path)
+    except OSError:
+        return
 
 
 def _parse_entry(path: Path) -> InstanceInfo | None:

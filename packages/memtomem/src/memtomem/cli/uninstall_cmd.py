@@ -203,6 +203,23 @@ def _real_presence_dir(root: Path | None = None) -> Path | None:
     return d
 
 
+def _prune_stale_presence_dirs(roots: tuple[Path, ...] | None = None) -> None:
+    """``rmdir`` each now-empty presence directory. Never raises (#2230).
+
+    Split from the sweep so both exits — the full staging path and the
+    empty-state fast path — prune the same way through the same
+    anchor-and-leaf no-follow check.
+    """
+    try:
+        canonical = runtime_dir()
+    except OSError:
+        return
+    for root in _inventory_runtime_roots() if roots is None else roots:
+        directory = _real_presence_dir() if root == canonical else _real_presence_dir(root)
+        if directory is not None:
+            _prune_if_empty(directory)
+
+
 def _inventory_runtime_roots() -> tuple[Path, ...]:
     """Return safe, existing canonical and transition roots for inventory.
 
@@ -1190,11 +1207,7 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # on the open handle. Sweep only what its owner can no longer remove,
     # then prune the directory when nothing live is left in it.
     _sweep_stale_presence()
-    canonical = runtime_dir()
-    for root in inv.runtime_roots:
-        directory = _real_presence_dir() if root == canonical else _real_presence_dir(root)
-        if directory is not None:
-            _prune_if_empty(directory)
+    _prune_stale_presence_dirs(inv.runtime_roots)
 
     for root in inv.runtime_roots:
         _prune_if_empty(root)
@@ -1249,6 +1262,14 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         and not _entry_present(db_path)
         and not _registry_has_sentinels()
     ):
+        # #2230: presence markers are not "state" for this decision — a live
+        # one belongs to a running server and an abandoned one is inert — so
+        # they do not keep this fast path from firing. They are still swept
+        # on the way out: a handshake-only server killed with SIGKILL leaves
+        # a marker behind, and a host with no store at all is exactly where
+        # nothing else would ever come along to collect it.
+        _sweep_stale_presence()
+        _prune_stale_presence_dirs()
         click.echo("No memtomem state to remove (~/.memtomem/ does not exist).")
         label, lines = _binary_uninstall_hint(profile)
         _print_binary_hint(label, lines)

@@ -796,16 +796,21 @@ def main(argv: list[str] | None = None) -> None:
         # a lock timeout, a contended sentinel), so the warning keys off the
         # return value, not off an exception. A server that cannot be counted
         # must still start.
+        import logging
+
         _presence = None
         try:
             from memtomem._instance_registry import register_server_presence
 
             _presence = register_server_presence(db_path)
         except Exception:  # pragma: no cover - defensive; the registry swallows its own
-            pass
+            # Only an import-time failure reaches here; the traceback is the
+            # single piece of information the warning below cannot carry, so
+            # it is logged rather than dropped.
+            logging.getLogger(__name__).debug(
+                "presence registration could not be attempted", exc_info=True
+            )
         if _presence is None:
-            import logging
-
             logging.getLogger(__name__).warning(
                 "Could not record this server in the instance registry "
                 "(runtime dir: %s); `mm doctor` may under-report running servers.",
