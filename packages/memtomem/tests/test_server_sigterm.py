@@ -27,7 +27,11 @@ from pathlib import Path
 
 import pytest
 
-from memtomem.server import _install_sigterm_handler
+from memtomem.server import (
+    _install_sigterm_handler,
+    _sigterm_deferred,
+    _sigterm_targets,
+)
 
 
 @pytest.mark.skipif(
@@ -939,3 +943,229 @@ class TestContentionWarningScope:
             "a live server on a different store must not trigger the "
             f"contention warning; records={[r.getMessage() for r in caplog.records]}"
         )
+
+
+def test_handshake_only_server_registers_a_presence_marker(tmp_path: Path) -> None:
+    """A server that never opens a store is still visible to the registry (#2230).
+
+    This is the whole gap: the store-scoped sentinel is written from lazy
+    initialization, so a session that handshakes and stops — the majority
+    population on a real machine, 34 of 35 when it was measured — used to
+    register nothing at all. The marker below is written at startup instead,
+    and it must not cost the #412 invariant this file already pins: the
+    coordination write lands on the runtime anchor, never in ``~/.memtomem``.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_RUNTIME_DIR"] = str(xdg)
+    runtime = _subprocess_runtime_dir(env)
+    pid_file = runtime / _pin_store_pid_name(env, home)
+    presence = runtime / "presence"
+    instances = runtime / "instances"
+
+    proc = _spawn_server(env)
+    try:
+        _wait_for_pid_file(proc, pid_file)
+        deadline = time.time() + 10.0
+        markers: list[Path] = []
+        while time.time() < deadline:
+            markers = list(presence.glob("*.lock")) if presence.exists() else []
+            if markers:
+                break
+            time.sleep(0.05)
+
+        assert markers, "a handshake-only server must register a presence marker"
+        assert len(markers) == 1, f"one marker per process, found {[m.name for m in markers]}"
+        # The store-scoped sentinel is still lazy — nothing has opened a DB.
+        assert not instances.exists() or not list(instances.glob("*.lock")), (
+            "no store is open, so no sentinel may exist"
+        )
+        assert not (home / ".memtomem").exists(), (
+            "the startup marker must not resurrect the #412 handshake write"
+        )
+    finally:
+        _cleanup_proc(proc)
+
+
+def test_sigterm_targets_name_only_files_this_process_owns() -> None:
+    """The handler unlinks without re-checking ownership, so the list must be exact."""
+    pid_file = Path("/nonexistent/server.pid")
+    marker = Path("/nonexistent/presence/1-2-a.lock")
+
+    class _Registered:
+        path = marker
+
+    assert _sigterm_targets(pid_file, _Registered()) == (pid_file, marker)
+    # A server that lost the pid-file flock owns its marker and nothing else;
+    # unlinking the pid file there would yank it from the primary holder.
+    assert _sigterm_targets(None, _Registered()) == (marker,)
+    # Registration can decline (untrusted directory, lock timeout) — there is
+    # then nothing extra to clean up, and no ``None`` may reach the handler.
+    assert _sigterm_targets(pid_file, None) == (pid_file,)
+    assert _sigterm_targets(None, None) == ()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is not delivered on Windows (#817)")
+def test_sigterm_removes_the_presence_marker(tmp_path: Path) -> None:
+    """``os._exit(0)`` bypasses ``atexit``, so the handler must unlink it itself.
+
+    Left behind, the marker is not counted as a live server (the kernel drops
+    its flock at exit, so it probes stale) but it is residue until a later
+    registration sweeps it — and on a host whose servers are all killed by
+    signal, no later registration may come.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_RUNTIME_DIR"] = str(xdg)
+    runtime = _subprocess_runtime_dir(env)
+    pid_file = runtime / _pin_store_pid_name(env, home)
+    presence = runtime / "presence"
+
+    proc = _spawn_server(env)
+    try:
+        _wait_for_pid_file(proc, pid_file)
+        deadline = time.time() + 10.0
+        while time.time() < deadline and not (presence.exists() and list(presence.glob("*.lock"))):
+            time.sleep(0.05)
+        assert list(presence.glob("*.lock")), "premise: the marker was written"
+
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pytest.fail("Server did not exit within 10s of SIGTERM")
+
+        assert not list(presence.glob("*.lock")), (
+            "the presence marker must be unlinked on SIGTERM, not left as residue"
+        )
+    finally:
+        _cleanup_proc(proc)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is not delivered on Windows (#817)")
+def test_second_server_cleans_its_marker_without_touching_the_primary(tmp_path: Path) -> None:
+    """The lock-contended arm owns a marker even though it owns no pid file."""
+    home = tmp_path / "home"
+    home.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_RUNTIME_DIR"] = str(xdg)
+    runtime = _subprocess_runtime_dir(env)
+    pid_file = runtime / _pin_store_pid_name(env, home)
+    presence = runtime / "presence"
+
+    first = _spawn_server(env)
+    second = None
+    try:
+        _wait_for_pid_file(first, pid_file)
+        second = _spawn_server(env)
+        deadline = time.time() + 15.0
+        while time.time() < deadline and len(list(presence.glob("*.lock"))) < 2:
+            if second.poll() is not None:
+                pytest.fail(f"second server died (rc={second.returncode})")
+            time.sleep(0.1)
+        assert len(list(presence.glob("*.lock"))) == 2, (
+            "a second server on one store is exactly the accumulation this marker "
+            "exists to show, and the pid file cannot represent it"
+        )
+
+        second.send_signal(signal.SIGTERM)
+        second.wait(timeout=10)
+        deadline = time.time() + 10.0
+        while time.time() < deadline and len(list(presence.glob("*.lock"))) > 1:
+            time.sleep(0.05)
+
+        assert len(list(presence.glob("*.lock"))) == 1, "the secondary removed its own marker"
+        assert pid_file.exists(), "and never touched the primary's pid file"
+        assert first.poll() is None, "the primary is still running"
+    finally:
+        if second is not None:
+            _cleanup_proc(second)
+        _cleanup_proc(first)
+
+
+def test_unregisterable_presence_directory_warns_but_still_starts(tmp_path: Path) -> None:
+    """Registration declines by returning ``None``, not by raising.
+
+    A server that cannot be counted must still start, and the operator must
+    still be told — otherwise ``mm doctor`` under-reports with no signal, the
+    exact silence #2230 was filed about.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    xdg = tmp_path / "xdg_runtime"
+    xdg.mkdir()
+    os.chmod(xdg, 0o700)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_RUNTIME_DIR"] = str(xdg)
+    runtime = _subprocess_runtime_dir(env)
+    runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    try:
+        (runtime / "presence").symlink_to(elsewhere, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    proc = _spawn_server(env)
+    try:
+        _wait_for_pid_file(proc, runtime / _pin_store_pid_name(env, home))
+        assert proc.poll() is None, "a coordination failure must not stop the server"
+        assert list(elsewhere.iterdir()) == [], "and must not write through the link"
+        stderr = _kill_and_read_stderr(proc)
+        assert stderr is not None and "under-report" in stderr, (
+            f"the dropped registration must be reported; stderr was:\n{stderr}"
+        )
+    finally:
+        _cleanup_proc(proc)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no pthread_sigmask on Windows (#817)")
+def test_sigterm_deferral_restores_the_caller_mask() -> None:
+    """The span defers SIGTERM; it does not decide the caller's mask.
+
+    An embedder may run ``main()`` on a thread that already blocks SIGTERM.
+    Unblocking on exit would hand back a mask it never chose and deliver the
+    very signal it was deferring.
+    """
+    import signal
+
+    original = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    try:
+        # Entered unblocked: blocked inside, unblocked again on exit.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+        with _sigterm_deferred():
+            assert signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+
+        # Entered blocked: it must still be blocked afterwards.
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        with _sigterm_deferred():
+            pass
+        assert signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, set()), (
+            "the caller's deferral must survive ours"
+        )
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, original)

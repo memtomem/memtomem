@@ -132,8 +132,39 @@ would need the servers' own logs. Either way, a population the registry cannot
 see was larger than the one it could.
 
 So `mm doctor` faithfully reports the registry, and on a machine like that one
-the registry answers a narrower question than #2226 asked. Closing the gap means
-either registering at lifespan startup or writing a lighter presence marker
-before first use; both trade against #399's reason for being lazy, and the
-decision is tracked in #2230 rather than settled here. This ADR does not change
-registration — it made the discrepancy observable for the first time.
+the registry answers a narrower question than #2226 asked. This ADR did not
+change registration — it made the discrepancy observable for the first time.
+
+### Resolution (#2230)
+
+The gap is closed by a second, lighter population: `memtomem-server` writes a
+**presence marker** at startup, under `<runtime_dir>/presence/`, beside the pid
+file it already writes there. The store-scoped sentinel under `instances/` is
+unchanged and still published from `ensure_initialized`.
+
+Two facts made this cheaper than it looked when the limitation was written:
+
+- **#399 is about the store, not about writing nothing.** Its invariant is that
+  a handshake must not create `~/.memtomem/`; the handshake already creates the
+  runtime directory and a flocked `server-<digest>.pid` inside it. A marker
+  there costs the invariant nothing, and `test_server_sigterm.py` pins that
+  both before and after.
+- **Only one sentinel field needs the store to be open.** pid, ppid, procid and
+  the nonce are all available at startup; the digest is not, because it is the
+  store file's `st_dev:st_ino`. The marker substitutes the *path-text* digest
+  (`store_pid_digest`) that already names the pid file — so this is a role
+  split between two digests the codebase had, not a new concept.
+
+What the split buys, and what it costs, is deliberately asymmetric. A marker
+proves "this process is a live server"; a sentinel proves "this process has
+this store open". Only the sentinel population reaches `mm status`'s
+concurrent-writer warning and `mm uninstall`'s fail-closed probe — an idle
+server is not a writer, and a stale marker must not block a deletion. `mm
+doctor` reads both, identifies a process by `(pid, procid)` — `procid` is 32
+random bits and a pid is reused, so neither is identity alone — and reports the
+split ("*N* live server processes … *K* with no store registration observed").
+That wording is deliberate: sentinel registration is best-effort, so the
+absence of one is evidence about the *record*, not proof that the server never
+opened a store. The two digests are never compared: they are different
+functions of different inputs, and every marker whose store has no path
+(`:memory:`, a URI) shares one placeholder.

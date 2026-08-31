@@ -6,6 +6,7 @@ All public symbols are re-exported here for backward compatibility:
 
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -267,8 +268,58 @@ if _TOOL_MODE != "full":
             mcp.remove_tool(name)
 
 
-def _install_sigterm_handler(pid_file: Path) -> None:
-    """Install a SIGTERM handler that unlinks ``pid_file`` and hard-exits.
+@contextlib.contextmanager
+def _sigterm_deferred():
+    """Hold SIGTERM across creating a runtime file and covering it.
+
+    Between the moment a file exists on disk and the moment the SIGTERM
+    handler knows to unlink it, a signal kills the process by default
+    disposition and leaves the file behind. The window is short but real, and
+    it is the whole reason the handler exists — so the two steps are made
+    indivisible rather than made fast. Blocking, not ignoring: a SIGTERM that
+    arrives here is delivered the instant the mask lifts, so this defers
+    shutdown by microseconds and never swallows it.
+
+    The previous mask is *restored*, not unblocked: an embedder may have
+    entered with SIGTERM already blocked on this thread, and unblocking
+    unconditionally would both hand back a mask the caller never chose and
+    deliver a signal it was deliberately deferring.
+
+    A no-op where the primitive is absent (Windows has no ``pthread_sigmask``,
+    and no SIGTERM delivery to defer, #817).
+    """
+    import signal
+
+    mask = getattr(signal, "pthread_sigmask", None)
+    if mask is None or os.name == "nt":
+        yield
+        return
+    previous = mask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        yield
+    finally:
+        mask(signal.SIG_SETMASK, previous)
+
+
+def _sigterm_targets(pid_file: Path | None, presence: object) -> tuple[Path, ...]:
+    """Runtime files this process owns and must unlink on SIGTERM.
+
+    ``presence`` is the :class:`~memtomem._instance_registry.RegisteredInstance`
+    returned by the startup marker registration, or ``None`` when it did not
+    register — the caller passes the value through rather than deciding, so the
+    "which files do we own" question has one answer in one place.
+    """
+    targets: list[Path] = []
+    if pid_file is not None:
+        targets.append(pid_file)
+    path = getattr(presence, "path", None)
+    if isinstance(path, Path):
+        targets.append(path)
+    return tuple(targets)
+
+
+def _install_sigterm_handler(*paths: Path) -> None:
+    """Install a SIGTERM handler that unlinks ``paths`` and hard-exits.
 
     ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
     ``SystemExit`` raised from a classic ``signal.signal`` handler — the
@@ -276,13 +327,20 @@ def _install_sigterm_handler(pid_file: Path) -> None:
     So we can't rely on ``sys.exit(0)`` + ``atexit``: we unlink
     explicitly and call ``os._exit(0)`` to bypass the event loop.
 
-    Used to be variadic to also tear down the legacy
+    Variadic because the process can own more than one runtime file. It
+    was variadic once before, to tear down the legacy
     ``~/.memtomem/.server.pid`` compatibility lock during the #412
-    transition window; that interlock was retired in #2003 and the
-    runtime pid file is the only teardown target left.
+    transition window (retired in #2003); today the callers pass the
+    scoped pid file, the startup presence marker (#2230), or — on the
+    lock-contended path, which owns no pid file — the marker alone.
+    Every path passed must be one this process created: each is unlinked
+    unconditionally, with no ownership re-check, because a signal handler
+    cannot take the registry's mutation lock (it may be interrupting a
+    thread that holds it) and the marker's per-registration nonce already
+    makes its name unrepeatable, so there is no other inode to hit.
 
-    Only register after the flock succeeds, so we never unlink a pid
-    file another primary owns. ``atexit`` still handles the normal
+    Pass the pid file only after its flock succeeds, so we never unlink
+    one another primary owns. ``atexit`` still handles the normal
     stdin-EOF shutdown path.
 
     What ``os._exit(0)`` intentionally abandons (#1574 item 8): the
@@ -301,6 +359,15 @@ def _install_sigterm_handler(pid_file: Path) -> None:
     performed. If a synchronous best-effort DB close is ever added here,
     it must not touch asyncio state.
 
+    The startup presence marker (#2230) is unlinked here, like the pid
+    file and for the same reason: ``atexit`` never runs, so nothing else
+    would. A store *sentinel* is still abandoned — it is published from
+    the async initialization path and released through the registry's
+    mutation lock, which this handler must not take. That residue is
+    bounded: the kernel drops the flock at exit, so the sentinel probes
+    *stale* immediately, no reader counts it as a live server, and the
+    next registration's sweep collects it once past the grace window.
+
     Windows note (#817): Python's ``signal.SIGTERM`` is a no-op on
     Windows — the OS has no equivalent of POSIX SIGTERM that the C
     runtime delivers to the Python signal layer. We skip registration
@@ -314,10 +381,13 @@ def _install_sigterm_handler(pid_file: Path) -> None:
     import signal
 
     def _handle(_signum: int, _frame: object) -> None:
-        try:
-            pid_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # One unusable path must not strand the others, and the
+                # hard exit below has to happen either way.
+                pass
         _os._exit(0)
 
     if _os.name != "nt":
@@ -705,69 +775,113 @@ def main(argv: list[str] | None = None) -> None:
     # ``MsvcrtLocker`` backend calls ``msvcrt.locking``, which the C runtime
     # rejects on read-only handles with ``EACCES``. ``cli/_liveness.py`` uses
     # ``"rb+"`` for the same reason. Don't simplify this to ``"w"``.
-    _lock_fp = open(pid_file, "a+")
-    try:
-        portalocker.lock(_lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-    except (portalocker.LockException, BlockingIOError, OSError):
-        # Another server already holds the lock — proceed anyway (the editor
-        # expects the process to stay alive), but log a warning. Don't register
-        # atexit unlink or the SIGTERM handler: either would yank the primary
-        # server's pid file out from under it.
+    # SIGTERM is held for this whole span (#2230). Each file below exists on
+    # disk before the handler that unlinks it is installed, and a signal
+    # landing in that gap kills the process by default disposition and leaves
+    # the file behind — the residue the handler exists to prevent. Deferring
+    # delivery until the handler covers both targets makes create-and-cover
+    # indivisible instead of merely quick.
+    with _sigterm_deferred():
+        # Record this process in the instance registry's startup population
+        # (#2230), before the pid-lock decision because it is independent of it:
+        # the ``server[-<digest>].pid`` file is exclusive per store, so the
+        # contended arm below keeps no pid record at all — yet a second server on
+        # one store is exactly the accumulation this marker exists to make
+        # visible. It is also the only registration a handshake-only session ever
+        # performs, since the store-scoped sentinel's digest is the DB file's
+        # inode identity and no store is open yet.
         #
-        # Exception tuple matches ``cli/_liveness.py:probe_pid_file`` (#817):
-        # POSIX raises ``BlockingIOError``; portalocker's Windows backend
-        # wraps Win32 errors as ``LockException``. Keep all three explicit so
-        # a future reader doesn't narrow this and accidentally swallow the
-        # wrong exception.
-        _lock_fp.close()
-        import logging
+        # Best-effort by contract, and reported: the registry returns ``None``
+        # rather than raising for every ordinary failure (an untrusted directory,
+        # a lock timeout, a contended sentinel), so the warning keys off the
+        # return value, not off an exception. A server that cannot be counted
+        # must still start.
+        _presence = None
+        try:
+            from memtomem._instance_registry import register_server_presence
 
-        logging.getLogger(__name__).warning(
-            "Another memtomem-server is already writing to this store (pid file: %s). "
-            "Concurrent writes may be slow.",
-            pid_file,
-        )
-    else:
-        _lock_fp.seek(0)
-        _lock_fp.truncate()
-        # Keep the pid on the first line for old readers. The blank second
-        # line is the optional Web-UI port slot understood by
-        # ``cli._liveness._parse_pid_payload``; the third line records this
-        # process generation's UTC start time.
-        _lock_fp.write(f"{os.getpid()}\n\n{process_started}\n")
-        _lock_fp.flush()
+            _presence = register_server_presence(db_path)
+        except Exception:  # pragma: no cover - defensive; the registry swallows its own
+            pass
+        if _presence is None:
+            import logging
 
-        # Composite cleanup — single atexit registration, platform-aware order
-        # (#818 review). Splitting close+unlink across two ``atexit.register``
-        # calls relies on LIFO so unlink runs before close, which works on
-        # POSIX (you can unlink an open file and the inode persists until
-        # close) but breaks on Windows: NTFS refuses to delete an open or
-        # locked handle, so a clean shutdown via ``atexit`` would raise
-        # ``PermissionError`` (WinError 32) and leave a stale ``server.pid``
-        # behind — the next start then misreads it as a live holder.
-        def _cleanup() -> None:
-            if os.name == "nt":
-                # Close → unlock → unlink. The close releases both the
-                # file handle and the portalocker lock; the unlink only
-                # then succeeds because no handle is open against the path.
-                try:
-                    _lock_fp.close()
-                finally:
+            logging.getLogger(__name__).warning(
+                "Could not record this server in the instance registry "
+                "(runtime dir: %s); `mm doctor` may under-report running servers.",
+                pid_file.parent,
+            )
+
+        _lock_fp = open(pid_file, "a+")
+        try:
+            portalocker.lock(_lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        except (portalocker.LockException, BlockingIOError, OSError):
+            # Another server already holds the lock — proceed anyway (the editor
+            # expects the process to stay alive), but log a warning. Don't register
+            # atexit unlink or the SIGTERM handler: either would yank the primary
+            # server's pid file out from under it.
+            #
+            # Exception tuple matches ``cli/_liveness.py:probe_pid_file`` (#817):
+            # POSIX raises ``BlockingIOError``; portalocker's Windows backend
+            # wraps Win32 errors as ``LockException``. Keep all three explicit so
+            # a future reader doesn't narrow this and accidentally swallow the
+            # wrong exception.
+            _lock_fp.close()
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Another memtomem-server is already writing to this store (pid file: %s). "
+                "Concurrent writes may be slow.",
+                pid_file,
+            )
+            # This arm owns no pid file, but it does own its presence marker, and
+            # ``atexit`` never runs under SIGTERM. Install a marker-only handler so
+            # a secondary server cleans up after itself without ever touching the
+            # primary's pid file.
+            _marker_only = _sigterm_targets(None, _presence)
+            if _marker_only:
+                _install_sigterm_handler(*_marker_only)
+        else:
+            _lock_fp.seek(0)
+            _lock_fp.truncate()
+            # Keep the pid on the first line for old readers. The blank second
+            # line is the optional Web-UI port slot understood by
+            # ``cli._liveness._parse_pid_payload``; the third line records this
+            # process generation's UTC start time.
+            _lock_fp.write(f"{os.getpid()}\n\n{process_started}\n")
+            _lock_fp.flush()
+
+            # Composite cleanup — single atexit registration, platform-aware order
+            # (#818 review). Splitting close+unlink across two ``atexit.register``
+            # calls relies on LIFO so unlink runs before close, which works on
+            # POSIX (you can unlink an open file and the inode persists until
+            # close) but breaks on Windows: NTFS refuses to delete an open or
+            # locked handle, so a clean shutdown via ``atexit`` would raise
+            # ``PermissionError`` (WinError 32) and leave a stale ``server.pid``
+            # behind — the next start then misreads it as a live holder.
+            def _cleanup() -> None:
+                if os.name == "nt":
+                    # Close → unlock → unlink. The close releases both the
+                    # file handle and the portalocker lock; the unlink only
+                    # then succeeds because no handle is open against the path.
                     try:
-                        pid_file.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-            else:
-                # POSIX: unlink while still holding the flock so we delete
-                # exactly the inode we own; without that, a window opens
-                # where another process could ``open`` the same path and
-                # we'd close-then-unlink the wrong inode. Closing the fd
-                # afterwards releases the flock.
-                pid_file.unlink(missing_ok=True)
-                _lock_fp.close()
+                        _lock_fp.close()
+                    finally:
+                        try:
+                            pid_file.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                else:
+                    # POSIX: unlink while still holding the flock so we delete
+                    # exactly the inode we own; without that, a window opens
+                    # where another process could ``open`` the same path and
+                    # we'd close-then-unlink the wrong inode. Closing the fd
+                    # afterwards releases the flock.
+                    pid_file.unlink(missing_ok=True)
+                    _lock_fp.close()
 
-        atexit.register(_cleanup)
-        _install_sigterm_handler(pid_file)
+            atexit.register(_cleanup)
+            _install_sigterm_handler(*_sigterm_targets(pid_file, _presence))
 
     if transport != "stdio":
         # Banner runs after the lock decision so the warning log (if any)

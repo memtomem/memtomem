@@ -54,6 +54,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm doctor` now sees servers that never opened a store.** The instance
+  registry only ever recorded a server once it *initialized* — which is lazy by
+  design (#399), so a client that connects, handshakes and asks for nothing
+  registered nothing. On the machine that motivated this, that was 34 of 35
+  running servers: exactly the idle population that accumulates. Each server
+  now writes a lightweight **presence marker** at startup, beside the pid file
+  it already writes on the runtime anchor, and `mm doctor` reports the split
+  ("*N* live server processes … *K* with no store registration observed";
+  `--json` gains `processes_with_store_registered`,
+  `processes_without_store_registration`, and a `kind` of `sentinel` or
+  `presence` on each instance row). The wording reports the *records*, not an
+  inferred state: sentinel registration is best-effort, so a missing one is
+  not proof that no store was opened. `~/.memtomem/` is still untouched by a
+  handshake — the invariant #399 and #412 actually protect is the *store*,
+  not the runtime directory.
+
+  Deliberately unchanged: `mm status`'s concurrent-writer warning and
+  `mm uninstall`'s refusal both still read store sentinels only. An idle server
+  is not a writer, and it is not a reason to refuse deleting state — so an
+  uninstall neither blocks on a marker nor deletes a live one; it collects only
+  abandoned markers. (#2230)
+
 - **`mm doctor` reports the memtomem runtime on this machine, including
   accumulated server processes.** Every MCP client starts its own
   `memtomem-server` and holds it for as long as the client lives, so a

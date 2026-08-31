@@ -3624,3 +3624,73 @@ class TestUnverifiableLivenessBoundaryAndModes:
         assert "Cannot verify whether a memtomem server is running" not in result.output
         assert "--force" not in result.output
         assert (state / "memtomem.db").exists()
+
+
+class TestPresenceMarkerCleanup:
+    """Startup presence markers (#2230) at the destructive boundary."""
+
+    @pytest.fixture(autouse=True)
+    def _uninstall_cmd(self):
+        from memtomem.cli import uninstall_cmd
+
+        return uninstall_cmd
+
+    def test_junctioned_runtime_anchor_is_not_pruned_through(
+        self, home, registry_at_runtime_dir, monkeypatch, _uninstall_cmd
+    ):
+        """The prune must re-check the anchor, not inherit an earlier check.
+
+        ``_prune_if_empty`` refuses a leaf that is itself a link, but a
+        junctioned runtime dir holds an ordinary ``presence/`` inside the
+        *target* — which passes every test made on the leaf alone, and would
+        then be listed and ``rmdir``'d in someone else's tree.
+        """
+        reg = registry_at_runtime_dir
+        anchor = reg.instances_dir().parent
+        presence = reg.presence_dir()
+        presence.mkdir(mode=0o700, parents=True, exist_ok=True)
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == anchor)
+
+        assert _uninstall_cmd._real_presence_dir() is None, (
+            "a redirected anchor must make the marker directory unreachable"
+        )
+        assert presence.exists(), "and nothing under the target may be removed"
+
+    def test_symlinked_presence_dir_is_refused(
+        self, home, registry_at_runtime_dir, tmp_path, _uninstall_cmd
+    ):
+        reg = registry_at_runtime_dir
+        elsewhere = tmp_path / "elsewhere-presence"
+        elsewhere.mkdir()
+        reg.instances_dir().parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            reg.presence_dir().symlink_to(elsewhere, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+
+        assert _uninstall_cmd._real_presence_dir() is None
+        assert elsewhere.exists()
+
+    def test_real_presence_dir_is_returned_when_both_are_real(
+        self, home, registry_at_runtime_dir, _uninstall_cmd
+    ):
+        reg = registry_at_runtime_dir
+        presence = reg.presence_dir()
+        presence.mkdir(mode=0o700, parents=True, exist_ok=True)
+        assert _uninstall_cmd._real_presence_dir() == presence
+
+    def test_a_live_marker_survives_uninstall(self, home, registry_at_runtime_dir):
+        """An idle server does not block uninstall, so uninstall must not
+        unregister it: staging a held marker would drop a running process from
+        the registry, and on Windows would fail on the open handle."""
+        reg = registry_at_runtime_dir
+        _seed_state(home)
+        inst = reg.register_server_presence(home / ".memtomem" / "memtomem.db")
+        assert inst is not None, "premise: the marker was registered"
+        try:
+            result = CliRunner().invoke(cli, ["uninstall", "-y", "--force"])
+            assert result.exit_code == 0, result.output
+            assert inst.path.exists(), "a live marker is not this command's to remove"
+            assert inst.path.name not in result.output, "and is never inventoried"
+        finally:
+            inst.cleanup()

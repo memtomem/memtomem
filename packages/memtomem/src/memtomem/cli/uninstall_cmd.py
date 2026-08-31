@@ -57,7 +57,11 @@ from memtomem._instance_registry import BarrierTimeout as _BarrierTimeout
 from memtomem._instance_registry import (
     acquire_uninstall_lifecycle_barrier as _acquire_lifecycle_barrier,
 )
-from memtomem._instance_registry import instances_dir as _instances_dir
+from memtomem._instance_registry import (
+    instances_dir as _instances_dir,
+    presence_dir as _presence_dir,
+    sweep_stale_presence as _sweep_stale_presence,
+)
 from memtomem._instance_registry import (
     probe_all_for_uninstall as _probe_registry_liveness,
 )
@@ -165,6 +169,29 @@ def _real_registry_dir(root: Path | None = None) -> Path | None:
     not depend on something else having run first.
     """
     d = _instances_dir() if root is None else _instances_dir(root)
+    if _is_dir_link(d.parent):
+        return None
+    try:
+        st = os.stat(d, follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode) or _is_dir_link(d):
+        return None
+    return d
+
+
+def _real_presence_dir(root: Path | None = None) -> Path | None:
+    """The presence-marker directory iff it and its anchor are real (#2230).
+
+    The same anchor-and-leaf no-follow pair :func:`_real_registry_dir`
+    applies, and for the same reason: ``_prune_if_empty`` refuses a leaf that
+    is itself a link, but a junctioned runtime *root* leaves an ordinary
+    ``presence/`` inside the target — which passes every check made on the
+    leaf alone, and would then be listed and ``rmdir``'d in someone else's
+    tree. Trust is re-established here rather than inherited from whichever
+    validation ran earlier, because a root can be replaced between the two.
+    """
+    d = _presence_dir() if root is None else _presence_dir(root)
     if _is_dir_link(d.parent):
         return None
     try:
@@ -1155,6 +1182,19 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # links in general.
     for reg_dir in _real_registry_dirs(inv.runtime_roots):
         _prune_if_empty(reg_dir)
+
+    # #2230: startup presence markers are deliberately *not* inventoried or
+    # staged. A handshake-only server that is still running holds its
+    # marker's flock, and this command does not refuse on that evidence — so
+    # staging one would unregister a live process, and on Windows would fail
+    # on the open handle. Sweep only what its owner can no longer remove,
+    # then prune the directory when nothing live is left in it.
+    _sweep_stale_presence()
+    canonical = runtime_dir()
+    for root in inv.runtime_roots:
+        directory = _real_presence_dir() if root == canonical else _real_presence_dir(root)
+        if directory is not None:
+            _prune_if_empty(directory)
 
     for root in inv.runtime_roots:
         _prune_if_empty(root)
