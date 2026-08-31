@@ -115,44 +115,39 @@ quality gate's contract (`tools/quality-gate/README.md`).
 
 ### Recalibrated for #2224 — `genre_primary` measured path text
 
-`baseline_v2.json` was regenerated when BM25 stopped searching the
-`source_file` column while any chunk's `content` matches (#2224). Only the
-`genre_primary` floors moved materially, and only in the English tracks:
+Both baselines were regenerated on the Ubuntu producer when BM25 stopped
+searching the `source_file` column while any chunk's `content` matches
+(#2224). Every floor that moved by more than 0.01 belongs to `genre_primary`,
+plus one that moved *up*:
 
 | floor | before | after |
 |---|---|---|
-| `cross_language en\|genre_primary\|recall@10` | 0.2925 | 0.2475 |
 | `cross_language en\|genre_primary\|cross_language_relevant@10` | 1.44 | 1.26 |
+| `cross_language en\|genre_primary\|recall@10` | 0.2925 | 0.2475 |
+| `cross_language en\|genre_primary\|ndcg@10` | 0.2774 | 0.2492 |
 | `english en\|genre_primary\|recall@10` | 0.405 | 0.3825 |
+| `english en\|genre_primary\|mrr@10` | 0.408 | 0.3876 |
+| `v1 ko\|genre_primary\|mrr@10` | 0.30 | 0.25 |
+| `korean` / `cross_language` `ko\|direct\|mrr@10` | 0.4525 / 0.5029 | 0.4675 / 0.5179 (**up**) |
 
-Everything else moved by at most ~0.003 in either direction, and the Korean
-`genre_primary` floors went **up**.
+`genre_primary` relevance is defined as "chunk's topic is a target topic **and**
+chunk's genre is the query's genre" (`benchmark_v2.py:build_qrels`), and both
+are parsed from the file's path — the corpus is laid out
+`{language}/{topic}/{genre}.md`. A retriever that matched path tokens was
+matching the label definition itself.
 
-That asymmetry is the point, and it is why these floors were lowered rather
-than the change reverted. `genre_primary` relevance is defined as
-"chunk's topic is a target topic **and** chunk's genre is the query's genre"
-(`benchmark_v2.py:build_qrels`), and both of those are parsed from the file's
-path — the corpus is laid out `{language}/{topic}/{genre}.md`. A retriever that
-matched path tokens was therefore matching the label definition itself, in
-English, which is also why the Korean queries — whose text never matched an
-English path component — are unaffected or better. The lost points were a
-measurement of the corpus's directory names, not of retrieval quality.
+The Korean slices are the tell. `ko|genre_primary` queries are mixed-script and
+carry the English topic word literally (`postgres 절차 접속 수행`,
+`observability KST 원인 후속 조치`), so they leaked through the same English
+directory names; `ko|direct` queries, which name no path component, went *up*.
+The lost points measured the corpus's directory names, not retrieval quality.
 
-The floors were **not** hand-edited: the file is regenerated wholesale by
-`tune_rrf_v2.py`, and `test_v2_committed_quality_bounds_match_generation_formula`
-recomputes every bound from the committed per-query data, so a hand-tuned
-number fails the suite. The frozen holdout (`query_holdout_v2.py`) is
-unchanged — the queries, their identifiers and the qrel rules are the same; only
-the measured baseline they are scored against moved.
-
-Methodology v2 keeps those topic metrics and adds intent-specific checks:
-
-- `genre_hit@1` and genre MRR use `topic AND expected genre` qrels.
-- `constraint_success@10` requires a negation/contrast ADR result to rank
-  before same-topic hard negatives.
-- `intent_coverage@10` requires multi-topic queries to cover both intents.
-- Same-language precision and cross-language relevant hits are reported only
-  in the combined-corpus track.
+Neither file was hand-edited. Both are regenerated wholesale by their tools,
+and `test_v2_committed_quality_bounds_match_generation_formula` recomputes
+every v2 bound from the committed per-query data, so a hand-tuned number fails
+the suite. The frozen holdout (`query_holdout_v2.py`) is untouched — the
+queries, their identifiers and the qrel rules are unchanged; only the measured
+baseline they are scored against moved.
 
 ## RRF sensitivity correctness
 
