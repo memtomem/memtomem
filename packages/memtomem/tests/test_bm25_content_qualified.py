@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import pytest
 
+from memtomem.storage.sqlite_backend import _column_match
+
 from helpers import make_chunk as _make_chunk
 
 #: Long filler so the content match has a *low* per-term density. fts5
@@ -130,4 +132,60 @@ class TestHybridPipeline:
         )
         assert any("marine-biology" in s for s in surfaced), (
             "the genuine content match did not survive the pipeline"
+        )
+
+
+class TestTheColumnFilterCannotBeEscaped:
+    """A query cannot spell its way out of the filter imposed on it.
+
+    The filter is built by concatenating around ``tokenize_for_fts``'s output,
+    which makes the escaping contract load-bearing in a way it was not before:
+    a query that itself looks like fts5 column syntax must stay a *search term*.
+    The braces matter here — a bare ``content : expr`` prefix would be re-parsed
+    when ``expr`` starts with something column-shaped, while a braced column
+    list is closed before the expression begins.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "source_file : secret",
+            "{source_file} : secret",
+            "} : (source_file",
+            "content} OR {source_file",
+            "a}b",
+        ],
+    )
+    def test_a_column_shaped_query_stays_inside_the_content_filter(self, query):
+        expr = _column_match("content", query, use_or=False)
+        assert expr.startswith("{content} : ("), expr
+        assert expr.endswith(")"), expr
+        # Everything the caller supplied is quoted, so no bare brace or colon
+        # from the query can be read as syntax.
+        body = expr[len("{content} : (") : -1]
+        for ch in "{}:":
+            assert ch not in body.replace('"', "") or '"' in body, (
+                f"unquoted {ch!r} reached the expression: {body!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_naming_the_column_does_not_reopen_it(self, storage):
+        """The end of the same argument, run against a real store.
+
+        A query that spells ``source_file :`` gets no more access to the path
+        column than any other query: while something's *content* matches, the
+        path phase does not run, and the words it typed are searched as terms.
+        (With nothing matching in content the fallback would return the path
+        chunk — as it would for the bare word — which is the feature, not an
+        escape, so this fixture keeps a content match present.)
+        """
+        content_hit = _make_chunk("a note that mentions secret handling", source="notes/a.md")
+        path_only = _make_chunk("nothing to see", source="notes/secret-plan.md")
+        await storage.upsert_chunks([path_only, content_hit])
+
+        results = await storage.bm25_search("source_file : secret", top_k=5)
+
+        assert [r.chunk.id for r in results] == [content_hit.id], (
+            "a column-shaped query pulled a path-only chunk while content matched: "
+            f"{[str(r.chunk.metadata.source_file) for r in results]}"
         )
