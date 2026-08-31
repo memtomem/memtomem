@@ -369,10 +369,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the same type the lock's own `mkdir`/`open` already raise, so it reaches the
   branches written for it — `mm wiki <kind> commit` reports an unavailable
   lock, the web route answers `500 lock_unavailable`. Contention is unchanged:
-  still `TimeoutError`, still "held by another process", still retryable.
-  Applies to the sync and async helpers and to the unbounded (`timeout=None`)
-  acquire, and covers the raw `pywintypes.error` a portalocker 3.x install can
-  still raise. (#2229)
+  still `TimeoutError` on the bounded path, still "held by another process",
+  still retryable — and a backend failure can no longer arrive dressed as one
+  either: an `ETIMEDOUT` lock error used to *construct* a `TimeoutError`,
+  since Python dispatches `OSError` on the errno. Applies to the sync and
+  async helpers and to the unbounded (`timeout=None`) acquire, which has no
+  budget to convert contention against and so leaves its type alone, and
+  covers the raw `pywintypes.error` a portalocker 3.x install can still
+  raise. (#2229)
 
 - **An error inside a lock is no longer replaced by the failure to release it.**
   The same helper released the lock in a bare `finally`, so if the guarded work
@@ -381,9 +385,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   or a git failure could surface as a raw `OSError` from the release, past every
   arm written to classify it. The body's exception now always wins (including
   `CancelledError` on the async path); a release failure while unwinding is
-  logged at warning with the lock path, and the descriptor close drops the lock
-  regardless — closing it is held to the same rule, so a failing `close` cannot
-  replace the body's error either. A release failure on the *success* path
+  logged at warning with the lock path, and closing the descriptor is held to
+  the same rule, so a failing `close` cannot replace the body's error either.
+  Neither swallow strands the lock: closing releases it, and the OS reclaims
+  the descriptor even when `close` reports an error. A release failure on the
+  *success* path
   still propagates unchanged — there the guarded work has already completed,
   and relabelling it as a lock failure would report a finished commit as
   failed. (#2229)

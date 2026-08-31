@@ -125,6 +125,13 @@ def _close_quietly(fp: IO[bytes], lock_path: Path) -> None:
     the way out would mask the error the caller is already handling (#2229).
     On the success path the close is left bare, where its failure is the only
     thing that went wrong and belongs to the caller.
+
+    Swallowing it does not strand the descriptor: a buffered ``close`` shuts
+    its raw stream even when the flush that precedes it raises, and ``close``
+    (2) releases the descriptor whether or not it reports an error. There is
+    deliberately no ``os.close(fd)`` fallback — after a partial close that fd
+    number can already belong to something else, and closing it would be a
+    far worse bug than the one being reported.
     """
     try:
         fp.close()
@@ -166,8 +173,12 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
 
     Failure contract (#2229), three outcomes a caller can classify:
 
-    * ``TimeoutError`` — *contention*. Someone holds the lock; retrying is
-      the right advice ("busy", HTTP 503).
+    * ``TimeoutError`` — *contention*, on the bounded path. Someone holds the
+      lock; retrying is the right advice ("busy", HTTP 503). Unbounded
+      (``timeout=None``) there is no budget to convert against, so contention
+      keeps whatever type the backend gave it — on POSIX it simply waits, and
+      on Windows it can surface as ``portalocker.AlreadyLocked`` (#759), which
+      is why a caller that must not fail on contention passes a bound.
     * ``OSError`` — the lock could not be *established or acquired*: its
       directory/file could not be made or opened, or the lock call itself
       failed (``EIO``, ``ENOLCK``, an NFS ``EOFError``, a non-lock-violation
@@ -176,7 +187,9 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
       :class:`~memtomem.wiki.commit.WikiLockUnavailableError` (#2227); the
       destructive CLIs route it to their repair-the-path remediation.
     * Whatever the caller's own body raised — never replaced by a failure to
-      release the lock on the way out.
+      unlock or to close on the way out. Both are still attempted and their
+      failures logged; releasing the descriptor is what drops the lock, and
+      the OS reclaims it even when ``close`` itself reports an error.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # os.open + os.fdopen: pin 0o600 mode while still handing portalocker

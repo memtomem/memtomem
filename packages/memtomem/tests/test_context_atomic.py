@@ -310,6 +310,50 @@ class TestFileLockFailureClassification:
         assert str(lock) in str(excinfo.value)
         assert unlock.calls == 0
 
+    def test_an_etimedout_backend_failure_is_not_dressed_as_contention(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``OSError(ETIMEDOUT, ...)`` *constructs* a TimeoutError — Python
+        # dispatches OSError on the errno — and TimeoutError is the one type
+        # every caller here reads as "someone holds it, retry". A lock backend
+        # that fails with ETIMEDOUT would otherwise come back wearing the
+        # single label this classification exists to deny it.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker,
+            "lock",
+            _RaisingLock(_lock_exc(OSError(errno.ETIMEDOUT, "timed out"))),
+        )
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock())
+
+        with pytest.raises(OSError) as excinfo:
+            with _file_lock(lock, timeout=30.0):
+                pytest.fail("body must not run when acquisition failed")
+
+        assert not isinstance(excinfo.value, TimeoutError)
+        assert excinfo.value.errno == errno.ETIMEDOUT
+        assert excinfo.value.filename == str(lock)
+
+    def test_a_raw_timeouterror_from_the_backend_is_demoted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same hazard one level up: a backend raising TimeoutError directly
+        # must not be forwarded as-is just because it is already an OSError.
+        lock = _lock_path_for(tmp_path / "data.json")
+        monkeypatch.setattr(
+            _atomic_mod.portalocker,
+            "lock",
+            _RaisingLock(TimeoutError(errno.ETIMEDOUT, "timed out")),
+        )
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", _RecordingUnlock())
+
+        with pytest.raises(OSError) as excinfo:
+            with _file_lock(lock, timeout=30.0):
+                pytest.fail("body must not run when acquisition failed")
+
+        assert not isinstance(excinfo.value, TimeoutError)
+        assert excinfo.value.errno == errno.ETIMEDOUT
+
     @pytest.mark.parametrize(
         "exc",
         [
@@ -393,6 +437,27 @@ class TestFileLockReleaseDoesNotMaskBody:
         with pytest.raises(_BodyFailure):
             with _file_lock(lock, timeout=5.0):
                 raise _BodyFailure("what the caller actually needs to see")
+
+    def test_the_lock_is_actually_released_after_a_failing_unlock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Suppressing the unlock error is only safe because closing the
+        # descriptor drops the lock anyway. Pin that rather than the claim:
+        # after a failed body *and* a failed unlock, the very next acquisition
+        # must succeed — if it did not, the swallow would have stranded the
+        # lock for the life of the process.
+        lock = _lock_path_for(tmp_path / "data.json")
+        unlock = _RecordingUnlock(OSError(errno.EIO, "unlock failed"))
+        monkeypatch.setattr(_atomic_mod.portalocker, "unlock", unlock)
+
+        with pytest.raises(_BodyFailure):
+            with _file_lock(lock, timeout=5.0):
+                raise _BodyFailure("boom")
+
+        assert unlock.calls == 1
+        monkeypatch.undo()
+        with _file_lock(lock, timeout=1.0):
+            pass
 
     def test_unlock_failure_on_the_success_path_still_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

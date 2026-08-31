@@ -150,6 +150,10 @@ def raise_lock_io_failure(exc: BaseException, path: Path, *, label: str) -> NoRe
     from exc`` would make the pair each other's ``__cause__``/``__context__``
     — a reference cycle the caller's log does not need.
 
+    The raised type is never a ``TimeoutError`` — see :func:`_plain_oserror`
+    for why that one ``OSError`` subclass has to be demoted rather than
+    preserved.
+
     ``path`` (the resolved lock file) backfills the filename: a lock syscall
     operates on a descriptor, so ``OSError.filename`` is usually ``None``
     and the ``EOFError`` fallback is always pathless — leaving the CLI to
@@ -158,7 +162,7 @@ def raise_lock_io_failure(exc: BaseException, path: Path, *, label: str) -> NoRe
     last-resort message ("lifecycle barrier", "file lock"), which is the
     only text a caller without an errno has to go on.
     """
-    if isinstance(exc, OSError):
+    if isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
         # Mutate in place rather than re-wrap: keeps the precise subtype
         # (``FileNotFoundError`` etc.) while naming the path in ``str(exc)``.
         if exc.filename is None:
@@ -166,7 +170,30 @@ def raise_lock_io_failure(exc: BaseException, path: Path, *, label: str) -> NoRe
         raise exc
     cause = exc.__cause__
     if isinstance(cause, OSError) and cause.errno is not None:
-        err = OSError(cause.errno, cause.strerror or str(cause))
-        err.filename = cause.filename or str(path)
-        raise err from exc
+        raise _plain_oserror(
+            cause.errno, cause.strerror or str(cause), cause.filename or str(path)
+        ) from exc
+    if isinstance(exc, OSError) and exc.errno is not None:
+        raise _plain_oserror(
+            exc.errno, exc.strerror or str(exc), exc.filename or str(path)
+        ) from exc
     raise OSError(f"{label} lock failed at {path}: {exc}") from exc
+
+
+def _plain_oserror(code: int, strerror: str, filename: str) -> OSError:
+    """Build an ``OSError`` that is *not* one of its errno-mapped subclasses.
+
+    ``OSError(errno, strerror)`` dispatches on the errno — ``ETIMEDOUT``
+    yields a :class:`TimeoutError`, and ``TimeoutError`` is precisely the type
+    every caller of this package reads as *contention* ("someone holds it,
+    retry"). A lock backend that fails with ``ETIMEDOUT`` would therefore be
+    handed back to the caller wearing the one label this whole classification
+    exists to deny it (#2229). Constructing with no arguments skips that
+    dispatch; the fields are then set by hand so ``errno``, ``strerror``,
+    ``filename`` and ``str()`` read exactly as they would have.
+    """
+    err = OSError()
+    err.errno = code
+    err.strerror = strerror
+    err.filename = filename
+    return err

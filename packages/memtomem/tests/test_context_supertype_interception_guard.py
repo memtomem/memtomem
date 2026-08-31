@@ -986,11 +986,11 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
     ("context/_atomic.py", "_file_lock", ("<dynamic>",), 0): (
         _I,
         "",
-        "The acquire poll loop's catch set (LOCK_CALL_ERRORS, a module "
-        "constant, so <dynamic>): every shape a non-blocking portalocker.lock "
-        "can produce. It classifies immediately — contention polls on, a "
-        "lock-call I/O failure is re-raised as OSError (#2229) — and the body "
-        "has not run yet, so no recovery exception can exist to demote.",
+        "The unbounded (timeout=None) acquire's catch set "
+        "(LOCK_CALL_ERRORS_WIDE, a module constant, so <dynamic>): it "
+        "classifies and re-raises — a lock-call I/O failure as OSError, "
+        "contention with its own type (#2229) — and the body has not run yet, "
+        "so no recovery exception can exist to demote.",
     ),
     ("context/_atomic.py", "_file_lock", ("BaseException",), 1): (
         _I,
@@ -1015,8 +1015,9 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
     ("context/_atomic.py", "_file_lock", ("<dynamic>",), 1): (
         _I,
         "",
-        "The unbounded (timeout=None) acquire's catch set: same classify-and-"
-        "reraise as the poll loop, body not yet run (#2229).",
+        "The bounded acquire's poll loop, same catch set: contention polls on "
+        "to the deadline, anything else is re-raised as OSError (#2229). Body "
+        "not yet run.",
     ),
     ("context/_atomic.py", "_file_lock", ("BaseException",), 2): (
         _I,
