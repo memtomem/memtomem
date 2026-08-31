@@ -79,7 +79,14 @@ jobs:
       matrix:
         shard: [0, 1]
     runs-on: windows-latest
-    timeout-minutes: 25
+    # 35, matching the Linux/macOS `test` job. The 25-minute cap was set when
+    # the worst shard ran ~12m; it has since crept to 24.4m on a green main
+    # (28b6fee) and cancelled two PRs mid-run (#2058, #2266). Balancing the
+    # shards by recorded cost buys back roughly 15% of the worst cell, which
+    # is not enough on its own — a slow Windows runner still costs more than
+    # the remaining margin. The timeout is a hang guard (#1642), and 35
+    # minutes still catches a hang long before the 6-hour default does.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
