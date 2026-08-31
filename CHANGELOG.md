@@ -146,6 +146,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **A file's path no longer retrieves it while anything's prose matches.**
+  `chunks_fts` is `fts5(content, source_file)` and an unqualified `MATCH`
+  searches both columns. `source_file` is stored raw, so unicode61 split it
+  into components and every directory and filename word became a searchable,
+  *scoring* term: on a real 6,995-chunk store, 71 of the top 100 hits for
+  `plans` were chunks about something else, surfaced because they live under
+  `.claude/plans/`, and for auto-generated plan-filename words (`octopus`,
+  `duckling`) the path noise was the entire result set. Nothing ever queried
+  the column deliberately, and path matching already has its own parameter —
+  `source_filter`, in Python, with its own separator-folding rules (#720).
+
+  BM25 now runs its AND-then-OR ladder against `content` alone, and repeats it
+  against `source_file` only when the content phase found nothing at all. So
+  typing a filename into search still finds that file's chunks — an
+  undocumented but plausible habit that keeps working — while within the BM25
+  leg a path can never outrank prose, because the two never compete for a slot.
+  One case sits outside that guarantee and is worth knowing: when no chunk's
+  content matches but the dense leg does find prose, the path fallback's rows
+  and those dense rows are fused together, so a path match can appear among
+  them.
+
+  Weighting the column 0.0 instead, which is the obvious smaller change, is not
+  enough: RRF fuses on a result's *ordinal rank*, not its score, so a
+  path-only row scored 0.0 still occupies a BM25 slot and still contributes
+  positive fused relevance to the hybrid pipeline every caller actually uses.
+  It has to not be retrieved. No column weights are involved either way — under
+  a column-qualified `MATCH` the excluded column contributes nothing to a query
+  that never touched it, so `bm25(chunks_fts, 1.0, 0.0)` and the bare `rank`
+  score identically. No schema change: fts5 column filters need no new table.
+  (#2224)
+
 - **`mem_search`'s `tag_filter` now selects at retrieval instead of trimming
   the ranked results.** The filter ran as a post-rerank stage, after fusion had
   already capped the pool, so a tag rare enough that its chunks ranked below

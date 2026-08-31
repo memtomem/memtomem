@@ -11,6 +11,10 @@ on:
         description: "Regenerate the quality-gate baseline (cases.json + baseline_replay.json) and upload it as an artifact instead of running the check."
         type: boolean
         default: false
+      refresh_retrieval_baselines:
+        description: "Regenerate the retrieval-eval baselines (baseline_v0.3.8.json + baseline_v2.json) on Ubuntu and upload them as an artifact instead of running the floor checks."
+        type: boolean
+        default: false
   # schedule:
   #   - cron: "17 5 * * *"   # nightly — enable once LLM secrets are provisioned
 
@@ -145,10 +149,22 @@ jobs:
         with:
           path: ${{ env.FASTEMBED_CACHE_PATH }}
           key: ${{ runner.os }}-fastembed-retrieval-v2-bge-small-en-multilingual-minilm
+      # Same pin as the producer job below. `requires-python` is `>=3.12` and
+      # no `.python-version` is committed, so without this the runner could
+      # hand the *checks* a different interpreter — and a different SQLite —
+      # than the one that measured the floors they check.
+      - run: uv python pin 3.12
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_golden_path.py --tb=short -q
       - name: Audit public synthetic retrieval corpus
         run: uv run python tools/retrieval-eval/audit_public_corpus.py
+      # A baseline edited without regenerating its manifest is exactly the
+      # shape the manifest exists to rule out, so the hashes are checked here
+      # rather than trusted.
+      - name: Verify baseline provenance
+        run: |
+          uv run python tools/retrieval-eval/write_provenance.py \
+            --output tools/retrieval-eval/PROVENANCE.json --check
       - name: Check public retrieval quality floors
         env:
           PYTHONHASHSEED: "0"
@@ -159,6 +175,65 @@ jobs:
           PYTHONHASHSEED: "0"
           OMP_NUM_THREADS: "1"
         run: uv run python tools/retrieval-eval/check_baseline_v2.py
+
+  # Canonical producer for the retrieval-eval baselines, the same contract the
+  # quality gate has had since #1837. These floors are *checked* on Ubuntu, so
+  # they must be *produced* on Ubuntu: the platform delta is the size of the
+  # margins they are built from (#2224 — a macOS recalibration RAISED
+  # ko|genre_primary|mrr@10 to 0.31 while this runner observed 0.291).
+  #
+  # Its own job, not a step in golden-path: it runs ten calibration passes plus
+  # the v2 RRF grid, which needs a far larger timeout than the floor checks
+  # should ever be allowed. Being a separate job also means a failing floor
+  # cannot block its own refresh — nothing here `needs:` golden-path.
+  retrieval-baselines-refresh:
+    name: retrieval baselines (canonical refresh)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_retrieval_baselines }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
+      # Job-level, not per-step: these are properties of the measurement, and
+      # the provenance step records them. Setting them only on the regenerate
+      # step made the manifest report "unset" for a run that had them set.
+      PYTHONHASHSEED: "0"
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Cache retrieval models (English bge-small + multilingual MiniLM)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ env.FASTEMBED_CACHE_PATH }}
+          key: ${{ runner.os }}-fastembed-retrieval-v2-bge-small-en-multilingual-minilm
+      # Pin the interpreter for the same reason the quality gate does: a
+      # refresh has to reproduce the assets it replaces.
+      - run: uv python pin 3.12
+      - run: uv sync --frozen
+      - name: Regenerate both baselines
+        run: |
+          uv run python tools/retrieval-eval/calibrate_portfolio.py \
+            --runs 10 --factor 0.85 --output tools/retrieval-eval/baseline_v0.3.8.json
+          uv run python tools/retrieval-eval/tune_rrf_v2.py \
+            --output tools/retrieval-eval/baseline_v2.json
+      # A lowered floor is a claim; this is what lets someone audit it later.
+      - name: Record provenance
+        env:
+          MEMTOMEM_PROVENANCE_COMMIT: ${{ github.sha }}
+          MEMTOMEM_PROVENANCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run python tools/retrieval-eval/write_provenance.py \
+            --output tools/retrieval-eval/PROVENANCE.json
+      - name: Upload regenerated retrieval baselines
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: retrieval-eval-baselines
+          path: |
+            tools/retrieval-eval/baseline_v0.3.8.json
+            tools/retrieval-eval/baseline_v2.json
+            tools/retrieval-eval/PROVENANCE.json
 
   quality-gate:
     name: quality-gate (BM25 replay)

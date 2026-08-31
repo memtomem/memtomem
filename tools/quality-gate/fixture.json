@@ -97,6 +97,14 @@
       "query_text": "Redis Cluster 대신 Master-Replica Sentinel 채택",
       "top_k": 5,
       "relevant_globs": ["ko/caching/adr.md"]
+    },
+    {
+      "case_id": "qg-corpus-postmortem-path-token",
+      "name": "corpus-postmortem-path-token",
+      "query_text": "postmortem",
+      "top_k": 5,
+      "relevant_globs": ["README.md", "GENERATION.md"],
+      "note": "#2224 sensitivity case. 'postmortem' is a filename-shaped word: twelve corpus files carry it in their path and only these two carry it in their prose, so it isolates what source_file contributes. Before the fix an unqualified MATCH searched both columns and the top ten were ten path-only matches with neither prose file present; the MATCH is now content-qualified, so the prose files are the whole result. Without a case of this shape the gate is blind to which columns are searched at all - it reported 12/12 unchanged for the very commit that changed them. A multi-term query does not work here: the AND-first strategy filters the path-only rows out before ranking, so the case has to be the single path-shaped term."
     }
   ]
 }

@@ -320,6 +320,43 @@ def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
     return content
 
 
+#: The two ``chunks_fts`` columns, as fts5 column-filter names (#2224).
+#: ``content`` is what a search is *for*; ``source_file`` is a fallback so
+#: typing a filename still finds that file, never a competitor to prose.
+_FTS_CONTENT_COLUMN = "content"
+_FTS_SOURCE_COLUMN = "source_file"
+
+
+def _restrict_to_column(column: str, body: str) -> str:
+    """Wrap an already-tokenized expression in one ``chunks_fts`` column filter.
+
+    fts5 spells this ``{col} : (expr)``. The braces are what make it safe to
+    build by concatenation: a *bare* ``col : expr`` prefix would be re-parsed
+    if ``expr`` itself began with something column-shaped, while a braced
+    column list is closed before the expression starts. ``column`` is never
+    user input — it is one of the two module constants above — so nothing
+    interpolated here comes from the caller.
+
+    ``body`` is whatever ``tokenize_for_fts`` produced, unchanged: quoted
+    phrases, prefix wildcards and the ``OR`` fallback all survive being
+    parenthesised, which is exactly why the escaping stays that function's job
+    and is not re-implemented here.
+    """
+    if column not in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):  # pragma: no cover - guard
+        raise ValueError(f"not a chunks_fts column: {column!r}")
+    return "{" + column + "} : (" + body + ")"
+
+
+def _column_match(column: str, query: str, *, use_or: bool) -> str:
+    """Tokenize *query* and restrict it to one column — one call, one analysis.
+
+    The search path builds the bodies itself (it needs each form once, not once
+    per column); this is the convenience spelling the tests and any future
+    single-shot caller use.
+    """
+    return _restrict_to_column(column, _fts.tokenize_for_fts(query, for_query=True, use_or=use_or))
+
+
 class SqliteBackend(
     SessionMixin,
     ScratchMixin,
@@ -2202,19 +2239,69 @@ class SqliteBackend(
                    ORDER BY fts.rank, {tie_break}, c.id
                    LIMIT ?"""
 
-            # Try AND first (default FTS5 behaviour)
-            fts_query = _fts.tokenize_for_fts(query, for_query=True)
-            rows = db.execute(
-                sql, [fts_query] + ns_params + scope_params + metadata_params + [top_k]
-            ).fetchall()
+            # Content first, path only as a fallback (#2224). ``chunks_fts`` is
+            # ``fts5(content, source_file)`` and an unqualified MATCH searches
+            # both, so a term appearing only in a chunk's *path* used to
+            # retrieve it and — every column weighted 1.0 in the default
+            # ``rank`` — score as a relevance signal. ``source_file`` is stored
+            # raw, so unicode61 splits it into components and every directory
+            # and filename word became a searchable term: on a real
+            # 6,995-chunk store, 71 of the top 100 hits for ``plans`` were
+            # chunks about something else, surfaced because they live under
+            # ``.claude/plans/``.
+            #
+            # Column-qualifying the MATCH is what makes path a non-signal, and
+            # zero-weighting it is not: RRF fuses on a result's *ordinal rank*
+            # (``search/fusion.py`` — ``w / (k + rank)``), so a path-only row
+            # scored 0.0 still occupies a BM25 slot and still contributes
+            # positive fused relevance downstream. It has to not be retrieved.
+            #
+            # The fallback keeps filename lookup working — typing a path word
+            # still finds that file's chunks — but only once nothing in any
+            # chunk's *content* matches, so a path can never outrank prose.
+            # No weights are needed either way: under a column-qualified MATCH
+            # ``bm25(chunks_fts, 1.0, 0.0)`` and the bare ``rank`` score
+            # identically, because the excluded column contributes nothing to
+            # a query that never touched it.
+            # AND first (FTS5's default), then OR, within each column in turn.
+            # Written as one flat loop rather than a helper because
+            # ``test_mixin_commit_guard`` resolves the SQL keyword of every
+            # ``db.execute`` from the literal its first argument is bound to,
+            # and a closure hides that binding — which is the exact shape #2207
+            # added the "unknowable statement" rule for.
+            #
+            # The OR pass is skipped when it would repeat the AND one, decided
+            # by comparing the two *tokenized* bodies rather than by looking for
+            # a space in the raw query. Whitespace is the wrong test under a
+            # morphological tokenizer: kiwipiepy expands one space-free Korean
+            # word into several terms, so a query like ``했습니다`` has an OR
+            # form that differs from its AND form and was losing the fallback
+            # entirely.
+            #
+            # The bodies are tokenized once each and then wrapped per column —
+            # two analyses per search at most, whatever the ladder does. Asking
+            # for the four ``(column, form)`` expressions directly would analyse
+            # the query once per expression, which for a morphological backend
+            # is the expensive half of the call.
+            and_body = _fts.tokenize_for_fts(query, for_query=True)
+            or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
+            bodies = [and_body] if or_body == and_body else [and_body, or_body]
 
-            # Fall back to OR if AND returns nothing and query has multiple terms
-            if not rows and " " in query.strip():
-                fts_query_or = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
-                rows = db.execute(
-                    sql,
-                    [fts_query_or] + ns_params + scope_params + metadata_params + [top_k],
-                ).fetchall()
+            rows: list = []
+            for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):
+                for body in bodies:
+                    rows = db.execute(
+                        sql,
+                        [_restrict_to_column(column, body)]
+                        + ns_params
+                        + scope_params
+                        + metadata_params
+                        + [top_k],
+                    ).fetchall()
+                    if rows:
+                        break
+                if rows:
+                    break
 
         except sqlite3.OperationalError:
             raise

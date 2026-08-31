@@ -15,7 +15,7 @@ documents. See its
 
 | File | Author | Purpose |
 |------|--------|---------|
-| `fixture.json` | hand-written | Manifest: corpus dir, pinned `as_of`, BM25-only config overrides, and 12 `case_defs` whose relevance is declared as `relevant_globs` over corpus files. |
+| `fixture.json` | hand-written | Manifest: corpus dir, pinned `as_of`, BM25-only config overrides, and 13 `case_defs` whose relevance is declared as `relevant_globs` over corpus files. |
 | `cases.json` | **generated** | Portable `eval_case_set` envelope — the `relevant_globs` resolved to chunk `content_hash` labels. Imported at replay time. |
 | `baseline_replay.json` | **generated** | Canonical baseline replay report the gate compares against. |
 | `policy.json` | hand-written | The `GatePolicy` — the single source of every threshold (no thresholds live in the workflow YAML). |
