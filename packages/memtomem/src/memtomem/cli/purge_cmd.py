@@ -102,11 +102,14 @@ async def _run_matching_excluded(*, apply_: bool, sample_size: int, as_json: boo
                 click.secho("No stored chunks match the current exclude set.", fg="green")
             return
 
-        # Count chunks per matched file for the summary.
-        chunks_by_source = await comp.storage.list_chunks_by_sources(matched)
-        total_chunks = sum(len(v) for v in chunks_by_source.values())
-
         if not apply_:
+            # Counted, not listed. Reading the chunks to take ``len()`` capped
+            # the preview at 10,000 per file while the delete it previews has
+            # no such cap, so a big file was announced as smaller than it was
+            # about to be deleted (#2261). Only the preview needs this — the
+            # apply path reports what ``delete_by_source`` actually removed.
+            counts = await comp.storage.count_chunks_by_sources(matched)
+            total_chunks = sum(counts.values())
             sample = [str(sf) for sf in sorted(matched)[:sample_size]]
             if as_json:
                 click.echo(

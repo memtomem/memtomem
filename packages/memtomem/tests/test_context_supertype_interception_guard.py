@@ -983,6 +983,70 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "",
         "Async twin of the lock primitive; close-and-reraise.",
     ),
+    ("context/_atomic.py", "_file_lock", ("<dynamic>",), 0): (
+        _I,
+        "",
+        "The unbounded (timeout=None) acquire's catch set "
+        "(LOCK_CALL_ERRORS_WIDE, a module constant, so <dynamic>): it "
+        "classifies and re-raises — a lock-call I/O failure as OSError, "
+        "contention with its own type (#2229) — and the body has not run yet, "
+        "so no recovery exception can exist to demote.",
+    ),
+    ("context/_atomic.py", "_file_lock", ("BaseException",), 1): (
+        _I,
+        "",
+        "The release arm: it unlocks quietly and RE-RAISES the body's "
+        "exception unchanged (#2229) — the point of the arm is that a "
+        "SwapRecoveryError/TransferRecoveryError raised under the lock is not "
+        "replaced by an unlock failure. Nothing is swallowed.",
+    ),
+    ("context/_atomic.py", "async_file_lock", ("<dynamic>",), 0): (
+        _I,
+        "",
+        "Async twin of the acquire poll loop's catch set; same classify-and-"
+        "reraise, body not yet run.",
+    ),
+    ("context/_atomic.py", "async_file_lock", ("BaseException",), 1): (
+        _I,
+        "",
+        "Async twin of the release arm; re-raises the body's exception "
+        "(CancelledError included) over any unlock failure.",
+    ),
+    ("context/_atomic.py", "_file_lock", ("<dynamic>",), 1): (
+        _I,
+        "",
+        "The bounded acquire's poll loop, same catch set: contention polls on "
+        "to the deadline, anything else is re-raised as OSError (#2229). Body "
+        "not yet run.",
+    ),
+    ("context/_atomic.py", "_file_lock", ("BaseException",), 2): (
+        _I,
+        "",
+        "The close arm wrapping acquire+body+release: it closes the descriptor "
+        "quietly and RE-RAISES (#2229), so a failing close cannot replace a "
+        "recovery exception raised under the lock.",
+    ),
+    ("context/_atomic.py", "async_file_lock", ("BaseException",), 2): (
+        _I,
+        "",
+        "Async twin of the close arm; closes quietly and re-raises.",
+    ),
+    ("context/_atomic.py", "_close_quietly", ("Exception",), 0): (
+        _I,
+        "",
+        "The quiet-close helper, called only while another exception unwinds: "
+        "swallowing the close error IS what keeps the body's exception "
+        "(recovery types included) intact, and it is logged at warning with "
+        "the lock path rather than lost.",
+    ),
+    ("context/_atomic.py", "_release_quietly", ("Exception",), 0): (
+        _I,
+        "",
+        "The quiet-release helper itself, called only while another exception "
+        "unwinds: swallowing the unlock error IS the mechanism that keeps the "
+        "body's exception (recovery types included) intact, and it is logged "
+        "at warning with the lock path rather than lost.",
+    ),
     ("context/_atomic.py", "_fsync_fd", ("OSError",), 0): (
         _I,
         "",

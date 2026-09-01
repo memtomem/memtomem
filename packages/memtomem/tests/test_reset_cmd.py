@@ -45,7 +45,7 @@ from memtomem.cli import cli
 from memtomem.cli import reset_cmd
 from memtomem.cli._liveness import ServerState
 
-from .helpers import set_home
+from .helpers import poison_click_prompts, set_home
 from .test_uninstall_cmd import (
     _child_hold_shared_barrier,
     _child_try_exclusive_barrier,
@@ -367,21 +367,21 @@ class TestResetJson:
         assert "Continue?" in result.stderr
         assert _count(db_path, "chunks") >= 1
 
-    def test_cancelled_confirm_json_win_prompt_branch(self, home, monkeypatch):
-        """#1640: click's WIN prompt branch leaked the CliRunner reply echo
+    def test_cancelled_confirm_json_click_prompt_machinery_unused(self, home, monkeypatch):
+        """#1640: click's Windows prompt branch leaked the CliRunner reply echo
         into stdout (`' n\\n' + JSON`), failing this flow on windows-latest.
-        ``_prompts.confirm`` bypasses that branch, so stdout must stay a
-        single JSON document even with the branch forced."""
-        import click.termui
-
+        ``_prompts.confirm`` never enters click's prompt machinery at all, so
+        stdout stays a single JSON document — on the clicks that still have
+        that branch and on 8.5+, which dropped it."""
         _patch_liveness(monkeypatch)
         runner = CliRunner()
         _init_and_index(home, runner)
-        monkeypatch.setattr(click.termui, "WIN", True)
+        calls = poison_click_prompts(monkeypatch)
 
         result = runner.invoke(cli, ["reset", "--json"], input="n\n")
 
         assert result.exit_code == 1, result.output
+        assert calls == []
         data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "cancelled at confirmation prompt"}
 

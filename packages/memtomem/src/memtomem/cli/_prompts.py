@@ -13,10 +13,15 @@ def confirm(text: str, *, default: bool = False, err: bool = False) -> bool:
     With ``err=False`` this defers to ``click.confirm`` unchanged. With
     ``err=True`` the prompt is written to stderr and the reply is read
     straight from ``sys.stdin``, bypassing click's prompt machinery: click
-    8.4's ``_readline_prompt`` redirects the prompt function's stdout to
+    8.1-8.4's ``_readline_prompt`` redirects the prompt function's stdout to
     stderr on POSIX but not on Windows, where the prompt tail (and, under
     ``CliRunner``, the echoed reply) leaks into stdout and corrupts the
     single-JSON-document contract of ``--json`` runs (#1640).
+
+    Click 8.5 dropped that Windows fork, but ``click>=8.1`` in
+    ``pyproject.toml`` still admits every version that has it, so the bypass
+    stays. The pins guard the bypass itself rather than the vanished fork —
+    see ``tests/helpers.poison_click_prompts``.
     """
     if not err:
         return click.confirm(text, default=default)

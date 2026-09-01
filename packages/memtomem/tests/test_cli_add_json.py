@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 from click.testing import CliRunner
 
-from helpers import set_home
+from helpers import poison_click_prompts, set_home
 from memtomem import privacy
 from memtomem.cli.memory import add as add_cmd
 
@@ -147,12 +147,11 @@ class TestAddJsonAck:
         assert "Continue?" in result.stderr
         comp.index_engine.index_file.assert_not_called()
 
-    def test_project_shared_decline_json_win_prompt_branch(self, monkeypatch, tmp_path):
-        """#1640: forced WIN prompt branch must not pollute the JSON ack —
-        this flow failed on windows-latest until Gate B moved to
+    def test_project_shared_decline_json_click_prompt_machinery_unused(self, monkeypatch, tmp_path):
+        """#1640: click's prompt machinery must stay unreached, or its stdout
+        leak (the Windows prompt fork, pre-8.5) pollutes the JSON ack — this
+        flow failed on windows-latest until Gate B moved to
         ``_prompts.confirm``."""
-        import click.termui
-
         proj = tmp_path / "proj"
         base = proj / ".memtomem" / "memories"
         comp = _components(tmp_path)
@@ -161,13 +160,14 @@ class TestAddJsonAck:
         monkeypatch.setattr(
             "memtomem.server.tools.search._resolve_project_context_root", lambda comp: proj
         )
-        monkeypatch.setattr(click.termui, "WIN", True)
+        calls = poison_click_prompts(monkeypatch)
 
         result = CliRunner().invoke(
             add_cmd, [_CLEAN, "--scope", "project_shared", "--json"], input="n\n"
         )
 
         assert result.exit_code == 1, result.output
+        assert calls == []
         data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "cancelled at project_shared confirmation prompt"}
 

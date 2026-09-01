@@ -28,7 +28,7 @@
     "ndcg": 0.0,
     "precision": 0.0
   },
-  "min_compared_cases": 12,
+  "min_compared_cases": 13,
   "max_incomplete_precision_cases": 0,
   "allowlist": []
 }

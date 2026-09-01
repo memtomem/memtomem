@@ -45,7 +45,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from memtomem.config import TargetScope
-from memtomem.context._kimi_home import kimi_code_home
+from memtomem.context._host_homes import host_kimi_home, pin_expanduser
 from memtomem.context._names import InvalidNameError, is_internal_artifact_dir, validate_name
 from memtomem.context.scope_resolver import ArtifactKind
 
@@ -100,7 +100,7 @@ RUNTIME_FANOUT_TABLE: dict[
     # Legacy ``~/.kimi`` stays a registry install marker and an uninstall
     # inventory item only. Project-relative ``.kimi/`` is a separate
     # project-dir convention and is unchanged.
-    ("agents", "kimi", "user"): lambda: kimi_code_home() / "agents",
+    ("agents", "kimi", "user"): lambda: host_kimi_home() / "agents",
     ("agents", "kimi", "project_shared"): _KIMI_AGENTS_REL,
     ("agents", "kimi", "project_local"): NO_FANOUT,
     # ── skills ───────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ RUNTIME_FANOUT_TABLE: dict[
     ),  # Agent Skills Open Spec — see docstring rule 5
     ("skills", "codex", "project_shared"): _CODEX_SKILLS_REL,
     ("skills", "codex", "project_local"): NO_FANOUT,
-    ("skills", "kimi", "user"): lambda: kimi_code_home() / "skills",  # see agents note
+    ("skills", "kimi", "user"): lambda: host_kimi_home() / "skills",  # see agents note
     ("skills", "kimi", "project_shared"): _KIMI_SKILLS_REL,
     ("skills", "kimi", "project_local"): NO_FANOUT,
     # ── commands ─────────────────────────────────────────────────────
@@ -248,7 +248,10 @@ def runtime_fanout_root(
                 f"runtime_fanout_root({artifact!r}, {runtime!r}, {scope!r}): "
                 f"callable entry returned {type(resolved).__name__}, expected Path."
             )
-        return resolved.expanduser().resolve()
+        # Pinned, not ambient: user-scope entries are ``~``-anchored
+        # literals and this resolves inside a worker thread whose caller
+        # may already be gone (#2250).
+        return pin_expanduser(resolved).resolve()
     # project_shared / project_local — entry is a project-relative tail.
     # Callables are user-scope-only by design; fail loud rather than join.
     if not isinstance(entry, Path):

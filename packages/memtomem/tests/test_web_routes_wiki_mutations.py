@@ -21,6 +21,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import portalocker
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -1159,6 +1160,33 @@ async def test_commit_git_failure_is_fixed_message_no_path_leak(
     assert resp.status_code == 500
     assert resp.json()["detail"]["reason_code"] == "commit_failed"
     assert str(seeded_wiki) not in resp.text  # no absolute-path / $HOME leak
+
+
+@pytest.mark.asyncio
+async def test_commit_lock_backend_failure_is_500_not_busy(
+    dev_client, seeded_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2229: a lock *call* that fails for a non-contention reason used to be
+    # polled to the deadline and reported as contention, so this route answered
+    # 503 "busy" — telling a client to retry a condition that will never clear.
+    from memtomem.context import _atomic as _atomic_mod
+
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        exc = portalocker.LockException("lock failed")
+        exc.__cause__ = OSError(5, "input/output error")  # EIO
+        raise exc
+
+    monkeypatch.setattr(_atomic_mod.portalocker, "lock", _fail)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["reason_code"] == "lock_unavailable"
+    assert resp.json()["detail"]["error_kind"] != "busy"
 
 
 @pytest.mark.asyncio

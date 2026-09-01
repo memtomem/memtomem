@@ -13,7 +13,7 @@ import threading
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Sequence
+from typing import Any, AsyncIterator, Iterator, Sequence, TypeVar
 from uuid import UUID
 
 import sqlite_vec
@@ -89,6 +89,23 @@ logger = logging.getLogger(__name__)
 # before 3.32 and 32766 after; staying under the lower one keeps the query
 # valid on every runtime this package supports rather than on the newest.
 _SQL_MAX_PARAMS = 900
+
+_T = TypeVar("_T")
+
+
+def _param_batches(values: Sequence[_T]) -> Iterator[Sequence[_T]]:
+    """Slice *values* into runs that fit one ``IN (...)`` clause.
+
+    Every caller of this hands over a list whose length is chosen by the data
+    rather than by the code — a file's whole row set, a namespace's, an MCP
+    argument — so a single ``IN (?, ?, ...)`` turns a large input into
+    ``too many SQL variables`` instead of a slow call (#2265). Reads
+    ``_SQL_MAX_PARAMS`` at call time so a test can shrink it and observe the
+    split on a build whose real ceiling is 32766.
+    """
+    for start in range(0, len(values), _SQL_MAX_PARAMS):
+        yield values[start : start + _SQL_MAX_PARAMS]
+
 
 __all__ = ["SqliteBackend"]
 
@@ -301,6 +318,43 @@ def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
         except (ValueError, TypeError):
             pass
     return content
+
+
+#: The two ``chunks_fts`` columns, as fts5 column-filter names (#2224).
+#: ``content`` is what a search is *for*; ``source_file`` is a fallback so
+#: typing a filename still finds that file, never a competitor to prose.
+_FTS_CONTENT_COLUMN = "content"
+_FTS_SOURCE_COLUMN = "source_file"
+
+
+def _restrict_to_column(column: str, body: str) -> str:
+    """Wrap an already-tokenized expression in one ``chunks_fts`` column filter.
+
+    fts5 spells this ``{col} : (expr)``. The braces are what make it safe to
+    build by concatenation: a *bare* ``col : expr`` prefix would be re-parsed
+    if ``expr`` itself began with something column-shaped, while a braced
+    column list is closed before the expression starts. ``column`` is never
+    user input — it is one of the two module constants above — so nothing
+    interpolated here comes from the caller.
+
+    ``body`` is whatever ``tokenize_for_fts`` produced, unchanged: quoted
+    phrases, prefix wildcards and the ``OR`` fallback all survive being
+    parenthesised, which is exactly why the escaping stays that function's job
+    and is not re-implemented here.
+    """
+    if column not in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):  # pragma: no cover - guard
+        raise ValueError(f"not a chunks_fts column: {column!r}")
+    return "{" + column + "} : (" + body + ")"
+
+
+def _column_match(column: str, query: str, *, use_or: bool) -> str:
+    """Tokenize *query* and restrict it to one column — one call, one analysis.
+
+    The search path builds the bodies itself (it needs each form once, not once
+    per column); this is the convenience spelling the tests and any future
+    single-shot caller use.
+    """
+    return _restrict_to_column(column, _fts.tokenize_for_fts(query, for_query=True, use_or=use_or))
 
 
 class SqliteBackend(
@@ -1189,12 +1243,22 @@ class SqliteBackend(
         try:
             chunk_ids = [str(c.id) for c in chunks]
 
-            # Batch fetch existing {id: rowid} in a single query (P1)
-            existing_rows = db.execute(
-                f"SELECT id, rowid FROM chunks WHERE id IN ({placeholders(len(chunk_ids))})",
-                chunk_ids,
-            ).fetchall()
-            existing_rowid_map = {row[0]: row[1] for row in existing_rows}
+            # Batch fetch existing {id: rowid} (P1) — one query per
+            # host-parameter batch, because a single ``IN (...)`` would raise
+            # ``too many SQL variables`` on a file large enough to fill it
+            # (#2265), and the id list here is the file's whole upsert bucket.
+            existing_rowid_map: dict[str, int] = {}
+            for id_batch in _param_batches(chunk_ids):
+                existing_rowid_map.update(
+                    {
+                        row[0]: row[1]
+                        for row in db.execute(
+                            f"SELECT id, rowid FROM chunks "
+                            f"WHERE id IN ({placeholders(len(id_batch))})",
+                            id_batch,
+                        ).fetchall()
+                    }
+                )
 
             to_update = [
                 (c, existing_rowid_map[str(c.id)])
@@ -1257,10 +1321,12 @@ class SqliteBackend(
                     # pre-existing chunk permanently BM25-only. The DELETE
                     # keeps this idempotent when the vector row does exist.
                     update_rowids = [rowid for _, rowid in vec_updates]
-                    db.execute(
-                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(update_rowids))})",
-                        update_rowids,
-                    )
+                    for rowid_batch in _param_batches(update_rowids):
+                        db.execute(
+                            f"DELETE FROM chunks_vec "
+                            f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
+                            rowid_batch,
+                        )
                     db.executemany(
                         "INSERT INTO chunks_vec(rowid, embedding) VALUES (?,?)",
                         [(rowid, serialize_f32(c.embedding)) for c, rowid in vec_updates],  # type: ignore[arg-type]
@@ -1312,13 +1378,20 @@ class SqliteBackend(
                         for c in to_insert
                     ],
                 )
-                # Fetch newly assigned rowids in a single query
+                # Fetch newly assigned rowids, batched like the lookup above
                 new_ids = [str(c.id) for c in to_insert]
-                new_rows = db.execute(
-                    f"SELECT id, rowid FROM chunks WHERE id IN ({placeholders(len(new_ids))})",
-                    new_ids,
-                ).fetchall()
-                new_rowid_map = {row[0]: row[1] for row in new_rows}
+                new_rowid_map: dict[str, int] = {}
+                for id_batch in _param_batches(new_ids):
+                    new_rowid_map.update(
+                        {
+                            row[0]: row[1]
+                            for row in db.execute(
+                                f"SELECT id, rowid FROM chunks "
+                                f"WHERE id IN ({placeholders(len(id_batch))})",
+                                id_batch,
+                            ).fetchall()
+                        }
+                    )
 
                 # Defensive cleanup: remove orphaned FTS/vec entries for these
                 # rowids. Orphans can arise from interrupted concurrent operations
@@ -1328,15 +1401,18 @@ class SqliteBackend(
                 # race-loser case): there are no rowids to scrub or repopulate.
                 new_rowids = list(new_rowid_map.values())
                 if new_rowids:
-                    db.execute(
-                        f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(new_rowids))})",
-                        new_rowids,
-                    )
-                    if self._has_vec_table:
+                    for rowid_batch in _param_batches(new_rowids):
                         db.execute(
-                            f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(new_rowids))})",
-                            new_rowids,
+                            f"DELETE FROM chunks_fts "
+                            f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
+                            rowid_batch,
                         )
+                        if self._has_vec_table:
+                            db.execute(
+                                f"DELETE FROM chunks_vec "
+                                f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
+                                rowid_batch,
+                            )
 
                     db.executemany(
                         "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
@@ -1395,11 +1471,16 @@ class SqliteBackend(
         chunk_by_id = {str(chunk.id): chunk for chunk in chunks}
         ids = list(chunk_by_id)
         try:
-            rows = db.execute(
-                f"SELECT id, rowid, start_line, end_line FROM chunks "
-                f"WHERE id IN ({placeholders(len(ids))})",
-                ids,
-            ).fetchall()
+            # Batched (#2265): ``ids`` is every hash-matched chunk of one file.
+            rows: list[tuple[Any, ...]] = []
+            for id_batch in _param_batches(ids):
+                rows.extend(
+                    db.execute(
+                        f"SELECT id, rowid, start_line, end_line FROM chunks "
+                        f"WHERE id IN ({placeholders(len(id_batch))})",
+                        id_batch,
+                    ).fetchall()
+                )
             changed = [
                 (chunk_by_id[row[0]], row[1])
                 for row in rows
@@ -1471,11 +1552,16 @@ class SqliteBackend(
         ids = list(chunk_by_id)
         async with self._tag_write_lock:
             try:
-                rows = db.execute(
-                    f"SELECT id, tags, valid_from_unix, valid_to_unix FROM chunks "
-                    f"WHERE id IN ({placeholders(len(ids))})",
-                    ids,
-                ).fetchall()
+                # Batched (#2265): ``ids`` is one file's metadata-only bucket.
+                rows: list[tuple[Any, ...]] = []
+                for id_batch in _param_batches(ids):
+                    rows.extend(
+                        db.execute(
+                            f"SELECT id, tags, valid_from_unix, valid_to_unix FROM chunks "
+                            f"WHERE id IN ({placeholders(len(id_batch))})",
+                            id_batch,
+                        ).fetchall()
+                    )
                 changed = []
                 for chunk_id, stored_json, valid_from, valid_to in rows:
                     chunk = chunk_by_id[chunk_id]
@@ -1542,8 +1628,7 @@ class SqliteBackend(
         # order — same rows either way, but reproducible in a log or a trace.
         ids_str = list(dict.fromkeys(str(cid) for cid in chunk_ids))
         out: dict[UUID, Chunk] = {}
-        for start in range(0, len(ids_str), _SQL_MAX_PARAMS):
-            batch = ids_str[start : start + _SQL_MAX_PARAMS]
+        for batch in _param_batches(ids_str):
             rows = db.execute(
                 f"SELECT * FROM chunks WHERE id IN ({placeholders(len(batch))})",
                 batch,
@@ -1556,38 +1641,57 @@ class SqliteBackend(
             return 0
 
         db = self._get_db()
-        ids_str = [str(cid) for cid in chunk_ids]
+        # Deduplicated before batching, like ``get_chunks_batch``: a repeat
+        # costs a placeholder each, and once the lookup is split a duplicate
+        # landing in two batches would come back as two rows — inflating the
+        # count this method returns, which purge and the web routes report as
+        # "deleted N". One ``IN`` clause collapsed repeats on its own.
+        ids_str = list(dict.fromkeys(str(cid) for cid in chunk_ids))
 
-        # Batch fetch rowids + source_file in a single query (P2). The
+        # Batch fetch rowids + source_file ahead of the delete (P2). The
         # ``source_file`` column travels along so that *after* the delete
         # we can check which sources lost their last chunk and need their
         # AI summary cache cleared — partial deletions leave the summary
         # in place (the signature drifts and gets refreshed on the next
         # reindex), but a fully-emptied source has no future reindex to
         # rely on, so its cached prose has to go now.
-        rows = db.execute(
-            f"SELECT id, rowid, source_file FROM chunks WHERE id IN ({placeholders(len(ids_str))})",
-            ids_str,
-        ).fetchall()
+        #
+        # Batched (#2265): the id list is chosen by the caller's data — an
+        # index run's whole delete bucket, a decay or dedup sweep's — so one
+        # ``IN (...)`` would raise ``too many SQL variables`` rather than
+        # delete.
+        rows: list[tuple[Any, ...]] = []
+        for id_batch in _param_batches(ids_str):
+            rows.extend(
+                db.execute(
+                    f"SELECT id, rowid, source_file FROM chunks "
+                    f"WHERE id IN ({placeholders(len(id_batch))})",
+                    id_batch,
+                ).fetchall()
+            )
 
         if not rows:
             return 0
 
-        found_ids = [row[0] for row in rows]
-        rowids = [row[1] for row in rows]
         affected_sources = {row[2] for row in rows if row[2]}
 
         try:
-            db.execute(
-                f"DELETE FROM chunks WHERE id IN ({placeholders(len(found_ids))})", found_ids
-            )
-            db.execute(
-                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
-            )
-            if self._has_vec_table:
+            # Every batch inside this one try/except, so the rollback below
+            # still covers the whole delete.
+            for batch in _param_batches(rows):
+                found_ids = [row[0] for row in batch]
+                rowids = [row[1] for row in batch]
                 db.execute(
-                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                    f"DELETE FROM chunks WHERE id IN ({placeholders(len(found_ids))})", found_ids
                 )
+                db.execute(
+                    f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                )
+                if self._has_vec_table:
+                    db.execute(
+                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})",
+                        rowids,
+                    )
 
             # AI summary cache cleanup for sources that just lost their
             # last chunk — but only when this delete is the *final*
@@ -1654,18 +1758,25 @@ class SqliteBackend(
                 self._commit_if_standalone(db)
             return 0
 
-        ids = [row[0] for row in rows]
-        rowids = [row[1] for row in rows]
-
         try:
-            db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
-            db.execute(
-                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
-            )
-            if self._has_vec_table:
+            # Batched, and every batch inside this one try/except: the list is
+            # the file's own row count, so a single ``IN (...)`` made a large
+            # enough source undeletable through every caller — purge, the web
+            # source tab, re-index replacement — with ``too many SQL
+            # variables`` (#2265). The transaction still spans all of them, so
+            # the rollback below keeps covering the whole delete.
+            for batch in _param_batches(rows):
+                ids = [row[0] for row in batch]
+                rowids = [row[1] for row in batch]
+                db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
                 db.execute(
-                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                    f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
                 )
+                if self._has_vec_table:
+                    db.execute(
+                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})",
+                        rowids,
+                    )
             db.execute(
                 "DELETE FROM _memtomem_meta WHERE key=?",
                 (_ai_summary_key(source_file),),
@@ -1932,10 +2043,16 @@ class SqliteBackend(
                     old_norm,
                 ),
             )
-            db.execute(
-                f"UPDATE chunks_fts SET source_file=? WHERE rowid IN ({placeholders(len(rowids))})",
-                [new_norm, *rowids],
-            )
+            # Batched (#2265): ``rowids`` is the file's whole row set. The
+            # extra ``new_norm`` parameter rides along in each batch, so the
+            # bound count is ``_SQL_MAX_PARAMS + 1`` — still under the 999
+            # ceiling the constant is sized against.
+            for rowid_batch in _param_batches(rowids):
+                db.execute(
+                    f"UPDATE chunks_fts SET source_file=? "
+                    f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
+                    [new_norm, *rowid_batch],
+                )
             # Move the AI summary cache row alongside the chunks. The
             # cache key is derived from the source path, so an in-place
             # path rewrite would otherwise leave an ``ai_summary:<old>``
@@ -2122,19 +2239,69 @@ class SqliteBackend(
                    ORDER BY fts.rank, {tie_break}, c.id
                    LIMIT ?"""
 
-            # Try AND first (default FTS5 behaviour)
-            fts_query = _fts.tokenize_for_fts(query, for_query=True)
-            rows = db.execute(
-                sql, [fts_query] + ns_params + scope_params + metadata_params + [top_k]
-            ).fetchall()
+            # Content first, path only as a fallback (#2224). ``chunks_fts`` is
+            # ``fts5(content, source_file)`` and an unqualified MATCH searches
+            # both, so a term appearing only in a chunk's *path* used to
+            # retrieve it and — every column weighted 1.0 in the default
+            # ``rank`` — score as a relevance signal. ``source_file`` is stored
+            # raw, so unicode61 splits it into components and every directory
+            # and filename word became a searchable term: on a real
+            # 6,995-chunk store, 71 of the top 100 hits for ``plans`` were
+            # chunks about something else, surfaced because they live under
+            # ``.claude/plans/``.
+            #
+            # Column-qualifying the MATCH is what makes path a non-signal, and
+            # zero-weighting it is not: RRF fuses on a result's *ordinal rank*
+            # (``search/fusion.py`` — ``w / (k + rank)``), so a path-only row
+            # scored 0.0 still occupies a BM25 slot and still contributes
+            # positive fused relevance downstream. It has to not be retrieved.
+            #
+            # The fallback keeps filename lookup working — typing a path word
+            # still finds that file's chunks — but only once nothing in any
+            # chunk's *content* matches, so a path can never outrank prose.
+            # No weights are needed either way: under a column-qualified MATCH
+            # ``bm25(chunks_fts, 1.0, 0.0)`` and the bare ``rank`` score
+            # identically, because the excluded column contributes nothing to
+            # a query that never touched it.
+            # AND first (FTS5's default), then OR, within each column in turn.
+            # Written as one flat loop rather than a helper because
+            # ``test_mixin_commit_guard`` resolves the SQL keyword of every
+            # ``db.execute`` from the literal its first argument is bound to,
+            # and a closure hides that binding — which is the exact shape #2207
+            # added the "unknowable statement" rule for.
+            #
+            # The OR pass is skipped when it would repeat the AND one, decided
+            # by comparing the two *tokenized* bodies rather than by looking for
+            # a space in the raw query. Whitespace is the wrong test under a
+            # morphological tokenizer: kiwipiepy expands one space-free Korean
+            # word into several terms, so a query like ``했습니다`` has an OR
+            # form that differs from its AND form and was losing the fallback
+            # entirely.
+            #
+            # The bodies are tokenized once each and then wrapped per column —
+            # two analyses per search at most, whatever the ladder does. Asking
+            # for the four ``(column, form)`` expressions directly would analyse
+            # the query once per expression, which for a morphological backend
+            # is the expensive half of the call.
+            and_body = _fts.tokenize_for_fts(query, for_query=True)
+            or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
+            bodies = [and_body] if or_body == and_body else [and_body, or_body]
 
-            # Fall back to OR if AND returns nothing and query has multiple terms
-            if not rows and " " in query.strip():
-                fts_query_or = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
-                rows = db.execute(
-                    sql,
-                    [fts_query_or] + ns_params + scope_params + metadata_params + [top_k],
-                ).fetchall()
+            rows: list = []
+            for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):
+                for body in bodies:
+                    rows = db.execute(
+                        sql,
+                        [_restrict_to_column(column, body)]
+                        + ns_params
+                        + scope_params
+                        + metadata_params
+                        + [top_k],
+                    ).fetchall()
+                    if rows:
+                        break
+                if rows:
+                    break
 
         except sqlite3.OperationalError:
             raise
@@ -2746,6 +2913,51 @@ class SqliteBackend(
         ).fetchone()
         return int(row[0]) if row else 0
 
+    async def count_chunks_by_sources(self, source_files: Sequence[Path]) -> dict[Path, int]:
+        """How many chunks each of ``source_files`` holds, in one pass per batch.
+
+        The batch sibling of :meth:`count_chunks_by_source`, for callers holding
+        a set of paths that is not bounded by anything — ``mm purge`` matches
+        against every source in the store. Counting them by listing the chunks
+        and taking ``len()`` was what capped ``mm purge``'s preview at 10,000
+        per file (#2261) while the delete it previews had no such cap.
+
+        Two contract details worth stating, both from the ``norm_path``
+        round-trip that keys the result back to the caller's own ``Path``
+        objects:
+
+        - **Sparse.** A file with no chunks is absent rather than ``0``; read a
+          missing key as zero. Callers that want a total just ``sum(...)``.
+        - **Aliases collapse.** Two inputs that normalise to the same stored
+          path (symlink, NFC/NFD spelling) yield one entry, keyed by whichever
+          the caller passed last. Paths that came out of the store — the purge
+          case — are already canonical and distinct, so this cannot bite there.
+        """
+        if not source_files:
+            return {}
+
+        db = self._get_read_db()
+        norm_to_path = {norm_path(sf): sf for sf in source_files}
+        norm_paths = list(norm_to_path)
+
+        result: dict[Path, int] = {}
+        # Batched like ``get_chunks_batch``: ``source_files`` is caller-sized,
+        # and one ``IN`` clause per host-parameter ceiling is the difference
+        # between a purge that reports and one that raises "too many SQL
+        # variables" before printing anything.
+        for batch in _param_batches(norm_paths):
+            rows = db.execute(
+                f"SELECT source_file, COUNT(*) FROM chunks "
+                f"WHERE source_file IN ({placeholders(len(batch))}) GROUP BY source_file",
+                batch,
+            ).fetchall()
+            for stored_path, count in rows:
+                sf_key = norm_to_path.get(str(stored_path))
+                if sf_key is not None:
+                    result[sf_key] = int(count)
+
+        return result
+
     async def count_chunk_links_for_source(self, source_file: Path) -> int:
         # ADR-0011 #886: `mm context memory-migrate` reports the size of the
         # chunk_links "neighborhood" attached to a moving source. For v1
@@ -2810,35 +3022,6 @@ class SqliteBackend(
             tuple(tags),
         ).fetchone()
         return int(row[0]) if row else 0
-
-    async def list_chunks_by_sources(
-        self,
-        source_files: Sequence[Path],
-        limit_per_file: int = 10000,
-    ) -> dict[Path, list[Chunk]]:
-        """Batch-fetch chunks for multiple source files in a single query."""
-        if not source_files:
-            return {}
-
-        db = self._get_read_db()
-        norm_paths = [norm_path(sf) for sf in source_files]
-
-        rows = db.execute(
-            f"SELECT * FROM chunks WHERE source_file IN ({placeholders(len(norm_paths))}) "
-            "ORDER BY source_file, start_line",
-            norm_paths,
-        ).fetchall()
-
-        result: dict[Path, list[Chunk]] = {sf: [] for sf in source_files}
-        norm_to_path = {norm_path(sf): sf for sf in source_files}
-
-        for row in rows:
-            chunk = self._row_to_chunk(row)
-            sf_key = norm_to_path.get(str(chunk.metadata.source_file))
-            if sf_key is not None and len(result[sf_key]) < limit_per_file:
-                result[sf_key].append(chunk)
-
-        return result
 
     async def recall_chunks(
         self,

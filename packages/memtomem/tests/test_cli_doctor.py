@@ -388,6 +388,7 @@ class TestJsonContract:
             "age_seconds",
             "recorded_parent",
             "recorded_ppid_is_one",
+            "kind",
         }
 
     def test_top_level_shape(self, seeded):
@@ -409,3 +410,60 @@ class TestHelpBoundary:
 
     def test_registered_on_the_live_cli(self):
         assert "doctor" in cli.commands
+
+
+class TestIdleServers:
+    """Handshake-only servers (#2230) — the population the registry once missed."""
+
+    def test_marker_only_process_is_counted_and_named(self, seeded):
+        seeded(_snapshot(presence=(_info(1000),)))
+        payload = _payload(_run(["--json"]))
+        servers = payload["checks"][1]
+        assert servers["data"]["processes"] == 1
+        assert servers["data"]["processes_without_store_registration"] == 1
+        assert servers["data"]["processes_with_store_registered"] == 0
+        # Stated as an observation about records: a sentinel can also be
+        # missing for a server that did open a store, since its registration
+        # is best-effort.
+        assert "no store registration observed" in servers["message"]
+        assert "idle" not in servers["message"]
+
+    def test_idle_process_does_not_inflate_the_store_count(self, seeded):
+        # A marker's digest names configured path text, not an open store.
+        seeded(_snapshot([_info(1000, digest="a" * 16)], presence=(_info(2000, digest="e" * 16),)))
+        servers = _payload(_run(["--json"]))["checks"][1]
+        assert servers["data"]["stores"] == 1, "only sentinels name a store"
+        assert servers["data"]["processes"] == 2
+
+    def test_one_process_in_both_populations_counts_once(self, seeded):
+        # The join key is procid: a server that registered at startup and then
+        # opened a store is one process, not two.
+        seeded(
+            _snapshot(
+                [_info(1000, procid="deadbeef")],
+                presence=(_info(1000, procid="deadbeef", digest="e" * 16),),
+            )
+        )
+        servers = _payload(_run(["--json"]))["checks"][1]
+        assert servers["data"]["processes"] == 1
+        assert servers["data"]["processes_without_store_registration"] == 0
+        assert servers["data"]["registrations"] == 2
+
+    def test_rows_carry_their_kind_and_hide_a_marker_digest(self, seeded):
+        seeded(_snapshot([_info(1000)], presence=(_info(2000),)))
+        kinds = {r["pid"]: r["kind"] for r in _payload(_run(["--json"]))["instances"]}
+        # The row names the record it came from, never a state inferred from
+        # it — one process can legitimately produce both.
+        assert kinds == {1000: "sentinel", 2000: "presence"}
+        table = _run([]).output
+        assert "presence" in table
+        # The table must not print a marker's path digest where readers expect
+        # a store identity they could match against a sentinel's.
+        assert f"{'a' * 10}" in table and table.count("a" * 10) == 1
+
+    def test_marker_residue_is_reported_as_hygiene(self, seeded):
+        seeded(_snapshot(presence_stale_seen=2))
+        hygiene = _payload(_run(["--json"]))["checks"][2]
+        assert hygiene["data"]["presence_stale"] == 2
+        assert hygiene["data"]["stale"] == 2, "both directories leak the same way"
+        assert hygiene["status"] == "info"

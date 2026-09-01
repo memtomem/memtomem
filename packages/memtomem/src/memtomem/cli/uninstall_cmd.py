@@ -57,7 +57,10 @@ from memtomem._instance_registry import BarrierTimeout as _BarrierTimeout
 from memtomem._instance_registry import (
     acquire_uninstall_lifecycle_barrier as _acquire_lifecycle_barrier,
 )
-from memtomem._instance_registry import instances_dir as _instances_dir
+from memtomem._instance_registry import (
+    instances_dir as _instances_dir,
+    sweep_stale_presence as _sweep_stale_presence,
+)
 from memtomem._instance_registry import (
     probe_all_for_uninstall as _probe_registry_liveness,
 )
@@ -1156,6 +1159,17 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     for reg_dir in _real_registry_dirs(inv.runtime_roots):
         _prune_if_empty(reg_dir)
 
+    # #2230: startup presence markers are deliberately *not* inventoried or
+    # staged. A handshake-only server that is still running holds its
+    # marker's flock, and this command does not refuse on that evidence — so
+    # staging one would unregister a live process, and on Windows would fail
+    # on the open handle. Sweep only what its owner can no longer remove,
+    # then prune the directory when nothing live is left in it.
+    # Pruning happens inside the sweep, under the registry's mutation lock:
+    # an unlocked ``rmdir`` here could land between a starting server's
+    # ``mkdir`` and the marker it is about to open inside that same lock.
+    _sweep_stale_presence()
+
     for root in inv.runtime_roots:
         _prune_if_empty(root)
 
@@ -1209,6 +1223,13 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         and not _entry_present(db_path)
         and not _registry_has_sentinels()
     ):
+        # #2230: presence markers are not "state" for this decision — a live
+        # one belongs to a running server and an abandoned one is inert — so
+        # they do not keep this fast path from firing. They are still swept
+        # on the way out: a handshake-only server killed with SIGKILL leaves
+        # a marker behind, and a host with no store at all is exactly where
+        # nothing else would ever come along to collect it.
+        _sweep_stale_presence()
         click.echo("No memtomem state to remove (~/.memtomem/ does not exist).")
         label, lines = _binary_uninstall_hint(profile)
         _print_binary_hint(label, lines)

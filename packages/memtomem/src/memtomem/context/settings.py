@@ -53,15 +53,18 @@ import logging
 import re
 import time
 import tomllib
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Protocol
 
 from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
-from memtomem.context._kimi_home import kimi_code_home
+from memtomem.context._host_homes import (
+    HostHomes,
+    host_home,
+    host_kimi_home,
+    pinned_host_homes,
+)
 from memtomem.context.error_redact import redact_secret_value
 
 logger = logging.getLogger(__name__)
@@ -142,70 +145,12 @@ _KIMI_END = "# END memtomem managed hooks"
 _SETTINGS_LOCK_BUDGET_S = 30.0
 
 
-@dataclass(frozen=True)
-class HostHomes:
-    """The host directories a settings sync may write to, resolved once.
-
-    Every user-scope target is anchored on ``$HOME`` (and Kimi additionally on
-    ``$KIMI_CODE_HOME``), and both are read from the *ambient process
-    environment*. That is safe on a caller's own thread and unsafe the moment
-    the work moves to ``asyncio.to_thread``: cancelling the awaiting task
-    cannot stop the worker, so a worker that resolves its target later reads
-    whatever the environment says *then* — which is how a cancelled sync came
-    to write a settings file outside the home its caller intended (#2211).
-    """
-
-    home: Path
-    kimi_home: Path
-
-    @classmethod
-    def capture(cls) -> HostHomes:
-        """Snapshot the current environment's host homes."""
-        return cls(home=Path.home(), kimi_home=kimi_code_home())
-
-
-_pinned_homes: ContextVar[HostHomes | None] = ContextVar(
-    "memtomem_settings_host_homes", default=None
-)
-
-
-@contextmanager
-def pinned_host_homes(homes: HostHomes | None = None) -> Iterator[HostHomes]:
-    """Pin the host homes for everything run inside this context.
-
-    Dispatchers that hand settings work to a worker thread enter this
-    *before* the hand-off. ``asyncio.to_thread`` copies the caller's
-    ``contextvars`` context into the worker, so the worker keeps the pinned
-    snapshot even after the caller's ``with`` block — or the whole request —
-    is gone. The token reset keeps the pin scoped to this context rather than
-    leaking into whatever the loop runs next.
-    """
-    token = _pinned_homes.set(homes or HostHomes.capture())
-    try:
-        yield _pinned_homes.get()  # type: ignore[misc]
-    finally:
-        _pinned_homes.reset(token)
-
-
-def host_home() -> Path:
-    """The pinned ``$HOME``, or the live one when nothing pinned it.
-
-    The live fallback keeps synchronous callers (CLI, detectors) reading the
-    environment exactly as before; only the threaded dispatch paths pin.
-    """
-    pinned = _pinned_homes.get()
-    return pinned.home if pinned is not None else Path.home()
-
-
-def host_kimi_home() -> Path:
-    """The pinned Kimi home, or the live one when nothing pinned it.
-
-    Snapshotted separately because ``kimi_code_home`` consults
-    ``$KIMI_CODE_HOME`` first, so deriving it from :func:`host_home` would
-    miss an override and resolve a different directory than the caller saw.
-    """
-    pinned = _pinned_homes.get()
-    return pinned.kimi_home if pinned is not None else kimi_code_home()
+#: The host-home pin moved to ``context/_host_homes.py`` when the skills
+#: engines needed it (#2250): its consumers there are ``scope_resolver`` and
+#: ``_runtime_targets``, which must not import this module to learn where
+#: ``$HOME`` is. The names stay re-exported — ``pinned_host_homes`` is in
+#: ``__all__`` and is the name the dispatch guard looks for, and this module's
+#: own targets resolve through ``host_home`` / ``host_kimi_home``.
 
 
 #: The abort flag moved to ``context/_abandon.py`` when the sibling engines

@@ -414,8 +414,9 @@ async def mem_context_init(
             # flag, so a cancelled call stops importing rather than finishing
             # into a caller that is gone (#2247).
             from memtomem.context._abandon import abandon_sync_on_exit
+            from memtomem.context._host_homes import pinned_host_homes
 
-            with abandon_sync_on_exit():
+            with pinned_host_homes(), abandon_sync_on_exit():
                 skill_result = await asyncio.to_thread(
                     extract_skills_to_canonical,
                     root,
@@ -711,8 +712,9 @@ async def mem_context_generate(
             # worker the abort flag so a cancelled call stops fanning out
             # (#2247).
             from memtomem.context._abandon import abandon_sync_on_exit
+            from memtomem.context._host_homes import pinned_host_homes
 
-            with abandon_sync_on_exit():
+            with pinned_host_homes(), abandon_sync_on_exit():
                 skill_result = await asyncio.to_thread(
                     generate_all_skills, root, scope=artifact_scope, surface="mcp_context_generate"
                 )
@@ -1086,8 +1088,9 @@ async def mem_context_sync(
             # Thread offload + abort scope: same rationale as
             # mem_context_generate (#1247 id 18, #2247).
             from memtomem.context._abandon import abandon_sync_on_exit
+            from memtomem.context._host_homes import pinned_host_homes
 
-            with abandon_sync_on_exit():
+            with pinned_host_homes(), abandon_sync_on_exit():
                 skill_result = await asyncio.to_thread(
                     generate_all_skills, root, scope=artifact_scope, surface="mcp_context_sync"
                 )

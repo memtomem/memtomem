@@ -11,6 +11,7 @@ fail-open/fail-closed decision logic.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import multiprocessing as mp
 import os
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import memtomem._instance_registry as reg
+from memtomem._runtime_paths import store_pid_digest
 
 _CTX = mp.get_context("spawn")
 
@@ -1367,3 +1369,310 @@ class TestSnapshotAllInstances:
         snap = reg.snapshot_all_instances()
         assert snap.unparseable_seen == 1
         assert not snap.complete, "an unattributable holder means we counted low"
+
+
+class TestPresenceMarkers:
+    """Startup presence markers (#2230): the population sentinels cannot see."""
+
+    def test_marker_filename_parses_back_with_the_path_digest(self, rt, db):
+        inst = reg.register_server_presence(db)
+        assert inst is not None
+        try:
+            assert inst.path.parent == reg.presence_dir()
+            info = reg._parse_entry(inst.path)
+            assert info is not None
+            assert info.pid == os.getpid()
+            assert info.ppid == os.getppid()
+            # The whole point of the second digest: it is the *path text*
+            # key that already names the pid file, not the store's inode
+            # identity, because at startup no store exists to stat.
+            assert info.digest == store_pid_digest(db)
+            assert info.digest != reg.store_digest_for(db)
+        finally:
+            inst.cleanup()
+
+    def test_unnamed_store_still_registers(self, rt):
+        """A store with no path must not silently drop the process."""
+        inst = reg.register_server_presence(":memory:")
+        assert inst is not None
+        try:
+            info = reg._parse_entry(inst.path)
+            assert info is not None and info.digest == reg._UNKNOWN_STORE_DIGEST
+        finally:
+            inst.cleanup()
+
+    def test_missing_store_file_still_registers(self, rt, tmp_path):
+        """The startup case itself: the DB is configured but not yet created."""
+        absent = tmp_path / "not-created-yet.db"
+        assert reg.store_digest_for(absent) is None, "premise: no inode digest exists"
+        inst = reg.register_server_presence(absent)
+        assert inst is not None
+        try:
+            assert reg._parse_entry(inst.path).digest == store_pid_digest(absent)
+        finally:
+            inst.cleanup()
+
+    def test_cleanup_removes_the_marker_and_unpublishes_it(self, rt, db):
+        inst = reg.register_server_presence(db)
+        assert inst is not None
+        path = inst.path
+        inst.cleanup()
+        assert not path.exists()
+        assert path not in reg._active_presence
+        assert reg.snapshot_all_instances().presence == ()
+
+    def test_symlinked_presence_dir_is_refused(self, rt, tmp_path, db):
+        rt.mkdir(mode=0o700, exist_ok=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        try:
+            reg.presence_dir().symlink_to(elsewhere, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        assert reg.register_server_presence(db) is None
+        assert list(elsewhere.iterdir()) == [], "must not write through the link"
+
+    def test_stale_marker_is_collected_by_a_later_registration(self, rt, db):
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        stale = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        stale.touch()
+        # Backdate past the publication grace window rather than sleeping:
+        # a fresh unlocked entry is a registrar mid-publication, not residue.
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        os.utime(stale, (old, old))
+        inst = reg.register_server_presence(db)
+        try:
+            assert not stale.exists(), "an unlocked, aged marker is residue"
+        finally:
+            if inst is not None:
+                inst.cleanup()
+
+    def test_fresh_unlocked_marker_survives_registration(self, rt, db):
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fresh = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        fresh.touch()
+        inst = reg.register_server_presence(db)
+        try:
+            assert fresh.exists(), "inside the grace window it may be mid-publication"
+        finally:
+            if inst is not None:
+                inst.cleanup()
+
+
+class TestPresenceStaysOutOfTheSentinelPopulation:
+    """A marker is weaker evidence than a sentinel and must not stand in for one."""
+
+    def test_snapshot_reports_the_two_populations_separately(self, rt, db):
+        marker = reg.register_server_presence(db)
+        sentinel = reg.register_instance(db)
+        assert marker is not None and sentinel is not None
+        try:
+            snap = reg.snapshot_all_instances()
+            assert len(snap.instances) == 1
+            assert len(snap.presence) == 1
+            # procid is the join key: one process, two records.
+            assert snap.instances[0].procid == snap.presence[0].procid
+            assert snap.presence[0].digest != snap.instances[0].digest
+        finally:
+            sentinel.cleanup()
+            marker.cleanup()
+
+    def test_marker_alone_is_not_a_same_store_writer(self, rt, db):
+        """``mm status``'s concurrent-writer signal must not fire on idle servers."""
+        marker = reg.register_server_presence(db)
+        assert marker is not None
+        try:
+            digest = reg.store_digest_for(db)
+            assert digest is not None
+            result = reg.enumerate_live_instances(digest)
+            assert result.instances == ()
+            assert result.complete
+        finally:
+            marker.cleanup()
+
+    def test_marker_alone_does_not_block_uninstall(self, rt, db):
+        """Uninstall keeps deciding on its own probe, not on a startup marker."""
+        marker = reg.register_server_presence(db)
+        assert marker is not None
+        try:
+            assert reg.probe_all_for_uninstall().state == "NONE"
+        finally:
+            marker.cleanup()
+
+
+class TestPresenceSweep:
+    """The destructive boundary collects residue without touching live markers."""
+
+    def test_sweep_leaves_a_live_marker_alone(self, rt, db):
+        """An idle server does not block uninstall, so it must survive it.
+
+        Staging a held marker would unregister a running process — and on
+        Windows would fail outright on the open handle.
+        """
+        inst = reg.register_server_presence(db)
+        assert inst is not None
+        try:
+            reg.sweep_stale_presence()
+            assert inst.path.exists()
+        finally:
+            inst.cleanup()
+
+    def test_sweep_collects_an_abandoned_marker(self, rt):
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        residue = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        residue.touch()
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        os.utime(residue, (old, old))
+        reg.sweep_stale_presence()
+        assert not residue.exists()
+
+    def test_sweep_is_inert_when_nothing_was_ever_registered(self, rt):
+        reg.sweep_stale_presence()
+        assert not reg.presence_dir().exists(), "a sweep must not create the directory"
+
+    def test_sweep_prunes_the_emptied_directory(self, rt):
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        residue = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        residue.touch()
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        os.utime(residue, (old, old))
+        reg.sweep_stale_presence()
+        assert not directory.exists()
+
+    def test_sweep_prunes_under_the_lock_that_registration_holds(self, rt, db, monkeypatch):
+        """The prune must not land between a registration's mkdir and its open.
+
+        Registration creates the directory and opens its marker inside one
+        locked span. An ``rmdir`` from an unlocked second pass could slip
+        between the two, and the registration would fail on a directory that
+        vanished underneath it — leaving a live server invisible to
+        ``mm doctor``, which is the exact failure this feature exists to fix.
+        """
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        swept: list[str] = []
+        real_rmdir = Path.rmdir
+
+        def _rmdir(self):
+            swept.append(str(self))
+            # The lock is held for this call, or the race is open.
+            assert reg._mutation_thread_lock.locked(), (
+                "the prune ran outside the registry mutation lock"
+            )
+            return real_rmdir(self)
+
+        monkeypatch.setattr(Path, "rmdir", _rmdir)
+        reg.sweep_stale_presence()
+        assert swept, "premise: the prune was attempted"
+
+    def test_sweep_leaves_a_directory_that_still_holds_a_marker(self, rt, db):
+        inst = reg.register_server_presence(db)
+        assert inst is not None
+        try:
+            reg.sweep_stale_presence()
+            assert reg.presence_dir().exists(), "rmdir refuses a non-empty directory"
+            assert inst.path.exists()
+        finally:
+            inst.cleanup()
+
+    def test_sweep_refuses_a_redirected_anchor(self, rt, tmp_path, monkeypatch):
+        """A junctioned runtime root holds an ordinary ``presence/`` inside the
+        *target*, which passes every check made on the leaf alone."""
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        residue = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        residue.touch()
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        os.utime(residue, (old, old))
+        monkeypatch.setattr(reg, "_dir_state", lambda p: "untrusted" if p == rt else "dir")
+
+        reg.sweep_stale_presence()
+
+        assert residue.exists(), "nothing under a redirected anchor may be touched"
+
+
+class TestPresenceRegistrationBudget:
+    def test_startup_gives_up_quickly_rather_than_retrying(self, rt, db, monkeypatch):
+        """Startup latency, not registry completeness, is what bounds this.
+
+        ``register_instance`` retries because a lost sentinel leaves a *writer*
+        invisible; a lost marker costs one row in a diagnostic. This runs ahead
+        of ``mcp.run()``, so it must not spend the sentinel budget.
+        """
+        attempts = []
+
+        @contextlib.contextmanager
+        def _always_timeout(deadline, *, root=None):
+            attempts.append(deadline)
+            raise reg._MutationLockTimeout("busy")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(reg, "_mutation_lock", _always_timeout)
+        started = time.monotonic()
+        assert reg.register_server_presence(db) is None
+        assert len(attempts) == 1, "one attempt only"
+        # Pin the budget the call actually passed, not merely that the shorter
+        # constant exists: reverting the call site to ``_LOCK_TIMEOUT_S`` must
+        # fail here. The deadline is monotonic, so compare it against the
+        # instant before the call.
+        assert reg._PRESENCE_LOCK_TIMEOUT_S < reg._LOCK_TIMEOUT_S
+        budget = attempts[0] - started
+        assert budget <= reg._PRESENCE_LOCK_TIMEOUT_S + 0.2
+        assert budget < reg._LOCK_TIMEOUT_S
+
+    def test_gc_touches_no_further_entry_once_the_deadline_passes(self, rt, db, monkeypatch):
+        """The budget must bound the work done *under* the lock, not only the
+        acquisition of it.
+
+        What is pinned is the loop, not wall-clock: the bound is cooperative
+        and per-entry, so a probe already in flight finishes. The guarantee is
+        that no *further* entry is touched — the sweep cannot run the
+        directory's length while holding the shared lock.
+
+        The sweep runs with the shared mutation lock held — the same lock that
+        serializes sentinel registration, the concurrent-writer enumeration and
+        the uninstall probe — on a startup path a client is waiting on. A host
+        with a large residue directory (exactly the host this feature is for)
+        would otherwise let one probe loop hold it for as long as the directory
+        is long.
+        """
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        residue = []
+        for i in range(40):
+            entry = directory / f"9{i:05d}-1-{'b' * 16}-{'c' * 8}-{i:08x}.lock"
+            entry.touch()
+            os.utime(entry, (old, old))
+            residue.append(entry)
+
+        probes = []
+        real_probe = reg._probe_entry
+
+        def _slow_probe(path):
+            probes.append(path)
+            # Burn the budget on the first entry, so every later one is past
+            # the deadline and must not be probed at all.
+            if len(probes) == 1:
+                monkeypatch.setattr(
+                    reg.time, "monotonic", lambda base=time.monotonic(): base + 3600
+                )
+            return real_probe(path)
+
+        monkeypatch.setattr(reg, "_probe_entry", _slow_probe)
+        inst = reg.register_server_presence(db)
+        try:
+            assert len(probes) == 1, f"the sweep must stop at the deadline, probed {len(probes)}"
+            assert sum(1 for e in residue if e.exists()) >= 39, (
+                "un-swept residue stays for the next registration; it is already inert"
+            )
+            # Registration itself is never skipped by a spent budget — the
+            # process must still be counted.
+            assert inst is not None and inst.path.exists()
+        finally:
+            if inst is not None:
+                inst.cleanup()

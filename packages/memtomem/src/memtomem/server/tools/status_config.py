@@ -19,6 +19,7 @@ from memtomem._instance_registry import (
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.generation import ComponentGeneration
+from memtomem.runtime.components import prune_settled_generations
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -930,6 +931,11 @@ async def _revert_to_stored_locked(
             "deferring its close to the last release",
             old_generation.leases,
         )
+    # The entry above is only needed while its close is outstanding. An
+    # inline close is already done by now, so pruning here keeps the list to
+    # the generations shutdown actually has to drain instead of growing it by
+    # one per revert (#2201).
+    prune_settled_generations(comp)
     if first_cancel is not None:
         raise first_cancel
 
