@@ -1482,7 +1482,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   // a later phase fails — without this the dashboard keeps showing
   // pre-sync counts while disk has already moved (issue #1074) — and
   // (b) surface a partial-result toast naming what landed and what
-  // didn't. Without the partial copy, a "Sync failed: X" toast after
+  // didn't. Without the partial copy, a "Push failed: X" toast after
   // skills already wrote to disk looks like nothing happened.
   const succeeded = [];
   let failed = null;
@@ -1780,7 +1780,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     }
     // Decide the final toast. Partial-success branches name the phases
     // that landed so the user can map the toast to what disk actually
-    // changed; a bare "Sync failed: X" after a half-completed run is
+    // changed; a bare "Push failed: X" after a half-completed run is
     // the failure mode the issue calls out.
     if (failed) {
       if (succeeded.length === 0) {
