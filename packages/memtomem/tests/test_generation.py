@@ -217,3 +217,86 @@ async def test_retire_refuses_a_second_call():
 
     await asyncio.sleep(0)
     assert calls == ["first"]
+
+
+async def test_a_never_retired_generation_is_settled():
+    """Nothing to close, so a shutdown drain has nothing to do — the same
+    reason ``drain`` on such a handle is already a no-op."""
+    assert ComponentGeneration().settled is True
+
+
+async def test_an_idle_retirement_is_settled_immediately():
+    """The idle path hands the close back to the caller and stores nothing,
+    so the handle never needs the shutdown backstop (#2201)."""
+    gen = ComponentGeneration()
+    calls: list[str] = []
+
+    pending = gen.retire(_recorder(calls))
+
+    assert gen.settled is True
+    assert pending is not None
+    await pending
+    assert gen.settled is True
+
+
+async def test_a_pending_deferred_close_is_not_settled():
+    """A leaseholder still holds the generation, so the callback is stored
+    and only shutdown may run it — exactly the entry the list exists for."""
+    gen = ComponentGeneration()
+    calls: list[str] = []
+
+    with gen.hold():
+        assert gen.retire(_recorder(calls)) is None
+        assert gen.settled is False
+
+
+async def test_a_running_deferred_close_is_not_settled_until_it_finishes():
+    gen = ComponentGeneration()
+    release = asyncio.Event()
+
+    async def _slow_close() -> None:
+        await release.wait()
+
+    with gen.hold():
+        gen.retire(_slow_close)
+
+    await asyncio.sleep(0)
+    assert gen.settled is False, "the deferred close task is still running"
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert gen.settled is True
+
+
+async def test_a_cancelled_deferred_close_stays_unsettled():
+    """Its cancellation is a value ``drain`` still owes ``close_components``
+    (see ``test_drain_reports_a_cancelled_deferred_close``), so the handle
+    must survive pruning until shutdown reads it."""
+    gen = ComponentGeneration()
+
+    async def _cancelled_close() -> None:
+        raise asyncio.CancelledError()
+
+    with gen.hold():
+        gen.retire(_cancelled_close)
+
+    await asyncio.sleep(0)
+    assert gen.settled is False
+    assert isinstance(await gen.drain(), asyncio.CancelledError)
+
+
+async def test_an_ordinary_close_failure_settles():
+    """``drain`` only logs and swallows those, so retaining the handle would
+    buy nothing."""
+    gen = ComponentGeneration()
+
+    async def _failing_close() -> None:
+        raise RuntimeError("boom")
+
+    with gen.hold():
+        gen.retire(_failing_close)
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert gen.settled is True

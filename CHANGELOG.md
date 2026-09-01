@@ -377,6 +377,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Retired component generations no longer pile up for the life of the
+  process.** `revert_to_stored` records the generation it retires so shutdown
+  can still close one whose last leaseholder never released (#2180), but
+  nothing removed an entry once its close had run — the common idle case,
+  where the close happens inline during the revert. The list grew by one per
+  revert, each holding a settled handle `drain()` would no-op on. The
+  retirement path now prunes settled entries; a generation with a pending or
+  in-flight close is kept, and one whose deferred close ended *cancelled* is
+  kept too, because that cancellation is a value shutdown still has to
+  re-raise. (#2201)
+
 - **A failing lock is no longer reported as a busy one.** The shared
   cross-process helper behind every sidecar lock (`.mcp.json`, settings, skills,
   versions, the wiki commit lock, the memory files) treated *every*

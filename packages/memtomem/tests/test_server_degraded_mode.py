@@ -382,6 +382,41 @@ async def test_revert_to_stored_closes_the_retired_generation(degraded_component
     assert all(cleared for _, _, cleared in closed)
 
 
+async def test_a_settled_retirement_is_not_kept_for_shutdown(degraded_components):
+    """``retired_generations`` exists so shutdown can close a generation whose
+    leaseholder never released. An idle revert closes inline, so by the time
+    the call returns there is nothing left to drain — and pre-#2201 the entry
+    was still held until the process exited, one per revert."""
+    comp = degraded_components
+    app = _make_app(comp)
+    ctx = _StubCtx(app)
+
+    out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "Reverted to stored DB settings" in out
+    assert comp.retired_generations == []
+
+
+async def test_repeated_reverts_do_not_accumulate_settled_generations(degraded_components):
+    """Acceptance criterion 1 of #2201. The mismatch is cleared by each
+    revert, so it is re-armed between rounds — the swap path under test is
+    the same one a repeatedly-reverting server walks."""
+    comp = degraded_components
+    app = _make_app(comp)
+    ctx = _StubCtx(app)
+    storage = comp.storage
+    armed = (storage._dim_mismatch, storage._model_mismatch, storage._policy_mismatch)
+    assert storage.embedding_mismatch is not None, "fixture must start mismatched"
+
+    for _ in range(3):
+        # ``embedding_mismatch`` is derived, so re-arm the three flags the
+        # revert clears; setting the property is not possible by design.
+        storage._dim_mismatch, storage._model_mismatch, storage._policy_mismatch = armed
+        out = await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+        assert "Reverted to stored DB settings" in out
+        assert comp.retired_generations == [], "a settled generation was retained"
+
+
 async def test_concurrent_reverts_swap_exactly_once(degraded_components):
     """Two racing reverts must not both publish (the loser would close the
     winner's freshly published embedder). Serialized on app._config_lock,
@@ -820,6 +855,9 @@ async def test_shutdown_drains_a_generation_nobody_released(degraded_components)
     lease.__enter__()
     await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
     assert closed == []
+    # Pruning settled entries (#2201) must not reach this one: its close is
+    # still pending, which is the whole reason the list exists.
+    assert degraded_components.retired_generations == [old_generation]
 
     await close_components(degraded_components)
     assert closed == ["pipeline", "embedder"]
