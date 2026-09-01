@@ -357,17 +357,22 @@ def _isolated_instance_registry(
         return rt
 
     active: dict = {}
+    presence: dict = {}
     barriers: set = set()
     monkeypatch.setattr(_reg, "runtime_dir", _rt)
     monkeypatch.setattr(_reg, "ensure_runtime_dir", _ensure_rt)
     monkeypatch.setattr(_reg, "_active", active)
+    # The startup presence population (#2230) is a second dict and needs the
+    # same per-test swap: a marker leaked by one test would otherwise still be
+    # published when the next one reads the registry.
+    monkeypatch.setattr(_reg, "_active_presence", presence)
     monkeypatch.setattr(_reg, "_active_barriers", barriers)
     monkeypatch.setattr(_reg, "_procid", None)
     yield
     # Release any registration a test made and forgot to clean — leaked
     # flock handles would otherwise pile up for the pytest process
     # lifetime and the shared atexit handler would walk a stale dict.
-    for inst in list(active.values()):
+    for inst in [*active.values(), *presence.values()]:
         inst.cleanup()
     # Same for lifecycle barriers (#1936). NOTE this sweep is a *safety
     # net, not a verification tool*: because it silently releases a leaked

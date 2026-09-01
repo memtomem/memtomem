@@ -24,6 +24,26 @@ Layout (all under :func:`memtomem._runtime_paths.runtime_dir`):
     kernel released it when the holder died). mtime is the registration
     timestamp, used only for the stale-GC grace period.
 
+``presence/<pid>-<ppid>-<pathdigest16>-<procid8>-<nonce8>.lock``
+    One empty file per live *server process* (#2230), written at startup
+    before any store is opened, so handshake-only MCP sessions — the
+    population that accumulates — are visible at all. Same filename
+    grammar and same liveness rule as ``instances/`` above, with one
+    substitution: ``pathdigest16`` is :func:`memtomem._runtime_paths.
+    store_pid_digest`, the SHA-256 prefix of the *normalized store path
+    text* already used to name ``server-<digest>.pid``, because the store
+    file need not exist yet and ``st_dev:st_ino`` is therefore undefined.
+    The two digests are not comparable and must never be joined on.
+    A marker and the sentinel the same process later publishes under
+    ``instances/`` are related through the process they share — readers
+    identify it by ``(pid, procid8)``, since ``procid8`` is 32 random bits
+    and a pid is reused and collides across pid namespaces, so neither
+    settles identity on its own. Markers live in their
+    own directory precisely so that no existing reader — above all
+    ``mm uninstall``'s fail-closed probe, which treats an unparseable
+    entry under ``instances/`` as untrusted — sees a new kind of file in a
+    directory whose contents it already ascribes meaning to.
+
 ``instances.registry.lock``
     Mutation sidecar, deliberately *outside* the scanned directory so it
     can never be mistaken for a corrupt sentinel. Serializes every
@@ -113,6 +133,7 @@ from memtomem._runtime_paths import (
     ensure_runtime_dir,
     ensure_runtime_dir_at,
     runtime_dir,
+    store_pid_digest,
     validate_runtime_dir,
 )
 
@@ -135,6 +156,25 @@ _REGISTRATION_ATTEMPTS = 3
 _STALE_GRACE_S = 60.0
 
 _ENTRY_RE = re.compile(r"^(\d+)-(\d+)-([0-9a-f]{16})-([0-9a-f]{8})-([0-9a-f]{8})\.lock$")
+
+# Digest slot for a presence marker (#2230) whose store cannot be named:
+# ``:memory:``, a URI store, or a config that would not resolve. Chosen to
+# satisfy ``_ENTRY_RE`` so an unnamed store still registers rather than
+# leaving the process uncounted. It is *not* a store identity — every
+# unnamed store collapses onto it — so only ``procid`` may be grouped on.
+# A SHA-256 prefix of sixteen zeros is not reachable in practice, so this
+# cannot be confused with a real digest.
+_UNKNOWN_STORE_DIGEST = "0" * 16
+
+# Presence registration runs inline in ``memtomem-server``'s startup, ahead of
+# ``mcp.run()``, so its worst case is startup latency an MCP client waits on.
+# ``register_instance``'s budget is wrong here twice over: it is three attempts
+# of ``_LOCK_TIMEOUT_S`` (up to six seconds before the handshake), and its
+# reason for retrying does not apply — a sentinel lost to the sidecar race
+# would leave a *writer* permanently invisible to the concurrent-writer
+# warning, while a lost marker costs one process in a diagnostic and is
+# rewritten by the next server to start. One short attempt, then give up.
+_PRESENCE_LOCK_TIMEOUT_S = 0.5
 
 # Separate budget from ``_LOCK_TIMEOUT_S`` so the barrier's wait can be
 # tuned (and shortened in tests) without touching the mutation lock's.
@@ -175,6 +215,11 @@ _BARRIER_LOCK_ERRORS: tuple[type[BaseException], ...] = LOCK_CALL_ERRORS_WIDE
 def instances_dir(root: Path | None = None) -> Path:
     """Return the sentinel directory path without creating it."""
     return (runtime_dir() if root is None else root) / "instances"
+
+
+def presence_dir(root: Path | None = None) -> Path:
+    """Return the startup-marker directory path without creating it (#2230)."""
+    return (runtime_dir() if root is None else root) / "presence"
 
 
 def registry_sidecar_path(root: Path | None = None) -> Path:
@@ -323,6 +368,13 @@ class _RuntimeDirRefused(Exception):
 # installation — pure in-memory work, never held across file I/O.
 _state_guard = threading.Lock()
 _active: dict[Path, "RegisteredInstance"] = {}
+# Startup presence markers (#2230), deliberately a *separate* dict from
+# ``_active``. Both live one level under the runtime root, so a shared dict
+# would leak markers into ``_active_for_root`` — and through it into the
+# store-scoped enumeration and, worse, into ``mm uninstall``'s fail-closed
+# in-process LIVE short-circuit. A handshake-only server is not evidence
+# that the store is open, so the two populations never merge.
+_active_presence: dict[Path, "RegisteredInstance"] = {}
 # Identity set — several shared barrier holders share one path, so a
 # path-keyed dict (as ``_active`` uses) could not hold them all.
 _active_barriers: set["HeldBarrier"] = set()
@@ -648,8 +700,14 @@ class RegisteredInstance:
             if self._closed:
                 return
             self._closed = True
-            if _active.get(self.path) is self:
-                del _active[self.path]
+            # Both populations are unpublished here rather than only
+            # ``_active``: a startup presence marker (#2230) is the same held
+            # (path, flock) pair and releases identically, and keying the
+            # sweep on identity keeps a path that somehow appears in both
+            # from unpublishing the wrong record.
+            for pool in (_active, _active_presence):
+                if pool.get(self.path) is self:
+                    del pool[self.path]
         try:
             with _mutation_lock(time.monotonic() + _LOCK_TIMEOUT_S):
                 _remove_locked_sentinel(self.path, self._fp)
@@ -688,7 +746,7 @@ def _atexit_cleanup() -> None:
     # and per-registration callbacks would carry live handles past the
     # active-dict reset. This handler re-reads the dict at exit time, and
     # each cleanup() re-checks the pid guard anyway.
-    for inst in list(_active.values()):
+    for inst in [*_active.values(), *_active_presence.values()]:
         inst.cleanup()
 
 
@@ -777,6 +835,188 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
     except Exception:
         logger.debug("instance registration failed", exc_info=True)
         return None
+
+
+def register_server_presence(db_path: Path | str | None) -> RegisteredInstance | None:
+    """Record that this *process* is a live server, before any store opens.
+
+    The startup counterpart to :func:`register_instance` (#2230). That one
+    can only run once storage is initialized, because its digest is the
+    store file's ``st_dev:st_ino`` — so a handshake-only MCP session, which
+    opens no store at all, was invisible to every registry consumer. This
+    marker is written from ``memtomem-server``'s ``main`` beside the pid
+    lock, where the only store fact available is the configured *path*.
+
+    ``db_path`` is therefore digested with
+    :func:`memtomem._runtime_paths.store_pid_digest` (path text, the same
+    key that names ``server-<digest>.pid``), and a ``None`` digest —
+    ``:memory:``, a URI store, an unresolvable config, or no path at all —
+    falls back to :data:`_UNKNOWN_STORE_DIGEST` rather than refusing to
+    register: the marker's job is to count *processes*, and a server whose
+    store cannot be named is still a running server. Consumers group
+    markers by ``procid`` and must not read the digest as a store identity
+    (all unnamed stores collapse onto one value), nor compare it with a
+    sentinel's inode digest — the two are different functions of different
+    inputs and only coincide by accident.
+
+    Returns ``None`` — never raises — on any failure, and one registration
+    is one file: startup must not be blocked, delayed past its bounded lock
+    budget, or aborted because a coordination directory is unusable.
+    """
+    try:
+        digest = store_pid_digest(db_path) if db_path is not None else None
+        if digest is None:
+            digest = _UNKNOWN_STORE_DIGEST
+        pid = os.getpid()
+        with _state_guard:
+            procid = _process_id_locked()
+        name = f"{pid}-{os.getppid()}-{digest}-{procid}-{secrets.token_hex(4)}.lock"
+        # One budget for the whole lock-held span, not just for taking it:
+        # whatever acquisition leaves is what the sweep may spend, and
+        # publishing this process's own marker always happens regardless.
+        deadline = time.monotonic() + _PRESENCE_LOCK_TIMEOUT_S
+        try:
+            with _mutation_lock(deadline):
+                directory = presence_dir()
+                directory.mkdir(mode=0o700, exist_ok=True)
+                # ``exist_ok=True`` accepts a symlink-to-directory and the open
+                # below would then land in the link's target — refuse instead,
+                # the same trust rule the sentinel path applies.
+                if _dir_state(directory) != "dir":
+                    return None
+                # Markers outlive their process only when it died without
+                # running its cleanup (SIGKILL, power loss). Nothing else ever
+                # walks this directory with the mutation lock held, so
+                # registration is the one place that can collect them; the
+                # snapshot readers stay read-only by contract.
+                _gc_stale_presence(directory, deadline)
+                path = directory / name
+                # The nonce makes this filename fresh — never reuse or unlink
+                # an existing entry here; probe+grace GC above owns that.
+                fp = open(path, "a+b")
+                try:
+                    portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                except _LOCK_CONTENDED:
+                    fp.close()
+                    return None
+                inst = RegisteredInstance(path=path, pid=pid, _fp=fp)
+                # Published under the mutation lock, as sentinels are, so the
+                # file is never visible to a same-process read before the
+                # in-memory record exists.
+                with _state_guard:
+                    _active_presence[path] = inst
+                    global _atexit_installed
+                    if not _atexit_installed:
+                        atexit.register(_atexit_cleanup)
+                        _atexit_installed = True
+                return inst
+        except _MutationLockTimeout:
+            logger.debug("presence registration lost the sidecar race", exc_info=True)
+        return None
+    except Exception:
+        logger.debug("presence registration failed", exc_info=True)
+        return None
+
+
+def sweep_stale_presence() -> None:
+    """Collect abandoned presence markers under every known runtime root.
+
+    For the destructive CLIs (#2230). A marker is *not* inventoried, staged
+    or deleted the way a sentinel is: a handshake-only server that is still
+    running holds its marker's flock, and moving that file would both
+    silently unregister a live process and, on Windows, fail outright on the
+    open handle. So this removes exactly what its owner can no longer remove
+    — unlocked, past the publication grace window — and leaves everything
+    else, which is also why it is safe to run while servers are starting.
+
+    Never raises: a coordination directory that cannot be swept is residue
+    in a volatile temp tree, not a reason to abort an uninstall.
+    """
+    try:
+        canonical = runtime_dir()
+        roots, _refusal = _candidate_registry_roots()
+    except OSError:
+        return
+    for root in roots or ():
+        try:
+            # Anchor *and* leaf are checked, the same pair
+            # ``mm uninstall``'s own registry listing checks: a junctioned
+            # runtime dir leaves an ordinary ``presence/`` inside the target,
+            # which passes every test made on the leaf alone. Deliberately
+            # ``_dir_state`` rather than ``validate_runtime_dir`` — the
+            # historical roots were already trust-filtered by
+            # ``_candidate_registry_roots``, which admits the canonical root
+            # unvalidated, and what this pass needs from a root is that it
+            # does not redirect, not that it is owner-only.
+            if _dir_state(root) != "dir":
+                continue
+            directory = presence_dir() if root == canonical else presence_dir(root)
+            if _dir_state(directory) != "dir":
+                continue
+            lock_root = None if root == canonical else root
+            # One budget per root for acquiring the lock and sweeping under
+            # it, so a large residue directory cannot hold the shared lock
+            # for an unbounded time while a destructive command waits.
+            deadline = time.monotonic() + _LOCK_TIMEOUT_S
+            with _mutation_lock(deadline, root=lock_root):
+                _gc_stale_presence(directory, deadline)
+                # Remove the emptied directory here, under the same lock
+                # that serialized the sweep — never in a second, unlocked
+                # pass. Registration creates this directory and opens its
+                # marker inside one locked span; an unlocked ``rmdir``
+                # could land between those two steps, and the registration
+                # would fail on a directory that vanished underneath it,
+                # leaving a live server invisible. ``rmdir`` refuses a
+                # non-empty directory, so a marker written by any other
+                # process is safe by the same atomicity.
+                with contextlib.suppress(OSError):
+                    directory.rmdir()
+        except (_MutationLockTimeout, OSError):
+            continue
+        except Exception:
+            logger.debug("presence sweep failed for %s", root, exc_info=True)
+            continue
+
+
+def _gc_stale_presence(directory: Path, deadline: float) -> None:
+    """Collect unlocked, aged presence markers, bounded by ``deadline``.
+
+    Runs with the shared mutation lock held, which is why the deadline is not
+    optional: that lock also serializes sentinel registration, the
+    concurrent-writer enumeration and the uninstall probe, and this sweep runs
+    on a startup path that a client is waiting on. An accumulated directory —
+    exactly what a host with this problem has — would otherwise let an
+    unbounded probe loop hold the lock for as long as it takes. Collecting
+    part of the residue and stopping is correct: the next registration
+    resumes, and the entries left behind are already inert.
+
+    Streamed with ``scandir`` rather than a sorted listing for the same
+    reason: order is irrelevant to collection, and materializing thousands of
+    paths before the first check is work done inside the lock for nothing.
+    """
+    with _state_guard:
+        own = set(_active_presence)
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if time.monotonic() >= deadline:
+                    return
+                if _ENTRY_RE.match(entry.name) is None:
+                    continue
+                path = Path(entry.path)
+                if path in own:
+                    continue
+                if _probe_entry(path) != "stale" or not _aged(path):
+                    continue
+                if time.monotonic() >= deadline:
+                    # Re-checked after probing, before the expensive half:
+                    # collection re-acquires the entry's flock and unlinks.
+                    # Spending that on an entry whose budget ran out mid-probe
+                    # is the one overshoot this loop can cheaply decline.
+                    return
+                _gc_stale_entry(path)
+    except OSError:
+        return
 
 
 def _parse_entry(path: Path) -> InstanceInfo | None:
@@ -1014,6 +1254,16 @@ def _active_for_root(root: Path) -> dict[Path, "RegisteredInstance"]:
     return {path: inst for path, inst in _active.items() if path.parent.parent == root}
 
 
+def _active_presence_for_root(root: Path) -> dict[Path, "RegisteredInstance"]:
+    """Return the in-process presence markers published beneath ``root`` (#2230).
+
+    Separate from :func:`_active_for_root` because the dicts are separate:
+    both populations sit one level under the root, so a shared dict would
+    make ``presence/`` entries answer questions asked about ``instances/``.
+    """
+    return {path: inst for path, inst in _active_presence.items() if path.parent.parent == root}
+
+
 def _enumerate_live_instances_at(
     root: Path, store_digest: str, deadline: float
 ) -> EnumerationResult:
@@ -1132,6 +1382,14 @@ class RegistrySnapshot:
     unseen); the *canonical* root failing means this host's coordination
     directory is unusable, which is a finding in its own right and must be
     reportable as a failure rather than dissolving into ``complete=False``.
+
+    ``presence`` is the startup population (#2230) and is kept in its own
+    field rather than folded into ``instances``: a marker says only "this
+    process is a live server", while a sentinel says "this process has
+    *this store* open". Every existing consumer reads ``instances`` and
+    keeps its current meaning by construction. The two are joined on
+    ``procid`` — never on ``digest``, which is a different function of a
+    different input on each side.
     """
 
     instances: tuple[InstanceInfo, ...]
@@ -1142,6 +1400,10 @@ class RegistrySnapshot:
     roots_consulted: int
     canonical_error: OSError | None
     refusal: tuple[Path, OSError] | None
+    presence: tuple[InstanceInfo, ...] = ()
+    presence_stale_seen: int = 0
+    presence_unlocked_fresh_seen: int = 0
+    presence_unparseable_seen: int = 0
 
 
 def _scan_registry_root(root: Path, deadline: float) -> _RootScan:
@@ -1162,6 +1424,30 @@ def _scan_registry_root(root: Path, deadline: float) -> _RootScan:
     this checks every root itself before touching anything beneath it. Without
     that, a symlinked or junctioned runtime dir would be traversed here.
     """
+    return _scan_entry_dir(root, deadline, kind="instances")
+
+
+def _scan_entry_dir(
+    root: Path, deadline: float, *, kind: Literal["instances", "presence"]
+) -> _RootScan:
+    """Read one root's ``instances/`` or ``presence/`` directory, read-only.
+
+    The two populations share a filename grammar, a liveness rule and a
+    staleness policy, and differ only in which directory holds them and
+    which in-process dict already knows about our own entries — so they
+    share the walk. They are never merged into one result: what a marker
+    proves ("this process is a server") is weaker than what a sentinel
+    proves ("this process has this store open"), and only the sentinel
+    population may reach the concurrent-writer signal or the uninstall
+    probe. Callers keep them apart, which is why ``kind`` selects a
+    directory rather than the walk taking both.
+
+    The root is validated here, per call, rather than once by the caller:
+    ``_candidate_registry_roots`` admits the canonical root *unvalidated*,
+    and a symlinked or junctioned runtime dir must not be traversed by
+    either walk. One extra no-follow ``stat`` per root is the price of
+    neither walk depending on the other having run first.
+    """
     try:
         if not validate_runtime_dir(root):
             # Absent is not a failure: a host that has never run a server has
@@ -1178,13 +1464,15 @@ def _scan_registry_root(root: Path, deadline: float) -> _RootScan:
     unparseable = 0
     try:
         canonical = runtime_dir()
+        resolve = instances_dir if kind == "instances" else presence_dir
+        pool = _active_for_root if kind == "instances" else _active_presence_for_root
         with _state_guard:
-            own = _active_for_root(root)
+            own = pool(root)
         for path in own:
             info = _parse_entry(path)
             if info is not None:
                 results.append(info)
-        directory = instances_dir() if root == canonical else instances_dir(root)
+        directory = resolve() if root == canonical else resolve(root)
         dir_state = _dir_state(directory)
         if dir_state == "missing":
             return _RootScan(_sorted(results), True, 0, 0, 0, None)
@@ -1260,8 +1548,10 @@ def snapshot_all_instances() -> RegistrySnapshot:
         canonical = None
 
     results: list[InstanceInfo] = []
+    presence: list[InstanceInfo] = []
     complete = refusal is None
     stale = unlocked_fresh = unparseable = 0
+    p_stale = p_unlocked_fresh = p_unparseable = 0
     canonical_error: OSError | None = None
     for root in roots:
         scan = _scan_registry_root(root, deadline)
@@ -1272,6 +1562,19 @@ def snapshot_all_instances() -> RegistrySnapshot:
         unparseable += scan.unparseable_seen
         if scan.error is not None and root == canonical and canonical_error is None:
             canonical_error = scan.error
+        # Same roots, same deadline: a marker directory that does not exist
+        # (a host on a pre-#2230 server, or a historical root) simply scans
+        # empty, so multi-root parity needs no separate policy. ``complete``
+        # is shared — a degraded marker scan makes the whole snapshot a
+        # lower bound, which is what every consumer already reads it as.
+        p_scan = _scan_entry_dir(root, deadline, kind="presence")
+        presence.extend(p_scan.instances)
+        complete = complete and p_scan.complete
+        p_stale += p_scan.stale_seen
+        p_unlocked_fresh += p_scan.unlocked_fresh_seen
+        p_unparseable += p_scan.unparseable_seen
+        if p_scan.error is not None and root == canonical and canonical_error is None:
+            canonical_error = p_scan.error
     return RegistrySnapshot(
         instances=_sorted(results),
         complete=complete,
@@ -1281,6 +1584,10 @@ def snapshot_all_instances() -> RegistrySnapshot:
         roots_consulted=len(roots),
         canonical_error=canonical_error,
         refusal=refusal,
+        presence=_sorted(presence),
+        presence_stale_seen=p_stale,
+        presence_unlocked_fresh_seen=p_unlocked_fresh,
+        presence_unparseable_seen=p_unparseable,
     )
 
 

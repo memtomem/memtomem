@@ -146,6 +146,16 @@ stores' `server-*.pid` files alone. Retained registry and lifecycle-lock
 sidecars are volatile and self-clean. Do not use a wildcard runtime-directory
 deletion: it can erase active liveness evidence or another store's state.
 
+Startup *presence markers* under `<runtime dir>/presence/` (#2230 — one per
+running server, written before it opens any store) are treated differently
+from the sentinels under `instances/`. They never block an uninstall: a
+handshake-only server holds no store and no write lock, so it is not evidence
+that deleting state is unsafe. For the same reason they are never staged for
+deletion while their owner is alive — that would silently unregister a running
+process. `mm uninstall` removes only abandoned markers (unlocked, past the
+grace window) and then prunes the directory if it is empty; a live server's
+marker stays, and disappears when that server exits.
+
 Two POSIX deployment constraints follow from the stable `/tmp` anchor:
 
 - Every memtomem process for one user must see the same host `/tmp` mount.
