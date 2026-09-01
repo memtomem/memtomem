@@ -77,7 +77,26 @@ _CLAIM_FUTURE_SKEW_S = 5.0
 
 
 class DebounceQueueError(RuntimeError):
-    """The durable queue could not be interpreted safely."""
+    """The durable queue could not be interpreted safely.
+
+    ``kind`` classifies the failure so a caller can offer remediation that
+    matches it. The distinction is load-bearing, not cosmetic: the
+    ``unsupported_version`` refusal exists precisely to avoid data loss, so
+    answering it with "delete the queue" would defeat the guard it trips.
+
+    * ``unreadable`` — the file exists but could not be read (permissions,
+      an interrupted read). The queue's contents are intact.
+    * ``corrupt`` — the file was read but does not parse or does not hold a
+      well-formed queue.
+    * ``unsupported_version`` — written by a newer memtomem; refusing rather
+      than rewriting it in an older shape.
+    * ``claim`` — a claim timestamp is missing or implausibly ahead of the
+      clock (corruption, or a clock step backwards).
+    """
+
+    def __init__(self, message: str, *, kind: str = "corrupt") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass
@@ -174,13 +193,17 @@ def _load(path: Path) -> dict[str, QueueEntry]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise DebounceQueueError(f"debounce queue {path} is unreadable: {exc}") from exc
+        raise DebounceQueueError(
+            f"debounce queue {path} is unreadable: {exc}",
+            kind="unreadable" if isinstance(exc, OSError) else "corrupt",
+        ) from exc
     if not isinstance(raw, dict):
         raise DebounceQueueError(f"debounce queue {path} root is not a JSON object")
     version = raw.get("version", 1)
     if not isinstance(version, int) or version < 1 or version > _QUEUE_VERSION:
         raise DebounceQueueError(
-            f"debounce queue {path} has unsupported version {version!r}; refusing data loss"
+            f"debounce queue {path} has unsupported version {version!r}; refusing data loss",
+            kind="unsupported_version",
         )
     entries = raw.get("entries", {})
     if not isinstance(entries, dict):
@@ -344,12 +367,12 @@ def _claimable(entry: QueueEntry, now: float) -> bool:
     if entry.claim_id is None:
         return True
     if entry.claimed_at is None:
-        raise DebounceQueueError("claimed queue entry is missing claimed_at")
+        raise DebounceQueueError("claimed queue entry is missing claimed_at", kind="claim")
     # A timestamp implausibly ahead of the current clock is corruption or
     # clock rollback.  Treating it as an eternal live claim would silently
     # strand work; stealing it immediately could duplicate an active index.
     if entry.claimed_at > now + _CLAIM_FUTURE_SKEW_S:
-        raise DebounceQueueError("queue claim timestamp is in the future")
+        raise DebounceQueueError("queue claim timestamp is in the future", kind="claim")
     return now - entry.claimed_at >= _CLAIM_LEASE_S
 
 

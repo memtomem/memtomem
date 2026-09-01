@@ -1837,4 +1837,5 @@ def test_claude_scan_unreadable_entry_does_not_drop_its_readable_siblings(
     assert live.resolve() in {scope.root for scope in scopes}
     assert report.ok is True
     assert report.scan_error_kind == "permission"
+    assert report.scan_skipped_entries == 1
     assert "incomplete" in (report.scan_detail or "")

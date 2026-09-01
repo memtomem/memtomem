@@ -790,4 +790,59 @@ class TestCliQueueErrorBoundary:
         assert result.exit_code != 0
         assert not isinstance(result.exception, debounce.DebounceQueueError)
         assert "debounce queue" in result.output
-        assert "remove" in result.output
+        # A remediation line, not a bare traceback.
+        assert len(result.output.strip().splitlines()) > 1
+
+    @pytest.mark.parametrize(
+        ("payload", "kind", "forbidden"),
+        [
+            ("{broken", "corrupt", None),
+            (
+                json.dumps({"version": debounce._QUEUE_VERSION + 1, "entries": {}}),
+                "unsupported_version",
+                # The refusal exists to prevent exactly this.
+                "Move it aside",
+            ),
+        ],
+    )
+    def test_remediation_matches_the_failure(
+        self, tmp_path: Path, monkeypatch, payload, kind, forbidden
+    ) -> None:
+        """A blanket "delete the queue" hint contradicts the
+        ``unsupported_version`` refusal, whose whole point is to not lose the
+        queued paths."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        qp = tmp_path / "queue.json"
+        qp.write_text(payload, encoding="utf-8")
+        monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(qp))
+
+        result = CliRunner().invoke(cli, ["index", "--status"])
+
+        assert result.exit_code != 0
+        if kind == "unsupported_version":
+            assert "Upgrade memtomem" in result.output
+            assert forbidden not in result.output
+        else:
+            assert "Move it aside" in result.output
+
+    def test_queue_error_honors_the_json_contract(self, tmp_path: Path, monkeypatch) -> None:
+        """``--json`` is a one-line machine contract; the newly handled failure
+        path must not be the one place that answers in prose."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        qp = tmp_path / "queue.json"
+        qp.write_text("{broken", encoding="utf-8")
+        monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(qp))
+
+        result = CliRunner().invoke(cli, ["index", "--status", "--json"])
+
+        assert result.exit_code != 0
+        payload = json.loads(result.output)
+        assert payload["error_kind"] == "corrupt"
+        assert payload["queue_path"] == str(qp)
+        assert payload["remediation"]

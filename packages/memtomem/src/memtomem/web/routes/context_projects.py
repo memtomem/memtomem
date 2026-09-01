@@ -123,13 +123,22 @@ def _registry_warnings(report: KnownProjectsLoadReport) -> list[dict]:
             }
         )
     if report.scan_error_kind is not None:
+        # A scan that ran and skipped some entries is *incomplete*, not
+        # unavailable: it still contributed rows. Collapsing both into one
+        # reason code with ``skipped_rows: None`` renders the partial case as a
+        # total outage that skipped nothing.
+        partial = report.scan_skipped_entries > 0
         warnings.append(
             {
-                "reason_code": "claude_projects_scan_unavailable",
+                "reason_code": (
+                    "claude_projects_scan_incomplete"
+                    if partial
+                    else "claude_projects_scan_unavailable"
+                ),
                 "error_kind": report.scan_error_kind,
                 "message": _redact_message(report.scan_detail or ""),
                 "retryable": True,
-                "skipped_rows": None,
+                "skipped_rows": report.scan_skipped_entries or None,
             }
         )
     return warnings

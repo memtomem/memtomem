@@ -335,6 +335,51 @@ async def create_components(
 #: giving up on it. See the loop at the end of ``close_components``.
 _MAX_DRAIN_PASSES = 3
 
+#: Wall-clock budget for the first drain of a retired generation. This is the
+#: pass where a deferred close normally *runs*, so it is generous enough for a
+#: real teardown (an ONNX session release) while still refusing to wedge
+#: shutdown behind a leaseholder that is never coming back.
+_DRAIN_CLOSE_TIMEOUT_S = 30.0
+
+#: Budget per retry pass. Those passes only *observe* a close that is already
+#: running — the live resources it was waiting on are down by then — so they
+#: are short.
+_DRAIN_OBSERVE_TIMEOUT_S = 5.0
+
+
+async def _drain_within(gen: ComponentGeneration, timeout: float) -> asyncio.CancelledError | None:
+    """``gen.drain()`` under a wall-clock bound.
+
+    ``drain`` awaits the deferred close through :func:`asyncio.shield`, which
+    is unbounded: nothing about the "never raises, always returns a value"
+    contract stops it from *waiting* forever on a close that never finishes.
+    Capping the number of passes bounds the retry, not the wait. The timeout
+    cancels only this observation — the shield leaves the close itself running,
+    which is exactly the intended outcome: hand the task to process exit rather
+    than hold shutdown open for it.
+    """
+    task = asyncio.ensure_future(gen.drain())
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError as exc:
+        # Shutdown itself was cancelled. ``drain`` shields the close, so the
+        # close survives; report the cancellation for the caller to defer and
+        # re-raise once the rest of teardown is down.
+        task.cancel()
+        return exc
+    if done:
+        # ``drain`` never raises — every outcome is a return value.
+        return task.result()
+    task.cancel()
+    _log.warning(
+        "Retired component generation close did not finish within %.1fs; leaving it running",
+        timeout,
+    )
+    # Deliberately *not* the ``CancelledError`` the cancelled ``drain`` hands
+    # back: that cancellation is ours, and reporting it would make a hung close
+    # look to the caller like a cancelled shutdown it must re-raise.
+    return None
+
 
 def prune_settled_generations(comp: Components) -> None:
     """Drop retired generations the shutdown drain no longer needs (#2201).
@@ -358,7 +403,7 @@ async def close_components(comp: Components) -> TeardownResult:
     # shutdown cancellation interrupts a shielded close, the second pass below
     # observes it after the live resources have had a chance to release it.
     for retired in comp.retired_generations:
-        cancelled = await retired.drain()
+        cancelled = await _drain_within(retired, _DRAIN_CLOSE_TIMEOUT_S)
         if first_cancel is None:
             first_cancel = cancelled
     for resource, label in (
@@ -389,7 +434,7 @@ async def close_components(comp: Components) -> TeardownResult:
         # leave the close running and let process exit take it, rather than
         # trading a leaked task for a wedged shutdown.
         for _ in range(_MAX_DRAIN_PASSES):
-            cancelled = await retired.drain()
+            cancelled = await _drain_within(retired, _DRAIN_OBSERVE_TIMEOUT_S)
             if first_cancel is None:
                 first_cancel = cancelled
             if retired.settled:

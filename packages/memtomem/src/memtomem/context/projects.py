@@ -207,6 +207,12 @@ class KnownProjectsLoadReport:
     # without falsely marking ``registry_status`` unavailable.
     scan_detail: str | None = None
     scan_error_kind: str | None = None
+    # Entries the scan skipped because they could not be read.  Non-zero means
+    # the scan *ran* and contributed rows but may be incomplete — a different
+    # condition from an unreadable directory, which contributes nothing.
+    # Consumers that render the two identically would report a partial scan as
+    # a total outage (or as "0 rows skipped").
+    scan_skipped_entries: int = 0
 
 
 def _classify_registry_os_error(exc: OSError) -> str:
@@ -1102,6 +1108,7 @@ def discover_project_scopes_with_report(
                     load_report,
                     scan_detail=detail,
                     scan_error_kind=_classify_registry_os_error(first_error),
+                    scan_skipped_entries=len(entry_errors),
                 )
         for decoded in decoded_projects:
             if not experimental_claude_projects_scan and not has_runtime_marker(decoded):

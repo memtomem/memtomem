@@ -1277,3 +1277,39 @@ async def test_get_projects_reports_unavailable_claude_scan_without_losing_roste
     assert warning["error_kind"] == "permission"
     assert warning["retryable"] is True
     assert warning["skipped_rows"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_projects_distinguishes_a_partial_claude_scan_from_an_unavailable_one(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scan that ran and skipped entries is *incomplete*, not unavailable.
+
+    Both used to serialize as ``claude_projects_scan_unavailable`` with
+    ``skipped_rows: None``, so a partial scan rendered as a total outage that
+    skipped nothing.
+    """
+    from memtomem.context import projects as projects_mod
+
+    def skipping(anchors=(), *, entry_errors=None, **_kwargs):
+        if entry_errors is not None:
+            entry_errors.append(PermissionError(13, "denied"))
+            entry_errors.append(PermissionError(13, "denied"))
+        return []
+
+    monkeypatch.setattr(projects_mod, "_discover_claude_projects", skipping)
+    resp = await client.get("/api/context/projects")
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["registry_status"] == "ok"
+    warning = next(
+        item
+        for item in data["warnings"]
+        if item["reason_code"] == "claude_projects_scan_incomplete"
+    )
+    assert warning["error_kind"] == "permission"
+    assert warning["skipped_rows"] == 2
+    assert not any(
+        item["reason_code"] == "claude_projects_scan_unavailable" for item in data["warnings"]
+    )

@@ -359,3 +359,14 @@ class TestMemDoErrorScoping:
     async def test_parameter_validation_still_returns_the_error_string(self) -> None:
         result = await mem_do("reset", params={"confirm": "true"})
         assert result.startswith("error:")
+
+    async def test_unknown_parameter_keeps_the_action_specific_help_hint(self) -> None:
+        """``validate_action_params`` ends in ``Signature.bind``, which reports
+        an unknown or missing parameter as a ``TypeError``. Narrowing the guard
+        to ``ValueError`` alone dropped those out of the invalid-parameter
+        response and into the generic handler."""
+        result = await mem_do("reset", params={"no_such_param": 1})
+
+        assert "invalid parameter for action 'reset'" in result
+        assert "no_such_param" in result
+        assert "category" in result

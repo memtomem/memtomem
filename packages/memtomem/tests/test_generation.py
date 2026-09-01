@@ -388,3 +388,52 @@ async def test_teardown_gives_up_on_a_generation_that_never_settles():
     assert gen.drains == 1 + comp_mod._MAX_DRAIN_PASSES
     # Unsettled, so it is retained rather than pruned.
     assert components.retired_generations == [gen]
+
+
+async def test_teardown_abandons_a_close_that_never_finishes(monkeypatch):
+    """The drain is bounded in *time*, not only in passes.
+
+    ``drain`` awaits the deferred close through ``asyncio.shield``, which never
+    times out on its own. Capping the retries bounds the loop but not the wait,
+    so a leaseholder whose close never returns would still hold shutdown open
+    forever. The close is left running for process exit instead.
+    """
+    from memtomem.runtime import components as comp_mod
+
+    monkeypatch.setattr(comp_mod, "_DRAIN_CLOSE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(comp_mod, "_DRAIN_OBSERVE_TIMEOUT_S", 0.05)
+
+    gen = ComponentGeneration()
+    started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def _hangs() -> None:
+        started.set()
+        await never.wait()
+
+    lease = gen.hold()
+    lease.__enter__()
+    gen.retire(_hangs)
+
+    components = Components(
+        config=Mem2MemConfig(),
+        storage=None,
+        embedder=None,
+        index_engine=object(),  # type: ignore[arg-type]
+        search_pipeline=None,
+        retired_generations=[gen],
+    )
+
+    result = await asyncio.wait_for(close_components(components), timeout=5)
+
+    # The close actually ran; otherwise the timeout assertions pass vacuously.
+    assert started.is_set()
+    assert gen.settled is False
+    assert components.retired_generations == [gen]
+    assert result.cancelled is None
+
+    # The close was abandoned, not cancelled: it is still running.
+    assert gen._close_task is not None and not gen._close_task.done()
+    never.set()
+    await gen._close_task
+    lease.__exit__(None, None, None)

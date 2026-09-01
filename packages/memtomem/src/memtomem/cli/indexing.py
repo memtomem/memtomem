@@ -154,12 +154,23 @@ def index(
             )
             return
     except DebounceQueueError as exc:
-        raise click.ClickException(
-            f"{exc}\n"
-            f"The debounce queue is unusable. If this persists, remove "
-            f"{queue_path()} to reset it; queued paths will be re-queued on "
-            f"the next edit."
-        ) from exc
+        qp = queue_path()
+        remedy = _QUEUE_REMEDIES.get(exc.kind, _QUEUE_REMEDIES["corrupt"]).format(path=qp)
+        if as_json:
+            # ``--json`` is a one-line machine contract; a failure on this path
+            # must not be the one place that answers in prose.
+            click.echo(
+                _json.dumps(
+                    {
+                        "error": str(exc),
+                        "error_kind": exc.kind,
+                        "queue_path": str(qp),
+                        "remediation": remedy,
+                    }
+                )
+            )
+            raise click.exceptions.Exit(1) from exc
+        raise click.ClickException(f"{exc}\n{remedy}") from exc
 
     try:
         asyncio.run(
@@ -289,6 +300,35 @@ async def _index(
     )
     if agg["errors"] or agg["blocked"]:
         raise click.exceptions.Exit(1)
+
+
+#: Remediation text per ``DebounceQueueError.kind``.  Deliberately not one
+#: blanket "delete the queue": that answer contradicts the
+#: ``unsupported_version`` refusal, which exists to *prevent* the data loss
+#: deleting it would cause, and it is the wrong advice for a permissions
+#: problem the file's contents survived.
+_QUEUE_REMEDIES: dict[str, str] = {
+    "unreadable": (
+        "The queue file could not be read. Check its permissions and ownership "
+        "({path}); its contents are intact, so do not delete it."
+    ),
+    "corrupt": (
+        "The queue file does not parse. Move it aside (`mv {path} {path}.bad`) "
+        "to reset it, then re-run `mm index` over the paths edited since the "
+        "last successful run — the reset drops whatever was still queued."
+    ),
+    "unsupported_version": (
+        "The queue was written by a newer memtomem and is being refused rather "
+        "than rewritten in an older shape. Upgrade memtomem; do not delete "
+        "{path}, which would discard the queued paths this refusal protects."
+    ),
+    "claim": (
+        "A queue claim is missing or dated ahead of this clock. If the system "
+        "clock stepped backwards, re-run once it has settled; otherwise move "
+        "{path} aside and re-run `mm index` over the paths edited since the "
+        "last successful run."
+    ),
+}
 
 
 def _print_status(*, as_json: bool) -> None:
