@@ -281,6 +281,8 @@ mm config show                         # view all settings
 mm config set search.default_top_k 20  # change a setting
 mm config unset mmr.enabled            # drop a pinned override
 mm embedding-reset                     # check/resolve embedding model mismatch
+mm embedding-reset --mode apply-current --yes  # non-interactive; --yes only skips the prompt
+mm index --force <path>                # required after apply-current — it drops every vector
 mm reset                               # delete all data and reinitialize the DB (refuses while the server or web UI is running)
 mm reset --yes                         # skip confirmation prompt (safety gates still apply)
 mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.bak before wiping
