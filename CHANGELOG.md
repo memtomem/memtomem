@@ -54,6 +54,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm embedding-reset --mode apply-current` takes `--yes` / `-y`.** It was the
+  last destructive-but-scriptable command with no non-interactive escape, so a
+  cron or CI caller had to reach for `yes | mm embedding-reset …` — which under
+  `set -o pipefail` fails the pipeline with exit 141, because `yes` takes
+  SIGPIPE the moment mm stops reading stdin, even though the reset succeeded.
+  `--yes` skips only the confirmation prompt, nothing else. It is refused
+  outside `--mode apply-current` (the only mode that prompts), mirroring
+  `mm gc`'s `--yes requires --apply`: `mm embedding-reset --yes` reads like
+  "reset without asking" but would otherwise print status and exit 0. (#2065)
+
 - **`mm doctor` now sees servers that never opened a store.** The instance
   registry only ever recorded a server once it *initialized* — which is lazy by
   design (#399), so a client that connects, handshakes and asks for nothing

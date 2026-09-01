@@ -14,7 +14,14 @@ import click
     default="status",
     help="status: show mismatch info, apply-current: reset DB (destructive), revert-to-stored: match DB",
 )
-def embedding_reset(mode: str) -> None:
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the --mode apply-current confirmation prompt (for cron/CI).",
+)
+def embedding_reset(mode: str, assume_yes: bool) -> None:
     """Check or resolve embedding configuration mismatches.
 
     \b
@@ -22,11 +29,20 @@ def embedding_reset(mode: str) -> None:
       status          Show DB stored values vs current config (default)
       apply-current   Reset DB to current config — deletes all vectors, re-index required
       revert-to-stored  Switch runtime embedder to match DB stored values (non-destructive)
+
+    ``--mode apply-current --yes`` is the non-interactive form.
     """
-    asyncio.run(_run(mode))
+    # --yes names a prompt, and only apply-current has one.  Refusing it
+    # elsewhere is the ``mm gc --yes requires --apply`` precedent: a bare
+    # ``mm embedding-reset --yes`` reads like "reset without asking" but would
+    # silently print status instead, which is the confusion the flag exists to
+    # remove.
+    if assume_yes and mode != "apply-current":
+        raise click.UsageError("--yes requires --mode apply-current.")
+    asyncio.run(_run(mode, assume_yes=assume_yes))
 
 
-async def _run(mode: str) -> None:
+async def _run(mode: str, *, assume_yes: bool = False) -> None:
     from memtomem.config import (
         Mem2MemConfig,
         embedding_policy_fingerprint,
@@ -87,7 +103,7 @@ async def _run(mode: str) -> None:
     internal_mode = mode.replace("-", "_")
 
     if internal_mode == "apply_current":
-        if not click.confirm(
+        if not assume_yes and not click.confirm(
             f"This will DELETE all vectors and reset DB to "
             f"{cfg.embedding.provider}/{cfg.embedding.model} ({cfg.embedding.dimension}d). "
             f"Re-indexing will be required. Continue?",
