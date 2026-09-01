@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -105,6 +106,63 @@ def set_home(monkeypatch: pytest.MonkeyPatch, path: Path | str) -> None:
     """
     monkeypatch.setenv("HOME", str(path))
     monkeypatch.setenv("USERPROFILE", str(path))
+
+
+#: Written to stdout by every poisoned click prompt entry point. Any test that
+#: pins a ``--json`` stdout payload fails on its own assertions if this leaks.
+CLICK_PROMPT_SENTINEL = "<click-prompt-machinery-entered>"
+
+
+def poison_click_prompts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Make click's prompt machinery loud and stdout-polluting.
+
+    ``cli._prompts.confirm(err=True)`` promises it never enters click's prompt
+    machinery — that promise is what keeps ``--json`` stdout a single JSON
+    document (#1640). The original pins simulated the hazard by forcing click's
+    Windows prompt branch with ``monkeypatch.setattr(click.termui, "WIN", True)``;
+    click 8.5 deleted that branch (``termui`` no longer imports ``WIN`` and
+    ``_readline_prompt`` has no platform fork), so the pins raised
+    ``AttributeError``. Poisoning the machinery pins the same promise without
+    depending on a platform branch that may not exist.
+
+    Returns a list that records the name of every prompt entry point reached,
+    so a caller asserts ``calls == []``. Each entry point also writes
+    :data:`CLICK_PROMPT_SENTINEL` to stdout, which independently breaks the
+    caller's ``json.loads(result.stdout)``.
+
+    Patched:
+
+    * ``click.confirm`` / ``click.prompt`` — the package attributes
+      ``_prompts`` actually resolves at call time.
+    * ``click.termui._readline_prompt`` — the chokepoint both ``termui.confirm``
+      and ``termui.prompt`` route through on click 8.4 *and* 8.5, covering the
+      callers that bypass the package alias (option prompting, click core's own
+      aliases, a direct ``click.termui.confirm``). It is a private name, but
+      ``monkeypatch.setattr`` defaults to ``raising=True``, so a rename in a
+      future click fails these tests loudly instead of silently disarming them.
+
+    ``termui.visible_prompt_func`` is deliberately *not* patched: these pins run
+    under ``CliRunner``, whose ``isolation()`` reassigns it inside ``invoke``
+    and restores it afterwards, so a poison installed there is overwritten
+    before the command runs — armed-looking and dead.
+    """
+    import click
+    import click.termui
+
+    calls: list[str] = []
+
+    def _poison(name: str):
+        def _fire(*args, **kwargs):
+            calls.append(name)
+            sys.stdout.write(CLICK_PROMPT_SENTINEL)
+            return False if name == "click.confirm" else ""
+
+        return _fire
+
+    monkeypatch.setattr(click, "confirm", _poison("click.confirm"))
+    monkeypatch.setattr(click, "prompt", _poison("click.prompt"))
+    monkeypatch.setattr(click.termui, "_readline_prompt", _poison("click.termui._readline_prompt"))
+    return calls
 
 
 class StubCtx:
