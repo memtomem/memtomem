@@ -387,6 +387,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Retired component generations no longer pile up for the life of the
+  process.** `revert_to_stored` records the generation it retires so shutdown
+  can still close one whose last leaseholder never released (#2180), but
+  nothing removed an entry once its close had run — the common idle case,
+  where the close happens inline during the revert. The list grew by one per
+  revert, each holding a settled handle `drain()` would no-op on. The
+  retirement path now prunes settled entries; a generation with a pending or
+  in-flight close is kept, and one whose deferred close ended *cancelled* is
+  kept too, because that cancellation is a value shutdown still has to
+  re-raise. (#2201)
 - **An empty `mm search` / `mm recall` result no longer blames the index when a
   filter emptied it.** `No results found. See \`mm status\` to confirm your index
   has chunks.` was printed whatever the query looked like, so a mistyped

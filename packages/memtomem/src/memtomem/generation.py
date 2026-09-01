@@ -109,6 +109,28 @@ class ComponentGeneration:
         """
         return self._retired
 
+    @property
+    def settled(self) -> bool:
+        """True when :meth:`drain` has nothing left to do for this handle.
+
+        Settled means no close callback is still pending *and* no deferred
+        close is still running — so a shutdown drain would be a no-op and the
+        handle can be dropped from ``Components.retired_generations`` (#2201).
+        Leases are deliberately not part of it: a leaseholder that never
+        releases leaves the callback pending, which is exactly the case the
+        shutdown backstop exists for.
+
+        A finished-but-*cancelled* deferred close is **not** settled. Its
+        cancellation is a value :meth:`drain` still has to report, so that
+        ``close_components`` can re-raise it after every other component is
+        down (the accumulate-and-defer contract). Dropping the handle would
+        silently swallow it.
+        """
+        if self._close_cb is not None:
+            return False
+        task = self._close_task
+        return task is None or (task.done() and not task.cancelled())
+
     @contextlib.contextmanager
     def hold(self) -> Iterator[None]:
         """Pin this generation for the duration of one operation.
