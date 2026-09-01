@@ -164,7 +164,12 @@ class TestCliNoRerankFlag:
         from memtomem.cli import cli
 
         pipeline = SimpleNamespace(search=AsyncMock(return_value=([], RetrievalStats())))
-        comp = SimpleNamespace(search_pipeline=pipeline)
+        # ``storage`` for the #2255 empty-result diagnosis; no namespaces is
+        # the empty-index answer, which prints the pre-existing hint.
+        comp = SimpleNamespace(
+            search_pipeline=pipeline,
+            storage=SimpleNamespace(list_namespaces=AsyncMock(return_value=[])),
+        )
 
         @asynccontextmanager
         async def fake_components():
@@ -184,7 +189,12 @@ class TestCliNoRerankFlag:
         from memtomem.cli import cli
 
         pipeline = SimpleNamespace(search=AsyncMock(return_value=([], RetrievalStats())))
-        comp = SimpleNamespace(search_pipeline=pipeline)
+        # ``storage`` for the #2255 empty-result diagnosis; no namespaces is
+        # the empty-index answer, which prints the pre-existing hint.
+        comp = SimpleNamespace(
+            search_pipeline=pipeline,
+            storage=SimpleNamespace(list_namespaces=AsyncMock(return_value=[])),
+        )
 
         @asynccontextmanager
         async def fake_components():
@@ -204,7 +214,12 @@ class TestCliNoRerankFlag:
         from memtomem.cli import cli
 
         pipeline = SimpleNamespace(search=AsyncMock(return_value=([], RetrievalStats())))
-        comp = SimpleNamespace(search_pipeline=pipeline)
+        # ``storage`` for the #2255 empty-result diagnosis; no namespaces is
+        # the empty-index answer, which prints the pre-existing hint.
+        comp = SimpleNamespace(
+            search_pipeline=pipeline,
+            storage=SimpleNamespace(list_namespaces=AsyncMock(return_value=[])),
+        )
 
         @asynccontextmanager
         async def fake_store_context():
