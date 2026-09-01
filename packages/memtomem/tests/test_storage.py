@@ -530,6 +530,55 @@ class TestTagsAnyFilter:
         )
 
     @pytest.mark.asyncio
+    async def test_dense_source_filter_stays_out_of_adaptive_knn_sql(self, storage, monkeypatch):
+        """A rare source match must not drive KNN all the way to its ceiling.
+
+        The fake row count makes the escalation schedule larger than this
+        fixture's candidate set. If the source predicate is pushed into the
+        outer SQL, only one row survives and every scheduled K is attempted;
+        when filtering happens after the bounded pass, the first unfiltered
+        candidate pool is already large enough and the loop stops.
+        """
+        dim = storage._dimension
+        chunks = []
+        for i in range(8):
+            near = _make_chunk(f"near {i}", source=f"other-{i}.md")
+            near.embedding = [0.1] * dim
+            chunks.append(near)
+        target = _make_chunk("target", source="notes/target.md")
+        target.embedding = [0.2] + [0.1] * (dim - 1)
+        chunks.append(target)
+        await storage.upsert_chunks(chunks)
+
+        monkeypatch.setattr(storage, "_cached_vec_row_count", lambda _db: 10_000)
+        knn_statements: list[str] = []
+
+        def _trace(statement: str) -> None:
+            if "chunks_vec" in statement and "MATCH" in statement:
+                knn_statements.append(statement)
+
+        traced = [storage._get_db(), *storage._read_pool]
+        for conn in traced:
+            conn.set_trace_callback(_trace)
+        try:
+            results = await storage.dense_search(
+                [0.1] * dim,
+                top_k=3,
+                source_filter="target.md",
+            )
+        finally:
+            for conn in traced:
+                conn.set_trace_callback(None)
+
+        assert [result.chunk.id for result in results] == [target.id]
+        assert len(knn_statements) == 1, (
+            "the source filter drove adaptive KNN escalation instead of "
+            "filtering one bounded candidate pool"
+        )
+        assert "memtomem_source_match" not in knn_statements[0]
+        assert [result.rank for result in results] == [1]
+
+    @pytest.mark.asyncio
     async def test_dense_still_caps_a_tagged_result_at_top_k(self, storage):
         """Lifting the SQL ``LIMIT`` for tagged searches must not widen the
         response: the cap moves after the filter, it does not disappear."""

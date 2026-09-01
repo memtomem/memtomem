@@ -338,7 +338,7 @@ def rescan_files_cmd(as_json: bool) -> None:
 
     scanned = 0
     violations: list[dict[str, object]] = []
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, object]] = []
     seen: set[Path] = set()
     for root_raw in cfg.indexing.all_index_roots():
         root_candidate = Path(root_raw).expanduser()

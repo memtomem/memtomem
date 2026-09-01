@@ -166,7 +166,7 @@ async def create_components(
     try:
         embedder = create_embedder(config.embedding)
         await storage.initialize()
-    except EmbeddingDimensionMismatchError:
+    except EmbeddingDimensionMismatchError as mismatch_exc:
         # Stored DB has ``embedding_dimension=0`` (prior NoopEmbedder / BM25
         # install) but the runtime config points at a real provider. Instead
         # of crashing the server — which leaves the user no MCP-level path to
@@ -176,7 +176,15 @@ async def create_components(
         # recovery tool (``mem_embedding_reset``) stays callable over MCP.
         # Vector-dependent tools (``mem_add`` / ``mem_index`` / …) are gated
         # separately via ``_check_embedding_mismatch``. See issue #349.
-        await storage.close()
+        storage_closed, cancelled = await _close_resource(storage, "storage")
+        if cancelled is not None:
+            raise cancelled
+        if not storage_closed:
+            # Reopening the same store after an unconfirmed close could put two
+            # live sqlite handles behind one Components object.  Preserve the
+            # initialization failure that caused rollback; cleanup failures
+            # have already been logged by _close_resource.
+            raise mismatch_exc
         _log.warning(
             "Embedding dimension mismatch detected at startup — entering "
             "degraded mode. Non-vector tools (mem_status, mem_stats, "
@@ -195,16 +203,14 @@ async def create_components(
         )
         try:
             await storage.initialize()
-        except Exception:
-            if embedder is not None:
-                await embedder.close()
-            await storage.close()
+        except BaseException:
+            await _close_resource(embedder, "embedder")
+            await _close_resource(storage, "storage")
             raise
         embedding_broken = storage.embedding_mismatch
-    except Exception:
-        if embedder is not None:
-            await embedder.close()
-        await storage.close()
+    except BaseException:
+        await _close_resource(embedder, "embedder")
+        await _close_resource(storage, "storage")
         raise
     assert embedder is not None
 
@@ -325,6 +331,11 @@ async def create_components(
         raise
 
 
+#: Observation passes ``close_components`` gives one retired generation before
+#: giving up on it. See the loop at the end of ``close_components``.
+_MAX_DRAIN_PASSES = 3
+
+
 def prune_settled_generations(comp: Components) -> None:
     """Drop retired generations the shutdown drain no longer needs (#2201).
 
@@ -343,14 +354,13 @@ async def close_components(comp: Components) -> TeardownResult:
     first_cancel: asyncio.CancelledError | None = None
     # Retired generations first (#2180): a swap deferred their close to the
     # last lease release, which may never have come (a hung or cancelled
-    # leaseholder). Draining before the current components keeps the close
-    # ordering the swap promised — retired pipeline and embedder go down
-    # before the live ones, never interleaved with them.
+    # leaseholder). Normally this preserves retired-before-live ordering. If
+    # shutdown cancellation interrupts a shielded close, the second pass below
+    # observes it after the live resources have had a chance to release it.
     for retired in comp.retired_generations:
         cancelled = await retired.drain()
         if first_cancel is None:
             first_cancel = cancelled
-    comp.retired_generations.clear()
     for resource, label in (
         (comp.search_pipeline, "search pipeline"),
         (comp.llm, "LLM provider"),
@@ -362,4 +372,33 @@ async def close_components(comp: Components) -> TeardownResult:
     storage_closed, cancelled = await _close_resource(comp.storage, "storage")
     if first_cancel is None:
         first_cancel = cancelled
+
+    # A cancellation delivered during the first drain is returned promptly so
+    # teardown can release any live resource the shielded retired close needs.
+    # Do not drop that task with the Components container: after the remaining
+    # resources are down, settle and observe every retained close before the
+    # owner clears its component reference.
+    for retired in comp.retired_generations:
+        # Bounded, not ``while True``: ``drain`` reports a cancellation
+        # *without* settling whenever the shielded close is still running, so
+        # under a supervisor that re-delivers cancellation on every ``await``
+        # — an expired ``asyncio.timeout``/``wait_for`` wrapped around
+        # shutdown — each pass raises immediately and an unbounded retry would
+        # spin without ever yielding. A hung leaseholder close has the same
+        # shape. Give it a small finite number of observation passes, then
+        # leave the close running and let process exit take it, rather than
+        # trading a leaked task for a wedged shutdown.
+        for _ in range(_MAX_DRAIN_PASSES):
+            cancelled = await retired.drain()
+            if first_cancel is None:
+                first_cancel = cancelled
+            if retired.settled:
+                break
+        else:
+            _log.warning(
+                "Retired component generation did not settle within %d drain passes; "
+                "leaving its close running",
+                _MAX_DRAIN_PASSES,
+            )
+    prune_settled_generations(comp)
     return TeardownResult(storage_closed=storage_closed, cancelled=first_cancel)

@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -3760,7 +3760,7 @@ class TestBulkSymlinkedLeaf:
     ``storage.sqlite_helpers.norm_path`` resolves ``source_file`` on write.
     """
 
-    async def test_alias_matches_its_own_namespace_rule_and_locks_the_target(
+    async def test_alias_uses_the_canonical_target_namespace_rule_and_lock(
         self, components, memory_dir, monkeypatch, tmp_path
     ):
         # Target outside the memory dir, so the walk discovers only the alias.
@@ -3790,8 +3790,8 @@ class TestBulkSymlinkedLeaf:
         stats = await engine.index_path(memory_dir, recursive=True)
 
         assert not stats.errors
-        assert stats.applied_namespaces == ("by-alias",), (
-            "the rule must match the discovered alias path, not the resolved target: "
+        assert stats.applied_namespaces == (None,), (
+            "a symlink alias must not select a weaker policy than its canonical target: "
             f"{stats.applied_namespaces}"
         )
         # ...while the lock is the target's: one physical file, one sidecar, so
@@ -4288,6 +4288,94 @@ class TestFileWatcher:
 
         assert watcher._watches == {old_root.resolve(): old_watch}
         assert observer.unschedule.call_args_list[1].args == (new_watch,)
+        assert watcher._config is original_config
+
+    async def test_reconfigure_replaces_observer_when_backend_changes(self, components, tmp_path):
+        from memtomem.config import IndexingConfig
+        from memtomem.indexing import watcher as watcher_module
+        from memtomem.indexing.watcher import FileWatcher
+
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        original_config = IndexingConfig(
+            memory_dirs=[first],
+            watcher_backend="native",
+        )
+        watcher = FileWatcher(components.index_engine, original_config)
+        old_observer = MagicMock(name="native_observer")
+        old_watch = object()
+        handler = MagicMock()
+        watcher._observer = old_observer
+        watcher._observer_backend = "native"
+        watcher._handler = handler
+        watcher._watches = {first.resolve(): old_watch}
+
+        replacement = MagicMock(name="polling_observer")
+        replacement_watches = [object(), object()]
+        replacement.schedule.side_effect = replacement_watches
+        new_config = IndexingConfig(
+            memory_dirs=[first, second],
+            watcher_backend="polling",
+            supported_extensions=frozenset({".md", ".rst"}),
+        )
+
+        with patch.object(watcher_module, "_create_observer", return_value=replacement):
+            await watcher.reconfigure(new_config)
+
+        assert replacement.schedule.call_args_list == [
+            ((handler, str(first.resolve())), {"recursive": True}),
+            ((handler, str(second.resolve())), {"recursive": True}),
+        ]
+        replacement.start.assert_called_once_with()
+        old_observer.stop.assert_called_once_with()
+        old_observer.join.assert_called_once_with()
+        assert watcher._observer is replacement
+        assert watcher._observer_backend == "polling"
+        assert watcher._watches == dict(
+            zip((first.resolve(), second.resolve()), replacement_watches)
+        )
+        assert handler._supported == frozenset({".md", ".rst"})
+        assert watcher._config is new_config
+
+    async def test_backend_replacement_failure_keeps_running_observer(self, components, tmp_path):
+        from memtomem.config import IndexingConfig
+        from memtomem.indexing import watcher as watcher_module
+        from memtomem.indexing.watcher import FileWatcher
+
+        root = tmp_path / "root"
+        root.mkdir()
+        original_config = IndexingConfig(
+            memory_dirs=[root],
+            watcher_backend="native",
+        )
+        watcher = FileWatcher(components.index_engine, original_config)
+        old_observer = MagicMock(name="native_observer")
+        old_watch = object()
+        handler = MagicMock()
+        watcher._observer = old_observer
+        watcher._observer_backend = "native"
+        watcher._handler = handler
+        watcher._watches = {root.resolve(): old_watch}
+
+        replacement = MagicMock(name="polling_observer")
+        replacement.start.side_effect = RuntimeError("start failed")
+        replacement.is_alive.return_value = True
+        new_config = IndexingConfig(memory_dirs=[root], watcher_backend="polling")
+
+        with (
+            patch.object(watcher_module, "_create_observer", return_value=replacement),
+            pytest.raises(RuntimeError, match="start failed"),
+        ):
+            await watcher.reconfigure(new_config)
+
+        replacement.stop.assert_called_once_with()
+        replacement.join.assert_called_once_with()
+        old_observer.stop.assert_not_called()
+        assert watcher._observer is old_observer
+        assert watcher._observer_backend == "native"
+        assert watcher._watches == {root.resolve(): old_watch}
         assert watcher._config is original_config
 
     async def test_startup_backfill_default_off_skips_walk(self, components, memory_dir):
@@ -5486,3 +5574,49 @@ class TestGenerationLease:
 
         assert seen == [1]
         assert generation.leases == 0
+
+
+class TestPartialPersistReadBack:
+    """The partial-persist read-back must run on the *writer* connection.
+
+    ``upsert_chunks`` inserts ``OR IGNORE`` against the #691 content-identity
+    index, so it can report fewer rows than it was handed. The engine then
+    re-reads to find out which chunks actually landed — from *inside* the open
+    chunk-write transaction. The read pool's separate WAL connections cannot
+    see that transaction, so reading through them reports every genuinely new
+    chunk as absent: ``indexed`` collapses to 0, ``new_chunk_ids`` empties, and
+    ``_extract_entities_for`` skips the chunks entirely.
+    """
+
+    async def test_partial_count_still_reports_the_rows_that_landed(
+        self, components, memory_dir, monkeypatch
+    ):
+        engine = components.index_engine
+        storage = components.storage
+        fp = memory_dir / "partial.md"
+        body = "\n\n".join(
+            f"## Section {i}\n\n" + ("partial persist body. " * 40) for i in range(4)
+        )
+        fp.write_text(f"# P\n\n{body}\n", encoding="utf-8")
+
+        real_upsert = storage.upsert_chunks
+        seen: list[int] = []
+
+        async def under_report(chunks):
+            written = await real_upsert(chunks)
+            seen.append(len(chunks))
+            # Simulate a concurrent writer winning the identity race for one
+            # chunk: everything else really is on disk under this transaction.
+            return max(written - 1, 1)
+
+        monkeypatch.setattr(storage, "upsert_chunks", under_report)
+
+        result = await engine._index_file(fp, force=False)
+
+        # The partial-count branch is the one under test; a single-chunk file
+        # would take the equal-count fast path and never read back.
+        assert seen and seen[0] > 1
+        assert result["indexed"] == seen[0] - 1 or result["indexed"] == seen[0]
+        assert result["indexed"] > 0
+        assert result["new_chunk_ids"]
+        assert result["mutated"] is True

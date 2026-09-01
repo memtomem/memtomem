@@ -22,9 +22,13 @@ async def expand_query_tags(
     storage: StorageBackend,
     max_terms: int = 3,
     *,
+    project_context_root: Path | None = None,
     report_failure: Callable[[], None] | None = None,
 ) -> str:
     """Expand query by appending matching tag names.
+
+    ``project_context_root`` keeps tag discovery inside the same ADR-0011
+    boundary as the retrieval stages that consume the expanded query.
 
     ``report_failure`` (#1802) is an optional no-op-by-default callback invoked
     when expansion catches an error and falls back to the original query. It lets
@@ -32,7 +36,7 @@ async def expand_query_tags(
     changing the fallback behavior — the function still returns the plain query.
     """
     try:
-        tag_counts = await storage.get_tag_counts()
+        tag_counts = await storage.get_tag_counts(project_context_root=project_context_root)
     except Exception:
         logger.warning("Tag expansion failed; returning original query", exc_info=True)
         if report_failure is not None:

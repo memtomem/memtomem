@@ -58,6 +58,9 @@ async def test_csp_locks_script_src_to_self_no_external_cdn() -> None:
     # positive — header present and tightened to first-party
     assert "default-src 'self';" in csp
     assert "script-src 'self';" in csp
+    assert "base-uri 'none';" in csp
+    assert "form-action 'self';" in csp
+    assert "object-src 'none';" in csp
 
     # negative — guard against re-introducing external CDN allow-lists
     assert "cdnjs.cloudflare.com" not in csp

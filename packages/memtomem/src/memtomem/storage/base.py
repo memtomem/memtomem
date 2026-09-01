@@ -206,6 +206,7 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        source_filter: str | None = None,
     ) -> list[SearchResult]: ...
     async def dense_search(
         self,
@@ -215,6 +216,7 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        source_filter: str | None = None,
         *,
         exhaustive: bool = False,
     ) -> list[SearchResult]: ...
@@ -351,7 +353,9 @@ class StorageBackend(Protocol):
     ) -> NamespaceRenameResult: ...
 
     # Tags
-    async def get_tag_counts(self) -> list[tuple[str, int]]: ...
+    async def get_tag_counts(
+        self, *, project_context_root: Path | None = None
+    ) -> list[tuple[str, int]]: ...
     async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]: ...
     async def count_chunks_by_tag(self, tag: str) -> int: ...
     async def count_chunks_by_any_tag(self, tags: Sequence[str]) -> int: ...
@@ -454,17 +458,48 @@ class StorageBackend(Protocol):
         query_embedding: list[float],
         result_chunk_ids: list[str],
         result_scores: list[float],
+        *,
+        project_context_root: Path | str | None = None,
+        effective_scope: str | list[str] | tuple[str, ...] | None = None,
     ) -> None: ...
-    async def get_query_history(self, limit: int = 20, since: str | None = None) -> list[dict]: ...
-    async def suggest_queries(self, prefix: str, limit: int = 5) -> list[str]: ...
+    async def get_query_history(
+        self,
+        limit: int = 20,
+        since: str | None = None,
+        *,
+        project_context_root: Path | str | None = None,
+    ) -> list[dict]: ...
+    async def suggest_queries(
+        self,
+        prefix: str,
+        limit: int = 5,
+        *,
+        project_context_root: Path | str | None = None,
+    ) -> list[str]: ...
 
     # Explicit relevance feedback on observed search runs (#1801)
     async def save_search_feedback(
-        self, run_id: str, chunk_id: str, judgment: str, *, replace: bool = False
+        self,
+        run_id: str,
+        chunk_id: str,
+        judgment: str,
+        *,
+        replace: bool = False,
+        project_context_root: Path | str | None = None,
     ) -> dict: ...
-    async def get_search_feedback(self, run_id: str) -> list[dict]: ...
-    async def get_search_run(self, run_id: str) -> dict: ...
-    async def get_search_runs(self, limit: int = 50, since: str | None = None) -> list[dict]: ...
+    async def get_search_feedback(
+        self, run_id: str, *, project_context_root: Path | str | None = None
+    ) -> list[dict]: ...
+    async def get_search_run(
+        self, run_id: str, *, project_context_root: Path | str | None = None
+    ) -> dict: ...
+    async def get_search_runs(
+        self,
+        limit: int = 50,
+        since: str | None = None,
+        *,
+        project_context_root: Path | str | None = None,
+    ) -> list[dict]: ...
 
     # Importance scoring
     async def update_importance_scores(self, scores: dict[str, float]) -> int: ...
@@ -483,14 +518,36 @@ class StorageBackend(Protocol):
     async def get_entity_type_counts(self) -> dict[str, int]: ...
 
     # Analytics (replaces direct _get_db() access in tools)
-    async def get_health_report(self, namespace: str | None = None) -> dict: ...
+    async def get_health_report(
+        self,
+        namespace: str | None = None,
+        *,
+        project_context_root: Path | None = None,
+    ) -> dict: ...
     async def get_frequently_accessed(
-        self, namespace: str | None = None, limit: int = 20
+        self,
+        namespace: str | None = None,
+        limit: int = 20,
+        *,
+        project_context_root: Path | None = None,
     ) -> list[dict]: ...
     async def get_agent_sessions(self, since: str | None = None, limit: int = 20) -> list[dict]: ...
-    async def get_knowledge_gaps(self, limit: int = 10) -> list[dict]: ...
-    async def get_most_connected(self, limit: int = 5) -> list[dict]: ...
-    async def get_chunk_factors(self, namespace: str | None = None) -> list[dict]: ...
+    async def get_knowledge_gaps(
+        self, limit: int = 10, *, project_context_root: Path | None = None
+    ) -> list[dict]: ...
+    async def get_most_connected(
+        self,
+        limit: int = 5,
+        *,
+        namespace: str | None = None,
+        project_context_root: Path | None = None,
+    ) -> list[dict]: ...
+    async def get_chunk_factors(
+        self,
+        namespace: str | None = None,
+        *,
+        project_context_root: Path | None = None,
+    ) -> list[dict]: ...
     async def get_consolidation_groups(
         self, min_size: int = 3, max_groups: int = 10
     ) -> list[dict]: ...

@@ -157,6 +157,40 @@ def test_artifacts_accept_raised_project_floors(tmp_path: Path) -> None:
     rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6", repo)
 
 
+def test_artifacts_reject_unexpected_wheel_top_level_member(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    dist = _dist(tmp_path)
+    wheel = next(dist.glob("*.whl"))
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("unexpected_package/payload.py", b"pass\n")
+
+    with pytest.raises(rp.ReleaseCheckError, match="unexpected top-level"):
+        rp.validate_artifacts(dist, "0.3.6", repo)
+
+
+@pytest.mark.parametrize("member_kind", ["symlink", "unexpected"])
+def test_artifacts_reject_unsafe_sdist_members(tmp_path: Path, member_kind: str) -> None:
+    repo = _repo(tmp_path)
+    dist = _dist(tmp_path)
+    sdist = next(dist.glob("*.tar.gz"))
+    body = _metadata()
+    with tarfile.open(sdist, "w:gz") as archive:
+        metadata = tarfile.TarInfo("memtomem-0.3.6/PKG-INFO")
+        metadata.size = len(body)
+        archive.addfile(metadata, io.BytesIO(body))
+        if member_kind == "symlink":
+            hostile = tarfile.TarInfo("memtomem-0.3.6/src/link")
+            hostile.type = tarfile.SYMTYPE
+            hostile.linkname = "/etc/passwd"
+        else:
+            hostile = tarfile.TarInfo("memtomem-0.3.6/secrets.txt")
+            hostile.size = 1
+        archive.addfile(hostile, io.BytesIO(b"x") if hostile.isfile() else None)
+
+    with pytest.raises(rp.ReleaseCheckError, match="unsupported|unexpected"):
+        rp.validate_artifacts(dist, "0.3.6", repo)
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0

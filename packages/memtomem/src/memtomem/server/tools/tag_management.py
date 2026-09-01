@@ -15,6 +15,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary
 from memtomem.server.tools._validation import strict_bool
 from memtomem.services import tag_management as tag_svc
 
@@ -42,12 +43,12 @@ def _format_samples(result: tag_svc.TagOpResult) -> str:
 async def mem_tag_list(
     ctx: CtxType = None,
 ) -> str:
-    """List all tags and their usage counts, ordered by frequency.
+    """List visible tags and their usage counts, ordered by frequency.
 
     Use this to see which tags exist in the index and how many chunks use each tag.
     """
     app = await _get_app_initialized(ctx)
-    tag_counts = await app.storage.get_tag_counts()
+    tag_counts = await app.storage.get_tag_counts(project_context_root=caller_boundary(app))
 
     if not tag_counts:
         return "No tags found."

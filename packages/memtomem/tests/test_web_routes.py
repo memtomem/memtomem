@@ -33,6 +33,7 @@ from .web.test_upload_quarantine import (
     TestUploadQuarantineBoundaries,  # noqa: F401
     TestUploadQuarantineLifecycle,  # noqa: F401
     test_body_limit_without_content_length_exact_and_plus_one,  # noqa: F401
+    test_json_body_limit_and_multipart_import_use_separate_budgets,  # noqa: F401
     test_upload_openapi_keeps_multipart_file_array_contract,  # noqa: F401
 )
 
@@ -3049,6 +3050,41 @@ class TestAddMemory:
         )
         assert resp.status_code == 422
 
+    @pytest.mark.parametrize(
+        "file_name",
+        [r"C:\Windows\system32\drivers\etc\hosts", r"\\server\share\note.md"],
+    )
+    async def test_add_memory_rejects_windows_absolute_paths_on_every_host(
+        self, client: AsyncClient, file_name: str
+    ):
+        resp = await client.post("/api/add", json={"content": "test", "file": file_name})
+        assert resp.status_code == 422
+
+    async def test_add_memory_rejects_symlink_sibling_escape(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        base = tmp_path / "memories"
+        outside = tmp_path / "memories-elsewhere"
+        base.mkdir()
+        outside.mkdir()
+        (base / "escape").symlink_to(outside, target_is_directory=True)
+        app.state.config.indexing.memory_dirs = [base]
+
+        resp = await client.post("/api/add", json={"content": "test", "file": "escape/stolen.md"})
+
+        assert resp.status_code == 422
+        assert not (outside / "stolen.md").exists()
+
+    async def test_add_memory_allows_dots_inside_a_file_name(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        base = tmp_path / "memories"
+        base.mkdir()
+        app.state.config.indexing.memory_dirs = [base]
+        resp = await client.post("/api/add", json={"content": "test", "file": "notes..reviewed.md"})
+        assert resp.status_code == 200, resp.text
+        assert (base / "notes..reviewed.md").exists()
+
     @staticmethod
     def _seed_mixed_target(app, tmp_path) -> Path:
         """A real file with content: the guard skips a missing or empty
@@ -3270,6 +3306,20 @@ class TestAddMemory:
             f"explicit-file write {path} did not land under {tmp_path}"
         )
 
+    async def test_add_memory_named_write_creates_missing_registered_directory(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        base = tmp_path / "not-created-yet" / "memories"
+        app.state.config.indexing.memory_dirs = [base]
+
+        resp = await client.post(
+            "/api/add",
+            json={"content": "First entry.", "file": "notes/topic.md"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert (base / "notes" / "topic.md").exists()
+
 
 # ---------------------------------------------------------------------------
 # Redaction guard wire-in for the web write surfaces. The helper-level
@@ -3431,6 +3481,27 @@ class TestAddMemoryProjectTier:
         assert local_dir.resolve() in path.parents, (
             f"project_local write landed at {path}, expected under {local_dir}"
         )
+
+    async def test_named_project_write_creates_missing_registered_tier(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        proj_root = tmp_path / "proj"
+        proj_root.mkdir()
+        local_dir = proj_root / ".memtomem" / "memories.local"
+        app.state.project_root = proj_root
+        app.state.config.indexing.project_memory_dirs = [local_dir]
+
+        resp = await client.post(
+            "/api/add",
+            json={
+                "content": "First project note.",
+                "file": "notes/first.md",
+                "scope": "project_local",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert (local_dir / "notes" / "first.md").exists()
 
     async def test_project_shared_with_confirm_routes_to_shared_dir(
         self, app, client: AsyncClient, tmp_path

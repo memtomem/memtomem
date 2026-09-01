@@ -508,10 +508,35 @@ def ensure_runtime_dir_at(target: Path) -> Path:
         target.mkdir(mode=0o700, exist_ok=False)
     except FileExistsError:
         return ensure_runtime_dir_at(target)
-    try:
+    # Creation is security-sensitive: every lock, PID marker, and presence
+    # sentinel below this directory is trusted as same-user coordination.
+    # Never turn a failed chmod into success, and on POSIX bind the chmod to
+    # the inode we opened without following redirects.  The final identity
+    # comparison catches a directory-to-symlink/rename swap between mkdir and
+    # publication of the path.
+    if os.name != "nt":
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(target, flags)
+        try:
+            os.fchmod(fd, 0o700)
+            fd_stat = os.fstat(fd)
+            path_stat = os.stat(target, follow_symlinks=False)
+            if (fd_stat.st_dev, fd_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+                cause = OSError("runtime directory identity changed during creation")
+                raise RuntimeDirValidationError(target, "cannot_stat", cause=cause) from cause
+        finally:
+            os.close(fd)
+    else:
         os.chmod(target, 0o700)
-    except OSError:
-        pass
+
+    # Re-run the complete policy after creation.  Besides checking the mode,
+    # this rejects a late redirect on platforms where O_NOFOLLOW is absent.
+    if not validate_runtime_dir(target):  # pragma: no cover - mkdir proved existence
+        cause = FileNotFoundError("runtime directory disappeared after creation")
+        raise RuntimeDirValidationError(target, "cannot_stat", cause=cause) from cause
     return target
 
 

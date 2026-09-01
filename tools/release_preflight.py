@@ -31,6 +31,15 @@ _SECURITY_DIRECT_NAMES = {
 }
 _REQUIRED_URLLIB3_EXTRAS = {"all", "langfuse", "onnx"}
 _TERMINAL_FAILURES = {"action_required", "cancelled", "failure", "stale", "timed_out"}
+_SDIST_TOP_LEVEL_ALLOWLIST = {
+    ".gitignore",
+    "LICENSE",
+    "PKG-INFO",
+    "README.md",
+    "pyproject.toml",
+    "src",
+    "tests-js",
+}
 
 
 class ReleaseCheckError(RuntimeError):
@@ -100,6 +109,12 @@ def validate_contract(tag: str, repo_root: Path) -> str:
 
 def _metadata_from_wheel(path: Path) -> email.message.Message:
     with zipfile.ZipFile(path) as archive:
+        for name in archive.namelist():
+            parts = Path(name).parts
+            if not parts or name.startswith(("/", "\\")) or ".." in parts:
+                raise ReleaseCheckError(f"wheel contains unsafe member {name!r}")
+            if parts[0] != "memtomem" and not parts[0].endswith(".dist-info"):
+                raise ReleaseCheckError(f"wheel contains unexpected top-level member {name!r}")
         names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
         if len(names) != 1:
             raise ReleaseCheckError(f"expected one METADATA in {path}, found {len(names)}")
@@ -108,6 +123,18 @@ def _metadata_from_wheel(path: Path) -> email.message.Message:
 
 def _metadata_from_sdist(path: Path) -> email.message.Message:
     with tarfile.open(path, mode="r:gz") as archive:
+        roots: set[str] = set()
+        for member in archive.getmembers():
+            parts = Path(member.name).parts
+            if not parts or member.name.startswith(("/", "\\")) or ".." in parts:
+                raise ReleaseCheckError(f"sdist contains unsafe member {member.name!r}")
+            roots.add(parts[0])
+            if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                raise ReleaseCheckError(f"sdist contains unsupported member {member.name!r}")
+            if len(parts) > 1 and parts[1] not in _SDIST_TOP_LEVEL_ALLOWLIST:
+                raise ReleaseCheckError(f"sdist contains unexpected member {member.name!r}")
+        if len(roots) != 1:
+            raise ReleaseCheckError(f"sdist must contain exactly one root directory, found {roots}")
         members = [member for member in archive.getmembers() if member.name.endswith("/PKG-INFO")]
         if len(members) != 1:
             raise ReleaseCheckError(f"expected one PKG-INFO in {path}, found {len(members)}")

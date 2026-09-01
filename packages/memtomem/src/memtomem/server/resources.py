@@ -11,7 +11,7 @@ from memtomem.server.context import (
     _get_active_app_initialized,
     _get_app_initialized,
 )
-from memtomem.server.tools._id_access import resolve_chunk
+from memtomem.server.tools._id_access import caller_boundary, resolve_chunk
 
 # The 2.0 SDK injects ``Context`` into templated resource handlers only —
 # a static URI carries no request, and declaring the parameter there is a
@@ -50,9 +50,9 @@ async def namespaces_resource() -> str:
 
 @mcp.resource("memtomem://tags")
 async def tags_resource() -> str:
-    """List all tags and their usage counts."""
+    """List tags visible in the caller's project boundary and their counts."""
     app = await _get_active_app_initialized()
-    tag_counts = await app.storage.get_tag_counts()
+    tag_counts = await app.storage.get_tag_counts(project_context_root=caller_boundary(app))
     result = [{"tag": tag, "chunks": count} for tag, count in tag_counts]
     return json.dumps(result, indent=2)
 

@@ -486,6 +486,9 @@ def create_tables(
             run_id TEXT,
             observation_json TEXT NOT NULL DEFAULT '{}',
             result_snapshot_json TEXT NOT NULL DEFAULT '[]',
+            project_key TEXT,
+            effective_scope_json TEXT NOT NULL DEFAULT '[]',
+            legacy_unscoped INTEGER NOT NULL DEFAULT 0 CHECK (legacy_unscoped IN (0, 1)),
             created_at TEXT NOT NULL
         )
     """)
@@ -502,11 +505,26 @@ def create_tables(
         "result_snapshot_json": (
             "ALTER TABLE query_history ADD COLUMN result_snapshot_json TEXT NOT NULL DEFAULT '[]'"
         ),
+        # Existing rows pre-date project isolation. Preserve them for local
+        # maintenance/retention, but mark them unavailable to public scoped
+        # readers instead of guessing which project produced them.
+        "project_key": "ALTER TABLE query_history ADD COLUMN project_key TEXT",
+        "effective_scope_json": (
+            "ALTER TABLE query_history ADD COLUMN effective_scope_json TEXT NOT NULL DEFAULT '[]'"
+        ),
+        "legacy_unscoped": (
+            "ALTER TABLE query_history ADD COLUMN legacy_unscoped INTEGER NOT NULL DEFAULT 1 "
+            "CHECK (legacy_unscoped IN (0, 1))"
+        ),
     }
     for column_name, col_sql in observation_columns.items():
         if column_name not in existing_history_columns:
             db.execute(col_sql)
     db.execute("CREATE INDEX IF NOT EXISTS idx_query_history_created ON query_history(created_at)")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_query_history_project_created "
+        "ON query_history(project_key, legacy_unscoped, created_at)"
+    )
     # The run_id unique index started life partial (WHERE run_id IS NOT NULL,
     # #1800). search_feedback references query_history(run_id), and SQLite
     # only accepts a non-partial unique index as an FK parent key, so rebuild

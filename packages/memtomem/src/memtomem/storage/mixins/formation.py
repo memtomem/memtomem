@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from memtomem.errors import StorageError
+
 
 class FormationMixin:
     _CANDIDATE_KEYS = (
@@ -32,10 +34,27 @@ class FormationMixin:
 
     @classmethod
     def _candidate_row(cls, row: tuple[Any, ...]) -> dict[str, Any]:
+        if len(row) != len(cls._CANDIDATE_KEYS):
+            raise StorageError(
+                f"memory candidate row has {len(row)} columns; expected {len(cls._CANDIDATE_KEYS)}"
+            )
         item = dict(zip(cls._CANDIDATE_KEYS, row))
-        item["evidence"] = json.loads(item["evidence"])
-        item["matched_existing_ids"] = json.loads(item["matched_existing_ids"])
+        try:
+            evidence = json.loads(item["evidence"])
+            matched = json.loads(item["matched_existing_ids"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise StorageError("memory candidate contains malformed JSON evidence") from exc
+        if not isinstance(evidence, list) or not isinstance(matched, list):
+            raise StorageError("memory candidate evidence fields must be JSON arrays")
+        item["evidence"] = evidence
+        item["matched_existing_ids"] = matched
         return item
+
+    @staticmethod
+    def _validated_reviewer(reviewer: str) -> str:
+        if not isinstance(reviewer, str) or not reviewer.strip():
+            raise ValueError("candidate reviewer cannot be empty")
+        return reviewer.strip()
 
     async def add_memory_candidate(self, candidate: dict[str, Any]) -> bool:
         db = self._get_db()
@@ -127,7 +146,8 @@ class FormationMixin:
         row = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
-            "extractor_version, reviewer, decision_reason, created_at, expires_at, decided_at "
+            "extractor_version, reviewer, decision_reason, created_at, expires_at, decided_at, "
+            "claim_started_at "
             "FROM memory_candidates WHERE session_id=? AND fingerprint=?",
             (session_id, fingerprint),
         ).fetchone()
@@ -137,6 +157,7 @@ class FormationMixin:
         self, candidate_id: str, reviewer: str, reason: str = ""
     ) -> dict[str, Any] | None:
         """Atomically claim a pending candidate before any durable write."""
+        reviewer = self._validated_reviewer(reviewer)
         # The claim state machine brackets a durable write that happens
         # outside SQLite (the pinned store, a memory file). Joining a
         # caller's transaction would let a rollback undo the transition
@@ -403,6 +424,7 @@ class FormationMixin:
     ) -> bool:
         if status not in {"approved", "rejected"}:
             raise ValueError("candidate decision must be approved or rejected")
+        reviewer = self._validated_reviewer(reviewer)
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._rolls_back_if_standalone(db):

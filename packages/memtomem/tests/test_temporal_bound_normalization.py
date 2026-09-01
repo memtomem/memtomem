@@ -110,7 +110,8 @@ def _record_query_at(storage, text: str, when: datetime) -> None:
     """
     storage._get_db().execute(
         "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, "
-        "result_scores, created_at) VALUES (?, ?, ?, ?, ?)",
+        "result_scores, project_key, legacy_unscoped, created_at) "
+        "VALUES (?, ?, ?, ?, 'user', 0, ?)",
         (text, b"", "[]", "[]", when.isoformat(timespec="seconds")),
     )
 
@@ -160,7 +161,8 @@ class TestSearchRunBounds:
     async def _record_run(self, storage, when: datetime, run_id: str) -> None:
         storage._get_db().execute(
             "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, "
-            "result_scores, created_at, run_id) VALUES (?, ?, ?, ?, ?, ?)",
+            "result_scores, project_key, legacy_unscoped, created_at, run_id) "
+            "VALUES (?, ?, ?, ?, 'user', 0, ?, ?)",
             ("run query", b"", "[]", "[]", when.isoformat(timespec="seconds"), run_id),
         )
 

@@ -205,6 +205,37 @@ class TestEnsureRuntimeDir:
         assert "\x1b" not in str(exc_info.value)
         assert "\\x1b" in str(exc_info.value)
 
+    def test_new_runtime_dir_chmod_failure_is_not_hidden(self, tmp_path, monkeypatch):
+        target = tmp_path / "new-runtime"
+
+        def denied(*args, **kwargs):
+            raise PermissionError("chmod denied")
+
+        if os.name == "nt":
+            monkeypatch.setattr(os, "chmod", denied)
+        else:
+            monkeypatch.setattr(os, "fchmod", denied)
+
+        with pytest.raises(PermissionError, match="chmod denied"):
+            ensure_runtime_dir_at(target)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX inode identity check")
+    def test_new_runtime_dir_rejects_path_swap_after_open(self, tmp_path, monkeypatch):
+        target = tmp_path / "new-runtime"
+        real_stat = os.stat
+
+        def swapped(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if path == target and kwargs.get("follow_symlinks") is False:
+                values = list(result)
+                values[1] = result.st_ino + 1
+                return os.stat_result(values)
+            return result
+
+        monkeypatch.setattr(os, "stat", swapped)
+        with pytest.raises(RuntimeDirValidationError, match="cannot stat"):
+            ensure_runtime_dir_at(target)
+
 
 def _make_spacey_xdg(tmp_path: Path) -> Path:
     """Like :func:`_make_safe_xdg` but the base name contains a space, so

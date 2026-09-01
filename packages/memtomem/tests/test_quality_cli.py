@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 from click.testing import CliRunner
 
 from memtomem.cli.quality_cmd import quality
+from memtomem.config import Mem2MemConfig
 from memtomem.quality import metrics
 from memtomem.quality.fingerprints import case_set_fingerprint
 from memtomem.quality.replay import (
@@ -122,7 +123,7 @@ class TestWriteAcks:
             lambda storage, config: ({"profile": "p", "corpus": "c", "index": "i"}, {}),
         )
         comp = SimpleNamespace(
-            config=SimpleNamespace(),
+            config=Mem2MemConfig(),
             storage=SimpleNamespace(
                 promote_search_run=AsyncMock(
                     return_value={

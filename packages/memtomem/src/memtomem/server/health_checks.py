@@ -12,6 +12,7 @@ import time
 from typing import TYPE_CHECKING
 
 from memtomem.errors import TransactionOwnedError
+from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server.health_store import HealthSnapshot
 
 if TYPE_CHECKING:
@@ -180,7 +181,9 @@ async def check_wal_status(app: AppContext) -> HealthSnapshot:
 async def check_full_health_report(app: AppContext) -> HealthSnapshot:
     """Reuse storage.get_health_report() for comprehensive metrics."""
     now = time.time()
-    report = await app.storage.get_health_report()
+    report = await app.storage.get_health_report(
+        project_context_root=_resolve_project_context_root(app)
+    )
 
     dead_pct = report.get("dead_memories_pct", 0)
     if dead_pct > 80:

@@ -37,6 +37,7 @@ from typing import NoReturn
 
 import click
 
+from memtomem._instance_registry import RegistrySnapshot, snapshot_all_instances
 from memtomem._process_probe import probe_pid
 from memtomem._runtime_paths import legacy_server_pid_path
 from memtomem.cli._db_lock import check_db_lock
@@ -117,17 +118,19 @@ def _is_new_generation(state: ServerState, installed_at: datetime) -> bool:
 def _same_process_generation(current: ServerState, previous: ServerState) -> bool:
     """Conservatively compare a post-stop holder with its retirement target.
 
-    Start stamps disambiguate the vanishingly rare case where the kernel
-    recycles a PID during cleanup. Older pid payloads have no stamp, so a
-    matching PID remains fail-closed for backward compatibility.
+    Start stamps disambiguate the case where the kernel recycles a PID during
+    cleanup.  A matching PID without two stamps is not identity: accepting it
+    would let an unrelated replacement process inherit the retirement target.
     """
     if current.pid != previous.pid:
         return False
     current_started = _started_at(current)
     previous_started = _started_at(previous)
-    if current_started is not None and previous_started is not None:
-        return current_started == previous_started
-    return True
+    return (
+        current_started is not None
+        and previous_started is not None
+        and current_started == previous_started
+    )
 
 
 def _probe_problem(state: ServerState, label: str) -> str:
@@ -201,6 +204,79 @@ def _inventory_problems(server_states: list[ServerState], web_state: ServerState
         path = _format_path(web_state.pid_file) if web_state.pid_file is not None else "?"
         problems.append(f"web UI: live lock {path} has no signalable PID")
     return problems
+
+
+def _registry_inventory_problems(
+    snapshot: RegistrySnapshot,
+    server_states: list[ServerState],
+) -> list[str]:
+    """Return fail-closed findings from the all-process server registry.
+
+    Pid files name only their primary holder.  Startup presence markers and
+    store sentinels also reveal handshake-only and secondary server processes;
+    those processes cannot be safely terminated from a pid-file inventory and
+    therefore must block an in-place reinstall.  ``procid`` distinguishes two
+    processes with the same pid across pid namespaces, while joining a
+    process's presence marker and store sentinel without double-counting it.
+    """
+    problems: list[str] = []
+    if snapshot.canonical_error is not None:
+        problems.append(
+            "server registry: canonical runtime directory could not be read "
+            f"({snapshot.canonical_error})"
+        )
+    if snapshot.refusal is not None:
+        path, exc = snapshot.refusal
+        problems.append(f"server registry: refused runtime root {_format_path(path)} ({exc})")
+    if not snapshot.complete:
+        problems.append("server registry: the all-process snapshot is incomplete")
+
+    attributed_pids = {
+        state.pid
+        for state in _upgrade_server_stops(server_states)
+        if state.alive and state.probe_error is None and state.pid is not None
+    }
+    procids_by_pid: dict[int, set[str]] = {}
+    for info in (*snapshot.instances, *snapshot.presence):
+        procids_by_pid.setdefault(info.pid, set()).add(info.procid)
+    for pid, procids in sorted(procids_by_pid.items()):
+        if pid not in attributed_pids:
+            problems.append(
+                f"server registry: live server pid {pid} has no authoritative pid lock "
+                "(secondary or startup-only process); stop it manually"
+            )
+        elif len(procids) > 1:
+            problems.append(
+                f"server registry: pid {pid} identifies {len(procids)} live process "
+                "identities across namespaces; automatic termination is unsafe"
+            )
+    return problems
+
+
+def _complete_inventory_problems(
+    server_states: list[ServerState],
+    web_state: ServerState,
+    registry: RegistrySnapshot,
+    *,
+    is_windows: bool,
+) -> list[str]:
+    """Combine pid-lock and registry evidence into one mutation gate."""
+    problems = _inventory_problems(server_states, web_state)
+    problems.extend(_registry_inventory_problems(registry, server_states))
+    if is_windows:
+        for state in _upgrade_server_stops(server_states):
+            if state.alive and state.probe_error is None:
+                problems.append(
+                    "memtomem-server: a live process is present on Windows; stop every "
+                    "server manually before upgrading"
+                )
+                break
+        if web_state.alive and web_state.probe_error is None:
+            problems.append(
+                "web UI: a live process is present on Windows; stop `mm web` manually "
+                "before upgrading"
+            )
+    return list(dict.fromkeys(problems))
 
 
 def _has_startup_gap(server_states: list[ServerState], web_state: ServerState) -> bool:
@@ -643,29 +719,19 @@ def upgrade(
         server_states, web_state, server_warning = _stabilize_process_inventory(
             server_states, web_state, server_warning
         )
+    registry = snapshot_all_instances()
     extras, extras_auto = _resolve_extras(extras_flag)
     install_cmd = _build_install_cmd(version, extras)
     pkg_target = install_cmd[-1]
     server_stops = _upgrade_server_stops(server_states)
     live_states = [*server_stops, *([web_state] if web_state.alive else [])]
-    initial_problems = _inventory_problems(server_states, web_state)
-    probe_problems = [
-        _probe_problem(state, "memtomem-server")
-        for state in server_states
-        if state.probe_error is not None
-    ]
-    if web_state.probe_error is not None:
-        probe_problems.append(_probe_problem(web_state, "web UI"))
-    warnings = (
-        [
-            "Process inventory is incomplete on Windows: "
-            f"{problem}. Windows does not terminate memtomem processes automatically; "
-            "continuing with reinstall. Stop every memtomem server and `mm web` manually."
-            for problem in probe_problems
-        ]
-        if is_windows
-        else []
+    initial_problems = _complete_inventory_problems(
+        server_states,
+        web_state,
+        registry,
+        is_windows=is_windows,
     )
+    warnings: list[str] = []
     record_narrowed_inventory_warning(warnings, server_warning, emit=False)
     # Windows skips the kill stage entirely, so a truthful plan/dry-run
     # must not claim we would kill or remove anything there.
@@ -676,9 +742,8 @@ def upgrade(
         click.echo("memtomem upgrade plan:")
         if is_windows:
             click.secho(
-                "  Detected Windows; skipping process termination. "
-                "Stop every memtomem server (and any `mm web`) manually before "
-                "rerunning if you see a split-brain after upgrade.",
+                "  Detected Windows; process termination is unavailable. "
+                "Any live server or `mm web` process makes this upgrade fail closed.",
                 fg="yellow",
             )
         elif live_states:
@@ -711,7 +776,7 @@ def upgrade(
     if dry_run:
         if json_out:
             payload: dict[str, object] = {
-                "ok": is_windows or not initial_problems,
+                "ok": not initial_problems,
                 "dry_run": True,
                 "inventory_complete": not initial_problems,
                 "would_kill": [s.pid for s in planned_stops if s.pid is not None],
@@ -722,16 +787,16 @@ def upgrade(
             }
             if warnings:
                 payload["warnings"] = warnings
-            if initial_problems and not is_windows:
+            if initial_problems:
                 payload["error"] = _inventory_failure_message(initial_problems)
             click.echo(_json.dumps(payload))
-        if initial_problems and not is_windows:
+        if initial_problems:
             if not json_out:
                 click.secho(_inventory_failure_message(initial_problems), fg="red")
             sys.exit(1)
         return
 
-    if initial_problems and not is_windows:
+    if initial_problems:
         _refuse_upgrade(
             _inventory_failure_message(initial_problems),
             json_out=json_out,
@@ -786,7 +851,9 @@ def upgrade(
     # A clean snapshot cannot be required here: MCP clients commonly respawn
     # immediately and would make upgrade impossible. Require a complete,
     # signalable inventory, then retire that generation after uv succeeds.
-    # Windows deliberately keeps its no-kill, no-boundary compatibility path.
+    # Windows cannot retire a holder automatically, but it still participates
+    # in the boundary: an observed process is a refusal rather than permission
+    # to reinstall bytes underneath it.
     if not is_windows:
         boundary_servers, boundary_web, boundary_warning = _stabilize_process_inventory()
         record_narrowed_inventory_warning(
@@ -795,15 +862,30 @@ def upgrade(
             emit=not json_out,
             indent="  ",
         )
-        boundary_problems = _inventory_problems(boundary_servers, boundary_web)
-        if boundary_problems:
-            _refuse_upgrade(
-                _inventory_failure_message(boundary_problems),
-                json_out=json_out,
-                killed=killed,
-                removed=removed,
-                extra={"warnings": warnings} if warnings else None,
-            )
+    else:
+        boundary_servers, boundary_warning = enumerate_server_liveness_inventory()
+        boundary_web = check_web_liveness()
+        record_narrowed_inventory_warning(
+            warnings,
+            boundary_warning,
+            emit=not json_out,
+            indent="  ",
+        )
+    boundary_registry = snapshot_all_instances()
+    boundary_problems = _complete_inventory_problems(
+        boundary_servers,
+        boundary_web,
+        boundary_registry,
+        is_windows=is_windows,
+    )
+    if boundary_problems:
+        _refuse_upgrade(
+            _inventory_failure_message(boundary_problems),
+            json_out=json_out,
+            killed=killed,
+            removed=removed,
+            extra={"warnings": warnings} if warnings else None,
+        )
 
     # ----- reinstall -----
     try:
@@ -881,13 +963,19 @@ def upgrade(
         # fourth complete inventory is used only if one of those re-probes
         # catches the lock-before-pid startup window.
         retirement_servers, retirement_web, retirement_warning = _stabilize_process_inventory()
+        retirement_registry = snapshot_all_instances()
         record_narrowed_inventory_warning(
             warnings,
             retirement_warning,
             emit=not json_out,
             indent="  ",
         )
-        cleanup_problems = _inventory_problems(retirement_servers, retirement_web)
+        cleanup_problems = _complete_inventory_problems(
+            retirement_servers,
+            retirement_web,
+            retirement_registry,
+            is_windows=False,
+        )
         retirement_server_targets = [
             state
             for state in _upgrade_server_stops(retirement_servers)
@@ -903,7 +991,6 @@ def upgrade(
             and not _is_new_generation(retirement_web, installed_at)
             else None
         )
-
         stopped, cleaned, stop_problems, final_servers, final_web = _stop_process_snapshot(
             retirement_servers,
             retirement_web,
@@ -926,7 +1013,15 @@ def upgrade(
                 emit=not json_out,
                 indent="  ",
             )
-        cleanup_problems.extend(_inventory_problems(final_servers, final_web))
+        final_registry = snapshot_all_instances()
+        cleanup_problems.extend(
+            _complete_inventory_problems(
+                final_servers,
+                final_web,
+                final_registry,
+                is_windows=False,
+            )
+        )
 
         for state in _upgrade_server_stops(final_servers):
             if state.probe_error is not None or state.pid is None:
@@ -941,15 +1036,29 @@ def upgrade(
                 cleanup_problems.append(
                     f"memtomem-server: retirement pid {state.pid} still holds {path}"
                 )
+            elif not _is_new_generation(state, installed_at):
+                cleanup_problems.append(
+                    f"memtomem-server: a pre-install or unverifiable generation pid "
+                    f"{state.pid} still holds {path}"
+                )
         if (
             final_web.alive
             and final_web.probe_error is None
             and final_web.pid is not None
-            and retirement_web_target is not None
-            and _same_process_generation(final_web, retirement_web_target)
+            and not _is_new_generation(final_web, installed_at)
         ):
             path = _format_path(final_web.pid_file) if final_web.pid_file is not None else "?"
-            cleanup_problems.append(f"web UI: retirement pid {final_web.pid} still holds {path}")
+            if retirement_web_target is not None and _same_process_generation(
+                final_web, retirement_web_target
+            ):
+                cleanup_problems.append(
+                    f"web UI: retirement pid {final_web.pid} still holds {path}"
+                )
+            else:
+                cleanup_problems.append(
+                    f"web UI: a pre-install or unverifiable generation pid "
+                    f"{final_web.pid} still holds {path}"
+                )
 
         cleanup_problems = list(dict.fromkeys(cleanup_problems))
         if cleanup_problems:
@@ -957,6 +1066,53 @@ def upgrade(
                 "reinstalled": pkg_target,
                 "cleanup_complete": False,
             }
+            if warnings:
+                extra["warnings"] = warnings
+            _refuse_upgrade(
+                _inventory_failure_message(cleanup_problems, package_changed=True),
+                json_out=json_out,
+                killed=killed,
+                removed=removed,
+                extra=extra,
+            )
+    else:
+        # A Windows process can appear while uv is installing. Accept only a
+        # directly attributable pid-file holder stamped after installation;
+        # everything else is old or unverifiable and therefore a split-brain
+        # risk that requires a manual stop.
+        final_servers, final_warning = enumerate_server_liveness_inventory()
+        final_web = check_web_liveness()
+        record_narrowed_inventory_warning(
+            warnings,
+            final_warning,
+            emit=not json_out,
+            indent="  ",
+        )
+        final_registry = snapshot_all_instances()
+        cleanup_problems = _inventory_problems(final_servers, final_web)
+        cleanup_problems.extend(_registry_inventory_problems(final_registry, final_servers))
+        for state in _upgrade_server_stops(final_servers):
+            if (
+                state.alive
+                and state.probe_error is None
+                and not _is_new_generation(state, installed_at)
+            ):
+                cleanup_problems.append(
+                    f"memtomem-server: pid {state.pid or '?'} started before the install "
+                    "or has no verifiable generation stamp"
+                )
+        if (
+            final_web.alive
+            and final_web.probe_error is None
+            and not _is_new_generation(final_web, installed_at)
+        ):
+            cleanup_problems.append(
+                f"web UI: pid {final_web.pid or '?'} started before the install or has "
+                "no verifiable generation stamp"
+            )
+        cleanup_problems = list(dict.fromkeys(cleanup_problems))
+        if cleanup_problems:
+            extra = {"reinstalled": pkg_target, "cleanup_complete": False}
             if warnings:
                 extra["warnings"] = warnings
             _refuse_upgrade(

@@ -126,23 +126,40 @@ def index(
             "--debounce-window / --flush / --status."
         )
 
-    if do_status:
-        _print_status(as_json=as_json)
-        return
+    # ``DebounceQueueError`` means the durable queue is unreadable or
+    # internally inconsistent — a transient EACCES on the queue file, or a
+    # clock step that backdates a live claim.  These reach the PostToolUse
+    # hook (`mm index --debounce`), where an uncaught traceback would stall
+    # reactive indexing on every subsequent invocation until a human found
+    # and deleted the file.  Convert to a CLI error that names the queue and
+    # the one-line recovery instead.
+    from memtomem.indexing.debounce import DebounceQueueError, queue_path
 
-    if do_flush:
-        _run_flush(as_json=as_json)
-        return
+    try:
+        if do_status:
+            _print_status(as_json=as_json)
+            return
 
-    if debounce_window is not None:
-        _run_debounce(
-            path=path,
-            window_seconds=debounce_window,
-            namespace=namespace,
-            force=force,
-            as_json=as_json,
-        )
-        return
+        if do_flush:
+            _run_flush(as_json=as_json)
+            return
+
+        if debounce_window is not None:
+            _run_debounce(
+                path=path,
+                window_seconds=debounce_window,
+                namespace=namespace,
+                force=force,
+                as_json=as_json,
+            )
+            return
+    except DebounceQueueError as exc:
+        raise click.ClickException(
+            f"{exc}\n"
+            f"The debounce queue is unusable. If this persists, remove "
+            f"{queue_path()} to reset it; queued paths will be re-queued on "
+            f"the next edit."
+        ) from exc
 
     try:
         asyncio.run(

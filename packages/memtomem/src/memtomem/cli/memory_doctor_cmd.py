@@ -432,14 +432,20 @@ def _settle_wikilink_labels(
         if kind == "wiki":
             wikilinks.append(title)  # the name rides in the title slot
             continue
-        inner = title[1:-1] if _WIKILINK_LABEL_RE.match(title) else None
-        if inner is not None and verdicts[inner] == "wikilink":
+        label_inner: str | None = title[1:-1] if _WIKILINK_LABEL_RE.match(title) else None
+        if label_inner is not None and verdicts[label_inner] == "wikilink":
             # CommonMark reports the label as ``[memo]``; settled against the
             # source, it can only have come from ``[[memo]]`` — recover the
             # target (dropping an ``|alias`` part, which never names the file).
-            wikilinks.append(inner.split("|", 1)[0])
+            wikilinks.append(label_inner.split("|", 1)[0])
         else:
-            links.append((title, dest, inner is not None and verdicts[inner] == "contested"))
+            links.append(
+                (
+                    title,
+                    dest,
+                    label_inner is not None and verdicts[label_inner] == "contested",
+                )
+            )
     return links, wikilinks
 
 
@@ -454,8 +460,8 @@ def _markdown_parser() -> MarkdownIt:
     silently dropped into a non-link.
     """
     md = MarkdownIt("commonmark")
-    md.normalizeLink = lambda url: url
-    md.validateLink = lambda url: True
+    setattr(md, "normalizeLink", lambda url: url)
+    setattr(md, "validateLink", lambda url: True)
     return md
 
 
@@ -649,6 +655,8 @@ def parse_memory_index(text: str) -> ParsedIndex:
             continue
         body = _list_item_body(tokens, i)
         for inline in _own_inlines(body):
+            if inline.map is None:
+                continue
             line_no = inline.map[0] + 1
             links, inline_wikilinks, unresolved = _read_inline(inline)
             wikilinks.extend((line_no, target) for target in inline_wikilinks)

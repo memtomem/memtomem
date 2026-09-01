@@ -37,9 +37,12 @@ needed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -55,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_QUEUE_PATH = Path("~/.memtomem/index_debounce_queue.json").expanduser()
-_QUEUE_VERSION = 1
+_QUEUE_VERSION = 2
 
 # Retryable failures must not stay queued forever — drain runs on every hook
 # fire and every ``Stop``-hook ``--flush``, so a store outage that never clears
@@ -65,6 +68,16 @@ _QUEUE_VERSION = 1
 # budget. Permanent failures (parser errors, redaction blocks, malformed files)
 # bypass this budget and are dropped on their first drain (#2026).
 _MAX_DRAIN_ATTEMPTS = 5
+# A claimed entry remains durable while its index callback runs.  If the
+# process crashes, a later drainer may reclaim it after this lease rather than
+# losing the path forever.  Indexing one file should remain far below an hour;
+# the generous bound avoids duplicate expensive work under normal load.
+_CLAIM_LEASE_S = 3600.0
+_CLAIM_FUTURE_SKEW_S = 5.0
+
+
+class DebounceQueueError(RuntimeError):
+    """The durable queue could not be interpreted safely."""
 
 
 @dataclass
@@ -77,15 +90,38 @@ class QueueEntry:
     namespace: str | None = None
     force: bool = False
     attempts: int = 0  # retryable drain attempts so far (see _MAX_DRAIN_ATTEMPTS)
+    claim_id: str | None = None
+    claimed_at: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "QueueEntry":
+        if not isinstance(d, dict):
+            raise DebounceQueueError("queue entry is not a JSON object")
+        first_seen = float(d["first_seen"])
+        last_seen = float(d["last_seen"])
+        attempts = int(d.get("attempts", 0))
+        claimed_at_raw = d.get("claimed_at")
+        claimed_at = float(claimed_at_raw) if claimed_at_raw is not None else None
+        if not all(math.isfinite(value) for value in (first_seen, last_seen)):
+            raise DebounceQueueError("queue timestamps must be finite")
+        if claimed_at is not None and not math.isfinite(claimed_at):
+            raise DebounceQueueError("claim timestamp must be finite")
+        if attempts < 0:
+            raise DebounceQueueError("queue attempts must be non-negative")
+        force = d.get("force", False)
+        if not isinstance(force, bool):
+            raise DebounceQueueError("queue force flag must be boolean")
+        claim_id = d.get("claim_id")
+        if claim_id is not None and not isinstance(claim_id, str):
+            raise DebounceQueueError("queue claim_id must be a string")
         return cls(
-            first_seen=float(d["first_seen"]),
-            last_seen=float(d["last_seen"]),
+            first_seen=first_seen,
+            last_seen=last_seen,
             namespace=d.get("namespace"),
-            force=bool(d.get("force", False)),
-            attempts=int(d.get("attempts", 0)),
+            force=force,
+            attempts=attempts,
+            claim_id=claim_id,
+            claimed_at=claimed_at,
         )
 
 
@@ -137,11 +173,22 @@ def _load(path: Path) -> dict[str, QueueEntry]:
         return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("debounce queue %s unreadable (%s); treating as empty", path, e)
-        return {}
-    entries = raw.get("entries", {}) if isinstance(raw, dict) else {}
-    return {p: QueueEntry.from_dict(d) for p, d in entries.items()}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DebounceQueueError(f"debounce queue {path} is unreadable: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise DebounceQueueError(f"debounce queue {path} root is not a JSON object")
+    version = raw.get("version", 1)
+    if not isinstance(version, int) or version < 1 or version > _QUEUE_VERSION:
+        raise DebounceQueueError(
+            f"debounce queue {path} has unsupported version {version!r}; refusing data loss"
+        )
+    entries = raw.get("entries", {})
+    if not isinstance(entries, dict):
+        raise DebounceQueueError(f"debounce queue {path} entries are not a JSON object")
+    try:
+        return {p: QueueEntry.from_dict(d) for p, d in entries.items() if isinstance(p, str)}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DebounceQueueError(f"debounce queue {path} has an invalid entry: {exc}") from exc
 
 
 def _save(path: Path, entries: dict[str, QueueEntry]) -> None:
@@ -281,11 +328,133 @@ def enqueue(
             # PostToolUse[Write] hook), so give the entry a fresh retry
             # budget — the failure may have been fixed by this write.
             existing.attempts = 0
+            # A write that lands while an older revision is being indexed is
+            # new work.  Detach it from that claim so the old completion can
+            # never delete the newly enqueued revision.
+            existing.claim_id = None
+            existing.claimed_at = None
         _save(qp, entries)
 
 
 def _ready(entry: QueueEntry, window_seconds: float, now: float) -> bool:
     return (now - entry.last_seen) >= window_seconds
+
+
+def _claimable(entry: QueueEntry, now: float) -> bool:
+    if entry.claim_id is None:
+        return True
+    if entry.claimed_at is None:
+        raise DebounceQueueError("claimed queue entry is missing claimed_at")
+    # A timestamp implausibly ahead of the current clock is corruption or
+    # clock rollback.  Treating it as an eternal live claim would silently
+    # strand work; stealing it immediately could duplicate an active index.
+    if entry.claimed_at > now + _CLAIM_FUTURE_SKEW_S:
+        raise DebounceQueueError("queue claim timestamp is in the future")
+    return now - entry.claimed_at >= _CLAIM_LEASE_S
+
+
+def _claim_entries(
+    qp: Path,
+    *,
+    now: float,
+    predicate: Callable[[str, QueueEntry], bool],
+) -> dict[str, tuple[str, QueueEntry]]:
+    """Persist claims under lock, then return immutable callback inputs."""
+    claimed: dict[str, tuple[str, QueueEntry]] = {}
+    with _Lock(qp):
+        entries = _load(qp)
+        for path_str, entry in entries.items():
+            if not predicate(path_str, entry) or not _claimable(entry, now):
+                continue
+            claim_id = secrets.token_hex(16)
+            entry.claim_id = claim_id
+            entry.claimed_at = now
+            claimed[path_str] = (claim_id, QueueEntry.from_dict(asdict(entry)))
+        if claimed:
+            _save(qp, entries)
+    return claimed
+
+
+def _refresh_claim_if_owned(qp: Path, path_str: str, claim_id: str) -> bool:
+    """Refresh one lease immediately before its callback, if still ours.
+
+    A drain claims a bounded batch before running callbacks without the queue
+    lock. Slow earlier callbacks can outlive the initial lease of later rows;
+    reloading under lock here prevents their stale owner from indexing after a
+    second drainer has legitimately reclaimed them.
+    """
+    with _Lock(qp):
+        entries = _load(qp)
+        current = entries.get(path_str)
+        if current is None or current.claim_id != claim_id:
+            return False
+        current.claimed_at = time.time()
+        _save(qp, entries)
+        return True
+
+
+async def _run_claims(
+    qp: Path,
+    claims: dict[str, tuple[str, QueueEntry]],
+    indexer: Callable[[str, str | None, bool], Awaitable[Literal["indexed", "skipped"] | None]],
+) -> DrainResult:
+    """Run callbacks lock-free and settle only claims still owned by us."""
+    outcomes: dict[str, tuple[Literal["indexed", "skipped", "error"], Exception | None]] = {}
+    result = DrainResult()
+    try:
+        for path_str, (claim_id, entry) in claims.items():
+            if not _refresh_claim_if_owned(qp, path_str, claim_id):
+                continue
+            try:
+                outcome = await indexer(path_str, entry.namespace, entry.force)
+                outcomes[path_str] = ("skipped" if outcome == "skipped" else "indexed", None)
+                if outcome == "skipped":
+                    result.skipped.append(path_str)
+                else:
+                    result.indexed.append(path_str)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                outcomes[path_str] = ("error", exc)
+    except asyncio.CancelledError:
+        # Stop hooks and CLI flushes can be cancelled by their host timeout.
+        # Claims are durable, so leaving them behind would make every later
+        # drainer wait for the one-hour crash lease. Release only rows whose
+        # token still belongs to this drain; a concurrent enqueue clears the
+        # token and must remain untouched as newer work.
+        with _Lock(qp):
+            entries = _load(qp)
+            changed = False
+            for path_str, (claim_id, _entry) in claims.items():
+                current = entries.get(path_str)
+                if current is None or current.claim_id != claim_id:
+                    continue
+                current.claim_id = None
+                current.claimed_at = None
+                changed = True
+            if changed:
+                _save(qp, entries)
+        raise
+
+    with _Lock(qp):
+        entries = _load(qp)
+        for path_str, (claim_id, _claimed_entry) in claims.items():
+            current = entries.get(path_str)
+            # A concurrent enqueue cleared/replaced this claim.  Its newer
+            # revision remains queued regardless of this callback's outcome.
+            if current is None or current.claim_id != claim_id:
+                continue
+            settlement_outcome, settlement_exc = outcomes[path_str]
+            if settlement_outcome != "error":
+                del entries[path_str]
+                continue
+            assert settlement_exc is not None
+            current.claim_id = None
+            current.claimed_at = None
+            _record_failure(entries, path_str, current, settlement_exc, result)
+        result.remaining = len(entries)
+        _save(qp, entries)
+    return result
 
 
 def _record_failure(
@@ -353,28 +522,12 @@ async def drain_ready(
     """
     qp = queue_file or queue_path()
     ts = time.time() if now is None else now
-    result = DrainResult()
-    with _Lock(qp):
-        entries = _load(qp)
-        ready_paths = [p for p, e in entries.items() if _ready(e, window_seconds, ts)]
-        for p in ready_paths:
-            entry = entries[p]
-            try:
-                outcome = await indexer(p, entry.namespace, entry.force)
-                if outcome == "skipped":
-                    result.skipped.append(p)
-                else:
-                    # ``None`` remains the backward-compatible success value
-                    # for existing callback implementations and test doubles.
-                    result.indexed.append(p)
-                del entries[p]
-            except Exception as e:
-                # Classification decides whether the entry stays for another
-                # drain or is permanently removed on this attempt (#2026).
-                _record_failure(entries, p, entry, e, result)
-        result.remaining = len(entries)
-        _save(qp, entries)
-    return result
+    claims = _claim_entries(
+        qp,
+        now=ts,
+        predicate=lambda _path, entry: _ready(entry, window_seconds, ts),
+    )
+    return await _run_claims(qp, claims, indexer)
 
 
 async def drain_all(
@@ -394,27 +547,14 @@ async def drain_all(
     always ``None`` and every queued entry drains.
     """
     qp = queue_file or queue_path()
-    result = DrainResult()
     selected = set(paths) if paths is not None else None
-    with _Lock(qp):
-        entries = _load(qp)
-        targets = [p for p in entries if (selected is None or p in selected)]
-        for p in targets:
-            entry = entries[p]
-            try:
-                outcome = await indexer(p, entry.namespace, entry.force)
-                if outcome == "skipped":
-                    result.skipped.append(p)
-                else:
-                    result.indexed.append(p)
-                del entries[p]
-            except Exception as e:
-                # Same classification + retry cap as drain_ready — this path
-                # runs on every Stop-hook ``--flush`` and must not drift.
-                _record_failure(entries, p, entry, e, result)
-        result.remaining = len(entries)
-        _save(qp, entries)
-    return result
+    now = time.time()
+    claims = _claim_entries(
+        qp,
+        now=now,
+        predicate=lambda path_str, _entry: selected is None or path_str in selected,
+    )
+    return await _run_claims(qp, claims, indexer)
 
 
 def status_snapshot(*, queue_file: Path | None = None) -> StatusSnapshot:

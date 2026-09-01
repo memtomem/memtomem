@@ -1251,3 +1251,29 @@ async def test_get_projects_permission_denied_registry_classifies_permission(
     assert warning["retryable"] is True
     assert warning["skipped_rows"] is None
     assert "unreadable" in warning["message"]
+
+
+@pytest.mark.asyncio
+async def test_get_projects_reports_unavailable_claude_scan_without_losing_roster(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.context import projects as projects_mod
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(projects_mod, "_discover_claude_projects", denied)
+    resp = await client.get("/api/context/projects")
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["registry_status"] == "ok"
+    assert any("server-cwd" in scope["sources"] for scope in data["scopes"])
+    warning = next(
+        item
+        for item in data["warnings"]
+        if item["reason_code"] == "claude_projects_scan_unavailable"
+    )
+    assert warning["error_kind"] == "permission"
+    assert warning["retryable"] is True
+    assert warning["skipped_rows"] is None

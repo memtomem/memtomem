@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 from memtomem.config import IndexingConfig
 from memtomem.errors import NamespaceResolutionError, RetryableError
@@ -42,6 +44,19 @@ _WATCHER_QUEUE_MAXSIZE = 1000
 # event or restart.
 _BACKFILL_MAX_ATTEMPTS = 3
 _BACKFILL_RETRY_BASE_S = 5.0
+
+
+def effective_watcher_backend(config: IndexingConfig) -> str:
+    """Return the concrete watchdog backend selected for this runtime."""
+    if config.watcher_backend == "auto":
+        return "polling" if sys.platform == "darwin" else "native"
+    return config.watcher_backend
+
+
+def _create_observer(config: IndexingConfig) -> BaseObserver:
+    if effective_watcher_backend(config) == "polling":
+        return PollingObserver()
+    return Observer()
 
 
 class _MarkdownEventHandler(FileSystemEventHandler):
@@ -142,6 +157,10 @@ class FileWatcher:
         self._search_pipeline = search_pipeline
         self._debounce_s = debounce_ms / 1000.0
         self._observer: BaseObserver | None = None
+        # Track what the live observer actually is instead of deriving it from
+        # ``_config``: callers may replace or mutate the config before asking
+        # us to reconfigure, while the observer itself keeps its old backend.
+        self._observer_backend: str | None = None
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
         self._backfill_task: asyncio.Task[None] | None = None
@@ -165,7 +184,10 @@ class FileWatcher:
         loop = asyncio.get_running_loop()
         handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
         self._handler = handler
-        self._observer = Observer()
+        backend = effective_watcher_backend(self._config)
+        self._observer = _create_observer(self._config)
+        self._observer_backend = backend
+        logger.info("File watcher backend: %s", backend)
 
         watched: list[Path] = []
         # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
@@ -199,6 +221,58 @@ class FileWatcher:
                 for path in config.all_index_roots()
                 if Path(path).expanduser().resolve().exists()
             }
+            desired_backend = effective_watcher_backend(config)
+            current_backend = self._observer_backend or effective_watcher_backend(self._config)
+            if desired_backend != current_backend:
+                # Watchdog cannot change an Observer's implementation in place.
+                # Build and start the replacement first so a construction or
+                # scheduling failure leaves the old observer fully operational.
+                replacement = _create_observer(config)
+                replacement_watches: dict[Path, ObservedWatch] = {}
+                try:
+                    for path in sorted(desired):
+                        replacement_watches[path] = replacement.schedule(
+                            handler, str(path), recursive=True
+                        )
+                    replacement.start()
+                except BaseException:
+                    # ``start`` can fail after partially starting its thread.
+                    # Best-effort cleanup must not mask the original failure.
+                    try:
+                        replacement.stop()
+                        if replacement.is_alive():
+                            replacement.join()
+                    except Exception:
+                        logger.warning(
+                            "Failed to clean up replacement file watcher",
+                            exc_info=True,
+                        )
+                    raise
+
+                try:
+                    observer.stop()
+                    observer.join()
+                except BaseException:
+                    # Preserve the old published observer/config on failure and
+                    # avoid leaking the successfully started replacement.
+                    try:
+                        replacement.stop()
+                        replacement.join()
+                    except Exception:
+                        logger.warning(
+                            "Failed to clean up replacement file watcher",
+                            exc_info=True,
+                        )
+                    raise
+
+                self._observer = replacement
+                self._observer_backend = desired_backend
+                self._watches = replacement_watches
+                handler._supported = config.supported_extensions
+                self._config = config
+                logger.info("File watcher backend changed to: %s", desired_backend)
+                return
+
             current = set(self._watches)
             added: list[Path] = []
             removed: list[Path] = []
@@ -276,6 +350,7 @@ class FileWatcher:
             self._observer.stop()
             self._observer.join()
         self._observer = None
+        self._observer_backend = None
         self._handler = None
         self._watches.clear()
         self._task = None

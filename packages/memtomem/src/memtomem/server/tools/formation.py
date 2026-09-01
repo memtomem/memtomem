@@ -242,6 +242,8 @@ async def mem_candidate_review(
             that resolution asserts the durable destination was inspected.
     """
     app = await _get_app_initialized(ctx)
+    if not reviewer.strip():
+        return json.dumps({"ok": False, "reason": "reviewer cannot be empty"})
     candidate = await app.storage.get_memory_candidate(candidate_id)
     if candidate is None:
         return json.dumps({"ok": False, "reason": "candidate not found"})

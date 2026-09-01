@@ -14,6 +14,19 @@ def _make_chunk(components, content="test", tags=(), namespace="default"):
     return make_chunk(content=content, tags=tags, namespace=namespace, embedding=[0.0] * dim)
 
 
+def _project_chunk(components, project: Path, content: str, tag: str) -> Chunk:
+    return Chunk(
+        content=content,
+        metadata=ChunkMetadata(
+            source_file=project / f"{content}.md",
+            tags=(tag,),
+            scope="project_shared",
+            project_root=project,
+        ),
+        embedding=[0.0] * components.config.embedding.dimension,
+    )
+
+
 class TestHealthReport:
     @pytest.mark.asyncio
     async def test_empty_db(self, storage):
@@ -167,6 +180,34 @@ class TestMostConnected:
         result = await storage.get_most_connected(limit=2)
         assert len(result) >= 1
         assert result[0]["link_count"] >= 2
+
+
+class TestProjectAnalyticsIsolation:
+    @pytest.mark.asyncio
+    async def test_aggregates_tags_gaps_and_relations_are_project_scoped(self, storage, components):
+        project_a = Path("/workspace/project-a")
+        project_b = Path("/workspace/project-b")
+        a1 = _project_chunk(components, project_a, "alpha-hub", "alpha")
+        a2 = _project_chunk(components, project_a, "alpha-spoke", "alpha")
+        b1 = _project_chunk(components, project_b, "beta-hub", "beta")
+        b2 = _project_chunk(components, project_b, "beta-spoke", "beta")
+        await storage.upsert_chunks([a1, a2, b1, b2])
+        await storage.increment_access([a1.id, b1.id])
+        await storage.add_relation(a1.id, a2.id)
+        await storage.add_relation(b1.id, b2.id)
+        await storage.save_query_history("alpha gap", [], [], [], project_context_root=project_a)
+        await storage.save_query_history("beta gap", [], [], [], project_context_root=project_b)
+
+        report = await storage.get_health_report(project_context_root=project_a)
+        assert report["total_chunks"] == 2
+        assert report["cross_references"] == 1
+        assert all("beta" not in row["content"] for row in report["top_accessed"])
+        assert await storage.get_tag_counts(project_context_root=project_a) == [("alpha", 2)]
+        assert await storage.get_knowledge_gaps(project_context_root=project_a) == [
+            {"query": "alpha gap", "count": 1}
+        ]
+        connected = await storage.get_most_connected(project_context_root=project_a)
+        assert {row["chunk_id"] for row in connected} == {str(a1.id), str(a2.id)}
 
 
 class TestChunkFactors:

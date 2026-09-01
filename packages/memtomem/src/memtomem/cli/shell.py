@@ -263,7 +263,10 @@ async def _cmd_recall(comp, args: list[str]) -> None:
 
 
 async def _cmd_tags(comp) -> None:
-    tag_counts = await comp.storage.get_tag_counts()
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(comp)
+    tag_counts = await comp.storage.get_tag_counts(project_context_root=project_context_root)
     if not tag_counts:
         click.secho("No tags found.", fg="yellow")
         return
@@ -280,7 +283,10 @@ async def _cmd_stats(comp) -> None:
     click.echo(f"  Chunks:    {stats['total_chunks']}")
     click.echo(f"  Sources:   {stats['total_sources']}")
 
-    tag_counts = await comp.storage.get_tag_counts()
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_context_root = _resolve_project_context_root(comp)
+    tag_counts = await comp.storage.get_tag_counts(project_context_root=project_context_root)
     click.echo(f"  Tags:      {len(tag_counts)}")
 
     namespaces = await comp.storage.list_namespaces()

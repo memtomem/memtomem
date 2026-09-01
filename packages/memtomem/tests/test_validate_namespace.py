@@ -326,6 +326,7 @@ class TestCliSessionStartNamespaceOverride:
     def test_accepts_explicit_shared(self, runner, monkeypatch, storage_mock):
         comp = SimpleNamespace(storage=storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._write_current_session", lambda _sid: None)
 
         result = runner.invoke(
             cli,

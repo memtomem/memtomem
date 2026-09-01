@@ -11,7 +11,9 @@ import asyncio
 
 import pytest
 
+from memtomem.config import Mem2MemConfig
 from memtomem.generation import ComponentGeneration
+from memtomem.runtime.components import Components, close_components
 
 pytestmark = pytest.mark.anyio
 
@@ -189,6 +191,52 @@ async def test_drain_returns_rather_than_propagating_its_own_cancellation():
     assert isinstance(await drain, asyncio.CancelledError)
 
 
+async def test_component_teardown_observes_shielded_retired_close_after_cancellation():
+    gen = ComponentGeneration()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def _retired_close() -> None:
+        started.set()
+        await release.wait()
+        calls.append("retired")
+
+    class _Resource:
+        def __init__(self, name: str, *, releases_retired: bool = False) -> None:
+            self.name = name
+            self.releases_retired = releases_retired
+
+        async def close(self) -> None:
+            calls.append(self.name)
+            if self.releases_retired:
+                release.set()
+
+    lease = gen.hold()
+    lease.__enter__()
+    gen.retire(_retired_close)
+    components = Components(
+        config=Mem2MemConfig(),
+        storage=_Resource("storage", releases_retired=True),  # type: ignore[arg-type]
+        embedder=_Resource("embedder"),  # type: ignore[arg-type]
+        index_engine=object(),  # type: ignore[arg-type]
+        search_pipeline=_Resource("pipeline"),  # type: ignore[arg-type]
+        retired_generations=[gen],
+    )
+
+    teardown = asyncio.create_task(close_components(components))
+    await started.wait()
+    teardown.cancel()
+    result = await teardown
+
+    assert isinstance(result.cancelled, asyncio.CancelledError)
+    assert calls == ["pipeline", "embedder", "storage", "retired"]
+    assert gen.settled is True
+    assert gen._close_task is None
+    assert components.retired_generations == []
+    lease.__exit__(None, None, None)
+
+
 async def test_drain_reports_a_cancelled_deferred_close():
     """A deferred close that ends cancelled is reported too, so shutdown can
     re-raise it once every other component is down."""
@@ -300,3 +348,43 @@ async def test_an_ordinary_close_failure_settles():
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert gen.settled is True
+
+
+async def test_teardown_gives_up_on_a_generation_that_never_settles():
+    """The shutdown drain is bounded, not ``while True``.
+
+    ``drain`` reports a cancellation *without* settling whenever the shielded
+    close is still running, so a supervisor that re-delivers cancellation on
+    every ``await`` — an expired ``asyncio.timeout`` around shutdown — makes
+    every pass raise immediately. An unbounded retry would spin there without
+    ever yielding. Cap the passes, keep the cancellation, and leave the close
+    running for process exit.
+    """
+    from memtomem.runtime import components as comp_mod
+
+    class _NeverSettles:
+        def __init__(self) -> None:
+            self.drains = 0
+            self.settled = False
+
+        async def drain(self) -> asyncio.CancelledError | None:
+            self.drains += 1
+            return asyncio.CancelledError()
+
+    gen = _NeverSettles()
+    components = Components(
+        config=Mem2MemConfig(),
+        storage=None,
+        embedder=None,
+        index_engine=object(),  # type: ignore[arg-type]
+        search_pipeline=None,
+        retired_generations=[gen],  # type: ignore[list-item]
+    )
+
+    result = await asyncio.wait_for(close_components(components), timeout=5)
+
+    assert isinstance(result.cancelled, asyncio.CancelledError)
+    # One pass in the ordering loop, then the capped observation loop.
+    assert gen.drains == 1 + comp_mod._MAX_DRAIN_PASSES
+    # Unsettled, so it is retained rather than pruned.
+    assert components.retired_generations == [gen]

@@ -67,6 +67,22 @@ def get_project_root(request: Request) -> Path:
     return _require_app_state(request, "project_root")
 
 
+def get_project_context_root(request: Request) -> Path | None:
+    """Return the live ADR-0011 boundary for the Web server's cwd.
+
+    ``app.state.project_root`` records the filesystem project detected when
+    ``mm web`` started.  It is not an authorization boundary: project tiers
+    become visible only while their memory directory remains registered in
+    the live (hot-reloadable) config.  Resolve through the same helper as the
+    search route so search history, analytics, and tag discovery cannot drift
+    from the chunks a search can return.
+    """
+    from memtomem.runtime.project_context import _resolve_project_context_from_dirs
+
+    config = get_config(request)
+    return _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
+
+
 def get_hooks_target_scope(request: Request) -> str:
     """Return ``hooks.target_scope`` from the live ``app.state.config``.
 

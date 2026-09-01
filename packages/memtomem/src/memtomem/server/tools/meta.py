@@ -5,7 +5,7 @@ from __future__ import annotations
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.tool_registry import ACTIONS
+from memtomem.server.tool_registry import ACTIONS, validate_action_params
 
 # Common aliases for discoverability — maps intuitive names to actual actions
 _ALIASES: dict[str, str] = {
@@ -77,6 +77,18 @@ async def mem_do(
 
     kwargs = dict(params) if params else {}
     kwargs["ctx"] = ctx
+    try:
+        # Scoped to validation alone.  Widening it over ``info.fn`` would
+        # rewrite every ``ValueError`` a tool body raises for its own reasons
+        # (range checks, timestamp parsing, reviewer/decision validation) into
+        # a caller-input error, hiding it from ``@tool_handler`` and making an
+        # internal failure indistinguishable from a bad parameter.
+        kwargs = validate_action_params(info, kwargs)
+    except ValueError as exc:
+        # Registered tool bodies historically use the lower-case prefix for
+        # literal-boolean refusals; keep that wire contract while moving the
+        # guard in front of every action.
+        return f"error: {exc}"
     try:
         return await info.fn(**kwargs)
     except TypeError as exc:

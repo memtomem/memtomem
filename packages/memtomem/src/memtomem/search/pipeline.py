@@ -60,7 +60,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from functools import lru_cache
 from datetime import UTC, datetime
 from fnmatch import fnmatch
@@ -97,7 +97,7 @@ from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.visibility import chunk_valid_at, neighbor_visible
 from memtomem.search.reranker.base import close_reranker_safely
 from memtomem.storage.base import ContextWindowRows, SearchMetadataFilter, parse_tag_filter
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import match_source_filter_value, norm_path
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +170,38 @@ def _saver_takes_created_at(saver: Callable) -> bool:
     bound and never hit.
     """
     return _signature_accepts_created_at(getattr(saver, "__func__", saver))
+
+
+@lru_cache(maxsize=32)
+def _signature_accepts_project_boundary(func: Callable) -> bool:
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    if "project_context_root" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _saver_takes_project_boundary(saver: Callable) -> bool:
+    """Whether a duck-typed saver implements project-isolated history."""
+    return _signature_accepts_project_boundary(getattr(saver, "__func__", saver))
+
+
+@lru_cache(maxsize=32)
+def _signature_accepts_effective_scope(func: Callable) -> bool:
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    if "effective_scope" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _saver_takes_effective_scope(saver: Callable) -> bool:
+    """Whether a duck-typed saver accepts the resolved search scope."""
+    return _signature_accepts_effective_scope(getattr(saver, "__func__", saver))
 
 
 def _bg_task_error_cb(task: asyncio.Task) -> None:
@@ -253,11 +285,7 @@ def match_source_filter(filter_str: str, source_path: str) -> bool:
     users avoid backslashes in POSIX filenames) and is the trade-off for
     a Windows-portable comparison.
     """
-    norm_filter = filter_str.replace("\\", "/")
-    norm_source = source_path.replace("\\", "/")
-    if any(c in norm_filter for c in ("*", "?", "[")):
-        return fnmatch(norm_source, norm_filter)
-    return norm_filter in norm_source
+    return match_source_filter_value(filter_str, source_path)
 
 
 def match_source_filter_substring(filter_str: str, source_path: str) -> bool:
@@ -532,6 +560,7 @@ class SearchPipeline:
         metadata_filter: SearchMetadataFilter | None,
         as_of_unix: int | None,
         rrf_weights: list[float],
+        project_context_root: Path | None,
     ) -> str | None:
         """Schedule a content-minimized ranked-search observation when supported.
 
@@ -565,12 +594,29 @@ class SearchPipeline:
             if stats.cache_hit:
                 return None
 
+            legacy_saver: Callable[..., Awaitable[None]] = self._storage.save_query_history
+            if project_context_root is not None and not _saver_takes_project_boundary(legacy_saver):
+                # An old alternate backend has no way to isolate this row from
+                # user history. Dropping optional history is safer than storing
+                # project query text under the backend's default user key.
+                logger.warning(
+                    "Skipping legacy query history: backend does not accept project_context_root"
+                )
+                return None
+
+            legacy_kwargs: dict[str, object] = {}
+            if _saver_takes_project_boundary(legacy_saver):
+                legacy_kwargs["project_context_root"] = project_context_root
+            if _saver_takes_effective_scope(legacy_saver):
+                legacy_kwargs["effective_scope"] = scope
+
             async def _save_legacy_history() -> None:
-                await self._storage.save_query_history(
+                await legacy_saver(
                     query,
                     query_embedding,
                     [str(result.chunk.id) for result in results[:top_k]],
                     [result.score for result in results[:top_k]],
+                    **legacy_kwargs,
                 )
 
             task = asyncio.create_task(_save_legacy_history())
@@ -662,7 +708,19 @@ class SearchPipeline:
         # pre-#2183 signature. Passing an unknown keyword would TypeError
         # inside the background task and strand the run ID; such a backend
         # simply keeps stamping the write itself, as it did before.
-        extra_kwargs = {"created_at": created_at} if _saver_takes_created_at(saver) else {}
+        if project_context_root is not None and not _saver_takes_project_boundary(saver):
+            logger.warning(
+                "Skipping search observation: backend does not accept project_context_root"
+            )
+            return None
+
+        extra_kwargs: dict[str, object] = (
+            {"created_at": created_at} if _saver_takes_created_at(saver) else {}
+        )
+        if _saver_takes_project_boundary(saver):
+            extra_kwargs["project_context_root"] = project_context_root
+        if _saver_takes_effective_scope(saver):
+            extra_kwargs["effective_scope"] = scope
 
         async def _persist() -> None:
             try:
@@ -1004,6 +1062,7 @@ class SearchPipeline:
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        source_filter: str | None = None,
         exhaustive: bool = False,
         report_failure: Callable[[], None] | None = None,
     ) -> list[SearchResult]:
@@ -1071,6 +1130,7 @@ class SearchPipeline:
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
                     metadata_filter=bm25_filter,
+                    source_filter=source_filter,
                 )
             except Exception:
                 _log_rescue_failure("bm25_leg", "rescue bm25 leg failed")
@@ -1088,6 +1148,7 @@ class SearchPipeline:
                     namespace_filter=None,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
+                    source_filter=source_filter,
                     exhaustive=exhaustive,
                     **dense_metadata_kwargs,
                 )
@@ -1503,6 +1564,10 @@ class SearchPipeline:
             if record and as_of_unix is None and cache_key in self._search_cache:
                 ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
                 if ver == self._cache_version and time.time() - ts < ttl_snapshot:
+                    # Cache entries are internal snapshots. SearchResult embeds
+                    # mutable Chunk/metadata objects, so handing the stored list
+                    # out directly lets one caller poison every later hit.
+                    results_for_return = deepcopy(cached_results)
                     run_stats = dataclass_replace(
                         cached_stats,
                         query_run_id=None,
@@ -1514,7 +1579,7 @@ class SearchPipeline:
                     run_stats.query_run_id = await self._record_ranked_search(
                         query=original_query,
                         query_embedding=[],
-                        results=cached_results,
+                        results=results_for_return,
                         stats=run_stats,
                         top_k=top_k,
                         origin=origin,
@@ -1525,8 +1590,9 @@ class SearchPipeline:
                         metadata_filter=metadata_filter,
                         as_of_unix=as_of_unix,
                         rrf_weights=effective_weights,
+                        project_context_root=project_context_root,
                     )
-                    return cached_results, run_stats
+                    return results_for_return, run_stats
                 self._search_cache.pop(cache_key, None)
 
             bm25_k = max(self._config.bm25_candidates, top_k)
@@ -1646,7 +1712,11 @@ class SearchPipeline:
 
                 if strategy in ("tags", "both"):
                     query = await expand_query_tags(
-                        query, self._storage, max_terms, report_failure=_mark_expansion_failed
+                        query,
+                        self._storage,
+                        max_terms,
+                        project_context_root=project_context_root,
+                        report_failure=_mark_expansion_failed,
                     )
                 if strategy in ("headings", "both"):
                     # ADR-0011 PR-D round 11: thread the outer search's
@@ -1703,6 +1773,7 @@ class SearchPipeline:
                         namespace_filter=ns_filter,
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
+                        source_filter=source_filter,
                         **metadata_kwargs,
                     )
                 )
@@ -1716,6 +1787,7 @@ class SearchPipeline:
                         namespace_filter=ns_filter,
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
+                        source_filter=source_filter,
                         exhaustive=not record,
                         **metadata_kwargs,
                     )
@@ -1801,6 +1873,7 @@ class SearchPipeline:
                             scope_filter=scope_filter,
                             project_context_root=project_context_root,
                             metadata_filter=retrieval_metadata_filter,
+                            source_filter=source_filter,
                             exhaustive=not record,
                             report_failure=_mark_rescue_failed,
                         )
@@ -1925,8 +1998,10 @@ class SearchPipeline:
                         stats.score_scale = "rerank"
                         stats.reranker_model = rerank_cfg.model
 
-            # Stage 3c: source filter (glob/substring, so it cannot be an
-            # exact-match SQL conjunct the way ``source_exact`` is).
+            # Stage 3c: defensive source filter. The canonical matcher is
+            # pushed into both retrievers before their LIMIT so selective
+            # sources cannot be crowded out of the candidate pool; retain this
+            # boundary check for alternate StorageBackend implementations.
             if source_filter:
                 fused = [
                     r
@@ -1957,7 +2032,7 @@ class SearchPipeline:
                 # ``apply_score_decay`` defaults to wall clock and a replay with
                 # an explicit ``as_of_unix`` would still drift with real time.
                 fused = apply_score_decay(
-                    fused,
+                    deepcopy(fused),
                     half_life_days=self._decay_config.half_life_days,
                     now=datetime.fromtimestamp(effective_as_of, tz=UTC),
                 )
@@ -2122,6 +2197,7 @@ class SearchPipeline:
                     metadata_filter=metadata_filter,
                     as_of_unix=as_of_unix,
                     rrf_weights=effective_weights,
+                    project_context_root=project_context_root,
                 )
                 if record
                 else None

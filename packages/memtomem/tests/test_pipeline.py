@@ -120,7 +120,7 @@ class TestPipelineQueryExpansion:
         from memtomem.search.expansion import expand_query_tags
 
         class FakeStorage:
-            async def get_tag_counts(self):
+            async def get_tag_counts(self, *, project_context_root=None):
                 return [("deployment", 10), ("kubernetes", 5), ("docker", 3)]
 
         result = await expand_query_tags("deploy containers", FakeStorage())
@@ -131,7 +131,7 @@ class TestPipelineQueryExpansion:
         from memtomem.search.expansion import expand_query_tags
 
         class FakeStorage:
-            async def get_tag_counts(self):
+            async def get_tag_counts(self, *, project_context_root=None):
                 return [("python", 5)]
 
         result = await expand_query_tags("javascript frameworks", FakeStorage())
@@ -142,7 +142,7 @@ class TestPipelineQueryExpansion:
         from memtomem.search.expansion import expand_query_tags
 
         class BrokenStorage:
-            async def get_tag_counts(self):
+            async def get_tag_counts(self, *, project_context_root=None):
                 raise RuntimeError("DB error")
 
         result = await expand_query_tags("test", BrokenStorage())

@@ -1,7 +1,11 @@
 """Tests for quality audit fixes: read pool, batch ops, error handler, linking, sessions."""
 
+import sqlite_vec
 import pytest
 
+from memtomem.config import Mem2MemConfig
+from memtomem.errors import StorageStartupError
+from memtomem.storage.sqlite_backend import SqliteBackend
 
 from helpers import make_chunk as _make_chunk
 
@@ -52,6 +56,54 @@ class TestReadPool:
         await storage.upsert_chunks([chunk])
         stats = await storage.get_stats()
         assert stats["total_chunks"] == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_vec_reader_is_discarded_not_round_robined(self, tmp_path, monkeypatch):
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "partial-reader.db"
+        backend = SqliteBackend(config.storage, dimension=8)
+        real_load = sqlite_vec.load
+        calls = 0
+
+        def fail_first_reader(connection):
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # writer succeeds; first read connection fails
+                raise RuntimeError("reader extension load failed")
+            return real_load(connection)
+
+        monkeypatch.setattr(sqlite_vec, "load", fail_first_reader)
+        await backend.initialize()
+        try:
+            assert len(backend._read_pool) == 2
+            chunk = _make_chunk("dense survives partial reader failure", embedding=[0.1] * 8)
+            await backend.upsert_chunks([chunk])
+            for _ in range(6):
+                results = await backend.dense_search([0.1] * 8, top_k=1)
+                assert [result.chunk.id for result in results] == [chunk.id]
+        finally:
+            await backend.close()
+
+    @pytest.mark.asyncio
+    async def test_all_vec_readers_failing_aborts_initialization(self, tmp_path, monkeypatch):
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = tmp_path / "no-readers.db"
+        backend = SqliteBackend(config.storage, dimension=8)
+        real_load = sqlite_vec.load
+        calls = 0
+
+        def fail_every_reader(connection):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise RuntimeError("reader extension load failed")
+            return real_load(connection)
+
+        monkeypatch.setattr(sqlite_vec, "load", fail_every_reader)
+        with pytest.raises(StorageStartupError, match="stage=read_pool"):
+            await backend.initialize()
+        assert backend._db is None
+        assert backend._read_pool == []
 
 
 # ── Batch Operations ──────────────────────────────────────────────────
@@ -371,8 +423,10 @@ class TestHealthReportConsolidated:
         await storage.scratch_set("key2", "val2")
 
         report = await storage.get_health_report()
-        assert report["sessions"]["total"] >= 1
-        assert report["working_memory"]["total"] >= 2
+        # These tables have no project identity, so caller-bound public
+        # analytics fail closed rather than leaking whole-store counts.
+        assert report["sessions"]["total"] == 0
+        assert report["working_memory"]["total"] == 0
 
     @pytest.mark.asyncio
     async def test_relation_count(self, storage):

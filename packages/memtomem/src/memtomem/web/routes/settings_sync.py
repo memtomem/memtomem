@@ -728,7 +728,7 @@ async def resolve_conflict(
         "project_shared",
         description="Claude Code settings tier to update.",
     ),
-) -> dict:
+) -> Any:
     """Resolve a single hook conflict by replacing the target's rule."""
     if body.action != "use_proposed":
         raise _error(400, "validation", f"Unknown action: {body.action}")
@@ -1009,7 +1009,7 @@ async def delete_target_rule(
         "project_shared",
         description="Claude Code settings tier to update.",
     ),
-) -> dict:
+) -> Any:
     """Delete one exact rule from the selected target settings file."""
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
     target_path = _claude_target(project_root, target_scope)
@@ -1078,7 +1078,7 @@ async def promote_target_rule(
         "project_shared",
         description="Claude Code settings tier to read from.",
     ),
-) -> dict:
+) -> Any:
     """Promote one exact target rule into the canonical settings file."""
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
     target_path = _claude_target(project_root, target_scope)

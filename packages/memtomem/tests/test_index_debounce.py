@@ -593,6 +593,137 @@ class TestPersistenceAndConcurrency:
         remaining = _read_raw(queue_file)["entries"]
         assert list(remaining.keys()) == ["/tmp/bad.py"]
 
+    def test_index_callback_runs_without_holding_queue_lock(self, queue_file: Path) -> None:
+        debounce.enqueue("/tmp/file.py", now=100.0, queue_file=queue_file)
+
+        async def indexer(path: str, _ns: str | None, _force: bool) -> None:
+            # This would deadlock when drain held _Lock across the await.
+            debounce.enqueue(path, now=120.0, queue_file=queue_file)
+
+        result = asyncio.run(
+            debounce.drain_ready(
+                window_seconds=5.0,
+                indexer=indexer,
+                now=110.0,
+                queue_file=queue_file,
+            )
+        )
+        assert result.indexed == ["/tmp/file.py"]
+        remaining = _read_raw(queue_file)["entries"]
+        assert remaining["/tmp/file.py"]["last_seen"] == 120.0
+        assert remaining["/tmp/file.py"]["claim_id"] is None
+
+    def test_expired_durable_claim_is_recovered(self, queue_file: Path) -> None:
+        debounce.enqueue("/tmp/file.py", now=100.0, queue_file=queue_file)
+        raw = _read_raw(queue_file)
+        raw["entries"]["/tmp/file.py"].update({"claim_id": "crashed", "claimed_at": 101.0})
+        queue_file.write_text(json.dumps(raw), encoding="utf-8")
+
+        async def indexer(*_args) -> None:
+            return None
+
+        result = asyncio.run(
+            debounce.drain_ready(
+                window_seconds=5.0,
+                indexer=indexer,
+                now=101.0 + debounce._CLAIM_LEASE_S,
+                queue_file=queue_file,
+            )
+        )
+        assert result.indexed == ["/tmp/file.py"]
+
+    def test_late_batch_row_is_not_run_after_another_drain_reclaims_it(
+        self, queue_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        debounce.enqueue("/tmp/a.py", now=100.0, queue_file=queue_file)
+        debounce.enqueue("/tmp/b.py", now=100.0, queue_file=queue_file)
+        clock = [100.0]
+        monkeypatch.setattr(debounce.time, "time", lambda: clock[0])
+
+        async def scenario() -> None:
+            first_started = asyncio.Event()
+            release_first = asyncio.Event()
+            calls: list[tuple[str, str]] = []
+
+            async def first_indexer(path: str, *_args) -> None:
+                calls.append(("first", path))
+                if path == "/tmp/a.py":
+                    first_started.set()
+                    await release_first.wait()
+
+            async def second_indexer(path: str, *_args) -> None:
+                calls.append(("second", path))
+
+            first_task = asyncio.create_task(
+                debounce.drain_all(indexer=first_indexer, queue_file=queue_file)
+            )
+            await first_started.wait()
+
+            # Only B is selected for the competing drain. Its batch-time lease
+            # has expired while A is still running, so the second drainer owns
+            # and settles it before the first drainer reaches it.
+            clock[0] += debounce._CLAIM_LEASE_S
+            second = await debounce.drain_all(
+                indexer=second_indexer,
+                paths=["/tmp/b.py"],
+                queue_file=queue_file,
+            )
+            release_first.set()
+            first = await first_task
+
+            assert first.indexed == ["/tmp/a.py"]
+            assert second.indexed == ["/tmp/b.py"]
+            assert calls.count(("first", "/tmp/b.py")) == 0
+            assert calls.count(("second", "/tmp/b.py")) == 1
+            assert second.remaining == 1
+            assert first.remaining == 0
+
+        asyncio.run(scenario())
+
+    def test_cancelled_drain_releases_owned_claims_immediately(self, queue_file: Path) -> None:
+        debounce.enqueue("/tmp/file.py", now=100.0, queue_file=queue_file)
+
+        async def scenario() -> None:
+            started = asyncio.Event()
+            parked = asyncio.Event()
+
+            async def blocked_indexer(*_args) -> None:
+                started.set()
+                await parked.wait()
+
+            task = asyncio.create_task(
+                debounce.drain_all(indexer=blocked_indexer, queue_file=queue_file)
+            )
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            released = _read_raw(queue_file)["entries"]["/tmp/file.py"]
+            assert released["claim_id"] is None
+            assert released["claimed_at"] is None
+
+            async def succeeding_indexer(*_args) -> None:
+                return None
+
+            retried = await debounce.drain_all(indexer=succeeding_indexer, queue_file=queue_file)
+            assert retried.indexed == ["/tmp/file.py"]
+            assert retried.remaining == 0
+
+        asyncio.run(scenario())
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "{broken",
+            json.dumps({"version": debounce._QUEUE_VERSION + 1, "entries": {}}),
+        ],
+    )
+    def test_corrupt_or_future_queue_fails_closed(self, queue_file: Path, payload: str) -> None:
+        queue_file.write_text(payload, encoding="utf-8")
+        with pytest.raises(debounce.DebounceQueueError):
+            debounce.enqueue("/tmp/new.py", now=100.0, queue_file=queue_file)
+
 
 class TestQueuePathOverride:
     def test_env_override_changes_queue_path(self, tmp_path: Path, monkeypatch) -> None:
@@ -605,3 +736,58 @@ class TestQueuePathOverride:
         path = debounce.queue_path()
         assert path.name == "index_debounce_queue.json"
         assert ".memtomem" in str(path)
+
+
+class TestCliQueueErrorBoundary:
+    """A broken queue is a CLI error with a recovery hint, never a traceback.
+
+    ``mm index --debounce-window`` is the PostToolUse hook. A transient
+    ``EACCES`` on the queue file, or a clock step that backdates a live claim,
+    raises ``DebounceQueueError`` from deep inside ``_load``/``_claimable``; an
+    uncaught one would traceback on *every* subsequent invocation and stall
+    reactive indexing until a human found and deleted the file.
+    """
+
+    def test_status_queue_error_surfaces_as_a_cli_error(self, tmp_path: Path, monkeypatch) -> None:
+        """End-to-end through the read-only path, which needs no components."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        qp = tmp_path / "queue.json"
+        qp.write_text("{broken", encoding="utf-8")
+        monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(qp))
+
+        result = CliRunner().invoke(cli, ["index", "--status"])
+
+        assert result.exit_code != 0
+        assert not isinstance(result.exception, debounce.DebounceQueueError)
+        assert "debounce queue" in result.output
+        assert str(qp) in result.output
+
+    @pytest.mark.parametrize(
+        ("args", "target"),
+        [
+            (["index", "--status"], "_print_status"),
+            (["index", "--flush"], "_run_flush"),
+            (["index", "--debounce-window", "1", "."], "_run_debounce"),
+        ],
+    )
+    def test_every_queue_entry_point_is_inside_the_guard(self, args, target, monkeypatch) -> None:
+        """The drain paths boot components, so the guard is pinned at the
+        boundary rather than through a full runtime."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, indexing as indexing_mod
+
+        def boom(**_kwargs):
+            raise debounce.DebounceQueueError("debounce queue /q.json is unreadable: EACCES")
+
+        monkeypatch.setattr(indexing_mod, target, boom)
+
+        result = CliRunner().invoke(cli, args)
+
+        assert result.exit_code != 0
+        assert not isinstance(result.exception, debounce.DebounceQueueError)
+        assert "debounce queue" in result.output
+        assert "remove" in result.output

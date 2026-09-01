@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.services import tag_management as tag_svc
 from memtomem.tools.auto_tag import auto_tag_storage
-from memtomem.web.deps import get_search_pipeline, get_storage
+from memtomem.web.deps import get_project_context_root, get_search_pipeline, get_storage
 from memtomem.web.schemas.tags import (
     AutoTagRequest,
     AutoTagResponse,
@@ -29,9 +29,10 @@ async def list_tags(
     limit: int = Query(100, ge=1, le=10000),
     offset: int = Query(0, ge=0),
     storage=Depends(get_storage),
+    project_context_root=Depends(get_project_context_root),
 ) -> TagsListResponse:
-    """Return all unique tags across the knowledge base with occurrence counts."""
-    tag_counts = await storage.get_tag_counts()
+    """Return tags visible in the live project boundary with occurrence counts."""
+    tag_counts = await storage.get_tag_counts(project_context_root=project_context_root)
     all_tags = [TagCount(tag=t, count=c) for t, c in tag_counts]
     total = len(all_tags)
     page = all_tags[offset : offset + limit]

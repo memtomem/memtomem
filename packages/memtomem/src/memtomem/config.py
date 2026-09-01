@@ -323,6 +323,11 @@ class IndexingConfig(ConfigModel):
     # button cover ad-hoc indexing without flipping this — content-hash
     # dedup makes both paths idempotent.
     startup_backfill: bool = False
+    # ``auto`` uses watchdog's polling backend on macOS.  Native FSEvents can
+    # coalesce or miss short-lived edits on cloud-synchronised/project trees;
+    # polling is slower but gives the indexer a reliable default there.  Other
+    # platforms retain their native backend unless explicitly overridden.
+    watcher_backend: Literal["auto", "native", "polling"] = "auto"
 
     # AI per-source summary (Source tab "✨ AI" preview). Disabled by default —
     # requires ``llm.enabled=true`` and a configured provider, and produces one
@@ -1610,6 +1615,9 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
     except (OSError, _json.JSONDecodeError) as exc:
         _log.warning("Failed to read config overrides from %s: %s", path, exc)
         return
+    if not isinstance(data, dict):
+        _log.warning("Config overrides in %s are not a JSON object (ignored)", path)
+        return
     for section_name, updates in data.items():
         section_obj = getattr(config, section_name, None)
         if section_obj is None or not isinstance(updates, dict):
@@ -1672,13 +1680,9 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
         # invariants are about field *combinations*, so partial retention isn't
         # meaningful; fall back to known-good as a whole.
         #
-        # This is deliberately a *check*, not a rebuild: we do not assign the
-        # coerced model back. ``model_validate`` coerces every field to its
-        # declared type (e.g. a ``config.json`` string ``sqlite_path`` ->
-        # ``Path``), which would diverge from the raw values the ``setattr``
-        # path stores and change ``str()`` output cross-platform. That
-        # normalization is out of scope here; this pass only enforces validity
-        # and surfaces warnings.
+        # Commit the validated model, not the raw ``setattr`` intermediate,
+        # so persisted JSON cannot leave strings/dicts in typed Path/model
+        # fields merely because assignment validation is disabled.
         if applied_keys:
             # ``exclude_defaults`` keeps *untouched* defaulted legacy fields
             # (e.g. ``rerank.top_k``) out of the payload so they don't spuriously
@@ -1695,7 +1699,7 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    type(section_obj).model_validate(payload)
+                    validated_section = type(section_obj).model_validate(payload)
             except ValidationError as exc:
                 _log.warning(
                     "Invalid config section [%s] in %s: %s (reverting section to defaults)",
@@ -1705,15 +1709,16 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                 )
                 setattr(config, section_name, section_before)
             else:
+                setattr(config, section_name, validated_section)
                 for w in caught:
                     # The captured message may describe an auto-migration (e.g.
                     # "migrating rerank.top_k to min_pool"), but this validation
                     # pass does not persist it — the config.json value is used as
                     # set. Clarify so the operator updates the config themselves.
                     _log.warning(
-                        "Config %s [%s] in %s: %s (config.json value is applied "
-                        "as set and not auto-rewritten — update it to the "
-                        "replacement field named above)",
+                        "Config %s [%s] in %s: %s (the typed in-memory config "
+                        "applies this migration, but config.json is not "
+                        "auto-rewritten — update the replacement field named above)",
                         w.category.__name__,
                         section_name,
                         path,
@@ -1855,10 +1860,19 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
             if section_obj is None or not isinstance(updates, dict):
                 if section_obj is None and isinstance(updates, dict):
                     _warn("Unknown config section '%s' in %s (ignored)", section_name, path)
+                elif section_obj is not None:
+                    _warn(
+                        "Config section '%s' in %s is not a JSON object (ignored)",
+                        section_name,
+                        path,
+                    )
                 continue
             section_cls = type(section_obj)
+            section_before = section_obj.model_copy(deep=True)
+            touched: set[str] = set()
             for key, value in updates.items():
                 if not hasattr(section_obj, key):
+                    _warn("Unknown config field '%s.%s' in %s (ignored)", section_name, key, path)
                     continue
                 env_var = env_var_owning(section_name, key)
                 if env_var is not None:
@@ -1910,6 +1924,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                             seen.add(k)
                     try:
                         setattr(section_obj, key, current)
+                        touched.add(key)
                     except (TypeError, ValueError) as exc:
                         _warn(
                             "Skipping invalid fragment merge %s.%s from %s: %s",
@@ -1932,6 +1947,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                         if callable(fragment_validator):
                             fragment_validator(value)
                         setattr(section_obj, key, value)
+                        touched.add(key)
                     except (TypeError, ValueError) as exc:
                         _warn(
                             "Skipping invalid fragment value %s.%s=%r from %s: %s",
@@ -1941,6 +1957,23 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                             path,
                             exc,
                         )
+            if not touched:
+                continue
+
+            # Treat one section in one fragment as a transaction.  Cross-field
+            # validators see the assembled result, and only the typed model is
+            # committed.  A malformed section therefore cannot partially
+            # mutate live startup configuration.
+            dumped = section_obj.model_dump()
+            payload = section_obj.model_dump(exclude_defaults=True)
+            payload.update({key: dumped[key] for key in touched if key in dumped})
+            try:
+                validated_section = section_cls.model_validate(payload)
+            except (TypeError, ValueError, ValidationError) as exc:
+                setattr(config, section_name, section_before)
+                _warn("Invalid config section [%s] in %s: %s", section_name, path, exc)
+                continue
+            setattr(config, section_name, validated_section)
 
 
 # Typed vocabulary for provider-dir classification. ``ProviderCategory``

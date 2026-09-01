@@ -1030,18 +1030,18 @@ async function loadWatchdogStatus() {
         ${names.map(n => {
           const c = checks[n];
           const val = c.value || {};
-          const detail = Object.entries(val).map(([k,v]) => `<span class="mono">${k}</span>: ${v}`).join(' &middot; ');
+          const detail = Object.entries(val).map(([k,v]) => `<span class="mono">${escapeHtml(String(k))}</span>: ${escapeHtml(String(v))}`).join(' &middot; ');
           return `<div class="health-card card">
-            <div class="health-card-title" style="display:flex;align-items:center;gap:6px">${_wdDot(c.status)} ${n}</div>
+            <div class="health-card-title" style="display:flex;align-items:center;gap:6px">${_wdDot(c.status)} ${escapeHtml(String(n))}</div>
             <div style="font-size:0.85rem;font-weight:600;margin:4px 0">${_wdLabel(c.status)}</div>
             <div class="health-card-detail">${detail || '—'}</div>
-            <div class="health-card-detail" style="opacity:0.5">${c.tier}</div>
+            <div class="health-card-detail" style="opacity:0.5">${escapeHtml(String(c.tier || ''))}</div>
           </div>`;
         }).join('')}
       </div>
     `;
   } catch (e) {
-    report.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+    report.innerHTML = `<div class="empty-state">Error: ${escapeHtml(String(e.message || ''))}</div>`;
   }
 }
 

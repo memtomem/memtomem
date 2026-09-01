@@ -19,7 +19,8 @@ import logging
 import os
 import subprocess
 import sys
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -95,6 +96,61 @@ from memtomem.web.schemas.sources import (
     SourceOut,
     StatsResponse,
 )
+
+
+_ADD_PATH_ERROR = "File path must be a relative path contained by the configured memory directory"
+
+
+def _resolve_add_target(base: Path, raw: str) -> Path:
+    """Resolve an ``/api/add`` target without platform or symlink escapes."""
+    if "\x00" in raw:
+        raise ValueError(_ADD_PATH_ERROR)
+
+    # Treat both separator families as separators on every host. Otherwise a
+    # Windows drive/UNC path can pass on POSIX and become absolute when the
+    # same request reaches a Windows server.
+    windows = PureWindowsPath(raw)
+    portable = PurePosixPath(raw.replace("\\", "/"))
+    if windows.drive or windows.root or portable.is_absolute():
+        raise ValueError(_ADD_PATH_ERROR)
+    if not portable.parts or any(part in ("", ".", "..") for part in portable.parts):
+        raise ValueError(_ADD_PATH_ERROR)
+
+    # A registered memory root is allowed to be absent until its first write.
+    # ``strict=False`` still canonicalizes every existing prefix (including
+    # symlinks), while letting the safe mkdir below create the new root.
+    root = base.expanduser().resolve(strict=False)
+    lexical = root.joinpath(*portable.parts)
+
+    # Reject every existing symlink component, even one that currently points
+    # inside the root. Following it would leave a swap-to-external TOCTOU gap.
+    current = root
+    for part in portable.parts:
+        current = current / part
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                raise ValueError(_ADD_PATH_ERROR)
+        except FileNotFoundError:
+            break
+
+    resolved = lexical.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(_ADD_PATH_ERROR) from exc
+    return resolved
+
+
+def _revalidate_add_target(base: Path, target: Path) -> None:
+    """Repeat containment and component checks immediately before writing."""
+    root = base.expanduser().resolve(strict=True)
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(_ADD_PATH_ERROR) from exc
+    if _resolve_add_target(root, relative.as_posix()) != target:
+        raise ValueError(_ADD_PATH_ERROR)
+
 
 logger = logging.getLogger(__name__)
 
@@ -2184,18 +2240,10 @@ async def add_memory(
             )
 
     if req.file:
-        raw = req.file
-        if raw.startswith("/") or raw.startswith("\\") or ".." in raw:
-            raise HTTPException(
-                status_code=422,
-                detail="File path must be relative and must not contain '..'",
-            )
-        target = (base / raw).resolve()
-        if not str(target).startswith(str(base)):
-            raise HTTPException(
-                status_code=422,
-                detail="File path must be relative and must not contain '..'",
-            )
+        try:
+            target = _resolve_add_target(base, req.file)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=_ADD_PATH_ERROR) from exc
     else:
         # Issue #2005: one day file per namespace — a shared day file loses one
         # namespace as soon as chunk merging joins two entries. The web surface
@@ -2274,6 +2322,10 @@ async def add_memory(
                         status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
                     ) from exc
             target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                _revalidate_add_target(base, target)
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=_ADD_PATH_ERROR) from exc
             # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
             stats = await index_engine.index_file(

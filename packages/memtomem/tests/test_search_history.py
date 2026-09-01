@@ -1,5 +1,7 @@
 """Tests for search history storage methods."""
 
+from pathlib import Path
+
 import pytest
 
 
@@ -67,6 +69,56 @@ class TestSearchHistory:
         await storage.save_query_history("hello world", [], [], [])
         suggestions = await storage.suggest_queries("xyz")
         assert suggestions == []
+
+    @pytest.mark.asyncio
+    async def test_project_history_detail_suggestions_and_feedback_are_isolated(self, storage):
+        project_a = Path("/workspace/project-a")
+        project_b = Path("/workspace/project-b")
+        run_a = "aaaaaaaa-1111-4111-8111-111111111111"
+        run_b = "bbbbbbbb-2222-4222-8222-222222222222"
+        for project, run_id, query, chunk_id in (
+            (project_a, run_a, "deploy alpha", "a-chunk"),
+            (project_b, run_b, "deploy beta", "b-chunk"),
+        ):
+            await storage.save_search_observation(
+                query,
+                [],
+                [chunk_id],
+                [1.0],
+                run_id=run_id,
+                observation={"filters": {"scope": None}},
+                result_snapshot=[{"chunk_id": chunk_id, "rank": 1}],
+                project_context_root=project,
+            )
+
+        history_a = await storage.get_query_history(project_context_root=project_a)
+        assert [row["query_text"] for row in history_a] == ["deploy alpha"]
+        assert await storage.suggest_queries("deploy", project_context_root=project_a) == [
+            "deploy alpha"
+        ]
+        assert (await storage.get_search_run(run_a, project_context_root=project_a))[
+            "run_id"
+        ] == run_a
+        with pytest.raises(KeyError, match="not found"):
+            await storage.get_search_run(run_b, project_context_root=project_a)
+        with pytest.raises(KeyError, match="not found"):
+            await storage.save_search_feedback(
+                run_b,
+                "b-chunk",
+                "relevant",
+                project_context_root=project_a,
+            )
+
+    @pytest.mark.asyncio
+    async def test_migrated_unscoped_rows_fail_closed(self, storage):
+        await storage.save_query_history("legacy secret", [], [], [])
+        storage._get_db().execute(
+            "UPDATE query_history SET project_key = NULL, legacy_unscoped = 1"
+        )
+        storage._get_db().commit()
+
+        assert await storage.get_query_history() == []
+        assert await storage.suggest_queries("legacy") == []
 
 
 class TestImportanceScores:

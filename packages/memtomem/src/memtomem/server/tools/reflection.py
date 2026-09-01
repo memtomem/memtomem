@@ -40,9 +40,12 @@ async def mem_reflect(
     storage = app.storage
 
     lines = ["## Memory Reflection Report\n"]
+    boundary = caller_boundary(app)
 
     # 1. Most frequently accessed topics
-    top_topics = await storage.get_frequently_accessed(namespace=namespace, limit=limit)
+    top_topics = await storage.get_frequently_accessed(
+        namespace=namespace, limit=limit, project_context_root=boundary
+    )
     if top_topics:
         lines.append("### Frequently Accessed Topics")
         for row in top_topics:
@@ -51,18 +54,11 @@ async def mem_reflect(
             lines.append(f"  {row['total_access']}x — {topic}")
         lines.append("")
 
-    # 2. Recent session activity patterns
-    agent_sessions = await storage.get_agent_sessions(since=since, limit=limit)
-    if agent_sessions:
-        lines.append("### Agent Activity")
-        for row in agent_sessions:
-            lines.append(
-                f"  {row['agent_id']}: {row['session_count']} sessions (last: {row['last_session']})"
-            )
-        lines.append("")
+    # Session rows do not carry a project identity. Whole-store session
+    # analytics are intentionally reserved for local maintenance surfaces.
 
     # 3. Tag frequency (what topics keep coming up)
-    tag_counts = await storage.get_tag_counts()
+    tag_counts = await storage.get_tag_counts(project_context_root=boundary)
     if tag_counts:
         lines.append("### Recurring Themes (by tag)")
         for tag, count in tag_counts[:limit]:
@@ -74,7 +70,7 @@ async def mem_reflect(
     # history rows are written in the background (#2183) — settle them so a
     # reflection run right after a failed search sees it.
     await app.search_pipeline.flush_observation()
-    gaps = await storage.get_knowledge_gaps(limit=min(limit, 10))
+    gaps = await storage.get_knowledge_gaps(limit=min(limit, 10), project_context_root=boundary)
     if gaps:
         lines.append("### Knowledge Gaps (frequent queries with no results)")
         for row in gaps:
@@ -93,9 +89,12 @@ async def mem_reflect(
     # over-fetch window are still lost, which needs a boundary-aware aggregate
     # in SQL (#2244).
     want = min(limit, 5)
-    connected = await storage.get_most_connected(limit=max(want * 4, want))
+    connected = await storage.get_most_connected(
+        limit=max(want * 4, want),
+        namespace=namespace,
+        project_context_root=boundary,
+    )
     if connected:
-        boundary = caller_boundary(app)
         scored: list[tuple[int, str]] = []
         for row in connected:
             chunk = None

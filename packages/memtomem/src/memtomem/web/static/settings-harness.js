@@ -624,14 +624,14 @@ async function loadHarnessProcedures() {
       return;
     }
     list.innerHTML = data.procedures.map(p => {
-      const tags = (p.tags || []).map(t => `<span class="tag-pill">${t}</span>`).join(' ');
+      const tags = (p.tags || []).map(tag => `<span class="tag-pill">${escapeHtml(String(tag))}</span>`).join(' ');
       return `<div class="harness-procedure card">
         <div class="harness-procedure-header">
-          <span class="mono">${p.id.slice(0, 8)}</span>
-          <span class="muted-sm">${p.namespace}</span>
+          <span class="mono">${escapeHtml(String(p.id || '').slice(0, 8))}</span>
+          <span class="muted-sm">${escapeHtml(String(p.namespace || ''))}</span>
           ${tags}
         </div>
-        <pre class="harness-procedure-content">${p.content}</pre>
+        <pre class="harness-procedure-content">${escapeHtml(String(p.content || ''))}</pre>
       </div>`;
     }).join('');
   } catch (e) {
@@ -648,55 +648,60 @@ async function loadHarnessHealth() {
   renderPageState(report, { kind: 'loading', message: t('common.loading') });
   try {
     const d = await api('GET', '/api/eval');
+    const pct = value => Math.min(100, Math.max(0, Number.isFinite(Number(value)) ? Number(value) : 0));
+    const accessPct = pct(d.access_coverage.pct);
+    const tagPct = pct(d.tag_coverage.pct);
+    const deadPct = pct(d.dead_memories_pct);
+    const text = value => escapeHtml(String(value ?? ''));
     report.innerHTML = `
       <div class="health-grid">
         <div class="health-card card">
           <div class="health-card-title">Access Coverage</div>
           <div class="health-gauge">
-            <div class="health-gauge-bar" style="width:${d.access_coverage.pct}%"></div>
+            <div class="health-gauge-bar" style="width:${accessPct}%"></div>
           </div>
-          <div class="health-card-detail">${d.access_coverage.accessed} / ${d.access_coverage.total} chunks (${d.access_coverage.pct}%)</div>
+          <div class="health-card-detail">${text(d.access_coverage.accessed)} / ${text(d.access_coverage.total)} chunks (${text(accessPct)}%)</div>
         </div>
         <div class="health-card card">
           <div class="health-card-title">Tag Coverage</div>
           <div class="health-gauge">
-            <div class="health-gauge-bar" style="width:${d.tag_coverage.pct}%"></div>
+            <div class="health-gauge-bar" style="width:${tagPct}%"></div>
           </div>
-          <div class="health-card-detail">${d.tag_coverage.tagged} / ${d.tag_coverage.total} chunks (${d.tag_coverage.pct}%)</div>
+          <div class="health-card-detail">${text(d.tag_coverage.tagged)} / ${text(d.tag_coverage.total)} chunks (${text(tagPct)}%)</div>
         </div>
         <div class="health-card card">
           <div class="health-card-title">Dead Memories</div>
           <div class="health-gauge">
-            <div class="health-gauge-bar health-gauge-warn" style="width:${d.dead_memories_pct}%"></div>
+            <div class="health-gauge-bar health-gauge-warn" style="width:${deadPct}%"></div>
           </div>
-          <div class="health-card-detail">${d.dead_memories_pct}% never accessed</div>
+          <div class="health-card-detail">${text(deadPct)}% never accessed</div>
         </div>
         <div class="health-card card">
           <div class="health-card-title">Sessions</div>
-          <div class="stat-value">${d.sessions.total}</div>
-          <div class="health-card-detail">${d.sessions.active} active</div>
+          <div class="stat-value">${text(d.sessions.total)}</div>
+          <div class="health-card-detail">${text(d.sessions.active)} active</div>
         </div>
         <div class="health-card card">
           <div class="health-card-title">Working Memory</div>
-          <div class="stat-value">${d.working_memory.total}</div>
-          <div class="health-card-detail">${d.working_memory.promoted} promoted</div>
+          <div class="stat-value">${text(d.working_memory.total)}</div>
+          <div class="health-card-detail">${text(d.working_memory.promoted)} promoted</div>
         </div>
         <div class="health-card card">
           <div class="health-card-title">Cross-References</div>
-          <div class="stat-value">${d.cross_references}</div>
+          <div class="stat-value">${text(d.cross_references)}</div>
         </div>
       </div>
       ${d.top_accessed.length ? `
       <div class="health-section">
         <h3>Top Accessed</h3>
         <table class="harness-table"><thead><tr><th>ID</th><th>Content</th><th>Count</th></tr></thead>
-        <tbody>${d.top_accessed.map(r => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${truncate(r.content, 80)}</td><td>${r.access_count}</td></tr>`).join('')}</tbody></table>
+        <tbody>${d.top_accessed.map(r => `<tr><td class="mono">${escapeHtml(String(r.id || '').slice(0,8))}</td><td>${escapeHtml(String(truncate(r.content, 80)))}</td><td>${text(r.access_count)}</td></tr>`).join('')}</tbody></table>
       </div>` : ''}
       ${d.namespace_distribution.length ? `
       <div class="health-section">
         <h3>Namespace Distribution</h3>
         <table class="harness-table"><thead><tr><th>Namespace</th><th>Chunks</th></tr></thead>
-        <tbody>${d.namespace_distribution.map(r => `<tr><td>${r.namespace}</td><td>${r.count}</td></tr>`).join('')}</tbody></table>
+        <tbody>${d.namespace_distribution.map(r => `<tr><td>${text(r.namespace)}</td><td>${text(r.count)}</td></tr>`).join('')}</tbody></table>
       </div>` : ''}
     `;
   } catch (e) {

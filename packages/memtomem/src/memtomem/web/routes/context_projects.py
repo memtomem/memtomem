@@ -111,18 +111,28 @@ def _registry_warnings(report: KnownProjectsLoadReport) -> list[dict]:
     classifies at the catch site so no live exception crosses the
     context/web boundary).
     """
-    if report.reason_code is None:
-        return []
-    error_kind = report.error_kind or "parse"
-    return [
-        {
-            "reason_code": report.reason_code,
-            "error_kind": error_kind,
-            "message": _redact_message(report.detail or ""),
-            "retryable": True,
-            "skipped_rows": report.skipped_rows or None,
-        }
-    ]
+    warnings: list[dict] = []
+    if report.reason_code is not None:
+        warnings.append(
+            {
+                "reason_code": report.reason_code,
+                "error_kind": report.error_kind or "parse",
+                "message": _redact_message(report.detail or ""),
+                "retryable": True,
+                "skipped_rows": report.skipped_rows or None,
+            }
+        )
+    if report.scan_error_kind is not None:
+        warnings.append(
+            {
+                "reason_code": "claude_projects_scan_unavailable",
+                "error_kind": report.scan_error_kind,
+                "message": _redact_message(report.scan_detail or ""),
+                "retryable": True,
+                "skipped_rows": None,
+            }
+        )
+    return warnings
 
 
 def _default_project_root(request: Request) -> Path:
@@ -426,6 +436,7 @@ def _scope_to_dict(
     counts: dict[str, int] | None = None
     counts_unavailable: list[str] | None = None
     if with_counts and computable:
+        assert scope.root is not None
         counts, counts_unavailable = _counts_for(scope.root, target_scope=target_scope)
 
     # Runtime coverage is opt-in via ``?include=runtime_coverage`` for the same
@@ -441,6 +452,7 @@ def _scope_to_dict(
     if with_coverage:
         coverage_unavailable = False
         if computable:
+            assert scope.root is not None
             try:
                 coverage = compute_runtime_coverage(scope.root)
             except Exception:

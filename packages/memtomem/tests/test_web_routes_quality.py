@@ -9,6 +9,8 @@ contracts are pinned in ``test_eval_cases.py`` / ``test_quality_replay.py``.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -58,7 +60,8 @@ def app(monkeypatch):
     storage.promote_search_run = AsyncMock(return_value=PROMOTED_CASE)
     application.state.storage = storage
     application.state.search_pipeline = AsyncMock()
-    application.state.config = object()
+    application.state.config = SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[]))
+    application.state.project_root = Path("/project-a")
 
     monkeypatch.setattr(
         "memtomem.web.routes.quality.current_fingerprints",
@@ -126,6 +129,23 @@ class TestPromote:
         assert kwargs["name"] == f"run-{RUN_ID}"  # full id, never a prefix
         assert kwargs["allow_unreplayable_filters"] is False
         assert kwargs["fingerprints"] == {"profile": "p", "corpus": "c", "index": "i"}
+        assert kwargs["project_context_root"] is None
+
+    async def test_promotion_uses_live_registered_boundary(
+        self, app, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        monkeypatch.chdir(project_root)
+        app.state.config.indexing.project_memory_dirs = [project_root / ".memtomem" / "memories"]
+
+        resp = await client.post("/api/quality/cases", json={"run_id": RUN_ID})
+
+        assert resp.status_code == 200
+        assert (
+            app.state.storage.promote_search_run.await_args.kwargs["project_context_root"]
+            == project_root.resolve()
+        )
 
     async def test_explicit_name_passed_through(self, app, client):
         resp = await client.post("/api/quality/cases", json={"run_id": RUN_ID, "name": "my-case"})

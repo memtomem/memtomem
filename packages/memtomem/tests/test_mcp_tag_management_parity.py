@@ -214,7 +214,7 @@ async def test_mem_do_rename_refuses_malformed_dry_run(mcp_app, components):
             params={"old_tag": "old", "new_tag": "new", "dry_run": bad},
             ctx=ctx,
         )
-        assert "Error" in out, f"dry_run={bad!r} was not refused"
+        assert "error" in out.lower(), f"dry_run={bad!r} was not refused"
         assert "literal boolean" in out
     assert counter["calls"] == 0
     counts = dict(await components.storage.get_tag_counts())
@@ -230,7 +230,7 @@ async def test_mem_do_delete_refuses_malformed_dry_run(mcp_app, components):
 
     for bad in _MALFORMED_DRY_RUN:
         out = await mem_do(action="tag_delete", params={"tag": "doomed", "dry_run": bad}, ctx=ctx)
-        assert "Error" in out, f"dry_run={bad!r} was not refused"
+        assert "error" in out.lower(), f"dry_run={bad!r} was not refused"
         assert "literal boolean" in out
     assert counter["calls"] == 0
     counts = dict(await components.storage.get_tag_counts())
@@ -249,7 +249,7 @@ async def test_mem_do_merge_refuses_malformed_dry_run(mcp_app, components):
             params={"sources": ["py"], "target": "python", "dry_run": bad},
             ctx=ctx,
         )
-        assert "Error" in out, f"dry_run={bad!r} was not refused"
+        assert "error" in out.lower(), f"dry_run={bad!r} was not refused"
         assert "literal boolean" in out
     assert counter["calls"] == 0
     counts = dict(await components.storage.get_tag_counts())

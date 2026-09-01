@@ -278,6 +278,22 @@ class TestTags:
         assert data["tags"][0]["tag"] == "python"
         assert data["tags"][0]["count"] == 10
 
+    async def test_list_tags_uses_live_project_boundary(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        monkeypatch.chdir(project_root)
+        app.state.config.indexing.project_memory_dirs = [project_root / ".memtomem" / "memories"]
+
+        resp = await client.get("/api/tags")
+
+        assert resp.status_code == 200
+        assert (
+            app.state.storage.get_tag_counts.await_args.kwargs["project_context_root"]
+            == project_root.resolve()
+        )
+
     async def test_list_tags_pagination(self, client: AsyncClient):
         resp = await client.get("/api/tags", params={"limit": 1, "offset": 1})
         assert resp.status_code == 200
@@ -468,6 +484,25 @@ class TestEvaluation:
         # The mock returns the same report regardless; just verify it passes through
         data = resp.json()
         assert "total_chunks" in data
+
+    async def test_eval_drops_deregistered_project_boundary(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        monkeypatch.chdir(project_root)
+        app.state.config.indexing.project_memory_dirs = [project_root / ".memtomem" / "memories"]
+        first = await client.get("/api/eval")
+        assert first.status_code == 200
+        assert (
+            app.state.storage.get_health_report.await_args.kwargs["project_context_root"]
+            == project_root.resolve()
+        )
+
+        app.state.config.indexing.project_memory_dirs = []
+        second = await client.get("/api/eval")
+        assert second.status_code == 200
+        assert app.state.storage.get_health_report.await_args.kwargs["project_context_root"] is None
 
 
 # ---------------------------------------------------------------------------

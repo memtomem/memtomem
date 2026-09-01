@@ -154,13 +154,13 @@ async def mem_related(
         return f"No related chunks for {chunk_id[:8]}..."
 
     lines = [f"Related to {chunk_id[:8]}... ({len(visible)} links):\n"]
-    for related_id, rel_type, related in visible:
+    for related_id_text, rel_type, related in visible:
         if related is None:
-            lines.append(f"  - [{rel_type}] {related_id} (deleted)")
+            lines.append(f"  - [{rel_type}] {related_id_text} (deleted)")
             continue
         preview = related.content[:80].replace("\n", " ")
         source = str(related.metadata.source_file).split("/")[-1]
-        lines.append(f"  - [{rel_type}] {related_id[:8]}... ({source})")
+        lines.append(f"  - [{rel_type}] {related_id_text[:8]}... ({source})")
         lines.append(f"    {preview}...")
 
     return "\n".join(lines)
