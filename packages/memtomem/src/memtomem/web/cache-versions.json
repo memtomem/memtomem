@@ -55,7 +55,8 @@
     "/context-gateway-overview.js": {
       "versions": {
         "5": "c89c4b9df4fa38724bc5cabab7f4550008304381ebf1462343f088f80b5c9ce9",
-        "6": "d61e5fdc192fa41e76e2179706d78c5faa0a1ed75784a1a2ed42708a02e3f7f3"
+        "6": "d61e5fdc192fa41e76e2179706d78c5faa0a1ed75784a1a2ed42708a02e3f7f3",
+        "7": "81e4e912d6c2ba358c2f3376c33b4b18cf2a589b0ff91129a1dead07b99dfbf2"
       }
     },
     "/context-gateway-pull.js": {
