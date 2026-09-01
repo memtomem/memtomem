@@ -240,15 +240,19 @@ class StorageBackend(Protocol):
         self, source_file: Path, limit: int | None = 50
     ) -> list[Chunk]: ...
     async def count_chunks_by_source(self, source_file: Path) -> int: ...
+    # Batch sibling of the above (#2261). Two contract points:
+    #   * **Sparse** — a file with no chunks is absent, not zero — and keys are
+    #     the caller's own Path objects, so two spellings that normalise to one
+    #     stored path (symlink, NFC/NFD) collapse to a single entry owned by
+    #     whichever was passed last. Summing the values is therefore correct.
+    #   * The input is **caller-sized**, not code-sized: ``mm purge`` matches
+    #     against every source in the store. An implementation must answer for
+    #     an arbitrarily long sequence rather than failing on a per-query limit.
+    async def count_chunks_by_sources(self, source_files: Sequence[Path]) -> dict[Path, int]: ...
     # Distinct namespaces stored for one source file — the input to the
     # issue #2005 mixed-namespace write guard.
     async def namespaces_for_source(self, source_file: Path) -> list[str]: ...
     async def count_chunk_links_for_source(self, source_file: Path) -> int: ...
-    async def list_chunks_by_sources(
-        self,
-        source_files: Sequence[Path],
-        limit_per_file: int = 10000,
-    ) -> dict[Path, list[Chunk]]: ...
     # Context-window expansion (#2237). Listing the file and slicing in Python
     # could not survive a file longer than the listing cap: past it the anchor
     # was simply absent and the hit came back with no context at all. The

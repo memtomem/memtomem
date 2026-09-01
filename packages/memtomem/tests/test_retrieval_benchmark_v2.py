@@ -139,6 +139,26 @@ def test_v2_baseline_compare_treats_hard_negative_hits_as_a_ceiling():
     ]
 
 
+def test_v2_baseline_benchmarks_the_product_rrf_weights():
+    """The required check must validate the configuration the product ships.
+
+    ``check_baseline_v2`` benchmarks with ``baseline["search"]["rrf_weights"]``,
+    and the file is produced by ``tune_rrf_v2.py``, whose job is to *select* a
+    candidate from a grid. Nothing else connects the two: a refresh that picked
+    a non-control candidate would quietly make a blocking CI check measure a
+    profile no user runs, and would also be retuning against the published
+    frozen holdout. If this ever fails, the refresh selected different weights —
+    which is a decision to make deliberately (change the product default, or
+    keep the tuning as a separate versioned experiment), not to absorb.
+    """
+    from memtomem.config import SearchConfig
+
+    baseline = json.loads(
+        (ROOT / "tools/retrieval-eval/baseline_v2.json").read_text(encoding="utf-8")
+    )
+    assert baseline["search"]["rrf_weights"] == SearchConfig().rrf_weights
+
+
 def test_v2_committed_quality_bounds_match_generation_formula():
     tuner = _load("tune_rrf_v2_parity", "tools/retrieval-eval/tune_rrf_v2.py")
     baseline = json.loads(

@@ -8,6 +8,7 @@ import sys
 import pytest
 from click.testing import CliRunner
 
+from helpers import poison_click_prompts
 from memtomem.cli import cli
 from memtomem.cli import upgrade_cmd
 from memtomem.cli._liveness import ServerState
@@ -260,9 +261,9 @@ def test_running_server_sigterm_path(monkeypatch, tmp_path, fake_uv, force_tty):
     def fake_kill(pid: int, sig: int) -> None:
         sent.append((pid, sig))
 
-    # _pid_alive() returns False on the first poll → graceful exit path.
+    # The probe reports "dead" on the first poll → graceful exit path.
     monkeypatch.setattr(upgrade_cmd.os, "kill", fake_kill)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "1"])
     assert result.exit_code == 0, result.output
@@ -292,7 +293,7 @@ def test_human_refusal_keeps_partial_stop_accounting(monkeypatch, tmp_path, fake
     )
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
     probes = iter(
         [
             ServerState(
@@ -339,7 +340,7 @@ def test_two_store_servers_stopped_before_reinstall(monkeypatch, tmp_path, fake_
             events.append(("term", pid))
 
     monkeypatch.setattr(upgrade_cmd.os, "kill", fake_kill)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
     fake_run = upgrade_cmd.subprocess.run
 
     def tracked_run(cmd, capture_output=True, text=True, timeout=None):
@@ -446,7 +447,7 @@ def test_distinct_legacy_holder_is_stopped_with_runtime_server(
     _patch_liveness(monkeypatch, states)
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
 
     result = CliRunner().invoke(cli, ["upgrade", "-y"])
     assert result.exit_code == 0, result.output
@@ -472,7 +473,7 @@ def test_legacy_only_server_keeps_direct_stop_behavior(monkeypatch, tmp_path, fa
     )
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
 
     result = CliRunner().invoke(cli, ["upgrade", "-y"])
     assert result.exit_code == 0, result.output
@@ -501,7 +502,9 @@ def test_running_server_escalates_to_sigkill(monkeypatch, tmp_path, fake_uv, for
             killed["done"] = True
 
     monkeypatch.setattr(upgrade_cmd.os, "kill", fake_kill)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: not killed["done"])
+    monkeypatch.setattr(
+        upgrade_cmd, "probe_pid", lambda _pid: "dead" if killed["done"] else "alive"
+    )
     monkeypatch.setattr(upgrade_cmd.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
         upgrade_cmd.time,
@@ -515,6 +518,59 @@ def test_running_server_escalates_to_sigkill(monkeypatch, tmp_path, fake_uv, for
     assert upgrade_cmd.signal.SIGTERM in sigs
     assert upgrade_cmd.signal.SIGKILL in sigs
     assert not pid_file.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: SIGKILL escalation path")
+def test_an_unknown_probe_waits_out_the_grace_and_does_not_sigkill(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    """ "Could not tell" is neither "gone" nor "still alive" (#2234).
+
+    The tri-state probe's third answer used to be collapsed by a boolean
+    helper, and whichever side it fell on was wrong at one of the two sites
+    this stop has. Both collapses are pinned here because they differ:
+
+    * the **wait loop** must not treat it as "gone" and stop waiting early —
+      it keeps polling until the grace deadline, which costs time and nothing
+      else;
+    * the **escalation** must not treat it as "still alive" and SIGKILL a pid
+      nothing vouches for — on a recycled id that signal lands on an unrelated
+      process.
+    """
+    _calls, _configure = fake_uv
+    pid_file = tmp_path / "server.pid"
+    pid_file.write_text("12345")
+    _patch_liveness(monkeypatch, ServerState(alive=True, pid=12345, pid_file=pid_file))
+
+    sent: list[tuple[int, int]] = []
+    probes: list[int] = []
+    sleeps: list[float] = []
+
+    def probe(pid: int) -> str:
+        probes.append(pid)
+        return "unknown"
+
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", probe)
+    monkeypatch.setattr(upgrade_cmd.time, "sleep", sleeps.append)
+    # Two reads per loop turn (deadline then the `while` check); the last value
+    # is sticky, so the loop runs three turns and then the deadline passes.
+    monkeypatch.setattr(
+        upgrade_cmd.time,
+        "monotonic",
+        _make_monotonic([0.0, 0.1, 0.2, 0.3, 9.0]),
+    )
+
+    CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.5"])
+
+    sigs = [sig for _pid, sig in sent]
+    assert upgrade_cmd.signal.SIGTERM in sigs, "the graceful signal is unconditional"
+    assert upgrade_cmd.signal.SIGKILL not in sigs, f"an unknown probe escalated to SIGKILL: {sigs}"
+    # The wait half: an early break would leave the loop having slept never and
+    # probed once, which is exactly the mutation `if probe_pid(pid) != "alive"`
+    # would produce.
+    assert len(probes) > 1, f"the wait loop stopped on the first unknown probe: {probes}"
+    assert sleeps, "the wait loop never waited"
 
 
 def test_windows_skips_kill(monkeypatch, tmp_path, fake_uv, force_tty):
@@ -662,7 +718,7 @@ def test_pid_file_unlink_skipped_if_respawned(monkeypatch, tmp_path, fake_uv, fo
     )
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
 
     probes = iter([respawned, replacement])
     monkeypatch.setattr(
@@ -705,7 +761,7 @@ def test_boundary_enumeration_error_refuses_after_completed_stops(
         post=[error],
     )
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
 
     def unexpected_db_probe():
         raise AssertionError("DB probe must not run after boundary enumeration failure")
@@ -754,7 +810,7 @@ def test_lock_before_pid_startup_windows_are_retried(monkeypatch, tmp_path, fake
     sleeps: list[float] = []
     monkeypatch.setattr(upgrade_cmd.time, "sleep", sleeps.append)
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
     monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _path: _DEAD)
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
@@ -804,7 +860,7 @@ def test_preinstall_boundary_retries_empty_pid_payload(monkeypatch, tmp_path, fa
     sleeps: list[float] = []
     monkeypatch.setattr(upgrade_cmd.time, "sleep", sleeps.append)
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
     monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _path: _DEAD)
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
@@ -880,7 +936,7 @@ def test_server_starting_during_reinstall_is_recycled(monkeypatch, tmp_path, fak
             events.append(("term", pid)) if sig == upgrade_cmd.signal.SIGTERM else None
         ),
     )
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
     monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _p: replacement)
 
     result = CliRunner().invoke(cli, ["upgrade", "-y"])
@@ -956,7 +1012,7 @@ def test_retirement_pid_still_present_reports_partial_failure(
         snapshots=[[], [], [retirement], [retirement]],
     )
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
     monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _p: retirement)
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
@@ -991,7 +1047,7 @@ def test_reused_pid_with_new_start_stamp_is_not_misclassified(
     )
     _patch_liveness(monkeypatch, _DEAD, snapshots=[[], [], [old]])
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda _pid, _sig: None)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
     monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _path: replacement)
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
@@ -1039,7 +1095,7 @@ def test_running_web_ui_is_stopped(monkeypatch, tmp_path, fake_uv, force_tty):
 
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "1"])
     assert result.exit_code == 0, result.output
@@ -1070,7 +1126,7 @@ def test_server_and_web_both_stopped(monkeypatch, tmp_path, fake_uv, force_tty):
 
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "1"])
     assert result.exit_code == 0, result.output
@@ -1122,7 +1178,7 @@ def test_web_sidecar_kept_if_respawned_after_pid_cleanup(monkeypatch, tmp_path, 
         web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
     )
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
 
     # First re-probe (pid-file unlink guard in _stop_server) sees no holder;
     # second re-probe (sidecar sweep) sees the respawned web UI.
@@ -1160,7 +1216,7 @@ def test_web_auto_respawn_is_recycled_after_install(monkeypatch, tmp_path, fake_
     monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda _p: next(probes))
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
 
     result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
     assert result.exit_code == 0, result.output
@@ -1254,17 +1310,17 @@ def test_cancel_exits_zero_and_json_consistent(monkeypatch, fake_uv, force_tty):
     assert calls == []
 
 
-def test_cancel_json_win_prompt_branch(monkeypatch, fake_uv, force_tty):
-    """#1640: forcing click's WIN prompt branch must not pollute the JSON
-    ack — _prompts.confirm never enters click's prompt machinery."""
-    import click.termui
-
+def test_cancel_json_click_prompt_machinery_unused(monkeypatch, fake_uv, force_tty):
+    """#1640: click's prompt machinery must stay unreached, or the stdout leak
+    it can produce (the Windows prompt fork, pre-8.5) pollutes the JSON ack —
+    _prompts.confirm never enters that machinery."""
     calls, _configure = fake_uv
     _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
-    monkeypatch.setattr(click.termui, "WIN", True)
+    prompt_calls = poison_click_prompts(monkeypatch)
 
     result = CliRunner().invoke(cli, ["upgrade", "--json"], input="n\n")
     assert result.exit_code == 0, result.output
+    assert prompt_calls == []
     assert json.loads(result.stdout) == {"ok": True, "cancelled": True}
     assert calls == []
 

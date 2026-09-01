@@ -29,7 +29,11 @@ from typing import Literal, NamedTuple
 
 import click
 
-from memtomem._instance_registry import RegistrySnapshot, snapshot_all_instances
+from memtomem._instance_registry import (
+    InstanceInfo,
+    RegistrySnapshot,
+    snapshot_all_instances,
+)
 from memtomem._process_probe import probe_pid
 from memtomem._runtime_paths import runtime_dir, scrub_text, validate_runtime_dir
 
@@ -73,7 +77,31 @@ class CheckResult(NamedTuple):
 
 
 class InstanceRow(NamedTuple):
-    """One *registration*. A process may hold several (one per store)."""
+    """One *registration*. A process may hold several (one per store).
+
+    ``kind`` names the *record*, not a state inferred from it (#2230).
+    ``sentinel`` is a store registration: this process had that store open,
+    and ``store_digest`` is the store's filesystem identity. ``presence`` is
+    a startup marker: the process is a live server, written before any store
+    opens — the population the registry could not see at all before. Its
+    ``store_digest`` digests the *configured path text*, so it compares with
+    other markers but never with a sentinel's, and it is
+    :data:`~memtomem._instance_registry._UNKNOWN_STORE_DIGEST` when the
+    configured store has no path.
+
+    Read as a record rather than a state because one process legitimately
+    produces both rows, and because the absence of a sentinel is not proof
+    a store was never opened: sentinel registration is best-effort and
+    returns ``None`` on a lock timeout or an untrusted directory. So a
+    process with markers only is reported as one with *no store
+    registration observed*, never as one known to be idle.
+
+    Processes are identified by ``(pid, procid)``. ``procid`` alone is 32
+    random bits — about one chance in 860,000 that some pair among a
+    hundred servers collides — and a process's pid is stable across every
+    record it writes, so pairing them can only ever separate two processes
+    that were about to be merged, never split one.
+    """
 
     pid: int
     procid: str
@@ -82,6 +110,7 @@ class InstanceRow(NamedTuple):
     age_seconds: float | None
     recorded_parent: Literal["alive", "missing", "unknown"]
     recorded_ppid_is_one: bool
+    kind: Literal["sentinel", "presence"] = "sentinel"
 
 
 def _emit(result: CheckResult) -> None:
@@ -121,7 +150,15 @@ def _instance_rows(snapshot: RegistrySnapshot) -> list[InstanceRow]:
     # ppid repeatedly, where a parent exiting mid-report would make one
     # process's rows disagree with each other.
     probed: dict[tuple[str, int], Literal["alive", "missing", "unknown"]] = {}
-    for info in snapshot.instances:
+    # Both populations become rows (#2230). Keeping them in one list is what
+    # lets ``procid`` do the joining: a process that registered at startup and
+    # then opened a store appears in both, and every per-process reduction
+    # below already collapses on that key.
+    sourced: list[tuple[Literal["sentinel", "presence"], InstanceInfo]] = [
+        *(("sentinel", info) for info in snapshot.instances),
+        *(("presence", info) for info in snapshot.presence),
+    ]
+    for kind, info in sourced:
         try:
             age: float | None = max(time.time() - info.path.stat().st_mtime, 0.0)
         except OSError:
@@ -148,9 +185,21 @@ def _instance_rows(snapshot: RegistrySnapshot) -> list[InstanceRow]:
                 # POSIX-only signal: Windows pids are multiples of four, so 1
                 # cannot occur there, and Windows never reparents anyway.
                 recorded_ppid_is_one=info.ppid == 1,
+                kind=kind,
             )
         )
     return rows
+
+
+def _process_key(row: InstanceRow) -> tuple[int, str]:
+    """Identity of the process a row belongs to.
+
+    ``procid`` is a random per-process value and ``pid`` alone is reused and
+    collides across pid namespaces, so neither is identity by itself. The pair
+    is: every record one process writes carries the same pid, so pairing can
+    only separate two processes that ``procid`` would have merged.
+    """
+    return (row.pid, row.procid)
 
 
 def _process_ages(rows: list[InstanceRow]) -> tuple[list[float], int]:
@@ -161,15 +210,16 @@ def _process_ages(rows: list[InstanceRow]) -> tuple[list[float], int]:
     of its registrations whose mtime we could read; a process with no readable
     mtime contributes to the unknown tally instead of a fabricated value.
     """
-    oldest: dict[str, float] = {}
-    procids: set[str] = set()
+    oldest: dict[tuple[int, str], float] = {}
+    procids: set[tuple[int, str]] = set()
     for row in rows:
-        procids.add(row.procid)
+        key = _process_key(row)
+        procids.add(key)
         if row.age_seconds is None:
             continue
-        current = oldest.get(row.procid)
+        current = oldest.get(key)
         if current is None or row.age_seconds > current:
-            oldest[row.procid] = row.age_seconds
+            oldest[key] = row.age_seconds
     return sorted(oldest.values(), reverse=True), len(procids - set(oldest))
 
 
@@ -223,7 +273,10 @@ def _check_runtime_dir(snapshot: RegistrySnapshot) -> CheckResult:
         # started before the runtime dir moved registers under a historical
         # root, which the snapshot still reads. Only say "nothing here" when
         # the scan actually found nothing.
-        found = len(snapshot.instances)
+        # Both populations count: a server that registered under a historical
+        # root before the anchor moved may have written only a marker, and
+        # "no server has registered here" must not be claimed over it.
+        found = len(snapshot.instances) + len(snapshot.presence)
         return CheckResult(
             name="runtime-dir",
             status="pass",
@@ -252,8 +305,14 @@ def _check_server_instances(snapshot: RegistrySnapshot, rows: list[InstanceRow])
     "looks abandoned" would have hidden the common case entirely.
     """
     ages, age_unknown = _process_ages(rows)
-    processes = len({r.procid for r in rows})
-    stores = len({r.store_digest for r in rows})
+    processes = len({_process_key(r) for r in rows})
+    # Stores are counted from sentinels only. A presence marker's digest is a
+    # digest of configured *path text*, not of the store's inode identity, and
+    # every marker whose store has no path shares one placeholder value — so
+    # mixing the two would both double-count one store and collapse several.
+    registered = {_process_key(r) for r in rows if r.kind == "sentinel"}
+    unregistered = len({_process_key(r) for r in rows} - registered)
+    stores = len({r.store_digest for r in rows if r.kind == "sentinel"})
     # Parent state is a property of a *process*, not of each registration it
     # holds: a server registered against three stores has one parent, and
     # counting it three times would inflate every tally against the process
@@ -265,20 +324,23 @@ def _check_server_instances(snapshot: RegistrySnapshot, rows: list[InstanceRow])
     # absence. Picking the first row instead would make the answer depend on
     # directory order.
     rank = {"alive": 2, "unknown": 1, "missing": 0}
-    per_process: dict[str, str] = {}
+    per_process: dict[tuple[int, str], str] = {}
     for row in rows:
-        current = per_process.get(row.procid)
+        key = _process_key(row)
+        current = per_process.get(key)
         if current is None or rank[row.recorded_parent] > rank[current]:
-            per_process[row.procid] = row.recorded_parent
+            per_process[key] = row.recorded_parent
     alive_parents = sum(1 for s in per_process.values() if s == "alive")
     missing_parents = sum(1 for s in per_process.values() if s == "missing")
     unknown_parents = sum(1 for s in per_process.values() if s == "unknown")
-    ppid_one = len({r.procid for r in rows if r.recorded_ppid_is_one})
+    ppid_one = len({_process_key(r) for r in rows if r.recorded_ppid_is_one})
 
     data: dict[str, object] = {
         "processes": processes,
         "registrations": len(rows),
         "stores": stores,
+        "processes_with_store_registered": len(registered),
+        "processes_without_store_registration": unregistered,
         "age_unknown": age_unknown,
         "alive_recorded_parents": alive_parents,
         "missing_recorded_parents": missing_parents,
@@ -314,6 +376,13 @@ def _check_server_instances(snapshot: RegistrySnapshot, rows: list[InstanceRow])
 
     summary = f"{processes} live server process{'es' if processes != 1 else ''}"
     summary += f" across {stores} store{'s' if stores != 1 else ''}"
+    if unregistered:
+        # Named rather than folded into the total: this is precisely the
+        # population that accumulates unseen (#2230), and a reader deciding
+        # what to close needs the split. Worded as an observation about the
+        # *records*, because a sentinel can also be missing for a server that
+        # did open a store — registration is best-effort.
+        summary += f", {unregistered} with no store registration observed"
     if ages:
         summary += f" (median age {_format_age(statistics.median(ages))}"
         summary += f", max {_format_age(max(ages))})"
@@ -374,27 +443,37 @@ def _age_buckets(ages: list[float]) -> dict[str, int]:
 
 
 def _check_registry_hygiene(snapshot: RegistrySnapshot) -> CheckResult:
-    """Leftovers in the sentinel directory, as an observation."""
+    """Leftovers in the sentinel and presence directories, as an observation."""
+    # Counted together but reported apart in the JSON: both directories leave
+    # residue the same way and for the same reason (a process that died without
+    # running its atexit), so one hygiene verdict covers them, while a consumer
+    # tracking which population leaks still needs the two numbers.
+    stale_seen = snapshot.stale_seen + snapshot.presence_stale_seen
+    unlocked_fresh_seen = snapshot.unlocked_fresh_seen + snapshot.presence_unlocked_fresh_seen
+    unparseable_seen = snapshot.unparseable_seen + snapshot.presence_unparseable_seen
     data: dict[str, object] = {
-        "stale": snapshot.stale_seen,
-        "unlocked_fresh": snapshot.unlocked_fresh_seen,
-        "unparseable": snapshot.unparseable_seen,
+        "stale": stale_seen,
+        "unlocked_fresh": unlocked_fresh_seen,
+        "unparseable": unparseable_seen,
         "roots_consulted": snapshot.roots_consulted,
+        "presence_stale": snapshot.presence_stale_seen,
+        "presence_unlocked_fresh": snapshot.presence_unlocked_fresh_seen,
+        "presence_unparseable": snapshot.presence_unparseable_seen,
     }
-    if snapshot.unparseable_seen:
+    if unparseable_seen:
         return CheckResult(
             name="registry-hygiene",
             status="warn",
-            message=f"{snapshot.unparseable_seen} held sentinel(s) could not be attributed",
+            message=f"{unparseable_seen} held entr(ies) could not be attributed",
             detail="the live-server count above is a lower bound",
             data=data,
         )
-    if snapshot.stale_seen or snapshot.unlocked_fresh_seen:
+    if stale_seen or unlocked_fresh_seen:
         parts = []
-        if snapshot.stale_seen:
-            parts.append(f"{snapshot.stale_seen} stale sentinel(s) awaiting collection")
-        if snapshot.unlocked_fresh_seen:
-            parts.append(f"{snapshot.unlocked_fresh_seen} registration(s) still starting up")
+        if stale_seen:
+            parts.append(f"{stale_seen} stale entr(ies) awaiting collection")
+        if unlocked_fresh_seen:
+            parts.append(f"{unlocked_fresh_seen} registration(s) still starting up")
         # Same rule as the sibling server count: an incomplete scan makes every
         # figure it produced a lower bound, so say so here too rather than
         # presenting these as settled.
@@ -435,6 +514,7 @@ def _row_json(row: InstanceRow) -> dict[str, object]:
         "age_seconds": row.age_seconds,
         "recorded_parent": row.recorded_parent,
         "recorded_ppid_is_one": row.recorded_ppid_is_one,
+        "kind": row.kind,
     }
 
 
@@ -506,12 +586,19 @@ def doctor(as_json: bool) -> None:
 
 
 def _emit_table(rows: list[InstanceRow]) -> None:
-    click.secho(f"{'PID':>8}  {'PARENT':>8}  {'STORE':<10}  {'AGE':>7}  PARENT STATE", bold=True)
+    click.secho(
+        f"{'PID':>8}  {'PARENT':>8}  {'RECORD':<10}  {'STORE':<10}  {'AGE':>7}  PARENT STATE",
+        bold=True,
+    )
     for row in sorted(rows, key=lambda r: (-(r.age_seconds or 0.0), r.pid)):
         note = str(row.recorded_parent)
         if row.recorded_ppid_is_one:
             note += " (ppid 1)"
+        # A marker's digest names a configured path, not an open store, and
+        # the placeholder one names nothing at all — print neither as if it
+        # were a store identity the reader could match against a sentinel.
+        store = "-" if row.kind == "presence" else row.store_digest[:10]
         click.echo(
-            f"{row.pid:>8}  {row.recorded_ppid:>8}  {row.store_digest[:10]:<10}  "
+            f"{row.pid:>8}  {row.recorded_ppid:>8}  {row.kind:<10}  {store:<10}  "
             f"{_format_age(row.age_seconds):>7}  {note}"
         )

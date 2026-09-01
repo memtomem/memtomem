@@ -54,6 +54,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm embedding-reset --mode apply-current` takes `--yes` / `-y`.** It was the
+  last destructive-but-scriptable command with no non-interactive escape, so a
+  cron or CI caller had to reach for `yes | mm embedding-reset …` — which under
+  `set -o pipefail` fails the pipeline with exit 141, because `yes` takes
+  SIGPIPE the moment mm stops reading stdin, even though the reset succeeded.
+  `--yes` skips only the confirmation prompt, nothing else. It is refused
+  outside `--mode apply-current` (the only mode that prompts), mirroring
+  `mm gc`'s `--yes requires --apply`: `mm embedding-reset --yes` reads like
+  "reset without asking" but would otherwise print status and exit 0. (#2065)
+
+- **`mm doctor` now sees servers that never opened a store.** The instance
+  registry only ever recorded a server once it *initialized* — which is lazy by
+  design (#399), so a client that connects, handshakes and asks for nothing
+  registered nothing. On the machine that motivated this, that was 34 of 35
+  running servers: exactly the idle population that accumulates. Each server
+  now writes a lightweight **presence marker** at startup, beside the pid file
+  it already writes on the runtime anchor, and `mm doctor` reports the split
+  ("*N* live server processes … *K* with no store registration observed";
+  `--json` gains `processes_with_store_registered`,
+  `processes_without_store_registration`, and a `kind` of `sentinel` or
+  `presence` on each instance row). The wording reports the *records*, not an
+  inferred state: sentinel registration is best-effort, so a missing one is
+  not proof that no store was opened. `~/.memtomem/` is still untouched by a
+  handshake — the invariant #399 and #412 actually protect is the *store*,
+  not the runtime directory.
+
+  Deliberately unchanged: `mm status`'s concurrent-writer warning and
+  `mm uninstall`'s refusal both still read store sentinels only. An idle server
+  is not a writer, and it is not a reason to refuse deleting state — so an
+  uninstall neither blocks on a marker nor deletes a live one; it collects only
+  abandoned markers. (#2230)
+
 - **`mm doctor` reports the memtomem runtime on this machine, including
   accumulated server processes.** Every MCP client starts its own
   `memtomem-server` and holds it for as long as the client lives, so a
@@ -145,6 +177,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (#2145)
 
 ### Changed
+
+- **A file's path no longer retrieves it while anything's prose matches.**
+  `chunks_fts` is `fts5(content, source_file)` and an unqualified `MATCH`
+  searches both columns. `source_file` is stored raw, so unicode61 split it
+  into components and every directory and filename word became a searchable,
+  *scoring* term: on a real 6,995-chunk store, 71 of the top 100 hits for
+  `plans` were chunks about something else, surfaced because they live under
+  `.claude/plans/`, and for auto-generated plan-filename words (`octopus`,
+  `duckling`) the path noise was the entire result set. Nothing ever queried
+  the column deliberately, and path matching already has its own parameter —
+  `source_filter`, in Python, with its own separator-folding rules (#720).
+
+  BM25 now runs its AND-then-OR ladder against `content` alone, and repeats it
+  against `source_file` only when the content phase found nothing at all. So
+  typing a filename into search still finds that file's chunks — an
+  undocumented but plausible habit that keeps working — while within the BM25
+  leg a path can never outrank prose, because the two never compete for a slot.
+  One case sits outside that guarantee and is worth knowing: when no chunk's
+  content matches but the dense leg does find prose, the path fallback's rows
+  and those dense rows are fused together, so a path match can appear among
+  them.
+
+  Weighting the column 0.0 instead, which is the obvious smaller change, is not
+  enough: RRF fuses on a result's *ordinal rank*, not its score, so a
+  path-only row scored 0.0 still occupies a BM25 slot and still contributes
+  positive fused relevance to the hybrid pipeline every caller actually uses.
+  It has to not be retrieved. No column weights are involved either way — under
+  a column-qualified `MATCH` the excluded column contributes nothing to a query
+  that never touched it, so `bm25(chunks_fts, 1.0, 0.0)` and the bare `rank`
+  score identically. No schema change: fts5 column filters need no new table.
+  (#2224)
 
 - **`mem_search`'s `tag_filter` now selects at retrieval instead of trimming
   the ranked results.** The filter ran as a post-rerank stage, after fusion had
@@ -323,6 +386,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (#2092)
 
 ### Fixed
+
+- **Retired component generations no longer pile up for the life of the
+  process.** `revert_to_stored` records the generation it retires so shutdown
+  can still close one whose last leaseholder never released (#2180), but
+  nothing removed an entry once its close had run — the common idle case,
+  where the close happens inline during the revert. The list grew by one per
+  revert, each holding a settled handle `drain()` would no-op on. The
+  retirement path now prunes settled entries; a generation with a pending or
+  in-flight close is kept, and one whose deferred close ended *cancelled* is
+  kept too, because that cancellation is a value shutdown still has to
+  re-raise. (#2201)
+
+- **A failing lock is no longer reported as a busy one.** The shared
+  cross-process helper behind every sidecar lock (`.mcp.json`, settings, skills,
+  versions, the wiki commit lock, the memory files) treated *every*
+  `portalocker` failure as contention: it polled the whole acquisition budget
+  and then raised `TimeoutError` "held by another process". Only a held lock is
+  contention. A lock call that fails for its own reason — `EIO`, `ENOLCK`, an
+  NFS `EOFError`, a non-lock-violation Win32 error — can never be cleared by
+  retrying, so the wait was pure delay and the advice pointed at a holder that
+  does not exist: `mm wiki <kind> commit` said "another wiki operation may be in
+  progress; retry shortly" and the web route answered `503 busy`, inviting a
+  client to spin forever. Such a failure is now raised immediately as `OSError`,
+  the same type the lock's own `mkdir`/`open` already raise, so it reaches the
+  branches written for it — `mm wiki <kind> commit` reports an unavailable
+  lock, the web route answers `500 lock_unavailable`. Contention is unchanged:
+  still `TimeoutError` on the bounded path, still "held by another process",
+  still retryable — and a backend failure can no longer arrive dressed as one
+  either: an `ETIMEDOUT` lock error used to *construct* a `TimeoutError`,
+  since Python dispatches `OSError` on the errno. Applies to the sync and
+  async helpers and to the unbounded (`timeout=None`) acquire, which has no
+  budget to convert contention against and so leaves its type alone, and
+  covers the raw `pywintypes.error` a portalocker 3.x install can still
+  raise. (#2229)
+
+- **An error inside a lock is no longer replaced by the failure to release it.**
+  The same helper released the lock in a bare `finally`, so if the guarded work
+  raised and the unlock then failed, the unlock's exception propagated and the
+  caller's own error survived only as `__context__` — a `WikiTargetChangedError`
+  or a git failure could surface as a raw `OSError` from the release, past every
+  arm written to classify it. The body's exception now always wins (including
+  `CancelledError` on the async path); a release failure while unwinding is
+  logged at warning with the lock path, and closing the descriptor is held to
+  the same rule, so a failing `close` cannot replace the body's error either.
+  Neither swallow strands the lock: closing releases it, and the OS reclaims
+  the descriptor even when `close` reports an error. A release failure on the
+  *success* path
+  still propagates unchanged — there the guarded work has already completed,
+  and relabelling it as a lock failure would report a finished commit as
+  failed. (#2229)
+
+- **A source larger than SQLite's bound-variable limit can be deleted again.**
+  `delete_by_source` bound every one of a file's row ids into a single
+  `IN (...)`, so a source with more chunks than the connection's
+  `SQLITE_LIMIT_VARIABLE_NUMBER` (32,766 today; 999 on builds older than
+  SQLite 3.32, which an ordinary large document reaches) raised
+  `too many SQL variables` instead of deleting — cleanly rolled back, but the
+  file was then undeletable through `mm purge --matching-excluded`, the web
+  source tab, the health-maintenance sweep, `mm gc`, and re-index replacement
+  alike. Every write path whose `IN` clause is sized by a file's or a
+  namespace's own row count now batches under the existing `_SQL_MAX_PARAMS`
+  ceiling, inside the same transaction as before, so a failed batch still
+  rolls back the whole operation: `delete_by_source`, `delete_chunks`,
+  `upsert_chunks`, `update_chunk_line_ranges`, `update_chunk_metadata`,
+  `update_chunks_scope_for_source`, and `delete_by_namespace`. (#2265)
 
 - **Per-chunk tag edits no longer undo a concurrent memory scope migration.**
   The tag service fetched a chunk, rebuilt the entire row with new tags, and

@@ -325,6 +325,19 @@ async def create_components(
         raise
 
 
+def prune_settled_generations(comp: Components) -> None:
+    """Drop retired generations the shutdown drain no longer needs (#2201).
+
+    ``retired_generations`` exists so ``close_components`` can close a
+    generation whose last leaseholder never released. An entry that has
+    finished closing — the common idle-server revert, which closes inline —
+    is dead weight the process would otherwise hold until exit. Mutates in
+    place: the list is a field other holders of the same ``Components`` read.
+    """
+
+    comp.retired_generations[:] = [g for g in comp.retired_generations if not g.settled]
+
+
 async def close_components(comp: Components) -> TeardownResult:
     """Shut down every component even when an earlier close fails."""
     first_cancel: asyncio.CancelledError | None = None

@@ -95,14 +95,84 @@ the balanced `[1.0, 1.0]` BM25/dense weighting.
 - A calibration run is invalid unless all 48 files and 192 chunks index with
   zero privacy blocks and zero errors.
 
-Methodology v2 keeps those topic metrics and adds intent-specific checks:
+### Canonical producer: Ubuntu
 
-- `genre_hit@1` and genre MRR use `topic AND expected genre` qrels.
-- `constraint_success@10` requires a negation/contrast ADR result to rank
-  before same-topic hard negatives.
-- `intent_coverage@10` requires multi-topic queries to cover both intents.
-- Same-language precision and cross-language relevant hits are reported only
-  in the combined-corpus track.
+Both baselines are *checked* on the Ubuntu CI runner, so both must be
+*produced* there. Calibrating on a developer's machine is not a smaller version
+of the same thing: the platform delta is the same size as the margins these
+floors are built from. #2224 measured it — a macOS recalibration raised
+`ko|genre_primary|mrr@10` to `0.31` while the Ubuntu runner observed `0.291`,
+so the locally produced file would have made CI *stricter* on the very slice
+that was failing.
+
+Regenerate by running the CI workflow with `workflow_dispatch` and input
+`refresh_retrieval_baselines: true`, then download the
+`retrieval-eval-baselines` artifact — `baseline_v0.3.8.json`,
+`baseline_v2.json` and `PROVENANCE.json` — and commit all three as-is. The
+refresh is its own job and nothing `needs:` the floor checks, so a
+currently-failing floor does not block its own refresh. This mirrors the
+quality gate's contract (`tools/quality-gate/README.md`).
+
+`PROVENANCE.json` is what makes a lowered floor auditable after the fact: the
+source commit, the workflow run, the runner platform, the versions of the
+packages that actually decide these numbers, the exact command behind each
+file, and a sha256 of each. CI re-checks those hashes on every run
+(`write_provenance.py --check`), so a baseline edited without regenerating its
+manifest fails rather than passing quietly.
+
+Run-to-run variance is real and bounded: two consecutive refreshes on the same
+runner and commit differed on exactly one floor, by one rounding step
+(`ko|genre_primary|mrr@10`, 0.25 vs 0.24). Do not read a difference that size
+as a change in behaviour.
+
+### Recalibrated for #2224 — `genre_primary` measured path text
+
+Both baselines were regenerated on the Ubuntu producer when BM25 stopped
+searching the `source_file` column while any chunk's `content` matches
+(#2224). Every floor that moved by more than 0.01 belongs to `genre_primary`,
+plus one that moved *up*:
+
+| floor | before | after |
+|---|---|---|
+| `cross_language en\|genre_primary\|cross_language_relevant@10` | 1.44 | 1.26 |
+| `cross_language en\|genre_primary\|recall@10` | 0.2925 | 0.2475 |
+| `cross_language en\|genre_primary\|ndcg@10` | 0.2774 | 0.2492 |
+| `english en\|genre_primary\|recall@10` | 0.405 | 0.3825 |
+| `english en\|genre_primary\|mrr@10` | 0.408 | 0.3876 |
+| `v1 ko\|genre_primary\|mrr@10` | 0.30 | 0.25 |
+| `korean` / `cross_language` `ko\|direct\|mrr@10` | 0.4525 / 0.5029 | 0.4675 / 0.5179 (**up**) |
+
+`genre_primary` relevance is defined as "chunk's topic is a target topic **and**
+chunk's genre is the query's genre" (`benchmark_v2.py:build_qrels`), and both
+are parsed from the file's path — the corpus is laid out
+`{language}/{topic}/{genre}.md`. A retriever that matched path tokens was
+matching the label definition itself.
+
+The Korean slices are the supporting evidence, not a proof. `ko|genre_primary`
+queries are mixed-script and carry the English topic word literally
+(`postgres 절차 접속 수행`, `observability KST 원인 후속 조치`), so an English
+directory name was reachable from a Korean query — and that is the same
+component the label is derived from. What separates `genre_primary` from the
+other types is not whether the query names a path word (`ko|direct` includes
+`Postgres 커넥션 풀 포화`, which names one too, and went *up*) but that its
+label is defined by **topic *and* genre**, and the path encodes both: the
+directory is the topic and the filename is the genre, so a path match supplied
+the entire qrel key rather than half of it.
+
+That is why the movement reads as removing a label-shaped signal rather than
+losing retrieval quality. It is an inference from where the metric moved, not a
+per-query audit; a stronger claim would need each lost result checked for
+whether it was reachable only through its path.
+
+Neither file was hand-edited. Both are regenerated wholesale by their tools,
+and `test_v2_committed_quality_bounds_match_generation_formula` recomputes
+every v2 bound from the committed `aggregate` and `run_spreads` values, so a
+floor edited on its own fails the suite. Note the limit of that guard: it
+checks bounds against aggregates, not aggregates against the per-query rows, so
+a *coordinated* edit to both would still pass. The protection against that is
+the workflow producing the file, not the test reading it. The frozen holdout (`query_holdout_v2.py`) is untouched — the
+queries, their identifiers and the qrel rules are unchanged; only the measured
+baseline they are scored against moved.
 
 ## RRF sensitivity correctness
 
