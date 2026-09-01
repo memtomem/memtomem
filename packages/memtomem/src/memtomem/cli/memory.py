@@ -477,7 +477,7 @@ async def _recall(
     fmt: str,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.cli._empty_results import explain_empty_result
+    from memtomem.cli._empty_results import active_tag_filter, explain_empty_result
     from memtomem.models import NamespaceFilter, ScopeFilter
     from memtomem.server.helpers import _parse_recall_date
     from memtomem.server.tools.search import _resolve_project_context_root
@@ -513,18 +513,26 @@ async def _recall(
                 filters=[
                     (flag, value)
                     for flag, value in (
-                        ("--since", since),
-                        ("--until", until),
-                        ("--source-filter", source_filter),
-                        ("--tag-filter", tag_filter),
+                        # ``if since``/``if until`` above already turn an
+                        # empty bound into ``None`` before parsing.
+                        ("--since", since or None),
+                        ("--until", until or None),
+                        # An empty source filter is ``LIKE '%%'`` over a NOT
+                        # NULL column — every row matches.
+                        ("--source-filter", source_filter or None),
+                        ("--tag-filter", active_tag_filter(tag_filter)),
+                        # Both of these are applied verbatim: recall does not
+                        # go through ``run_search``, so an empty value is a
+                        # filter that matches nothing.
                         ("--namespace", namespace),
                         ("--scope", scope),
                     )
-                    # Empty strings are dropped, not just ``None``: the
-                    # query normalizes them away (``namespace or
-                    # current_namespace``), so listing one as a filter that
-                    # might be responsible contradicts what actually ran.
-                    if value
+                    # Every supplied value, empty ones included: recall does
+                    # not go through ``run_search``, so it applies
+                    # ``NamespaceFilter.parse("")`` / ``ScopeFilter.parse("")``
+                    # verbatim and an empty string is a filter that matches
+                    # nothing.
+                    if value is not None
                 ],
                 count_flag="-l",
             )

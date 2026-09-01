@@ -29,6 +29,40 @@ class _NamespaceLister(Protocol):
     async def list_namespaces(self) -> list[tuple[str, int]]: ...
 
 
+def active_tag_filter(value: str | None) -> str | None:
+    """``None`` when a ``--tag-filter`` value selects no tags at all.
+
+    ``parse_tag_filter`` — the same function the query uses — reads ``""``
+    and ``","`` as an empty tag tuple, which filters nothing. Naming such a
+    value as a filter to drop is the weaker form of the wrong-cause claim
+    this module exists to remove: the reader drops it and the result set does
+    not move.
+    """
+
+    from memtomem.storage.base import parse_tag_filter
+
+    if value is None:
+        return None
+    return value if parse_tag_filter(value) else None
+
+
+def _count_flag_suggestion(namespace: str, count_flag: str) -> str | None:
+    """The ``-n 3`` → ``-k 3`` hint, for values that are really a count.
+
+    Strictly positive integers only. ``str.isdigit`` already rejects a sign,
+    and rejecting ``0`` too keeps the hint from proposing a command that is
+    valid but useless — while ``-1`` would be worse than useless, since
+    SQLite reads ``LIMIT -1`` as no limit at all.
+    """
+
+    stripped = namespace.strip()
+    if not stripped.isdigit() or int(stripped) <= 0:
+        return None
+    return (
+        f"'-n' is --namespace, not the result count: did you mean `{count_flag} {int(stripped)}`?"
+    )
+
+
 def _format_filters(filters: Sequence[tuple[str, str]]) -> str:
     return ", ".join(f"{flag} {value!r}" for flag, value in filters)
 
@@ -51,10 +85,13 @@ async def explain_empty_result(
 ) -> str:
     """Return the message to print when a query returned nothing.
 
-    ``filters`` is every filter the user actually supplied, in the order the
-    command declares them, including ``--namespace`` itself. ``count_flag``
-    is that command's "how many results" option (``-k`` for search, ``-l``
-    for recall) — the flag ``-n`` is most often mistaken for.
+    ``filters`` is every filter the query actually applied, in the order the
+    command declares them, including ``--namespace`` itself. Emptiness is not
+    a proxy for "inactive": ``--scope ''`` parses to ``scopes=('',)`` and
+    empties a healthy store, so a call site must drop a value only where its
+    own option is genuinely normalized away. ``count_flag`` is that command's
+    "how many results" option (``-k`` for search, ``-l`` for recall) — the
+    flag ``-n`` is most often mistaken for.
 
     Falls back to :data:`INDEX_HINT` whenever the index is the plausible
     suspect: no filter was supplied, or the store has no namespaces at all
@@ -73,10 +110,12 @@ async def explain_empty_result(
     if not known:
         return INDEX_HINT
 
-    # An empty ``--namespace`` is not a namespace: ``run_search`` normalizes it
-    # away (``effective_ns = namespace or current_namespace``), so the query
-    # ran unfiltered and naming it as the cause would be a lie.
-    if namespace:
+    # ``namespace`` is the value the query *ran with*, not the raw argument:
+    # only ``mm search`` normalizes an empty one away, so each call site
+    # resolves it and hands the result here. An empty string that survives is
+    # a real filter (``NamespaceFilter.parse("")`` is ``namespaces=('',)``)
+    # and matches nothing, which is worth saying out loud.
+    if namespace is not None:
         try:
             parsed = NamespaceFilter.parse(namespace)
         except InvalidNamespaceFilterError:  # pragma: no cover - rejected upstream
@@ -89,11 +128,9 @@ async def explain_empty_result(
                 "namespaces this index has.",
                 f"Indexed namespaces: {_format_namespaces(known)}",
             ]
-            if namespace.strip().lstrip("+-").isdigit():
-                lines.append(
-                    f"'-n' is --namespace, not the result count: did you mean "
-                    f"`{count_flag} {namespace}`?"
-                )
+            suggestion = _count_flag_suggestion(namespace, count_flag)
+            if suggestion is not None:
+                lines.append(suggestion)
             return "\n".join(lines)
 
     return (

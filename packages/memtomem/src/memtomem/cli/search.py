@@ -137,7 +137,7 @@ async def _search(
     rerank: bool | None = None,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.cli._empty_results import explain_empty_result
+    from memtomem.cli._empty_results import active_tag_filter, explain_empty_result
     from memtomem.models import (
         InvalidNamespaceFilterError,
         InvalidScopeFilterError,
@@ -199,24 +199,32 @@ async def _search(
         # the message is printed (#2255). Gated on the format that prints it
         # so ``--format json`` keeps its bare ``[]`` — and cannot start
         # failing on a store read whose answer it would never show.
+        # ``run_search`` resolves the namespace as ``namespace or
+        # current_namespace``, so an empty one is no filter at all here. That
+        # normalization is this option's alone — ``--scope ''`` reaches the
+        # SQL as ``scopes=('',)`` and really does empty the result, so every
+        # other value is reported whenever it was passed.
+        effective_namespace = namespace or None
         empty_message = (
             await explain_empty_result(
                 comp.storage,
-                namespace=namespace,
+                namespace=effective_namespace,
                 filters=[
                     (flag, value)
                     for flag, value in (
-                        ("--source-filter", source_filter),
-                        ("--tag-filter", tag_filter),
-                        ("--namespace", namespace),
+                        # ``if source_filter:`` gates the match in the
+                        # pipeline, so an empty one excludes nothing.
+                        ("--source-filter", source_filter or None),
+                        ("--tag-filter", active_tag_filter(tag_filter)),
+                        ("--namespace", effective_namespace),
+                        # No normalization: ``ScopeFilter.parse('')`` is
+                        # ``scopes=('',)`` and really does empty the result.
                         ("--scope", scope),
+                        # An empty ``--as-of`` never reaches here; the bound
+                        # parser rejects it above.
                         ("--as-of", as_of),
                     )
-                    # Empty strings are dropped, not just ``None``: the
-                    # query normalizes them away (``namespace or
-                    # current_namespace``), so listing one as a filter that
-                    # might be responsible contradicts what actually ran.
-                    if value
+                    if value is not None
                 ],
                 count_flag="-k",
             )

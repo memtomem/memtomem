@@ -269,3 +269,70 @@ class TestEmptyResultNamesTheFilter:
 
         assert result.exit_code == 0, result.output
         assert result.output.strip() == "[]"
+
+    def test_an_empty_scope_is_reported_because_it_really_filters(self, monkeypatch) -> None:
+        """``ScopeFilter.parse("")`` is ``scopes=('',)`` and ``run_search``
+        passes scope through unnormalized, so an empty ``--scope`` empties a
+        healthy store — exactly the case that must not print the index hint."""
+        result = self._search(monkeypatch, ["--scope", "", "hello"], namespaces=[("default", 7)])
+
+        assert "Filters applied: --scope ''" in result.stderr
+        assert HINT not in result.stderr
+
+    def test_recall_reports_an_empty_scope_too(self, monkeypatch) -> None:
+        result = self._recall(monkeypatch, ["--scope", ""], namespaces=[("default", 7)])
+
+        assert "Filters applied: --scope ''" in result.stderr
+        assert HINT not in result.stderr
+
+    def test_recall_reports_an_empty_namespace(self, monkeypatch) -> None:
+        """Recall does not go through ``run_search``, so it applies
+        ``NamespaceFilter.parse("")`` verbatim — the empty namespace really is
+        the filter that emptied the result, unlike on search."""
+        result = self._recall(monkeypatch, ["-n", ""], namespaces=[("default", 7)])
+
+        assert "--namespace '' matches none of the namespaces" in result.stderr
+        assert HINT not in result.stderr
+
+    @pytest.mark.parametrize("argv", [["-t", ""], ["-t", ","], ["-s", ""]])
+    def test_search_no_op_filters_are_not_blamed(self, monkeypatch, argv) -> None:
+        """``parse_tag_filter`` reads ``""`` and ``","`` as no tags, and the
+        pipeline gates the source match on ``if source_filter:`` — none of
+        these excluded anything, so naming them is the weaker form of the
+        wrong-cause claim this whole change removes."""
+        result = self._search(monkeypatch, [*argv, "hello"], namespaces=[("default", 7)])
+
+        assert "Filters applied" not in result.stderr
+        assert HINT in result.stderr
+
+    @pytest.mark.parametrize(
+        "argv", [["-t", ""], ["-t", ","], ["-s", ""], ["--since", ""], ["--until", ""]]
+    )
+    def test_recall_no_op_filters_are_not_blamed(self, monkeypatch, argv) -> None:
+        """Recall's empty source filter is ``LIKE '%%'`` over a NOT NULL
+        column, and its date bounds are dropped before parsing."""
+        result = self._recall(monkeypatch, argv, namespaces=[("default", 7)])
+
+        assert "Filters applied" not in result.stderr
+        assert HINT in result.stderr
+
+    @pytest.mark.parametrize("value", ["0", "00"])
+    def test_a_non_positive_count_gets_no_suggestion(self, monkeypatch, value: str) -> None:
+        """``-k 0`` is valid and useless, so proposing it helps nobody. The
+        namespace itself is still named — it really did empty the result."""
+        result = self._search(monkeypatch, ["-n", value, "hello"], namespaces=[("default", 7)])
+
+        assert "matches none of the namespaces" in result.stderr
+        assert "did you mean" not in result.stderr
+
+    def test_a_negative_count_is_never_suggested(self, monkeypatch) -> None:
+        """``-l -1`` is the dangerous one: SQLite reads ``LIMIT -1`` as no
+        limit, so a hint proposing it would turn a typo into a full dump."""
+        result = self._recall(monkeypatch, ["-n", "-1"], namespaces=[("default", 7)])
+
+        assert "did you mean" not in result.stderr
+
+    def test_the_suggestion_renders_the_normalized_value(self, monkeypatch) -> None:
+        result = self._search(monkeypatch, ["-n", " 3 ", "hello"], namespaces=[("default", 7)])
+
+        assert "did you mean `-k 3`?" in result.stderr
