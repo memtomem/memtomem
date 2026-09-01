@@ -1533,6 +1533,67 @@ class TestPresenceSweep:
         reg.sweep_stale_presence()
         assert not reg.presence_dir().exists(), "a sweep must not create the directory"
 
+    def test_sweep_prunes_the_emptied_directory(self, rt):
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        residue = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        residue.touch()
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        os.utime(residue, (old, old))
+        reg.sweep_stale_presence()
+        assert not directory.exists()
+
+    def test_sweep_prunes_under_the_lock_that_registration_holds(self, rt, db, monkeypatch):
+        """The prune must not land between a registration's mkdir and its open.
+
+        Registration creates the directory and opens its marker inside one
+        locked span. An ``rmdir`` from an unlocked second pass could slip
+        between the two, and the registration would fail on a directory that
+        vanished underneath it — leaving a live server invisible to
+        ``mm doctor``, which is the exact failure this feature exists to fix.
+        """
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        swept: list[str] = []
+        real_rmdir = Path.rmdir
+
+        def _rmdir(self):
+            swept.append(str(self))
+            # The lock is held for this call, or the race is open.
+            assert reg._mutation_thread_lock.locked(), (
+                "the prune ran outside the registry mutation lock"
+            )
+            return real_rmdir(self)
+
+        monkeypatch.setattr(Path, "rmdir", _rmdir)
+        reg.sweep_stale_presence()
+        assert swept, "premise: the prune was attempted"
+
+    def test_sweep_leaves_a_directory_that_still_holds_a_marker(self, rt, db):
+        inst = reg.register_server_presence(db)
+        assert inst is not None
+        try:
+            reg.sweep_stale_presence()
+            assert reg.presence_dir().exists(), "rmdir refuses a non-empty directory"
+            assert inst.path.exists()
+        finally:
+            inst.cleanup()
+
+    def test_sweep_refuses_a_redirected_anchor(self, rt, tmp_path, monkeypatch):
+        """A junctioned runtime root holds an ordinary ``presence/`` inside the
+        *target*, which passes every check made on the leaf alone."""
+        directory = reg.presence_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        residue = directory / f"999999-1-{'b' * 16}-{'c' * 8}-{'d' * 8}.lock"
+        residue.touch()
+        old = time.time() - (reg._STALE_GRACE_S + 60)
+        os.utime(residue, (old, old))
+        monkeypatch.setattr(reg, "_dir_state", lambda p: "untrusted" if p == rt else "dir")
+
+        reg.sweep_stale_presence()
+
+        assert residue.exists(), "nothing under a redirected anchor may be touched"
+
 
 class TestPresenceRegistrationBudget:
     def test_startup_gives_up_quickly_rather_than_retrying(self, rt, db, monkeypatch):
@@ -1563,9 +1624,14 @@ class TestPresenceRegistrationBudget:
         assert budget <= reg._PRESENCE_LOCK_TIMEOUT_S + 0.2
         assert budget < reg._LOCK_TIMEOUT_S
 
-    def test_gc_stops_at_the_deadline_instead_of_holding_the_lock(self, rt, db, monkeypatch):
+    def test_gc_touches_no_further_entry_once_the_deadline_passes(self, rt, db, monkeypatch):
         """The budget must bound the work done *under* the lock, not only the
         acquisition of it.
+
+        What is pinned is the loop, not wall-clock: the bound is cooperative
+        and per-entry, so a probe already in flight finishes. The guarantee is
+        that no *further* entry is touched — the sweep cannot run the
+        directory's length while holding the shared lock.
 
         The sweep runs with the shared mutation lock held — the same lock that
         serializes sentinel registration, the concurrent-writer enumeration and

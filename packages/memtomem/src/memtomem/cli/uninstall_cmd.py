@@ -59,7 +59,6 @@ from memtomem._instance_registry import (
 )
 from memtomem._instance_registry import (
     instances_dir as _instances_dir,
-    presence_dir as _presence_dir,
     sweep_stale_presence as _sweep_stale_presence,
 )
 from memtomem._instance_registry import (
@@ -178,46 +177,6 @@ def _real_registry_dir(root: Path | None = None) -> Path | None:
     if not stat.S_ISDIR(st.st_mode) or _is_dir_link(d):
         return None
     return d
-
-
-def _real_presence_dir(root: Path | None = None) -> Path | None:
-    """The presence-marker directory iff it and its anchor are real (#2230).
-
-    The same anchor-and-leaf no-follow pair :func:`_real_registry_dir`
-    applies, and for the same reason: ``_prune_if_empty`` refuses a leaf that
-    is itself a link, but a junctioned runtime *root* leaves an ordinary
-    ``presence/`` inside the target — which passes every check made on the
-    leaf alone, and would then be listed and ``rmdir``'d in someone else's
-    tree. Trust is re-established here rather than inherited from whichever
-    validation ran earlier, because a root can be replaced between the two.
-    """
-    d = _presence_dir() if root is None else _presence_dir(root)
-    if _is_dir_link(d.parent):
-        return None
-    try:
-        st = os.stat(d, follow_symlinks=False)
-    except OSError:
-        return None
-    if not stat.S_ISDIR(st.st_mode) or _is_dir_link(d):
-        return None
-    return d
-
-
-def _prune_stale_presence_dirs(roots: tuple[Path, ...] | None = None) -> None:
-    """``rmdir`` each now-empty presence directory. Never raises (#2230).
-
-    Split from the sweep so both exits — the full staging path and the
-    empty-state fast path — prune the same way through the same
-    anchor-and-leaf no-follow check.
-    """
-    try:
-        canonical = runtime_dir()
-    except OSError:
-        return
-    for root in _inventory_runtime_roots() if roots is None else roots:
-        directory = _real_presence_dir() if root == canonical else _real_presence_dir(root)
-        if directory is not None:
-            _prune_if_empty(directory)
 
 
 def _inventory_runtime_roots() -> tuple[Path, ...]:
@@ -1206,8 +1165,10 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # staging one would unregister a live process, and on Windows would fail
     # on the open handle. Sweep only what its owner can no longer remove,
     # then prune the directory when nothing live is left in it.
+    # Pruning happens inside the sweep, under the registry's mutation lock:
+    # an unlocked ``rmdir`` here could land between a starting server's
+    # ``mkdir`` and the marker it is about to open inside that same lock.
     _sweep_stale_presence()
-    _prune_stale_presence_dirs(inv.runtime_roots)
 
     for root in inv.runtime_roots:
         _prune_if_empty(root)
@@ -1269,7 +1230,6 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         # a marker behind, and a host with no store at all is exactly where
         # nothing else would ever come along to collect it.
         _sweep_stale_presence()
-        _prune_stale_presence_dirs()
         click.echo("No memtomem state to remove (~/.memtomem/ does not exist).")
         label, lines = _binary_uninstall_hint(profile)
         _print_binary_hint(label, lines)

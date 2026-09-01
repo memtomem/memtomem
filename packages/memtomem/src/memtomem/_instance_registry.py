@@ -960,6 +960,17 @@ def sweep_stale_presence() -> None:
             deadline = time.monotonic() + _LOCK_TIMEOUT_S
             with _mutation_lock(deadline, root=lock_root):
                 _gc_stale_presence(directory, deadline)
+                # Remove the emptied directory here, under the same lock
+                # that serialized the sweep — never in a second, unlocked
+                # pass. Registration creates this directory and opens its
+                # marker inside one locked span; an unlocked ``rmdir``
+                # could land between those two steps, and the registration
+                # would fail on a directory that vanished underneath it,
+                # leaving a live server invisible. ``rmdir`` refuses a
+                # non-empty directory, so a marker written by any other
+                # process is safe by the same atomicity.
+                with contextlib.suppress(OSError):
+                    directory.rmdir()
         except (_MutationLockTimeout, OSError):
             continue
         except Exception:
@@ -995,8 +1006,15 @@ def _gc_stale_presence(directory: Path, deadline: float) -> None:
                 path = Path(entry.path)
                 if path in own:
                     continue
-                if _probe_entry(path) == "stale" and _aged(path):
-                    _gc_stale_entry(path)
+                if _probe_entry(path) != "stale" or not _aged(path):
+                    continue
+                if time.monotonic() >= deadline:
+                    # Re-checked after probing, before the expensive half:
+                    # collection re-acquires the entry's flock and unlinks.
+                    # Spending that on an entry whose budget ran out mid-probe
+                    # is the one overshoot this loop can cheaply decline.
+                    return
+                _gc_stale_entry(path)
     except OSError:
         return
 
