@@ -245,7 +245,9 @@ def make_chunk(
             heading_hierarchy=tuple(heading),
             origin=origin,
         ),
-        content_hash=f"hash-{uuid4().hex[:8]}",
+        # Batches commonly share namespace, source_file, and start_line, making
+        # this the only varying UNIQUE-key column. Keep the full UUID (#2278).
+        content_hash=f"hash-{uuid4().hex}",
         embedding=embedding if embedding is not None else [0.1] * 1024,
     )
 

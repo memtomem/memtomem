@@ -6,7 +6,7 @@ import sqlite3
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -208,6 +208,8 @@ class TestChunkCRUD:
         source = Path("/tmp/same-hash.md")
         first = _make_chunk("same body", source=source)
         second = _make_chunk("same body", source=source)
+        second.content_hash = first.content_hash
+        assert first.content_hash == second.content_hash
         first.metadata = dataclasses.replace(first.metadata, start_line=10, end_line=10)
         second.metadata = dataclasses.replace(second.metadata, start_line=20, end_line=20)
         await storage.upsert_chunks([first, second])
@@ -581,6 +583,28 @@ class TestChunkUniqueness:
     differ only in id. Once present, those rows survive subsequent
     re-indexing because the differ never sees their hash as "stale".
     """
+
+    @pytest.mark.asyncio
+    async def test_make_chunk_full_uuid_prefix_collision_seeds_both_rows(
+        self, storage, monkeypatch
+    ):
+        """#2278: equal 32-bit prefixes must not collapse shared factory rows."""
+        first_uuid = UUID("deadbeef-0000-4000-8000-000000000001")
+        second_uuid = UUID("deadbeef-0000-4000-8000-000000000002")
+        generated = iter((first_uuid, second_uuid))
+        monkeypatch.setattr("helpers.uuid4", lambda: next(generated))
+
+        first = _make_chunk("first body")
+        second = _make_chunk("second body")
+
+        assert first.content_hash == f"hash-{first_uuid.hex}"
+        assert second.content_hash == f"hash-{second_uuid.hex}"
+        assert first.content_hash != second.content_hash
+
+        await storage.upsert_chunks([first, second])
+
+        assert await storage.get_chunk(first.id) is not None
+        assert await storage.get_chunk(second.id) is not None
 
     @staticmethod
     def _twin_chunks() -> tuple[Chunk, Chunk]:
