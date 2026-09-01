@@ -1,21 +1,27 @@
 """Tests for ``cli/_prompts.confirm`` (#1640).
 
-click 8.4's ``_readline_prompt`` redirects the prompt function's stdout to
+Click 8.1-8.4's ``_readline_prompt`` redirects the prompt function's stdout to
 stderr on POSIX when ``err=True`` but not on Windows, where the prompt tail
-(and, under ``CliRunner``, the echoed reply) leaks into stdout.
-``confirm(err=True)`` bypasses click's prompt machinery so ``--json`` stdout
-stays a single JSON document on every platform. The end-to-end pins for the
-two production call sites live next to their suites
-(``test_reset_cmd.py`` / ``test_cli_add_json.py``).
+(and, under ``CliRunner``, the echoed reply) leaks into stdout. Click 8.5
+dropped that Windows fork, but ``click>=8.1`` still admits the versions that
+have it. ``confirm(err=True)`` bypasses click's prompt machinery entirely, so
+``--json`` stdout stays a single JSON document on every platform and every
+supported click. That bypass is what ``helpers.poison_click_prompts`` pins.
+The end-to-end pins for the three production call sites live next to their
+suites (``test_reset_cmd.py`` / ``test_cli_add_json.py`` /
+``test_upgrade_cmd.py``).
 """
 
 from __future__ import annotations
 
 import click
+import click.termui
 import pytest
 from click.testing import CliRunner
 
 from memtomem.cli._prompts import confirm
+
+from helpers import CLICK_PROMPT_SENTINEL, poison_click_prompts
 
 
 @click.command()
@@ -65,18 +71,18 @@ class TestConfirmErrTrue:
         assert result.exit_code == 1
         assert "answer=" not in result.stdout
 
-    def test_stdout_stays_clean_under_simulated_windows(
+    def test_stdout_stays_clean_without_click_prompt_machinery(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The #1640 trigger — forcing click's WIN prompt branch must not
-        # matter because the helper never enters click's prompt machinery.
-        import click.termui
-
-        monkeypatch.setattr(click.termui, "WIN", True)
+        # The #1640 invariant: the helper never enters click's prompt
+        # machinery, so the stdout leak that machinery can produce (click's
+        # Windows prompt fork, pre-8.5) is unreachable by construction.
+        calls = poison_click_prompts(monkeypatch)
 
         result = CliRunner().invoke(_cmd, [], input="n\n")
 
         assert result.exit_code == 0, result.output
+        assert calls == []
         assert result.stdout == "answer=False\n"
 
 
@@ -93,3 +99,50 @@ class TestConfirmErrFalse:
 
         assert confirm("Go?", default=True, err=False) is True
         assert calls["args"] == ("Go?", True)
+
+
+class TestPoisonClickPromptsIsArmed:
+    """The guard has to survive the environment it guards in.
+
+    ``poison_click_prompts`` is only evidence if it still fires from inside a
+    ``CliRunner.invoke``. An earlier draft patched
+    ``click.termui.visible_prompt_func``, which ``CliRunner.isolation()``
+    reassigns during ``invoke`` — the poison looked installed and never fired,
+    so ``calls == []`` would have passed for a command that prompted freely.
+    These cases fail if that ever becomes true of a patched name, and they
+    cover every name the helper patches — an unexercised arm is a claim, not
+    evidence.
+    """
+
+    @pytest.mark.parametrize("alias", ["confirm", "prompt"])
+    def test_package_alias_is_poisoned_under_cli_runner(
+        self, monkeypatch: pytest.MonkeyPatch, alias: str
+    ) -> None:
+        @click.command()
+        def _prompting() -> None:
+            getattr(click, alias)("Continue?")
+
+        calls = poison_click_prompts(monkeypatch)
+
+        result = CliRunner().invoke(_prompting, [], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        assert calls == [f"click.{alias}"]
+        assert CLICK_PROMPT_SENTINEL in result.stdout
+
+    def test_termui_path_is_poisoned_under_cli_runner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bypasses the ``click.confirm`` alias, the way click's own option
+        # prompting does, and lands on the ``_readline_prompt`` chokepoint.
+        @click.command()
+        def _prompting() -> None:
+            click.termui.confirm("Continue?")
+
+        calls = poison_click_prompts(monkeypatch)
+
+        result = CliRunner().invoke(_prompting, [], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        assert calls == ["click.termui._readline_prompt"]
+        assert CLICK_PROMPT_SENTINEL in result.stdout

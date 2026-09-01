@@ -8,6 +8,7 @@ import sys
 import pytest
 from click.testing import CliRunner
 
+from helpers import poison_click_prompts
 from memtomem.cli import cli
 from memtomem.cli import upgrade_cmd
 from memtomem.cli._liveness import ServerState
@@ -1309,17 +1310,17 @@ def test_cancel_exits_zero_and_json_consistent(monkeypatch, fake_uv, force_tty):
     assert calls == []
 
 
-def test_cancel_json_win_prompt_branch(monkeypatch, fake_uv, force_tty):
-    """#1640: forcing click's WIN prompt branch must not pollute the JSON
-    ack — _prompts.confirm never enters click's prompt machinery."""
-    import click.termui
-
+def test_cancel_json_click_prompt_machinery_unused(monkeypatch, fake_uv, force_tty):
+    """#1640: click's prompt machinery must stay unreached, or the stdout leak
+    it can produce (the Windows prompt fork, pre-8.5) pollutes the JSON ack —
+    _prompts.confirm never enters that machinery."""
     calls, _configure = fake_uv
     _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
-    monkeypatch.setattr(click.termui, "WIN", True)
+    prompt_calls = poison_click_prompts(monkeypatch)
 
     result = CliRunner().invoke(cli, ["upgrade", "--json"], input="n\n")
     assert result.exit_code == 0, result.output
+    assert prompt_calls == []
     assert json.loads(result.stdout) == {"ok": True, "cancelled": True}
     assert calls == []
 
