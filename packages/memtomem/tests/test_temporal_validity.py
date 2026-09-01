@@ -702,6 +702,10 @@ def _mock_cli_components_for_search(search_return):
     config = SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[]))
     comp = SimpleNamespace(
         search_pipeline=SimpleNamespace(search=pipeline_mock),
+        # #2255: an empty result set asks the store which namespaces exist,
+        # so as to name the filter that emptied it. None here, which is the
+        # empty-index answer the old message already gave.
+        storage=SimpleNamespace(list_namespaces=AsyncMock(return_value=[])),
         config=config,
     )
 
