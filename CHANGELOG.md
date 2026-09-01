@@ -377,6 +377,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An empty `mm search` / `mm recall` result no longer blames the index when a
+  filter emptied it.** `No results found. See \`mm status\` to confirm your index
+  has chunks.` was printed whatever the query looked like, so a mistyped
+  `-n 3` — `-n` is `--namespace`, the result count is `-k` (`-l` for recall) —
+  sent the reader to the one subsystem that was not wrong. Zero results is a
+  plausible answer, so the stated cause got believed. When filters were
+  supplied, the message now names them: a `--namespace` value matching none of
+  the indexed namespaces is called out and the existing namespaces are listed,
+  an all-digit value adds the count-flag suggestion, and any other filter
+  combination is listed for the reader to drop one at a time. Nothing is
+  rejected — "nothing indexed under this namespace yet" is still a legitimate
+  answer — and a genuinely empty store keeps the `mm status` pointer, which is
+  where it is right. `--format json` output is byte-identical and does not pay
+  for the diagnosis. (#2255)
+
 - **A failing lock is no longer reported as a busy one.** The shared
   cross-process helper behind every sidecar lock (`.mcp.json`, settings, skills,
   versions, the wiki commit lock, the memory files) treated *every*

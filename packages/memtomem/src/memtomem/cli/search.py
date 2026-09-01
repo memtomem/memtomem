@@ -137,6 +137,7 @@ async def _search(
     rerank: bool | None = None,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.cli._empty_results import explain_empty_result
     from memtomem.models import (
         InvalidNamespaceFilterError,
         InvalidScopeFilterError,
@@ -193,6 +194,35 @@ async def _search(
             rerank=rerank,
             origin="cli",
         )
+        # Built inside the block: naming the filter that emptied the result
+        # needs the store, and ``cli_components`` has closed it by the time
+        # the message is printed (#2255). Gated on the format that prints it
+        # so ``--format json`` keeps its bare ``[]`` — and cannot start
+        # failing on a store read whose answer it would never show.
+        empty_message = (
+            await explain_empty_result(
+                comp.storage,
+                namespace=namespace,
+                filters=[
+                    (flag, value)
+                    for flag, value in (
+                        ("--source-filter", source_filter),
+                        ("--tag-filter", tag_filter),
+                        ("--namespace", namespace),
+                        ("--scope", scope),
+                        ("--as-of", as_of),
+                    )
+                    # Empty strings are dropped, not just ``None``: the
+                    # query normalizes them away (``namespace or
+                    # current_namespace``), so listing one as a filter that
+                    # might be responsible contradicts what actually ran.
+                    if value
+                ],
+                count_flag="-k",
+            )
+            if not results and fmt in ("table", "plain")
+            else ""
+        )
 
     # Hints go to stderr for every format, and before any format-specific
     # return: ``context``/``smart`` return early on an empty result set, which
@@ -202,11 +232,7 @@ async def _search(
         click.secho(f"({hint})", fg="yellow", err=True)
 
     if not results and fmt in ("table", "plain"):
-        click.secho(
-            "No results found. See `mm status` to confirm your index has chunks.",
-            fg="yellow",
-            err=True,
-        )
+        click.secho(empty_message, fg="yellow", err=True)
 
     if fmt == "context":
         if not results:

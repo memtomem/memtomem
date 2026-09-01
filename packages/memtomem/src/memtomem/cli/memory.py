@@ -477,6 +477,7 @@ async def _recall(
     fmt: str,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.cli._empty_results import explain_empty_result
     from memtomem.models import NamespaceFilter, ScopeFilter
     from memtomem.server.helpers import _parse_recall_date
     from memtomem.server.tools.search import _resolve_project_context_root
@@ -501,13 +502,38 @@ async def _recall(
             scope_filter=scope_filter,
             project_context_root=project_context_root,
         )
+        # Inside the block: the explainer reads the store, which
+        # ``cli_components`` closes on exit (#2255). Gated on the format that
+        # prints it, so ``--format json`` neither pays for the read nor can
+        # fail on it.
+        empty_message = (
+            await explain_empty_result(
+                comp.storage,
+                namespace=namespace,
+                filters=[
+                    (flag, value)
+                    for flag, value in (
+                        ("--since", since),
+                        ("--until", until),
+                        ("--source-filter", source_filter),
+                        ("--tag-filter", tag_filter),
+                        ("--namespace", namespace),
+                        ("--scope", scope),
+                    )
+                    # Empty strings are dropped, not just ``None``: the
+                    # query normalizes them away (``namespace or
+                    # current_namespace``), so listing one as a filter that
+                    # might be responsible contradicts what actually ran.
+                    if value
+                ],
+                count_flag="-l",
+            )
+            if not chunks and fmt in ("table", "plain")
+            else ""
+        )
 
     if not chunks and fmt in ("table", "plain"):
-        click.secho(
-            "No results found. See `mm status` to confirm your index has chunks.",
-            fg="yellow",
-            err=True,
-        )
+        click.secho(empty_message, fg="yellow", err=True)
 
     if fmt == "json":
         out = [
