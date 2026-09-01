@@ -7,9 +7,26 @@ leg before ranking runs, and the message then points the reader at the one
 subsystem that is not wrong. Zero results is a plausible answer, so the
 stated cause gets believed.
 
-This module builds the replacement text. It **never rejects** a filter —
-"nothing indexed under this namespace yet" is a legitimate answer, and the
-existing behaviour of returning it is preserved; only the explanation
+The branch is **evidence-first**: it turns on what the store reports, not on
+a judgement about which supplied option narrowed the query. An earlier
+version tried the latter and could not be finished — whether a value narrows
+depends on each option's own parser (``--scope ''`` filters, ``--tag-filter
+','`` does not, ``'*'`` matches everything, ``-k 0`` returns nothing at all),
+so every case answered raised another, and the answers had to stay in step
+with parsers this module does not own.
+
+Reading ``list_namespaces()`` settles the only question that matters for the
+original complaint — is the index actually empty — and it settles it by
+observation. So:
+
+* empty store → the index hint, which is right there;
+* a ``--namespace`` that matches nothing the store has → say exactly that,
+  because ``NamespaceFilter.matches`` is the same question the query asked;
+* otherwise → report what the index holds and what the command included,
+  and claim nothing about which option is responsible.
+
+It **never rejects** a filter: "nothing indexed under this namespace yet" is
+a legitimate answer, and returning it is preserved. Only the explanation
 changes.
 """
 
@@ -29,38 +46,29 @@ class _NamespaceLister(Protocol):
     async def list_namespaces(self) -> list[tuple[str, int]]: ...
 
 
-def active_tag_filter(value: str | None) -> str | None:
-    """``None`` when a ``--tag-filter`` value selects no tags at all.
-
-    ``parse_tag_filter`` — the same function the query uses — reads ``""``
-    and ``","`` as an empty tag tuple, which filters nothing. Naming such a
-    value as a filter to drop is the weaker form of the wrong-cause claim
-    this module exists to remove: the reader drops it and the result set does
-    not move.
-    """
-
-    from memtomem.storage.base import parse_tag_filter
-
-    if value is None:
-        return None
-    return value if parse_tag_filter(value) else None
-
-
 def _count_flag_suggestion(namespace: str, count_flag: str) -> str | None:
     """The ``-n 3`` → ``-k 3`` hint, for values that are really a count.
 
-    Strictly positive integers only. ``str.isdigit`` already rejects a sign,
-    and rejecting ``0`` too keeps the hint from proposing a command that is
-    valid but useless — while ``-1`` would be worse than useless, since
-    SQLite reads ``LIMIT -1`` as no limit at all.
+    Strictly positive decimals only, and the conversion is guarded rather
+    than assumed: ``"²".isdigit()`` is true while ``int("²")`` raises, and
+    ``int()`` also refuses a digit string past CPython's conversion limit.
+    A namespace is unbounded user input, so both reach here.
+
+    Rejecting ``0`` keeps the hint from proposing a command that is valid and
+    useless; a negative value never gets this far, but would be worse than
+    useless — SQLite reads ``LIMIT -1`` as no limit at all.
     """
 
     stripped = namespace.strip()
-    if not stripped.isdigit() or int(stripped) <= 0:
+    if not stripped.isascii() or not stripped.isdecimal():
         return None
-    return (
-        f"'-n' is --namespace, not the result count: did you mean `{count_flag} {int(stripped)}`?"
-    )
+    try:
+        count = int(stripped)
+    except ValueError:
+        return None
+    if count <= 0:
+        return None
+    return f"'-n' is --namespace, not the result count: did you mean `{count_flag} {count}`?"
 
 
 def _format_filters(filters: Sequence[tuple[str, str]]) -> str:
@@ -76,6 +84,10 @@ def _format_namespaces(known: list[tuple[str, int]]) -> str:
     return rendered
 
 
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
 async def explain_empty_result(
     storage: _NamespaceLister,
     *,
@@ -85,36 +97,21 @@ async def explain_empty_result(
 ) -> str:
     """Return the message to print when a query returned nothing.
 
-    ``filters`` is every filter the query actually applied, in the order the
-    command declares them, including ``--namespace`` itself. Emptiness is not
-    a proxy for "inactive": ``--scope ''`` parses to ``scopes=('',)`` and
-    empties a healthy store, so a call site must drop a value only where its
-    own option is genuinely normalized away. ``count_flag`` is that command's
+    ``namespace`` is the value the query *ran with* — only ``mm search``
+    normalizes an empty one away, so each call site resolves it. ``filters``
+    is what the command line carried, reported as a fact about the invocation
+    rather than as a verdict on any option. ``count_flag`` is that command's
     "how many results" option (``-k`` for search, ``-l`` for recall) — the
     flag ``-n`` is most often mistaken for.
-
-    Falls back to :data:`INDEX_HINT` whenever the index is the plausible
-    suspect: no filter was supplied, or the store has no namespaces at all
-    (which is what an empty index looks like from here).
     """
 
     from memtomem.models import InvalidNamespaceFilterError, NamespaceFilter
 
-    if not filters:
-        return INDEX_HINT
-
-    # Checked for every filtered query, not only namespaced ones: a store with
-    # nothing in it answers every filter with zero, and blaming the filter
-    # there is the same wrong-subsystem diagnosis in the other direction.
     known = await storage.list_namespaces()
     if not known:
+        # Nothing indexed anywhere: the index really is the answer.
         return INDEX_HINT
 
-    # ``namespace`` is the value the query *ran with*, not the raw argument:
-    # only ``mm search`` normalizes an empty one away, so each call site
-    # resolves it and hands the result here. An empty string that survives is
-    # a real filter (``NamespaceFilter.parse("")`` is ``namespaces=('',)``)
-    # and matches nothing, which is worth saying out loud.
     if namespace is not None:
         try:
             parsed = NamespaceFilter.parse(namespace)
@@ -133,9 +130,17 @@ async def explain_empty_result(
                 lines.append(suggestion)
             return "\n".join(lines)
 
+    total = sum(count for _, count in known)
+    inventory = (
+        f"No results found. The index has {_plural(total, 'chunk')} across "
+        f"{_plural(len(known), 'namespace')}"
+    )
+    if not filters:
+        # Only what was observed. "nothing matched" would be a claim about
+        # retrieval that ``-k 0`` falsifies — it returns nothing without
+        # matching being involved at all.
+        return f"{inventory}, so the index is not the empty one."
     return (
-        f"No results found. Filters applied: {_format_filters(filters)}. "
-        "Drop them one at a time to see whether any of them is excluding "
-        "matches; `mm status` reports index size if you suspect the index "
-        "instead."
+        f"{inventory}. This query included: {_format_filters(filters)}. "
+        "Review those options, or rerun with fewer of them."
     )

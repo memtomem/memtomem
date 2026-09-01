@@ -392,15 +392,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   has chunks.` was printed whatever the query looked like, so a mistyped
   `-n 3` — `-n` is `--namespace`, the result count is `-k` (`-l` for recall) —
   sent the reader to the one subsystem that was not wrong. Zero results is a
-  plausible answer, so the stated cause got believed. When filters were
-  supplied, the message now names them: a `--namespace` value matching none of
-  the indexed namespaces is called out and the existing namespaces are listed,
-  an all-digit value adds the count-flag suggestion, and any other filter
-  combination is listed for the reader to drop one at a time. Nothing is
-  rejected — "nothing indexed under this namespace yet" is still a legitimate
-  answer — and a genuinely empty store keeps the `mm status` pointer, which is
-  where it is right. `--format json` output is byte-identical and does not pay
-  for the diagnosis. (#2255)
+  plausible answer, so the stated cause got believed. The message now branches
+  on what the store reports rather than on the query: an empty index keeps the
+  `mm status` pointer, which is where it belongs; a `--namespace` matching none
+  of the indexed namespaces is named as the cause, with the namespaces that do
+  exist listed and — for an all-digit value — the count-flag suggestion; and
+  every other case reports what the index holds and what the command included,
+  claiming nothing about which option is responsible. Nothing is rejected:
+  "nothing indexed under this namespace yet" is still a legitimate answer.
+  `--format json` output is byte-identical and does not pay for the diagnosis.
+  (#2255)
 
 - **A failing lock is no longer reported as a busy one.** The shared
   cross-process helper behind every sidecar lock (`.mcp.json`, settings, skills,

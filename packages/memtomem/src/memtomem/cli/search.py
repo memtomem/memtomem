@@ -137,7 +137,7 @@ async def _search(
     rerank: bool | None = None,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.cli._empty_results import active_tag_filter, explain_empty_result
+    from memtomem.cli._empty_results import explain_empty_result
     from memtomem.models import (
         InvalidNamespaceFilterError,
         InvalidScopeFilterError,
@@ -200,10 +200,10 @@ async def _search(
         # so ``--format json`` keeps its bare ``[]`` — and cannot start
         # failing on a store read whose answer it would never show.
         # ``run_search`` resolves the namespace as ``namespace or
-        # current_namespace``, so an empty one is no filter at all here. That
-        # normalization is this option's alone — ``--scope ''`` reaches the
-        # SQL as ``scopes=('',)`` and really does empty the result, so every
-        # other value is reported whenever it was passed.
+        # current_namespace``, so an empty one is no namespace at all — the
+        # branch that names a namespace as the cause must see what the query
+        # saw. ``filters`` is separate: it reports the command line as typed,
+        # claiming nothing about which option narrowed anything.
         effective_namespace = namespace or None
         empty_message = (
             await explain_empty_result(
@@ -212,16 +212,10 @@ async def _search(
                 filters=[
                     (flag, value)
                     for flag, value in (
-                        # ``if source_filter:`` gates the match in the
-                        # pipeline, so an empty one excludes nothing.
-                        ("--source-filter", source_filter or None),
-                        ("--tag-filter", active_tag_filter(tag_filter)),
-                        ("--namespace", effective_namespace),
-                        # No normalization: ``ScopeFilter.parse('')`` is
-                        # ``scopes=('',)`` and really does empty the result.
+                        ("--source-filter", source_filter),
+                        ("--tag-filter", tag_filter),
+                        ("--namespace", namespace),
                         ("--scope", scope),
-                        # An empty ``--as-of`` never reaches here; the bound
-                        # parser rejects it above.
                         ("--as-of", as_of),
                     )
                     if value is not None

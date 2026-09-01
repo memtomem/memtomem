@@ -195,7 +195,7 @@ class TestEmptyResultNamesTheFilter:
         )
 
         assert "matches none of the namespaces" not in result.stderr
-        assert "Filters applied: --tag-filter 'x', --namespace 'proj:*'" in result.stderr
+        assert "This query included: --tag-filter 'x', --namespace 'proj:*'" in result.stderr
 
     def test_a_comma_list_with_one_live_member_is_not_blamed(self, monkeypatch) -> None:
         result = self._search(monkeypatch, ["-n", "gone,work", "hello"], namespaces=[("work", 1)])
@@ -214,7 +214,7 @@ class TestEmptyResultNamesTheFilter:
     def test_a_non_namespace_filter_is_named(self, monkeypatch) -> None:
         result = self._search(monkeypatch, ["-t", "nope", "hello"], namespaces=[("default", 7)])
 
-        assert "Filters applied: --tag-filter 'nope'" in result.stderr
+        assert "This query included: --tag-filter 'nope'" in result.stderr
         assert HINT not in result.stderr
 
     def test_an_empty_store_still_blames_the_index_under_a_filter(self, monkeypatch) -> None:
@@ -230,11 +230,11 @@ class TestEmptyResultNamesTheFilter:
         namespace as the cause would be a lie."""
         result = self._search(monkeypatch, ["-n", "", "hello"], namespaces=[("default", 7)])
 
-        # Absent from the whole diagnostic, not just from the "unknown
-        # namespace" branch: naming it under "Filters applied" would claim a
-        # filter the query never ran.
-        assert "--namespace" not in result.stderr
-        assert result.stderr.strip() == HINT
+        # The namespace branch must not fire: the query ran without a
+        # namespace filter, so calling it the cause would be a lie. It is
+        # still reported as part of the command line, which is a fact.
+        assert "matches none of the namespaces" not in result.stderr
+        assert "This query included: --namespace ''" in result.stderr
 
     def test_the_namespace_list_is_truncated(self, monkeypatch) -> None:
         namespaces = [(f"ns{i}", i) for i in range(12)]
@@ -276,13 +276,13 @@ class TestEmptyResultNamesTheFilter:
         healthy store — exactly the case that must not print the index hint."""
         result = self._search(monkeypatch, ["--scope", "", "hello"], namespaces=[("default", 7)])
 
-        assert "Filters applied: --scope ''" in result.stderr
+        assert "This query included: --scope ''" in result.stderr
         assert HINT not in result.stderr
 
     def test_recall_reports_an_empty_scope_too(self, monkeypatch) -> None:
         result = self._recall(monkeypatch, ["--scope", ""], namespaces=[("default", 7)])
 
-        assert "Filters applied: --scope ''" in result.stderr
+        assert "This query included: --scope ''" in result.stderr
         assert HINT not in result.stderr
 
     def test_recall_reports_an_empty_namespace(self, monkeypatch) -> None:
@@ -294,42 +294,59 @@ class TestEmptyResultNamesTheFilter:
         assert "--namespace '' matches none of the namespaces" in result.stderr
         assert HINT not in result.stderr
 
-    @pytest.mark.parametrize("argv", [["-t", ""], ["-t", ","], ["-s", ""]])
-    def test_search_no_op_filters_are_not_blamed(self, monkeypatch, argv) -> None:
-        """``parse_tag_filter`` reads ``""`` and ``","`` as no tags, and the
-        pipeline gates the source match on ``if source_filter:`` — none of
-        these excluded anything, so naming them is the weaker form of the
-        wrong-cause claim this whole change removes."""
+    @pytest.mark.parametrize(
+        "argv",
+        [["-t", ""], ["-t", ","], ["-s", ""], ["-n", "*"], ["--scope", "*"], ["-k", "0"]],
+    )
+    def test_a_non_empty_index_is_never_blamed(self, monkeypatch, argv) -> None:
+        """The branch turns on what the store reports, not on judging which
+        option narrowed the query. No-op filters, wildcards and ``-k 0`` all
+        land here, and none of them may send the reader to ``mm status`` while
+        the index demonstrably holds chunks (#2255)."""
         result = self._search(monkeypatch, [*argv, "hello"], namespaces=[("default", 7)])
 
-        assert "Filters applied" not in result.stderr
-        assert HINT in result.stderr
+        assert HINT not in result.stderr
+        assert "The index has 7 chunks across 1 namespace" in result.stderr
 
-    @pytest.mark.parametrize(
-        "argv", [["-t", ""], ["-t", ","], ["-s", ""], ["--since", ""], ["--until", ""]]
-    )
-    def test_recall_no_op_filters_are_not_blamed(self, monkeypatch, argv) -> None:
-        """Recall's empty source filter is ``LIKE '%%'`` over a NOT NULL
-        column, and its date bounds are dropped before parsing."""
+    @pytest.mark.parametrize("argv", [["-t", ","], ["-s", ""], ["--since", ""], ["-l", "0"]])
+    def test_recall_never_blames_a_non_empty_index(self, monkeypatch, argv) -> None:
         result = self._recall(monkeypatch, argv, namespaces=[("default", 7)])
 
-        assert "Filters applied" not in result.stderr
-        assert HINT in result.stderr
+        assert HINT not in result.stderr
+        assert "The index has 7 chunks across 1 namespace" in result.stderr
 
-    @pytest.mark.parametrize("value", ["0", "00"])
-    def test_a_non_positive_count_gets_no_suggestion(self, monkeypatch, value: str) -> None:
-        """``-k 0`` is valid and useless, so proposing it helps nobody. The
-        namespace itself is still named — it really did empty the result."""
+    def test_no_filter_at_all_reports_the_inventory(self, monkeypatch) -> None:
+        """Nothing was filtered and the index is not empty, so the honest
+        answer states that much and no more. "nothing matched" would be a
+        claim about retrieval that ``-k 0`` falsifies."""
+        result = self._search(monkeypatch, ["hello"], namespaces=[("default", 7)])
+
+        assert "so the index is not the empty one" in result.stderr
+        assert "matched" not in result.stderr
+        assert HINT not in result.stderr
+
+    def test_supplied_options_are_reported_without_a_verdict(self, monkeypatch) -> None:
+        """Listing what the command carried is a fact about the invocation.
+        Asserting which option is responsible is what could not be kept
+        honest across every option and value."""
+        result = self._search(
+            monkeypatch, ["-t", "x", "--scope", "y", "hello"], namespaces=[("default", 7)]
+        )
+
+        assert "This query included: --tag-filter 'x', --scope 'y'." in result.stderr
+        assert "excluding matches" not in result.stderr
+        assert "responsible" not in result.stderr
+
+    @pytest.mark.parametrize("value", ["0", "00", "-1", "\u00b2", "+3", "9" * 5000])
+    def test_no_count_suggestion_for_a_value_that_is_not_a_positive_count(
+        self, monkeypatch, value: str
+    ) -> None:
+        """``\u00b2`` is ``isdigit()`` but not convertible, a 5000-digit string
+        exceeds CPython's ``int()`` limit, and ``-1`` would propose
+        ``LIMIT -1`` — which SQLite reads as no limit at all."""
         result = self._search(monkeypatch, ["-n", value, "hello"], namespaces=[("default", 7)])
 
-        assert "matches none of the namespaces" in result.stderr
-        assert "did you mean" not in result.stderr
-
-    def test_a_negative_count_is_never_suggested(self, monkeypatch) -> None:
-        """``-l -1`` is the dangerous one: SQLite reads ``LIMIT -1`` as no
-        limit, so a hint proposing it would turn a typo into a full dump."""
-        result = self._recall(monkeypatch, ["-n", "-1"], namespaces=[("default", 7)])
-
+        assert result.exit_code == 0, result.output
         assert "did you mean" not in result.stderr
 
     def test_the_suggestion_renders_the_normalized_value(self, monkeypatch) -> None:
