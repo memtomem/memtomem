@@ -22,8 +22,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   restart clears. Recovery is idempotent, so a second reset never starts a
   duplicate watcher. The start and its failure handling are now one shared
   helper used by both servers, since having been written twice is how `mm web`
-  came to have no recovery at all. Note `mm web` still runs no consolidation or
-  policy scheduler and no health watchdog in any mode. (#2188)
+  came to have no recovery at all, and concurrent resets are serialized so a
+  second one cannot start a watcher over the first one's handles. Note `mm web`
+  still runs no consolidation or policy scheduler and no health watchdog in any
+  mode. (#2188)
 
 ### Breaking
 

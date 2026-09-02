@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -631,65 +630,84 @@ class FileWatcher:
         return None
 
 
-@dataclass(frozen=True)
-class ResumedWatcher:
-    """What became of a watcher a degraded startup left constructed but stopped.
+class WatcherResumer:
+    """Starts a watcher a degraded startup left stopped, and remembers how it went.
 
-    ``retryable`` is about the *instance*, not the failure: unlike the
+    Both server surfaces come here once an embedding reset has cleared the
+    mismatch: the MCP server through ``AppContext.recover_from_degraded`` and
+    ``mm web`` through ``POST /api/embedding-reset`` (#2181, #2188). They
+    construct and hold the watcher differently, but the start and its failure
+    policy are the same — and having been written twice is how ``mm web`` came
+    to have no recovery at all.
+
+    The state lives on this object rather than being returned, because the one
+    case that matters most cannot return: a cancellation arriving mid-start
+    unwinds through here, and the caller must still learn that the instance is
+    barred before the exception carries it away.
+
+    ``can_retry`` is about the *instance*, not the failure: unlike the
     schedulers, a watcher is reused across attempts, and ``stop`` clears its
     observer and task handles only on the way out. So a start that fails and
     then cannot be stopped leaves both live where a later ``start`` would
     overwrite them, and nothing would ever stop what the first attempt left
-    running. Reporting ``retryable=False`` is what keeps shutdown able to.
+    running. Refusing the retry is what keeps shutdown able to.
     """
 
-    started: bool
-    retryable: bool
+    def __init__(
+        self,
+        watcher: FileWatcher | None,
+        *,
+        started: bool = False,
+        can_retry: bool = True,
+    ) -> None:
+        self._watcher = watcher
+        self.started = started
+        self.can_retry = can_retry
 
+    async def resume(self) -> bool:
+        """Start the watcher if it is stopped and startable; ``True`` if running.
 
-async def resume_after_recovery(watcher: FileWatcher) -> ResumedWatcher:
-    """Start a watcher that a degraded startup skipped (#2181, #2188).
+        A failure is reported, never raised. The recovery the user asked for —
+        a working index — has already happened by the time this runs, and
+        losing auto-indexing must not turn a successful reset into a failed
+        call. Idempotent: an already-started watcher is left alone, so a second
+        reset never starts a duplicate over live handles.
+        """
+        if self._watcher is None or self.started or not self.can_retry:
+            return self.started
+        try:
+            await self._watcher.start()
+        except asyncio.CancelledError:
+            await self._stop_failed_start()
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to start the file watcher after embedding recovery — "
+                "file edits are not auto-indexed until the next reset or restart",
+                exc_info=True,
+            )
+            # ``start`` publishes the observer and the processor task before it
+            # can fail, so whatever this attempt left running is stopped here
+            # or never.
+            await self._stop_failed_start()
+            return False
+        self.started = True
+        return True
 
-    Both server surfaces come here once an embedding reset has cleared the
-    mismatch: the MCP server through ``AppContext.recover_from_degraded`` and
-    ``mm web`` through ``POST /api/embedding-reset``. They construct and hold
-    the watcher differently, but the start and its failure policy are the same
-    — and having been written twice is how ``mm web`` came to have no recovery
-    at all.
-
-    A failure is reported, never raised. The recovery the user asked for — a
-    working index — has already happened by the time this runs, and losing
-    auto-indexing must not turn a successful reset into a failed call.
-    """
-    try:
-        await watcher.start()
-    except asyncio.CancelledError:
-        await _stop_failed_start(watcher)
-        raise
-    except Exception:
-        logger.warning(
-            "Failed to start the file watcher after embedding recovery — "
-            "file edits are not auto-indexed until the next reset or restart",
-            exc_info=True,
-        )
-        # ``start`` publishes the observer and the processor task before it can
-        # fail, so whatever this attempt left running is stopped here or never.
-        return ResumedWatcher(started=False, retryable=await _stop_failed_start(watcher))
-    return ResumedWatcher(started=True, retryable=True)
-
-
-async def _stop_failed_start(watcher: FileWatcher) -> bool:
-    """Stop what a failed ``start`` left running; ``False`` if it could not be."""
-    try:
-        await watcher.stop()
-    except asyncio.CancelledError:
-        logger.warning("Recovery cleanup of the file watcher was cancelled")
-        raise
-    except Exception:
-        logger.warning(
-            "Recovery cleanup of the file watcher failed — no further in-process "
-            "retry will start over it; restart the server to recover auto-indexing",
-            exc_info=True,
-        )
-        return False
-    return True
+    async def _stop_failed_start(self) -> None:
+        """Stop what a failed ``start`` left running; bar the retry if it can't."""
+        if self._watcher is None:
+            return
+        try:
+            await self._watcher.stop()
+        except asyncio.CancelledError:
+            self.can_retry = False
+            logger.warning("Recovery cleanup of the file watcher was cancelled")
+            raise
+        except Exception:
+            self.can_retry = False
+            logger.warning(
+                "Recovery cleanup of the file watcher failed — no further in-process "
+                "retry will start over it; restart the server to recover auto-indexing",
+                exc_info=True,
+            )

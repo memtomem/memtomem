@@ -13,6 +13,7 @@ than left believing a silent success.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -196,3 +197,70 @@ def test_a_server_holding_no_watcher_still_asks_for_a_restart(publishes_state: b
 
     assert "cannot be started here" in message
     assert "restart `mm web`" in message
+
+
+async def test_two_concurrent_resets_start_the_watcher_once() -> None:
+    """A yielding start must not let both callers past the stopped check.
+
+    ``FileWatcher.start`` overwrites the observer and the processor task, so a
+    second start strands the first pair with nothing able to stop them. The
+    current start happens not to suspend, which makes this an accident of the
+    implementation rather than a property — so the start here does suspend.
+    """
+    from memtomem.web.routes.system import _resume_watching
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_start() -> None:
+        entered.set()
+        await release.wait()
+
+    watcher = SimpleNamespace(start=AsyncMock(side_effect=_slow_start), stop=AsyncMock())
+    state = SimpleNamespace(
+        file_watcher=watcher,
+        file_watcher_started=False,
+        file_watcher_resume_blocked=False,
+        file_watcher_resume_lock=asyncio.Lock(),
+    )
+
+    first = asyncio.create_task(_resume_watching(state))
+    await entered.wait()
+    second = asyncio.create_task(_resume_watching(state))
+    # Give the second task every chance to race past the check.
+    await asyncio.sleep(0)
+    release.set()
+    messages = await asyncio.gather(first, second)
+
+    watcher.start.assert_awaited_once()
+    assert "File watching is on again" in messages[0]
+    # The one that waited finds the work already done and says nothing.
+    assert messages[1] == ""
+
+
+async def test_a_cancelled_cleanup_bars_the_retry() -> None:
+    """Cancellation must not carry away the fact that the instance is barred.
+
+    The start fails, and the stop meant to clean up after it is cancelled, so
+    the observer and task it left behind are still live. A later reset that
+    called ``start`` again would overwrite both. The state has to be settled
+    before the cancellation propagates.
+    """
+    from memtomem.web.routes.system import _resume_watching
+
+    watcher = SimpleNamespace(
+        start=AsyncMock(side_effect=OSError("no inotify")),
+        stop=AsyncMock(side_effect=asyncio.CancelledError()),
+    )
+    state = SimpleNamespace(
+        file_watcher=watcher,
+        file_watcher_started=False,
+        file_watcher_resume_blocked=False,
+        file_watcher_resume_lock=asyncio.Lock(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await _resume_watching(state)
+
+    assert state.file_watcher_started is False
+    assert state.file_watcher_resume_blocked is True

@@ -1550,10 +1550,28 @@ async def _resume_watching(state) -> str:
     Returns the sentence to append to the reset message, empty when the
     watcher was already running and there is nothing to say.
     """
+    from memtomem.indexing.watcher import WatcherResumer
+
+    # Two resets arriving together must not both pass the "not started yet"
+    # check: ``start`` overwrites the observer and the processor task, so the
+    # second would strand the first pair with nothing able to stop them. Every
+    # app built by ``create_app`` publishes the lock; a hand-assembled state
+    # without one is single-caller by construction.
+    lock = getattr(state, "file_watcher_resume_lock", None)
+    if lock is None:
+        return await _resume_watching_locked(state, WatcherResumer)
+    async with lock:
+        return await _resume_watching_locked(state, WatcherResumer)
+
+
+async def _resume_watching_locked(state, resumer_cls) -> str:
     watcher = getattr(state, "file_watcher", None)
-    if getattr(state, "file_watcher_started", watcher is not None):
+    # Read inside the lock: the reset that went first may have just started it.
+    started = getattr(state, "file_watcher_started", watcher is not None)
+    blocked = getattr(state, "file_watcher_resume_blocked", False)
+    if started:
         return ""
-    if watcher is None or getattr(state, "file_watcher_resume_blocked", False):
+    if watcher is None or blocked:
         # No instance to start, or an earlier attempt failed in a way that
         # cannot be retried in this process.
         return (
@@ -1561,14 +1579,19 @@ async def _resume_watching(state) -> str:
             " restart `mm web` to resume auto-indexing."
         )
 
-    from memtomem.indexing.watcher import resume_after_recovery
-
-    resumed = await resume_after_recovery(watcher)
-    state.file_watcher_started = resumed.started
-    state.file_watcher_resume_blocked = not resumed.retryable
-    if resumed.started:
+    resumer = resumer_cls(watcher, started=started, can_retry=not blocked)
+    try:
+        await resumer.resume()
+    finally:
+        # In ``finally`` for the same reason the MCP side settles there: a
+        # cancellation mid-start still decides whether this instance may be
+        # started again, and losing that would let a later reset start over
+        # handles nothing can stop.
+        state.file_watcher_started = resumer.started
+        state.file_watcher_resume_blocked = not resumer.can_retry
+    if resumer.started:
         return " File watching is on again, so new edits are auto-indexed."
-    if resumed.retryable:
+    if resumer.can_retry:
         return (
             " Starting the file watcher failed, so auto-indexing is still off:"
             " run this reset again, or restart `mm web`."

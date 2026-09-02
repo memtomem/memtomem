@@ -205,6 +205,15 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     app.state.web_mode = mode
     app.state.startup_state = "not_started"
     app.state.startup_reason_code = None
+    # Serializes the file-watcher recovery ``POST /api/embedding-reset``
+    # performs (#2188). Created here rather than in the lifespan so that every
+    # app has one from construction — two concurrent resets must not both get
+    # past the "not started yet" check and call ``start`` twice, which would
+    # overwrite the observer and task handles of the first and leave nothing
+    # able to stop them. ``asyncio.Lock`` binds to a loop on first use, not
+    # here, so building it outside one is fine. The MCP side of the same
+    # recovery is already serialized by ``AppContext._init_lock``.
+    app.state.file_watcher_resume_lock = asyncio.Lock()
 
     # Per-process CSRF token (RFC #787). Generated fresh on every
     # ``create_app`` so token rotation is just a restart; never persisted.

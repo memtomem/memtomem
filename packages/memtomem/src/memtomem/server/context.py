@@ -801,11 +801,22 @@ class AppContext:
                 # ``indexing/watcher.py`` because ``mm web`` performs the same
                 # recovery on a watcher it holds differently (#2188). Only the
                 # bookkeeping is this context's.
-                from memtomem.indexing.watcher import resume_after_recovery
+                from memtomem.indexing.watcher import WatcherResumer
 
-                resumed = await resume_after_recovery(self._watcher)
-                self._watcher_started = resumed.started
-                self._watcher_cleanup_failed = not resumed.retryable
+                resumer = WatcherResumer(
+                    self._watcher,
+                    started=self._watcher_started,
+                    can_retry=not self._watcher_cleanup_failed,
+                )
+                try:
+                    await resumer.resume()
+                finally:
+                    # In ``finally`` because a cancellation mid-start still
+                    # settles whether the instance may be started again, and
+                    # losing that would let a later reset start over handles
+                    # nothing can stop.
+                    self._watcher_started = resumer.started
+                    self._watcher_cleanup_failed = not resumer.can_retry
 
             if self.config.consolidation_schedule.enabled and self._scheduler is None:
                 from memtomem.server.scheduler import ConsolidationScheduler
