@@ -60,10 +60,12 @@ def _isatty() -> bool:
 
     Exists so tests can patch the default-interactive TTY gate without
     fighting CliRunner's substituted ``sys.stdin`` (see
-    ``feedback_clirunner_isatty_seam.md``). Only the picker-path gate at
-    the bottom of :func:`init` routes through this; the other legacy
-    ``sys.stdin.isatty()`` call sites in this module each have their own
-    test paths.
+    ``feedback_clirunner_isatty_seam.md``). Since #1631 the shared
+    non-TTY gate in :func:`init` routes through this for *every*
+    interactive branch — the preset picker, ``--preset <name>`` and
+    ``--advanced`` — so patching it here decides all three. The other
+    legacy ``sys.stdin.isatty()`` call sites in this module each have
+    their own test paths.
     """
     return sys.stdin.isatty()
 

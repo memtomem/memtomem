@@ -4612,11 +4612,12 @@ class TestPresetSelection:
         assert result.exit_code != 0
         assert "non-interactive terminal" in result.output.lower()
 
-    def test_non_tty_with_y_flag_runs_minimal(
+    def test_non_tty_non_interactive_runs_minimal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``mm init -y`` with no other flags still behaves as
-        ``--preset minimal -y`` — existing scripted callers unchanged."""
+        """``mm init --non-interactive`` with no other flags applies the
+        minimal preset. (Named for `-y` until #1631, which is why the
+        assertions describe minimal's defaults rather than the flag.)"""
         from click.testing import CliRunner
 
         from memtomem.cli.init_cmd import init
@@ -6380,7 +6381,7 @@ class TestNonInteractiveExtrasValidation:
         state = {"provider": "none", "tokenizer": "kiwipiepy", "rerank_enabled": False}
         assert init_cmd._collect_missing_extras(state) == ["korean"]
 
-    def test_yes_flag_provider_onnx_missing_fastembed_exits_non_zero(
+    def test_scripted_provider_onnx_missing_fastembed_exits_non_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from click.testing import CliRunner
@@ -6419,7 +6420,7 @@ class TestNonInteractiveExtrasValidation:
         # Config must not be written.
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_tokenizer_kiwipiepy_missing_exits_non_zero(
+    def test_scripted_tokenizer_kiwipiepy_missing_exits_non_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from click.testing import CliRunner
@@ -6443,7 +6444,7 @@ class TestNonInteractiveExtrasValidation:
         assert "korean" in result.output
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_provider_ollama_missing_client_still_writes_config(
+    def test_scripted_provider_ollama_missing_client_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The Ollama embedder runs on httpx, not the ``ollama`` PyPI client, so
@@ -6481,7 +6482,7 @@ class TestNonInteractiveExtrasValidation:
         assert "Missing required extras" not in result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_web_only_missing_still_writes_config(
+    def test_scripted_web_only_missing_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """web is deliberately excluded from the required-extras set —
@@ -6507,7 +6508,7 @@ class TestNonInteractiveExtrasValidation:
         assert result.exit_code == 0, result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_all_extras_present_writes_config(
+    def test_scripted_all_extras_present_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from click.testing import CliRunner
@@ -6536,7 +6537,7 @@ class TestNonInteractiveExtrasValidation:
         assert result.exit_code == 0, result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_provider_openai_missing_client_still_writes_config(
+    def test_scripted_provider_openai_missing_client_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The OpenAI embedder runs on httpx + an API key, not the ``openai``
@@ -6578,7 +6579,7 @@ class TestNonInteractiveExtrasValidation:
         assert "Missing required extras" not in result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_multi_extra_missing_reports_both(
+    def test_scripted_multi_extra_missing_reports_both(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Both ``--provider onnx`` + ``--tokenizer kiwipiepy`` missing at
@@ -6621,7 +6622,7 @@ class TestNonInteractiveExtrasValidation:
         assert "memtomem[all]" in result.output
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_refused_leaves_memory_dir_untouched(
+    def test_scripted_refused_leaves_memory_dir_untouched(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Gate must run BEFORE ``memory_path.mkdir``. An earlier shape
@@ -6662,7 +6663,7 @@ class TestNonInteractiveExtrasValidation:
         assert result.exit_code != 0, result.output
         # The refused run must not have created the memory dir.
         assert not memory_dir.exists(), (
-            "memory_dir must not be created on refused -y runs (gate must precede mkdir)"
+            "memory_dir must not be created on a refused scripted run (gate must precede mkdir)"
         )
 
 
@@ -6916,6 +6917,38 @@ class TestNonInteractivePresetNotice:
         assert "'minimal' preset" in result.stderr
         assert "Deprecated:" not in result.stderr
         assert (tmp_path / ".memtomem" / "config.json").exists()
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param(["--advanced"], id="advanced"),
+            pytest.param(["--preset", "english", "--mcp", "skip"], id="preset"),
+            pytest.param(["-y", "--mcp", "skip"], id="legacy-yes"),
+        ],
+    )
+    def test_every_interactive_branch_refuses_without_a_terminal(
+        self, args: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1631 hoisted the non-TTY gate in front of every branch but
+        ``--non-interactive``. Before that only the default picker checked, so
+        ``--preset X`` and ``--advanced`` ran their wizard steps against EOF,
+        which ``run_steps`` reports as a user cancellation: exit 0, no config,
+        and a script that believes it initialized a store. Each branch is
+        pinned here because each reached the gate by a different route.
+        """
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        self._setup(tmp_path, monkeypatch)
+
+        result = CliRunner().invoke(cli, ["init", *args])
+
+        assert result.exit_code == 2, result.output
+        assert "Non-interactive terminal detected" in result.stderr
+        # The refusal has to name the flag that works, or it is a dead end.
+        assert "--non-interactive" in result.stderr
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
 
     def test_yes_and_non_interactive_have_diverged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

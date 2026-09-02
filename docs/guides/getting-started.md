@@ -163,8 +163,10 @@ For automation:
 mm init --non-interactive --preset minimal --mcp skip
 mm init --non-interactive --preset english --mcp skip
 mm init --non-interactive --preset korean --mcp skip
-mm init --advanced
 ```
+
+`mm init --advanced` runs the full ten-step wizard and is interactive; it is
+not an automation entry point.
 
 `-y` was a deprecated alias for `--non-interactive` through 0.4.x. Since
 v0.5.0 it is accepted and ignored — `mm init` has no confirmation prompt to

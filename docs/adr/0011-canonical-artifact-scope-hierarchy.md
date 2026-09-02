@@ -535,8 +535,10 @@ they do not block this ADR's acceptance.
   consolidated into `mm context migrate <kind> <name> --to <scope>`.
   #887 since landed MCP parity for `init` / `sync` / `generate` /
   `diff` (the `mem_context_*` tools), and memory migration is exposed
-  as `mem_context_migrate` — a thin wrapper over `mm context
-  memory-migrate` (markdown memory files only). The **artifact**
+  as `mem_context_memory_migrate` — a thin wrapper over `mm context
+  memory-migrate` (markdown memory files only). It was originally named
+  `mem_context_migrate`; #1147 (B5-2) renamed it and v0.5.0 (#1619)
+  removed the compatibility alias. The **artifact**
   scope-tier and flat→dir modes of `mm context migrate <kind> <name>`
   remain **CLI-only by design**: there is no MCP path that migrates
   agents / skills / commands between tiers. #1123 (B5-1 / B5-2) records
