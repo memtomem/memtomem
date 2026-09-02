@@ -72,6 +72,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_ask` says when its evidence came from a degraded search.** The tool
+  discarded every notice the search core derives, so a grounded prompt
+  assembled from a keyword-only pool — because the embedding dimension
+  changed and the semantic leg was suppressed — read exactly like one from a
+  healthy hybrid pool, and the answer built on it was just as confident. The
+  notices now follow the answer on both the empty and the answered path, the
+  way `mem_search` renders them. (#2194)
+
+- **Equal-confidence entities no longer lose their tier order at the
+  `limit`.** `mem_entity_search` ranked by extraction confidence alone, and
+  the extractor hands back the same confidence for most rows, so a small
+  `limit` left the surviving set to the storage scan order — a user-tier row
+  could crowd out the entities of the project you are standing in. Ties now
+  fall back to the ADR-0011 tier order (`project_local` > `project_shared` >
+  `user`) and then to a stable key, so the same store answers the same query
+  the same way. (#2194)
+
 - **An entity search no longer returns other projects' entities.** Every
   other read surface appends the ADR-0011 scope fragment unconditionally;
   `mem_entity_search`'s storage query appended nothing, even though it joins
