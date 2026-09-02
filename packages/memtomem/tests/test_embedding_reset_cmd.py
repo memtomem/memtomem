@@ -55,7 +55,16 @@ def _install(home, runner: CliRunner) -> None:
     (mem_dir / "note.md").write_text("# memo\n\nhello embedding reset\n", encoding="utf-8")
     result = runner.invoke(
         cli,
-        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+        [
+            "init",
+            "--non-interactive",
+            "--provider",
+            "none",
+            "--memory-dir",
+            str(mem_dir),
+            "--mcp",
+            "skip",
+        ],
     )
     assert result.exit_code == 0, f"init failed: {result.output}"
 

@@ -1206,13 +1206,15 @@ class TestRegistryAndInstallDocs:
         section = text.split("### Available MCP Tools", 1)[1].split("### STM Proxy Tools", 1)[0]
         table = "\n".join(line for line in section.splitlines() if line.startswith("|"))
         documented = set(re.findall(r"\bmem_[a-z0-9_]+\b", table))
-        current = set(_ALL_REGISTERED_TOOLS) - {"mem_context_migrate"}
+        # v0.5.0 (#1619) retired the last compatibility alias, so the
+        # registry and the documented table are the same set again — no
+        # subtraction, and one count rather than two.
+        current = set(_ALL_REGISTERED_TOOLS)
         assert documented == current, (
             f"MCP table drifted; missing={sorted(current - documented)}, "
             f"extra={sorted(documented - current)}"
         )
         assert len(current) == 100
-        assert len(_ALL_REGISTERED_TOOLS) == 101
         assert len(_CORE_TOOLS) == 9
         standard = set(_CORE_TOOLS) | {
             f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS

@@ -78,7 +78,7 @@ class TestFreshNoopIndexInline:
             cli,
             [
                 "init",
-                "-y",
+                "--non-interactive",
                 "--provider",
                 "none",
                 "--memory-dir",
@@ -178,7 +178,7 @@ class TestFreshNoopIndexSubprocess:
 
         r = _run(
             "init",
-            "-y",
+            "--non-interactive",
             "--provider",
             "none",
             "--memory-dir",
@@ -241,7 +241,16 @@ def test_debounce_flush_drops_blocked_file_as_permanent(tmp_path, monkeypatch):
     runner = CliRunner()
     r = runner.invoke(
         cli,
-        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+        [
+            "init",
+            "--non-interactive",
+            "--provider",
+            "none",
+            "--memory-dir",
+            str(mem_dir),
+            "--mcp",
+            "skip",
+        ],
     )
     assert r.exit_code == 0, f"init failed: {r.output}"
 
@@ -308,7 +317,16 @@ def test_debounce_flush_indexes_a_declared_exemption(tmp_path, monkeypatch):
     runner = CliRunner()
     r = runner.invoke(
         cli,
-        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+        [
+            "init",
+            "--non-interactive",
+            "--provider",
+            "none",
+            "--memory-dir",
+            str(mem_dir),
+            "--mcp",
+            "skip",
+        ],
     )
     assert r.exit_code == 0, f"init failed: {r.output}"
 
@@ -358,7 +376,16 @@ def test_debounce_flush_drops_binary_error_immediately(tmp_path, monkeypatch):
     runner = CliRunner()
     r = runner.invoke(
         cli,
-        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+        [
+            "init",
+            "--non-interactive",
+            "--provider",
+            "none",
+            "--memory-dir",
+            str(mem_dir),
+            "--mcp",
+            "skip",
+        ],
     )
     assert r.exit_code == 0, f"init failed: {r.output}"
 

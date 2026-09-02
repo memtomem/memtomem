@@ -516,7 +516,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (100 current tools plus the deprecated `mem_context_migrate` alias, 101 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (100 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.
@@ -551,8 +551,6 @@ reports `{"total", "with_dense"}` for the same project scope the search is
 pinned to, so a thin result set from a partly-vectorised corpus is not mistaken
 for an empty store. The CLI equivalent is
 `mm review evidence <candidate-id>`, which pins the same project scope.
-`mem_context_migrate` is a deprecated alias for
-`mem_context_memory_migrate` and is scheduled for removal in v0.5.0.
 
 ### STM Proxy Tools (optional, separate package)
 

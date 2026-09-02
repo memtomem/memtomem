@@ -488,7 +488,7 @@ class TestStartupBackfillOptIn:
         assert "startup_backfill" not in state
 
     def test_offer_skipped_when_non_tty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Non-TTY (CI, piped ``mm init -y``) → silent skip without
+        """Non-TTY (CI, piped ``mm init --non-interactive``) → silent skip without
         calling confirm. Mirrors the seed prompt's isatty gate so
         non-interactive runs stay deterministic."""
         from memtomem.cli import init_cmd
@@ -1331,7 +1331,7 @@ class TestInstallExtrasHelper:
         assert seen_defaults == [True, False]
 
     def test_non_tty_stdin_skips_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Scripted / non-TTY contexts (``mm init -y </dev/null``, CI jobs,
+        """Scripted / non-TTY contexts (``mm init --non-interactive </dev/null``, CI jobs,
         Docker build steps) must not hit the prompt — ``click.prompt``
         raises ``Abort!`` on stdin EOF rather than returning the
         ``default=``, which would hard-exit the wizard mid-summary.
@@ -2632,7 +2632,7 @@ class TestFreshFlag:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """``--fresh`` is compatible with ``-y`` (non-interactive) — drops
+        """``--fresh`` is compatible with ``--non-interactive`` — drops
         proceed without any prompt, the Reset block still prints, and the
         normal Setup-complete summary is unaffected."""
         from click import unstyle
@@ -2651,7 +2651,14 @@ class TestFreshFlag:
 
         result = CliRunner().invoke(
             init,
-            ["-y", "--fresh", "--provider", "none", "--memory-dir", str(tmp_path / "mem")],
+            [
+                "--non-interactive",
+                "--fresh",
+                "--provider",
+                "none",
+                "--memory-dir",
+                str(tmp_path / "mem"),
+            ],
         )
         assert result.exit_code == 0, result.output
 
@@ -4460,6 +4467,11 @@ class TestPresetSelection:
         from memtomem.cli.init_cmd import init
 
         set_home(monkeypatch, tmp_path)
+        # These exercise the *interactive* dispatch (the preset / advanced
+        # branches), which #1631 put behind the shared non-TTY refusal —
+        # declare the terminal through the ``_isatty`` seam like the other
+        # interactive tests do.
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -4514,6 +4526,11 @@ class TestPresetSelection:
         import memtomem.cli.init_cmd as init_cmd
 
         set_home(monkeypatch, tmp_path)
+        # These exercise the *interactive* dispatch (the preset / advanced
+        # branches), which #1631 put behind the shared non-TTY refusal —
+        # declare the terminal through the ``_isatty`` seam like the other
+        # interactive tests do.
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
 
         recorded: dict[str, object] = {}
 
@@ -4579,9 +4596,11 @@ class TestPresetSelection:
     def test_non_tty_without_flag_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Without ``--preset`` / ``-y`` / ``--advanced``, a non-TTY
-        invocation must error cleanly — not hang trying to read a
-        prompt from a closed stdin (review #5)."""
+        """A non-TTY invocation must error cleanly rather than hang trying to
+        read a prompt from a closed stdin (review #5). Since #1631 the refusal
+        covers ``--preset`` and ``--advanced`` too — every branch but
+        ``--non-interactive`` runs wizard steps — so the bare invocation here
+        is one case of a shared guard, not the only guarded one."""
         from click.testing import CliRunner
 
         from memtomem.cli.init_cmd import init
@@ -4593,11 +4612,12 @@ class TestPresetSelection:
         assert result.exit_code != 0
         assert "non-interactive terminal" in result.output.lower()
 
-    def test_non_tty_with_y_flag_runs_minimal(
+    def test_non_tty_non_interactive_runs_minimal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``mm init -y`` with no other flags still behaves as
-        ``--preset minimal -y`` — existing scripted callers unchanged."""
+        """``mm init --non-interactive`` with no other flags applies the
+        minimal preset. (Named for `-y` until #1631, which is why the
+        assertions describe minimal's defaults rather than the flag.)"""
         from click.testing import CliRunner
 
         from memtomem.cli.init_cmd import init
@@ -5140,7 +5160,7 @@ class TestInitialSeedThreshold:
     ``index_path_stream`` with a click progress bar so minutes-long
     embedder runs don't look hung — Ctrl-C cancels and is resumable via
     ``mm index`` (hash-dedup idempotent). Non-TTY (CI / piped stdin)
-    always skips silently so scripted ``mm init -y`` pipelines keep
+    always skips silently so scripted ``mm init --non-interactive`` pipelines keep
     passing."""
 
     @staticmethod
@@ -5302,7 +5322,7 @@ class TestInitialSeedThreshold:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Small dir + no TTY → silent skip. Prompt-on-non-TTY would
-        raise click.Abort and break `mm init -y </dev/null` pipelines
+        raise click.Abort and break `mm init --non-interactive </dev/null` pipelines
         (`feedback_click_prompt_needs_isatty_gate.md`)."""
         from memtomem.cli import init_cmd
 
@@ -6312,7 +6332,7 @@ class TestInitialSeedThreshold:
 
 
 class TestNonInteractiveExtrasValidation:
-    """Issue #396: ``mm init -y`` must refuse to write a config when the
+    """Issue #396: ``mm init --non-interactive`` must refuse to write a config when the
     requested ``--provider`` / ``--tokenizer`` needs an extra that is not
     importable AND has no working runtime fallback — e.g. ``onnx`` (fastembed),
     whose absence leaves the embedder at dimension 0. (``kiwipiepy`` falls back
@@ -6361,7 +6381,7 @@ class TestNonInteractiveExtrasValidation:
         state = {"provider": "none", "tokenizer": "kiwipiepy", "rerank_enabled": False}
         assert init_cmd._collect_missing_extras(state) == ["korean"]
 
-    def test_yes_flag_provider_onnx_missing_fastembed_exits_non_zero(
+    def test_scripted_provider_onnx_missing_fastembed_exits_non_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from click.testing import CliRunner
@@ -6382,7 +6402,7 @@ class TestNonInteractiveExtrasValidation:
             cli,
             [
                 "init",
-                "-y",
+                "--non-interactive",
                 "--provider",
                 "onnx",
                 "--model",
@@ -6400,7 +6420,7 @@ class TestNonInteractiveExtrasValidation:
         # Config must not be written.
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_tokenizer_kiwipiepy_missing_exits_non_zero(
+    def test_scripted_tokenizer_kiwipiepy_missing_exits_non_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from click.testing import CliRunner
@@ -6416,7 +6436,7 @@ class TestNonInteractiveExtrasValidation:
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
 
         result = CliRunner().invoke(
-            cli, ["init", "-y", "--tokenizer", "kiwipiepy", "--mcp", "skip"]
+            cli, ["init", "--non-interactive", "--tokenizer", "kiwipiepy", "--mcp", "skip"]
         )
 
         assert result.exit_code != 0, result.output
@@ -6424,7 +6444,7 @@ class TestNonInteractiveExtrasValidation:
         assert "korean" in result.output
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_provider_ollama_missing_client_still_writes_config(
+    def test_scripted_provider_ollama_missing_client_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The Ollama embedder runs on httpx, not the ``ollama`` PyPI client, so
@@ -6448,7 +6468,7 @@ class TestNonInteractiveExtrasValidation:
             cli,
             [
                 "init",
-                "-y",
+                "--non-interactive",
                 "--provider",
                 "ollama",
                 "--model",
@@ -6462,7 +6482,7 @@ class TestNonInteractiveExtrasValidation:
         assert "Missing required extras" not in result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_web_only_missing_still_writes_config(
+    def test_scripted_web_only_missing_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """web is deliberately excluded from the required-extras set —
@@ -6481,12 +6501,14 @@ class TestNonInteractiveExtrasValidation:
         )
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: "fastapi", raising=False)
 
-        result = CliRunner().invoke(cli, ["init", "-y", "--provider", "none", "--mcp", "skip"])
+        result = CliRunner().invoke(
+            cli, ["init", "--non-interactive", "--provider", "none", "--mcp", "skip"]
+        )
 
         assert result.exit_code == 0, result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_all_extras_present_writes_config(
+    def test_scripted_all_extras_present_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from click.testing import CliRunner
@@ -6500,13 +6522,22 @@ class TestNonInteractiveExtrasValidation:
 
         result = CliRunner().invoke(
             cli,
-            ["init", "-y", "--provider", "onnx", "--model", "bge-m3", "--mcp", "skip"],
+            [
+                "init",
+                "--non-interactive",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-m3",
+                "--mcp",
+                "skip",
+            ],
         )
 
         assert result.exit_code == 0, result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_provider_openai_missing_client_still_writes_config(
+    def test_scripted_provider_openai_missing_client_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The OpenAI embedder runs on httpx + an API key, not the ``openai``
@@ -6532,7 +6563,7 @@ class TestNonInteractiveExtrasValidation:
             cli,
             [
                 "init",
-                "-y",
+                "--non-interactive",
                 "--provider",
                 "openai",
                 "--model",
@@ -6548,7 +6579,7 @@ class TestNonInteractiveExtrasValidation:
         assert "Missing required extras" not in result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_multi_extra_missing_reports_both(
+    def test_scripted_multi_extra_missing_reports_both(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Both ``--provider onnx`` + ``--tokenizer kiwipiepy`` missing at
@@ -6570,7 +6601,7 @@ class TestNonInteractiveExtrasValidation:
             cli,
             [
                 "init",
-                "-y",
+                "--non-interactive",
                 "--provider",
                 "onnx",
                 "--model",
@@ -6591,7 +6622,7 @@ class TestNonInteractiveExtrasValidation:
         assert "memtomem[all]" in result.output
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_refused_leaves_memory_dir_untouched(
+    def test_scripted_refused_leaves_memory_dir_untouched(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Gate must run BEFORE ``memory_path.mkdir``. An earlier shape
@@ -6617,7 +6648,7 @@ class TestNonInteractiveExtrasValidation:
             cli,
             [
                 "init",
-                "-y",
+                "--non-interactive",
                 "--provider",
                 "onnx",
                 "--model",
@@ -6632,14 +6663,14 @@ class TestNonInteractiveExtrasValidation:
         assert result.exit_code != 0, result.output
         # The refused run must not have created the memory dir.
         assert not memory_dir.exists(), (
-            "memory_dir must not be created on refused -y runs (gate must precede mkdir)"
+            "memory_dir must not be created on a refused scripted run (gate must precede mkdir)"
         )
 
 
 class TestYRefuseHintParity:
-    """#403 — wizard fallback paths must mention the ``-y`` refuse semantic.
+    """#403 — wizard fallback paths must mention the scripted refuse semantic.
 
-    #402 added a new axis: ``-y`` refuses non-zero while the interactive
+    #402 added a new axis: ``--non-interactive`` refuses non-zero while the interactive
     wizard still warns-and-saves. A user who copies a wizard choice into a
     scripted install gets an unexpected hard failure unless the wizard
     warning surfaces the asymmetry. These tests pin:
@@ -6685,7 +6716,7 @@ class TestYRefuseHintParity:
             "ONNX fallback must surface -y refuse hint (#403)"
         )
         # ollama / openai are HTTP providers (httpx) that need NO PyPI client,
-        # so ``-y`` no longer refuses on a missing client — the wizard must NOT
+        # so the scripted path no longer refuses on a missing client — the wizard must NOT
         # print a (now false) "-y will refuse" hint for them.
         assert _count_calls(embedding_src, "--provider ollama", "ollama") == 0, (
             "ollama needs no client package; -y does not refuse, so no refuse hint"
@@ -6801,9 +6832,10 @@ class TestNonInteractivePresetNotice:
     minimal`` when no preset is given — a materially weaker setup than the
     wizard's default (english) — so the implicit-preset run must say so
     loudly on stderr, and an explicit ``--preset`` must silence that note.
-    ``-y`` is now a separate deprecated-alias flag: every ``-y`` use (preset
-    or not) must emit a deprecation warning naming v0.5.0, while the
-    ``--non-interactive`` spelling must never trigger it."""
+    #1631 stage 3 (v0.5.0) flipped ``-y``: it is accepted and ignored, no
+    longer implying ``--non-interactive``. Every ``-y`` use still prints a
+    note explaining the change, while the ``--non-interactive`` spelling
+    must never trigger it."""
 
     def _setup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from memtomem.cli import init_cmd
@@ -6813,9 +6845,12 @@ class TestNonInteractivePresetNotice:
         monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
 
-    def test_bare_yes_emits_notice_on_stderr(
+    def test_bare_yes_no_longer_implies_non_interactive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The stage-3 flip: `-y` alone reaches the wizard, not the scripted
+        path. Under a non-interactive terminal that is a refusal naming the
+        flag that does work — not a silent minimal-preset install."""
         from click.testing import CliRunner
 
         from memtomem.cli import cli
@@ -6824,22 +6859,29 @@ class TestNonInteractivePresetNotice:
 
         result = CliRunner().invoke(cli, ["init", "-y", "--mcp", "skip"])
 
-        assert result.exit_code == 0, result.output
-        # Deprecation warning for the -y spelling, naming the target version.
-        assert "Deprecated:" in result.stderr
-        assert "will be removed in v0.5.0" in result.stderr
+        # `-y` did not select the scripted path, so the wizard was entered and
+        # refused for want of a terminal.
+        assert result.exit_code == 2, result.output
+        assert "Non-interactive terminal detected" in result.stderr
+        # The refusal names the flag that replaces the old `-y` behavior.
         assert "--non-interactive" in result.stderr
-        # Implicit-preset note still fires when no --preset is given.
-        assert "'minimal' preset" in result.stderr
-        assert "wizard defaults to 'english'" in result.stderr
-        # stderr only — scripted stdout consumers must not see either notice.
-        assert "'minimal' preset" not in result.stdout
-        assert "Deprecated:" not in result.stdout
-        assert (tmp_path / ".memtomem" / "config.json").exists()
+        # The note explains why a script that worked in 0.4.x now stops here.
+        assert "accepted but ignored" in result.stderr
+        assert "no longer implies --non-interactive" in result.stderr
+        # The implicit-preset note belongs to the scripted path, which was
+        # never entered.
+        assert "'minimal' preset" not in result.stderr
+        # stderr only — scripted stdout consumers must not see the note.
+        assert "accepted but ignored" not in result.stdout
+        # Nothing was written: the flip must not half-configure a store.
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_explicit_preset_silences_notice(
+    def test_yes_with_explicit_preset_also_stops_implying_non_interactive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The 0.4.x warning promised the flip would break `-y --preset X`
+        scripts too, not only bare `-y`. Pin that it did: a preset does not
+        substitute for the flag `-y` used to imply."""
         from click.testing import CliRunner
 
         from memtomem.cli import cli
@@ -6848,13 +6890,15 @@ class TestNonInteractivePresetNotice:
 
         result = CliRunner().invoke(cli, ["init", "-y", "--preset", "english", "--mcp", "skip"])
 
-        assert result.exit_code == 0, result.output
-        assert "'minimal' preset" not in result.stderr
-        # The -y deprecation warning is NOT preset-gated: at v0.5.0 the flag
-        # stops implying --non-interactive entirely, so `-y --preset english`
-        # scripts break too and must be warned now.
-        assert "will be removed in v0.5.0" in result.stderr
-        assert (tmp_path / ".memtomem" / "config.json").exists()
+        # `-y --preset X` used to reach the scripted path. It now reaches the
+        # preset branch, which is interactive — so with no terminal it must
+        # refuse, loudly and with an exit code, rather than run the wizard's
+        # steps against EOF and report success having written nothing.
+        assert result.exit_code == 2, result.output
+        assert "Non-interactive terminal detected" in result.stderr
+        assert "--non-interactive" in result.stderr
+        assert "accepted but ignored" in result.stderr
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
 
     def test_non_interactive_spelling_no_deprecation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6874,31 +6918,68 @@ class TestNonInteractivePresetNotice:
         assert "Deprecated:" not in result.stderr
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_equals_non_interactive_behavior(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param(["--advanced"], id="advanced"),
+            pytest.param(["--preset", "english", "--mcp", "skip"], id="preset"),
+            pytest.param(["-y", "--mcp", "skip"], id="legacy-yes"),
+        ],
+    )
+    def test_every_interactive_branch_refuses_without_a_terminal(
+        self, args: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Parity pin for the deprecation window: until v0.5.0, `-y` must
-        produce byte-identical config to `--non-interactive`."""
-        import json
-
+        """#1631 hoisted the non-TTY gate in front of every branch but
+        ``--non-interactive``. Before that only the default picker checked, so
+        ``--preset X`` and ``--advanced`` ran their wizard steps against EOF,
+        which ``run_steps`` reports as a user cancellation: exit 0, no config,
+        and a script that believes it initialized a store. Each branch is
+        pinned here because each reached the gate by a different route.
+        """
         from click.testing import CliRunner
 
         from memtomem.cli import cli
 
-        configs: list[dict] = []
-        for flag in ("-y", "--non-interactive"):
-            home = tmp_path / flag.lstrip("-")
-            home.mkdir()
-            self._setup(home, monkeypatch)
-            result = CliRunner().invoke(cli, ["init", flag, "--mcp", "skip"])
-            assert result.exit_code == 0, result.output
-            configs.append(json.loads((home / ".memtomem" / "config.json").read_text()))
-        assert configs[0] == configs[1]
+        self._setup(tmp_path, monkeypatch)
 
-    def test_usage_error_still_emits_deprecation(
+        result = CliRunner().invoke(cli, ["init", *args])
+
+        assert result.exit_code == 2, result.output
+        assert "Non-interactive terminal detected" in result.stderr
+        # The refusal has to name the flag that works, or it is a dead end.
+        assert "--non-interactive" in result.stderr
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_yes_and_non_interactive_have_diverged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The -y warning fires before validation exits, so even a rejected
+        """Successor to the deprecation-window parity pin, which asserted the
+        two spellings produced byte-identical config. Stage 3 is exactly the
+        removal of that equivalence, so pin the divergence directly: the
+        replacement flag still configures a store, the retired alias does
+        not."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        scripted = tmp_path / "non-interactive"
+        scripted.mkdir()
+        self._setup(scripted, monkeypatch)
+        result = CliRunner().invoke(cli, ["init", "--non-interactive", "--mcp", "skip"])
+        assert result.exit_code == 0, result.output
+        assert (scripted / ".memtomem" / "config.json").exists()
+
+        legacy = tmp_path / "y"
+        legacy.mkdir()
+        self._setup(legacy, monkeypatch)
+        result = CliRunner().invoke(cli, ["init", "-y", "--mcp", "skip"])
+        assert result.exit_code == 2, result.output
+        assert not (legacy / ".memtomem" / "config.json").exists()
+
+    def test_usage_error_still_emits_the_note(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The -y note fires before validation exits, so even a rejected
         `-y --preset X --advanced` invocation teaches the migration."""
         from click.testing import CliRunner
 
@@ -6910,7 +6991,7 @@ class TestNonInteractivePresetNotice:
 
         assert result.exit_code != 0
         assert "mutually exclusive" in result.stderr
-        assert "will be removed in v0.5.0" in result.stderr
+        assert "accepted but ignored" in result.stderr
 
     def test_missing_extras_error_teaches_non_interactive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6941,7 +7022,8 @@ class TestNonInteractivePresetNotice:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#1631: the non-TTY guard must point at --non-interactive, not the
-        deprecated `-y`, and not suggest --preset alone (which still prompts)."""
+        retired `-y`, and not suggest --preset alone — a preset does not make
+        the run scripted, so on its own it is refused by this same guard."""
         from click.testing import CliRunner
 
         from memtomem.cli import cli, init_cmd
@@ -6969,9 +7051,9 @@ class TestNonInteractivePresetNotice:
         normalized = " ".join(result.output.split())
         # --non-interactive help names the implicit-preset side effect.
         assert "`--preset minimal` (BM25-only, no embeddings)" in normalized
-        # -y is documented as a deprecated alias with the target version.
-        assert "Deprecated alias for --non-interactive" in normalized
-        assert "From v0.5.0" in normalized
+        # -y is documented as accepted-and-ignored, naming the replacement.
+        assert "Accepted and ignored" in normalized
+        assert "deprecated alias for --non-interactive through 0.4.x" in normalized
 
 
 class TestStepHeaderPosition:
