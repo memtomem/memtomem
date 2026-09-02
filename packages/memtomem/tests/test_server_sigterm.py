@@ -190,6 +190,31 @@ def _kill_and_read_stderr(proc: subprocess.Popen, *, timeout: float = 20.0) -> s
     return err.decode(errors="replace") if err else ""
 
 
+def _leftover_marker_detail(presence: Path, rc: int | None, proc: subprocess.Popen) -> str:
+    """Explain a marker that outlived its server, for an assertion message.
+
+    The count alone is unattributable. ``_install_sigterm_handler`` unlinks
+    synchronously and only then calls ``os._exit(0)``, so a leftover marker is
+    never "cleanup still in flight" — it is either a handler that never ran or
+    an ``unlink`` that raised and was swallowed by the handler's ``except
+    OSError``. Those two differ in the exit code, which is asserted separately.
+    The stderr drained here is startup context — which arm the secondary took,
+    whether registration warned — not the swallowed ``OSError``, which is never
+    logged.
+
+    Evaluated lazily: Python only builds an ``assert`` message when the
+    assertion fails, so draining stderr here costs a passing run nothing.
+    """
+    markers = sorted(path.name for path in presence.glob("*.lock"))
+    stderr = _kill_and_read_stderr(proc)
+    said = stderr.strip() if stderr else ""
+    return (
+        f"the secondary removed its own marker "
+        f"(rc={rc}, {len(markers)} left: {markers}; "
+        f"secondary stderr: {said or '<none drainable>'})"
+    )
+
+
 def _cleanup_proc(proc: subprocess.Popen) -> None:
     if proc.poll() is None:
         proc.kill()
@@ -1089,12 +1114,24 @@ def test_second_server_cleans_its_marker_without_touching_the_primary(tmp_path: 
         )
 
         second.send_signal(signal.SIGTERM)
-        second.wait(timeout=10)
+        second_rc = second.wait(timeout=10)
         deadline = time.time() + 10.0
         while time.time() < deadline and len(list(presence.glob("*.lock"))) > 1:
             time.sleep(0.05)
 
-        assert len(list(presence.glob("*.lock"))) == 1, "the secondary removed its own marker"
+        # Pin the exit code before the count. The handler unlinks and then
+        # hard-exits 0, so `-SIGTERM` here means it never ran at all, while 0
+        # with a marker still present means the unlink raised and the handler's
+        # ``except OSError`` swallowed it. A count-only assertion cannot tell
+        # those apart, which is what made an Ubuntu failure on this test
+        # unattributable during the v0.5.0 release.
+        assert second_rc == 0, (
+            f"the secondary ran its SIGTERM handler (rc={second_rc}; the default "
+            "disposition would leave the marker with nothing having run)"
+        )
+        assert len(list(presence.glob("*.lock"))) == 1, _leftover_marker_detail(
+            presence, second_rc, second
+        )
         assert pid_file.exists(), "and never touched the primary's pid file"
         assert first.poll() is None, "the primary is still running"
     finally:
