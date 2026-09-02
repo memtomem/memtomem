@@ -99,8 +99,11 @@ async def test_the_config_a_blocked_reconfigure_carried_survives_for_the_next_st
     await watcher.reconfigure(IndexingConfig(memory_dirs=[str(first), str(second)]))
     await stopping
 
+    # Only the restart's own scheduling is in evidence, so the first start's
+    # call cannot stand in for a root the reconfigure failed to carry over.
+    observer.schedule.reset_mock()
     await watcher.start()
-    scheduled = {call.args[1] for call in observer.schedule.call_args_list[1:]}
+    scheduled = {call.args[1] for call in observer.schedule.call_args_list}
     assert scheduled == {str(first.resolve()), str(second.resolve())}
     await watcher.stop()
 
