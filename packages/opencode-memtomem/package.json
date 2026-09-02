@@ -1,6 +1,6 @@
 {
   "name": "opencode-memtomem",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Safe memtomem MCP, commands, and read skills for OpenCode",
   "type": "module",
   "sideEffects": false,

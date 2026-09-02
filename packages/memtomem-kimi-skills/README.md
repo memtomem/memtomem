@@ -9,7 +9,7 @@ separate, explicit step.
 
 Register the MCP server once by creating `~/.kimi-code/mcp.json` as shown in
 the [Kimi Code integration guide](../../docs/guides/integrations/kimi-code.md).
-(`memtomem==0.4.0` and later write that path, so `mm init --mcp kimi` also
+(memtomem `0.4.0` and later write that path, so `mm init --mcp kimi` also
 works; releases up to `0.3.14` wrote the legacy `~/.kimi/mcp.json` layout,
 which current Kimi Code does not read.)
 

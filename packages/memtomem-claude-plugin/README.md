@@ -24,8 +24,8 @@ write-time indexing.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem==0.4.0' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem==0.4.0' mm status
+uvx --from 'memtomem==0.5.0' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem==0.5.0' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -36,7 +36,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.4.0' mm mem init --scope project_local
+uvx --from 'memtomem==0.5.0' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and
@@ -46,7 +46,7 @@ Claude Code, Codex CLI, or Kimi Code; see the cross-runtime guide below.
 
 If you previously registered the server manually, what happens depends on
 the manual entry's command. If it matches the plugin's exact launch command
-(`uvx --from memtomem==0.4.0 memtomem-server`), Claude Code suppresses the
+(`uvx --from memtomem==0.5.0 memtomem-server`), Claude Code suppresses the
 plugin-managed copy and your manual entry keeps winning. Any other command —
 including a bare `memtomem-server` registration — runs **both** servers
 against the same store and doubles the tool list. Keep one: remove the
