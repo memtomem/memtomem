@@ -6,10 +6,8 @@ and three read-only skills. It does not add event hooks or automatic indexing.
 
 ## Install
 
-The npm release for this core is `opencode-memtomem@0.3.0`, bundling core
-`0.5.0`. It is published from this repository's `opencode-v*` tag shortly
-after each PyPI release; until that tag lands, npm's `latest` is the previous
-version and the manual MCP path below is the way to run core `0.5.0`.
+The published npm release is `opencode-memtomem@0.3.0`, bundling core
+`0.5.0`.
 
 Do not use an `opencode plugin add` command; OpenCode loads npm plugins from
 the singular `plugin` array in `opencode.json`:

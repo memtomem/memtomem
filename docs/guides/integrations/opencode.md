@@ -14,10 +14,8 @@ Native Windows has not yet been verified.
 
 ## Install
 
-The npm release for this core is `opencode-memtomem@0.3.0`, bundling core
-`0.5.0`. It is published from an `opencode-v*` tag shortly after each PyPI
-release; until that tag lands, npm's `latest` is the previous version and the
-manual MCP path below is the way to run core `0.5.0`. Add it through OpenCode's singular `plugin` configuration key
+The published npm release is `opencode-memtomem@0.3.0`, bundling core
+`0.5.0`. Add it through OpenCode's singular `plugin` configuration key
 (there is no `opencode plugin add` command):
 
 ```json
