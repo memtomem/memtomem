@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from memtomem.models import InvalidFilterSyntaxError, ScopeFilter
+from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -173,6 +175,7 @@ async def mem_entity_search(
     value: str | None = None,
     namespace: str | None = None,
     limit: int = 20,
+    scope: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Search for chunks containing specific entities.
@@ -184,9 +187,22 @@ async def mem_entity_search(
         value: Search for entities matching this value (substring match)
         namespace: Namespace scope
         limit: Maximum results (default 20)
+        scope: ADR-0011 tier filter — value, comma list (``user,project_local``)
+            or glob (``project_*``), not both. Omitted, the default merge
+            applies: inside a project ``user`` + that project's tiers, outside
+            one ``user`` only. Pass ``project_shared`` from outside a project to
+            search across projects.
     """
     if not 1 <= limit <= 500:
         return f"Error: limit must be between 1 and 500, got {limit}."
+
+    # Reject a malformed filter before touching the app, the way mem_search
+    # does: an unparseable scope is a caller mistake, and an empty result set
+    # would read as "no such entities" instead of "that filter never ran".
+    try:
+        scope_filter = ScopeFilter.parse(scope)
+    except InvalidFilterSyntaxError as e:
+        return f"Error: {e}"
 
     app = await _get_app_initialized(ctx)
     results = await app.storage.search_entities(
@@ -194,6 +210,8 @@ async def mem_entity_search(
         value=value,
         namespace=namespace,
         limit=limit,
+        scope_filter=scope_filter,
+        project_context_root=_resolve_project_context_root(app),
     )
 
     if not results:

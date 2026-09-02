@@ -621,3 +621,159 @@ async def test_bm25_search_filters_inside_candidate_selection(storage, tmp_path)
     assert not any(c.startswith("alpha bravo charlie noise") for c in contents)
     # proj_a's chunk surfaces despite proj_b dominating the global rank.
     assert "alpha bravo charlie team rule" in contents
+
+
+# ---------------------------------------------------------------------------
+# Entity search (#2194) — the same boundary every other read surface has
+# ---------------------------------------------------------------------------
+
+
+async def _seed_entities_across_projects(storage, tmp_path):
+    """Four chunks across the scope tiers, each carrying one person entity.
+
+    Both projects get a ``project_shared`` row: a single one would let a
+    query that ignored the second project still pass the cross-project
+    union case below.
+    """
+    proj_a = tmp_path / "proj_a"
+    proj_b = tmp_path / "proj_b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+
+    user_chunk = _make_chunk_at_scope(
+        content="user level note about Ulrich",
+        source_file=tmp_path / "u.md",
+        scope="user",
+        project_root=None,
+    )
+    a_chunk = _make_chunk_at_scope(
+        content="proj A note about Alice",
+        source_file=proj_a / ".memtomem" / "memories" / "a.md",
+        scope="project_local",
+        project_root=proj_a,
+    )
+    b_chunk = _make_chunk_at_scope(
+        content="proj B note about Bruno",
+        source_file=proj_b / ".memtomem" / "memories" / "b.md",
+        scope="project_shared",
+        project_root=proj_b,
+    )
+    a_shared_chunk = _make_chunk_at_scope(
+        content="proj A shared note about Anouk",
+        source_file=proj_a / ".memtomem" / "memories" / "a-shared.md",
+        scope="project_shared",
+        project_root=proj_a,
+    )
+    await storage.upsert_chunks([user_chunk, a_chunk, b_chunk, a_shared_chunk])
+    for chunk, value in (
+        (user_chunk, "Ulrich"),
+        (a_chunk, "Alice"),
+        (b_chunk, "Bruno"),
+        (a_shared_chunk, "Anouk"),
+    ):
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "person", "entity_value": value}]
+        )
+    return proj_a, proj_b
+
+
+@pytest.mark.asyncio
+async def test_entity_search_no_project_context_returns_user_only(storage, tmp_path):
+    """Out of a project, an entity search sees user-tier entities only.
+
+    Before #2194 this query applied no scope fragment at all, so every
+    project's people, decisions and action items came back by default.
+    """
+    await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {r["entity_value"] for r in await storage.search_entities(entity_type="person")}
+
+    assert values == {"Ulrich"}
+
+
+@pytest.mark.asyncio
+async def test_entity_search_in_project_context_adds_that_project_only(storage, tmp_path):
+    """Inside project A: user + both of A's tiers, never B's."""
+    proj_a, _proj_b = await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {
+        r["entity_value"]
+        for r in await storage.search_entities(entity_type="person", project_context_root=proj_a)
+    }
+
+    assert values == {"Ulrich", "Alice", "Anouk"}
+
+
+@pytest.mark.asyncio
+async def test_entity_search_explicit_scope_narrows_within_the_project(storage, tmp_path):
+    """An explicit tier filter narrows; it does not widen past the project."""
+    proj_a, _proj_b = await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {
+        r["entity_value"]
+        for r in await storage.search_entities(
+            entity_type="person",
+            scope_filter=ScopeFilter.parse("project_local"),
+            project_context_root=proj_a,
+        )
+    }
+
+    assert values == {"Alice"}
+
+
+@pytest.mark.asyncio
+async def test_entity_search_explicit_project_shared_out_of_context_unions_projects(
+    storage, tmp_path
+):
+    """The documented deliberate cross-project read (ADR-0011 §6).
+
+    Both projects' shared entities come back — one project's alone would
+    also satisfy an implementation that never left its own tree.
+    """
+    await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {
+        r["entity_value"]
+        for r in await storage.search_entities(
+            entity_type="person", scope_filter=ScopeFilter.parse("project_shared")
+        )
+    }
+
+    assert values == {"Bruno", "Anouk"}
+
+
+@pytest.mark.asyncio
+async def test_entity_search_ties_order_by_tier_before_the_limit_cuts(storage, tmp_path):
+    """Equal confidence must not let a user-tier row crowd out this project's.
+
+    ``search_entities`` ranks by extraction confidence, and the extractor
+    hands back 1.0 for most rows — so with a restrictive ``limit`` the tie
+    order is what decides who survives the cut. The user-tier entity is
+    written first, so it wins the trailing ``e.id`` key: only the ADR-0011
+    §3 tier expression (``project_local > project_shared > user``) can put
+    the project's own entity ahead of it, and dropping that expression
+    alone fails this test rather than leaving it to row-id luck.
+    """
+    proj_a = tmp_path / "proj_a"
+    proj_a.mkdir()
+    user_chunk = _make_chunk_at_scope(
+        content="user level note about Aaron",
+        source_file=tmp_path / "u.md",
+        scope="user",
+        project_root=None,
+    )
+    local_chunk = _make_chunk_at_scope(
+        content="proj A note about Zoe",
+        source_file=proj_a / ".memtomem" / "memories" / "a.md",
+        scope="project_local",
+        project_root=proj_a,
+    )
+    await storage.upsert_chunks([user_chunk, local_chunk])
+    for chunk, value in ((user_chunk, "Aaron"), (local_chunk, "Zoe")):
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "person", "entity_value": value}]
+        )
+
+    rows = await storage.search_entities(entity_type="person", project_context_root=proj_a, limit=1)
+
+    assert [r["entity_value"] for r in rows] == ["Zoe"]

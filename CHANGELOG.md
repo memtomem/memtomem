@@ -37,6 +37,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   still runs no consolidation or policy scheduler and no health watchdog in any
   mode. (#2188)
 
+### Added
+
+- **`mem_ask`, `mem_entity_search` and `mem_timeline` take a `scope`.** The
+  ADR-0011 tier axis reached `mem_search` and `mem_recall` in the PR-C round
+  and stopped there, so on the other three read surfaces the only way to
+  choose a tier was to stand in the right directory: no way to narrow to
+  `project_local`, and no way to run the deliberate cross-project
+  `scope=project_shared` query the ADR documents as supported. All three now
+  accept the same spellings the primary surfaces do — a value, a comma list
+  or a glob — and refuse a comma/glob mix before the server opens, so a
+  filter that cannot run reads as a filter error rather than as an empty
+  result set. `mem_ask` also gains `as_of`, the temporal bound the other
+  search surfaces have, and now shares the search core's parsing of it
+  instead of hand-rolling the namespace fallback. (#2194)
+
 ### Breaking
 
 - **The health report's `sessions` / `working_memory` counts are now `null`
@@ -56,6 +71,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `full_health_report.active_sessions` is `null` for the same reason. (#2281)
 
 ### Fixed
+
+- **`mem_ask` says when its evidence came from a degraded search.** The tool
+  discarded every notice the search core derives, so a grounded prompt
+  assembled from a keyword-only pool — because the embedding dimension
+  changed and the semantic leg was suppressed — read exactly like one from a
+  healthy hybrid pool, and the answer built on it was just as confident. The
+  notices now follow the answer on both the empty and the answered path, the
+  way `mem_search` renders them. (#2194)
+
+- **Equal-confidence entities no longer lose their tier order at the
+  `limit`.** `mem_entity_search` ranked by extraction confidence alone, and
+  the extractor hands back the same confidence for most rows, so a small
+  `limit` left the surviving set to the storage scan order — a user-tier row
+  could crowd out the entities of the project you are standing in. Ties now
+  fall back to the ADR-0011 tier order (`project_local` > `project_shared` >
+  `user`) and then to a stable key, so the same store answers the same query
+  the same way. (#2194)
+
+- **An entity search no longer returns other projects' entities.** Every
+  other read surface appends the ADR-0011 scope fragment unconditionally;
+  `mem_entity_search`'s storage query appended nothing, even though it joins
+  `chunks`. Inside one project it listed every other project's people,
+  decisions and action items, and it never threaded the project anchor, so
+  there was no boundary to narrow in the first place. It now follows the same
+  rule as search and recall: out of a project, user-tier entities only; inside
+  project X, user-tier plus X's own. Cross-project reads stay available
+  through an explicit `scope`. Callers that relied on the whole-store listing
+  will see fewer rows; that listing was the leak. (#2194)
 
 - **"Most Connected Memories" no longer loses a small project's hubs to a
   large one's.** `get_most_connected` used to rank by whole-store degree and

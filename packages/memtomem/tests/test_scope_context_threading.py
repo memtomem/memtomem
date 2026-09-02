@@ -59,7 +59,7 @@ _ALLOWED_FILES: set[str] = {
 }
 
 
-_TARGET_METHODS = {"search", "recall_chunks", "dense_search", "bm25_search"}
+_TARGET_METHODS = {"search", "recall_chunks", "dense_search", "bm25_search", "search_entities"}
 
 
 class _CallVisitor(ast.NodeVisitor):
@@ -95,10 +95,11 @@ class _CallVisitor(ast.NodeVisitor):
                 token in recv
                 for token in ("search_pipeline", ".pipeline", "self.pipeline", "self._pipeline")
             ) or recv.endswith("pipeline")
-        if method in ("recall_chunks", "dense_search", "bm25_search"):
+        if method in ("recall_chunks", "dense_search", "bm25_search", "search_entities"):
             # ``app.storage.recall_chunks`` / ``comp.storage.recall_chunks`` /
             # ``self._storage.recall_chunks`` / ``storage.recall_chunks`` —
-            # same shape across the three storage methods.
+            # same shape across the storage methods. ``search_entities``
+            # joins ``chunks`` and so carries the same boundary (#2194).
             return "storage" in recv
         return False
 

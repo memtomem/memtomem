@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from memtomem.models import InvalidFilterSyntaxError, ScopeFilter
+from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -23,6 +25,7 @@ async def mem_timeline(
     until: str | None = None,
     namespace: str | None = None,
     limit: int = 50,
+    scope: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Show how memories about a topic evolved over time.
@@ -36,9 +39,21 @@ async def mem_timeline(
         until: End date
         namespace: Namespace scope
         limit: Maximum chunks to analyze (default 50)
+        scope: ADR-0011 tier filter — value, comma list (``user,project_local``)
+            or glob (``project_*``), not both. Omitted, the default merge
+            applies: inside a project ``user`` + that project's tiers, outside
+            one ``user`` only. Pass ``project_shared`` from outside a project to
+            search across projects.
     """
     if not 1 <= limit <= 500:
         return f"Error: limit must be between 1 and 500, got {limit}."
+
+    # Same pre-app validation mem_search does: a comma/glob mix is a caller
+    # mistake, and reporting it as an empty timeline would be a lie.
+    try:
+        ScopeFilter.parse(scope)
+    except InvalidFilterSyntaxError as e:
+        return f"Error: {e}"
 
     from memtomem.tools.temporal import build_timeline, format_timeline
 
@@ -48,8 +63,6 @@ async def mem_timeline(
     # storage scope filter sees the same boundary the primary mem_search
     # uses. Without this, mem_temporal_search inside a registered
     # project would silently drop project_shared / project_local rows.
-    from memtomem.server.tools.search import _resolve_project_context_root
-
     project_context_root = _resolve_project_context_root(app)
 
     # Search for topic
@@ -57,6 +70,7 @@ async def mem_timeline(
         query=topic,
         top_k=limit,
         namespace=namespace,
+        scope=scope,
         project_context_root=project_context_root,
     )
 

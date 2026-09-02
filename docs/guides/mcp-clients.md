@@ -484,7 +484,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add`, `mem_add_redaction_stats` |
 | **Indexing** | `mem_index` (file/directory indexing, optional `auto_tag`) |
 | **Meta** | `mem_do` (routes to all registered actions, supports aliases — including `schedule_register`, `schedule_list`, `schedule_run_now`, `schedule_delete` for cron jobs) |
-| **Ask** | `mem_ask` (natural-language Q&A over indexed memories) |
+| **Ask** | `mem_ask` (natural-language Q&A over indexed memories; optional `as_of`, `scope`) |
 | **Namespace** | `mem_ns_list`, `mem_ns_set`, `mem_ns_get`, `mem_ns_assign`, `mem_ns_update`, `mem_ns_rename`, `mem_ns_delete` |
 | **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_merge`, `mem_tag_delete`, `mem_auto_tag` |
 | **Cross-ref** | `mem_link`, `mem_unlink`, `mem_related` |
@@ -498,8 +498,8 @@ uses, so the output is identical. Useful as a sanity check between
 | **History** | `mem_search_history`, `mem_search_feedback`, `mem_search_suggest` |
 | **Conflict** | `mem_conflict_check` |
 | **Importance** | `mem_importance_scan` |
-| **Entity** | `mem_entity_scan`, `mem_entity_search` |
-| **Temporal** | `mem_timeline`, `mem_activity` |
+| **Entity** | `mem_entity_scan`, `mem_entity_search` (optional `scope`) |
+| **Temporal** | `mem_timeline` (optional `scope`), `mem_activity` |
 | **Policy** | `mem_policy_add`, `mem_policy_list`, `mem_policy_delete`, `mem_policy_run` |
 | **Schedule** | `mem_schedule_register`, `mem_schedule_list`, `mem_schedule_run_now`, `mem_schedule_delete` (cron-driven compaction, decay, dead-link cleanup, dedup; also reachable as `mem_do` actions) |
 | **Health** | `mem_watchdog`, `mem_cleanup_orphans` |
