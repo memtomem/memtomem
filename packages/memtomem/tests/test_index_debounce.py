@@ -801,7 +801,7 @@ class TestCliQueueErrorBoundary:
                 json.dumps({"version": debounce._QUEUE_VERSION + 1, "entries": {}}),
                 "unsupported_version",
                 # The refusal exists to prevent exactly this.
-                "Move it aside",
+                "Rename it",
             ),
         ],
     )
@@ -826,7 +826,7 @@ class TestCliQueueErrorBoundary:
             assert "Upgrade memtomem" in result.output
             assert forbidden not in result.output
         else:
-            assert "Move it aside" in result.output
+            assert "Rename it" in result.output
 
     def test_queue_error_honors_the_json_contract(self, tmp_path: Path, monkeypatch) -> None:
         """``--json`` is a one-line machine contract; the newly handled failure
@@ -846,3 +846,44 @@ class TestCliQueueErrorBoundary:
         assert payload["error_kind"] == "corrupt"
         assert payload["queue_path"] == str(qp)
         assert payload["remediation"]
+
+    @pytest.mark.parametrize(
+        ("payload", "kind"),
+        [
+            # ``UnicodeDecodeError`` is a ``ValueError``, not an ``OSError``:
+            # binary garbage escaped the wrapper entirely and took the --json
+            # error contract down with it.
+            (b"\xff\xfe\x00not utf-8", "corrupt"),
+            # Only a version *newer* than this build can be fixed by upgrading;
+            # 0 and a non-integer are malformed data, and the upgrade advice
+            # would send the user nowhere.
+            (b'{"version": 0, "entries": {}}', "corrupt"),
+            (b'{"version": "broken", "entries": {}}', "corrupt"),
+            # ``bool`` subclasses ``int``, so ``true`` used to load as v1.
+            (b'{"version": true, "entries": {}}', "corrupt"),
+        ],
+    )
+    def test_malformed_queues_stay_inside_the_error_contract(
+        self, tmp_path: Path, monkeypatch, payload: bytes, kind: str
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        qp = tmp_path / "queue.json"
+        qp.write_bytes(payload)
+        monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(qp))
+
+        result = CliRunner().invoke(cli, ["index", "--status", "--json"])
+
+        assert result.exit_code != 0
+        assert json.loads(result.output)["error_kind"] == kind
+
+    def test_remediation_carries_no_shell_syntax(self) -> None:
+        """The hints are read on Windows too, and a path with a space would
+        break a copy-pasted POSIX command."""
+        from memtomem.cli.indexing import _QUEUE_REMEDIES
+
+        for kind, text in _QUEUE_REMEDIES.items():
+            assert "mv " not in text, kind
+            assert "`" not in text.replace("`mm index`", ""), kind

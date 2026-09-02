@@ -313,9 +313,10 @@ _QUEUE_REMEDIES: dict[str, str] = {
         "({path}); its contents are intact, so do not delete it."
     ),
     "corrupt": (
-        "The queue file does not parse. Move it aside (`mv {path} {path}.bad`) "
-        "to reset it, then re-run `mm index` over the paths edited since the "
-        "last successful run — the reset drops whatever was still queued."
+        "The queue file does not parse. Rename it to reset the queue — it is "
+        "at {path}, and any name outside that path will do — then re-run "
+        "`mm index` over the paths edited since the last successful run, "
+        "because the reset drops whatever was still queued."
     ),
     "unsupported_version": (
         "The queue was written by a newer memtomem and is being refused rather "
@@ -324,9 +325,9 @@ _QUEUE_REMEDIES: dict[str, str] = {
     ),
     "claim": (
         "A queue claim is missing or dated ahead of this clock. If the system "
-        "clock stepped backwards, re-run once it has settled; otherwise move "
-        "{path} aside and re-run `mm index` over the paths edited since the "
-        "last successful run."
+        "clock stepped backwards, re-run once it has settled; otherwise rename "
+        "{path} and re-run `mm index` over the paths edited since the last "
+        "successful run."
     ),
 }
 

@@ -192,7 +192,10 @@ def _load(path: Path) -> dict[str, QueueEntry]:
         return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # ``UnicodeDecodeError`` is a ``ValueError``, not an ``OSError``, so a
+        # queue file holding binary garbage would otherwise escape this wrapper
+        # entirely and take the CLI's machine-readable error contract with it.
         raise DebounceQueueError(
             f"debounce queue {path} is unreadable: {exc}",
             kind="unreadable" if isinstance(exc, OSError) else "corrupt",
@@ -200,7 +203,16 @@ def _load(path: Path) -> dict[str, QueueEntry]:
     if not isinstance(raw, dict):
         raise DebounceQueueError(f"debounce queue {path} root is not a JSON object")
     version = raw.get("version", 1)
-    if not isinstance(version, int) or version < 1 or version > _QUEUE_VERSION:
+    # ``bool`` subclasses ``int``, so an explicit type check is what keeps a
+    # JSON ``true`` from being read as version 1.
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise DebounceQueueError(
+            f"debounce queue {path} has a malformed version {version!r}",
+            kind="corrupt",
+        )
+    if version > _QUEUE_VERSION:
+        # The only case an upgrade can resolve, and the only one where deleting
+        # the queue would throw away data a newer memtomem can still read.
         raise DebounceQueueError(
             f"debounce queue {path} has unsupported version {version!r}; refusing data loss",
             kind="unsupported_version",
