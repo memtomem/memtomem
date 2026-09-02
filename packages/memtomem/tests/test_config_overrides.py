@@ -81,7 +81,7 @@ def test_config_json_applies_when_no_env(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/config.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/from/config.db")
 
 
 def test_config_json_non_object_root_is_ignored(
@@ -191,7 +191,7 @@ def test_config_json_valid_override_still_applies(
     cfg = Mem2MemConfig()
     load_config_overrides(cfg, migrate=False)
     assert cfg.context_window.enabled is True
-    assert str(cfg.storage.sqlite_path) == "/from/config.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/from/config.db")
 
 
 def test_config_json_invalid_rrf_weights_warns_and_keeps_default(
@@ -373,10 +373,13 @@ def test_config_d_append_merges_with_defaults(
     cfg = Mem2MemConfig()
     before = list(cfg.indexing.memory_dirs)
     load_config_d(cfg)
-    after = [str(p) for p in cfg.indexing.memory_dirs]
-    assert "/from/fragment" in after
+    # Compared as paths, not strings: ``load_config_overrides`` commits the
+    # validated model, so these fields hold real ``Path`` objects whose
+    # ``str()`` renders with the platform separator.
+    after = [Path(p) for p in cfg.indexing.memory_dirs]
+    assert Path("/from/fragment") in after
     for original in before:
-        assert str(original) in after
+        assert Path(original) in after
 
 
 def test_config_d_append_dedupes(config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -464,7 +467,7 @@ def test_config_d_scalar_last_wins(config_d_dir: Path, monkeypatch: pytest.Monke
     )
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/b.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/b.db")
 
 
 def test_config_d_env_wins_over_fragments(
@@ -496,7 +499,7 @@ def test_config_d_unknown_section_warned_but_not_fatal(
     cfg = Mem2MemConfig()
     with caplog.at_level(logging.WARNING, logger="memtomem.config"):
         load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/ok.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/ok.db")
     assert any("nope_not_a_section" in r.message for r in caplog.records)
 
 
@@ -514,7 +517,7 @@ def test_config_d_invalid_json_warned(
     cfg = Mem2MemConfig()
     with caplog.at_level(logging.WARNING, logger="memtomem.config"):
         load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/ok.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/ok.db")
     assert any("bad.json" in r.message for r in caplog.records)
 
 
@@ -529,7 +532,7 @@ def test_config_d_ignores_non_json_files(
     )
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/ok.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/ok.db")
 
 
 def test_config_d_namespace_rules_appends(
