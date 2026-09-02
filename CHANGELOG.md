@@ -40,10 +40,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   used to filter the hubs by `X` while counting their links to every other
   namespace. Both ends are screened on both axes now, so those calls report
   smaller, self-consistent numbers. A hub whose every edge leaves the boundary
-  is absent rather than reported as `0`. The degree is also the number of
-  distinct neighbours a caller can follow: a self-relation and the reciprocal
-  row pair a bidirectional link leaves behind each count once, where summing
-  the two edge directions counted them twice and let them distort the ranking.
+  is absent rather than reported as `0`. The degree is also the number of links
+  a caller can follow, counted the way `mem_related` lists them — one per
+  neighbour and relation type. A self-relation counts once, and so does a pair
+  of rows joining the same two chunks under the same type in both orders, which
+  is what linking the two ends separately leaves behind. Summing the two edge
+  directions counted each of those twice and let them distort the ranking.
   (#2244)
 
 ## [0.5.0] — 2026-09-02

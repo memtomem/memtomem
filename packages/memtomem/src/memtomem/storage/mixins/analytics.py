@@ -222,10 +222,13 @@ class AnalyticsMixin:
         # ``adjacency`` is the undirected neighbour set ``get_related`` returns,
         # restricted to visible endpoints: each stored row read from both ends,
         # deduplicated on ``(hub, neighbour, relation_type)`` by the ``UNION``.
-        # Summing two directed ``COUNT``s instead would count a self-relation
-        # twice and a reciprocal pair — the two rows a bidirectional ``mem_link``
-        # leaves behind — twice each, inflating the degree above the number of
-        # links a caller can actually follow, and with it the ranking.
+        # That identity is ``get_related``'s own, so two rows joining the same
+        # pair under different relation types stay two links, as they do there.
+        # Summing two directed ``COUNT``s instead would count twice both a
+        # self-relation and a same-type pair stored in both endpoint orders —
+        # ``mem_link`` writes one row, so that shape comes from linking the two
+        # ends separately — inflating the degree above the links a caller can
+        # actually follow, and with it the ranking.
         rows = db.execute(
             "SELECT chunk_id, link_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
             f"{visible_sql}), adjacency AS ("  # nosec B608
