@@ -636,3 +636,49 @@ async def test_facade_picks_up_the_reconciled_webhook_manager(
             assert facade.webhook_manager is managers[1]
             assert facade.config is owner.config
             assert managers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_aborted_initialization_still_reloads_config_on_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An aborted first initialization must not bank a config it never read.
+
+    ``defer_config_migration`` used to be cleared next to the rebuild, but
+    everything after it can raise — the webhook close is a cancellation point,
+    and so is every component start. The retry then skipped the rebuild, kept
+    the config from the aborted attempt, and recorded the *current* signature
+    over it, so an edit made in between counted as applied while never being
+    read.
+    """
+    home = tmp_path / "home"
+    fragment_dir = home / ".memtomem" / "config.d"
+    fragment_dir.mkdir(parents=True)
+    fragment = fragment_dir / "10-search.json"
+    fragment.write_text(json.dumps({"search": {"default_top_k": 11}}), encoding="utf-8")
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+
+    seen: list[int] = []
+
+    async def stop_after_reload(config, **_kwargs):  # type: ignore[no-untyped-def]
+        seen.append(config.search.default_top_k)
+        raise RuntimeError("stop after reload")
+
+    import memtomem.server.component_factory as factory_mod
+
+    monkeypatch.setattr(factory_mod, "create_components", stop_after_reload)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        # A config edit lands between the aborted attempt and the retry.
+        fragment.write_text(json.dumps({"search": {"default_top_k": 37}}), encoding="utf-8")
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        assert seen == [11, 37], "the retry reused the aborted attempt's config"
+        assert ctx.config.search.default_top_k == 37

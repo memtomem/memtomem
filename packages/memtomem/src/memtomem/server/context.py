@@ -594,7 +594,6 @@ class AppContext:
                 # behavior so malformed config remains repairable.
                 self.config = build_fresh_config(migrate=True, strict_overrides=False)
                 self.ambient_config_loaded = True
-                self.defer_config_migration = False
                 await self._reconcile_webhook_manager()
 
             # #1936: take the lifecycle barrier BEFORE storage opens, so a
@@ -727,6 +726,14 @@ class AppContext:
 
             self._dedup_scanner = dedup
             self._config_signature = signature_at_load
+            # Cleared here, where initialization commits, and not next to the
+            # rebuild above. Everything between the two can raise — the webhook
+            # close is a cancellation point, and so is every component start —
+            # and clearing it eagerly made that abort permanent: the retry
+            # skipped the rebuild, kept the config from the aborted attempt,
+            # and then banked *this* signature over it. A config edit made in
+            # between was recorded as applied while never being read.
+            self.defer_config_migration = False
             self._watcher = watcher
             self._watcher_started = watcher_started
             self._scheduler = scheduler
