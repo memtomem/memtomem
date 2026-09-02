@@ -115,6 +115,7 @@ describe('Search filters - add/remove UX', () => {
     ns.textContent = 'work';
     document.getElementById('ns-filter').appendChild(ns);
     document.getElementById('ns-filter').value = 'work';
+    document.getElementById('scope-filter').value = 'project_local';
     addSourceOption('/repo/docs/cache.md');
 
     document.getElementById('load-more-btn').dispatchEvent(new window.Event('click'));
@@ -125,8 +126,36 @@ describe('Search filters - add/remove UX', () => {
     expect(params.get('q')).toBe('cache');
     expect(params.get('top_k')).toBe('20');
     expect(params.get('namespace')).toBe('work');
+    expect(params.get('scope')).toBe('project_local');
     expect(params.get('context_window')).toBe('2');
     expect(params.getAll('source_exact')).toEqual(['/repo/docs/cache.md']);
+  });
+
+  it('omits scope entirely when the default option is selected', async () => {
+    // An empty select means "let the server apply the ADR-0011 default
+    // merge". Sending scope='' would be a different, narrower query.
+    document.getElementById('search-input').value = 'cache';
+
+    document.getElementById('load-more-btn').dispatchEvent(new window.Event('click'));
+    await flush();
+
+    const params = new URL(`http://localhost${searchUrls[0]}`).searchParams;
+    expect(params.has('scope')).toBe(false);
+  });
+
+  it('shows a scope chip, counts it, and clears it with the others', () => {
+    document.getElementById('tag-filter').value = 'redis';
+    document.getElementById('scope-filter').value = 'project_shared';
+
+    window.renderResults([]);
+
+    const active = document.getElementById('active-filters');
+    expect(active.textContent).toContain('scope: project_shared');
+    expect(document.getElementById('filter-count-badge').textContent).toBe('2');
+
+    document.getElementById('clear-search-filters').click();
+    expect(document.getElementById('scope-filter').value).toBe('');
+    expect(document.getElementById('filter-count-badge').hidden).toBe(true);
   });
 
   it('shows reranked results with rank percentile instead of raw negative score', () => {

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
 from memtomem.web.deps import get_project_context_root, get_search_pipeline
 from memtomem.web.schemas.core import RetrievalStatsOut, to_result_out
 from memtomem.web.schemas.search import SearchResponse
@@ -28,6 +28,16 @@ async def search(
     created_before: datetime | None = Query(None),
     tag_filter: str | None = Query(None),
     namespace: str | None = Query(None),
+    scope: str | None = Query(
+        None,
+        description=(
+            "ADR-0011 tier filter — a value, a comma list (user,project_local) "
+            "or a glob (project_*), not both. Omitted, the default merge "
+            "applies: inside a project, user plus that project's tiers; "
+            "outside one, user only. project_shared from outside a project "
+            "is a deliberate cross-project search"
+        ),
+    ),
     context_window: int = Query(
         0,
         ge=0,
@@ -64,6 +74,7 @@ async def search(
     # problem, not a server fault.
     try:
         NamespaceFilter.parse(namespace)
+        ScopeFilter.parse(scope)
     except InvalidFilterSyntaxError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -89,6 +100,7 @@ async def search(
             created_before=created_before,
             tag_filter=tag_filter,
             namespace=namespace,
+            scope=scope,
             context_window=context_window if context_window > 0 else None,
             project_context_root=project_context_root,
             origin="web",

@@ -1111,6 +1111,44 @@ class TestSearch:
         assert resp.status_code == 422, resp.text
         assert "archive:*,work" in resp.json().get("detail", "")
 
+    async def test_search_threads_scope_to_the_pipeline(self, app, client: AsyncClient):
+        """Without this the web UI cannot reach a tier the CLI and MCP can:
+        the scope context is derived from cwd, so a deliberate cross-project
+        ``project_shared`` read was unreachable from a browser."""
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "scope": "project_*"})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["scope"] == "project_*"
+
+    async def test_search_omits_scope_when_the_caller_sends_none(self, app, client: AsyncClient):
+        """An unset filter must reach the pipeline as ``None`` so the ADR-0011
+        default merge applies. Sending ``""`` would be a different query."""
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test"})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["scope"] is None
+
+    async def test_search_rejects_a_scope_mixing_a_comma_list_with_a_glob(
+        self, client: AsyncClient
+    ):
+        """Same reason the namespace mix is rejected here: the call below the
+        guard turns anything raised into a 500, and a filter the caller
+        spelled wrong is a request problem."""
+        resp = await client.get("/api/search", params={"q": "test", "scope": "project_*,user"})
+
+        assert resp.status_code == 422, resp.text
+        assert "project_*,user" in resp.json().get("detail", "")
+
+    async def test_scope_alone_is_not_a_search_axis(self, client: AsyncClient):
+        """Scope narrows a result set; it never selects one. A scope-only
+        request has nothing to search by and must be refused like a bare
+        namespace, not answered with the whole tier."""
+        resp = await client.get("/api/search", params={"scope": "user"})
+
+        assert resp.status_code == 400, resp.text
+
     async def test_search_rejects_naive_or_reversed_date_bounds(self, client: AsyncClient):
         naive = await client.get("/api/search", params={"created_from": "2026-07-01T00:00:00"})
         assert naive.status_code == 422

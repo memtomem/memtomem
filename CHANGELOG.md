@@ -52,6 +52,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   search surfaces have, and now shares the search core's parsing of it
   instead of hand-rolling the namespace fallback. (#2194)
 
+- **The web search API and the Search tab take a `scope`.** `GET /api/search`
+  derived its ADR-0011 scope context from the server's working directory and
+  offered no way to override it, so the deliberate cross-project
+  `scope=project_shared` query that `mem_search(scope=)` and `mm search
+  --scope` both support was unreachable from a browser, as was narrowing to a
+  single tier. The endpoint now accepts the same spellings those surfaces do —
+  a value, a comma list or a glob — and rejects a comma/glob mix with `422`
+  rather than running a filter that matches nothing. The Search tab gets a
+  scope select beside the namespace one, with a chip, a filter count and a
+  Clear all that behave like the existing filters. Scope narrows a result set
+  and never selects one, so a scope-only request is refused for having no
+  search axis, exactly as a namespace-only one is. (#2193)
+
 ### Breaking
 
 - **The health report's `sessions` / `working_memory` counts are now `null`
