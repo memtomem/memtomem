@@ -621,3 +621,106 @@ async def test_bm25_search_filters_inside_candidate_selection(storage, tmp_path)
     assert not any(c.startswith("alpha bravo charlie noise") for c in contents)
     # proj_a's chunk surfaces despite proj_b dominating the global rank.
     assert "alpha bravo charlie team rule" in contents
+
+
+# ---------------------------------------------------------------------------
+# Entity search (#2194) — the same boundary every other read surface has
+# ---------------------------------------------------------------------------
+
+
+async def _seed_entities_across_projects(storage, tmp_path):
+    """Three chunks, one per scope tier, each carrying one person entity."""
+    proj_a = tmp_path / "proj_a"
+    proj_b = tmp_path / "proj_b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+
+    user_chunk = _make_chunk_at_scope(
+        content="user level note about Ulrich",
+        source_file=tmp_path / "u.md",
+        scope="user",
+        project_root=None,
+    )
+    a_chunk = _make_chunk_at_scope(
+        content="proj A note about Alice",
+        source_file=proj_a / ".memtomem" / "memories" / "a.md",
+        scope="project_local",
+        project_root=proj_a,
+    )
+    b_chunk = _make_chunk_at_scope(
+        content="proj B note about Bruno",
+        source_file=proj_b / ".memtomem" / "memories" / "b.md",
+        scope="project_shared",
+        project_root=proj_b,
+    )
+    await storage.upsert_chunks([user_chunk, a_chunk, b_chunk])
+    for chunk, value in (
+        (user_chunk, "Ulrich"),
+        (a_chunk, "Alice"),
+        (b_chunk, "Bruno"),
+    ):
+        await storage.upsert_entities(
+            str(chunk.id), [{"entity_type": "person", "entity_value": value}]
+        )
+    return proj_a, proj_b
+
+
+@pytest.mark.asyncio
+async def test_entity_search_no_project_context_returns_user_only(storage, tmp_path):
+    """Out of a project, an entity search sees user-tier entities only.
+
+    Before #2194 this query applied no scope fragment at all, so every
+    project's people, decisions and action items came back by default.
+    """
+    await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {r["entity_value"] for r in await storage.search_entities(entity_type="person")}
+
+    assert values == {"Ulrich"}
+
+
+@pytest.mark.asyncio
+async def test_entity_search_in_project_context_adds_that_project_only(storage, tmp_path):
+    """Inside project A: user + A's entities, never B's."""
+    proj_a, _proj_b = await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {
+        r["entity_value"]
+        for r in await storage.search_entities(entity_type="person", project_context_root=proj_a)
+    }
+
+    assert values == {"Ulrich", "Alice"}
+
+
+@pytest.mark.asyncio
+async def test_entity_search_explicit_scope_narrows_within_the_project(storage, tmp_path):
+    """An explicit tier filter narrows; it does not widen past the project."""
+    proj_a, _proj_b = await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {
+        r["entity_value"]
+        for r in await storage.search_entities(
+            entity_type="person",
+            scope_filter=ScopeFilter.parse("project_local"),
+            project_context_root=proj_a,
+        )
+    }
+
+    assert values == {"Alice"}
+
+
+@pytest.mark.asyncio
+async def test_entity_search_explicit_project_shared_out_of_context_unions_projects(
+    storage, tmp_path
+):
+    """The documented deliberate cross-project read (ADR-0011 §6)."""
+    await _seed_entities_across_projects(storage, tmp_path)
+
+    values = {
+        r["entity_value"]
+        for r in await storage.search_entities(
+            entity_type="person", scope_filter=ScopeFilter.parse("project_shared")
+        )
+    }
+
+    assert values == {"Bruno"}

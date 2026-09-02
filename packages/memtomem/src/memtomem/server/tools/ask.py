@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import logging
 
+from memtomem.models import InvalidFilterSyntaxError, ScopeFilter
+from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.validation import MAX_QUERY_LENGTH
+from memtomem.services.search_service import (
+    InvalidTemporalBoundError,
+    parse_as_of_bound,
+    run_search,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +29,8 @@ async def mem_ask(
     namespace: str | None = None,
     source_filter: str | None = None,
     tag_filter: str | None = None,
+    as_of: str | None = None,
+    scope: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Ask a question and get an answer grounded in your memories.
@@ -39,6 +48,16 @@ async def mem_ask(
         namespace: Scope to a specific namespace.
         source_filter: Filter by source file path.
         tag_filter: Filter by tags (comma-separated, OR logic).
+        as_of: Temporal bound for retroactive search — ``YYYY-MM-DD`` or
+            ``YYYY-QN``, default now. Chunks whose ``valid_from`` /
+            ``valid_to`` frontmatter excludes that point drop out; chunks
+            without those keys are always valid. Time decay anchors here,
+            not to the wall clock.
+        scope: ADR-0011 tier filter — value, comma list (``user,project_local``)
+            or glob (``project_*``), not both. Omitted, the default merge
+            applies: inside a project ``user`` + that project's tiers, outside
+            one ``user`` only. Pass ``project_shared`` from outside a project to
+            search across projects.
     """
     if not question.strip():
         return "Error: question cannot be empty."
@@ -47,23 +66,39 @@ async def mem_ask(
     if not 1 <= top_k <= 20:
         return f"Error: top_k must be between 1 and 20, got {top_k}."
 
+    # Reject malformed arguments before touching the app, the way mem_search
+    # does — validation here runs without an initialized server, and the core
+    # re-derives both from the raw values so there is one definition of what
+    # is accepted.
+    try:
+        parse_as_of_bound(as_of)
+        ScopeFilter.parse(scope)
+    except (InvalidTemporalBoundError, InvalidFilterSyntaxError) as e:
+        return f"Error: {e}"
+
     app = await _get_app_initialized(ctx)
-    effective_ns = namespace or app.current_namespace
 
     # ADR-0011 PR-D round 9: same project-context threading mem_search
     # uses, so mem_ask in a registered project does not silently lose
     # project-tier rows on the always-on scope filter.
-    from memtomem.server.tools.search import _resolve_project_context_root
-
     project_context_root = _resolve_project_context_root(app)
 
-    results, stats = await app.search_pipeline.search(
+    # ``run_search`` owns the ``as_of`` parse and the
+    # ``namespace or current_namespace`` fallback this tool used to hand-roll;
+    # its result-derived hints belong to the search surfaces, not to a Q&A
+    # prompt, so they are dropped here.
+    results, _stats, _hints = await run_search(
+        app.search_pipeline,
         query=question,
         top_k=top_k,
         source_filter=source_filter,
         tag_filter=tag_filter,
-        namespace=effective_ns,
+        namespace=namespace,
+        current_namespace=app.current_namespace,
+        as_of=as_of,
+        scope=scope,
         project_context_root=project_context_root,
+        origin="mcp",
     )
 
     if not results:

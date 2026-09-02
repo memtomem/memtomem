@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem.errors import StorageError
+from memtomem.storage.sqlite_scope import scope_context_sql
 
 if TYPE_CHECKING:
-    from memtomem.models import Chunk
+    from memtomem.models import Chunk, ScopeFilter
 
 # ``_memtomem_meta`` key for the one-time entity backfill (#2133). Values:
 # a decimal ``chunks.rowid`` cursor while the walk is in progress, ``done``
@@ -229,8 +231,20 @@ class EntityMixin:
         value: str | None = None,
         namespace: str | None = None,
         limit: int = 50,
+        *,
+        scope_filter: ScopeFilter | None = None,
+        project_context_root: Path | None = None,
     ) -> list[dict]:
-        """Search entities, optionally filtered by type, value substring, and namespace."""
+        """Search entities, optionally filtered by type, value substring, and namespace.
+
+        The ADR-0011 scope-context fragment is appended unconditionally, the
+        same way the search and recall paths append it: this query joins
+        ``chunks``, so without it an entity search inside one project returns
+        every other project's people, decisions and action items (#2194).
+        ``scope_filter`` narrows further, or opts into a deliberate
+        cross-project read; ``project_context_root`` is what the default merge
+        resolves "this project" against.
+        """
         db = self._get_read_db()
         query = (
             "SELECT e.entity_type, e.entity_value, e.confidence, e.chunk_id, "
@@ -250,6 +264,12 @@ class EntityMixin:
         if namespace:
             query += "AND c.namespace = ? "
             params.append(namespace)
+
+        scope_frag, scope_params = scope_context_sql(
+            scope_filter, project_context_root, column_alias="c."
+        )
+        query += f"AND ({scope_frag}) "
+        params.extend(scope_params)
 
         query += "ORDER BY e.confidence DESC LIMIT ?"
         params.append(limit)
