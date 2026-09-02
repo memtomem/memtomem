@@ -44,7 +44,7 @@ body:
       label: Steps to reproduce
       description: Minimal steps that show the bug. Include the exact commands, tool calls, or UI actions.
       placeholder: |
-        1. `mm init -y`
+        1. `mm init --non-interactive --preset minimal`
         2. `mm index ~/notes`
         3. Call `mem_search(query="...")` from Claude Code
         4. Observe empty result

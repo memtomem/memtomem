@@ -87,9 +87,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **100 current MCP tools** organized into categories. Full mode
-also registers the deprecated `mem_context_migrate` compatibility alias (101
-registered names total):
+memtomem provides **100 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -132,7 +130,7 @@ The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skill
 - **`generate` / `sync`** also accept `on_drop="ignore|warn|error"` (the legacy alias `strict=True` ≡ `on_drop="error"`) to control how dropped sub-agent or command fields are reported, and `label="latest|v1|production"` to deploy from a specific version snapshot (agents/commands only).
 - **`version`** manages snapshots via `action="list"|"create"|"enable"` — `enable` adopts a flat-layout artifact into directory layout (a byte-identical, same-scope move) so it can be versioned, mirroring `mm context version enable` and the web `POST …/versions/enable` route (`confirm_project_shared=True` for the git-tracked tier).
 - **`promote`** moves or deletes label pointers to versions.
-- **`memory_migrate`** takes `from_scope`/`to_scope` instead of a single `scope` (it has two endpoints), plus `apply=True` to execute and `confirm_project_shared=True` when writing to the git-tracked tier. (`mem_context_migrate` is a deprecated alias for `mem_context_memory_migrate`.)
+- **`memory_migrate`** takes `from_scope`/`to_scope` instead of a single `scope` (it has two endpoints), plus `apply=True` to execute and `confirm_project_shared=True` when writing to the git-tracked tier.
 - **`artifact_migrate`** migrates agents/commands/skills — flat→dir layout when `to_scope` is omitted, or a scope-tier move when it is set (`apply=True` to execute, `force=True` for a dirty flat→dir, `confirm_project_shared=True` for the git-tracked tier).
 - **`artifact_transfer`** moves or copies one canonical artifact between tiers and/or registered projects — `mode="move"|"copy"`, `to_project_scope_id` (from `mm context projects list`), `as_name` for a renamed copy, and `asset_type="mcp-servers"` for cross-project MCP-server definition copies (`apply=True` to execute, `confirm_project_shared=True` for the git-tracked tier, `allow_host_writes=True` for a user-tier landing).
 - **`pull`** brings one runtime's copy of a `kind="skills|agents|commands"` artifact (`name=…`) back into the canonical Store — the reverse of `sync`/push. Dry-run preview by default; `apply=True` executes. `from_runtime` selects the source (required when runtime copies diverge — ADR-0030 §5), `scope="user|project_shared"` the destination tier (explicit for the git-tracked tier — ADR-0030 §11; `project_local` is rejected), `overwrite=True` replaces an existing Store entry, snapshotting the current canonical first (agents/commands into `versions/vN.md`; skills into a `versions/vN/` tree, preserving Store-owned `overrides/` and `versions/` — ADR-0030 §10), `confirm_project_shared=True` / `allow_host_writes=True` for the git-tracked / user-tier landing, and `force_unsafe_import=True` (literal) to bypass Gate A for a reviewed false positive on the user tier only. Mirrors `mm context pull` and the web Pull route.

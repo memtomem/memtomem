@@ -51,7 +51,16 @@ def test_search_json_chunk_id_feeds_agent_share(tmp_path, monkeypatch) -> None:
 
     r = runner.invoke(
         cli,
-        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+        [
+            "init",
+            "--non-interactive",
+            "--provider",
+            "none",
+            "--memory-dir",
+            str(mem_dir),
+            "--mcp",
+            "skip",
+        ],
     )
     assert r.exit_code == 0, f"init failed: {r.output}"
 

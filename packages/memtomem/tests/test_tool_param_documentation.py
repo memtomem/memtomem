@@ -8,10 +8,9 @@ help catalog listed bare types (``scope: TargetScope = 'user'``) and an agent
 had to guess. Four of them hid ``force_unsafe``, the redaction-guard bypass.
 
 The coverage check is deliberately scoped to the whole tool surface rather
-than to ``ACTIONS``: a direct-only tool (``mem_context_migrate``) and the
-register-only actions (``mem_ingest``, ``mem_increment_access``,
-``mem_version``) each appear on exactly one of the two surfaces, and both are
-read by somebody.
+than to ``ACTIONS``: the register-only actions (``mem_ingest``,
+``mem_increment_access``, ``mem_version``) appear on only one of the two
+surfaces, and both are read by somebody.
 """
 
 from __future__ import annotations
@@ -53,9 +52,7 @@ def test_no_tool_takes_variadic_arguments() -> None:
     """``*args`` / ``**kwargs`` would publish an empty MCP parameter schema.
 
     ``_params`` cannot name what it cannot see, so reject the shape outright
-    rather than let a variadic tool pass the coverage check vacuously. The
-    deprecated ``mem_context_migrate`` alias repeats its signature explicitly
-    for exactly this reason.
+    rather than let a variadic tool pass the coverage check vacuously.
     """
     offenders = [
         f"{filename}::{node.name}"

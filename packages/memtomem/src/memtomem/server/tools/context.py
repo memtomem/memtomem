@@ -1237,7 +1237,7 @@ async def mem_context_memory_migrate(
     ever covered *memory*-tier migration, but the bare name implied it
     mirrored the full CLI ``mm context migrate`` (which also does artifact
     flat→dir and scope-tier moves — see ``mem_context_artifact_migrate``).
-    The old name remains as a deprecated alias.
+    The old name was a deprecated alias and was removed in v0.5.0 (#1619).
 
     Mirrors the CLI ``mm context memory-migrate <SOURCE> --from <scope>
     --to <scope> [--apply] [--confirm-project-shared]``
@@ -1369,56 +1369,6 @@ async def mem_context_memory_migrate(
     if stderr_tail:
         stdout_text = f"{stdout_text}\n{stderr_tail}" if stdout_text else stderr_tail
     return stdout_text or "Nothing to migrate."
-
-
-@mcp.tool()
-@tool_handler
-async def mem_context_migrate(
-    source: str,
-    from_scope: str,
-    to_scope: str,
-    apply: bool = False,
-    confirm_project_shared: bool = False,
-    ctx: CtxType = None,
-) -> str:
-    """DEPRECATED alias for mem_context_memory_migrate.
-
-    Renamed in #1147 (B5-2): ``mem_context_migrate`` only ever covered
-    *memory*-tier migration, but its bare name implied parity with the
-    full CLI ``mm context migrate`` (which also does artifact flat→dir and
-    scope-tier moves, now exposed as ``mem_context_artifact_migrate``).
-    Use ``mem_context_memory_migrate`` instead; this alias forwards every
-    argument unchanged and **will be removed in v0.5.0** (timeline recorded
-    in CHANGELOG "Deprecations", #1619 — deprecated since v0.3.x/#1147).
-
-    The explicit signature is repeated (rather than ``**kwargs``) because
-    the MCP schema is built by inspecting the function signature — a
-    ``**kwargs`` alias would publish an empty parameter schema. Not
-    routed through ``mem_do`` directly: the registry alias
-    ``"context_migrate" → "context_memory_migrate"`` (``tools/meta.py``)
-    keeps the old ``mem_do`` action name working.
-
-    Args:
-        source: Single markdown file path OR a glob pattern. Forwarded
-            unchanged to ``mem_context_memory_migrate``.
-        from_scope: Source memory tier — ``user``, ``project_shared``, or
-            ``project_local``.
-        to_scope: Target memory tier (same vocabulary); must differ from
-            ``from_scope``.
-        apply: Execute the migration. ``False`` (default) returns a dry-run
-            preview.
-        confirm_project_shared: Required when ``to_scope="project_shared"``;
-            without it the call returns a ``needs confirmation`` message
-            instead of touching disk.
-    """
-    return await mem_context_memory_migrate(
-        source=source,
-        from_scope=from_scope,
-        to_scope=to_scope,
-        apply=apply,
-        confirm_project_shared=confirm_project_shared,
-        ctx=ctx,
-    )
 
 
 # ── Artifact migration (flat→dir + scope-tier) ──────────────────────────────

@@ -1142,7 +1142,7 @@ def _step_settings(state: dict) -> None:
 def _step_mcp(state: dict) -> None:
     # #449: ``--mcp`` pre-sets ``state["mcp_choice"]`` via ``_override_from_flags``
     # in the ``--preset`` branch. Skip the prompt so the flag isn't silently
-    # discarded. The ``-y`` branch omits this step entirely; the default picker
+    # discarded. The ``--non-interactive`` branch omits this step entirely; the picker
     # branch applies overrides *after* ``run_steps`` so the key is absent here.
     if "mcp_choice" in state:
         return
@@ -1456,7 +1456,7 @@ def _maybe_offer_embedding_reset(state: dict, *, interactive: bool) -> None:
 
     Interactive: prompt before the destructive reset (default=yes so the
     wizard's common case flows forward without extra typing). Non-interactive
-    (``-y`` / piped stdin): print a loud warning pointing at the exact
+    (``--non-interactive`` / piped stdin): print a loud warning pointing at the exact
     recovery command instead of guessing.
     """
     import asyncio
@@ -1700,7 +1700,7 @@ def _install_extras(
     and MUST be ``None`` for ``"tool"`` / ``"uvx"``. Callers are expected
     to branch on the install type before calling.
 
-    Non-interactive contexts (no TTY on stdin — scripted ``mm init -y
+    Non-interactive contexts (no TTY on stdin — scripted ``mm init --non-interactive
     </dev/null``, CI jobs, Docker build steps) skip the prompt entirely
     and return ``False`` so the caller falls through to the Phase 1
     hint. This is the only sensible choice: ``click.prompt`` raises
@@ -1729,7 +1729,7 @@ def _install_extras(
 
     # Non-TTY: skip prompt and defer to Phase 1 hint. Without this,
     # click.prompt raises Abort! on stdin EOF — a regression for every
-    # scripted `mm init -y` pipeline that worked on v0.1.19.
+    # scripted `mm init --non-interactive` pipeline that worked on v0.1.19.
     if not sys.stdin.isatty():
         return False
 
@@ -1956,7 +1956,7 @@ def _maybe_seed_initial_index(paths: list[Path], state: dict) -> bool:
     1. No existing paths / empty union → silent skip. The wizard already
        printed ``Memory: <dir>``; adding "no files found" noise would
        confuse.
-    2. Non-TTY (CI, piped ``mm init -y``) → silent skip. ``click.confirm``
+    2. Non-TTY (CI, piped ``mm init --non-interactive``) → silent skip. ``click.confirm``
        with no TTY raises ``Abort``, so we gate explicitly
        (``feedback_click_prompt_needs_isatty_gate.md``).
     3. Small (both axes under threshold) → short confirm, default No.
@@ -2060,7 +2060,7 @@ def _maybe_offer_startup_backfill(state: dict) -> None:
     ``state["startup_backfill"] = True`` so
     :func:`_write_config_and_summary` emits
     ``indexing.startup_backfill = true`` to ``config.json``. No-op when
-    not a TTY (CI, ``mm init -y``) so piped runs stay deterministic.
+    not a TTY (CI, ``mm init --non-interactive``) so piped runs stay deterministic.
     """
     if not sys.stdin.isatty():
         return
@@ -2131,11 +2131,11 @@ def _collect_missing_extras(state: dict) -> list[str]:
     # call the Ollama server / OpenAI API over HTTP via ``httpx`` (a core
     # dependency) and never import the ``ollama`` / ``openai`` PyPI clients, so
     # gating them on those packages was a false failure path that aborted valid
-    # ``mm init -y --provider ollama|openai`` runs. The real preconditions are
+    # ``mm init --non-interactive --provider ollama|openai`` runs. The real preconditions are
     # the Ollama server (binary) and an OpenAI API key, neither of which a
     # package check proves.
     # [korean] = kiwipiepy. The tokenizer falls back to unicode61 at runtime
-    # if kiwipiepy is absent, so missing it is not fatal — but `mm init -y
+    # if kiwipiepy is absent, so missing it is not fatal — but `mm init --non-interactive
     # --tokenizer kiwipiepy` should still be caught up front (#396).
     if state.get("tokenizer") == "kiwipiepy" and not have_kiwipiepy:
         missing.append("korean")
@@ -2146,7 +2146,7 @@ def _collect_missing_extras(state: dict) -> list[str]:
     return [x for x in missing if x not in warned]
 
 
-# Extras that ``-y`` must refuse to write a config for when absent. ``web``
+# Extras that ``--non-interactive`` must refuse to write a config for when absent. ``web``
 # is excluded — scripted runs often use ``--mcp skip`` without any intention
 # to run the web UI, and the runtime fallback (clear ``mm web`` error on
 # missing fastapi) is already loud. ``ollama`` / ``openai`` are excluded too:
@@ -3064,9 +3064,9 @@ _MODEL_DIMS: dict[str, int] = {
     "legacy_yes",
     is_flag=True,
     help=(
-        "Deprecated alias for --non-interactive. From v0.5.0, -y on "
-        "`mm init` will be accepted but ignored (init has no confirmation "
-        "prompt to skip); use --non-interactive in scripts."
+        "Accepted and ignored; `mm init` has no confirmation prompt to "
+        "skip. It was a deprecated alias for --non-interactive through "
+        "0.4.x; use --non-interactive in scripts."
     ),
 )
 @click.option("--provider", type=click.Choice(["none", "onnx", "ollama", "openai"]), default=None)
@@ -3179,21 +3179,20 @@ def init(
         click.echo()
 
     if legacy_yes:
-        # #1616/#1631 stage 2: `-y` is now a separate flag so the deprecation
-        # warning fires only for the legacy spelling — --non-interactive users
-        # are already on the stage-3 entry point. Warn on every parsed `-y`
-        # use, before any usage-error exit and preset or not: at v0.5.0 `-y`
-        # stops implying --non-interactive entirely, so `-y --preset english`
-        # scripts break too.
+        # #1616/#1631 stage 3 (v0.5.0): `-y` no longer implies
+        # --non-interactive. It is accepted and ignored, matching every other
+        # `mm` command where -y skips a confirmation prompt — init has none.
+        # The notice stays (rather than going silent) because the flip is
+        # breaking for `-y`-only scripts: they now get the wizard, and a
+        # script that reached here in 0.4.x needs to be told why.
         click.secho(
-            "  Deprecated: `-y` as a wizard-skip alias for --non-interactive "
-            "will be removed in v0.5.0; `mm init -y` will then run the wizard "
-            "(-y becomes a no-op — init has no confirmation prompt). "
-            "Use --non-interactive in scripts. (#1631)",
+            "  Note: `-y` is accepted but ignored on `mm init` — it no longer "
+            "implies --non-interactive (deprecated through 0.4.x, changed in "
+            "0.5.0). `mm init` has no confirmation prompt to skip; use "
+            "--non-interactive in scripts. (#1631)",
             fg="yellow",
             err=True,
         )
-        non_interactive = True
 
     if preset and advanced:
         raise click.UsageError("--preset and --advanced are mutually exclusive")
@@ -3210,6 +3209,19 @@ def init(
         _step_settings,
         _step_mcp,
     ]
+
+    # #1631: every branch below except ``non_interactive`` runs wizard steps
+    # that read stdin. Without a terminal those steps take EOF, which
+    # ``run_steps`` reports as a user cancellation — an exit-0 no-op that
+    # tells a script it succeeded while writing nothing. Refuse once, here,
+    # rather than per-branch: `--preset X` and `--advanced` are as scripted
+    # a spelling as the default picker, and before the `-y` flip a
+    # `-y --preset X` caller reached the scripted path instead of this.
+    if not non_interactive and not _isatty():
+        raise click.UsageError(
+            "Non-interactive terminal detected. Pass --non-interactive "
+            "(optionally with --preset <name>)."
+        )
 
     if non_interactive:
         # `mm init --non-interactive` alone behaves as `--preset minimal
@@ -3255,7 +3267,7 @@ def init(
         _resolve_provider_dirs_non_interactive(state, effective_preset, include_providers)
 
         # #396: fail loudly when the requested provider / tokenizer needs an
-        # extra that isn't importable. Previously `-y` silently wrote the
+        # extra that isn't importable. Previously the scripted path silently wrote the
         # config and the mismatch surfaced only at runtime (e.g. `mm index`
         # would enter degraded mode for onnx without fastembed). Scripted
         # workflows prefer a non-zero exit here over a stale config.
@@ -3300,11 +3312,8 @@ def init(
         run_steps([_step_memory_dir, _step_provider_dirs_auto, _step_mcp], state)
     else:
         # Default interactive path: show the preset picker, dispatch on choice.
-        if not _isatty():
-            raise click.UsageError(
-                "Non-interactive terminal detected. Pass --non-interactive "
-                "(optionally with --preset <name>)."
-            )
+        # (The non-TTY refusal is hoisted above, shared with the other
+        # interactive branches.)
         # Combine the picker with its follow-up steps in ONE run_steps call so
         # "b" at ``_step_memory_dir`` navigates back to the picker (#371). The
         # previous split ran picker alone in a separate call, which left

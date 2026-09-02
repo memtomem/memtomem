@@ -171,8 +171,8 @@ class TestContextSurfacePosture:
     absence, so adding a verb later must consciously flip this test rather than
     slip in unnoticed."""
 
-    # The 10 @register("context") actions. mem_context_migrate is @mcp.tool()
-    # only (a deprecated alias, not @register-ed), so it is not in ACTIONS.
+    # The 10 @register("context") actions. (v0.5.0/#1619 retired the
+    # @mcp.tool()-only mem_context_migrate alias, which was never in ACTIONS.)
     _EXPECTED_CONTEXT_ACTIONS = frozenset(
         {
             "context_init",

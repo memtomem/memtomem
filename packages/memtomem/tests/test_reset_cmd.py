@@ -110,7 +110,16 @@ def _init_and_index(home: Path, runner: CliRunner) -> Path:
     (mem_dir / "note.md").write_text("# memo\n\nhello reset test\n", encoding="utf-8")
     r = runner.invoke(
         cli,
-        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+        [
+            "init",
+            "--non-interactive",
+            "--provider",
+            "none",
+            "--memory-dir",
+            str(mem_dir),
+            "--mcp",
+            "skip",
+        ],
     )
     assert r.exit_code == 0, f"init failed: {r.output}"
     r = runner.invoke(cli, ["index", str(mem_dir)])
@@ -297,7 +306,16 @@ class TestResetJson:
         mem_dir.mkdir(exist_ok=True)
         r = runner.invoke(
             cli,
-            ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+            [
+                "init",
+                "--non-interactive",
+                "--provider",
+                "none",
+                "--memory-dir",
+                str(mem_dir),
+                "--mcp",
+                "skip",
+            ],
         )
         assert r.exit_code == 0, r.output
 

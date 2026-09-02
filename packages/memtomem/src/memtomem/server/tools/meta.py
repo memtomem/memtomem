@@ -21,9 +21,6 @@ _ALIASES: dict[str, str] = {
     "namespace_assign": "ns_assign",
     "tag_auto": "auto_tag",
     "orphans": "cleanup_orphans",
-    # Deprecated: mem_context_migrate was renamed to mem_context_memory_migrate
-    # in #1147 (B5-2). Keep the old mem_do action name working.
-    "context_migrate": "context_memory_migrate",
     # Discoverability shortcut for the artifact-migration tool (#1147 B5-1).
     "artifact_migrate": "context_artifact_migrate",
     # Discoverability shortcut for the ADR-0022 promote tool (PR2). There is

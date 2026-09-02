@@ -166,8 +166,11 @@ mm init --non-interactive --preset korean --mcp skip
 mm init --advanced
 ```
 
-`-y` is a deprecated alias for `--non-interactive`; scripts should use the
-long option before v0.5.0 changes `-y` into an accepted no-op.
+`-y` was a deprecated alias for `--non-interactive` through 0.4.x. Since
+v0.5.0 it is accepted and ignored — `mm init` has no confirmation prompt to
+skip — so scripts must pass `--non-interactive`. `mm init --advanced` and
+`mm init --preset <name>` are interactive: without a terminal they refuse
+rather than run their prompts against EOF.
 
 ## First use
 

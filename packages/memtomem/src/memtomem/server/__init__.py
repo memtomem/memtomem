@@ -181,7 +181,6 @@ from memtomem.server.tools.context import (
     mem_context_diff,
     mem_context_sync,
     mem_context_memory_migrate,
-    mem_context_migrate,  # deprecated alias for mem_context_memory_migrate (#1147 B5-2)
     mem_context_artifact_migrate,
     mem_context_artifact_transfer,  # ADR-0023 A-13 — cross-project/tier copy+move
     mem_context_version,  # ADR-0022 PR2 — version snapshots (list/create)

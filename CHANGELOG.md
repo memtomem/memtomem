@@ -7,6 +7,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Breaking
 
+- **`mm init -y` is now accepted and ignored; use `--non-interactive`.** The
+  final stage of the #1616 → #1631 deprecation, whose window 0.4.0 shipped: a
+  `-y` on `mm init` no longer implies `--non-interactive`. Every other `mm`
+  command reads `-y` as "skip the confirmation prompt", and `mm init` has no
+  confirmation prompt to skip, so the alias meant something different here than
+  everywhere else. A script that ran `mm init -y` and nothing more now reaches
+  the wizard and, without a terminal, stops with `Non-interactive terminal
+  detected. Pass --non-interactive (optionally with --preset <name>).` — a
+  refusal that names the flag that works, rather than a silent minimal-preset
+  install. `-y` still prints a note explaining the change rather than going
+  quiet, because the break is invisible otherwise. `--non-interactive` is
+  unchanged and was already the spelling every error path and doc taught.
+  (#1631)
+
+- **The `mem_context_migrate` alias is removed.** Deprecated since v0.3.x when
+  #1147 renamed it to `mem_context_memory_migrate` — the old bare name implied
+  parity with `mm context migrate`, which also does artifact flat→dir and
+  scope-tier moves — and documented for removal in v0.5.0 ever since. Both
+  compatibility surfaces are gone: the directly-registered `full`-mode tool and
+  the `mem_do(action="context_migrate")` entry in `_ALIASES`. Callers use
+  `mem_context_memory_migrate` / `mem_do(action="context_memory_migrate")`,
+  which take the same arguments. `full` mode now exposes 100 names rather than
+  101, and the registry and the documented tool table are the same set again —
+  this was the last tool exempt from `@register`. (#1619)
+
 - **Chunks reached by id now honour the project boundary.** `mem_read`,
   `mem_expand`, `mem_related` / `mem_link` / `mem_unlink`, `mem_agent_share`,
   `mem_edit` / `mem_delete`, `mm agent share`, the
@@ -386,6 +411,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (#2092)
 
 ### Fixed
+
+- **`mm init --preset <name>` and `mm init --advanced` refuse without a
+  terminal instead of reporting success.** Both run wizard steps that read
+  stdin. With no terminal those steps took EOF, which the step runner reports
+  as a user cancellation — so a CI job got `Wizard cancelled.`, exit 0, and no
+  config file, then carried on as though initialization had happened. Only the
+  default picker checked for a terminal. The check now sits in front of every
+  branch except `--non-interactive`, so all three interactive spellings fail
+  with `Non-interactive terminal detected. Pass --non-interactive (optionally
+  with --preset <name>).` and exit 2. `--non-interactive`, with or without a
+  preset, is unaffected. This surfaced while flipping `-y` (#1631): the flip
+  routes `mm init -y --preset X` out of the scripted path, and without this it
+  would have turned a working scripted install into a silent no-op. (#1631)
 
 - **Retired component generations no longer pile up for the life of the
   process.** `revert_to_stored` records the generation it retires so shutdown

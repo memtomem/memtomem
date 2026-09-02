@@ -73,7 +73,7 @@ def xss_dev_server() -> Iterator[str]:
                 "run",
                 "mm",
                 "init",
-                "-y",
+                "--non-interactive",
                 "--provider",
                 "none",
                 "--preset",

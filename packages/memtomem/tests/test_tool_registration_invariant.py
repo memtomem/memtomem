@@ -32,13 +32,15 @@ from memtomem.server.tool_registry import ACTIONS
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "server" / "tools"
 
-#: ``mem_context_migrate`` is a deprecated compatibility alias. It is exposed
-#: directly in ``full`` mode for old clients, while ``mem_do`` reaches the same
-#: implementation through the ``context_migrate`` entry in ``_ALIASES``
-#: (``server/tools/meta.py``) — registering it a second time would put a
-#: duplicate action in the help catalog. This is the ONLY tool allowed to skip
-#: ``@register``; anything else is the ``mem_ask`` bug repeating.
-_ALIAS_EXEMPT = frozenset({"mem_context_migrate"})
+#: Empty since v0.5.0 (#1619), which retired ``mem_context_migrate`` — the one
+#: tool that was ever allowed to skip ``@register`` (it was exposed directly in
+#: ``full`` mode for old clients while ``mem_do`` reached the same
+#: implementation through ``_ALIASES``, so registering it twice would have put
+#: a duplicate action in the help catalog). The set is kept rather than deleted
+#: so a future exemption has to be added deliberately, with a reason; an
+#: unregistered tool appearing here by accident is the ``mem_ask`` bug
+#: repeating.
+_ALIAS_EXEMPT: frozenset[str] = frozenset()
 
 
 def _decorated_tools() -> tuple[set[str], set[str]]:
