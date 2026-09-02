@@ -33,10 +33,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   hub and both endpoints of every counted edge before ranking, so `link_count`
   is the visible degree and the limit cuts the caller's own ordering. The
   `limit * 4` over-fetch and per-hub recount `mem_reflect` carried as a
-  mitigation are gone with it, which also removes the disagreement between the
-  two: the Python recount treated a neighbour it could not resolve as visible,
-  the aggregate requires both ends inside the boundary. A hub whose every edge
-  leaves the boundary is absent rather than reported as `0`. (#2244)
+  mitigation are gone with it, and with them two ways the rendered count
+  disagreed with the aggregate. The recount treated a neighbour it could not
+  resolve as visible, where the aggregate requires both ends inside the
+  boundary; and it ignored `namespace` entirely, so `mem_reflect(namespace=X)`
+  used to filter the hubs by `X` while counting their links to every other
+  namespace. Both ends are screened on both axes now, so those calls report
+  smaller, self-consistent numbers. A hub whose every edge leaves the boundary
+  is absent rather than reported as `0`. The degree is also the number of
+  distinct neighbours a caller can follow: a self-relation and the reciprocal
+  row pair a bidirectional link leaves behind each count once, where summing
+  the two edge directions counted them twice and let them distort the ranking.
+  (#2244)
 
 ## [0.5.0] — 2026-09-02
 

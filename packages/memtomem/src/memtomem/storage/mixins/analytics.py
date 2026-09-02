@@ -219,17 +219,23 @@ class AnalyticsMixin:
         """
         db = self._get_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
+        # ``adjacency`` is the undirected neighbour set ``get_related`` returns,
+        # restricted to visible endpoints: each stored row read from both ends,
+        # deduplicated on ``(hub, neighbour, relation_type)`` by the ``UNION``.
+        # Summing two directed ``COUNT``s instead would count a self-relation
+        # twice and a reciprocal pair — the two rows a bidirectional ``mem_link``
+        # leaves behind — twice each, inflating the degree above the number of
+        # links a caller can actually follow, and with it the ranking.
         rows = db.execute(
             "SELECT chunk_id, link_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
-            f"{visible_sql}), degrees AS ("
-            "  SELECT r.source_id as chunk_id, COUNT(*) as cnt FROM chunk_relations r "
+            f"{visible_sql}), adjacency AS ("  # nosec B608
+            "  SELECT r.source_id AS chunk_id, r.target_id AS neighbour_id, "
+            "         r.relation_type AS rel FROM chunk_relations r "
             "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "
-            "  GROUP BY r.source_id "
-            "  UNION ALL "
-            "  SELECT r.target_id, COUNT(*) FROM chunk_relations r "
-            "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "
-            "  GROUP BY r.target_id"
-            ") SELECT chunk_id, SUM(cnt) AS link_count FROM degrees "
+            "  UNION "
+            "  SELECT r.target_id, r.source_id, r.relation_type FROM chunk_relations r "
+            "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id"
+            ") SELECT chunk_id, COUNT(*) AS link_count FROM adjacency "
             "GROUP BY chunk_id ORDER BY link_count DESC, chunk_id ASC LIMIT ?)",
             [*params, limit],
         ).fetchall()

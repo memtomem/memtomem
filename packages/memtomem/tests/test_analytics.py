@@ -322,6 +322,53 @@ class TestMostConnectedBoundary:
         assert [row["chunk_id"] for row in rows] == [str(thick.id)]
 
     @pytest.mark.asyncio
+    async def test_a_self_relation_counts_once(self, storage, components):
+        """One stored row is one link, read from either end.
+
+        The degree is the number of neighbours a caller could follow, which is
+        what ``get_related`` returns. Reading the row from both ends and
+        summing would report a chunk linked only to itself as having two.
+        """
+        hub = _project_chunk(components, self.PROJECT_A, "alpha-hub", "alpha")
+        spoke = _project_chunk(components, self.PROJECT_A, "alpha-spoke", "alpha")
+        await self._store(storage, components, [hub, spoke], [(hub, hub), (hub, spoke)])
+
+        rows = await storage.get_most_connected(project_context_root=self.PROJECT_A)
+
+        assert {row["chunk_id"]: row["link_count"] for row in rows} == {
+            str(hub.id): 2,
+            str(spoke.id): 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_reciprocal_pair_counts_as_one_link(self, storage, components):
+        """Two rows for the same undirected edge are still one neighbour.
+
+        ``add_relation`` called with the endpoints swapped stores a second row
+        — the primary key is the ordered pair — and both describe the same
+        link. Counting each direction separately would double every such edge
+        and let it outrank a genuinely better-connected hub.
+        """
+        left = _project_chunk(components, self.PROJECT_A, "alpha-left", "alpha")
+        right = _project_chunk(components, self.PROJECT_A, "alpha-right", "alpha")
+        rival = _project_chunk(components, self.PROJECT_A, "alpha-rival", "alpha")
+        rival_spokes = [
+            _project_chunk(components, self.PROJECT_A, f"alpha-rival-spoke-{i}", "alpha")
+            for i in range(2)
+        ]
+        await self._store(
+            storage,
+            components,
+            [left, right, rival, *rival_spokes],
+            [(left, right), (right, left)] + [(rival, s) for s in rival_spokes],
+        )
+
+        rows = await storage.get_most_connected(limit=1, project_context_root=self.PROJECT_A)
+
+        assert [row["chunk_id"] for row in rows] == [str(rival.id)]
+        assert rows[0]["link_count"] == 2
+
+    @pytest.mark.asyncio
     async def test_namespace_filter_composes_with_the_boundary(self, storage, components):
         """``namespace=`` narrows within the boundary; it does not replace it."""
         hub = _project_chunk(components, self.PROJECT_A, "alpha-hub", "alpha", namespace="work")
