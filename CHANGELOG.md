@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm web` starts watching files again after an embedding reset, instead of
+  asking for a restart.** A degraded start — a broken or mismatched embedding —
+  leaves auto-indexing off by design, because the indexer would crash on the
+  missing vector table. The MCP server has recovered from that in-process since
+  the previous release: its reset starts what startup skipped. `mm web` could
+  not, because its degraded startup never constructed a watcher at all, so
+  there was nothing for `POST /api/embedding-reset` to start and edits went
+  unindexed for the life of the process. It now builds the watcher in every
+  mode and starts it only when the embedding is healthy, matching the MCP
+  server, and the reset starts the stopped one. The response message says what
+  actually happened rather than always naming a restart: watching resumed, or
+  the start failed and the reset can be run again, or it failed in a way only a
+  restart clears. Recovery is idempotent, so a second reset never starts a
+  duplicate watcher. The start and its failure handling are now one shared
+  helper used by both servers, since having been written twice is how `mm web`
+  came to have no recovery at all. Note `mm web` still runs no consolidation or
+  policy scheduler and no health watchdog in any mode. (#2188)
+
 ### Breaking
 
 - **The health report's `sessions` / `working_memory` counts are now `null`
