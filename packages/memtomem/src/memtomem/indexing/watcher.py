@@ -193,6 +193,16 @@ class FileWatcher:
         """Schedule the watched roots and start the observer and processor task."""
         async with self._lifecycle_lock:
             loop = asyncio.get_running_loop()
+            # A fresh queue per lifecycle. ``stop`` signals the processor by
+            # enqueueing a sentinel, and a processor that misses it — the five
+            # second wait times out and the task is cancelled — leaves it
+            # sitting in the queue. Reusing that queue would hand the next
+            # processor a stale stop order: it would exit at once while the
+            # caller recorded a started watcher, so an embedding reset would
+            # report file watching back on with nothing draining events.
+            # Pending events from the stopped lifecycle go with it; a start
+            # runs a backfill over the watched roots anyway.
+            self._queue = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
             handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
             self._handler = handler
             backend = effective_watcher_backend(self._config)
@@ -361,7 +371,15 @@ class FileWatcher:
                         pass
             if self._observer:
                 self._observer.stop()
-                self._observer.join()
+                # Only join a thread that actually started. An observer whose
+                # ``start`` failed part-way has stopped emitters but no
+                # dispatcher thread, and watchdog raises ``RuntimeError:
+                # cannot join thread before it is started`` for that — which
+                # would reach the failed-start cleanup as a stop that failed
+                # and bar the retry over a watcher holding nothing. Same guard
+                # the replacement-observer cleanup in ``reconfigure`` uses.
+                if self._observer.is_alive():
+                    self._observer.join()
             self._observer = None
             self._observer_backend = None
             self._handler = None

@@ -27,7 +27,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   start, stop and `reconfigure` now share one lock: a watcher that can be
   started long after startup can also be reconfigured by a memory-directory
   route while a stop is midway through dismantling it, and those watches would
-  have been scheduled onto a dying observer and silently lost. Note `mm web`
+  have been scheduled onto a dying observer and silently lost. Two more states
+  only a restart could reach are fixed with it: stopping a watcher whose
+  observer failed to start no longer raises trying to join a thread that never
+  ran, which would have barred any further recovery in the process; and each
+  start gets a fresh event queue, so a stop order left behind by a processor
+  that missed it cannot kill the next one on arrival and leave the reset
+  reporting file watching back on with nothing draining events. Note `mm web`
   still runs no consolidation or policy scheduler and no health watchdog in any
   mode. (#2188)
 
