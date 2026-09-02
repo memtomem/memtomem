@@ -5,20 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-### Changed
+### Breaking
 
-- **The health report says "not project-scoped" instead of counting 0.** The
-  `sessions` and `working_memory` blocks of `mem_eval` / `GET /api/eval` have
-  no per-project answer to give — neither table carries a `project_root`, so a
-  project-scoped report cannot count them without leaking whole-store numbers.
-  They used to fail closed by reporting `0`, which is indistinguishable from
-  "this install has no sessions": an install with hundreds of live sessions
-  showed `0` / `0 active`, reading as data loss rather than as a scoping
-  decision. Both blocks now arrive as `{"total": null, ..., "available": false,
-  "reason": "no_project_identity"}`, the Web UI cards render an em dash with a
-  "Not project-scoped" label and an explanatory tooltip, and `mem_eval` drops
-  the two sections in favour of one line saying why. Consumers must branch on
-  `available` before formatting the counts; the watchdog's
+- **The health report's `sessions` / `working_memory` counts are now `null`
+  behind an `available: false` flag.** Neither table carries a `project_root`,
+  so a project-scoped report — `mem_eval`, `GET /api/eval` — cannot count them
+  without leaking whole-store numbers across projects. Through 0.5.0 it counted
+  them anyway; the fix for that (unreleased) reported `0` instead, which is
+  indistinguishable from "this install has no sessions": an install with
+  hundreds of live sessions showed `0` / `0 active` in the Web UI health cards,
+  reading as data loss rather than as a scoping decision. Both blocks now
+  arrive as `{"total": null, ..., "available": false, "reason":
+  "no_project_identity"}`. A consumer that reads `report["sessions"]["total"]`
+  as a number must branch on `available` first; system-wide maintenance can
+  still query those tables directly. The Web UI cards render an em dash with a
+  "Not project-scoped" label and an explanatory tooltip, `mem_eval` drops the
+  two sections in favour of one line saying why, and the watchdog's
   `full_health_report.active_sessions` is `null` for the same reason. (#2281)
 
 ## [0.5.0] — 2026-09-02

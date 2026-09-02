@@ -75,4 +75,82 @@ describe('health report — blocks with no project-scoped answer', () => {
     expect(card.textContent).toContain(ko['settings.health.not_project_scoped']);
     expect(card.getAttribute('title')).toBe(ko['settings.health.not_project_scoped_hint']);
   });
+
+  it('degrades a malformed 200 to the error state instead of a stuck spinner', async () => {
+    // The render reads ``d.access_coverage.pct``; a body missing the block
+    // throws mid-template. That must land on the error state (which offers
+    // Retry), not leave the panel on "Loading…".
+    const dom = await boot({ total_chunks: 1 });
+    const report = reportOf(dom);
+
+    expect(report.querySelector('.page-state--loading')).toBeNull();
+    expect(report.querySelector('[role="alert"]')).toBeTruthy();
+    expect(report.querySelector('.page-state-retry')).toBeTruthy();
+  });
+
+  it('keeps markup in API values inert', async () => {
+    const report = reportOf(await boot({
+      ...UNAVAILABLE,
+      top_accessed: [{ id: '<img src=x onerror="window.__pwned = true">', content: '<script>1</script>', access_count: 1 }],
+      namespace_distribution: [{ namespace: '<b>ns</b>', count: 2 }],
+    }));
+
+    expect(report.querySelector('img')).toBeNull();
+    expect(report.querySelector('b')).toBeNull();
+    expect(report.textContent).toContain('<b>ns</b>');
+  });
+
+  describe('overlapping refreshes', () => {
+    // A slower earlier fetch must not repaint over a newer one. Each test
+    // drives fetch by hand so the two requests are genuinely in flight at once.
+    function deferredEval(window) {
+      let settle;
+      const gate = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+      const realFetch = window.fetch;
+      window.fetch = async (input, init) => {
+        const url = typeof input === 'string' ? input : input?.url;
+        if (url && url.split('?')[0] === '/api/eval') {
+          return gate;
+        }
+        return realFetch(input, init);
+      };
+      return { settle, restore: () => { window.fetch = realFetch; } };
+    }
+
+    const jsonOk = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+
+    it('ignores a stale success that lands after a newer one', async () => {
+      const dom = await boot(UNAVAILABLE);
+      const { window } = dom;
+      const stale = deferredEval(window);
+      const first = window.loadHarnessHealth();  // in flight, gated
+
+      stale.restore();
+      await window.loadHarnessHealth();  // newer request wins
+      expect(reportOf(dom).textContent).toContain('Not project-scoped');
+
+      stale.settle.resolve(jsonOk({ ...UNAVAILABLE, sessions: { total: 99, active: 7, recent_7d: 7 } }));
+      await first;
+
+      expect(reportOf(dom).textContent).not.toContain('99');
+      expect(reportOf(dom).textContent).toContain('Not project-scoped');
+    });
+
+    it('ignores a stale failure that lands after a newer success', async () => {
+      const dom = await boot(UNAVAILABLE);
+      const { window } = dom;
+      const stale = deferredEval(window);
+      const first = window.loadHarnessHealth();
+
+      stale.restore();
+      await window.loadHarnessHealth();
+
+      stale.settle.reject(new Error('stale boom'));
+      await first;
+
+      const report = reportOf(dom);
+      expect(report.querySelector('[role="alert"]')).toBeNull();
+      expect(report.textContent).toContain('Not project-scoped');
+    });
+  });
 });

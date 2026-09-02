@@ -663,7 +663,20 @@ function _paintHealth() {
     });
     return;
   }
-  const d = v.data;
+  // A 200 whose body is missing a block the template reads throws mid-render.
+  // Degrade to the error state (which offers Retry) rather than leaving the
+  // panel on "Loading…" — the pre-refactor render sat inside the fetch's own
+  // try/catch and this path must keep that. Recursing is safe: the error
+  // branch above renders from strings only.
+  try {
+    report.innerHTML = _healthHtml(v.data);
+  } catch (e) {
+    _healthView = { kind: 'error', detail: (e && e.message) || String(e) };
+    _paintHealth();
+  }
+}
+
+function _healthHtml(d) {
   const pct = value => Math.min(100, Math.max(0, Number.isFinite(Number(value)) ? Number(value) : 0));
   const accessPct = pct(d.access_coverage.pct);
   const tagPct = pct(d.tag_coverage.pct);
@@ -687,7 +700,7 @@ function _paintHealth() {
         <div class="health-card-title">${escapeHtml(title)}</div>${inner}
       </div>`;
   };
-  report.innerHTML = `
+  return `
     <div class="health-grid">
       <div class="health-card card">
         <div class="health-card-title">Access Coverage</div>
