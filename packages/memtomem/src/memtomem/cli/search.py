@@ -137,7 +137,6 @@ async def _search(
     rerank: bool | None = None,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.cli._empty_results import explain_empty_result
     from memtomem.models import (
         InvalidNamespaceFilterError,
         InvalidScopeFilterError,
@@ -188,52 +187,97 @@ async def _search(
         raise click.ClickException(f"invalid --scope value '{scope}': {e}") from None
 
     async with cli_components() as comp:
-        project_context_root = _resolve_project_context_root_from_cwd(comp)
-        results, stats, hints = await run_search(
-            comp.search_pipeline,
+        await _search_with_components(
+            comp,
             query=query,
             top_k=top_k,
             source_filter=source_filter,
             tag_filter=tag_filter,
             namespace=namespace,
-            current_namespace=None,
-            as_of=as_of,
             scope=effective_scope,
-            project_context_root=project_context_root,
+            typed_scope=scope,
+            as_of=as_of,
+            fmt=fmt,
             rerank=rerank,
-            origin="cli",
         )
-        # Built inside the block: naming the filter that emptied the result
-        # needs the store, and ``cli_components`` has closed it by the time
-        # the message is printed (#2255). Gated on the format that prints it
-        # so ``--format json`` keeps its bare ``[]`` — and cannot start
-        # failing on a store read whose answer it would never show.
-        # ``run_search`` resolves the namespace as ``namespace or
-        # current_namespace``, so an empty one is no namespace at all — the
-        # branch that names a namespace as the cause must see what the query
-        # saw. ``filters`` is separate: it reports the command line as typed,
-        # claiming nothing about which option narrowed anything.
-        effective_namespace = namespace or None
-        empty_message = (
-            await explain_empty_result(
-                comp.storage,
-                namespace=effective_namespace,
-                filters=[
-                    (flag, value)
-                    for flag, value in (
-                        ("--source-filter", source_filter),
-                        ("--tag-filter", tag_filter),
-                        ("--namespace", namespace),
-                        ("--scope", scope),
-                        ("--as-of", as_of),
-                    )
-                    if value is not None
-                ],
-                count_flag="-k",
-            )
-            if not results and fmt in ("table", "plain")
-            else ""
+
+
+async def _search_with_components(
+    comp,
+    *,
+    query: str,
+    top_k: int,
+    source_filter: str | None,
+    tag_filter: str | None,
+    namespace: str | None,
+    scope: str | None,
+    as_of: str | None,
+    fmt: str,
+    typed_scope: str | None = None,
+    rerank: bool | None = None,
+) -> None:
+    """Run one search against already-open components and render it.
+
+    Split out of :func:`_search` so a sibling verb that has to resolve
+    something from the store first — ``mm agent search`` reads the active
+    session's agent binding — reuses this rendering instead of opening a
+    second set of components or growing a third copy of the formats
+    (``mm search`` and the interactive shell already have one each). The
+    caller owns validation; by the time this runs, the flags parsed.
+
+    ``scope`` is the value the search *runs with* — normalized by
+    ``validate_scope_vocabulary`` — while ``typed_scope`` is what the command
+    line carried. The empty-result diagnostic quotes the latter, so a caller
+    who typed ``--scope User`` is not shown the ``user`` it was folded to.
+    """
+    from memtomem.cli._empty_results import explain_empty_result
+
+    project_context_root = _resolve_project_context_root_from_cwd(comp)
+    results, stats, hints = await run_search(
+        comp.search_pipeline,
+        query=query,
+        top_k=top_k,
+        source_filter=source_filter,
+        tag_filter=tag_filter,
+        namespace=namespace,
+        current_namespace=None,
+        as_of=as_of,
+        scope=scope,
+        project_context_root=project_context_root,
+        rerank=rerank,
+        origin="cli",
+    )
+    # Built inside the block: naming the filter that emptied the result
+    # needs the store, and ``cli_components`` has closed it by the time
+    # the message is printed (#2255). Gated on the format that prints it
+    # so ``--format json`` keeps its bare ``[]`` — and cannot start
+    # failing on a store read whose answer it would never show.
+    # ``run_search`` resolves the namespace as ``namespace or
+    # current_namespace``, so an empty one is no namespace at all — the
+    # branch that names a namespace as the cause must see what the query
+    # saw. ``filters`` is separate: it reports the command line as typed,
+    # claiming nothing about which option narrowed anything.
+    effective_namespace = namespace or None
+    empty_message = (
+        await explain_empty_result(
+            comp.storage,
+            namespace=effective_namespace,
+            filters=[
+                (flag, value)
+                for flag, value in (
+                    ("--source-filter", source_filter),
+                    ("--tag-filter", tag_filter),
+                    ("--namespace", namespace),
+                    ("--scope", typed_scope),
+                    ("--as-of", as_of),
+                )
+                if value is not None
+            ],
+            count_flag="-k",
         )
+        if not results and fmt in ("table", "plain")
+        else ""
+    )
 
     # Hints go to stderr for every format, and before any format-specific
     # return: ``context``/``smart`` return early on an empty result set, which

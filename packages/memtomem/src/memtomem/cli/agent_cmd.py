@@ -439,6 +439,118 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     click.echo(f"- Indexed chunks: {stats.indexed_chunks}")
 
 
+# ── search ──────────────────────────────────────────────────────────────
+
+
+@agent.command("search")
+@click.argument("query")
+@click.option(
+    "--agent-id",
+    "-a",
+    default=None,
+    help="Agent whose scope to search. Defaults to the active session's agent.",
+)
+@click.option(
+    "--include-shared/--no-include-shared",
+    default=True,
+    show_default=True,
+    help="Also search the shared namespace.",
+)
+@click.option("--top-k", "-k", default=10, show_default=True, help="Number of results.")
+@click.option(
+    "--shared-namespace",
+    default=None,
+    help=(
+        "Shared bucket to merge in, for per-project agent teams "
+        "(e.g. ``shared:myproject``). Defaults to the global ``shared``."
+    ),
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json", "plain", "context", "smart"]),
+    default="table",
+    show_default=True,
+    help="Output format.",
+)
+def agent_search(
+    query: str,
+    agent_id: str | None,
+    include_shared: bool,
+    top_k: int,
+    shared_namespace: str | None,
+    fmt: str,
+) -> None:
+    """Search an agent's memories, merged with the shared namespace.
+
+    The shell twin of the ``mem_agent_search`` MCP tool, resolving the same
+    two buckets by the same rule: the agent's own ``agent-runtime:<id>``
+    scope plus, unless ``--no-include-shared``, the shared one. Without
+    ``--agent-id`` the agent comes from the active session's binding, the
+    way the MCP tool takes it from the session that started it; with no
+    session and no flag there is no agent to scope to, and the search runs
+    across every namespace.
+
+    Output formats are ``mm search``'s, not the MCP tool's — this is a CLI
+    command, and a shell pipeline expects ``--format json`` to mean what it
+    means everywhere else in this CLI.
+    """
+    try:
+        if agent_id is not None:
+            validate_agent_id(agent_id)
+        if shared_namespace is not None:
+            validate_namespace(shared_namespace)
+    except InvalidNameError as e:
+        raise click.ClickException(str(e)) from e
+    asyncio.run(
+        _run_agent_search(
+            query=query,
+            agent_id=agent_id,
+            include_shared=include_shared,
+            top_k=top_k,
+            shared_namespace=shared_namespace,
+            fmt=fmt,
+        )
+    )
+
+
+async def _run_agent_search(
+    *,
+    query: str,
+    agent_id: str | None,
+    include_shared: bool,
+    top_k: int,
+    shared_namespace: str | None,
+    fmt: str,
+) -> None:
+    from memtomem.cli._bootstrap import cli_components
+    from memtomem.cli._session_state import resolve_session_write_namespace
+    from memtomem.cli.search import _search_with_components
+    from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
+
+    async with cli_components() as comp:
+        # Priority mirrors ``_resolve_agent_namespace``: an explicit flag
+        # overrides the session, and the MCP chain's third step (the ambient
+        # ``current_namespace``) has no CLI equivalent, so it is simply absent.
+        if agent_id:
+            agent_ns: str | None = f"{_CURRENT_PREFIX}{agent_id}"
+        else:
+            agent_ns = await resolve_session_write_namespace(comp.storage)
+        ns_filter = merge_agent_namespace_filter(agent_ns, include_shared, shared_namespace)
+
+        await _search_with_components(
+            comp,
+            query=query,
+            top_k=top_k,
+            source_filter=None,
+            tag_filter=None,
+            namespace=ns_filter,
+            scope=None,
+            as_of=None,
+            fmt=fmt,
+        )
+
+
 # ── debug-resolve (hidden) ──────────────────────────────────────────────
 
 
@@ -475,7 +587,10 @@ def debug_resolve(
     from types import SimpleNamespace
 
     from memtomem.server.context import AppContext
-    from memtomem.server.tools.multi_agent import _resolve_agent_namespace
+    from memtomem.server.tools.multi_agent import (
+        _resolve_agent_namespace,
+        merge_agent_namespace_filter,
+    )
 
     fake_app = SimpleNamespace(
         current_agent_id=current_agent_id,
@@ -483,12 +598,7 @@ def debug_resolve(
     )
     agent_ns = _resolve_agent_namespace(cast(AppContext, fake_app), agent_id)
 
-    if include_shared and agent_ns:
-        ns_filter: str | None = f"{agent_ns},{SHARED_NAMESPACE}"
-    elif agent_ns:
-        ns_filter = agent_ns
-    else:
-        ns_filter = None
+    ns_filter = merge_agent_namespace_filter(agent_ns, include_shared)
 
     click.echo(
         _json.dumps(

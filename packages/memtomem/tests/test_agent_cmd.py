@@ -1,4 +1,4 @@
-"""Tests for ``mm agent`` (migrate / register / list / share / debug-resolve)."""
+"""Tests for ``mm agent`` (migrate / register / list / search / share / debug-resolve)."""
 
 from __future__ import annotations
 
@@ -409,3 +409,126 @@ class TestAgentDebugResolve:
         payload = json.loads(result.output)
         assert payload["agent_namespace"] is None
         assert payload["resolved_namespace_filter"] is None
+
+
+def _search_components(results=None):
+    """Components stub for ``mm agent search``: a pipeline that records how it
+    was called, plus the config the empty-result explainer reads."""
+    from memtomem.search.pipeline import RetrievalStats
+
+    storage = SimpleNamespace(
+        get_current_session=AsyncMock(return_value=None),
+        count_chunks=AsyncMock(return_value=0),
+        list_namespaces=AsyncMock(return_value=[]),
+        list_namespace_meta=AsyncMock(return_value=[]),
+    )
+    return SimpleNamespace(
+        storage=storage,
+        search_pipeline=SimpleNamespace(
+            search=AsyncMock(return_value=(results or [], RetrievalStats()))
+        ),
+        config=SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[])),
+    )
+
+
+class TestAgentSearch:
+    """``mm agent search`` resolves the same two buckets ``mem_agent_search``
+    does. The pins are on the namespace filter that reaches retrieval, because
+    that filter *is* the feature — everything else is ``mm search``'s.
+    """
+
+    def _run(self, monkeypatch, argv, comp=None, session_ns=None):
+        comp = comp or _search_components()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr(
+            "memtomem.cli._session_state.resolve_session_write_namespace",
+            AsyncMock(return_value=session_ns),
+        )
+        result = CliRunner().invoke(cli, argv)
+        return result, comp
+
+    def _namespace(self, comp):
+        return comp.search_pipeline.search.await_args.kwargs["namespace"]
+
+    @pytest.mark.parametrize("agent_flag", ("--agent-id", "-a"))
+    def test_explicit_agent_id_merges_the_shared_bucket(self, monkeypatch, agent_flag):
+        result, comp = self._run(monkeypatch, ["agent", "search", "deploy", agent_flag, "planner"])
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) == "agent-runtime:planner,shared"
+
+    def test_no_include_shared_searches_the_private_bucket_alone(self, monkeypatch):
+        result, comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy", "-a", "planner", "--no-include-shared"],
+        )
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) == "agent-runtime:planner"
+
+    def test_shared_namespace_repoints_only_the_shared_leg(self, monkeypatch):
+        """ADR-0028: a per-project team merges its own shared bucket, and the
+        agent's private scope is untouched by that choice."""
+        result, comp = self._run(
+            monkeypatch,
+            [
+                "agent",
+                "search",
+                "deploy",
+                "-a",
+                "planner",
+                "--shared-namespace",
+                "shared:myproj",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) == "agent-runtime:planner,shared:myproj"
+
+    def test_without_a_flag_the_active_session_supplies_the_agent(self, monkeypatch):
+        result, comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy"],
+            session_ns="agent-runtime:coder",
+        )
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) == "agent-runtime:coder,shared"
+
+    def test_no_flag_and_no_session_searches_everything(self, monkeypatch):
+        """An unresolved agent means "no filter", not "the shared bucket" —
+        the same rule ``_resolve_agent_namespace`` returning ``None`` sets on
+        the MCP side."""
+        result, comp = self._run(monkeypatch, ["agent", "search", "deploy"])
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) is None
+
+    def test_explicit_agent_id_beats_the_session_binding(self, monkeypatch):
+        result, comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy", "-a", "planner"],
+            session_ns="agent-runtime:coder",
+        )
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) == "agent-runtime:planner,shared"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["agent", "search", "deploy", "-a", "../etc"],
+            ["agent", "search", "deploy", "--shared-namespace", "bad space"],
+        ],
+    )
+    def test_hostile_names_are_refused_before_the_store_opens(self, monkeypatch, argv):
+        comp = _search_components()
+        monkeypatch.setattr(
+            "memtomem.cli._bootstrap.cli_components",
+            _patched_cli_components(comp),
+        )
+        result = CliRunner().invoke(cli, argv)
+        assert result.exit_code != 0
+        comp.search_pipeline.search.assert_not_awaited()
+
+    def test_json_format_is_a_bare_list(self, monkeypatch):
+        """``--format json`` has to stay pipeable into ``mm agent share``."""
+        result, _comp = self._run(
+            monkeypatch, ["agent", "search", "deploy", "-a", "planner", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == []

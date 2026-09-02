@@ -135,7 +135,8 @@ that is a separate decision and out of scope for this ADR.
   Tracker) — pinning the convention first de-risks that work.
 - **Docs become the primary fix.** The agent-team tutorial and the
   `03_agent_memory_patterns` notebook gain a worked two-project example;
-  the `mem_agent_search` docstring documents `shared_namespace=`.
+  the `mem_agent_search` docstring documents `shared_namespace=`, and its
+  CLI twin `mm agent search` takes the same bucket as `--shared-namespace`.
 
 ## Alternatives considered
 

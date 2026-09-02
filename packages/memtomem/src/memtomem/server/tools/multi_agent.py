@@ -72,6 +72,35 @@ def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | Non
     return app.current_namespace
 
 
+def merge_agent_namespace_filter(
+    agent_ns: str | None,
+    include_shared: bool,
+    shared_namespace: str | None = None,
+) -> str | None:
+    """Build the namespace filter an agent-scoped read searches.
+
+    The merge rule for the two buckets an agent can see: its own
+    ``agent-runtime:<id>`` scope, and the shared one. ``shared_namespace``
+    re-points only the *shared* leg — a per-project team passes
+    ``shared:<project>`` so the merge stays inside that project's shared
+    scope (ADR-0028); the private leg is untouched.
+
+    ``None`` means "no filter": an unresolved agent searches everything
+    rather than falling back to an ambient namespace.
+
+    Shared by ``mem_agent_search``, ``mm agent search`` and the hidden
+    ``mm agent debug-resolve``, whose whole job is to report what the MCP
+    tool would resolve — three copies of one rule is how the debug helper
+    would come to disagree with the thing it exists to describe.
+    """
+    shared_ns = shared_namespace or SHARED_NAMESPACE
+    if not agent_ns:
+        return None
+    if include_shared:
+        return f"{agent_ns},{shared_ns}"
+    return agent_ns
+
+
 @mcp.tool()
 @tool_handler
 @register("multi_agent")
@@ -191,20 +220,7 @@ async def mem_agent_search(
 
     agent_ns = _resolve_agent_namespace(app, agent_id)
 
-    # The bucket merged in when include_shared is set. Defaults to the
-    # global SHARED_NAMESPACE; a per-project team passes
-    # shared_namespace="shared:<project>" so the merge stays inside that
-    # project's shared scope (ADR-0028). This only re-points the *shared*
-    # leg — the agent_ns private leg is untouched.
-    shared_ns = shared_namespace or SHARED_NAMESPACE
-
-    # Build namespace filter
-    if include_shared and agent_ns:
-        ns_filter = f"{agent_ns},{shared_ns}"
-    elif agent_ns:
-        ns_filter = agent_ns
-    else:
-        ns_filter = None
+    ns_filter = merge_agent_namespace_filter(agent_ns, include_shared, shared_namespace)
 
     # ADR-0011 PR-D round 9: thread project context onto the always-on
     # scope filter so an agent search running inside a registered
