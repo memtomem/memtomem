@@ -316,9 +316,8 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The npm plugin for this core is `opencode-memtomem@0.3.0` (bundling core
-`0.5.0`), published from an `opencode-v*` tag shortly after each PyPI release;
-until that tag lands npm's `latest` is the previous version. Add it through OpenCode's plugin form —
+The published npm plugin is `opencode-memtomem@0.3.0` (bundling core
+`0.5.0`). Add it through OpenCode's plugin form —
 `{"plugin": ["opencode-memtomem@0.3.0"]}` in `opencode.json`. The plugin
 supplies an exact-pinned MCP server, seven commands, three read-only skills,
 and conservative permissions. Upgrade any pin still on `0.1.3` or older:
