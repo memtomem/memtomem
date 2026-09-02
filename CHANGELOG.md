@@ -23,6 +23,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   two sections in favour of one line saying why, and the watchdog's
   `full_health_report.active_sessions` is `null` for the same reason. (#2281)
 
+### Fixed
+
+- **"Most Connected Memories" no longer loses a small project's hubs to a
+  large one's.** `get_most_connected` used to rank by whole-store degree and
+  leave the project screen to its caller, so hubs the caller cannot see
+  consumed the top-N slots and `mem_reflect` could show an empty section to a
+  caller with perfectly good hubs of its own. The aggregate now screens the
+  hub and both endpoints of every counted edge before ranking, so `link_count`
+  is the visible degree and the limit cuts the caller's own ordering. The
+  `limit * 4` over-fetch and per-hub recount `mem_reflect` carried as a
+  mitigation are gone with it, and with them two ways the rendered count
+  disagreed with the aggregate. The recount treated a neighbour it could not
+  resolve as visible, where the aggregate requires both ends inside the
+  boundary; and it ignored `namespace` entirely, so `mem_reflect(namespace=X)`
+  used to filter the hubs by `X` while counting their links to every other
+  namespace. Both ends are screened on both axes now, so those calls report
+  smaller, self-consistent numbers. A hub whose every edge leaves the boundary
+  is absent rather than reported as `0`. The degree is also the number of links
+  a caller can follow, counted the way `mem_related` lists them — one per
+  neighbour and relation type. A self-relation counts once, and so does a pair
+  of rows joining the same two chunks under the same type in both orders, which
+  is what linking the two ends separately leaves behind. Summing the two edge
+  directions counted each of those twice and let them distort the ranking.
+  (#2244)
+
 ## [0.5.0] — 2026-09-02
 
 ### Breaking

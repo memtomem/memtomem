@@ -256,21 +256,20 @@ class TestReflect:
     """ "Most Connected" must not describe the caller's blind spots."""
 
     @staticmethod
-    def _reflect_app(monkeypatch, *, hubs, related_by_hub, chunks):
+    def _reflect_app(monkeypatch, *, hubs, chunks):
         from memtomem.server.tools import reflection
 
         app = _app_returning(None, context=MINE)
-        # Honours ``limit``: if the stub returned everything regardless, the
-        # over-fetch that keeps visible hubs on the page would be untestable
-        # and a regression to filtering-after-LIMIT would pass.
+        # ``get_most_connected`` screens the boundary and ranks by visible
+        # degree inside the aggregate (#2244), so the stub answers like the
+        # real one: the caller's own page, already cut to ``limit``.
         app.storage.get_most_connected = AsyncMock(
             side_effect=lambda limit, **_kwargs: hubs[:limit]
         )
-        app.storage.get_related = AsyncMock(side_effect=lambda cid: related_by_hub.get(cid, []))
 
-        # ``mem_reflect`` hands ``get_chunk`` the raw string from the hub row
-        # while relation ids arrive as UUIDs, so the stub normalises rather
-        # than relying on a call-order list that would hide the difference.
+        # ``mem_reflect`` hands ``get_chunk`` the raw string from the hub row,
+        # so the stub normalises rather than relying on a call-order list that
+        # would hide the difference.
         def _lookup(cid):
             try:
                 return chunks.get(UUID(str(cid)))
@@ -278,9 +277,10 @@ class TestReflect:
                 return None
 
         app.storage.get_chunk = AsyncMock(side_effect=_lookup)
-        app.storage.get_chunks_batch = AsyncMock(
-            side_effect=lambda ids: {i: _lookup(i) for i in ids if _lookup(i) is not None}
-        )
+        # Present but never expected to fire: the tool must not go back to the
+        # graph to recount a degree the aggregate already computed.
+        app.storage.get_related = AsyncMock(return_value=[])
+        app.storage.get_chunks_batch = AsyncMock(return_value={})
         for empty in (
             "get_frequently_accessed",
             "get_agent_sessions",
@@ -291,43 +291,20 @@ class TestReflect:
         app.search_pipeline.flush_observation = AsyncMock()
         _pin_context(monkeypatch, MINE)
         monkeypatch.setattr(reflection, "_get_app_initialized", AsyncMock(return_value=app))
-        return reflection
-
-    async def test_link_counts_exclude_hidden_edges(self, monkeypatch):
-        """A visible hub's degree must not count neighbours the caller can't see.
-
-        ``get_most_connected`` counts every edge in the store, so rendering
-        its number would report how many foreign-project neighbours a chunk
-        has — the same existence leak as printing their ids, only quieter.
-        """
-        hub = _chunk("connected hub")
-        visible = _chunk("visible neighbour")
-        foreign = _foreign()
-        reflection = self._reflect_app(
-            monkeypatch,
-            hubs=[{"chunk_id": str(hub.id), "link_count": 2}],
-            related_by_hub={hub.id: [(visible.id, "related"), (foreign.id, "related")]},
-            chunks={hub.id: hub, visible.id: visible, foreign.id: foreign},
-        )
-
-        result = await reflection.mem_reflect(ctx=None)
-
-        assert "1 links — connected hub" in result
-        assert "2 links" not in result
+        return reflection, app
 
     async def test_a_hidden_hub_is_not_listed_at_all(self, monkeypatch):
-        """The hub itself is screened, not just its edge count."""
+        """The hub row is re-screened at the point it would be printed.
+
+        The aggregate should never hand back a foreign hub, but the row is
+        id-addressed and ADR-0036 wants an id-addressed render checked where
+        it is used, not only where it was produced.
+        """
         foreign_hub = _foreign()
-        # It has a neighbour the caller *can* see, so a non-zero visible
-        # degree cannot carry it: only the hub screen keeps it off the list.
-        # Without this the zero-degree drop would stand in for the screen and
-        # removing the screen would still pass.
-        seen_neighbour = _chunk("a neighbour I can see")
-        reflection = self._reflect_app(
+        reflection, _app = self._reflect_app(
             monkeypatch,
             hubs=[{"chunk_id": str(foreign_hub.id), "link_count": 9}],
-            related_by_hub={foreign_hub.id: [(seen_neighbour.id, "related")]},
-            chunks={foreign_hub.id: foreign_hub, seen_neighbour.id: seen_neighbour},
+            chunks={foreign_hub.id: foreign_hub},
         )
 
         result = await reflection.mem_reflect(ctx=None)
@@ -336,38 +313,16 @@ class TestReflect:
         assert str(foreign_hub.id) not in result
         assert "9 links" not in result
 
-    async def test_a_hub_whose_every_neighbour_is_hidden_drops_out(self, monkeypatch):
-        """Visible degree zero is not "0 links" — it is nothing to report.
-
-        Listing the hub with a zero would still say "this chunk is a hub, and
-        everything it connects to is out of your reach".
-        """
-        hub = _chunk("hub with only foreign edges")
-        foreign = _foreign()
-        reflection = self._reflect_app(
-            monkeypatch,
-            hubs=[{"chunk_id": str(hub.id), "link_count": 4}],
-            related_by_hub={hub.id: [(foreign.id, "related")]},
-            chunks={hub.id: hub, foreign.id: foreign},
-        )
-
-        result = await reflection.mem_reflect(ctx=None)
-
-        assert "hub with only foreign edges" not in result
-        assert "Most Connected" not in result
-
     async def test_an_unresolved_hub_is_dropped_not_degraded_to_its_id(self, monkeypatch):
         """A hub that vanished between the two queries prints nothing.
 
-        The old fallback rendered ``chunk_id[:8]`` beside the stored degree —
-        the uuid of a row the caller may not be allowed to know exists, next
-        to an unscreened count.
+        The old fallback rendered ``chunk_id[:8]`` beside the degree — the
+        uuid of a row the caller may not be allowed to know exists.
         """
         vanished_id = uuid4()
-        reflection = self._reflect_app(
+        reflection, _app = self._reflect_app(
             monkeypatch,
             hubs=[{"chunk_id": str(vanished_id), "link_count": 7}],
-            related_by_hub={},
             chunks={},
         )
 
@@ -376,59 +331,59 @@ class TestReflect:
         assert str(vanished_id)[:8] not in result
         assert "7 links" not in result
 
-    async def test_ranking_uses_visible_degree_not_the_stored_one(self, monkeypatch):
-        """Hidden edges must not decide which hubs get listed.
+    async def test_the_tool_asks_storage_for_exactly_the_page_it_renders(self, monkeypatch):
+        """No over-fetch, no re-ranking, no second pass over the graph (#2244).
 
-        A hub with ten edges of which one is visible outranks, in the store's
-        own ordering, a hub with nine visible ones. Cutting the page on that
-        ordering would list the wrong hub *and* let the hidden edges choose
-        it — the ranking becomes a channel for what the caller cannot see.
+        The boundary lives in the aggregate now. A tool that re-fetched every
+        hub's neighbours to recount would reintroduce a second, disagreeing
+        definition of a visible edge — the Python one counted an unresolvable
+        neighbour as visible, the SQL one does not.
         """
-        thin = _chunk("thin hub")  # high stored degree, one visible edge
-        thick = _chunk("thick hub")  # lower stored degree, all visible
-        thin_neighbour = _chunk("thin neighbour")
-        thick_neighbours = [_chunk(f"thick neighbour {i}") for i in range(3)]
-        foreign_edges = [_foreign() for _ in range(9)]
-        chunks = {c.id: c for c in [thin, thick, thin_neighbour, *thick_neighbours, *foreign_edges]}
-        reflection = self._reflect_app(
+        hub = _chunk("connected hub")
+        reflection, app = self._reflect_app(
             monkeypatch,
-            hubs=[
-                {"chunk_id": str(thin.id), "link_count": 10},
-                {"chunk_id": str(thick.id), "link_count": 3},
-            ],
-            related_by_hub={
-                thin.id: [(thin_neighbour.id, "related")]
-                + [(f.id, "related") for f in foreign_edges],
-                thick.id: [(n.id, "related") for n in thick_neighbours],
-            },
-            chunks=chunks,
+            hubs=[{"chunk_id": str(hub.id), "link_count": 4}],
+            chunks={hub.id: hub},
         )
 
-        result = await reflection.mem_reflect(limit=1, ctx=None)
+        result = await reflection.mem_reflect(limit=3, ctx=None)
 
-        assert "3 links — thick hub" in result
-        assert "thin hub" not in result
+        assert "4 links — connected hub" in result
+        app.storage.get_most_connected.assert_awaited_once()
+        kwargs = app.storage.get_most_connected.await_args.kwargs
+        assert kwargs["limit"] == 3
+        assert kwargs["project_context_root"] == MINE
+        app.storage.get_related.assert_not_awaited()
 
-    async def test_visible_hubs_survive_a_screen_that_cuts_the_top_of_the_list(self, monkeypatch):
-        """Screening after the LIMIT would let foreign hubs eat the whole list.
-
-        The tool over-fetches so the caller's own hubs still reach the page.
-        """
-        foreign_hubs = [_foreign() for _ in range(5)]
-        mine = _chunk("my hub")
-        neighbour = _chunk("my neighbour")
-        chunks = {c.id: c for c in [*foreign_hubs, mine, neighbour]}
-        reflection = self._reflect_app(
+    async def test_the_page_is_capped_at_five_hubs(self, monkeypatch):
+        """``limit`` above the section's own cap does not widen the request."""
+        hub = _chunk("connected hub")
+        reflection, app = self._reflect_app(
             monkeypatch,
-            hubs=[{"chunk_id": str(c.id), "link_count": 9} for c in foreign_hubs]
-            + [{"chunk_id": str(mine.id), "link_count": 1}],
-            related_by_hub={mine.id: [(neighbour.id, "related")]},
-            chunks=chunks,
+            hubs=[{"chunk_id": str(hub.id), "link_count": 4}],
+            chunks={hub.id: hub},
+        )
+
+        await reflection.mem_reflect(limit=50, ctx=None)
+
+        assert app.storage.get_most_connected.await_args.kwargs["limit"] == 5
+
+    async def test_storage_order_is_preserved(self, monkeypatch):
+        """The aggregate already ranked the page; the tool must not re-sort."""
+        first = _chunk("first hub")
+        second = _chunk("second hub")
+        reflection, _app = self._reflect_app(
+            monkeypatch,
+            hubs=[
+                {"chunk_id": str(first.id), "link_count": 3},
+                {"chunk_id": str(second.id), "link_count": 2},
+            ],
+            chunks={first.id: first, second.id: second},
         )
 
         result = await reflection.mem_reflect(ctx=None)
 
-        assert "1 links — my hub" in result
+        assert result.index("3 links — first hub") < result.index("2 links — second hub")
 
 
 class TestAgentShare:

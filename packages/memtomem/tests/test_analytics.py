@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 from memtomem.models import Chunk, ChunkMetadata
 
-from helpers import make_chunk
+from helpers import StubCtx, make_chunk
 
 
 def _make_chunk(components, content="test", tags=(), namespace="default"):
@@ -14,7 +14,9 @@ def _make_chunk(components, content="test", tags=(), namespace="default"):
     return make_chunk(content=content, tags=tags, namespace=namespace, embedding=[0.0] * dim)
 
 
-def _project_chunk(components, project: Path, content: str, tag: str) -> Chunk:
+def _project_chunk(
+    components, project: Path, content: str, tag: str, namespace: str = "default"
+) -> Chunk:
     return Chunk(
         content=content,
         metadata=ChunkMetadata(
@@ -22,6 +24,7 @@ def _project_chunk(components, project: Path, content: str, tag: str) -> Chunk:
             tags=(tag,),
             scope="project_shared",
             project_root=project,
+            namespace=namespace,
         ),
         embedding=[0.0] * components.config.embedding.dimension,
     )
@@ -184,6 +187,217 @@ class TestMostConnected:
         assert result[0]["link_count"] >= 2
 
 
+class TestMostConnectedBoundary:
+    """#2244 — the aggregate ranks inside the caller's boundary, not after it.
+
+    Ranking by whole-store degree and screening the page afterwards lets hubs
+    the caller cannot see consume the top-N slots, so a caller in a small
+    project alongside a large one gets an empty section while having perfectly
+    good hubs of its own. These pin the screen as happening *before* the cut.
+    """
+
+    PROJECT_A = Path("/workspace/project-a")
+    PROJECT_B = Path("/workspace/project-b")
+
+    async def _store(self, storage, components, chunks, edges):
+        await storage.upsert_chunks(chunks)
+        for source, target in edges:
+            await storage.add_relation(source.id, target.id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit", [1, 2, 3, 5])
+    async def test_own_hub_survives_foreign_hubs_that_dominate_raw_degree(
+        self, storage, components, limit
+    ):
+        """The caller's hub is listed however far below the raw cut it sits.
+
+        Six foreign hubs of degree six each outrank a single visible hub of
+        degree one in whole-store order. An over-fetch factor makes this pass
+        for *some* factor; screening before the LIMIT makes it pass for every
+        one, which is what the issue asks for.
+        """
+        foreign = []
+        for h in range(6):
+            hub = _project_chunk(components, self.PROJECT_B, f"beta-hub-{h}", "beta")
+            spokes = [
+                _project_chunk(components, self.PROJECT_B, f"beta-spoke-{h}-{i}", "beta")
+                for i in range(6)
+            ]
+            foreign.append((hub, spokes))
+        mine = _project_chunk(components, self.PROJECT_A, "alpha-hub", "alpha")
+        # Two spokes, so the hub is unambiguously the caller's top row rather
+        # than tied with its own neighbour on the chunk_id tie-break.
+        my_spokes = [
+            _project_chunk(components, self.PROJECT_A, f"alpha-spoke-{i}", "alpha")
+            for i in range(2)
+        ]
+
+        chunks = [mine, *my_spokes]
+        edges = [(mine, spoke) for spoke in my_spokes]
+        for hub, spokes in foreign:
+            chunks.extend([hub, *spokes])
+            edges.extend((hub, spoke) for spoke in spokes)
+        await self._store(storage, components, chunks, edges)
+
+        rows = await storage.get_most_connected(limit=limit, project_context_root=self.PROJECT_A)
+
+        assert [row["chunk_id"] for row in rows][:1] == [str(mine.id)]
+        assert rows[0]["link_count"] == 2
+        foreign_ids = {str(hub.id) for hub, _ in foreign}
+        assert not foreign_ids & {row["chunk_id"] for row in rows}
+
+    @pytest.mark.asyncio
+    async def test_link_count_is_the_visible_degree(self, storage, components):
+        """Edges leaving the boundary are not counted, in either direction.
+
+        Reporting the stored degree would say how many foreign neighbours a
+        chunk has — the same existence leak as printing their ids, quieter.
+        """
+        hub = _project_chunk(components, self.PROJECT_A, "alpha-hub", "alpha")
+        mine = _project_chunk(components, self.PROJECT_A, "alpha-spoke", "alpha")
+        foreign = [
+            _project_chunk(components, self.PROJECT_B, f"beta-{i}", "beta") for i in range(9)
+        ]
+        # Half the foreign edges point *at* the hub, so a one-sided screen on
+        # ``source_id`` alone would still leak them into the count.
+        edges = [(hub, mine)]
+        edges += [(hub, f) for f in foreign[:5]]
+        edges += [(f, hub) for f in foreign[5:]]
+        await self._store(storage, components, [hub, mine, *foreign], edges)
+
+        rows = await storage.get_most_connected(project_context_root=self.PROJECT_A)
+
+        assert {row["chunk_id"]: row["link_count"] for row in rows} == {
+            str(hub.id): 1,
+            str(mine.id): 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_hub_whose_every_edge_leaves_the_boundary_is_absent(self, storage, components):
+        """Visible degree zero is absence, not a row reading ``0``.
+
+        A zero-degree row would still say "this chunk is a hub, and everything
+        it connects to is out of your reach".
+        """
+        hub = _project_chunk(components, self.PROJECT_A, "alpha-hub", "alpha")
+        foreign = [
+            _project_chunk(components, self.PROJECT_B, f"beta-{i}", "beta") for i in range(3)
+        ]
+        await self._store(storage, components, [hub, *foreign], [(hub, f) for f in foreign])
+
+        rows = await storage.get_most_connected(project_context_root=self.PROJECT_A)
+
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_ranking_uses_visible_degree_not_the_stored_one(self, storage, components):
+        """A thin hub must not outrank a thick one on its hidden edges.
+
+        Ten edges of which one is visible outranks nine visible ones in the
+        store's own ordering, so cutting on that ordering both lists the wrong
+        hub and lets the hidden edges choose it.
+        """
+        thin = _project_chunk(components, self.PROJECT_A, "thin-hub", "alpha")
+        thick = _project_chunk(components, self.PROJECT_A, "thick-hub", "alpha")
+        thin_spoke = _project_chunk(components, self.PROJECT_A, "thin-spoke", "alpha")
+        thick_spokes = [
+            _project_chunk(components, self.PROJECT_A, f"thick-spoke-{i}", "alpha")
+            for i in range(3)
+        ]
+        foreign = [
+            _project_chunk(components, self.PROJECT_B, f"beta-{i}", "beta") for i in range(9)
+        ]
+        edges = [(thin, thin_spoke)]
+        edges += [(thin, f) for f in foreign]
+        edges += [(thick, spoke) for spoke in thick_spokes]
+        await self._store(
+            storage,
+            components,
+            [thin, thick, thin_spoke, *thick_spokes, *foreign],
+            edges,
+        )
+
+        rows = await storage.get_most_connected(limit=1, project_context_root=self.PROJECT_A)
+
+        assert [row["chunk_id"] for row in rows] == [str(thick.id)]
+
+    @pytest.mark.asyncio
+    async def test_a_self_relation_counts_once(self, storage, components):
+        """One stored row is one link, read from either end.
+
+        The degree is the number of neighbours a caller could follow, which is
+        what ``get_related`` returns. Reading the row from both ends and
+        summing would report a chunk linked only to itself as having two.
+        """
+        hub = _project_chunk(components, self.PROJECT_A, "alpha-hub", "alpha")
+        spoke = _project_chunk(components, self.PROJECT_A, "alpha-spoke", "alpha")
+        await self._store(storage, components, [hub, spoke], [(hub, hub), (hub, spoke)])
+
+        rows = await storage.get_most_connected(project_context_root=self.PROJECT_A)
+
+        assert {row["chunk_id"]: row["link_count"] for row in rows} == {
+            str(hub.id): 2,
+            str(spoke.id): 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_reciprocal_pair_counts_as_one_link(self, storage, components):
+        """Two rows for the same undirected edge are still one neighbour.
+
+        ``add_relation`` called with the endpoints swapped stores a second row
+        — the primary key is the ordered pair — and both describe the same
+        link. Counting each direction separately would double every such edge
+        and let it outrank a genuinely better-connected hub.
+        """
+        left = _project_chunk(components, self.PROJECT_A, "alpha-left", "alpha")
+        right = _project_chunk(components, self.PROJECT_A, "alpha-right", "alpha")
+        rival = _project_chunk(components, self.PROJECT_A, "alpha-rival", "alpha")
+        rival_spokes = [
+            _project_chunk(components, self.PROJECT_A, f"alpha-rival-spoke-{i}", "alpha")
+            for i in range(2)
+        ]
+        await self._store(
+            storage,
+            components,
+            [left, right, rival, *rival_spokes],
+            [(left, right), (right, left)] + [(rival, s) for s in rival_spokes],
+        )
+
+        rows = await storage.get_most_connected(limit=1, project_context_root=self.PROJECT_A)
+
+        assert [row["chunk_id"] for row in rows] == [str(rival.id)]
+        assert rows[0]["link_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_namespace_filter_composes_with_the_boundary(self, storage, components):
+        """``namespace=`` narrows within the boundary; it does not replace it."""
+        hub = _project_chunk(components, self.PROJECT_A, "alpha-hub", "alpha", namespace="work")
+        same_ns = _project_chunk(
+            components, self.PROJECT_A, "alpha-work-spoke", "alpha", namespace="work"
+        )
+        other_ns = _project_chunk(
+            components, self.PROJECT_A, "alpha-home-spoke", "alpha", namespace="home"
+        )
+        foreign = _project_chunk(
+            components, self.PROJECT_B, "beta-work-spoke", "beta", namespace="work"
+        )
+        await self._store(
+            storage,
+            components,
+            [hub, same_ns, other_ns, foreign],
+            [(hub, same_ns), (hub, other_ns), (hub, foreign)],
+        )
+
+        rows = await storage.get_most_connected(
+            namespace="work", project_context_root=self.PROJECT_A
+        )
+
+        assert {row["chunk_id"]: row["link_count"] for row in rows} == {
+            str(hub.id): 1,
+            str(same_ns.id): 1,
+        }
+
+
 class TestProjectAnalyticsIsolation:
     @pytest.mark.asyncio
     async def test_aggregates_tags_gaps_and_relations_are_project_scoped(self, storage, components):
@@ -261,3 +475,53 @@ class TestScratchPromote:
     async def test_promote_nonexistent(self, storage):
         promoted = await storage.scratch_promote("nope")
         assert promoted is False
+
+
+class TestReflectEndToEnd:
+    """The whole path, no stubs: real store, real aggregate, real renderer."""
+
+    @pytest.mark.asyncio
+    async def test_report_lists_the_callers_hub_not_the_dominant_foreign_one(
+        self, storage, components, monkeypatch
+    ):
+        """#2244 end to end — a small project beside a large one still gets a section.
+
+        Every layer between the SQL and the rendered markdown is exercised
+        here, so a boundary that is correct in the aggregate but re-widened
+        by the tool (an over-fetch, a Python recount, a re-sort) still fails.
+        """
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.reflection import mem_reflect
+
+        project_a = Path("/workspace/project-a")
+        project_b = Path("/workspace/project-b")
+
+        mine = _project_chunk(components, project_a, "alpha-hub", "alpha")
+        my_spokes = [
+            _project_chunk(components, project_a, f"alpha-spoke-{i}", "alpha") for i in range(2)
+        ]
+        beta_hub = _project_chunk(components, project_b, "beta-hub", "beta")
+        beta_spokes = [
+            _project_chunk(components, project_b, f"beta-spoke-{i}", "beta") for i in range(8)
+        ]
+        await storage.upsert_chunks([mine, *my_spokes, beta_hub, *beta_spokes])
+        for spoke in my_spokes:
+            await storage.add_relation(mine.id, spoke.id)
+        for spoke in beta_spokes:
+            await storage.add_relation(beta_hub.id, spoke.id)
+        # A cross-project edge, so the visible count cannot come from simply
+        # ignoring the foreign store.
+        await storage.add_relation(mine.id, beta_hub.id)
+
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root",
+            lambda _app: project_a,
+        )
+        ctx = StubCtx(AppContext.from_components(components))
+
+        report = await mem_reflect(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "### Most Connected Memories" in report
+        assert "2 links — alpha-hub" in report
+        assert "beta-hub" not in report
+        assert str(beta_hub.id) not in report

@@ -541,7 +541,15 @@ class StorageBackend(Protocol):
         *,
         namespace: str | None = None,
         project_context_root: Path | None = None,
-    ) -> list[dict]: ...
+    ) -> list[dict]:
+        """Most cross-referenced chunks inside the caller's boundary.
+
+        Implementations must screen the hub and both endpoints of every
+        counted edge before ranking, so ``link_count`` is the visible degree
+        and ``limit`` cuts the caller's own ordering (#2244).
+        """
+        ...
+
     async def get_chunk_factors(
         self,
         namespace: str | None = None,
