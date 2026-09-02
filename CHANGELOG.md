@@ -18,6 +18,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   instead. `LIKE` semantics are unchanged and still pinned against SQLite
   itself, now including wildcard piles. (#2294)
 
+- **`mm status` and `mem_status` keep large source registries readable.**
+  Human reports now show each source tier as a count plus an indented list,
+  shorten paths below the home directory with `~`, group repeated provider
+  roots such as Claude project memories, and cap remaining rows with an exact
+  remainder count. `mm status --json` still returns every resolved absolute
+  path, so the machine-readable contract is unchanged.
+
 - **`mm web` starts watching files again after an embedding reset, instead of
   asking for a restart.** A degraded start — a broken or mismatched embedding —
   leaves auto-indexing off by design, because the indexer would crash on the

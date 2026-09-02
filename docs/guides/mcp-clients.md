@@ -429,8 +429,8 @@ Ask the AI:
 Call the mem_status tool to show the current status
 ```
 
-Expected response (BM25 default — the `Embedding` and `Dimension`
-lines change depending on the provider picked in the wizard):
+Expected response (abridged; `Embedding`, `Dimension`, `Watcher`, paths,
+and counts vary by install):
 
 ```
 memtomem Status
@@ -441,6 +441,18 @@ Embedding: none /
 Dimension: 0
 Top-K:     10
 RRF k:     60
+Watcher:   native
+
+Runtime context
+---------------
+CWD:             ~/my-project
+Project root:    ~/my-project
+User sources:    4
+  - ~/.memtomem/memories
+  - Claude project memories (3 dirs)
+  … (use `mm status --json` for full paths)
+Project sources: 1
+  - ~/my-project/.memtomem/memories.local
 
 Index stats
 -----------
@@ -449,9 +461,11 @@ Source files:  0
 ...
 ```
 
-The full report also includes an `Immutable fields` block (provider /
-model / tokenizer / backend echoed back as a "what can't be changed at
-runtime" reminder), and a `Warnings` block with stable schema keys
+Repeated provider roots are grouped in the human report and long source
+lists are capped; `mm status --json` retains every absolute path. The full
+report also includes an `Immutable fields` block (provider / model /
+tokenizer / backend echoed back as a "what can't be changed at runtime"
+reminder), and a `Warnings` block with stable schema keys
 (`kind` / `fix` / `doc` / `stored` / `configured`) when an embedding-
 dimension mismatch is detected. Run `mm status` from a terminal to see
 the exact output your install produces.

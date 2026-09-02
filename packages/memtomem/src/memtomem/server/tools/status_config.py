@@ -429,6 +429,13 @@ _IMMUTABLE_GUIDANCE = (
     "or `mm embedding-reset` to switch embedder (re-index required)."
 )
 
+_MAX_STATUS_SOURCE_ROWS = 8
+_PROVIDER_SOURCE_LABELS = {
+    "claude-memory": "Claude project memories",
+    "claude-plans": "Claude plans",
+    "codex": "Codex memories",
+}
+
 
 @dataclass(frozen=True)
 class StatusLine:
@@ -441,7 +448,8 @@ class StatusLine:
     """
 
     role: str  # "title" | "rule" | "section" | "kv" | "immutable_kv"
-    # | "dense" | "guidance" | "warning_kv" | "blank"
+    # | "dense" | "guidance" | "source_item" | "source_hint"
+    # | "warning_kv" | "blank"
     key: str = ""
     value: str = ""
     suffix: str = ""
@@ -450,6 +458,95 @@ class StatusLine:
     @property
     def text(self) -> str:
         return self.key + self.value + self.suffix
+
+
+def _shorten_status_path(path: str, *, home: str | Path | None = None) -> str:
+    """Contract a path below the user's home for deterministic human output.
+
+    ``collect_status_report`` deliberately keeps resolved absolute paths for
+    the JSON contract.  This helper is presentation-only and handles either
+    slash style so a Windows-shaped fixture behaves the same on POSIX CI.
+    """
+    home_text = str(Path.home().resolve() if home is None else home)
+    normalized_path = path.replace("\\", "/").rstrip("/")
+    normalized_home = home_text.replace("\\", "/").rstrip("/")
+    if not normalized_home:
+        return path
+
+    windows_style = (
+        len(normalized_home) >= 2 and normalized_home[1] == ":"
+    ) or normalized_home.startswith("//")
+    compared_path = normalized_path.casefold() if windows_style else normalized_path
+    compared_home = normalized_home.casefold() if windows_style else normalized_home
+    if compared_path != compared_home and not compared_path.startswith(compared_home + "/"):
+        return path
+
+    relative = normalized_path[len(normalized_home) :].lstrip("/")
+    if not relative:
+        return "~"
+    separator = "\\" if "\\" in path and "/" not in path else "/"
+    return f"~{separator}{relative.replace('/', separator)}"
+
+
+def _status_source_entries(paths: list[str], *, group_providers: bool) -> list[tuple[str, int]]:
+    """Return stable display rows paired with the source count each represents."""
+    if not group_providers:
+        return [(_shorten_status_path(path), 1) for path in paths]
+
+    from memtomem.config import categorize_memory_dir
+
+    categories = [categorize_memory_dir(path) for path in paths]
+    category_counts: dict[str, int] = {}
+    for category in categories:
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+    entries: list[tuple[str, int]] = []
+    emitted_categories: set[str] = set()
+    for path, category in zip(paths, categories, strict=True):
+        count = category_counts[category]
+        if category != "user" and count > 1:
+            if category in emitted_categories:
+                continue
+            emitted_categories.add(category)
+            label = _PROVIDER_SOURCE_LABELS.get(category, category.replace("-", " ").title())
+            entries.append((f"{label} ({count} dirs)", count))
+            continue
+        entries.append((_shorten_status_path(path), 1))
+    return entries
+
+
+def _status_source_lines(
+    label: str,
+    paths: list[str],
+    *,
+    group_providers: bool,
+) -> list[StatusLine]:
+    """Render one source tier as a count plus a bounded, readable list."""
+    header_key = f"{label}:".ljust(17)
+    if not paths:
+        return [StatusLine("kv", key=header_key, value="0 (none)")]
+
+    entries = _status_source_entries(paths, group_providers=group_providers)
+    shown = entries[:_MAX_STATUS_SOURCE_ROWS]
+    lines = [StatusLine("kv", key=header_key, value=str(len(paths)))]
+    lines.extend(StatusLine("source_item", value=f"  - {text}") for text, _ in shown)
+
+    hidden_count = sum(count for _, count in entries[_MAX_STATUS_SOURCE_ROWS:])
+    if hidden_count:
+        lines.append(
+            StatusLine(
+                "source_hint",
+                value=f"  … (+{hidden_count} more; use `mm status --json`)",
+            )
+        )
+    elif any(count > 1 for _, count in shown):
+        lines.append(
+            StatusLine(
+                "source_hint",
+                value="  … (use `mm status --json` for full paths)",
+            )
+        )
+    return lines
 
 
 def iter_status_lines(data: dict) -> list[StatusLine]:
@@ -463,7 +560,12 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
         StatusLine("title", value="memtomem Status"),
         StatusLine("rule", value="==============", meta={"tone": "title"}),
         StatusLine("kv", key="Storage:".ljust(11), value=str(cfg["storage_backend"])),
-        StatusLine("kv", key="DB path:".ljust(11), value=cfg["db_path"], meta={"value_fg": "cyan"}),
+        StatusLine(
+            "kv",
+            key="DB path:".ljust(11),
+            value=_shorten_status_path(cfg["db_path"]),
+            meta={"value_fg": "cyan"},
+        ),
         StatusLine("kv", key="Embedding:".ljust(11), value=f"{emb['provider']} / {emb['model']}"),
         StatusLine("kv", key="Dimension:".ljust(11), value=str(emb["dimension"])),
         StatusLine("kv", key="Top-K:".ljust(11), value=str(cfg["top_k"])),
@@ -472,22 +574,38 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
         StatusLine("blank"),
         StatusLine("section", value="Runtime context", meta={"tone": "plain"}),
         StatusLine("rule", value="---------------", meta={"tone": "plain"}),
-        StatusLine("kv", key="CWD:".ljust(15), value=str(runtime.get("cwd") or "(unavailable)")),
         StatusLine(
             "kv",
-            key="Project root:".ljust(15),
-            value=str(runtime.get("project_context_root") or "(none registered for CWD)"),
+            key="CWD:".ljust(17),
+            value=(
+                _shorten_status_path(str(runtime["cwd"])) if runtime.get("cwd") else "(unavailable)"
+            ),
         ),
         StatusLine(
             "kv",
-            key="User sources:".ljust(15),
-            value=", ".join(cfg.get("memory_dirs", [])) or "(none)",
+            key="Project root:".ljust(17),
+            value=(
+                _shorten_status_path(str(runtime["project_context_root"]))
+                if runtime.get("project_context_root")
+                else "(none registered for CWD)"
+            ),
         ),
-        StatusLine(
-            "kv",
-            key="Project sources: ",
-            value=", ".join(cfg.get("project_memory_dirs", [])) or "(none)",
-        ),
+    ]
+    lines.extend(
+        _status_source_lines(
+            "User sources",
+            [str(path) for path in cfg.get("memory_dirs", [])],
+            group_providers=True,
+        )
+    )
+    lines.extend(
+        _status_source_lines(
+            "Project sources",
+            [str(path) for path in cfg.get("project_memory_dirs", [])],
+            group_providers=False,
+        )
+    )
+    lines += [
         StatusLine("blank"),
         StatusLine("section", value="Index stats", meta={"tone": "plain"}),
         StatusLine("rule", value="-----------", meta={"tone": "plain"}),

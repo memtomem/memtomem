@@ -18,6 +18,8 @@ from memtomem.config import Mem2MemConfig
 from memtomem.indexing.watcher import effective_watcher_backend
 from memtomem.server.tools.status_config import (
     StatusLine,
+    _shorten_status_path,
+    _status_source_lines,
     collect_status_report,
     iter_status_lines,
     render_status_report,
@@ -304,6 +306,82 @@ class TestStatusOutput:
         assert "doc:        docs/guides/configuration.md#reset-flow" in result.output
 
 
+class TestStatusSourceRendering:
+    """Source roots stay useful when provider discovery registers many dirs."""
+
+    def test_empty_source_tier_renders_count_and_none(self) -> None:
+        lines = _status_source_lines("Project sources", [], group_providers=False)
+
+        assert [line.text for line in lines] == ["Project sources: 0 (none)"]
+
+    def test_single_source_uses_indented_short_home_path(self) -> None:
+        source = Path.home() / ".memtomem" / "memories"
+        lines = _status_source_lines("User sources", [str(source)], group_providers=True)
+
+        assert [line.text for line in lines] == [
+            "User sources:    1",
+            f"  - {Path('~') / '.memtomem' / 'memories'}",
+        ]
+
+    def test_repeated_provider_dirs_are_grouped_in_first_seen_order(self) -> None:
+        home = Path.home()
+        sources = [
+            str(home / ".memtomem" / "memories"),
+            str(home / ".claude" / "plans"),
+            *(str(home / ".claude" / "projects" / f"project-{i}" / "memory") for i in range(55)),
+            str(home / ".codex" / "memories"),
+        ]
+
+        lines = _status_source_lines("User sources", sources, group_providers=True)
+
+        assert [line.text for line in lines] == [
+            "User sources:    58",
+            f"  - {Path('~') / '.memtomem' / 'memories'}",
+            f"  - {Path('~') / '.claude' / 'plans'}",
+            "  - Claude project memories (55 dirs)",
+            f"  - {Path('~') / '.codex' / 'memories'}",
+            "  … (use `mm status --json` for full paths)",
+        ]
+
+    def test_exact_cap_has_no_hint_and_cap_plus_one_reports_remainder(self) -> None:
+        exact = [f"/opt/memtomem/source-{i}" for i in range(8)]
+        capped = _status_source_lines("Project sources", exact, group_providers=False)
+        overflow = _status_source_lines(
+            "Project sources", [*exact, "/opt/memtomem/source-8"], group_providers=False
+        )
+
+        assert len(capped) == 9  # header + eight paths
+        assert all("…" not in line.text for line in capped)
+        assert [line.text for line in overflow[1:9]] == [f"  - {path}" for path in exact]
+        assert overflow[-1].text == "  … (+1 more; use `mm status --json`)"
+
+    def test_remainder_counts_dirs_represented_by_hidden_group(self) -> None:
+        paths = [f"/opt/memtomem/custom-{i}" for i in range(8)]
+        paths.extend(rf"C:\Users\alice\.claude\projects\project-{i}\memory" for i in range(3))
+
+        lines = _status_source_lines("User sources", paths, group_providers=True)
+
+        assert lines[-1].text == "  … (+3 more; use `mm status --json`)"
+
+    @pytest.mark.parametrize(
+        ("path", "home", "expected"),
+        [
+            ("/Users/alice/notes", "/Users/alice", "~/notes"),
+            ("/Users/alice2/notes", "/Users/alice", "/Users/alice2/notes"),
+            (
+                r"C:\Users\Alice\Notes",
+                r"c:\users\alice",
+                r"~\Notes",
+            ),
+            (r"D:\Notes", r"C:\Users\alice", r"D:\Notes"),
+        ],
+    )
+    def test_home_contraction_is_boundary_and_windows_safe(
+        self, path: str, home: str, expected: str
+    ) -> None:
+        assert _shorten_status_path(path, home=home) == expected
+
+
 class TestStatusMcpParity:
     """``mm status`` and the MCP ``mem_status`` tool must render identical text.
 
@@ -370,11 +448,10 @@ class TestStatusTextPin:
     """Byte-level pin of the rendered report for a maxed-out fixture.
 
     The #1615 refactor split ``format_status_report`` into
-    ``collect_status_report`` + ``render_status_report``; this literal
-    pin (captured from the pre-refactor output) proves the split changed
-    no bytes — and from now on it is the canonical text-shape regression
-    net for the report. Update it deliberately, never to make a diff
-    pass.
+    ``collect_status_report`` + ``render_status_report``. This literal is
+    the canonical text-shape regression net for the report, including the
+    intentional compact source layout. Update it deliberately, never just
+    to make a diff pass.
     """
 
     def test_full_report_matches_captured_literal(self, tmp_path: Path) -> None:
@@ -385,6 +462,7 @@ class TestStatusTextPin:
 
         present = tmp_path / "present.md"
         present.write_text("hi")
+        project_source = tmp_path / "project" / ".memtomem" / "memories.local"
         comp = _mock_components(
             total_chunks=53,
             total_sources=25,
@@ -398,13 +476,15 @@ class TestStatusTextPin:
             config=Mem2MemConfig(
                 storage={"sqlite_path": "/opt/mm/memtomem.db"},
                 scheduler={"enabled": True},
+                indexing={"project_memory_dirs": [project_source]},
             ),
         )
 
         text = asyncio.run(format_status_report(AppContext.from_components(comp)))
 
-        # Resolve exactly like collect_status_report so Windows includes the
-        # drive prefix while POSIX keeps the absolute /opt path.
+        # Resolve exactly like collect_status_report, then apply the same
+        # presentation-only home contraction as the human report.
+        cwd_display = _shorten_status_path(str(Path.cwd().resolve()))
         expected = f"""\
 memtomem Status
 ==============
@@ -418,10 +498,12 @@ Watcher:   {effective_watcher_backend(comp.config.indexing)}
 
 Runtime context
 ---------------
-CWD:           {Path.cwd().resolve()}
-Project root:  (none registered for CWD)
-User sources:  {Path("~/.memtomem/memories").expanduser().resolve()}
-Project sources: (none)
+CWD:             {cwd_display}
+Project root:    (none registered for CWD)
+User sources:    1
+  - {Path("~") / ".memtomem" / "memories"}
+Project sources: 1
+  - {project_source.resolve()}
 
 Index stats
 -----------
@@ -504,6 +586,30 @@ class TestStatusJson:
 
         assert via_flag.exit_code == 0, via_flag.output
         assert via_flag.output == via_format.output
+
+    def test_json_keeps_every_absolute_source_path(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        user_sources = [tmp_path / f"user-{i}" for i in range(10)]
+        project_sources = [tmp_path / f"project-{i}" for i in range(3)]
+        comp = _mock_components(
+            config=Mem2MemConfig(
+                indexing={
+                    "memory_dirs": user_sources,
+                    "project_memory_dirs": project_sources,
+                }
+            )
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["config"]["memory_dirs"] == [str(path.resolve()) for path in user_sources]
+        assert data["config"]["project_memory_dirs"] == [
+            str(path.resolve()) for path in project_sources
+        ]
 
     def test_json_output_is_never_styled(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
