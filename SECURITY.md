@@ -10,8 +10,8 @@ memtomem is alpha (`0.x`); only the latest published minor receives security fix
 
 | Version | Supported |
 |---------|-----------|
-| 0.4.x   | Yes       |
-| < 0.4   | No        |
+| 0.5.x   | Yes       |
+| < 0.5   | No        |
 
 ## Security Measures
 

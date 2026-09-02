@@ -105,6 +105,67 @@ class TestEnsureRuntimeDir:
 
         assert stat.S_IMODE(d.stat().st_mode) == 0o700
 
+    def test_failed_chmod_leaves_a_leftover_that_is_refused_not_adopted(
+        self, tmp_path, monkeypatch
+    ):
+        """A half-secured leftover must be refused, never adopted.
+
+        Under ``umask 0o177`` ``mkdir(mode=0o700)`` actually produces 0o600.
+        If the ``fchmod`` that repairs it then fails, that 0o600 directory is
+        what the *next* call finds. It used to be adopted as pre-existing —
+        the group/world check passes — and then failed one lock and marker at
+        a time with ``PermissionError`` because owner-exec is missing.
+        """
+        xdg = _make_safe_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+
+        def boom(*_args, **_kwargs):
+            raise PermissionError(1, "Operation not permitted")
+
+        # Restored by hand rather than with ``monkeypatch.undo()``: undo drops
+        # *every* patch on this fixture, including the autouse runtime-dir
+        # isolation, and the retry below would then run against the real
+        # ``/tmp/memtomem-<uid>``.
+        real_fchmod = os.fchmod
+        os.fchmod = boom  # type: ignore[assignment]
+        old_umask = os.umask(0o177)
+        try:
+            with pytest.raises(PermissionError):
+                ensure_runtime_dir()
+            target = runtime_paths.runtime_dir()
+            # Left in place on purpose — removal here could only be path-based
+            # and would race a directory that took the name meanwhile. What
+            # matters is that the leftover is refused, not silently adopted.
+            assert target.exists()
+            assert stat.S_IMODE(target.stat().st_mode) == 0o600
+            with pytest.raises(PermissionError, match="owner read/write/execute"):
+                ensure_runtime_dir()
+
+            os.fchmod = real_fchmod  # type: ignore[assignment]
+            target.rmdir()
+            d = ensure_runtime_dir()
+        finally:
+            os.fchmod = real_fchmod  # type: ignore[assignment]
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+    def test_refuses_existing_dir_missing_owner_access(self, tmp_path, monkeypatch):
+        """Owner rwx is not implied by the absence of group/world bits: 0o600
+        passes the ``& 0o077`` test while being unusable."""
+        xdg = _make_safe_xdg(tmp_path)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+        runtime = runtime_paths.runtime_dir()
+        runtime.mkdir(parents=True)
+        os.chmod(runtime, 0o600)
+        try:
+            with pytest.raises(PermissionError) as excinfo:
+                ensure_runtime_dir()
+        finally:
+            os.chmod(runtime, 0o700)
+
+        assert "owner read/write/execute" in str(excinfo.value)
+
     def test_idempotent_does_not_fail_on_existing_dir(self, tmp_path, monkeypatch):
         xdg = _make_safe_xdg(tmp_path)
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))

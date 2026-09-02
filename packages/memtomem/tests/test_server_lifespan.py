@@ -511,3 +511,128 @@ async def test_static_resource_reads_the_active_app(
 
     assert '"namespace": "work"' in payload
     app.ensure_initialized.assert_awaited_once()
+
+
+class _RecordingWebhookManager:
+    instances: list["_RecordingWebhookManager"] = []
+
+    def __init__(self, config: object, *_args: object, **_kwargs: object) -> None:
+        self.config = config
+        self.closed = False
+        type(self).instances.append(self)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _record_webhook_managers(monkeypatch: pytest.MonkeyPatch) -> list[_RecordingWebhookManager]:
+    import memtomem.server.webhooks as webhooks_mod
+
+    _RecordingWebhookManager.instances = []
+    monkeypatch.setattr(webhooks_mod, "WebhookManager", _RecordingWebhookManager)
+    return _RecordingWebhookManager.instances
+
+
+def _stop_before_components(monkeypatch: pytest.MonkeyPatch) -> None:
+    import memtomem.server.component_factory as factory_mod
+
+    async def stop(config, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("stop after reload")
+
+    monkeypatch.setattr(factory_mod, "create_components", stop)
+
+
+@pytest.mark.asyncio
+async def test_first_initialization_drops_a_webhook_disabled_after_handshake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Handshake reads config before migration — that staleness is the whole
+    reason the migration is deferred. The webhook manager is built from that
+    same stale config, so without reconciliation a webhook the user disabled
+    between handshake and the first tool call keeps delivering to the endpoint
+    they removed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+    _enable_webhook(monkeypatch)
+    managers = _record_webhook_managers(monkeypatch)
+    _stop_before_components(monkeypatch)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        assert ctx.webhook_manager is managers[0]
+
+        monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        assert ctx.config.webhook.enabled is False
+        assert ctx.webhook_manager is None
+        assert managers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_first_initialization_repoints_a_webhook_url_and_teardown_follows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The replacement manager is the one teardown has to stop. The lifespan
+    caches the handshake-era object, so reading that cache would close the
+    stale manager and leave the live one's client open."""
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+    _enable_webhook(monkeypatch)
+    managers = _record_webhook_managers(monkeypatch)
+    _stop_before_components(monkeypatch)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        monkeypatch.setenv("MEMTOMEM_WEBHOOK__URL", "https://moved.invalid/hook")
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        assert len(managers) == 2
+        assert managers[0].closed is True
+        assert str(managers[1].config.url) == "https://moved.invalid/hook"
+        assert ctx.webhook_manager is managers[1]
+
+    assert managers[1].closed is True, "teardown stopped the stale manager, not the live one"
+
+
+@pytest.mark.asyncio
+async def test_facade_picks_up_the_reconciled_webhook_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A second SSE connection opened before first initialization must not keep
+    the handshake-era manager.
+
+    ``from_runtime_owner`` copies ``config`` and ``webhook_manager`` by value.
+    The owner replaces both during the deferred config rebuild, so a facade
+    that only re-read ``_components`` would go on firing at an endpoint whose
+    manager the owner has already closed.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+    _enable_webhook(monkeypatch)
+    managers = _record_webhook_managers(monkeypatch)
+    _stop_before_components(monkeypatch)
+
+    server = MagicMock()
+    async with lifespan_mod.app_lifespan(server) as owner:
+        async with lifespan_mod.app_lifespan(server) as facade:
+            assert facade._runtime_owner is owner
+            assert facade.webhook_manager is managers[0]
+
+            monkeypatch.setenv("MEMTOMEM_WEBHOOK__URL", "https://moved.invalid/hook")
+            owner.register_server_instance = False
+            with pytest.raises(RuntimeError, match="stop after reload"):
+                await facade.ensure_initialized()
+
+            assert owner.webhook_manager is managers[1]
+            assert facade.webhook_manager is managers[1]
+            assert facade.config is owner.config
+            assert managers[0].closed is True

@@ -544,7 +544,19 @@ class AppContext:
         background tasks just because a later step failed.
         """
         if self._runtime_owner is not None:
-            comp = await self._runtime_owner.ensure_initialized()
+            try:
+                comp = await self._runtime_owner.ensure_initialized()
+            finally:
+                # ``from_runtime_owner`` copies these two by value, and a
+                # facade built before first initialization captured the
+                # handshake-era pair. The owner replaces both when it runs the
+                # deferred config rebuild, so a facade that skipped this would
+                # keep firing on a manager the owner has already closed — and
+                # answer from a config the migration superseded. In ``finally``
+                # because the rebuild happens *before* components are built: a
+                # failure past that point still leaves the old manager closed.
+                self.config = self._runtime_owner.config
+                self.webhook_manager = self._runtime_owner.webhook_manager
             # Keep the private compatibility handle in sync for the one
             # embedding-reset implementation that intentionally mutates the
             # shared Components container directly.
@@ -583,6 +595,7 @@ class AppContext:
                 self.config = build_fresh_config(migrate=True, strict_overrides=False)
                 self.ambient_config_loaded = True
                 self.defer_config_migration = False
+                await self._reconcile_webhook_manager()
 
             # #1936: take the lifecycle barrier BEFORE storage opens, so a
             # concurrent ``mm uninstall`` either has not started staging
@@ -848,6 +861,45 @@ class AppContext:
             await self._quarantine_failed_start(service, label)
             return False
         return True
+
+    async def _reconcile_webhook_manager(self) -> None:
+        """Rebuild the webhook manager against the refreshed config.
+
+        The handshake builds the manager from a config read before migration —
+        the very staleness the deferred rebuild above exists to correct. Left
+        alone, a manager built at handshake keeps firing at the URL it captured
+        then, so a webhook the user disabled or repointed between handshake and
+        the first tool call still delivers to the endpoint they removed. That
+        is a config change silently not taking effect on an egress path, which
+        is why this reconciles rather than waiting for the next process start.
+
+        Unconditional rather than diffed: this runs once per process, and
+        ``WebhookManager`` rewrites its own config when it rejects a URL, so a
+        equality check against ``config.webhook`` would not mean what it reads
+        like.
+        """
+        from memtomem.server.webhooks import WebhookManager
+
+        webhook = self.config.webhook
+        replacement: object | None = None
+        if webhook.enabled and webhook.url:
+            replacement = WebhookManager(webhook)
+        previous, self.webhook_manager = self.webhook_manager, replacement
+        if previous is None:
+            return
+        # The replacement is published *before* the old close is awaited.
+        # ``_stop_quietly`` re-raises ``CancelledError``, so clearing the field
+        # first and closing after would drop the only reference to a manager
+        # that never closed — teardown reads this field and would find the
+        # replacement, or nothing. On that cancellation the old manager goes to
+        # the same retry channel a failed recovery start uses, so ``close``
+        # still stops it. (An ordinary close failure is logged and swallowed by
+        # ``_stop_quietly``, as it is for every other resource here.)
+        try:
+            await _stop_quietly(previous, "webhook_manager")
+        except BaseException:
+            self._failed_services.append((previous, "webhook_manager"))
+            raise
 
     async def reconcile_watched_roots(self) -> None:
         """Re-watch the index roots when someone else edited the config (#2186).

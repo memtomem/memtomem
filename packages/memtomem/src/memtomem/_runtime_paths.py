@@ -170,6 +170,7 @@ RuntimeDirReason = Literal[
     "not_directory",
     "wrong_owner",
     "unsafe_permissions",
+    "missing_owner_access",
 ]
 
 _T = TypeVar("_T")
@@ -255,6 +256,17 @@ class RuntimeDirValidationError(PermissionError):
                 "Ask an administrator to remove it, then retry:\n"
                 f"rm -rf -- {command_target}"
             )
+        if self.reason == "missing_owner_access":
+            mode = _required_validation_field(
+                self.mode,
+                reason=self.reason,
+                field="mode",
+            )
+            return (
+                f"runtime dir {target} has mode 0o{mode:o}; the runtime dir "
+                "requires owner read/write/execute (expected 0o700). "
+                f"Remove it and retry: rm -rf -- {command_target}"
+            )
         mode = _required_validation_field(
             self.mode,
             reason=self.reason,
@@ -298,6 +310,8 @@ class RuntimeDirValidationError(PermissionError):
             reason=self.reason,
             field="mode",
         )
+        if self.reason == "missing_owner_access":
+            return f"missing owner access 0o{mode:o}"
         return f"unsafe permissions 0o{mode:o}"
 
 
@@ -462,14 +476,23 @@ def validate_runtime_dir(target: Path) -> bool:
                 actual_uid=st.st_uid,
                 expected_uid=os.geteuid(),
             )
-        unsafe = stat.S_IMODE(st.st_mode) & 0o077
+        mode = stat.S_IMODE(st.st_mode)
+        unsafe = mode & 0o077
         if unsafe:
             raise RuntimeDirValidationError(
                 target,
                 "unsafe_permissions",
-                mode=stat.S_IMODE(st.st_mode),
+                mode=mode,
                 unsafe_bits=unsafe,
             )
+        # Owner rwx is as load-bearing as the absence of group/world bits, and
+        # is not implied by it: a restrictive umask turns ``mkdir(mode=0o700)``
+        # into 0o600, which passes the group/world test while making the
+        # directory unusable — every lock and marker underneath it then fails
+        # with ``PermissionError``.  Refuse it here rather than let a caller
+        # discover it one file at a time.
+        if mode & 0o700 != 0o700:
+            raise RuntimeDirValidationError(target, "missing_owner_access", mode=mode)
     return True
 
 
@@ -514,6 +537,16 @@ def ensure_runtime_dir_at(target: Path) -> Path:
     # the inode we opened without following redirects.  The final identity
     # comparison catches a directory-to-symlink/rename swap between mkdir and
     # publication of the path.
+    # A failure from here on leaves behind a directory this call created but
+    # never finished securing.  A restrictive umask makes that concrete:
+    # ``mkdir(mode=0o700)`` yields 0o600, and a failing ``fchmod`` below leaves
+    # that 0o600 directory for the *next* call to find.  It is deliberately
+    # left in place rather than cleaned up: removal here can only be
+    # path-based, and both the mkdir-to-stat and the stat-to-rmdir window let
+    # another party's directory take that name and be deleted instead.  The
+    # owner-rwx rule in ``validate_runtime_dir`` is what makes leaving it safe
+    # — the leftover is refused with remediation text on the next call rather
+    # than adopted as usable.
     if os.name != "nt":
         flags = os.O_RDONLY
         flags |= getattr(os, "O_DIRECTORY", 0)

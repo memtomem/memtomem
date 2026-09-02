@@ -107,7 +107,12 @@ async def _release_server_runtime(
             return None
 
         owner = state.owner
-        webhook_mgr = state.webhook_manager
+        # The owner's field, not this cached one, is authoritative once first
+        # initialization has run: it reconciles the manager against the
+        # post-migration config, so the handshake-era object cached here may
+        # already have been stopped and replaced.  Stopping the stale one would
+        # leave the live manager's client open.
+        webhook_mgr = owner.webhook_manager if owner is not None else state.webhook_manager
         first_cancel: asyncio.CancelledError | None = None
         try:
             await _stop_quietly(webhook_mgr, "webhook_manager")
