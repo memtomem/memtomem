@@ -34,7 +34,9 @@ class TestHealthReport:
         assert report["total_chunks"] == 0
         assert report["access_coverage"]["pct"] == 0
         assert report["tag_coverage"]["pct"] == 0
-        assert report["sessions"]["total"] == 0
+        # No project-scoped answer exists for these rows (#2281).
+        assert report["sessions"]["available"] is False
+        assert report["sessions"]["total"] is None
 
     @pytest.mark.asyncio
     async def test_with_data(self, storage, components):

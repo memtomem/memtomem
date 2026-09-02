@@ -71,19 +71,33 @@ async def mem_eval(
         for ns in ns_dist:
             lines.append(f"  {ns['namespace']}: {ns['count']} chunks")
 
-    # 6. Session activity
+    # 6. Session activity — omitted entirely when the block is marked
+    # unavailable (no project identity on those rows, #2281); a "0 sessions"
+    # heading would be a claim the report cannot make.
     sess = report.get("sessions", {})
-    if sess.get("total", 0) > 0:
+    if sess.get("available", True) and (sess.get("total") or 0) > 0:
         lines.append("\n### Session Activity")
         lines.append(f"- Total sessions: {sess['total']}")
         lines.append(f"- Last 7 days: {sess.get('recent_7d', 0)}")
 
     # 7. Working memory
     wm = report.get("working_memory", {})
-    if wm.get("total", 0) > 0:
+    if wm.get("available", True) and (wm.get("total") or 0) > 0:
         lines.append("\n### Working Memory")
         lines.append(f"- Active entries: {wm['total']}")
         lines.append(f"- Promoted to long-term: {wm['promoted']}")
+
+    if not sess.get("available", True) or not wm.get("available", True):
+        unavailable = [
+            name
+            for name, block in (("Session activity", sess), ("Working memory", wm))
+            if not block.get("available", True)
+        ]
+        lines.append(
+            f"\n_{' and '.join(unavailable)} not reported: "
+            "those rows carry no project identity, so they have no "
+            "project-scoped count._"
+        )
 
     # 8. Cross-references
     xrefs = report.get("cross_references", 0)

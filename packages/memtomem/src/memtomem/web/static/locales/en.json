@@ -1225,6 +1225,8 @@
   "settings.health.title": "Memory Health",
   "settings.health.refresh": "Refresh",
   "settings.health.load_failed": "Memory health could not be loaded.",
+  "settings.health.not_project_scoped": "Not project-scoped",
+  "settings.health.not_project_scoped_hint": "Sessions and working memory carry no project identity, so this report cannot give a per-project count.",
   "settings.health.watchdog_heading": "Watchdog",
   "settings.health.watchdog_desc": "Periodic background checks. Run manually to force an update.",
 

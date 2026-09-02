@@ -643,71 +643,132 @@ qs('procedures-refresh-btn')?.addEventListener('click', loadHarnessProcedures);
 
 // ── Harness: Health Report ──
 
-async function loadHarnessHealth() {
+// Render state of the health panel, cached so a ``langchange`` re-paints the
+// localized bits (the "not project-scoped" label and its tooltip) from the last
+// payload without a round-trip — same pattern as the Sessions surfaces above.
+let _healthView = null;
+let _healthSeq = 0;
+
+function _paintHealth() {
   const report = qs('health-report');
-  renderPageState(report, { kind: 'loading', message: t('common.loading') });
+  if (!report || !_healthView) return;
+  const v = _healthView;
+  if (v.kind === 'loading') {
+    renderPageState(report, { kind: 'loading', message: t('common.loading') });
+    return;
+  }
+  if (v.kind === 'error') {
+    renderPageState(report, {
+      kind: 'error', message: t('settings.health.load_failed'), detail: v.detail, retry: loadHarnessHealth,
+    });
+    return;
+  }
+  // A 200 whose body is missing a block the template reads throws mid-render.
+  // Degrade to the error state (which offers Retry) rather than leaving the
+  // panel on "Loading…" — the pre-refactor render sat inside the fetch's own
+  // try/catch and this path must keep that. Recursing is safe: the error
+  // branch above renders from strings only.
   try {
-    const d = await api('GET', '/api/eval');
-    const pct = value => Math.min(100, Math.max(0, Number.isFinite(Number(value)) ? Number(value) : 0));
-    const accessPct = pct(d.access_coverage.pct);
-    const tagPct = pct(d.tag_coverage.pct);
-    const deadPct = pct(d.dead_memories_pct);
-    const text = value => escapeHtml(String(value ?? ''));
-    report.innerHTML = `
-      <div class="health-grid">
-        <div class="health-card card">
-          <div class="health-card-title">Access Coverage</div>
-          <div class="health-gauge">
-            <div class="health-gauge-bar" style="width:${accessPct}%"></div>
-          </div>
-          <div class="health-card-detail">${text(d.access_coverage.accessed)} / ${text(d.access_coverage.total)} chunks (${text(accessPct)}%)</div>
-        </div>
-        <div class="health-card card">
-          <div class="health-card-title">Tag Coverage</div>
-          <div class="health-gauge">
-            <div class="health-gauge-bar" style="width:${tagPct}%"></div>
-          </div>
-          <div class="health-card-detail">${text(d.tag_coverage.tagged)} / ${text(d.tag_coverage.total)} chunks (${text(tagPct)}%)</div>
-        </div>
-        <div class="health-card card">
-          <div class="health-card-title">Dead Memories</div>
-          <div class="health-gauge">
-            <div class="health-gauge-bar health-gauge-warn" style="width:${deadPct}%"></div>
-          </div>
-          <div class="health-card-detail">${text(deadPct)}% never accessed</div>
-        </div>
-        <div class="health-card card">
-          <div class="health-card-title">Sessions</div>
-          <div class="stat-value">${text(d.sessions.total)}</div>
-          <div class="health-card-detail">${text(d.sessions.active)} active</div>
-        </div>
-        <div class="health-card card">
-          <div class="health-card-title">Working Memory</div>
-          <div class="stat-value">${text(d.working_memory.total)}</div>
-          <div class="health-card-detail">${text(d.working_memory.promoted)} promoted</div>
-        </div>
-        <div class="health-card card">
-          <div class="health-card-title">Cross-References</div>
-          <div class="stat-value">${text(d.cross_references)}</div>
-        </div>
-      </div>
-      ${d.top_accessed.length ? `
-      <div class="health-section">
-        <h3>Top Accessed</h3>
-        <table class="harness-table"><thead><tr><th>ID</th><th>Content</th><th>Count</th></tr></thead>
-        <tbody>${d.top_accessed.map(r => `<tr><td class="mono">${escapeHtml(String(r.id || '').slice(0,8))}</td><td>${escapeHtml(String(truncate(r.content, 80)))}</td><td>${text(r.access_count)}</td></tr>`).join('')}</tbody></table>
-      </div>` : ''}
-      ${d.namespace_distribution.length ? `
-      <div class="health-section">
-        <h3>Namespace Distribution</h3>
-        <table class="harness-table"><thead><tr><th>Namespace</th><th>Chunks</th></tr></thead>
-        <tbody>${d.namespace_distribution.map(r => `<tr><td>${text(r.namespace)}</td><td>${text(r.count)}</td></tr>`).join('')}</tbody></table>
-      </div>` : ''}
-    `;
+    report.innerHTML = _healthHtml(v.data);
   } catch (e) {
-    renderPageState(report, { kind: 'error', message: t('settings.health.load_failed'), detail: e.message, retry: loadHarnessHealth });
+    _healthView = { kind: 'error', detail: (e && e.message) || String(e) };
+    _paintHealth();
   }
 }
+
+function _healthHtml(d) {
+  const pct = value => Math.min(100, Math.max(0, Number.isFinite(Number(value)) ? Number(value) : 0));
+  const accessPct = pct(d.access_coverage.pct);
+  const tagPct = pct(d.tag_coverage.pct);
+  const deadPct = pct(d.dead_memories_pct);
+  const text = value => escapeHtml(String(value ?? ''));
+  // Blocks whose rows carry no project identity (sessions, working memory)
+  // come back as ``{available: false, reason, <counts>: null}`` — the report
+  // is project-scoped and those tables cannot answer per project (#2281).
+  // Render the "not project-scoped" state instead of the counts; printing
+  // the nulls (or the 0 that used to arrive) reads as data loss.
+  const scopedCard = (title, block, body) => {
+    const b = block || {};
+    const inner = b.available === false
+      ? `<div class="stat-value stat-value--na">&mdash;</div>
+        <div class="health-card-detail muted-sm">${escapeHtml(t('settings.health.not_project_scoped'))}</div>`
+      : body(b);
+    const hint = b.available === false
+      ? ` title="${escapeAttr(t('settings.health.not_project_scoped_hint'))}"`
+      : '';
+    return `<div class="health-card card"${hint}>
+        <div class="health-card-title">${escapeHtml(title)}</div>${inner}
+      </div>`;
+  };
+  return `
+    <div class="health-grid">
+      <div class="health-card card">
+        <div class="health-card-title">Access Coverage</div>
+        <div class="health-gauge">
+          <div class="health-gauge-bar" style="width:${accessPct}%"></div>
+        </div>
+        <div class="health-card-detail">${text(d.access_coverage.accessed)} / ${text(d.access_coverage.total)} chunks (${text(accessPct)}%)</div>
+      </div>
+      <div class="health-card card">
+        <div class="health-card-title">Tag Coverage</div>
+        <div class="health-gauge">
+          <div class="health-gauge-bar" style="width:${tagPct}%"></div>
+        </div>
+        <div class="health-card-detail">${text(d.tag_coverage.tagged)} / ${text(d.tag_coverage.total)} chunks (${text(tagPct)}%)</div>
+      </div>
+      <div class="health-card card">
+        <div class="health-card-title">Dead Memories</div>
+        <div class="health-gauge">
+          <div class="health-gauge-bar health-gauge-warn" style="width:${deadPct}%"></div>
+        </div>
+        <div class="health-card-detail">${text(deadPct)}% never accessed</div>
+      </div>
+      ${scopedCard('Sessions', d.sessions, b => `
+        <div class="stat-value">${text(b.total)}</div>
+        <div class="health-card-detail">${text(b.active)} active</div>`)}
+      ${scopedCard('Working Memory', d.working_memory, b => `
+        <div class="stat-value">${text(b.total)}</div>
+        <div class="health-card-detail">${text(b.promoted)} promoted</div>`)}
+      <div class="health-card card">
+        <div class="health-card-title">Cross-References</div>
+        <div class="stat-value">${text(d.cross_references)}</div>
+      </div>
+    </div>
+    ${d.top_accessed.length ? `
+    <div class="health-section">
+      <h3>Top Accessed</h3>
+      <table class="harness-table"><thead><tr><th>ID</th><th>Content</th><th>Count</th></tr></thead>
+      <tbody>${d.top_accessed.map(r => `<tr><td class="mono">${escapeHtml(String(r.id || '').slice(0,8))}</td><td>${escapeHtml(String(truncate(r.content, 80)))}</td><td>${text(r.access_count)}</td></tr>`).join('')}</tbody></table>
+    </div>` : ''}
+    ${d.namespace_distribution.length ? `
+    <div class="health-section">
+      <h3>Namespace Distribution</h3>
+      <table class="harness-table"><thead><tr><th>Namespace</th><th>Chunks</th></tr></thead>
+      <tbody>${d.namespace_distribution.map(r => `<tr><td>${text(r.namespace)}</td><td>${text(r.count)}</td></tr>`).join('')}</tbody></table>
+    </div>` : ''}
+  `;
+}
+
+async function loadHarnessHealth() {
+  // Sequence token: a slower earlier fetch must not repaint over a newer one.
+  const seq = ++_healthSeq;
+  _healthView = { kind: 'loading' };
+  _paintHealth();
+  try {
+    const d = await api('GET', '/api/eval');
+    if (seq !== _healthSeq) return;
+    _healthView = { kind: 'ready', data: d };
+  } catch (e) {
+    if (seq !== _healthSeq) return;
+    _healthView = { kind: 'error', detail: e.message };
+  }
+  _paintHealth();
+}
+
+// Re-localize the health panel from cached state on a language toggle.
+window.addEventListener('langchange', () => {
+  if (_healthView) _paintHealth();
+});
 
 qs('health-refresh-btn')?.addEventListener('click', loadHarnessHealth);
 

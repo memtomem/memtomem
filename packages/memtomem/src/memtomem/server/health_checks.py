@@ -185,6 +185,12 @@ async def check_full_health_report(app: AppContext) -> HealthSnapshot:
         project_context_root=_resolve_project_context_root(app)
     )
 
+    # ``sessions`` has no project-scoped answer (#2281): the block arrives
+    # ``available: false`` with ``None`` counts. Record it as ``None`` rather
+    # than coercing to 0 so a trend reader cannot mistake it for "no sessions".
+    sessions = report.get("sessions") or {}
+    active_sessions = sessions.get("active") if sessions.get("available", True) else None
+
     dead_pct = report.get("dead_memories_pct", 0)
     if dead_pct > 80:
         status = "critical"
@@ -201,7 +207,7 @@ async def check_full_health_report(app: AppContext) -> HealthSnapshot:
             "dead_memories_pct": dead_pct,
             "access_coverage_pct": report["access_coverage"]["pct"],
             "tag_coverage_pct": report["tag_coverage"]["pct"],
-            "active_sessions": report["sessions"]["active"],
+            "active_sessions": active_sessions,
             "cross_references": report["cross_references"],
         },
         status=status,
