@@ -10,15 +10,17 @@ memtomem is alpha (`0.x`); only the latest published minor receives security fix
 
 | Version | Supported |
 |---------|-----------|
-| 0.3.x   | Yes       |
-| < 0.3   | No        |
+| 0.5.x   | Yes       |
+| < 0.5   | No        |
 
 ## Security Measures
 
 ### Web UI
 
 - **XSS prevention**: All markdown rendering uses DOMPurify sanitization
-- **Content Security Policy**: Strict CSP header limits script/style sources to self + cdnjs
+- **Content Security Policy**: Scripts are restricted to same-origin vendored assets;
+  styles are same-origin with inline styles allowed for the current UI. Frames,
+  plugins, external base URLs, and cross-origin form submissions are blocked.
 - **Frame protection**: `X-Frame-Options: DENY` prevents clickjacking
 - **CORS**: Restricted to localhost origins only
 - **Path traversal protection**: General file access endpoints validate against

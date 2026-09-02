@@ -484,7 +484,9 @@ def prepare_pull(
         raise RuntimeError(f"selected candidate {selected.runtime} has no captured content")
     captured = tuple(selected.landing_full)
     src = _runtime_candidate_path(kind, selected.runtime, name, scope, resolved_root)
-    src_root = src.parent if kind == "skills" else src  # type: ignore[union-attr]
+    if src is None:
+        raise RuntimeError(f"selected candidate {selected.runtime} has no runtime path")
+    src_root = src.parent if kind == "skills" else src
     dst = canonical_artifact_dir(kind, scope, resolved_root) / name
     gate = _evaluate_gate(
         kind,

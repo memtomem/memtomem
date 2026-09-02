@@ -7,10 +7,11 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from memtomem.config import TargetScope
+from memtomem.server.validation import MAX_CONTENT_LENGTH
 
 
 class AddMemoryRequest(BaseModel):
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     title: str | None = None
     tags: list[str] = []
     file: str | None = None

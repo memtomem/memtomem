@@ -17,12 +17,15 @@ are covered in ``test_server_app_context.py``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from memtomem.server import lifespan as lifespan_mod
+from .helpers import set_home
 
 
 # ── helpers ───────────────────────────────────────────────────────────
@@ -67,6 +70,99 @@ async def test_lifespan_yields_context_without_initializing_components(
         assert ctx._scheduler is None
         assert ctx._policy_scheduler is None
         assert ctx._health_watchdog is None
+
+
+@pytest.mark.asyncio
+async def test_handshake_defers_legacy_config_migration_until_initialization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import memtomem.config as config_mod
+    import memtomem.server.component_factory as factory_mod
+
+    home = tmp_path / "home"
+    config_dir = home / ".memtomem"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    provider_dir = tmp_path / "provider-memory"
+    provider_dir.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(config_mod, "_canonical_provider_dirs", lambda: [provider_dir])
+    monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+
+    async def stop_after_migration(*_args, **_kwargs):
+        raise RuntimeError("stop after migration")
+
+    monkeypatch.setattr(factory_mod, "create_components", stop_after_migration)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        assert config_path.read_text(encoding="utf-8") == "{}"
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after migration"):
+            await ctx.ensure_initialized()
+
+        migrated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert migrated["indexing"]["auto_discover"] is False
+        assert provider_dir.resolve() in {
+            Path(value).expanduser().resolve() for value in migrated["indexing"]["memory_dirs"]
+        }
+
+
+@pytest.mark.asyncio
+async def test_first_initialization_reloads_fragments_changed_after_handshake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import memtomem.server.component_factory as factory_mod
+
+    home = tmp_path / "home"
+    fragment_dir = home / ".memtomem" / "config.d"
+    fragment_dir.mkdir(parents=True)
+    fragment = fragment_dir / "10-search.json"
+    fragment.write_text(json.dumps({"search": {"default_top_k": 11}}), encoding="utf-8")
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+
+    captured: dict[str, object] = {}
+
+    async def stop_after_reload(config, **kwargs):  # type: ignore[no-untyped-def]
+        captured["top_k"] = config.search.default_top_k
+        captured["load_ambient_config"] = kwargs["load_ambient_config"]
+        raise RuntimeError("stop after reload")
+
+    monkeypatch.setattr(factory_mod, "create_components", stop_after_reload)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        assert ctx.config.search.default_top_k == 11
+        fragment.write_text(json.dumps({"search": {"default_top_k": 37}}), encoding="utf-8")
+
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        assert ctx.config.search.default_top_k == 37
+        assert captured == {"top_k": 37, "load_ambient_config": False}
+
+
+@pytest.mark.asyncio
+async def test_handshake_tolerates_malformed_config_without_rewriting_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".memtomem"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.json"
+    malformed = "{not-json"
+    config_path.write_text(malformed, encoding="utf-8")
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        assert ctx._components is None
+
+    assert config_path.read_text(encoding="utf-8") == malformed
 
 
 # ── shutdown ordering ────────────────────────────────────────────────
@@ -352,6 +448,39 @@ async def test_overlapping_lifespans_do_not_share_the_active_app(
 
 
 @pytest.mark.asyncio
+async def test_same_server_overlapping_lifespans_share_one_runtime_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSE connections keep session state separate but refcount one runtime."""
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
+    server = MagicMock()
+    close_calls: list[object] = []
+
+    async def record_close(self) -> None:  # type: ignore[no-untyped-def]
+        close_calls.append(self)
+
+    import memtomem.server.context as context_mod
+
+    monkeypatch.setattr(context_mod.AppContext, "close", record_close)
+
+    async with lifespan_mod.app_lifespan(server) as first:
+        first.current_session_id = "first-session"
+        async with lifespan_mod.app_lifespan(server) as second:
+            assert second is not first
+            assert second._runtime_owner is first
+            assert second.config is first.config
+            assert second.current_session_id is None
+            second.current_session_id = "second-session"
+            assert first.current_session_id == "first-session"
+        # Disconnecting one SSE client must not stop services still used by
+        # the other connection.
+        assert close_calls == []
+
+    assert close_calls == [first]
+
+
+@pytest.mark.asyncio
 async def test_get_active_app_initialized_raises_outside_lifespan() -> None:
     """Fail loudly rather than hand a static resource a ``None`` app."""
     import memtomem.server.context as context_mod
@@ -382,3 +511,174 @@ async def test_static_resource_reads_the_active_app(
 
     assert '"namespace": "work"' in payload
     app.ensure_initialized.assert_awaited_once()
+
+
+class _RecordingWebhookManager:
+    instances: list["_RecordingWebhookManager"] = []
+
+    def __init__(self, config: object, *_args: object, **_kwargs: object) -> None:
+        self.config = config
+        self.closed = False
+        type(self).instances.append(self)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _record_webhook_managers(monkeypatch: pytest.MonkeyPatch) -> list[_RecordingWebhookManager]:
+    import memtomem.server.webhooks as webhooks_mod
+
+    _RecordingWebhookManager.instances = []
+    monkeypatch.setattr(webhooks_mod, "WebhookManager", _RecordingWebhookManager)
+    return _RecordingWebhookManager.instances
+
+
+def _stop_before_components(monkeypatch: pytest.MonkeyPatch) -> None:
+    import memtomem.server.component_factory as factory_mod
+
+    async def stop(config, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("stop after reload")
+
+    monkeypatch.setattr(factory_mod, "create_components", stop)
+
+
+@pytest.mark.asyncio
+async def test_first_initialization_drops_a_webhook_disabled_after_handshake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Handshake reads config before migration — that staleness is the whole
+    reason the migration is deferred. The webhook manager is built from that
+    same stale config, so without reconciliation a webhook the user disabled
+    between handshake and the first tool call keeps delivering to the endpoint
+    they removed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+    _enable_webhook(monkeypatch)
+    managers = _record_webhook_managers(monkeypatch)
+    _stop_before_components(monkeypatch)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        assert ctx.webhook_manager is managers[0]
+
+        monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        assert ctx.config.webhook.enabled is False
+        assert ctx.webhook_manager is None
+        assert managers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_first_initialization_repoints_a_webhook_url_and_teardown_follows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The replacement manager is the one teardown has to stop. The lifespan
+    caches the handshake-era object, so reading that cache would close the
+    stale manager and leave the live one's client open."""
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+    _enable_webhook(monkeypatch)
+    managers = _record_webhook_managers(monkeypatch)
+    _stop_before_components(monkeypatch)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        monkeypatch.setenv("MEMTOMEM_WEBHOOK__URL", "https://moved.invalid/hook")
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        assert len(managers) == 2
+        assert managers[0].closed is True
+        assert str(managers[1].config.url) == "https://moved.invalid/hook"
+        assert ctx.webhook_manager is managers[1]
+
+    assert managers[1].closed is True, "teardown stopped the stale manager, not the live one"
+
+
+@pytest.mark.asyncio
+async def test_facade_picks_up_the_reconciled_webhook_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A second SSE connection opened before first initialization must not keep
+    the handshake-era manager.
+
+    ``from_runtime_owner`` copies ``config`` and ``webhook_manager`` by value.
+    The owner replaces both during the deferred config rebuild, so a facade
+    that only re-read ``_components`` would go on firing at an endpoint whose
+    manager the owner has already closed.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+    _enable_webhook(monkeypatch)
+    managers = _record_webhook_managers(monkeypatch)
+    _stop_before_components(monkeypatch)
+
+    server = MagicMock()
+    async with lifespan_mod.app_lifespan(server) as owner:
+        async with lifespan_mod.app_lifespan(server) as facade:
+            assert facade._runtime_owner is owner
+            assert facade.webhook_manager is managers[0]
+
+            monkeypatch.setenv("MEMTOMEM_WEBHOOK__URL", "https://moved.invalid/hook")
+            owner.register_server_instance = False
+            with pytest.raises(RuntimeError, match="stop after reload"):
+                await facade.ensure_initialized()
+
+            assert owner.webhook_manager is managers[1]
+            assert facade.webhook_manager is managers[1]
+            assert facade.config is owner.config
+            assert managers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_aborted_initialization_still_reloads_config_on_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An aborted first initialization must not bank a config it never read.
+
+    ``defer_config_migration`` used to be cleared next to the rebuild, but
+    everything after it can raise — the webhook close is a cancellation point,
+    and so is every component start. The retry then skipped the rebuild, kept
+    the config from the aborted attempt, and recorded the *current* signature
+    over it, so an edit made in between counted as applied while never being
+    read.
+    """
+    home = tmp_path / "home"
+    fragment_dir = home / ".memtomem" / "config.d"
+    fragment_dir.mkdir(parents=True)
+    fragment = fragment_dir / "10-search.json"
+    fragment.write_text(json.dumps({"search": {"default_top_k": 11}}), encoding="utf-8")
+    set_home(monkeypatch, home)
+    monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
+
+    seen: list[int] = []
+
+    async def stop_after_reload(config, **_kwargs):  # type: ignore[no-untyped-def]
+        seen.append(config.search.default_top_k)
+        raise RuntimeError("stop after reload")
+
+    import memtomem.server.component_factory as factory_mod
+
+    monkeypatch.setattr(factory_mod, "create_components", stop_after_reload)
+
+    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
+        ctx.register_server_instance = False
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        # A config edit lands between the aborted attempt and the retry.
+        fragment.write_text(json.dumps({"search": {"default_top_k": 37}}), encoding="utf-8")
+        with pytest.raises(RuntimeError, match="stop after reload"):
+            await ctx.ensure_initialized()
+
+        assert seen == [11, 37], "the retry reused the aborted attempt's config"
+        assert ctx.config.search.default_top_k == 37

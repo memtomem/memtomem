@@ -5,7 +5,7 @@ from __future__ import annotations
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
-from memtomem.server.tool_registry import ACTIONS
+from memtomem.server.tool_registry import ACTIONS, validate_action_params
 
 # Common aliases for discoverability — maps intuitive names to actual actions
 _ALIASES: dict[str, str] = {
@@ -77,13 +77,35 @@ async def mem_do(
 
     kwargs = dict(params) if params else {}
     kwargs["ctx"] = ctx
-    try:
-        return await info.fn(**kwargs)
-    except TypeError as exc:
+
+    def _bad_parameter(exc: Exception) -> str:
         return (
             f"Error: invalid parameter for action '{resolved}' — {exc}. "
             f'Use action=\'help\' with params={{"category": "{info.category}"}} for details.'
         )
+
+    try:
+        # Scoped to validation alone.  Widening it over ``info.fn`` would
+        # rewrite every ``ValueError`` a tool body raises for its own reasons
+        # (range checks, timestamp parsing, reviewer/decision validation) into
+        # a caller-input error, hiding it from ``@tool_handler`` and making an
+        # internal failure indistinguishable from a bad parameter.  Both
+        # exception types are still caught *here*: ``validate_action_params``
+        # ends in ``Signature.bind``, which reports an unknown or missing
+        # parameter as a ``TypeError``, and that is the same caller mistake the
+        # dispatch guard below describes.
+        kwargs = validate_action_params(info, kwargs)
+    except ValueError as exc:
+        # Registered tool bodies historically use the lower-case prefix for
+        # literal-boolean refusals; keep that wire contract while moving the
+        # guard in front of every action.
+        return f"error: {exc}"
+    except TypeError as exc:
+        return _bad_parameter(exc)
+    try:
+        return await info.fn(**kwargs)
+    except TypeError as exc:
+        return _bad_parameter(exc)
 
 
 #: Narrative that does not fit in a one-line action description and must not

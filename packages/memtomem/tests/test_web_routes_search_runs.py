@@ -8,6 +8,8 @@ the real validation contract is pinned in ``test_search_feedback.py``.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
 from unittest.mock import DEFAULT, AsyncMock
@@ -94,6 +96,8 @@ def app():
     pipeline.flush_observation = AsyncMock(side_effect=_record("flush"))
     application.state.storage = storage
     application.state.search_pipeline = pipeline
+    application.state.config = SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[]))
+    application.state.project_root = Path("/project-a")
     application.state.call_order = call_order
     return application
 
@@ -113,7 +117,29 @@ class TestListRuns:
         assert data["total"] == 1
         assert data["runs"][0]["run_id"] == RUN_ID
         assert data["runs"][0]["feedback_count"] == 1
-        app.state.storage.get_search_runs.assert_awaited_once_with(limit=50, since=None)
+        app.state.storage.get_search_runs.assert_awaited_once_with(
+            limit=50, since=None, project_context_root=None
+        )
+
+    async def test_boundary_tracks_live_project_registration(
+        self, app, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        monkeypatch.chdir(project_root)
+        app.state.config.indexing.project_memory_dirs = [project_root / ".memtomem" / "memories"]
+
+        first = await client.get("/api/search/runs")
+        assert first.status_code == 200
+        assert (
+            app.state.storage.get_search_runs.await_args.kwargs["project_context_root"]
+            == project_root.resolve()
+        )
+
+        app.state.config.indexing.project_memory_dirs = []
+        second = await client.get("/api/search/runs")
+        assert second.status_code == 200
+        assert app.state.storage.get_search_runs.await_args.kwargs["project_context_root"] is None
 
     @pytest.mark.parametrize("bad_limit", [0, 201, -5])
     async def test_limit_bounds_rejected(self, client, bad_limit):
@@ -181,7 +207,11 @@ class TestPostFeedback:
         data = resp.json()
         assert data["created"] is True and data["replaced"] is False
         app.state.storage.save_search_feedback.assert_awaited_once_with(
-            RUN_ID, "c1", "relevant", replace=False
+            RUN_ID,
+            "c1",
+            "relevant",
+            replace=False,
+            project_context_root=None,
         )
 
     async def test_idempotent_resubmit(self, app, client):

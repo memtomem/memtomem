@@ -26,7 +26,11 @@ _PIPELINE = object()
 
 
 def _comp():
-    return SimpleNamespace(storage=_STORAGE, search_pipeline=_PIPELINE)
+    return SimpleNamespace(
+        storage=_STORAGE,
+        search_pipeline=_PIPELINE,
+        config=SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[])),
+    )
 
 
 def _patch_bootstrap(monkeypatch, comp):

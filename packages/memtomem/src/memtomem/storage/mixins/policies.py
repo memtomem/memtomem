@@ -18,7 +18,7 @@ class PolicyMixin:
         namespace_filter: str | None = None,
     ) -> str:
         db = self._get_db()
-        policy_id = uuid4().hex[:12]
+        policy_id = str(uuid4())
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._rolls_back_if_standalone(db):
             db.execute(

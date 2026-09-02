@@ -1362,6 +1362,21 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "scandir iteration; " + _RO,
     ),
+    ("context/projects.py", "_discover_claude_projects", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Claude projects root stat is re-raised into the degraded read-only report; " + _RO,
+    ),
+    ("context/projects.py", "_discover_claude_projects", ("OSError",), 1): (
+        _U,
+        "no_recovery_callee",
+        "Claude projects root iteration is re-raised into the degraded read-only report; " + _RO,
+    ),
+    ("context/projects.py", "_discover_claude_projects", ("OSError",), 2): (
+        _U,
+        "no_recovery_callee",
+        "Claude projects child stat is re-raised into the degraded read-only report; " + _RO,
+    ),
     ("context/projects.py", "_root_stale", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
@@ -1376,6 +1391,11 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         _U,
         "no_recovery_callee",
         "display.resolve probe; " + _RO,
+    ),
+    ("context/projects.py", "discover_project_scopes_with_report", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Claude read-only scan error becomes an availability warning; " + _RO,
     ),
     ("context/projects.py", "resolve_project_selector", ("OSError",), 0): (
         _U,

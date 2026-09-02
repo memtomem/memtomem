@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import struct
 import unicodedata
+import hashlib
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 
 from memtomem.models import NamespaceFilter
@@ -36,6 +38,28 @@ def norm_path(p: Path) -> str:
     except OSError:
         resolved = str(p)
     return unicodedata.normalize("NFC", resolved)
+
+
+def project_boundary_key(project_context_root: Path | str | None) -> str:
+    """Return the non-reversible key used to isolate project-owned records.
+
+    ``None`` is a real boundary: it represents a user-only invocation outside
+    a registered project.  Absolute roots are never persisted in history rows
+    or returned through diagnostics.
+    """
+    if project_context_root is None:
+        return "user"
+    canonical = norm_path(Path(project_context_root))
+    return hashlib.sha256(f"project\0{canonical}".encode("utf-8")).hexdigest()
+
+
+def match_source_filter_value(filter_str: str, source_path: str) -> bool:
+    """Canonical substring-or-glob source matcher, separator portable."""
+    norm_filter = filter_str.replace("\\", "/")
+    norm_source = source_path.replace("\\", "/")
+    if any(char in norm_filter for char in ("*", "?", "[")):
+        return fnmatch(norm_source, norm_filter)
+    return norm_filter in norm_source
 
 
 def placeholders(n: int) -> str:

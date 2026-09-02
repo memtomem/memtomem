@@ -1745,3 +1745,30 @@ class TestEmbeddingResetRunbooks:
     )
     def test_a_non_remedy_does_not_satisfy_the_guard(self, line: str) -> None:
         assert not self._REMEDY_RE.search(line)
+
+
+def test_security_policy_supports_the_shipped_minor() -> None:
+    """SECURITY.md promises that only the latest published minor is supported,
+    so its table has to move with the package version. A release bump that
+    leaves the table behind promises fixes for a line that no longer gets
+    them — and silently drops the one that does."""
+    import re
+    import tomllib
+
+    pyproject = _REPO_ROOT / "packages" / "memtomem" / "pyproject.toml"
+    version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    major, minor, *_ = version.split(".")
+
+    policy = (_REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\|\s*([^|]+?)\s*\|\s*(Yes|No)\s*\|", policy, re.M)
+    supported = [ver for ver, verdict in rows if verdict == "Yes"]
+    unsupported = [ver for ver, verdict in rows if verdict == "No"]
+
+    assert supported == [f"{major}.{minor}.x"], (
+        f"SECURITY.md marks {supported} supported; package version is {version}"
+    )
+    # Read from the table too, not matched as free text: a stale "No" row would
+    # otherwise pass on an unrelated mention of the version elsewhere in the file.
+    assert unsupported == [f"< {major}.{minor}"], (
+        f"SECURITY.md marks {unsupported} unsupported; package version is {version}"
+    )

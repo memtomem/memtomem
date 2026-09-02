@@ -263,7 +263,9 @@ class TestReflect:
         # Honours ``limit``: if the stub returned everything regardless, the
         # over-fetch that keeps visible hubs on the page would be untestable
         # and a regression to filtering-after-LIMIT would pass.
-        app.storage.get_most_connected = AsyncMock(side_effect=lambda limit: hubs[:limit])
+        app.storage.get_most_connected = AsyncMock(
+            side_effect=lambda limit, **_kwargs: hubs[:limit]
+        )
         app.storage.get_related = AsyncMock(side_effect=lambda cid: related_by_hub.get(cid, []))
 
         # ``mem_reflect`` hands ``get_chunk`` the raw string from the hub row

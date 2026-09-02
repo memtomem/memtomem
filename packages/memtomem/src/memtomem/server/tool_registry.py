@@ -7,8 +7,13 @@ The mem_do tool uses this registry to dispatch actions by name.
 from __future__ import annotations
 
 import inspect
+import types
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine
+from functools import reduce
+from operator import or_
+from typing import Any, Callable, Coroutine, Union, get_args, get_origin, get_type_hints
+
+from pydantic import StrictBool
 
 ActionFn = Callable[..., Coroutine[Any, Any, str]]
 
@@ -25,6 +30,59 @@ class ActionInfo:
 
 
 ACTIONS: dict[str, ActionInfo] = {}
+
+
+def _strict_boolean_annotation(annotation: Any) -> Any:
+    """Replace bool leaves with StrictBool for FastMCP's generated model.
+
+    ``@register`` runs below ``@tool_handler``/``@mcp.tool`` in every tool
+    declaration.  Updating the registered function's annotations here means
+    the outer decorators see the strict form too, so direct MCP calls and the
+    raw ``mem_do`` path share one literal-boolean contract.
+    """
+    if annotation is bool:
+        return StrictBool
+    origin = get_origin(annotation)
+    if origin in (Union, types.UnionType):
+        args = tuple(_strict_boolean_annotation(arg) for arg in get_args(annotation))
+        return reduce(or_, args)
+    return annotation
+
+
+def _contains_boolean(annotation: Any) -> bool:
+    if annotation is bool:
+        return True
+    origin = get_origin(annotation)
+    if origin is not None:
+        return any(_contains_boolean(arg) for arg in get_args(annotation))
+    return False
+
+
+def validate_action_params(info: ActionInfo, params: dict[str, Any]) -> dict[str, Any]:
+    """Validate the raw ``mem_do`` parameter mapping before dispatch.
+
+    FastMCP normally validates direct calls, but ``mem_do`` invokes the
+    registered function itself.  In particular, Python considers ``"false"``
+    truthy, so forwarding it to a destructive/consent flag can invert caller
+    intent.  Every declared boolean is therefore literal-only on this path.
+    Signature binding also gives unknown/missing parameters a consistent error
+    before any tool body runs.
+    """
+    signature = inspect.signature(info.fn)
+    hints = get_type_hints(info.fn, include_extras=True)
+    call_params = dict(params)
+    for name, value in call_params.items():
+        parameter = signature.parameters.get(name)
+        if parameter is None or name == "ctx":
+            continue
+        annotation = hints.get(name, parameter.annotation)
+        if _contains_boolean(annotation) and value is not True and value is not False:
+            raise ValueError(
+                f"{name} must be a literal boolean (true/false), got "
+                f"{type(value).__name__} {value!r}"
+            )
+    signature.bind(**call_params)
+    return call_params
 
 
 def _parse_arg_docs(docstring: str) -> dict[str, str]:
@@ -85,7 +143,23 @@ def register(category: str):
     """
 
     def decorator(fn: ActionFn) -> ActionFn:
-        sig = inspect.signature(fn)
+        # Preserve the public catalog signature before replacing bool leaves
+        # for FastMCP.  StrictBool is a validation implementation detail, not
+        # useful help text (and its verbose Annotated rendering needlessly
+        # consumes the bounded category catalog).
+        catalog_signature = inspect.signature(fn)
+        # FastMCP's default Pydantic model is lax for plain bool annotations.
+        # Promote every registered boolean (including Optional[bool]) to its
+        # strict counterpart before the outer decorators inspect the function.
+        resolved_hints = get_type_hints(fn, include_extras=True)
+        for name, annotation in resolved_hints.items():
+            if name == "return":
+                continue
+            strict_annotation = _strict_boolean_annotation(annotation)
+            if strict_annotation != annotation:
+                fn.__annotations__[name] = strict_annotation
+
+        sig = catalog_signature
         params: dict[str, str] = {}
         for name, p in sig.parameters.items():
             if name == "ctx":

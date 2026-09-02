@@ -2,6 +2,9 @@
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from memtomem.server.tool_registry import ACTIONS
 from memtomem.server.tools.meta import _ALIASES, _help, mem_do
 from memtomem.server.tools.status_config import mem_version
@@ -102,6 +105,23 @@ class TestMemDoRouting:
         """Verify fuzzy matching would find similar actions."""
         similar = [k for k in ACTIONS if "tag" in k]
         assert len(similar) >= 2  # tag_list, tag_rename, tag_delete, auto_tag
+
+    @pytest.mark.parametrize("bad", ["false", "true", "yes", 0, 1, None])
+    async def test_all_registered_booleans_are_literal_only_via_mem_do(self, bad):
+        result = await mem_do("reset", params={"confirm": bad})
+        assert result.startswith("error:")
+        assert "confirm must be a literal boolean" in result
+
+    def test_registered_boolean_annotations_are_strict_for_direct_mcp(self):
+        """The registry hardens FastMCP's direct path, not only mem_do."""
+        from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+
+        model = func_metadata(ACTIONS["reset"].fn).arg_model
+        for bad in ("false", "true", "yes", 0, 1, None):
+            with pytest.raises(ValidationError):
+                model.model_validate({"confirm": bad})
+        for good in (False, True):
+            assert model.model_validate({"confirm": good}).confirm is good
 
 
 class TestAliasInvariants:
@@ -307,3 +327,46 @@ class TestMemVersion:
         assert profile["search"]["configured_mode"] == "hybrid"
         assert profile["search"]["effective_mode"] == "bm25_only"
         assert profile["missing_extras"] == ["onnx"]
+
+
+class TestMemDoErrorScoping:
+    """``mem_do``'s ``ValueError`` guard covers parameter validation only.
+
+    Widening it over ``await info.fn(...)`` rewrote every ``ValueError`` a tool
+    body raises for its own reasons — range checks, timestamp parsing, reviewer
+    validation — into a caller-input string, hiding the failure from
+    ``@tool_handler`` and making an internal fault indistinguishable from a bad
+    parameter.
+    """
+
+    async def test_a_tool_body_valueerror_is_not_rewritten_as_a_param_error(
+        self, monkeypatch
+    ) -> None:
+        import dataclasses
+
+        async def _boom(ctx=None):
+            raise ValueError("limit must be between 1 and 200")
+
+        info = dataclasses.replace(ACTIONS["reset"], fn=_boom)
+        monkeypatch.setitem(ACTIONS, "reset", info)
+
+        result = await mem_do("reset", params={})
+        # Reaches ``@tool_handler``'s error surface, not the parameter-guard
+        # string the validation branch returns.
+        assert not result.startswith("error: limit must be")
+        assert "limit must be between 1 and 200" in result
+
+    async def test_parameter_validation_still_returns_the_error_string(self) -> None:
+        result = await mem_do("reset", params={"confirm": "true"})
+        assert result.startswith("error:")
+
+    async def test_unknown_parameter_keeps_the_action_specific_help_hint(self) -> None:
+        """``validate_action_params`` ends in ``Signature.bind``, which reports
+        an unknown or missing parameter as a ``TypeError``. Narrowing the guard
+        to ``ValueError`` alone dropped those out of the invalid-parameter
+        response and into the generic handler."""
+        result = await mem_do("reset", params={"no_such_param": 1})
+
+        assert "invalid parameter for action 'reset'" in result
+        assert "no_such_param" in result
+        assert "category" in result

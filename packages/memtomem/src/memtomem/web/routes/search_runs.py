@@ -19,7 +19,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.errors import FeedbackConflictError
-from memtomem.web.deps import get_search_pipeline, get_storage
+from memtomem.web.deps import get_project_context_root, get_search_pipeline, get_storage
 from memtomem.web.schemas.search_runs import (
     FeedbackIn,
     FeedbackOut,
@@ -38,10 +38,13 @@ async def list_search_runs(
     since: str | None = Query(None, description="ISO timestamp filter"),
     storage=Depends(get_storage),
     pipeline=Depends(get_search_pipeline),
+    project_context_root=Depends(get_project_context_root),
 ) -> SearchRunListResponse:
     """Newest-first summaries of observed search runs."""
     await pipeline.flush_observation()
-    rows = await storage.get_search_runs(limit=limit, since=since)
+    rows = await storage.get_search_runs(
+        limit=limit, since=since, project_context_root=project_context_root
+    )
     runs = [SearchRunSummary(**r) for r in rows]
     return SearchRunListResponse(runs=runs, total=len(runs))
 
@@ -51,11 +54,17 @@ async def get_search_run(
     run_id: str,
     storage=Depends(get_storage),
     pipeline=Depends(get_search_pipeline),
+    project_context_root=Depends(get_project_context_root),
 ) -> SearchRunDetailResponse:
     """One run: query, observation metadata, ranked snapshot + judgments."""
     await pipeline.flush_observation(run_id)
-    run = await storage.get_search_run(run_id)
-    judgments = {j["chunk_id"]: j for j in await storage.get_search_feedback(run_id)}
+    run = await storage.get_search_run(run_id, project_context_root=project_context_root)
+    judgments = {
+        j["chunk_id"]: j
+        for j in await storage.get_search_feedback(
+            run_id, project_context_root=project_context_root
+        )
+    }
     results = []
     for entry in run["result_snapshot"]:
         judgment = judgments.get(entry.get("chunk_id"))
@@ -81,12 +90,17 @@ async def save_search_feedback(
     body: FeedbackIn,
     storage=Depends(get_storage),
     pipeline=Depends(get_search_pipeline),
+    project_context_root=Depends(get_project_context_root),
 ) -> FeedbackOut:
     """Record one relevance judgment for a snapshotted result."""
     await pipeline.flush_observation(run_id)
     try:
         saved = await storage.save_search_feedback(
-            run_id, body.chunk_id, body.judgment, replace=body.replace
+            run_id,
+            body.chunk_id,
+            body.judgment,
+            replace=body.replace,
+            project_context_root=project_context_root,
         )
     except FeedbackConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

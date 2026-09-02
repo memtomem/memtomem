@@ -57,7 +57,7 @@ class ScheduleMixin:
         by callers).
         """
         db = self._get_db()
-        sched_id = uuid4().hex[:12]
+        sched_id = str(uuid4())
         with self._rolls_back_if_standalone(db):
             db.execute(
                 "INSERT INTO schedules "

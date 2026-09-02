@@ -795,11 +795,15 @@ async def diff_artifact(
             if parsed is None:
                 raise HTTPException(status_code=500, detail="Artifact parse state unavailable")
             artifact = parsed
+
+            def _render_expected(gen: Any = gen, artifact: Any = artifact) -> str:
+                return gen.render(artifact)[0]
+
             runtimes.append(
                 expected_vs_runtime_row(
                     kind=spec.kind_plural,
                     gen_name=gen_name,
-                    render=lambda gen=gen, artifact=artifact: gen.render(artifact)[0],
+                    render=_render_expected,
                     target=target,
                     name=name,
                     project_root=project_root,

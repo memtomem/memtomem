@@ -81,7 +81,18 @@ def test_config_json_applies_when_no_env(
     )
     cfg = Mem2MemConfig()
     load_config_overrides(cfg)
-    assert str(cfg.storage.sqlite_path) == "/from/config.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/from/config.db")
+
+
+def test_config_json_non_object_root_is_ignored(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _clear_all_memtomem_env(monkeypatch)
+    override_path.write_text("[]", encoding="utf-8")
+    cfg = Mem2MemConfig()
+    with caplog.at_level(logging.WARNING, logger="memtomem.config"):
+        load_config_overrides(cfg, migrate=False)
+    assert any("not a JSON object" in record.message for record in caplog.records)
 
 
 def test_config_json_stale_removed_field_skipped_not_fatal(
@@ -180,7 +191,7 @@ def test_config_json_valid_override_still_applies(
     cfg = Mem2MemConfig()
     load_config_overrides(cfg, migrate=False)
     assert cfg.context_window.enabled is True
-    assert str(cfg.storage.sqlite_path) == "/from/config.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/from/config.db")
 
 
 def test_config_json_invalid_rrf_weights_warns_and_keeps_default(
@@ -230,10 +241,9 @@ def test_config_json_legacy_field_deprecation_surfaced(
     The re-validation captures the ``DeprecationWarning`` triggered by
     ``rerank.top_k`` and re-emits it via the logger;
     ``catch_warnings(record=True)`` keeps it from escalating to an exception
-    even under ``-W error``. The re-validation is a *check* — it does not
-    persist the coerced/migrated model back — so ``top_k`` is not auto-rewritten
-    into ``min_pool`` on the ``config.json`` path (that broader normalization is
-    out of scope); the surfaced warning tells the operator to migrate.
+    even under ``-W error``. The validated typed model is committed, including
+    the legacy field's in-memory migration to ``min_pool``; persistence remains
+    explicit and the warning tells the operator to update config.json.
     """
     import logging
 
@@ -247,8 +257,7 @@ def test_config_json_legacy_field_deprecation_surfaced(
     assert any(
         "DeprecationWarning" in rec.message and "top_k" in rec.message for rec in caplog.records
     )
-    # The check does not mutate field types / apply the migration in place.
-    assert cfg.rerank.min_pool == Mem2MemConfig().rerank.min_pool
+    assert cfg.rerank.min_pool == 50
 
 
 def test_config_json_explicit_deprecated_field_at_default_still_surfaced(
@@ -364,10 +373,13 @@ def test_config_d_append_merges_with_defaults(
     cfg = Mem2MemConfig()
     before = list(cfg.indexing.memory_dirs)
     load_config_d(cfg)
-    after = [str(p) for p in cfg.indexing.memory_dirs]
-    assert "/from/fragment" in after
+    # Compared as paths, not strings: ``load_config_overrides`` commits the
+    # validated model, so these fields hold real ``Path`` objects whose
+    # ``str()`` renders with the platform separator.
+    after = [Path(p) for p in cfg.indexing.memory_dirs]
+    assert Path("/from/fragment") in after
     for original in before:
-        assert str(original) in after
+        assert Path(original) in after
 
 
 def test_config_d_append_dedupes(config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,6 +427,35 @@ def test_config_d_invalid_rrf_weights_fragment_warned_and_skipped(
     assert any("rrf_weights" in r.getMessage() for r in caplog.records)
 
 
+def test_config_d_cross_field_failure_rolls_back_whole_section(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _clear_all_memtomem_env(monkeypatch)
+    (config_d_dir / "bad.json").write_text(
+        json.dumps({"indexing": {"min_chunk_tokens": 900, "max_chunk_tokens": 100}}),
+        encoding="utf-8",
+    )
+    cfg = Mem2MemConfig()
+    before = cfg.indexing.model_dump()
+    with caplog.at_level(logging.WARNING, logger="memtomem.config"):
+        load_config_d(cfg)
+    assert cfg.indexing.model_dump() == before
+    assert any("Invalid config section [indexing]" in record.message for record in caplog.records)
+
+
+def test_config_d_strict_unknown_field_fails_closed(
+    config_d_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.errors import ConfigFragmentError
+
+    _clear_all_memtomem_env(monkeypatch)
+    (config_d_dir / "stale.json").write_text(
+        json.dumps({"search": {"removed_option": True}}), encoding="utf-8"
+    )
+    with pytest.raises(ConfigFragmentError, match="search.removed_option"):
+        load_config_d(Mem2MemConfig(), strict=True)
+
+
 def test_config_d_scalar_last_wins(config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Scalar field: last fragment applied wins."""
     _clear_all_memtomem_env(monkeypatch)
@@ -426,7 +467,7 @@ def test_config_d_scalar_last_wins(config_d_dir: Path, monkeypatch: pytest.Monke
     )
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/b.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/b.db")
 
 
 def test_config_d_env_wins_over_fragments(
@@ -458,7 +499,7 @@ def test_config_d_unknown_section_warned_but_not_fatal(
     cfg = Mem2MemConfig()
     with caplog.at_level(logging.WARNING, logger="memtomem.config"):
         load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/ok.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/ok.db")
     assert any("nope_not_a_section" in r.message for r in caplog.records)
 
 
@@ -476,7 +517,7 @@ def test_config_d_invalid_json_warned(
     cfg = Mem2MemConfig()
     with caplog.at_level(logging.WARNING, logger="memtomem.config"):
         load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/ok.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/ok.db")
     assert any("bad.json" in r.message for r in caplog.records)
 
 
@@ -491,7 +532,7 @@ def test_config_d_ignores_non_json_files(
     )
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    assert str(cfg.storage.sqlite_path) == "/ok.db"
+    assert Path(cfg.storage.sqlite_path) == Path("/ok.db")
 
 
 def test_config_d_namespace_rules_appends(

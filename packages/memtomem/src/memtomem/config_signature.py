@@ -86,12 +86,17 @@ def get_config_mtime_ns() -> int:
     return _stat_mtime_ns(_override_path())
 
 
-def build_fresh_config(*, migrate: bool = True, strict_fragments: bool = False) -> Mem2MemConfig:
-    """Replay the canonical load path used at startup, strictly.
+def build_fresh_config(
+    *,
+    migrate: bool = True,
+    strict_fragments: bool = False,
+    strict_overrides: bool = True,
+) -> Mem2MemConfig:
+    """Replay the canonical config load path.
 
     Defaults (+ env via pydantic-settings) → ``config.d`` fragments →
-    ``config.json`` overrides. Raises on ``config.json`` JSON / OS errors so
-    the caller can switch to fail-closed mode.
+    ``config.json`` overrides. By default, raises on ``config.json`` JSON / OS
+    errors so a hot reader can switch to fail-closed mode.
 
     ``migrate=False`` skips the legacy ``auto_discover`` → explicit
     ``memory_dirs`` migration, which **writes** ``config.json``. A caller that
@@ -107,7 +112,12 @@ def build_fresh_config(*, migrate: bool = True, strict_fragments: bool = False) 
     which a roots-reconciler would act on by unwatching every directory. So
     ``config.json`` is pre-parsed here before delegating.
 
-    ``strict_fragments=True`` extends that strictness to the ``config.d``
+    ``strict_overrides=False`` preserves the historical tolerant startup
+    behavior: a malformed ``config.json`` is logged and ignored. It is for
+    handshake-time service discovery, where refusing the whole MCP handshake
+    would also make repair/status tools unreachable.
+
+    ``strict_fragments=True`` extends strictness to the ``config.d``
     fragments, which :func:`load_config_d` otherwise logs and skips one at a
     time. It is passed down to the loader rather than pre-checked here, so it
     covers every skip the loader can make — a fragment whose JSON parses but
@@ -116,9 +126,11 @@ def build_fresh_config(*, migrate: bool = True, strict_fragments: bool = False) 
     validation pass and the real one.
     """
     override = _override_path()
-    if override.exists():
+    if strict_overrides and override.exists():
         # Strict pre-parse — raises on malformed JSON / OS errors.
-        _ = json.loads(override.read_text(encoding="utf-8"))
+        parsed = json.loads(override.read_text(encoding="utf-8"))
+        if not isinstance(parsed, dict):
+            raise ValueError(f"config overrides in {override} must be a JSON object")
 
     cfg = Mem2MemConfig()
     load_config_d(cfg, strict=strict_fragments)

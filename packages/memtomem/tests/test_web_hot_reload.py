@@ -144,6 +144,38 @@ async def test_get_config_picks_up_external_disk_edit(home: Path, app, client: A
     assert data["config_reload_error"] is None
 
 
+async def test_external_watcher_backend_edit_replaces_live_observer(
+    home: Path, app, client: AsyncClient
+):
+    from memtomem.indexing import watcher as watcher_module
+    from memtomem.indexing.watcher import FileWatcher
+
+    _write_config(home, {"indexing": {"watcher_backend": "native"}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    watcher = FileWatcher(app.state.index_engine, app.state.config.indexing)
+    old_observer = MagicMock(name="native_observer")
+    watcher._observer = old_observer
+    watcher._observer_backend = "native"
+    watcher._handler = MagicMock()
+    app.state.file_watcher = watcher
+
+    replacement = MagicMock(name="polling_observer")
+    _write_config(home, {"indexing": {"watcher_backend": "polling"}})
+
+    with patch.object(watcher_module, "_create_observer", return_value=replacement):
+        response = await client.get("/api/config")
+
+    assert response.status_code == 200
+    assert app.state.config.indexing.watcher_backend == "polling"
+    assert watcher._observer is replacement
+    assert watcher._observer_backend == "polling"
+    replacement.start.assert_called_once_with()
+    old_observer.stop.assert_called_once_with()
+    old_observer.join.assert_called_once_with()
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — PATCH re-reads before merge
 # ---------------------------------------------------------------------------

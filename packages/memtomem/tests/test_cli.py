@@ -1283,7 +1283,12 @@ class TestSaveConfigOverrides:
         save_config_overrides(cfg)
 
         data = json.loads(isolated["config_file"].read_text())
-        assert "/pre/existing" in [str(p) for p in data["indexing"]["memory_dirs"]]
+        # Compared as paths: ``load_config_overrides`` commits the validated
+        # model, so ``memory_dirs`` holds real ``Path`` objects and the value
+        # written back carries the platform separator.
+        from pathlib import Path as _Path
+
+        assert _Path("/pre/existing") in [_Path(p) for p in data["indexing"]["memory_dirs"]]
 
     # ── Delta semantic (renamed from drop-default) ─────────────────────
 
@@ -1466,8 +1471,8 @@ class TestSaveConfigOverrides:
         save_config_overrides(cfg)
 
         data = json.loads(isolated["config_file"].read_text())
-        assert "/machine-a-only" in [
-            str(p) for p in data.get("indexing", {}).get("memory_dirs", [])
+        assert Path("/machine-a-only") in [
+            Path(p) for p in data.get("indexing", {}).get("memory_dirs", [])
         ], "machine-A path must stay pinned on unrelated save (doc: user must reset actively)"
 
         # Active reset: drops cleanly

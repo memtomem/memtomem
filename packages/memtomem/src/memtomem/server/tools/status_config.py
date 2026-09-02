@@ -376,6 +376,8 @@ async def collect_status_report(app: AppContext) -> dict:
     except Exception:
         logger.debug("concurrent-writer detection failed", exc_info=True)
 
+    from memtomem.indexing.watcher import effective_watcher_backend
+
     return {
         "config": {
             "storage_backend": config.storage.backend,
@@ -389,6 +391,7 @@ async def collect_status_report(app: AppContext) -> dict:
             "project_memory_dirs": [
                 str(Path(p).expanduser().resolve()) for p in config.indexing.project_memory_dirs
             ],
+            "watcher_backend": effective_watcher_backend(config.indexing),
         },
         "runtime": {
             "cwd": str(cwd) if cwd is not None else None,
@@ -465,6 +468,7 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
         StatusLine("kv", key="Dimension:".ljust(11), value=str(emb["dimension"])),
         StatusLine("kv", key="Top-K:".ljust(11), value=str(cfg["top_k"])),
         StatusLine("kv", key="RRF k:".ljust(11), value=str(cfg["rrf_k"])),
+        StatusLine("kv", key="Watcher:".ljust(11), value=str(cfg["watcher_backend"])),
         StatusLine("blank"),
         StatusLine("section", value="Runtime context", meta={"tone": "plain"}),
         StatusLine("rule", value="---------------", meta={"tone": "plain"}),
@@ -798,7 +802,8 @@ async def _revert_to_stored_locked(
     # container and the properties pick up the new values automatically.
     # ``app.storage`` above already dereferenced ``_components``, so the
     # container is guaranteed non-None by the time we reach here.
-    comp = app._components
+    runtime_app = app._runtime_owner or app
+    comp = runtime_app._components
     assert comp is not None, (
         "_revert_to_stored called before ensure_initialized — "
         "handler must go through _get_app_initialized"
@@ -852,11 +857,11 @@ async def _revert_to_stored_locked(
     # The watcher and the dedup scanner captured the old engine/embedder at
     # init (server/context.py); without a rebind they keep the retired
     # generation alive and doing work after this swap.
-    watcher = getattr(app, "_watcher", None)
+    watcher = runtime_app._watcher
     if watcher is not None:
         watcher.rebind(comp.index_engine, comp.search_pipeline)
-    if app.dedup_scanner is not None:
-        app._dedup_scanner = DedupScanner(
+    if runtime_app.dedup_scanner is not None:
+        runtime_app._dedup_scanner = DedupScanner(
             storage=storage,
             embedder=new_embedder,
             # The freshly published generation, not the retired one: this

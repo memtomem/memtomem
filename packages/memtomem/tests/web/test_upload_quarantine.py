@@ -211,6 +211,62 @@ async def test_body_limit_without_content_length_exact_and_plus_one(
     assert overflow.json() == {"detail": "Upload request too large"}
 
 
+async def test_json_body_limit_and_multipart_import_use_separate_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(body_limit, "JSON_REQUEST_LIMIT", 4)
+    monkeypatch.setattr(body_limit, "UPLOAD_REQUEST_LIMIT", 8)
+
+    async def consume(scope, receive, send):
+        while (await receive()).get("more_body", False):
+            pass
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    transport = ASGITransport(app=body_limit.UploadBodyLimitMiddleware(consume))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        json_overflow = await client.post(
+            "/api/add", content=b"12345", headers={"content-type": "application/json"}
+        )
+        import_exact = await client.post(
+            "/api/export/import",
+            content=b"12345678",
+            headers={"content-type": "multipart/form-data; boundary=x"},
+        )
+        import_overflow = await client.post(
+            "/api/export/import",
+            content=b"123456789",
+            headers={"content-type": "multipart/form-data; boundary=x"},
+        )
+
+    assert json_overflow.status_code == 413
+    assert json_overflow.json() == {"detail": "JSON request too large"}
+    assert import_exact.status_code == 204
+    assert import_overflow.status_code == 413
+    assert import_overflow.json() == {"detail": "Upload request too large"}
+
+
+@pytest.mark.parametrize("content_type", [None, "application/problem+json"])
+async def test_json_body_limit_covers_fastapi_json_media_types(
+    monkeypatch: pytest.MonkeyPatch, content_type: str | None
+) -> None:
+    monkeypatch.setattr(body_limit, "JSON_REQUEST_LIMIT", 4)
+
+    async def consume(scope, receive, send):
+        while (await receive()).get("more_body", False):
+            pass
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    transport = ASGITransport(app=body_limit.UploadBodyLimitMiddleware(consume))
+    headers = {"content-type": content_type} if content_type is not None else {}
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/add", content=b"12345", headers=headers)
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "JSON request too large"}
+
+
 async def test_upload_openapi_keeps_multipart_file_array_contract(app) -> None:
     schema = app.openapi()["paths"]["/api/upload"]["post"]["requestBody"]
     multipart = schema["content"]["multipart/form-data"]["schema"]

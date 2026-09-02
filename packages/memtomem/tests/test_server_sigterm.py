@@ -79,6 +79,24 @@ def test_sigterm_handler_unlinks_pid_file_and_hard_exits(
     assert exit_calls == [0], "handler must call os._exit(0), not sys.exit or return"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not register SIGTERM")
+def test_sigterm_handler_reads_mutable_startup_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[int, object] = {}
+    monkeypatch.setattr(signal, "signal", lambda sig, h: captured.setdefault(sig, h))
+    monkeypatch.setattr(os, "_exit", lambda _code: None)
+    targets: list[Path] = []
+    _install_sigterm_handler(targets)
+
+    marker = tmp_path / "presence.lock"
+    marker.touch()
+    targets.append(marker)
+    captured[signal.SIGTERM](signal.SIGTERM, None)  # type: ignore[operator]
+
+    assert not marker.exists()
+
+
 @pytest.mark.skipif(
     sys.platform != "win32",
     reason="Windows-only: pins the no-op contract added in #817",

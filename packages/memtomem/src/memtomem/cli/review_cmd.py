@@ -146,6 +146,9 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
     from memtomem.server.tools.search import _resolve_project_context_root
     from memtomem.tools.memory_writer import append_entry
 
+    reviewer = reviewer.strip()
+    if not reviewer:
+        raise click.ClickException("Reviewer cannot be empty")
     async with cli_components() as comp:
         candidate = await comp.storage.get_memory_candidate(candidate_id)
         if candidate is None:

@@ -4,59 +4,80 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
+
+from memtomem.storage.sqlite_helpers import project_boundary_key
+from memtomem.storage.sqlite_scope import scope_context_sql
 
 logger = logging.getLogger(__name__)
+
+
+def _visible_chunks_where(
+    namespace: str | None,
+    project_context_root: Path | None,
+    *,
+    alias: str = "",
+) -> tuple[str, list]:
+    clause, params = scope_context_sql(None, project_context_root, column_alias=alias)
+    if namespace is not None:
+        clause += f" AND {alias}namespace = ?"
+        params.append(namespace)
+    return clause, params
 
 
 class AnalyticsMixin:
     """Mixin providing analytics methods. Requires self._get_db() and
     self._in_transaction."""
 
-    async def get_health_report(self, namespace: str | None = None) -> dict:
+    async def get_health_report(
+        self,
+        namespace: str | None = None,
+        *,
+        project_context_root: Path | None = None,
+    ) -> dict:
         """Compute a memory health report — replaces raw SQL in evaluation.py and web/routes/evaluation.py."""
         db = self._get_db()
+        visible_sql, visible_params = _visible_chunks_where(namespace, project_context_root)
 
         # Single query for chunk aggregate counts
         agg = db.execute(
             "SELECT COUNT(*), "
             "SUM(CASE WHEN access_count > 0 THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN tags != '[]' AND tags != '' THEN 1 ELSE 0 END) "
-            "FROM chunks"
+            f"FROM chunks WHERE {visible_sql}",
+            visible_params,
         ).fetchone()
         total_chunks, accessed, tagged = agg[0], agg[1] or 0, agg[2] or 0
         access_pct = round(accessed / total_chunks * 100, 1) if total_chunks else 0
         tag_pct = round(tagged / total_chunks * 100, 1) if total_chunks else 0
 
         top_accessed = db.execute(
-            "SELECT id, content, access_count FROM chunks WHERE access_count > 0 ORDER BY access_count DESC LIMIT 10",
+            "SELECT id, content, access_count FROM chunks WHERE access_count > 0 AND "
+            f"{visible_sql} ORDER BY access_count DESC LIMIT 10",
+            visible_params,
         ).fetchall()
         top_list = [{"id": r[0], "content": r[1][:120], "access_count": r[2]} for r in top_accessed]
 
         ns_rows = db.execute(
-            "SELECT COALESCE(namespace, 'default'), COUNT(*) FROM chunks GROUP BY namespace ORDER BY COUNT(*) DESC",
+            "SELECT COALESCE(namespace, 'default'), COUNT(*) FROM chunks WHERE "
+            f"{visible_sql} GROUP BY namespace ORDER BY COUNT(*) DESC",
+            visible_params,
         ).fetchall()
         ns_dist = [{"namespace": r[0], "count": r[1]} for r in ns_rows]
 
-        total_sources = db.execute("SELECT COUNT(DISTINCT source_file) FROM chunks").fetchone()[0]
+        total_sources = db.execute(
+            f"SELECT COUNT(DISTINCT source_file) FROM chunks WHERE {visible_sql}",
+            visible_params,
+        ).fetchone()[0]
 
-        # Single query for session/scratch/relation counts
-        aux = db.execute(
-            "SELECT "
-            "(SELECT COUNT(*) FROM sessions), "
-            "(SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL), "
-            "(SELECT COUNT(*) FROM working_memory), "
-            "(SELECT COUNT(*) FROM working_memory WHERE promoted = 1), "
-            "(SELECT COUNT(*) FROM chunk_relations), "
-            "(SELECT COUNT(*) FROM sessions WHERE started_at >= date('now', '-7 days'))"
-        ).fetchone()
-        (
-            total_sessions,
-            active_sessions,
-            scratch_count,
-            promoted_count,
-            relation_count,
-            recent_sessions,
-        ) = aux
+        relation_count = db.execute(
+            "SELECT relation_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
+            f"{visible_sql}) "
+            "SELECT COUNT(*) AS relation_count FROM chunk_relations r "
+            "JOIN visible s ON s.id = r.source_id "
+            "JOIN visible t ON t.id = r.target_id)",
+            visible_params,
+        ).fetchone()[0]
 
         dead_pct = round((total_chunks - accessed) / total_chunks * 100, 1) if total_chunks else 0
 
@@ -68,12 +89,11 @@ class AnalyticsMixin:
             "dead_memories_pct": dead_pct,
             "top_accessed": top_list,
             "namespace_distribution": ns_dist,
-            "sessions": {
-                "total": total_sessions,
-                "active": active_sessions,
-                "recent_7d": recent_sessions,
-            },
-            "working_memory": {"total": scratch_count, "promoted": promoted_count},
+            # Sessions and scratch rows have no project identity. Public
+            # reports fail closed instead of returning whole-store counts;
+            # system-wide maintenance can query those tables explicitly.
+            "sessions": {"total": 0, "active": 0, "recent_7d": 0},
+            "working_memory": {"total": 0, "promoted": 0},
             "cross_references": relation_count,
         }
 
@@ -81,19 +101,22 @@ class AnalyticsMixin:
         self,
         namespace: str | None = None,
         limit: int = 20,
+        *,
+        project_context_root: Path | None = None,
     ) -> list[dict]:
         """Return most accessed chunks with hierarchy info — for reflection."""
         import json as _json
 
         db = self._get_db()
+        visible_sql, params = _visible_chunks_where(namespace, project_context_root)
+        # ``visible_sql`` is built by ``scope_context_sql`` from fixed column
+        # names with ``?`` placeholders; every caller value travels in
+        # ``params``. Interpolated because a scope predicate is structure, not
+        # a value, and SQLite cannot bind that.
         query = (
             "SELECT heading_hierarchy, source_file, SUM(access_count) as total_access "
-            "FROM chunks WHERE access_count > 0 "
+            f"FROM chunks WHERE access_count > 0 AND {visible_sql} "  # nosec B608
         )
-        params: list = []
-        if namespace:
-            query += "AND namespace = ? "
-            params.append(namespace)
         query += "GROUP BY heading_hierarchy, source_file ORDER BY total_access DESC LIMIT ?"
         params.append(limit)
         rows = db.execute(query, params).fetchall()
@@ -123,14 +146,18 @@ class AnalyticsMixin:
         rows = db.execute(query, params).fetchall()
         return [{"agent_id": r[0], "session_count": r[1], "last_session": r[2]} for r in rows]
 
-    async def get_knowledge_gaps(self, limit: int = 10) -> list[dict]:
+    async def get_knowledge_gaps(
+        self, limit: int = 10, *, project_context_root: Path | None = None
+    ) -> list[dict]:
         """Return frequent queries with no results — for reflection."""
         db = self._get_db()
         try:
             rows = db.execute(
                 "SELECT query_text, COUNT(*) as cnt FROM query_history "
-                "WHERE result_chunk_ids = '[]' GROUP BY query_text ORDER BY cnt DESC LIMIT ?",
-                (limit,),
+                "WHERE result_chunk_ids = '[]' AND project_key = ? "
+                "AND legacy_unscoped = 0 GROUP BY query_text "
+                "ORDER BY cnt DESC LIMIT ?",
+                (project_boundary_key(project_context_root), limit),
             ).fetchall()
             return [{"query": r[0], "count": r[1]} for r in rows]
         except sqlite3.OperationalError as exc:
@@ -143,36 +170,54 @@ class AnalyticsMixin:
             logger.debug("get_knowledge_gaps: query_history table missing", exc_info=True)
             return []
 
-    async def get_most_connected(self, limit: int = 5) -> list[dict]:
+    async def get_most_connected(
+        self,
+        limit: int = 5,
+        *,
+        namespace: str | None = None,
+        project_context_root: Path | None = None,
+    ) -> list[dict]:
         """Return chunks with most cross-references — for reflection."""
         db = self._get_db()
-        relation_count = db.execute("SELECT COUNT(*) FROM chunk_relations").fetchone()[0]
-        if relation_count == 0:
-            return []
+        visible_sql, params = _visible_chunks_where(namespace, project_context_root)
         rows = db.execute(
-            "SELECT chunk_id, cnt FROM ("
-            "  SELECT source_id as chunk_id, COUNT(*) as cnt FROM chunk_relations GROUP BY source_id "
+            "SELECT chunk_id, link_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
+            f"{visible_sql}), degrees AS ("
+            "  SELECT r.source_id as chunk_id, COUNT(*) as cnt FROM chunk_relations r "
+            "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "
+            "  GROUP BY r.source_id "
             "  UNION ALL "
-            "  SELECT target_id, COUNT(*) FROM chunk_relations GROUP BY target_id"
-            ") GROUP BY chunk_id ORDER BY SUM(cnt) DESC LIMIT ?",
-            (limit,),
+            "  SELECT r.target_id, COUNT(*) FROM chunk_relations r "
+            "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "
+            "  GROUP BY r.target_id"
+            ") SELECT chunk_id, SUM(cnt) AS link_count FROM degrees "
+            "GROUP BY chunk_id ORDER BY link_count DESC, chunk_id ASC LIMIT ?)",
+            [*params, limit],
         ).fetchall()
         return [{"chunk_id": r[0], "link_count": r[1]} for r in rows]
 
-    async def get_chunk_factors(self, namespace: str | None = None) -> list[dict]:
+    async def get_chunk_factors(
+        self,
+        namespace: str | None = None,
+        *,
+        project_context_root: Path | None = None,
+    ) -> list[dict]:
         """Return access_count, tag_count, relation_count per chunk — for importance scoring."""
         import json as _json2
 
         db = self._get_db()
+        visible_sql, params = _visible_chunks_where(namespace, project_context_root, alias="c.")
+        # Same contract as ``get_frequently_accessed`` above: structure is
+        # interpolated, values stay bound in ``params``.
         query = (
+            "SELECT * FROM (WITH visible AS (SELECT c.* FROM chunks c WHERE "
+            f"{visible_sql}) "  # nosec B608
             "SELECT c.id, c.access_count, c.updated_at, c.tags, "
-            "(SELECT COUNT(*) FROM chunk_relations cr WHERE cr.source_id = c.id OR cr.target_id = c.id) as rel_count "
-            "FROM chunks c"
+            "(SELECT COUNT(*) FROM chunk_relations cr "
+            " WHERE (cr.source_id = c.id AND cr.target_id IN (SELECT id FROM visible)) "
+            "    OR (cr.target_id = c.id AND cr.source_id IN (SELECT id FROM visible))) "
+            "AS rel_count FROM visible c)"
         )
-        params: list = []
-        if namespace:
-            query += " WHERE c.namespace = ?"
-            params.append(namespace)
         rows = db.execute(query, params).fetchall()
         results = []
         for r in rows:

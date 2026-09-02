@@ -23,6 +23,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValida
 from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
 from memtomem.privacy import scan as _privacy_scan
 from memtomem.storage.mixins.history import FEEDBACK_JUDGMENTS
+from memtomem.storage.sqlite_helpers import project_boundary_key
 from memtomem.storage.sqlite_scope import _scopes_glob_clause, _scopes_in_clause
 
 #: The project-tier scope values (ADR-0011). These are the only scopes whose
@@ -264,6 +266,7 @@ class EvalCaseMixin:
         name: str | None = None,
         fingerprints: dict[str, str],
         allow_unreplayable_filters: bool = False,
+        project_context_root: Path | str | None = None,
     ) -> dict[str, Any]:
         """Copy one labeled run into a durable eval case, atomically.
 
@@ -292,13 +295,14 @@ class EvalCaseMixin:
         db.execute("BEGIN IMMEDIATE")
         try:
             run = db.execute(
-                "SELECT query_text, observation_json, result_snapshot_json "
-                "FROM query_history WHERE run_id = ?",
-                (run_id,),
+                "SELECT query_text, observation_json, result_snapshot_json, project_key "
+                "FROM query_history WHERE run_id = ? AND project_key = ? "
+                "AND legacy_unscoped = 0",
+                (run_id, project_boundary_key(project_context_root)),
             ).fetchone()
             if run is None:
                 raise EvalCaseNotFoundError(f"run_id {run_id!r} not found")
-            query_text, observation_json, snapshot_json = run
+            query_text, observation_json, snapshot_json, run_project_key = run
             observation = json.loads(observation_json or "{}")
             snapshot = json.loads(snapshot_json or "[]")
 
@@ -313,7 +317,10 @@ class EvalCaseMixin:
                     "(only their presence was recorded, not their values); "
                     "pass allow_unreplayable_filters=True to promote anyway"
                 )
-            if _scope_implies_project(db, filters.get("scope")):
+            default_reaches_project = filters.get(
+                "scope"
+            ) is None and run_project_key != project_boundary_key(None)
+            if default_reaches_project or _scope_implies_project(db, filters.get("scope")):
                 raise EvalCaseError(
                     f"run {run_id!r} is project-scoped (scope={filters.get('scope')!r}); "
                     "project_context_root is not recorded, so replay would widen it "

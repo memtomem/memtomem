@@ -42,6 +42,7 @@ def promote(run_id: str, name: str | None, allow_unreplayable_filters: bool) -> 
 async def _promote(run_id: str, name: str | None, allow_unreplayable_filters: bool) -> None:
     from memtomem.cli._bootstrap import cli_components
     from memtomem.quality.state import current_fingerprints
+    from memtomem.runtime.project_context import _resolve_project_context_root
 
     async with cli_components() as comp:
         fingerprints, _ = current_fingerprints(comp.storage, comp.config)
@@ -50,6 +51,7 @@ async def _promote(run_id: str, name: str | None, allow_unreplayable_filters: bo
             name=name,
             fingerprints=fingerprints,
             allow_unreplayable_filters=allow_unreplayable_filters,
+            project_context_root=_resolve_project_context_root(comp),
         )
         click.echo(
             json.dumps(

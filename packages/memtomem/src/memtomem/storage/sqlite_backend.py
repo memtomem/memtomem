@@ -48,6 +48,7 @@ from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
     escape_like,
+    match_source_filter_value,
     namespace_sql,
     norm_path,
     placeholders,
@@ -433,6 +434,9 @@ class SqliteBackend(
 
             stage = "open"
             self._db = sqlite3.connect(str(db_path), timeout=10)
+            self._db.create_function(
+                "memtomem_source_match", 2, match_source_filter_value, deterministic=True
+            )
             # Restrict DB file to owner-only access
             try:
                 db_path.chmod(0o600)
@@ -441,8 +445,10 @@ class SqliteBackend(
 
             stage = "extension"
             self._db.enable_load_extension(True)
-            sqlite_vec.load(self._db)
-            self._db.enable_load_extension(False)
+            try:
+                sqlite_vec.load(self._db)
+            finally:
+                self._db.enable_load_extension(False)
             # Downgrade fence before any write — the journal-mode PRAGMAs
             # below mutate the DB file, and a refused open (newer DB, older
             # binary) must leave it byte-identical for the newer release.
@@ -458,15 +464,35 @@ class SqliteBackend(
             stage = "read_pool"
             for _ in range(3):
                 rconn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
-                rconn.execute("PRAGMA journal_mode=WAL")
-                rconn.execute("PRAGMA query_only=ON")
                 try:
+                    rconn.create_function(
+                        "memtomem_source_match", 2, match_source_filter_value, deterministic=True
+                    )
+                    rconn.execute("PRAGMA journal_mode=WAL")
                     rconn.enable_load_extension(True)
                     sqlite_vec.load(rconn)
                     rconn.enable_load_extension(False)
+                    rconn.execute("PRAGMA query_only=ON")
                 except Exception as exc:
-                    logger.warning("Failed to load sqlite-vec for read pool connection: %s", exc)
+                    # Never publish a reader that lacks sqlite-vec: round-robin
+                    # dense searches would then fail nondeterministically only
+                    # when they land on that one connection.
+                    try:
+                        rconn.enable_load_extension(False)
+                    except Exception:
+                        # Re-locking the extension loader is hygiene on a
+                        # connection already being discarded; the close below
+                        # is what actually matters.
+                        logger.debug(
+                            "Could not re-lock extension loading on a discarded reader",
+                            exc_info=True,
+                        )
+                    rconn.close()
+                    logger.warning("Discarding unusable read pool connection: %s", exc)
+                    continue
                 self._read_pool.append(rconn)
+            if not self._read_pool:
+                raise StorageError("No SQLite read connection could load sqlite-vec")
 
             stage = "schema"
             self._meta = MetaManager(
@@ -1332,6 +1358,7 @@ class SqliteBackend(
                         [(rowid, serialize_f32(c.embedding)) for c, rowid in vec_updates],  # type: ignore[arg-type]
                     )
 
+            new_rowid_map: dict[str, int] = {}
             if to_insert:
                 # ``INSERT OR IGNORE``: the UNIQUE index on
                 # ``(namespace, source_file, content_hash, start_line)`` is
@@ -1380,7 +1407,6 @@ class SqliteBackend(
                 )
                 # Fetch newly assigned rowids, batched like the lookup above
                 new_ids = [str(c.id) for c in to_insert]
-                new_rowid_map: dict[str, int] = {}
                 for id_batch in _param_batches(new_ids):
                     new_rowid_map.update(
                         {
@@ -1449,7 +1475,11 @@ class SqliteBackend(
                     f"Run 'mm embedding-reset' (CLI) or mem_embedding_reset (MCP) to resolve."
                 ) from exc
             raise StorageError(f"upsert_chunks failed, transaction rolled back: {exc}") from exc
-        return len(chunks)
+        # ``INSERT OR IGNORE`` can reject a new ID when another process won
+        # the content-identity UNIQUE race.  Report rows that actually exist
+        # under the supplied IDs, not attempted operations, so callers do not
+        # announce or post-process a race loser that was never persisted.
+        return len(set(existing_rowid_map).intersection(chunk_ids) | set(new_rowid_map))
 
     async def update_chunk_line_ranges(self, chunks: Sequence[Chunk]) -> int:
         """Refresh line metadata for hash-matched chunks without rewriting content.
@@ -2190,6 +2220,7 @@ class SqliteBackend(
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        source_filter: str | None = None,
     ) -> list[SearchResult]:
         db = self._get_read_db()
         try:
@@ -2212,6 +2243,10 @@ class SqliteBackend(
                 metadata_filter, column_alias="c."
             )
             metadata_clause = f"AND ({metadata_frag})" if metadata_frag else ""
+            source_clause = (
+                "AND memtomem_source_match(?, c.source_file) = 1" if source_filter else ""
+            )
+            source_params = [source_filter] if source_filter else []
 
             # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
             # FTS candidate selection, not after a post-LIMIT join. With
@@ -2235,7 +2270,7 @@ class SqliteBackend(
             sql = f"""SELECT c.*, fts.rank
                    FROM chunks_fts fts
                    JOIN chunks c ON c.rowid = fts.rowid
-                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause}
+                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause} {source_clause}
                    ORDER BY fts.rank, {tie_break}, c.id
                    LIMIT ?"""
 
@@ -2296,6 +2331,7 @@ class SqliteBackend(
                         + ns_params
                         + scope_params
                         + metadata_params
+                        + source_params
                         + [top_k],
                     ).fetchall()
                     if rows:
@@ -2335,6 +2371,7 @@ class SqliteBackend(
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        source_filter: str | None = None,
         *,
         exhaustive: bool = False,
     ) -> list[SearchResult]:
@@ -2374,14 +2411,15 @@ class SqliteBackend(
         )
         scope_clause = f"AND ({scope_frag})"
         tie_break = scope_sort_priority_case("c.")
-        # ``tags_any`` is honored, but never in SQL here (#2191). The tag
-        # predicate would sit in the outer join below, so the escalation loop
-        # further down would keep retrying with a larger inner K until enough
-        # tagged rows survived — for a rare tag that means a full vector-table
-        # scan per query (#2184/#2221). Filter the KNN result in Python
+        # ``tags_any`` and the public ``source_filter`` are honored, but never
+        # in SQL here (#2191/#2221). Either selective predicate in the outer
+        # join below would leave the result short of ``top_k``, so the adaptive
+        # loop would keep retrying with a larger inner K and eventually scan
+        # the full vector table. Filter the bounded KNN result in Python
         # instead: the contract still holds (callers get only matching rows),
         # at the cost of not seeing a match outside the KNN pool.
         required_tags = set(metadata_filter.tags_any) if metadata_filter is not None else set()
+        required_source_filter = source_filter
         sql_metadata_filter = (
             dataclass_replace(metadata_filter, tags_any=())
             if metadata_filter is not None and metadata_filter.tags_any
@@ -2493,15 +2531,14 @@ class SqliteBackend(
         rows: list = []
         for inner_k in attempts:
             try:
-                # With a tag filter the outer ``LIMIT`` must not be ``top_k``:
-                # the Python tag pass runs after this query, so truncating
-                # here would drop a tagged row sitting at rank ``top_k + 1``
-                # of the untagged order — the dense half of the very bug this
-                # change fixes. Take the whole bounded candidate set instead
-                # and truncate after filtering. ``inner_k`` still bounds it,
-                # and the escalation check below still counts *untagged* rows,
-                # so a rare tag cannot drive another KNN attempt.
-                outer_limit = inner_k if required_tags else top_k
+                # With a Python-side tag/source filter the outer ``LIMIT``
+                # must not be ``top_k``: truncating here would drop a matching
+                # row sitting at rank ``top_k + 1`` of the unfiltered order.
+                # Take the whole bounded candidate set and truncate after
+                # filtering. ``inner_k`` still bounds it, and the escalation
+                # check below still counts *unfiltered* rows, so a selective
+                # filter cannot drive another KNN attempt.
+                outer_limit = inner_k if required_tags or required_source_filter else top_k
                 rows = db.execute(
                     sql,
                     [serialize_f32(embedding), inner_k]
@@ -2541,15 +2578,23 @@ class SqliteBackend(
             if len(rows) >= top_k or inner_k >= knn_ceiling:
                 break
 
-        # Tag filtering happens here rather than in the SQL above (see the
-        # ``required_tags`` comment): the escalation loop must judge its
-        # attempts on the unfiltered row count, or a rare tag reintroduces the
-        # full-scan escalation the pushdown avoids. ``top_k`` is applied after
-        # the filter — the query above deliberately did not apply it — and
-        # ranks are assigned last so the returned list stays 1..n contiguous.
+        # Selective tag/source filtering happens here rather than in the SQL
+        # above: the escalation loop must judge attempts on the unfiltered row
+        # count, or a rare match reintroduces the full-scan escalation this
+        # bounded pass avoids. ``top_k`` is applied after the filters and ranks
+        # are assigned last so the returned list stays 1..n contiguous.
         chunks = [(self._row_to_chunk(row[:-1]), row[-1]) for row in rows]
         if required_tags:
             chunks = [pair for pair in chunks if required_tags & set(pair[0].metadata.tags)]
+        if required_source_filter:
+            chunks = [
+                pair
+                for pair in chunks
+                if match_source_filter_value(
+                    required_source_filter, str(pair[0].metadata.source_file)
+                )
+            ]
+        if required_tags or required_source_filter:
             chunks = chunks[:top_k]
         return [
             SearchResult(
@@ -3312,16 +3357,23 @@ class SqliteBackend(
             Path(p) for p, rec in all_summaries.items() if rec.get("language") != target_language
         ]
 
-    async def get_tag_counts(self) -> list[tuple[str, int]]:
+    async def get_tag_counts(
+        self,
+        *,
+        project_context_root: Path | None = None,
+    ) -> list[tuple[str, int]]:
         db = self._get_read_db()
+        scope_frag, scope_params = scope_context_sql(None, project_context_root, column_alias="c.")
         rows = db.execute(
             "SELECT value, COUNT(*) as cnt "
-            "FROM chunks, json_each(chunks.tags) "
+            "FROM chunks c, json_each(c.tags) "
+            f"WHERE {scope_frag} "
             # ``value ASC`` breaks count ties deterministically so tag-strategy
             # query expansion (which truncates to max_terms) is order-stable
             # across runs — a replay-determinism requirement (#1802). Completes
             # the #516/#1817 tie-break series for the tags leg.
-            "GROUP BY value ORDER BY cnt DESC, value ASC"
+            "GROUP BY value ORDER BY cnt DESC, value ASC",
+            scope_params,
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
 

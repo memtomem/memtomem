@@ -115,7 +115,7 @@ async def test_concurrent_first_calls_invoke_create_components_once(
     real_create = component_factory.create_components
     call_count = 0
 
-    async def counting_create(config: object) -> object:
+    async def counting_create(config: object, **_kwargs: object) -> object:
         nonlocal call_count
         call_count += 1
         # Tiny sleep widens the race window so a missing lock surfaces

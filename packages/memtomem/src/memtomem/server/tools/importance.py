@@ -6,6 +6,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary
 
 
 @mcp.tool()
@@ -28,7 +29,9 @@ async def mem_importance_scan(
     from memtomem.search.importance import compute_importance
 
     app = await _get_app_initialized(ctx)
-    rows = await app.storage.get_chunk_factors(namespace=namespace)
+    rows = await app.storage.get_chunk_factors(
+        namespace=namespace, project_context_root=caller_boundary(app)
+    )
     now = datetime.now(timezone.utc)
 
     weights = (

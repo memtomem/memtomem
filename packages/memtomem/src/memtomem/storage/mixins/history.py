@@ -7,15 +7,31 @@ import logging
 import sqlite3
 import struct
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from memtomem.errors import FeedbackConflictError, StorageError
-from memtomem.storage.sqlite_helpers import utc_bound_from_iso
+from memtomem.storage.sqlite_helpers import project_boundary_key, utc_bound_from_iso
 
 _log = logging.getLogger(__name__)
 
 #: Closed relevance-judgment vocabulary (#1801). Validated here, in one
 #: place, so the MCP tool and the Web API emit identical error messages.
 FEEDBACK_JUDGMENTS: frozenset[str] = frozenset({"relevant", "not_relevant"})
+
+
+def _effective_scope_json(
+    scope: str | list[str] | tuple[str, ...] | None,
+    project_context_root: Path | str | None,
+) -> str:
+    if scope is None:
+        effective = ["user"]
+        if project_context_root is not None:
+            effective.extend(("project_shared", "project_local"))
+    elif isinstance(scope, str):
+        effective = [scope]
+    else:
+        effective = list(scope)
+    return json.dumps(effective, ensure_ascii=False, sort_keys=True)
 
 
 def _feedback_now() -> datetime:
@@ -55,6 +71,9 @@ class HistoryMixin:
         query_embedding: list[float],
         result_chunk_ids: list[str],
         result_scores: list[float],
+        *,
+        project_context_root: Path | str | None = None,
+        effective_scope: str | list[str] | tuple[str, ...] | None = None,
     ) -> None:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -63,12 +82,17 @@ class HistoryMixin:
         )
         with self._rolls_back_if_standalone(db):
             db.execute(
-                "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, result_scores, created_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO query_history "
+                "(query_text, query_embedding, result_chunk_ids, result_scores, "
+                "project_key, effective_scope_json, legacy_unscoped, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
                 (
                     query_text,
                     emb_blob,
                     json.dumps(result_chunk_ids),
                     json.dumps(result_scores),
+                    project_boundary_key(project_context_root),
+                    _effective_scope_json(effective_scope, project_context_root),
                     now,
                 ),
             )
@@ -90,6 +114,8 @@ class HistoryMixin:
         observation: dict,
         result_snapshot: list[dict],
         created_at: str | None = None,
+        project_context_root: Path | str | None = None,
+        effective_scope: str | list[str] | tuple[str, ...] | None = None,
     ) -> str:
         """Persist one ranked-search invocation and return its run ID.
 
@@ -135,8 +161,9 @@ class HistoryMixin:
             db.execute(
                 """INSERT INTO query_history
                    (query_text, query_embedding, result_chunk_ids, result_scores,
-                    run_id, observation_json, result_snapshot_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    run_id, observation_json, result_snapshot_json, project_key,
+                    effective_scope_json, legacy_unscoped, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
                 (
                     query_text,
                     emb_blob,
@@ -145,6 +172,8 @@ class HistoryMixin:
                     run_id,
                     json.dumps(observation, ensure_ascii=False, sort_keys=True),
                     json.dumps(result_snapshot, ensure_ascii=False),
+                    project_boundary_key(project_context_root),
+                    _effective_scope_json(effective_scope, project_context_root),
                     now,
                 ),
             )
@@ -181,15 +210,22 @@ class HistoryMixin:
                 "Pruned %d old query_history rows (>%d days)", deleted, self._HISTORY_MAX_AGE_DAYS
             )
 
-    async def get_query_history(self, limit: int = 20, since: str | None = None) -> list[dict]:
+    async def get_query_history(
+        self,
+        limit: int = 20,
+        since: str | None = None,
+        *,
+        project_context_root: Path | str | None = None,
+    ) -> list[dict]:
         db = self._get_db()
         query = (
             "SELECT query_text, result_chunk_ids, result_scores, created_at, "
-            "run_id, observation_json, result_snapshot_json FROM query_history"
+            "run_id, observation_json, result_snapshot_json FROM query_history "
+            "WHERE project_key = ? AND legacy_unscoped = 0"
         )
-        params: list = []
+        params: list = [project_boundary_key(project_context_root)]
         if since:
-            query += " WHERE created_at >= ?"
+            query += " AND created_at >= ?"
             params.append(utc_bound_from_iso(since, field="since", timespec="seconds"))
         query += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
@@ -207,18 +243,32 @@ class HistoryMixin:
             for r in rows
         ]
 
-    async def suggest_queries(self, prefix: str, limit: int = 5) -> list[str]:
+    async def suggest_queries(
+        self,
+        prefix: str,
+        limit: int = 5,
+        *,
+        project_context_root: Path | str | None = None,
+    ) -> list[str]:
         db = self._get_db()
         rows = db.execute(
-            "SELECT query_text, MAX(created_at) as latest FROM query_history WHERE query_text LIKE ? GROUP BY query_text ORDER BY latest DESC LIMIT ?",
-            (f"{prefix}%", limit),
+            "SELECT query_text, MAX(created_at) as latest FROM query_history "
+            "WHERE project_key = ? AND legacy_unscoped = 0 AND query_text LIKE ? "
+            "GROUP BY query_text ORDER BY latest DESC LIMIT ?",
+            (project_boundary_key(project_context_root), f"{prefix}%", limit),
         ).fetchall()
         return [r[0] for r in rows]
 
     # ---- explicit relevance feedback (#1801) ------------------------------
 
     async def save_search_feedback(
-        self, run_id: str, chunk_id: str, judgment: str, *, replace: bool = False
+        self,
+        run_id: str,
+        chunk_id: str,
+        judgment: str,
+        *,
+        replace: bool = False,
+        project_context_root: Path | str | None = None,
     ) -> dict:
         """Record one relevance judgment for a snapshotted result of one run.
 
@@ -242,7 +292,9 @@ class HistoryMixin:
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute(
-                "SELECT result_snapshot_json FROM query_history WHERE run_id = ?", (run_id,)
+                "SELECT result_snapshot_json FROM query_history "
+                "WHERE run_id = ? AND project_key = ? AND legacy_unscoped = 0",
+                (run_id, project_boundary_key(project_context_root)),
             ).fetchone()
             if row is None:
                 raise KeyError(f"run_id {run_id!r} not found")
@@ -357,13 +409,16 @@ class HistoryMixin:
             "replaced": replaced,
         }
 
-    def _require_search_run(self, run_id: str) -> tuple:
+    def _require_search_run(
+        self, run_id: str, project_context_root: Path | str | None = None
+    ) -> tuple:
         row = (
             self._get_db()
             .execute(
                 "SELECT run_id, query_text, created_at, observation_json, result_snapshot_json "
-                "FROM query_history WHERE run_id = ?",
-                (run_id,),
+                "FROM query_history WHERE run_id = ? AND project_key = ? "
+                "AND legacy_unscoped = 0",
+                (run_id, project_boundary_key(project_context_root)),
             )
             .fetchone()
         )
@@ -371,9 +426,11 @@ class HistoryMixin:
             raise KeyError(f"run_id {run_id!r} not found")
         return row
 
-    async def get_search_feedback(self, run_id: str) -> list[dict]:
+    async def get_search_feedback(
+        self, run_id: str, *, project_context_root: Path | str | None = None
+    ) -> list[dict]:
         """Current judgments for one observed run, ordered by chunk_id."""
-        self._require_search_run(run_id)
+        self._require_search_run(run_id, project_context_root)
         rows = (
             self._get_db()
             .execute(
@@ -388,9 +445,11 @@ class HistoryMixin:
             for r in rows
         ]
 
-    async def get_search_run(self, run_id: str) -> dict:
+    async def get_search_run(
+        self, run_id: str, *, project_context_root: Path | str | None = None
+    ) -> dict:
         """One observed run: query, observation metadata, ranked snapshot."""
-        row = self._require_search_run(run_id)
+        row = self._require_search_run(run_id, project_context_root)
         return {
             "run_id": row[0],
             "query_text": row[1],
@@ -399,7 +458,13 @@ class HistoryMixin:
             "result_snapshot": json.loads(row[4]) if row[4] else [],
         }
 
-    async def get_search_runs(self, limit: int = 50, since: str | None = None) -> list[dict]:
+    async def get_search_runs(
+        self,
+        limit: int = 50,
+        since: str | None = None,
+        *,
+        project_context_root: Path | str | None = None,
+    ) -> list[dict]:
         """Lightweight, newest-first summaries of observed runs.
 
         Legacy history rows (``run_id IS NULL``) are excluded — they have
@@ -408,12 +473,13 @@ class HistoryMixin:
         """
         if not 1 <= limit <= 200:
             raise ValueError(f"limit must be between 1 and 200, got {limit}")
-        params: list = []
+        params: list = [project_boundary_key(project_context_root)]
         query = (
             "SELECT h.run_id, h.query_text, h.created_at, h.result_snapshot_json, "
             "h.observation_json, "
             "(SELECT COUNT(*) FROM search_feedback f WHERE f.run_id = h.run_id) "
-            "FROM query_history h WHERE h.run_id IS NOT NULL"
+            "FROM query_history h WHERE h.run_id IS NOT NULL "
+            "AND h.project_key = ? AND h.legacy_unscoped = 0"
         )
         if since:
             query += " AND h.created_at >= ?"

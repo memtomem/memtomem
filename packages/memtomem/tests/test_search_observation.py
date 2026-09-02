@@ -233,9 +233,13 @@ async def test_legacy_backend_keeps_fire_and_forget_and_skips_cache_hit_history(
         config=components.config.search,
     )
 
-    results, first = await pipeline.search("telemetry", origin="internal")
+    results, first = await pipeline.search(
+        "telemetry", origin="internal", project_context_root=memory_dir
+    )
     await asyncio.sleep(0)
-    cached_results, second = await pipeline.search("telemetry", origin="internal")
+    cached_results, second = await pipeline.search(
+        "telemetry", origin="internal", project_context_root=memory_dir
+    )
     await asyncio.sleep(0)
 
     assert results and cached_results
@@ -243,6 +247,46 @@ async def test_legacy_backend_keeps_fire_and_forget_and_skips_cache_hit_history(
     assert second.query_run_id is None
     assert second.cache_hit is True
     legacy_storage.save_query_history.assert_awaited_once()
+    _, kwargs = legacy_storage.save_query_history.await_args
+    assert kwargs == {
+        "project_context_root": memory_dir,
+        "effective_scope": None,
+    }
+
+
+async def test_legacy_backend_without_boundary_support_skips_project_history(
+    bm25_only_components, caplog
+):
+    components, memory_dir = bm25_only_components
+    await _index_quality_note(components, memory_dir)
+
+    class OldLegacyStorageProxy:
+        def __init__(self, delegate):
+            self._delegate = delegate
+            self.history_calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        async def save_query_history(self, query, embedding, result_ids, scores):
+            self.history_calls += 1
+
+    legacy_storage = OldLegacyStorageProxy(components.storage)
+    pipeline = SearchPipeline(
+        storage=legacy_storage,  # type: ignore[arg-type]
+        embedder=components.embedder,
+        config=components.config.search,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        results, stats = await pipeline.search(
+            "telemetry", origin="internal", project_context_root=memory_dir
+        )
+
+    assert results
+    assert stats.query_run_id is None
+    assert legacy_storage.history_calls == 0
+    assert "does not accept project_context_root" in caplog.text
 
 
 async def test_explicit_instance_observation_capability_is_used(bm25_only_components):

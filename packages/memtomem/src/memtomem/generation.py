@@ -195,29 +195,36 @@ class ComponentGeneration:
         ordinary failures are logged and swallowed.
         """
         cb, self._close_cb = self._close_cb, None
-        task, self._close_task = self._close_task, None
-        cancelled: asyncio.CancelledError | None = None
+        task = self._close_task
         if cb is not None:
-            try:
-                await cb()
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-            except Exception:
-                logger.warning(
-                    "Failed to close a retired component generation at shutdown; "
-                    "its resources are leaked until the process exits",
-                    exc_info=True,
-                )
-        if task is not None:
-            try:
-                results = await asyncio.gather(task, return_exceptions=True)
-            except asyncio.CancelledError as exc:
-                # Delivered to *this* coroutine mid-gather. The deferred close
-                # keeps running as its own task; report the cancellation
-                # instead of propagating it into the rest of the shutdown.
-                return cancelled or exc
-            if cancelled is None:
-                cancelled = next(
-                    (r for r in results if isinstance(r, asyncio.CancelledError)), None
-                )
-        return cancelled
+            # Publish the task before awaiting it.  If shutdown itself is
+            # cancelled, ``shield`` leaves the close running and a later
+            # drain can observe the same task instead of starting the close
+            # twice.  Unlike executor settlement, this coroutine must return
+            # the cancellation promptly: the rest of component teardown is
+            # still waiting behind it and may itself release what the close
+            # needs in order to finish.
+            task = asyncio.create_task(cb())
+            self._close_task = task
+        if task is None:
+            return None
+
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if not task.done():
+                return exc
+            # A close which cancelled itself has settled; consume that
+            # outcome and report it to the aggregate shutdown caller.
+            if self._close_task is task:
+                self._close_task = None
+            return exc
+        except BaseException:
+            if self._close_task is task:
+                self._close_task = None
+            logger.warning("Retired component generation close failed", exc_info=True)
+            return None
+
+        if self._close_task is task:
+            self._close_task = None
+        return None

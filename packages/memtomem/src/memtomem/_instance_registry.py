@@ -118,7 +118,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Literal, NoReturn
+from typing import IO, Callable, Literal, NoReturn
 
 import portalocker
 
@@ -837,7 +837,11 @@ def register_instance(db_path: Path | str) -> RegisteredInstance | None:
         return None
 
 
-def register_server_presence(db_path: Path | str | None) -> RegisteredInstance | None:
+def register_server_presence(
+    db_path: Path | str | None,
+    *,
+    on_path_reserved: Callable[[Path], None] | None = None,
+) -> RegisteredInstance | None:
     """Record that this *process* is a live server, before any store opens.
 
     The startup counterpart to :func:`register_instance` (#2230). That one
@@ -891,6 +895,13 @@ def register_server_presence(db_path: Path | str | None) -> RegisteredInstance |
                 # snapshot readers stay read-only by contract.
                 _gc_stale_presence(directory, deadline)
                 path = directory / name
+                # Let the process-wide SIGTERM cleanup cover the unique path
+                # before ``open`` publishes it.  The callback runs under the
+                # mutation lock and must only record the path; it is invoked
+                # before any filesystem mutation, so a callback failure leaves
+                # no marker behind.
+                if on_path_reserved is not None:
+                    on_path_reserved(path)
                 # The nonce makes this filename fresh — never reuse or unlink
                 # an existing entry here; probe+grace GC above owns that.
                 fp = open(path, "a+b")

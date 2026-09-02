@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from memtomem.cli import cli
 from memtomem.cli.status_cmd import _style_status_lines
 from memtomem.config import Mem2MemConfig
+from memtomem.indexing.watcher import effective_watcher_backend
 from memtomem.server.tools.status_config import (
     StatusLine,
     collect_status_report,
@@ -413,6 +414,7 @@ Embedding: onnx / bge-m3
 Dimension: 1024
 Top-K:     10
 RRF k:     60
+Watcher:   {effective_watcher_backend(comp.config.indexing)}
 
 Runtime context
 ---------------

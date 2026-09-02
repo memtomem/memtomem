@@ -480,6 +480,7 @@ candidate) refuse with a configuration error naming
 |----------|---------|-------------|
 | `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories watched for reactive re-index (see above) |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
+| `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Maximum tokens per chunk |
 | `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | Merge threshold for short chunks |
 | `MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS` | `0` | Token overlap between adjacent chunks |

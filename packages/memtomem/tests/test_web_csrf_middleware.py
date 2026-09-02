@@ -24,7 +24,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from memtomem.web.app import resolve_csrf_enforce_from_env
+from memtomem.web.app import create_app, resolve_csrf_enforce_from_env
 from memtomem.web.middleware.csrf import CSRFGuardMiddleware
 
 _OBSERVE_RE = re.compile(
@@ -133,6 +133,21 @@ def test_options_preflight_is_not_gated(caplog_csrf) -> None:
     res = client.options("/api/ping", headers={"Host": "evil.example.com"})
     assert res.status_code != 403
     assert _parse_observe(caplog_csrf.records) == []
+
+
+def test_production_cors_preflight_allows_the_required_csrf_header() -> None:
+    client = TestClient(create_app(lifespan=None))
+    res = client.options(
+        "/api/add",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-memtomem-csrf",
+        },
+    )
+    assert res.status_code == 200
+    allowed = res.headers["access-control-allow-headers"].lower()
+    assert "x-memtomem-csrf" in allowed
 
 
 def test_post_without_token_returns_403(caplog_csrf) -> None:

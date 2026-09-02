@@ -956,6 +956,80 @@ def test_discover_experimental_scan_disabled(
     assert "claude-projects" not in scopes[0].sources
 
 
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (PermissionError(13, "denied"), "permission"),
+        (OSError(5, "I/O error"), "internal"),
+    ],
+)
+def test_unreadable_claude_scan_degrades_without_losing_registered_projects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: OSError,
+    kind: str,
+) -> None:
+    from memtomem.context import projects as proj_mod
+
+    cwd = tmp_path / "cwd"
+    registered = tmp_path / "registered"
+    cwd.mkdir()
+    registered.mkdir()
+    known = tmp_path / "known.json"
+    KnownProjectsStore(known).add(registered)
+    claude_projects = tmp_path / ".claude" / "projects"
+    claude_projects.mkdir(parents=True)
+    monkeypatch.setattr(proj_mod, "_CLAUDE_PROJECTS_DIR", claude_projects)
+
+    real_stat = Path.stat
+
+    def fail_root(self: Path, *args, **kwargs):
+        if self == claude_projects:
+            raise error
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_root)
+    scopes, report = discover_project_scopes_with_report(
+        cwd,
+        known,
+        experimental_claude_projects_scan=True,
+    )
+
+    assert {scope.root for scope in scopes} >= {cwd.resolve(), registered.resolve()}
+    assert report.ok is True
+    assert report.scan_error_kind == kind
+    assert "Claude projects directory" in (report.scan_detail or "")
+
+
+def test_claude_scan_entry_disappearance_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.context import projects as proj_mod
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    claude_projects = tmp_path / ".claude" / "projects"
+    child = claude_projects / "-vanished"
+    child.mkdir(parents=True)
+    monkeypatch.setattr(proj_mod, "_CLAUDE_PROJECTS_DIR", claude_projects)
+    real_stat = Path.stat
+
+    def vanish(self: Path, *args, **kwargs):
+        if self == child:
+            raise FileNotFoundError(str(child))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", vanish)
+    scopes, report = discover_project_scopes_with_report(
+        cwd,
+        tmp_path / "known.json",
+        experimental_claude_projects_scan=True,
+    )
+
+    assert [scope.root for scope in scopes] == [cwd.resolve()]
+    assert report.scan_error_kind == "missing"
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX-only fixture: the `-tmp` slug decodes to `/tmp`, which exists "
@@ -1049,7 +1123,7 @@ def test_discover_auto_display_filters_scan_by_marker(
     from memtomem.context import projects as proj_mod
 
     monkeypatch.setattr(
-        proj_mod, "_discover_claude_projects", lambda anchors=(): [configured, plain]
+        proj_mod, "_discover_claude_projects", lambda anchors=(), **_: [configured, plain]
     )
     scopes = proj_mod.discover_project_scopes(
         cwd,
@@ -1074,7 +1148,7 @@ def test_discover_experimental_bypasses_marker_filter(
 
     from memtomem.context import projects as proj_mod
 
-    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [plain])
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(), **_: [plain])
     scopes = proj_mod.discover_project_scopes(
         cwd,
         tmp_path / "kp.json",
@@ -1098,7 +1172,7 @@ def test_discover_filter_never_drops_known_or_cwd(
 
     from memtomem.context import projects as proj_mod
 
-    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [])
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(), **_: [])
     scopes = proj_mod.discover_project_scopes(
         cwd, kp, experimental_claude_projects_scan=False, auto_display_configured_projects=True
     )
@@ -1151,7 +1225,7 @@ def test_discover_paused_known_not_reenabled_by_scan(
     from memtomem.context import projects as proj_mod
 
     # Scan surfaces the SAME root → a naive OR-merge would flip enabled back True.
-    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [project])
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(), **_: [project])
     scopes = proj_mod.discover_project_scopes(
         cwd, kp, experimental_claude_projects_scan=False, auto_display_configured_projects=True
     )
@@ -1176,7 +1250,7 @@ def test_discover_auto_displayed_configured_scan_not_experimental(
 
     from memtomem.context import projects as proj_mod
 
-    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [configured])
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(), **_: [configured])
     scopes = proj_mod.discover_project_scopes(
         cwd,
         tmp_path / "kp.json",
@@ -1200,7 +1274,7 @@ def test_discover_unconfigured_scan_row_is_experimental(
 
     from memtomem.context import projects as proj_mod
 
-    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [plain])
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(), **_: [plain])
     scopes = proj_mod.discover_project_scopes(
         cwd,
         tmp_path / "kp.json",
@@ -1721,3 +1795,47 @@ def test_sync_skip_reason_missing_trumps_paused(tmp_path: Path) -> None:
     problem — eligibility is moot for a tree that no longer exists."""
     scope = _scope_for_skip(root=tmp_path, missing=True, enabled=False)
     assert sync_skip_reason(scope) == "missing_root"
+
+
+def test_claude_scan_unreadable_entry_does_not_drop_its_readable_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One bad entry degrades the report, not the roster.
+
+    ``child.stat()`` follows symlinks, so a dangling link or a mode-000
+    directory under ``~/.claude/projects`` raises. Propagating that discarded
+    every sibling the scan could still decode; the failure is now reported
+    additively while the readable entries survive.
+    """
+    from memtomem.context import projects as proj_mod
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    live = tmp_path / "live-project"
+    live.mkdir()
+    claude_projects = tmp_path / ".claude" / "projects"
+    claude_projects.mkdir(parents=True)
+    (claude_projects / proj_mod._encode_claude_project_path(live)).mkdir()
+    bad = claude_projects / "-broken-entry"
+    bad.mkdir()
+    monkeypatch.setattr(proj_mod, "_CLAUDE_PROJECTS_DIR", claude_projects)
+
+    real_stat = Path.stat
+
+    def fail_one_child(self: Path, *args, **kwargs):
+        if self == bad:
+            raise PermissionError(13, "denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_one_child)
+    scopes, report = discover_project_scopes_with_report(
+        cwd,
+        tmp_path / "known.json",
+        experimental_claude_projects_scan=True,
+    )
+
+    assert live.resolve() in {scope.root for scope in scopes}
+    assert report.ok is True
+    assert report.scan_error_kind == "permission"
+    assert report.scan_skipped_entries == 1
+    assert "incomplete" in (report.scan_detail or "")

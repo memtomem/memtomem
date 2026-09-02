@@ -66,6 +66,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from threading import Lock
+from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -578,7 +579,12 @@ def record(outcome: str, tool: str) -> None:
         _by_tool[tool][outcome] += 1
 
 
-def snapshot() -> dict[str, object]:
+class PrivacySnapshot(TypedDict):
+    outcomes: dict[str, int]
+    by_tool: dict[str, dict[str, int]]
+
+
+def snapshot() -> PrivacySnapshot:
     """Return a deep-copied counter snapshot.
 
     Safe to mutate or serialise without affecting the live counters.

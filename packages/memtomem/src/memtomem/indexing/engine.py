@@ -1142,14 +1142,11 @@ class IndexEngine:
         L3 regardless, so a file with no sidecar to hold is never unlocked.
 
         The lock is keyed on ``path.resolve()`` while ``_index_file`` receives
-        ``path`` **as given**. Every caller must contend on one sidecar per
-        physical file, but the work path is separately load-bearing: namespace
-        rules pattern-match it (``_resolve_namespace_directed``), so resolving
-        a symlinked leaf discovered by
-        the bulk walk would match the target's rules instead of the alias's,
-        including under ``--reassign-namespaces``. Storage identity is not at
-        stake either way — ``storage.sqlite_helpers.norm_path`` resolves
-        ``source_file`` on write.
+        ``path`` **as given** for diagnostics. Namespace and scope policy are
+        nevertheless adjudicated on the canonical target inside
+        ``_index_file``: an alias must not choose a weaker namespace rule than
+        the physical file it exposes. Storage identity already follows the
+        same rule via ``storage.sqlite_helpers.norm_path``.
 
         Known limit, unchanged in kind by #2105: a symlink retargeted between
         the ``resolve()`` here and the read inside ``_index_file`` leaves us
@@ -2016,7 +2013,7 @@ class IndexEngine:
         # failure here fails this file closed; the bulk flatten branches
         # keep the retryable type in ``stats.retryable_errors``.
         ns_decision = await self._namespace_decision(
-            file_path,
+            decision_path,
             namespace,
             force=force,
             reassign=reassign_namespaces,
@@ -2281,8 +2278,29 @@ class IndexEngine:
                     diff_result.metadata_only
                 )
 
+            persisted_upserts: list[Chunk] = []
             if diff_result.to_upsert:
-                await self._storage.upsert_chunks(diff_result.to_upsert)
+                persisted_count = await self._storage.upsert_chunks(diff_result.to_upsert)
+                if persisted_count == len(diff_result.to_upsert):
+                    persisted_upserts = diff_result.to_upsert
+                elif persisted_count:
+                    # Reads through the *writer* connection: this runs inside
+                    # the open chunk-write transaction, and the read pool's
+                    # separate WAL connections cannot see rows it has not
+                    # committed yet — ``get_chunks_batch`` would report every
+                    # genuinely new chunk as absent and drop it from
+                    # ``persisted_upserts``. A backend without the (duck-typed)
+                    # helper keeps the pre-#691 behaviour: assume the whole
+                    # bucket landed rather than silently discard it.
+                    if hasattr(self._storage, "filter_persisted_chunk_ids"):
+                        persisted = await self._storage.filter_persisted_chunk_ids(
+                            [str(chunk.id) for chunk in diff_result.to_upsert]
+                        )
+                        persisted_upserts = [
+                            chunk for chunk in diff_result.to_upsert if str(chunk.id) in persisted
+                        ]
+                    else:
+                        persisted_upserts = list(diff_result.to_upsert)
                 # Entities are rewritten with the chunk, inside the same
                 # transaction (#2145). Before this, ``chunk_entities`` was
                 # written only by ``mem_entity_scan``, so it was empty on a
@@ -2292,7 +2310,8 @@ class IndexEngine:
                 # Extraction here is the regex path only — stdlib ``re``, no
                 # model, no I/O — so it is free next to the embedding call this
                 # same write already paid for.
-                await self._extract_entities_for(diff_result.to_upsert)
+                if persisted_upserts:
+                    await self._extract_entities_for(persisted_upserts)
 
         # Both metadata mutators return the count of rows they actually
         # changed, so a run whose diff bucketed rows as metadata-only but
@@ -2300,15 +2319,16 @@ class IndexEngine:
         # (#2141). ``to_delete``/``to_upsert`` are non-empty only when there
         # is real work, so their length is signal enough.
         mutated = bool(
-            diff_result.to_delete or diff_result.to_upsert or ranges_changed or metadata_changed
+            diff_result.to_delete or persisted_upserts or ranges_changed or metadata_changed
         )
 
         # The namespace write is committed as of here. Capture the decision
         # now, before the auxiliary work below, so a failure in something that
         # is not the write cannot erase a move that actually happened.
+        persisted_upsert_ids = {chunk.id for chunk in persisted_upserts}
         result: IndexFileResult = {
             "total": len(new_chunks),
-            "indexed": len(diff_result.to_upsert),
+            "indexed": len(persisted_upserts),
             # Metadata-only rows are reported as skipped: nothing was embedded,
             # and the counters are a documented parse target (``mm index``'s
             # summary line, the ``mem_index`` block, ``IndexResponse``), so the
@@ -2318,13 +2338,15 @@ class IndexEngine:
             "deleted": len(diff_result.to_delete),
             "errors": [],
             "mutated": mutated,
-            "new_chunk_ids": truly_new_chunk_ids,
+            "new_chunk_ids": [
+                chunk_id for chunk_id in truly_new_chunk_ids if chunk_id in persisted_upsert_ids
+            ],
             "namespace_decision": ns_decision,
-            "namespace_written": bool(diff_result.to_upsert),
+            "namespace_written": bool(persisted_upserts),
         }
         if unchanged_ids:
             result["unchanged_chunk_ids"] = unchanged_ids
-        if diff_result.to_upsert:
+        if persisted_upserts:
             result["resolved_namespace"] = resolved_ns
         if exempted:
             result["exempted"] = 1

@@ -270,6 +270,22 @@ class TestUpsertChunks:
         assert all(c.content.endswith("revised") for c in found.values())
         assert _orphan_sidecars(storage) == (0, 0)
 
+    async def test_unique_race_loser_is_not_counted_as_persisted(self, storage):
+        winner = make_chunk("winner", source="race.md")
+        await storage.upsert_chunks([winner])
+        loser = make_chunk("different bytes", source="race.md")
+        loser.content_hash = winner.content_hash
+        loser.metadata = dataclasses.replace(
+            loser.metadata,
+            start_line=winner.metadata.start_line,
+        )
+
+        persisted = await storage.upsert_chunks([loser])
+
+        assert persisted == 0
+        assert await storage.get_chunk(loser.id) is None
+        assert await storage.get_chunk(winner.id) is not None
+
 
 class TestHashMatchedUpdates:
     """``update_chunk_line_ranges`` / ``update_chunk_metadata``: one file's rows."""

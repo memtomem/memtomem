@@ -1,6 +1,7 @@
 """Tests for query expansion."""
 
 import logging
+from pathlib import Path
 
 import pytest
 from memtomem.search.expansion import expand_query_headings, expand_query_tags
@@ -11,8 +12,10 @@ class FakeStorage:
 
     def __init__(self, tags):
         self._tags = tags
+        self.project_context_root = None
 
-    async def get_tag_counts(self):
+    async def get_tag_counts(self, *, project_context_root=None):
+        self.project_context_root = project_context_root
         return self._tags
 
 
@@ -50,9 +53,18 @@ class TestExpandQueryTags:
         result = await expand_query_tags("test query", storage)
         assert result == "test query"
 
+    @pytest.mark.asyncio
+    async def test_project_boundary_is_forwarded_to_tag_counts(self):
+        storage = FakeStorage([("deploy", 1)])
+        boundary = Path("/registered/project")
+
+        await expand_query_tags("deployment strategy", storage, project_context_root=boundary)
+
+        assert storage.project_context_root == boundary
+
 
 class _RaisingTagStorage:
-    async def get_tag_counts(self):
+    async def get_tag_counts(self, *, project_context_root=None):
         raise RuntimeError("tag store unavailable")
 
 

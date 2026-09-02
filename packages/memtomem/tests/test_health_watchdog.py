@@ -304,6 +304,39 @@ class TestDeepChecks:
         snap = await check_full_health_report(app)
         assert snap.status == "ok"
         assert snap.value["total_chunks"] == 100
+        app.storage.get_health_report.assert_awaited_once_with(project_context_root=None)
+
+    @pytest.mark.asyncio
+    async def test_full_health_report_uses_registered_project_boundary(
+        self, mock_app, tmp_path, monkeypatch
+    ):
+        from memtomem.config import Mem2MemConfig
+        from memtomem.server.health_checks import check_full_health_report
+
+        app, _db = mock_app
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        config = Mem2MemConfig()
+        config.indexing.project_memory_dirs = [project_root / ".memtomem" / "memories"]
+        app.config = config
+        monkeypatch.chdir(project_root)
+        app.storage.get_health_report = AsyncMock(
+            return_value={
+                "total_chunks": 4,
+                "dead_memories_pct": 75.0,
+                "access_coverage": {"pct": 25.0},
+                "tag_coverage": {"pct": 50.0},
+                "sessions": {"active": 0},
+                "cross_references": 0,
+            }
+        )
+
+        snap = await check_full_health_report(app)
+
+        assert snap.value["total_chunks"] == 4
+        app.storage.get_health_report.assert_awaited_once_with(
+            project_context_root=project_root.resolve()
+        )
 
     @pytest.mark.asyncio
     async def test_db_fragmentation(self, mock_app):

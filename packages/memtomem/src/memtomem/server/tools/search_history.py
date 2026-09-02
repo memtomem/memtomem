@@ -8,7 +8,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.tools._id_access import not_found, resolve_chunk
+from memtomem.server.tools._id_access import caller_boundary, not_found, resolve_chunk
 
 
 @mcp.tool()
@@ -32,7 +32,9 @@ async def mem_search_history(
     # Searches persist their observation in the background (#2183); settle the
     # in-flight ones so this listing includes runs this process just answered.
     await app.search_pipeline.flush_observation()
-    rows = await app.storage.get_query_history(limit=limit, since=since)
+    rows = await app.storage.get_query_history(
+        limit=limit, since=since, project_context_root=caller_boundary(app)
+    )
     if not rows:
         return "No search history found."
     lines = [f"Search History ({len(rows)} queries):"]
@@ -76,7 +78,9 @@ async def mem_search_feedback(
         app = await _get_app_initialized(ctx)
         # The run's own write may still be in flight (#2183).
         await app.search_pipeline.flush_observation(run_id)
-        judgments = await app.storage.get_search_feedback(run_id)
+        judgments = await app.storage.get_search_feedback(
+            run_id, project_context_root=caller_boundary(app)
+        )
         if not judgments:
             return f"No feedback recorded for run {run_id}."
         lines = [f"Feedback for run {run_id} ({len(judgments)} judgments):"]
@@ -106,7 +110,13 @@ async def mem_search_feedback(
     # run's backgrounded history row may not be committed yet (#2183); without
     # this the foreign key rejects a run ID that is entirely valid.
     await app.search_pipeline.flush_observation(run_id)
-    saved = await app.storage.save_search_feedback(run_id, chunk_id, judgment, replace=replace)
+    saved = await app.storage.save_search_feedback(
+        run_id,
+        chunk_id,
+        judgment,
+        replace=replace,
+        project_context_root=caller_boundary(app),
+    )
     if saved["created"]:
         return (
             f"Feedback recorded: run={run_id} chunk={chunk_id} "
@@ -144,7 +154,9 @@ async def mem_search_suggest(
     # Suggestions read the same history table the search path writes in the
     # background (#2183).
     await app.search_pipeline.flush_observation()
-    suggestions = await app.storage.suggest_queries(prefix=prefix, limit=limit)
+    suggestions = await app.storage.suggest_queries(
+        prefix=prefix, limit=limit, project_context_root=caller_boundary(app)
+    )
     if not suggestions:
         return f'No suggestions for "{prefix}".'
     lines = [f'Suggestions for "{prefix}":']

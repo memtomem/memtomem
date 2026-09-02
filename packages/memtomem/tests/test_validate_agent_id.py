@@ -224,6 +224,7 @@ class TestCliBoundary:
     def test_session_start_accepts_valid_agent_id(self, runner, monkeypatch, storage_mock):
         comp = SimpleNamespace(storage=storage_mock)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._write_current_session", lambda _sid: None)
 
         result = runner.invoke(cli, ["session", "start", "--agent-id", "planner"])
 

@@ -26,7 +26,24 @@ from watchdog.events import (
     FileMovedEvent,
 )
 
-from memtomem.indexing.watcher import _STOP_SENTINEL, FileWatcher, _MarkdownEventHandler
+from memtomem.config import IndexingConfig
+from memtomem.indexing import watcher as watcher_module
+from memtomem.indexing.watcher import (
+    _STOP_SENTINEL,
+    FileWatcher,
+    _MarkdownEventHandler,
+    effective_watcher_backend,
+)
+
+
+def test_auto_watcher_backend_uses_polling_on_macos(monkeypatch) -> None:
+    monkeypatch.setattr(watcher_module.sys, "platform", "darwin")
+    assert effective_watcher_backend(IndexingConfig()) == "polling"
+
+
+def test_explicit_native_watcher_backend_wins_on_macos(monkeypatch) -> None:
+    monkeypatch.setattr(watcher_module.sys, "platform", "darwin")
+    assert effective_watcher_backend(IndexingConfig(watcher_backend="native")) == "native"
 
 
 def _mock_embedder(components):

@@ -317,7 +317,7 @@ def _sigterm_targets(pid_file: Path | None, presence: object) -> tuple[Path, ...
     return tuple(targets)
 
 
-def _install_sigterm_handler(*paths: Path) -> None:
+def _install_sigterm_handler(*paths: Path | list[Path]) -> None:
     """Install a SIGTERM handler that unlinks ``paths`` and hard-exits.
 
     ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
@@ -380,7 +380,12 @@ def _install_sigterm_handler(*paths: Path) -> None:
     import signal
 
     def _handle(_signum: int, _frame: object) -> None:
-        for path in paths:
+        # A list is a live target set used during startup: marker paths are
+        # appended before their files are created and the pid path only after
+        # this process owns its lock.  This closes the create-before-handler
+        # window without ever risking deletion of another process's pid file.
+        targets = (path for item in paths for path in (item if isinstance(item, list) else [item]))
+        for path in targets:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -781,6 +786,12 @@ def main(argv: list[str] | None = None) -> None:
     # delivery until the handler covers both targets makes create-and-cover
     # indivisible instead of merely quick.
     with _sigterm_deferred():
+        # Install the process-wide handler before any presence marker can be
+        # published.  ``register_server_presence`` reserves its unique path in
+        # this mutable list immediately before opening it; the pid path is
+        # added only after the exclusive lock proves ownership.
+        _sigterm_cleanup_targets: list[Path] = []
+        _install_sigterm_handler(_sigterm_cleanup_targets)
         # Record this process in the instance registry's startup population
         # (#2230), before the pid-lock decision because it is independent of it:
         # the ``server[-<digest>].pid`` file is exclusive per store, so the
@@ -801,7 +812,10 @@ def main(argv: list[str] | None = None) -> None:
         try:
             from memtomem._instance_registry import register_server_presence
 
-            _presence = register_server_presence(db_path)
+            _presence = register_server_presence(
+                db_path,
+                on_path_reserved=_sigterm_cleanup_targets.append,
+            )
         except Exception:  # pragma: no cover - defensive; the registry swallows its own
             # Only an import-time failure reaches here; the traceback is the
             # single piece of information the warning below cannot carry, so
@@ -819,7 +833,14 @@ def main(argv: list[str] | None = None) -> None:
         _lock_fp = open(pid_file, "a+")
         try:
             portalocker.lock(_lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-        except (portalocker.LockException, BlockingIOError, OSError):
+        except (portalocker.LockException, BlockingIOError, OSError) as exc:
+            from memtomem._lock_errors import is_lock_contention, raise_lock_io_failure
+
+            if not is_lock_contention(exc):
+                _lock_fp.close()
+                if _presence is not None:
+                    _presence.cleanup()
+                raise_lock_io_failure(exc, pid_file, label="server pid")
             # Another server already holds the lock — proceed anyway (the editor
             # expects the process to stay alive), but log a warning. Don't register
             # atexit unlink or the SIGTERM handler: either would yank the primary
@@ -838,14 +859,8 @@ def main(argv: list[str] | None = None) -> None:
                 "Concurrent writes may be slow.",
                 pid_file,
             )
-            # This arm owns no pid file, but it does own its presence marker, and
-            # ``atexit`` never runs under SIGTERM. Install a marker-only handler so
-            # a secondary server cleans up after itself without ever touching the
-            # primary's pid file.
-            _marker_only = _sigterm_targets(None, _presence)
-            if _marker_only:
-                _install_sigterm_handler(*_marker_only)
         else:
+            _sigterm_cleanup_targets.append(pid_file)
             _lock_fp.seek(0)
             _lock_fp.truncate()
             # Keep the pid on the first line for old readers. The blank second
@@ -885,7 +900,6 @@ def main(argv: list[str] | None = None) -> None:
                     _lock_fp.close()
 
             atexit.register(_cleanup)
-            _install_sigterm_handler(*_sigterm_targets(pid_file, _presence))
 
     if transport != "stdio":
         # Banner runs after the lock decision so the warning log (if any)

@@ -1391,6 +1391,21 @@ class TestPresenceMarkers:
         finally:
             inst.cleanup()
 
+    def test_marker_path_is_reserved_before_publication(self, rt, db):
+        reserved: list[Path] = []
+
+        def _reserve(path: Path) -> None:
+            assert not path.exists()
+            reserved.append(path)
+
+        inst = reg.register_server_presence(db, on_path_reserved=_reserve)
+        assert inst is not None
+        try:
+            assert reserved == [inst.path]
+            assert inst.path.exists()
+        finally:
+            inst.cleanup()
+
     def test_unnamed_store_still_registers(self, rt):
         """A store with no path must not silently drop the process."""
         inst = reg.register_server_presence(":memory:")

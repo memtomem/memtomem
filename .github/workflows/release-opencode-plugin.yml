@@ -10,6 +10,7 @@ jobs:
     name: OpenCode plugin release preflight
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     defaults:
       run:
@@ -36,6 +37,16 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin main:refs/remotes/origin/main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Require the exact main-push CI run to succeed
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python tools/release_preflight.py wait-ci
+          --repository "$GITHUB_REPOSITORY"
+          --sha "$GITHUB_SHA"
+          --timeout-seconds 2400
+          --interval-seconds 15
       - run: npm ci
       - run: npm test
       - run: npm run pack:check

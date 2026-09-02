@@ -8,8 +8,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter
-from memtomem.server.tools.search import _resolve_project_context_from_dirs
-from memtomem.web.deps import get_config, get_search_pipeline
+from memtomem.web.deps import get_project_context_root, get_search_pipeline
 from memtomem.web.schemas.core import RetrievalStatsOut, to_result_out
 from memtomem.web.schemas.search import SearchResponse
 
@@ -40,7 +39,7 @@ async def search(
         ),
     ),
     pipeline=Depends(get_search_pipeline),
-    config=Depends(get_config),
+    project_context_root=Depends(get_project_context_root),
 ) -> SearchResponse:
     # #750: ``q`` is optional so a tag/source-only search (no keyword)
     # is a first-class path. The pipeline handles the empty-query branch
@@ -78,14 +77,6 @@ async def search(
                 "chunk_type, created_from, or created_before."
             ),
         )
-
-    # ADR-0011 PR-D round 9: thread project context onto the always-on
-    # storage scope filter so a Web UI search session running inside a
-    # registered project still surfaces project_shared / project_local
-    # rows. ``_resolve_project_context_from_dirs`` reads only the dirs
-    # list (the ``app``/``comp`` wrapper isn't available here — the
-    # endpoint depends on ``Mem2MemConfig`` directly).
-    project_context_root = _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
 
     try:
         results, rstats = await pipeline.search(

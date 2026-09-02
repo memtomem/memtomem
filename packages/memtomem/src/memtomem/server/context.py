@@ -131,6 +131,15 @@ class AppContext:
     # see a positional one. Keyword-only keeps the released positional
     # surface byte-for-byte and makes the keyword the only spelling.
     register_server_instance: bool = field(default=False, kw_only=True)
+    # The MCP lifespan must resolve persisted config before it decides whether
+    # to create webhook/warmup services.  Mark that fully loaded instance so
+    # lazy component initialisation does not apply config.d/config.json twice.
+    ambient_config_loaded: bool = field(default=False, kw_only=True)
+    # Lifespan reads persisted service flags without side effects so a mere MCP
+    # handshake cannot run the legacy auto-discover rewrite. The owner flips
+    # this after rebuilding all persisted layers and migrating at first real
+    # initialization.
+    defer_config_migration: bool = field(default=False, kw_only=True)
     # Backing field for the ``current_namespace`` property below. Kept off
     # ``__init__`` so callers go through the setter (which validates) and
     # cannot smuggle a hostile shape via ``AppContext(current_namespace=
@@ -156,6 +165,12 @@ class AppContext:
     # the MCP server don't run background loops.
     _components: Components | None = field(default=None, init=False, repr=False)
     _owns_components: bool = field(default=False, init=False, repr=False)
+    # SSE enters the SDK lifespan once per connection.  Secondary connection
+    # contexts keep their session/namespace state here but delegate the
+    # process-wide component graph and background services to the first
+    # lifespan's owner.  This prevents one watcher/scheduler/watchdog set per
+    # client while preserving per-connection session state.
+    _runtime_owner: AppContext | None = field(default=None, init=False, repr=False)
     _dedup_scanner: DedupScanner | None = field(default=None, init=False, repr=False)
     _watcher: FileWatcher | None = field(default=None, init=False, repr=False)
     # Whether ``_watcher.start()`` has actually run. Degraded startup (#349)
@@ -292,6 +307,38 @@ class AppContext:
     def __post_init__(self) -> None:
         self._writes_done = asyncio.Condition(self._session_lock)
 
+    def __getattribute__(self, name: str) -> Any:
+        """Keep process-wide config reads attached to the runtime owner.
+
+        SSE connection contexts share one component graph. A config rollback
+        may replace the configuration object rather than mutate it, so a
+        copied reference here would leave sibling connections on stale state.
+        """
+        if name == "config":
+            try:
+                owner = object.__getattribute__(self, "_runtime_owner")
+            except AttributeError:
+                # Dataclass ``__init__`` assigns config before internal fields.
+                owner = None
+            if owner is not None:
+                return owner.config
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Route config replacement through the shared runtime owner."""
+        if name == "config":
+            try:
+                owner = object.__getattribute__(self, "_runtime_owner")
+            except AttributeError:
+                owner = None
+            if owner is not None:
+                owner.config = value
+                # Preserve the latest value if this facade is later detached
+                # during connection shutdown.
+                object.__setattr__(self, name, value)
+                return
+        object.__setattr__(self, name, value)
+
     # ── current_namespace (validated) ─────────────────────────────────────
     # Property + setter pair so every write — whether via ``mem_ns_set``,
     # a future tool we forget to gate, or a bare ``app.current_namespace =
@@ -426,41 +473,49 @@ class AppContext:
 
     @property
     def storage(self) -> SqliteBackend:
-        return _require_initialized(self._components, "storage").storage
+        return _require_initialized(self._runtime_components(), "storage").storage
 
     @property
     def embedder(self) -> EmbeddingProvider:
-        return _require_initialized(self._components, "embedder").embedder
+        return _require_initialized(self._runtime_components(), "embedder").embedder
 
     @property
     def index_engine(self) -> IndexEngine:
-        return _require_initialized(self._components, "index_engine").index_engine
+        return _require_initialized(self._runtime_components(), "index_engine").index_engine
 
     @property
     def search_pipeline(self) -> SearchPipeline:
-        return _require_initialized(self._components, "search_pipeline").search_pipeline
+        return _require_initialized(self._runtime_components(), "search_pipeline").search_pipeline
 
     @property
     def llm_provider(self) -> LLMProvider | None:
         # LLM is optional even after init — return None when absent rather
         # than raising, mirroring the old field semantics.
-        return None if self._components is None else self._components.llm
+        components = self._runtime_components()
+        return None if components is None else components.llm
 
     @property
     def dedup_scanner(self) -> DedupScanner | None:
-        return self._dedup_scanner
+        owner = self._runtime_owner
+        return owner._dedup_scanner if owner is not None else self._dedup_scanner
 
     @property
     def health_watchdog(self) -> object | None:
-        return self._health_watchdog
+        owner = self._runtime_owner
+        return owner._health_watchdog if owner is not None else self._health_watchdog
 
     @property
     def embedding_broken(self) -> dict | None:
         # Mirrors the old field: None until init has run, then either None
         # (healthy) or the mismatch-info dict (degraded mode, see #349).
-        if self._components is None:
+        components = self._runtime_components()
+        if components is None:
             return None
-        return self._components.embedding_broken
+        return components.embedding_broken
+
+    def _runtime_components(self) -> Components | None:
+        owner = self._runtime_owner
+        return owner._components if owner is not None else self._components
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -488,6 +543,26 @@ class AppContext:
         prevents leaking the sqlite handle, embedder session, or running
         background tasks just because a later step failed.
         """
+        if self._runtime_owner is not None:
+            try:
+                comp = await self._runtime_owner.ensure_initialized()
+            finally:
+                # ``from_runtime_owner`` copies these two by value, and a
+                # facade built before first initialization captured the
+                # handshake-era pair. The owner replaces both when it runs the
+                # deferred config rebuild, so a facade that skipped this would
+                # keep firing on a manager the owner has already closed — and
+                # answer from a config the migration superseded. In ``finally``
+                # because the rebuild happens *before* components are built: a
+                # failure past that point still leaves the old manager closed.
+                self.config = self._runtime_owner.config
+                self.webhook_manager = self._runtime_owner.webhook_manager
+            # Keep the private compatibility handle in sync for the one
+            # embedding-reset implementation that intentionally mutates the
+            # shared Components container directly.
+            self._components = comp
+            self._watcher = self._runtime_owner._watcher
+            return comp
         if self._components is not None:
             # Already initialized: this call is a handler entering, which is
             # the moment to notice that another process changed the index roots
@@ -503,6 +578,24 @@ class AppContext:
             from memtomem.search.dedup import DedupScanner
             from memtomem.server.component_factory import close_components, create_components
 
+            # Sample the config signature *before* any loader reads the files.
+            # A write landing mid-load is then noticed by the next reconcile
+            # rather than being recorded as already applied (#2186). Sampling
+            # early can only cost one redundant reconcile pass.
+            signature_at_load = current_signature()
+
+            if self.defer_config_migration:
+                # Handshake discovery is read-only, so its config may already
+                # be stale when the first real tool call arrives. Rebuild from
+                # defaults + environment + config.d + config.json before
+                # running the deferred migration; replaying config.json alone
+                # would bank a changed fragment's signature while retaining
+                # its handshake-era values. Keep startup's tolerant override
+                # behavior so malformed config remains repairable.
+                self.config = build_fresh_config(migrate=True, strict_overrides=False)
+                self.ambient_config_loaded = True
+                await self._reconcile_webhook_manager()
+
             # #1936: take the lifecycle barrier BEFORE storage opens, so a
             # concurrent ``mm uninstall`` either has not started staging
             # (we hold shared, its exclusive acquire refuses) or is already
@@ -512,14 +605,10 @@ class AppContext:
             if self.register_server_instance and self._lifecycle_barrier is None:
                 await self._acquire_lifecycle_barrier()
 
-            # Sample the config signature *before* the factory reads the files
-            # (``create_components`` runs ``load_config_d`` /
-            # ``load_config_overrides`` itself). Taking it afterwards would
-            # record a write that landed mid-load as already applied, and the
-            # roots it added would then never be reconciled (#2186). Sampling
-            # early can only cost one redundant reconcile pass.
-            signature_at_load = current_signature()
-            comp = await create_components(self.config)
+            comp = await create_components(
+                self.config,
+                load_ambient_config=not self.ambient_config_loaded,
+            )
             # Expose storage/embedder via the property accessors *before*
             # constructing schedulers — they reach into ``ctx.storage`` etc.,
             # and ``_require_initialized`` would raise without this. The
@@ -637,6 +726,14 @@ class AppContext:
 
             self._dedup_scanner = dedup
             self._config_signature = signature_at_load
+            # Cleared here, where initialization commits, and not next to the
+            # rebuild above. Everything between the two can raise — the webhook
+            # close is a cancellation point, and so is every component start —
+            # and clearing it eagerly made that abort permanent: the retry
+            # skipped the rebuild, kept the config from the aborted attempt,
+            # and then banked *this* signature over it. A config edit made in
+            # between was recorded as applied while never being read.
+            self.defer_config_migration = False
             self._watcher = watcher
             self._watcher_started = watcher_started
             self._scheduler = scheduler
@@ -668,6 +765,11 @@ class AppContext:
         the scheduler must not turn a successful reset into a failed tool
         call. Same trade-off as the retirement closes in ``revert_to_stored``.
         """
+        if self._runtime_owner is not None:
+            await self._runtime_owner.recover_from_degraded()
+            self._components = self._runtime_owner._components
+            self._watcher = self._runtime_owner._watcher
+            return
         async with self._init_lock:
             comp = self._components
             if comp is None:
@@ -767,6 +869,45 @@ class AppContext:
             return False
         return True
 
+    async def _reconcile_webhook_manager(self) -> None:
+        """Rebuild the webhook manager against the refreshed config.
+
+        The handshake builds the manager from a config read before migration —
+        the very staleness the deferred rebuild above exists to correct. Left
+        alone, a manager built at handshake keeps firing at the URL it captured
+        then, so a webhook the user disabled or repointed between handshake and
+        the first tool call still delivers to the endpoint they removed. That
+        is a config change silently not taking effect on an egress path, which
+        is why this reconciles rather than waiting for the next process start.
+
+        Unconditional rather than diffed: this runs once per process, and
+        ``WebhookManager`` rewrites its own config when it rejects a URL, so a
+        equality check against ``config.webhook`` would not mean what it reads
+        like.
+        """
+        from memtomem.server.webhooks import WebhookManager
+
+        webhook = self.config.webhook
+        replacement: object | None = None
+        if webhook.enabled and webhook.url:
+            replacement = WebhookManager(webhook)
+        previous, self.webhook_manager = self.webhook_manager, replacement
+        if previous is None:
+            return
+        # The replacement is published *before* the old close is awaited.
+        # ``_stop_quietly`` re-raises ``CancelledError``, so clearing the field
+        # first and closing after would drop the only reference to a manager
+        # that never closed — teardown reads this field and would find the
+        # replacement, or nothing. On that cancellation the old manager goes to
+        # the same retry channel a failed recovery start uses, so ``close``
+        # still stops it. (An ordinary close failure is logged and swallowed by
+        # ``_stop_quietly``, as it is for every other resource here.)
+        try:
+            await _stop_quietly(previous, "webhook_manager")
+        except BaseException:
+            self._failed_services.append((previous, "webhook_manager"))
+            raise
+
     async def reconcile_watched_roots(self) -> None:
         """Re-watch the index roots when someone else edited the config (#2186).
 
@@ -791,6 +932,11 @@ class AppContext:
         archives): the reconciled unit is root policy, not just watch
         membership.
         """
+        if self._runtime_owner is not None:
+            await self._runtime_owner.reconcile_watched_roots()
+            self._components = self._runtime_owner._components
+            self._watcher = self._runtime_owner._watcher
+            return
         if self._components is None or not self._owns_components:
             return
         watcher = self._watcher
@@ -1057,6 +1203,24 @@ class AppContext:
         )
         return ctx
 
+    @classmethod
+    def from_runtime_owner(cls, owner: AppContext) -> AppContext:
+        """Create per-connection state backed by one process runtime owner."""
+        ctx = cls(
+            config=owner.config,
+            webhook_manager=owner.webhook_manager,
+            ambient_config_loaded=True,
+        )
+        ctx._runtime_owner = owner
+        # These guards protect process-wide mutable state and therefore must
+        # be shared even though session-transition locks remain per context.
+        ctx._config_lock = owner._config_lock
+        ctx._watch_roots_lock = owner._watch_roots_lock
+        ctx._memory_file_locks = owner._memory_file_locks
+        ctx._components = owner._components
+        ctx._watcher = owner._watcher
+        return ctx
+
     async def close(self) -> None:
         """Tear down components if this context owns them.
 
@@ -1085,6 +1249,14 @@ class AppContext:
         the watcher stop would skip the component close and leave the
         sentinel advertising an open store.
         """
+        if self._runtime_owner is not None:
+            # The lifespan refcount closes the owner after the final
+            # connection exits.  This context owns only request/session state.
+            self._components = None
+            self._watcher = None
+            self._runtime_owner = None
+            return
+
         from memtomem.server.component_factory import close_components
 
         first_cancel: asyncio.CancelledError | None = None

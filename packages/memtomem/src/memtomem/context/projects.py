@@ -20,9 +20,10 @@ import json
 import logging
 import os
 import re
+import stat
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Literal
@@ -200,6 +201,18 @@ class KnownProjectsLoadReport:
     detail: str | None
     skipped_rows: int
     error_kind: str | None = None
+    # The optional Claude discovery source degrades independently from the
+    # user-owned registry.  Keep its failure on the same report object so the
+    # roster can preserve cwd/registered rows and expose an additive warning
+    # without falsely marking ``registry_status`` unavailable.
+    scan_detail: str | None = None
+    scan_error_kind: str | None = None
+    # Entries the scan skipped because they could not be read.  Non-zero means
+    # the scan *ran* and contributed rows but may be incomplete — a different
+    # condition from an unreadable directory, which contributes nothing.
+    # Consumers that render the two identically would report a partial scan as
+    # a total outage (or as "0 rows skipped").
+    scan_skipped_entries: int = 0
 
 
 def _classify_registry_os_error(exc: OSError) -> str:
@@ -817,12 +830,44 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
     return results
 
 
-def _discover_claude_projects(anchors: tuple[Path, ...] = ()) -> list[Path]:
-    if not _CLAUDE_PROJECTS_DIR.is_dir():
+def _discover_claude_projects(
+    anchors: tuple[Path, ...] = (),
+    *,
+    entry_errors: list[OSError] | None = None,
+) -> list[Path]:
+    """Decode the project roots recorded under ``~/.claude/projects``.
+
+    Raises on a failure to read the directory *itself* — the caller turns that
+    into a degraded-source report. A failure on one child is appended to
+    ``entry_errors`` and skipped instead: ``stat()`` follows symlinks, so a
+    single dangling link or mode-000 entry would otherwise discard every
+    sibling this scan could still resolve. The caller reports those the same
+    way, so the degrade is still visible; only the data loss is dropped.
+    """
+    try:
+        root_stat = _CLAUDE_PROJECTS_DIR.stat()
+    except FileNotFoundError:
         return []
+    except OSError:
+        # The caller converts this into a degraded-source report while keeping
+        # cwd and known-projects rows.  Do not collapse unreadable into absent.
+        raise
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return []
+    try:
+        children = list(_CLAUDE_PROJECTS_DIR.iterdir())
+    except OSError:
+        raise
     found: list[Path] = []
-    for child in _CLAUDE_PROJECTS_DIR.iterdir():
-        if not child.is_dir():
+    for child in children:
+        try:
+            child_is_dir = stat.S_ISDIR(child.stat().st_mode)
+        except OSError as exc:
+            if entry_errors is not None:
+                entry_errors.append(exc)
+            logger.warning("claude-projects: skip %r: unreadable entry (%s)", child.name, exc)
+            continue
+        if not child_is_dir:
             continue
         try:
             candidates = _decode_claude_project_dirname(child.name, anchors)
@@ -1035,7 +1080,37 @@ def discover_project_scopes_with_report(
     #      unambiguously even where the FS walk would flag it ambiguous.
     if experimental_claude_projects_scan or auto_display_configured_projects:
         anchors = (cwd, *(entry.root for entry in known_entries))
-        for decoded in _discover_claude_projects(anchors):
+        entry_errors: list[OSError] = []
+        try:
+            decoded_projects = _discover_claude_projects(anchors, entry_errors=entry_errors)
+        except OSError as exc:
+            detail = f"Claude projects directory at {_CLAUDE_PROJECTS_DIR} is unreadable ({exc})"
+            logger.warning("claude-projects: scan unavailable: %s", exc)
+            load_report = replace(
+                load_report,
+                scan_detail=detail,
+                scan_error_kind=_classify_registry_os_error(exc),
+            )
+            decoded_projects = []
+        else:
+            if entry_errors:
+                # Partial degrade: the scan still contributed whatever it could
+                # decode, and the warning says the roster may be incomplete.
+                first_error = entry_errors[0]
+                detail = (
+                    f"{len(entry_errors)} entr"
+                    f"{'y' if len(entry_errors) == 1 else 'ies'} under the Claude projects "
+                    f"directory at {_CLAUDE_PROJECTS_DIR} could not be read "
+                    f"({first_error}); the scanned roster may be incomplete"
+                )
+                logger.warning("claude-projects: scan incomplete: %s", first_error)
+                load_report = replace(
+                    load_report,
+                    scan_detail=detail,
+                    scan_error_kind=_classify_registry_os_error(first_error),
+                    scan_skipped_entries=len(entry_errors),
+                )
+        for decoded in decoded_projects:
             if not experimental_claude_projects_scan and not has_runtime_marker(decoded):
                 continue
             _add(decoded, "claude-projects", missing=False)

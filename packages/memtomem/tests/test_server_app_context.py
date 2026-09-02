@@ -60,6 +60,25 @@ def fake_components() -> Components:
     )
 
 
+def test_runtime_facades_share_config_replacements_with_owner_and_siblings() -> None:
+    owner = AppContext(config=Mem2MemConfig())
+    first = AppContext.from_runtime_owner(owner)
+    second = AppContext.from_runtime_owner(owner)
+
+    replacement = Mem2MemConfig()
+    first.config = replacement
+
+    assert owner.config is replacement
+    assert first.config is replacement
+    assert second.config is replacement
+
+    later = Mem2MemConfig()
+    owner.config = later
+
+    assert first.config is later
+    assert second.config is later
+
+
 @pytest.mark.asyncio
 async def test_ensure_initialized_concurrent_calls_invoke_factory_once(
     fake_components: Components,
@@ -68,7 +87,7 @@ async def test_ensure_initialized_concurrent_calls_invoke_factory_once(
     ctx = AppContext(config=fake_components.config)
     call_count = 0
 
-    async def slow_create(_config: Mem2MemConfig) -> Components:
+    async def slow_create(_config: Mem2MemConfig, **_kwargs: object) -> Components:
         nonlocal call_count
         call_count += 1
         await asyncio.sleep(0.01)
@@ -111,7 +130,7 @@ async def test_ensure_initialized_failure_releases_lock_for_retry(
     ctx = AppContext(config=fake_components.config)
     attempt = 0
 
-    async def flaky_create(_config: Mem2MemConfig) -> Components:
+    async def flaky_create(_config: Mem2MemConfig, **_kwargs: object) -> Components:
         nonlocal attempt
         attempt += 1
         if attempt == 1:

@@ -42,15 +42,18 @@ def _print_samples(result: tag_svc.TagOpResult) -> None:
 # --------------------------------------------------------------------------- #
 @tags.command("list")
 def list_tags() -> None:
-    """List every tag and its chunk count, most frequent first."""
+    """List visible tags and their chunk counts, most frequent first."""
     asyncio.run(_run_list())
 
 
 async def _run_list() -> None:
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.runtime.project_context import _resolve_project_context_root
 
     async with cli_components() as comp:
-        tag_counts = await comp.storage.get_tag_counts()
+        tag_counts = await comp.storage.get_tag_counts(
+            project_context_root=_resolve_project_context_root(comp)
+        )
         if not tag_counts:
             click.secho("No tags found.", fg="yellow")
             return

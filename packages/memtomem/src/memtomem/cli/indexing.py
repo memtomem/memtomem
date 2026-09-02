@@ -126,23 +126,51 @@ def index(
             "--debounce-window / --flush / --status."
         )
 
-    if do_status:
-        _print_status(as_json=as_json)
-        return
+    # ``DebounceQueueError`` means the durable queue is unreadable or
+    # internally inconsistent — a transient EACCES on the queue file, or a
+    # clock step that backdates a live claim.  These reach the PostToolUse
+    # hook (`mm index --debounce`), where an uncaught traceback would stall
+    # reactive indexing on every subsequent invocation until a human found
+    # and deleted the file.  Convert to a CLI error that names the queue and
+    # the one-line recovery instead.
+    from memtomem.indexing.debounce import DebounceQueueError, queue_path
 
-    if do_flush:
-        _run_flush(as_json=as_json)
-        return
+    try:
+        if do_status:
+            _print_status(as_json=as_json)
+            return
 
-    if debounce_window is not None:
-        _run_debounce(
-            path=path,
-            window_seconds=debounce_window,
-            namespace=namespace,
-            force=force,
-            as_json=as_json,
-        )
-        return
+        if do_flush:
+            _run_flush(as_json=as_json)
+            return
+
+        if debounce_window is not None:
+            _run_debounce(
+                path=path,
+                window_seconds=debounce_window,
+                namespace=namespace,
+                force=force,
+                as_json=as_json,
+            )
+            return
+    except DebounceQueueError as exc:
+        qp = queue_path()
+        remedy = _QUEUE_REMEDIES.get(exc.kind, _QUEUE_REMEDIES["corrupt"]).format(path=qp)
+        if as_json:
+            # ``--json`` is a one-line machine contract; a failure on this path
+            # must not be the one place that answers in prose.
+            click.echo(
+                _json.dumps(
+                    {
+                        "error": str(exc),
+                        "error_kind": exc.kind,
+                        "queue_path": str(qp),
+                        "remediation": remedy,
+                    }
+                )
+            )
+            raise click.exceptions.Exit(1) from exc
+        raise click.ClickException(f"{exc}\n{remedy}") from exc
 
     try:
         asyncio.run(
@@ -272,6 +300,36 @@ async def _index(
     )
     if agg["errors"] or agg["blocked"]:
         raise click.exceptions.Exit(1)
+
+
+#: Remediation text per ``DebounceQueueError.kind``.  Deliberately not one
+#: blanket "delete the queue": that answer contradicts the
+#: ``unsupported_version`` refusal, which exists to *prevent* the data loss
+#: deleting it would cause, and it is the wrong advice for a permissions
+#: problem the file's contents survived.
+_QUEUE_REMEDIES: dict[str, str] = {
+    "unreadable": (
+        "The queue file could not be read. Check its permissions and ownership "
+        "({path}); its contents are intact, so do not delete it."
+    ),
+    "corrupt": (
+        "The queue file does not parse. Rename it to reset the queue — it is "
+        "at {path}, and any name outside that path will do — then re-run "
+        "`mm index` over the paths edited since the last successful run, "
+        "because the reset drops whatever was still queued."
+    ),
+    "unsupported_version": (
+        "The queue was written by a newer memtomem and is being refused rather "
+        "than rewritten in an older shape. Upgrade memtomem; do not delete "
+        "{path}, which would discard the queued paths this refusal protects."
+    ),
+    "claim": (
+        "A queue claim is missing or dated ahead of this clock. If the system "
+        "clock stepped backwards, re-run once it has settled; otherwise rename "
+        "{path} and re-run `mm index` over the paths edited since the last "
+        "successful run."
+    ),
+}
 
 
 def _print_status(*, as_json: bool) -> None:

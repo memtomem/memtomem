@@ -23,7 +23,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValidationError
 from memtomem.quality.replay import replay_cases
 from memtomem.quality.state import current_fingerprints
-from memtomem.web.deps import get_config, get_search_pipeline, get_storage
+from memtomem.web.deps import (
+    get_config,
+    get_project_context_root,
+    get_search_pipeline,
+    get_storage,
+)
 from memtomem.web.schemas.quality import (
     EvalCaseListResponse,
     EvalCaseSummary,
@@ -63,6 +68,7 @@ async def promote_quality_case(
     storage=Depends(get_storage),
     config=Depends(get_config),
     pipeline=Depends(get_search_pipeline),
+    project_context_root=Depends(get_project_context_root),
 ) -> PromoteCaseOut:
     """Promote a labeled search run into a durable evaluation case.
 
@@ -84,6 +90,7 @@ async def promote_quality_case(
             name=name,
             fingerprints=fingerprints,
             allow_unreplayable_filters=body.allow_unreplayable_filters,
+            project_context_root=project_context_root,
         )
     except EvalCaseError as exc:
         raise _eval_case_http(exc) from exc

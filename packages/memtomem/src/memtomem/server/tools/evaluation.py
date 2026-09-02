@@ -6,6 +6,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary
 
 
 @mcp.tool()
@@ -26,7 +27,9 @@ async def mem_eval(
         namespace: Scope analysis to this namespace
     """
     app = await _get_app_initialized(ctx)
-    report = await app.storage.get_health_report(namespace=namespace)
+    report = await app.storage.get_health_report(
+        namespace=namespace, project_context_root=caller_boundary(app)
+    )
 
     lines = ["## Memory Health Report\n"]
 
