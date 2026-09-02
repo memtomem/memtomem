@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-02
+
 ### Breaking
 
 - **`mm init -y` is now accepted and ignored; use `--non-interactive`.** The
@@ -130,6 +132,84 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   keep their own axes. See
   [ADR-0035](docs/adr/0035-mm-doctor-runtime-axis.md). (#2226)
 
+- **A new default-off ranking stage boosts chunks whose entities match the
+  query.** Entity extraction has been a query-only sidecar since it landed:
+  `mem_entity_search` could list mentions, but nothing in ranking ever read
+  `chunk_entities`, so a user who ran `mem_entity_scan` got no better search
+  results for it. Stage 7b closes that loop. Entities are extracted from the
+  *query* with the regex extractor — never the LLM path, whose cost belongs to
+  an explicit scan rather than to every search — and matched against the
+  stored entities of the candidate set, with the factor bounded by coverage:
+  `1.0 + (max_boost - 1.0) * matched / query_entities`. The match is
+  presence-only on purpose: stored `confidence` mixes two uncalibrated scales
+  (hardcoded per-pattern regex values and model-supplied LLM values), so it
+  gates candidate rows through `min_confidence` but never shapes the factor.
+  Coverage is sparse by construction, so a chunk with no matching entity keeps
+  its score exactly — the stage only ever promotes. The new
+  `search.entity_boost` section carries `enabled` (default `false`),
+  `max_boost` (1.5), `query_entity_types` (`technology`, `person`, `date` —
+  the other extractors are line-anchored patterns that never fire on a short
+  query) and `min_confidence`. Like `access` and `importance` it is
+  deliberately absent from `MUTABLE_FIELDS`: changing a ranking stage takes a
+  restart, not a live `mm config set`. (#2074)
+
+- **`mem_search` and `mem_agent_search` take a `record` argument.** The
+  pipeline has had a per-call recording switch since #1802, but only the
+  quality lab could reach it — every path a client or an agent can take called
+  `SearchPipeline.search` without the argument, so every search inflated
+  `chunks.access_count` and appended a query-run row. For a fan-out worker
+  gathering context that is the wrong default twice over: the access-frequency
+  boost starts ranking on retrieval traffic nobody asked for, and the writes
+  pile onto one global SQLite file. Both tools now accept `record`, defaulting
+  to `true`, so nothing changes for an existing caller and the two signatures
+  stay symmetric. A `false` default on `mem_agent_search` was tempting — fan-out
+  is its typical use — but #2086 had just restored that tool's search
+  observations and defaulting them back off would undo it. The tool
+  description spells out what `record=false` actually does, because it is not
+  the pure telemetry switch its name suggests: it also stops reading and
+  filling both caches and runs dense retrieval exhaustively, so the same query
+  can return different results. (#2166)
+
+- **Memory-candidate review can now see the evidence around a candidate.** A
+  reviewer approving or rejecting a candidate saw the candidate text and
+  nothing else — not whether the store already says the same thing, nor
+  whether it says the opposite. Those are exactly the two failures a review
+  queue exists to catch: a restatement gets accepted and has to be deduped
+  later, and a contradiction gets accepted alongside the memory it
+  contradicts, with nothing marking which one is current. The signal already
+  existed in `search/conflict.py`, reachable only through the separately
+  invoked `mem_conflict_check`, which collapses every failure into an empty
+  list. `find_neighbours` is split out of it (returning every scored
+  neighbour, letting errors propagate) with `detect_conflicts` now sitting on
+  top, its filtering and error semantics unchanged. New
+  `mem_candidate_evidence(candidate_id, top_k=5)` and `mm review evidence`
+  surface those neighbours with a dense score, a token-overlap ratio, and an
+  advisory label. The labels describe the *shape* of the similarity, not a
+  verdict — same topic in different words is equally consistent with a
+  contradiction and with a paraphrase — so nothing is auto-decided and nothing
+  is written; accept and reject stay with the reviewer. Evidence that cannot
+  be gathered must not block a decision, so a failure is reported in the
+  envelope rather than raised, and "no neighbours" stays distinct from "could
+  not look". (#2134)
+
+- **The rerank stage has a wall-clock bound, `rerank.timeout_s`.** Stage 3b's
+  `await reranker.rerank(...)` was unbounded, so a hung provider — a wedged
+  ONNX session, a stuck connection — hung the whole search with it. The call
+  is now wrapped in `asyncio.wait_for` against the new knob (default 30s,
+  validated finite and positive); on expiry the search degrades to the fused
+  order through the same fallback a provider error already took. A cold first
+  call still downloading a model can exceed the bound: that one query
+  degrades, the download finishes, and later queries rerank normally. Two
+  providers also stopped competing for the wrong thread. `LocalReranker`
+  loaded its CrossEncoder and ran `model.predict` synchronously on the event
+  loop, freezing every other coroutine for a torch forward pass;
+  `FastEmbedReranker` used `asyncio.to_thread`, whose shared default pool lets
+  N concurrent searches run N simultaneous ORT cross-encoder inferences — the
+  exact memory amplification `OnnxEmbedder` was hardened against in #1783.
+  Both now run on a dedicated single-worker executor: one inference at a time,
+  a queued rerank whose awaiting task was cancelled never starts, and
+  `close()` shuts the worker down. (#2179)
+
 - **Stores indexed before index-time extraction are backfilled automatically at
   startup.** #2145 gave every *new* chunk write an entity-extraction attempt but
   deliberately left existing stores to `mem_entity_scan` — a maintenance command
@@ -194,10 +274,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `true`) turns it off. Ranking is deliberately unchanged: `entity_boost.enabled`
   still defaults to `false`, and while it is off these rows are not folded into
   the Quality Lab index fingerprint. Stores indexed by an earlier release are
-  not backfilled — run `mem_entity_scan`, or re-index with `mm index --force`
-  (a plain re-index leaves unchanged files alone, so it writes no entities). Writers that reach
-  storage without going through the indexing engine (import, URL index,
-  consolidation) do not extract yet.
+  backfilled automatically at startup (see the entity-backfill entry above);
+  `mem_entity_scan` remains the way to upgrade a store to the LLM extractor.
+  Import and consolidation gained extraction later in this release (above),
+  which closed the last of the gaps this entry originally listed — the URL
+  indexer reaches extraction through the indexing engine, not around it.
   See [ADR-0034](docs/adr/0034-session-touched-entities-derived.md) §Deferral.
   (#2145)
 
@@ -267,8 +348,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   records work that happened, so it refuses when `completed` and `validation`
   cannot be filled from something observed — evidence, not execution mode, is
   the test, and context inherited from a caller counts. Shipped asset content
-  changed, so the Claude (`0.4.2`), Codex and OpenCode (`0.2.2`), and Kimi
-  (`0.1.1`) delivery versions move with it; the core version does not.
+  changed, so the delivery versions moved with it while the core version did
+  not — Claude to `0.4.2`, Codex and OpenCode to `0.2.2`, Kimi to `0.1.1`.
+  Those were intermediate: this release bumps the core, which re-renders every
+  plugin asset, so all five move again — Claude to `0.5.0`, Codex, automation
+  and OpenCode to `0.3.0`, Kimi to `0.2.0`.
 
 - **`chunk_entities` now has a uniqueness constraint.** The table shipped with
   three non-unique indexes, so one chunk could hold the same mention twice —
@@ -391,8 +475,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   torn rather than silently mis-parsed. The Claude skill's host-tool grant is
   scoped to `git rev-parse` / `git status` only.
 
-### Changed
-
 - **A zero RRF weight now disables its leg outright.** #2087 made
   `bm25_weight=0.0` / `dense_weight=0.0` survive to fusion, but zero only
   silenced the leg's score: its candidates still entered fusion at 0.0 and
@@ -410,6 +492,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   to the `[1.0, 1.0]` defaults instead of silently re-reading server config.
   (#2092)
 
+- **A search's `query_run_id` is now provisional when it is handed back.**
+  Every ranked search awaited a synchronous `query_history` INSERT, its
+  commit, and — every hundredth call — an inline history prune before it could
+  return. The cache-hit branch paid the same writer round trip even though it
+  had done no retrieval work at all, so a query answered entirely from the 30s
+  result cache still contended with indexing on the single writer connection.
+  The id was never the obstacle: it is a uuid4 minted in the pipeline, not a
+  database rowid, so it can be advertised before the row exists. The write now
+  goes on the same background-task set `increment_access` already uses,
+  converging with the fire-and-forget path alternate backends have always
+  taken. What changes for callers is that a failed write is no longer knowable
+  in-line — `query_run_id` used to come back `None`; now the failure is logged
+  and the id simply stays unresolvable, so history never lists it and the
+  `run_id` foreign key rejects feedback on it. Every surface that reads a run
+  back settles the write first through `SearchPipeline.flush_observation`, so
+  the common shape — an agent posting feedback in the tool call right after
+  its search — keeps working. The flush uses `asyncio.wait` rather than
+  `gather`, so a cancelled reader cannot cancel the write and strand the id it
+  was given, and a write that finds the writer connection held by another
+  task's transaction retries instead of dropping the row. (#2183)
+
+- **The session-summary rescue leg can now reach boost-source chunks that rank
+  below the global oversample cap.** Phase C's rescue leg ran a full
+  unrestricted FTS retrieval at oversample and then discarded every
+  non-boost-source row in Python, so a boost-source chunk that placed below
+  the cap was silently lost before the filter ever saw it. The restriction is
+  pushed into storage through the existing `SearchMetadataFilter.source_exact`
+  field — no storage signature changes — so candidate selection stops fetching
+  rows it will throw away and those chunks become reachable. An outer
+  `metadata_filter` composes by intersection, normalized on both sides through
+  `norm_path` before intersecting, so a disjoint outer source pin yields
+  nothing rather than quietly widening. The same leg's `chunk_links` walk,
+  previously one round trip per above-threshold summary on every
+  default-namespace query, collapses into a single batched call over one bound
+  JSON array. Its error semantics become all-or-nothing deliberately: a SQLite
+  failure on the batch statement would have failed every summary identically,
+  so the old per-summary isolation bought nothing — a batch failure logs at
+  the existing warn-once site and degrades to organic retrieval. (#2184)
+
+- **A `namespace` or `scope` value that mixes a comma list with a glob is now
+  refused instead of matching nothing.** `NamespaceFilter.parse` checked for
+  `*` before `,`, so `archive:*,work` was read as one glob pattern containing
+  a literal comma and reached SQL as a single `LIKE 'archive:%,work'` — which
+  matches nothing, so the caller got an empty result set and read it as "no
+  such memories" rather than "that filter was never runnable". The two
+  spellings genuinely cannot be combined: `namespace_sql` emits either an
+  `IN (…)` list or one `LIKE` pattern, and there is no representation for a
+  union of patterns — which the codebase already worked around, since
+  `hidden_namespace_hint` quotes one query per prefix group for exactly this
+  reason. The gap was in what the parser accepted, not in what the SQL layer
+  could express. The combination now raises with a message naming both working
+  spellings, and `ScopeFilter.parse` — same ordering, same silent-empty
+  failure — is fixed alongside. Both are `ValueError` subclasses, so the
+  existing surfaces translate them unchanged: `tool_handler` renders
+  `"Error: …"` and the web app maps them to HTTP 400. (#2202)
+
+- **`pywin32` is now a direct dependency on Windows.** portalocker 3.x listed
+  `pywin32>=226; platform_system == "Windows"` as an unconditional dependency;
+  4.0.0 moved it behind a `win32` extra and made `MsvcrtLocker` the default
+  Windows locker. msvcrt has no shared lock, so that locker raises
+  `ImportError` when `LockFlags.SHARED` is requested without pywin32 — and
+  `ImportError` is in neither `_LOCK_CONTENDED` nor `_BARRIER_LOCK_ERRORS`, so
+  it would escape both `LOCK_SH` call sites
+  (`_instance_registry.acquire_server_lifecycle_barrier` and
+  `cli/_liveness.probe_legacy_pid_file`) unhandled — a crash, not a degraded
+  lock. Nothing was broken in practice, because `mcp` still declares pywin32 on
+  win32 and no released version predates the bump, but that made the resolve
+  correct by luck rather than by contract. Declared directly rather than as
+  `portalocker[win32]`, because the floor is still `>=3.0` and 3.x publishes
+  no such extra, so that spelling would resolve to nothing there. A guard
+  derives its own scope by grepping `src/` for `LOCK_SH` and demands the pin
+  only while a call site exists, so a third one added later is covered.
+  (#2058)
+
 ### Fixed
 
 - **`mm init --preset <name>` and `mm init --advanced` refuse without a
@@ -424,6 +580,286 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   preset, is unaffected. This surfaced while flipping `-y` (#1631): the flip
   routes `mm init -y --preset X` out of the scripted path, and without this it
   would have turned a working scripted install into a silent no-op. (#1631)
+
+- **A settings sync that returns 503 stops writing the settings it had not
+  reached yet.** `generate_all_settings` runs in `asyncio.to_thread`, which
+  cannot be cancelled, so a request that hit its `asyncio.timeout` answered
+  503 and left the worker running. `_SETTINGS_LOCK_BUDGET_S` bounds only the
+  per-target sidecar-lock *waits*: once a target held its lock, the
+  reread/merge/write ran to completion with no cancellation check. The user
+  was told the sync failed and their settings changed anyway, seconds later,
+  with nothing in the response saying so. `abandon_sync_on_exit` installs a
+  `threading.Event` on a ContextVar and sets it in `finally`, so a block that
+  exits abnormally — the route's timeout, an MCP caller's cancellation — hands
+  the worker an abort flag; `asyncio.to_thread` copies the context, so the
+  worker polls the same Event the caller sets, and neither the dispatch shape
+  nor `generate_all_settings`'s signature changes. The worker reads the flag
+  at the top of each target (before the availability probe, so an abandoned
+  sync does not even create the parent directory and never-removed lock
+  sidecar that acquiring a lock would leave behind), again right after the
+  lock acquire where the longest wait is, and once more immediately before the
+  write. It stays cooperative rather than transactional: the one target
+  already past its last check still writes, and targets written earlier are
+  not rolled back. The 503 body and the docstrings that claimed the lock
+  budget covered this now say exactly that. (#2218)
+
+- **The sibling settings, skills and `.mcp.json` writers stop at the same
+  abandonment checkpoints after their caller's 503 too.** #2218 built the cooperative abort generic and was
+  adopted by exactly one engine; every other engine that writes the same files
+  under the same lock discipline still bounded only its lock *waits*, so a
+  timed-out request answered 503 and its un-cancellable worker went on to
+  resolve, delete or promote a settings entry, fan skills out, import them,
+  remove them, or rewrite `.mcp.json`. Each engine's checkpoints are argued
+  against its own transaction rather than copied: a single CAS write gets one
+  check after the lock, because it has no legs to leave half-done;
+  `apply_hook_copy` gets three, all before its first write, because a
+  canonical that classifies `exact` makes the *tier* write the first mutation;
+  `generate_all_skills` checks around the all-or-nothing `project_shared`
+  batch as a whole and per destination otherwise; the artifact CRUD closures
+  get one before the lock — the only check that can leave no trace at all,
+  since `asyncio.to_thread` queues the closure and a caller can be cancelled
+  before the body ever starts — and one after it. Every in-lock check sits
+  after the recovery pass rather than before it (ADR-0030 §10): recovery
+  repairs an interrupted swap for whoever comes next, while the abort only
+  declines this request's own write. `.mcp.json` gets the abort together with
+  the offload it needed anyway — its read-merge-write had taken a sidecar lock
+  with a 30s budget while still running synchronously, so a contended lock
+  froze the event loop for up to 30 seconds, taking every other request and
+  the whole sync-all pipeline with it and preventing that route's own
+  `asyncio.timeout` from firing at all, since the expiry callback runs on the
+  loop that is blocked. An abandoned run is reported with a new typed
+  `abandoned` skip code, distinct from `lock_timeout`. (#2247)
+
+- **Every date filter now compares UTC against UTC.** `created_at` /
+  `updated_at` hold ISO-8601 strings and SQLite has no datetime type, so every
+  filter on them compares *lexically* — which is temporal ordering only while
+  both sides are canonical UTC. Neither side held that invariant. On the bound
+  side, `_parse_recall_date` attached UTC to a naive input but left an
+  offset-carrying one in its original zone, the web route converted its bounds
+  while `SearchPipeline.search` passed the same bounds through untouched, and
+  `get_query_history` bound its `since` to SQL exactly as typed while
+  `get_search_runs` ten lines below it normalized correctly. So
+  `since="2026-01-01T00:00:00+09:00"` (= `2025-12-31T15:00Z`) sorted by its
+  printed digits, and a row written at `2025-12-31T16:00Z` — an hour after it
+  — compared as earlier and fell out of the range. On the row side, import
+  parsed a bundle's `created_at` with `fromisoformat` and kept whatever offset
+  it carried, so a bundle written at `+09:00` stored a row that sorts a day
+  late and a naive value stored a row with no offset at all, sorting before
+  every `+00:00` row at the same instant; separately
+  `update_chunks_scope_for_source` stamped `updated_at=CURRENT_TIMESTAMP`,
+  which SQLite renders space-separated and offset-less, so every scope move
+  wrote a row that sorts before all canonical ones and skewed the lexical
+  `MAX(updated_at)` ordering behind the source listings. Both conversions move
+  to the boundary the values funnel through — `utc_bound` /
+  `utc_bound_from_iso` for bounds, `utc_stamp` for stored timestamps — with
+  the precision named per column, since `query_history.created_at` is stored
+  at seconds and a bound carrying fractional seconds sorts after every row
+  inside its own second. `_parse_recall_date` also stopped deciding "is this a
+  whole period?" by testing for `"T"`: `fromisoformat` accepts a space or a
+  lowercase `t` too, so `until="2026-04-06 14:30:00+09:00"` was treated as
+  date-only and advanced a day, silently widening the range by 24 hours. It
+  parses instead, and only a value that parses as a bare date is advanced.
+  Existing rows are repaired: a marker-gated startup pass walks every `chunks`
+  row once and re-renders `created_at` / `updated_at` through `utc_stamp`,
+  writing only the rows whose rendering differs. A naive value is read as UTC;
+  an offset-aware value keeps its instant. Two residuals remain by design — a
+  value that does not parse is skipped and, because the marker is set either
+  way, never revisited; and an older binary can still write a non-canonical row
+  afterwards, which the marker then keeps a newer binary from re-scanning.
+  `last_accessed_at` is always stamped in UTC internally, and pre-fix
+  `query_history` rows age out under retention, so neither needs the pass.
+  (#2203)
+
+- **`mem_activity` no longer counts a day past its `until` bound, and
+  `mem_timeline` no longer includes a chunk created exactly on one.**
+  `_parse_recall_date(until, end_of_period=True)` returns the start of the
+  period *after* the requested one — an exclusive bound — but
+  `get_activity_summary` compares `DATE(created_at) <= ?`, which is inclusive,
+  so passing the value straight through counted one day too many:
+  `until="2026-04"` reached 2026-05-01, and the rendered range label said so
+  too. `mem_activity` now steps back to the last instant its bound admits and
+  takes that date, so the query and the label name the same day; the storage
+  contract stays inclusive, with the docstring saying so, since the mismatch
+  came from that being unstated. The summary groups by `DATE(created_at)` and
+  cannot express a time of day at all, so rather than silently rounding an
+  intraday bound up to the whole day — which would count hours the caller
+  excluded — an intraday `since` / `until` is now refused; the documented
+  shapes were always `YYYY` / `YYYY-MM` / `YYYY-MM-DD`, and timestamps only
+  worked because the shared parser accepts them. The implicit `now` default is
+  the one value that still rounds, to "through today". Guarding that also
+  removes an `OverflowError` at the minimum representable date, where the step
+  back would have raised outside the `ValueError` handler. `mem_timeline`
+  shares the exclusive bound and filtered with `dt > until_dt`, so a chunk
+  created exactly on it was reported inside the range; it now uses `>=`.
+  (#2206)
+
+- **Context expansion works on a file with more than 10,000 chunks.** Both
+  context-expansion surfaces read a source file's chunks with a 10,000-row cap
+  and sliced the window in Python. Past that cap the anchor was simply not in
+  the listing, so `_expand_context` returned the hit with no context at all
+  and `mem_expand` answered "not found in source file listing" for a chunk
+  that plainly exists; an anchor inside the cap reported a
+  `total_chunks_in_file` that stopped at 10,000 rather than describing the
+  file. The cap did not even buy what it was there for — the listing read
+  every row and discarded the excess afterwards. Neither quantity has to grow
+  with the file: the window is at most ±10 chunks, so the neighbours are a
+  bounded seek on `(start_line, rowid)`, and the ordinal and visible total are
+  aggregates. `get_context_windows` does both — one window-function pass per
+  source file for the counts, with anchors batched so several hits in one file
+  do not rescan it, plus two seeks per anchor — and nothing is deserialised in
+  order to be counted. The counts have to be taken under the same visibility
+  rule as the neighbours (#2192), which lives in Python, so
+  `neighbor_visibility_sql` states it as SQL, a twin in the same sense as
+  `NamespaceFilter.matches` ↔ `namespace_sql`, with a parity test running both
+  over one value matrix; the Python predicate stays authoritative for which
+  neighbours are *shown*, since a disagreement there would leak a hidden chunk
+  while a disagreement in the counts only misreports an ordinal. The #2236
+  anchor carve-out becomes arithmetic rather than a second opinion: SQL
+  excludes the anchor from both counts by construction and the callers add it
+  back unconditionally. The neighbour seeks exclude the anchor by id as well
+  as by position, because `upsert_chunks` updates `start_line` in place and
+  keeps the `rowid`, so a re-index landing between the count pass and the
+  seeks could otherwise return the anchor as one of its own neighbours. Adds
+  `idx_chunks_source_start` — additive and idempotent, so no `SCHEMA_VERSION`
+  bump. (#2237)
+
+- **Dense search no longer disappears on a store larger than 4,096
+  embeddings.** `dense_search` escalates its inner KNN `LIMIT` when a
+  namespace or scope filter rejects the nearest candidates, and its final
+  attempt was the full `chunks_vec` row count. sqlite-vec 0.1.9 refuses any k
+  above 4096, so on a larger store the escalation raised `OperationalError` —
+  and the pipeline treats any exception from the dense leg as "dense search
+  unavailable", so the query silently degraded to BM25-only and threw away the
+  candidates the earlier, smaller attempts had already retrieved. That is not
+  a rare path: escalation fires whenever the filter passes fewer than `top_k`
+  rows among the ~2,500 nearest embeddings, which is ordinary for
+  narrow-scope or low-recall queries — on a 7,157-chunk store every such query
+  lost dense retrieval with nothing but a `WARNING` line to show for it. Every
+  attempt is now clamped to `VEC_MAX_KNN_K`, the schedule is de-duplicated so
+  a large `top_k` cannot spend three identical round trips, and escalation
+  stops at that ceiling rather than at the table size; an attempt that fails
+  anyway keeps the previous attempt's candidates instead of propagating and
+  losing the leg. The `exhaustive` replay mode (#1802) cannot be fixed by
+  clamping — its contract is "no inner cutoff, so the outer stable sort
+  decides selection" — so above the cap it refuses with a message naming the
+  engine limit rather than returning a silently truncated replay. (#2119)
+
+- **An embedding reset no longer kills the searches and index runs already in
+  flight.** `mem_embedding_reset(mode="revert_to_stored")` swapped the
+  embedder, search pipeline and index engine on the `Components` container
+  without closing the retired instances, so every revert leaked the old ONNX
+  `InferenceSession` (mmap plus arenas), its dedicated executor thread, and
+  the retired pipeline's reranker — while the file watcher and the dedup
+  scanner, which captured the old engine and embedder at init, kept running
+  through the retired generation and cache invalidation hit a pipeline nobody
+  queries. Closing them immediately instead is destructive to whoever is
+  mid-call: `_closing` latches and the inference executor is shut down with
+  `cancel_futures=True`, so an in-flight caller fails. `ComponentGeneration`
+  lifts the `swap_reranker` lease contract (#1777) from one reranker to the
+  whole triple — users hold the generation for the span of their operation, a
+  swap retires it, and the retired generation closes on the last release, or
+  inline at swap time when nothing is in flight, so an idle revert never waits
+  on a release that is not coming. `SearchPipeline` holds it across the ranked
+  search body and `IndexEngine` in every entry point that can reach the
+  embedder (`index_path`, `index_file`, `index_path_stream`, the
+  `is_duplicate` probe). Everything else that reaches the embedder was
+  subsequently brought inside the same accounting: the dedup scan holds it for
+  the whole scan rather than only its phase-2 batch embed, and bundle import,
+  `mem_conflict_check`, `mem_candidate_evidence` and model warmup take it
+  through `hold_app_generation(app)` — warmup because a cold ONNX load is the
+  longest span in the process, and it reads both targets before its first
+  await, since `revert_to_stored` swaps onto the same `Components` object and
+  reading `search_pipeline` after warming the embedder could otherwise pair a
+  new-generation component with a retired lease. The watcher gains
+  `FileWatcher.rebind` and the dedup scanner is rebuilt on swap; a close that
+  fails is logged rather than raised, since the recovery the user asked for
+  has already happened. (#2180)
+
+- **A dead watchdog or scheduler loop now says so, and warning-tier
+  auto-maintenance can actually fire.** `check_search_cache_size` tops out at
+  "warning" (above 40 entries) and the pipeline self-evicts above 50, so no
+  critical threshold a live process could reach exists — yet `_run_check`
+  auto-maintained only on "critical", leaving the `search_cache_size` →
+  `trim_search_cache` pair permanently unreachable: a check/action pair that
+  reads as live and never fires. An explicit `_WARNING_TIER_MAINTENANCE`
+  opt-in set now routes that decision, every other check keeps the
+  critical-only contract, and the `auto_maintenance` config switch still gates
+  both tiers. Separately, `HealthWatchdog` and both schedulers spawned their
+  loop with a bare `asyncio.create_task`, which holds an exception until
+  someone awaits the task — and nobody ever did, so an exception escaping a
+  loop body ended monitoring with no log and no restart, the only trace being
+  `get_status()["running"]` flipping to `False`, which nothing polls. A shared
+  `server/background.py` now holds `loop_task_error_cb` (a dead loop is logged
+  at error level, since it means the service is gone for the life of the
+  process), `stop_loop_task`, and `track_task` as the strong-reference pair
+  for fire-and-forget work; all three loop tasks are named, so the log
+  identifies which one died. Health checks also stopped reading through the
+  writer connection. (#2185)
+
+- **A cancellation aimed at a shutting-down server is no longer swallowed by
+  the loop it was stopping.** `stop_loop_task` cancelled the loop and then
+  caught `CancelledError` around the await, which cannot distinguish the
+  child's cancellation — the one it had just requested, and rightly swallowed
+  — from one aimed at the caller. A shutdown cancelled mid-teardown therefore
+  returned normally and kept working through the rest of its ordering, even
+  though `AppContext.close` re-raises `CancelledError` through `_stop_quietly`
+  precisely so it does not. The shape is pre-existing: the
+  `suppress(CancelledError)` blocks this helper replaced behaved identically
+  in all three of `HealthWatchdog.stop`, `ConsolidationScheduler.stop` and
+  `PolicyScheduler.stop`. `current_task().cancelling()` is not enough on its
+  own, because a cancellation requested *before* the helper is entered is
+  already counted at entry and the delivered error still reads as the child's;
+  the child's outcome is normalized to a plain value instead — `gather(task,
+  return_exceptions=True)` hands its `CancelledError` back as a result — after
+  which any `CancelledError` raised out of the await is unambiguously the
+  caller's. That makes `_settlement.settle_shielded_result` directly reusable,
+  so the await is shielded (the loop's own cleanup always completes before
+  anything propagates) and the first cancellation is re-raised as the same
+  instance, so a `cancel(msg)` survives. The callers' side is fixed with it:
+  the three `stop()` methods finish their own cleanup in a `finally` so a
+  propagating cancellation cannot strand a stale task handle or an open health
+  store, and the web lifespan defers a cancellation from the
+  `summary_regen_task` drain to the end of teardown instead of letting it skip
+  `close_components`. (#2213)
+
+- **`mm web` waits for an FTS rebuild before it closes the store.**
+  `_schedule_fts_rebuild` stored the rebuild on `app.state.fts_rebuild_task`,
+  so it had a strong reference, but nothing waited for it: `_lifespan` drained
+  `summary_regen_task` before `close_components` and left the rebuild running.
+  Cancellation is not the fix — `SqliteBackend.rebuild_fts` does its heavy I/O
+  in `asyncio.to_thread` and that worker opens its *own* writer connection
+  against the same SQLite file, so cancelling the awaiting task would stop
+  nothing while the thread kept writing through a store `close_components` is
+  about to close. The rebuild is waited out instead, via `asyncio.wait` (which,
+  unlike `wait_for`, does not cancel on expiry) shielded through
+  `settle_shielded_result` so an outer cancellation cannot cut the settlement
+  short; "settled" means the coalescing loop returned, not that one pass
+  finished, since a queued follow-up writes through the same connection. An
+  unsettled rebuild — expired or cancelled — downgrades the close to
+  unconfirmed, so the lifecycle barrier is retained until process exit rather
+  than letting an uninstall start against a store a worker thread is still
+  writing. The `app is None` branch had the same gap by construction, and now
+  runs the rebuild inline, so the caller's own await is the settlement; the
+  module-level task set that held those untrackable tasks is gone, and
+  `fts_rebuild_task` / `fts_rebuild_pending` join the app.state cleanup list
+  so a second startup cannot inherit a dead handle. (#2214)
+
+- **An abandoned indexing stream now releases its run instead of showing up as
+  active forever.** `index_path_stream` counts one in-flight run and pins the
+  component generation inside `_active_run`, releasing both in that context
+  manager's `finally` — which runs when the generator completes, is cancelled,
+  or is closed, but not when a consumer simply walks away from a
+  still-referenced generator. asyncio's async-generator finalizer only
+  *schedules* an `aclose()`, and until it lands `GET /api/indexing/active`
+  reports a run that has stopped and a retired ONNX session stays pinned. Both
+  streaming consumers iterated with a bare `async for`: the SSE route's
+  generator, where a client disconnect unwinds the outer frame without closing
+  the inner one, and the CLI progress runner, which matters for `mm shell`,
+  where an interrupt does not end the process and the leaked run outlives the
+  command that started it. Both now drive the stream through
+  `contextlib.aclosing`, so the close happens in the same unwind as the
+  consumer's. The engine is unchanged — it already released correctly once
+  closed; the defect was purely at the call sites. (#2200)
 
 - **Retired component generations no longer pile up for the life of the
   process.** `revert_to_stored` records the generation it retires so shutdown
@@ -542,8 +978,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Ask for that context through `mem_search`, which takes an actual request:
   `namespace=` names a hidden namespace, and `scope=` opts into another
   project's tier — from outside a project context, since in-project searches
-  stay pinned to the current root. Reading the addressed chunk itself is
-  unchanged. (#2236)
+  stay pinned to the current root. Reading the addressed chunk itself was
+  unchanged here; #2238 later in this same release went further and stopped
+  another project's id from resolving at all, so the cross-project case
+  described above no longer returns the chunk with thin context — it answers
+  as though the id does not exist. The hidden-namespace case is as described.
+  (#2236)
 - **Context-window neighbours no longer leak chunks the search itself would
   hide.** Expanding a result with `context_window` (or `mem_expand`) reads the
   matched chunk's neighbours in bulk from the source file, so none of the
@@ -564,6 +1004,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   only visible chunks so the number of hidden ones does not leak. Searches run
   from outside a project, against files that also hold project-tier chunks,
   will see fewer context neighbours than before. (#2192)
+- **`DELETE /api/sources` gets the two guarantees `mem_delete` already had.**
+  The web route and `mem_delete(source_file=...)` are the same operation on
+  two surfaces, and the web half had drifted on two points. It never
+  invalidated the search cache: `delete_by_source` removes the rows, but the
+  pipeline kept serving a cached page that still names them, so a search
+  issued right after a delete returned chunks that no longer exist for up to
+  the cache TTL — the MCP path has called `invalidate_cache()` since it was
+  written. It also applied no ADR-0011 Gate-B check: `mem_delete` refuses a
+  source holding `project_shared` chunks unless the caller passes
+  `confirm_project_shared`, because those chunks are committed to the
+  repository and a bulk source delete is all-or-nothing, so one click in the
+  Sources tab could take shared memory away from everyone on the project with
+  no disclosure. Both are fixed by reusing what already exists —
+  `list_scopes_by_source` for the probe, `needs_confirmation_envelope` for the
+  refusal (HTTP 200 with a machine-readable flag name, since consent is an
+  application state and not a transport error), and the query-parameter flag
+  convention the other confirm-gated DELETE routes use. The scope is re-read
+  from storage on every request, so the flag can attest that the user
+  consented but never *what* they consented to. (#2082)
+
+- **A Context Gateway push that fails entirely now says "Push failed".** The
+  Sync All error branch on the gateway overview rendered `toast.sync_failed`,
+  so a total push failure was reported with the wording that belongs to the
+  Hooks Sync surface — the two are different operations and the message named
+  the wrong one. The gateway surface now owns `toast.push_failed` and Hooks
+  Sync keeps `toast.sync_failed`, in every branch that reports a failed push;
+  the tier the toast reports on is pinned to `project_shared` explicitly
+  rather than inferred. The i18n guard is updated to expect the gateway key,
+  the plugin asset delivery versions move with the changed strings, and the
+  `context-gateway-overview.js` cache-version hash — stale since edits landed
+  after its last bump — is corrected in place rather than bumped again, since
+  the recorded version had never shipped. (#1855)
+
+- **`mm purge --matching-excluded` no longer previews fewer chunks than it
+  deletes.** The preview summed `len()` over `list_chunks_by_sources`, whose
+  `limit_per_file=10000` truncated each file, while `--apply` removed
+  everything `delete_by_source` found — so a file with more than 10,000 chunks
+  was announced as smaller than it was about to be deleted, which is a preview
+  understating a destructive operation. The summary never needed the chunks,
+  only how many there are, so it asks for a count instead:
+  `count_chunks_by_sources` is the batch sibling of the existing per-file
+  `count_chunks_by_source`, one `GROUP BY` per batch with no rows
+  materialised, batching its `IN` clause because the input is caller-sized
+  rather than code-sized — purge matches against every source in the store,
+  and the old single-clause listing would have raised "too many SQL variables"
+  before printing anything. The count also moves inside the dry-run branch: it
+  had sat above it, so `--apply` was building every matched chunk object and
+  discarding the result, while apply reports what `delete_by_source` actually
+  removed and never needed a preview number. Text and JSON output are
+  unchanged. (#2261)
+
+- **The hidden-namespace hint no longer vanishes while another task holds a
+  transaction.** `count_chunks_by_ns_prefix` and its detail sibling are pure
+  reads that run on the default-namespace search hot path, yet they went
+  through the ownership-guarded writer connection — and `_get_db()` fails
+  closed while any other task owns a transaction, so for the whole span of
+  every transaction the hint silently disappeared, the pipeline having wrapped
+  the call in a debug-level `try`/`except`. The same routing also made every
+  query's `LIKE` scan contend with writes on the single writer connection.
+  Both counters now answer from the read pool whenever the current task holds
+  no transaction; inside the task's own transaction they keep the writer
+  connection, because the pool's WAL snapshot cannot see the caller's own
+  uncommitted rows. The `LIKE` scan itself is deliberately unchanged:
+  namespaces are not case-normalized on write, so a binary range rewrite would
+  change matching semantics. (#2178)
+
 - **The MCP server now notices memory dirs added or removed while it is
   running.** It built its file watcher once, at startup, and nothing ever
   reconciled it afterwards — so a directory registered by `mm init`, `mm mem
@@ -596,6 +1102,113 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   watcher for a reset to start — so its `POST /api/embedding-reset`
   now says a restart is still needed instead of reporting a bare success.
   (#2181)
+- **A consolidation summary is now all-or-nothing.** `apply_consolidation`
+  committed the summary chunk and its entities in a transaction, then linked
+  the `consolidated_into` edges and decayed the originals *outside* it.
+  Because `execute_auto_consolidate` keys idempotency on the committed
+  summary's source hash, a summary whose relations failed was skipped by every
+  later run — the edges `mem_related` and `mem_expand` traverse were missing
+  permanently, with nothing reporting a problem, and the linker swallowed
+  storage errors per row so the run could even report success. The whole
+  group's work moves into the one transaction. Two writers had to learn to
+  join it first: `add_relation` and `update_importance_scores` committed
+  unconditionally, which from inside the transaction would have ended it early
+  and reproduced the same partial write. The linker gains a `strict` mode used
+  by this path (link or raise); the agent path keeps the lenient default it
+  reports counts from. Stale regeneration moves in too — it used to delete the
+  old summary before generating the replacement, outside any transaction, so a
+  failure anywhere after left the source with no summary at all. The
+  replacement now clears the path inside the same transaction that writes the
+  new summary, reading it under the write lock rather than trusting a chunk id
+  read earlier, which also keeps two concurrent runs from leaving two
+  summaries behind. (#2158)
+
+- **`mem_entity_scan` scans every chunk of a source, not the first 50.** It
+  called `list_chunks_by_source` bare, and that method defaults to
+  `limit=50` — so a scan silently covered only the first 50 chunks (by
+  `start_line`) of every source file. The tail was not merely late:
+  `overwrite=False` re-runs skip already-extracted chunks, so chunks past the
+  cap were unreachable by any number of re-runs, and an `overwrite=True` pass
+  reported a completion it had not done. The backend already documents the
+  trap — `namespaces_for_source` refuses to route through the capped method
+  for exactly this reason. The scan now reads each source with `limit=None`:
+  one unbounded `SELECT`, one snapshot. Offset pagination was rejected,
+  because each page is a separate autocommit read and a concurrent re-index
+  landing between pages can shift rows across the offset, making the walk skip
+  or repeat chunks while still reporting completion; the scan accumulates the
+  whole source in memory either way, so the single query costs no additional
+  peak materialization. `list_chunks_by_source` keeps an `ORDER BY start_line,
+  rowid` tie-break, since chunks of a virtual source can share one
+  `start_line`. (#2173)
+
+- **A storage writer can no longer commit — or strand — someone else's
+  transaction.** `transaction()` composes writers by ambient task-affine
+  state, so a participating writer has to suppress its own commit; 43 of the
+  51 `db.commit()` sites under `storage/mixins/` did not, and every guard that
+  existed had been added reactively when a caller finally needed one. The
+  failure that shape produces is silent: an unguarded commit inside someone
+  else's transaction commits that transaction's work so far, `db.in_transaction`
+  then reads `False`, so the owner's commit at the end is a no-op and its
+  rollback can only undo what happened *after* the stray call — the owner sees
+  a clean `async with` and a successful return while half its work is already
+  durable. The mirror-image gap was open too: a writer that raised between its
+  first `db.execute` and its commit left the implicit transaction open on the
+  shared, process-lived writer connection, so the next unrelated commit
+  flushed the failed writer's half-written rows along with its own work and an
+  explicit `BEGIN IMMEDIATE` afterwards failed outright — only 4 of the 46
+  commit sites paired the commit with a rollback, and `formation.add_assertion`
+  was the live instance. Every commit now routes through
+  `_commit_if_standalone` and every write region through
+  `_rolls_back_if_standalone`, `transaction()` raises rather than committing
+  over a connection something else has already ended, and the exception is
+  re-raised unchanged so callers keep catching the exact types they already
+  catch. Writers that must *not* join — the idempotency ledger, the
+  memory-candidate claim state machine, the scheduler's run claim, each of
+  which takes a claim before a durable write that happens outside SQLite —
+  refuse an ambient transaction instead, since deferring their commit would
+  let a rollback un-claim work that really happened. The same sweep reaches
+  the writers outside `storage/mixins/`: `MetaManager.set_meta`,
+  `increment_access`, `delete_by_source`'s empty-source branch,
+  `delete_ai_summary`, and `update_chunks_scope_for_source`, which ran
+  `BEGIN IMMEDIATE` without refusing a pending transaction it does not own. An
+  AST guard keeps the sweep swept. (#2162, #2167)
+
+- **One physical memory file now has exactly one lock sidecar.** The
+  memory-file L2 sidecar was keyed on the resolved path by `IndexEngine` and
+  on the path *as given* by everyone else, so a file reached through a symlink
+  alias got two different lockfiles: a CRUD span held `.alias.md.lock` while
+  an indexer held `.target.md.lock`, and the two did not exclude each other at
+  all. #2105's removal of the run-wide `_index_lock` took away what had been
+  masking it. A new `memory_lock_path()` resolves before building the key, and
+  every memory-domain L2 acquire goes through it — six call sites, not the
+  three the issue named: `mm add`, `mm agent share`, `mm review`,
+  `mm memory doctor --fix`, the LangGraph adapter, and the web add route were
+  all keying unresolved. `_lock_path_for` itself deliberately did *not*
+  change: the context-artifact domain keys on the artifact *name* so that a
+  flat `<name>.md` and a directory `<name>/` share one lock (ADR-0030 §6), and
+  resolving there would break that. The scope comes from the prelude guard's
+  registry rather than from the hand-found sites, so a new acquisition that
+  forgets the resolution fails the build. (#2130)
+
+- **Bulk `mm index` takes the same per-file cross-process lock the other index
+  paths take.** `index_path` held only the process-local engine lock (L3) for
+  a whole run and called `_index_file` directly, while `index_file` and
+  `index_path_stream` both went through `_index_file_locked`, which takes the
+  cross-process L2 sidecar first. `_index_file` re-resolves each file's
+  namespace "inside the per-file critical section" — but in the bulk path that
+  section was invisible to other processes, so a concurrent writer's namespace
+  move could be undone by the bulk commit, and #2061's mixed-namespace refusal
+  and move summary could be decided from a stale read. A run-wide L3 and a
+  per-file L2 cannot coexist: a CRUD span holds L2 and enters
+  `index_file(lock_held=True)` at L3, so a run holding L3 while waiting on L2
+  is the reverse-order cycle #1587 removed. `index_path` therefore drops the
+  run-wide lock and takes L2 per file with `engine_serialized=False` — L2
+  alone, since L3 is engine-wide and taking it per file would collapse the run
+  to one file at a time; L2's in-process layer supplies same-process same-file
+  exclusion and its flock supplies the cross-process half. A file whose
+  sidecar is skipped (`lock_held`, or #1566's missing parent) still falls back
+  to L3, so no bulk file is ever unlocked. (#2105)
+
 - **A consolidation summary is now identified by provenance, not by its tags.**
   The auto-consolidate policy owns the virtual path
   `<source>.consolidated.md` and clears it before writing a replacement. What
@@ -634,7 +1247,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **Re-index, then search, now sees the re-index.** Search results are cached
   for `search.cache_ttl` (30s) and keyed on the query and its filters, never on
-  content. Every other write surface dropped that cache; the indexing surfaces
+  content. Most other write surfaces dropped that cache; the indexing surfaces
   never did, so in a long-lived process — the MCP server, `mm web`, `mm shell`,
   the file watcher, the LangGraph store — a query warmed just before an index
   run kept answering from the pre-index cache for up to the TTL. That made the
@@ -646,6 +1259,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the cache on it. The flag is not derivable from the counters: a tag-only
   (#2124), validity-only (#2140), or line-range-only rewrite mutates exactly
   the columns search filters on while being reported as `skipped`.
+
+- **Policy and maintenance writes drop the search cache too.**
+  `SearchPipeline` caches ranked results for `search.cache_ttl` and keys them
+  on the query and its filters alone, never on content, so a write that skips
+  `invalidate_cache()` leaves search answering from the pre-write cache for
+  the rest of the window. The indexing surfaces gained that contract in
+  #2141; several policy and maintenance paths were still outside it. The
+  scheduler and `mem_policy_run` gated invalidation on `affected_count` — a
+  user-facing counter that cannot answer "did this run write anything": a
+  consolidation run that deletes a stale summary and then fails to regenerate
+  it reports zero, and `auto_tag`'s count is a pre-scan estimate that can be
+  positive for a run that wrote nothing. `PolicyRunResult` now carries an
+  explicit `mutated` signal instead, mirroring `IndexingStats.mutated`, and
+  handlers arm it *before* a write rather than confirming one after, because
+  the paths that need it are exactly the ones where the evidence dies with an
+  exception; `run_policy` derives it from the counter only for the handlers
+  that leave it unset, so an explicit `False` is believed. The failure paths
+  needed it too — `run_policy` re-raises after a handler may have partly
+  landed and earlier policies in `run_all_enabled`'s loop are already
+  committed — so both the scheduler and `mem_policy_run` invalidate on
+  exception, with `CancelledError` named explicitly because it derives from
+  `BaseException` and would otherwise slip past. Separately,
+  `MaintenanceExecutor.cleanup_orphans` deleted chunks through
+  `delete_by_source` and never invalidated at all, so a watchdog-triggered
+  cleanup left searches returning chunks that no longer exist for the rest of
+  the TTL; its scheduler twin already invalidated after a non-zero delete, and
+  that guard is now on both. (#2157)
 
 - **Editing a file's frontmatter validity window reaches every chunk of that
   file.** `valid_from` / `valid_to` are file-level: the chunker stamps the same
@@ -775,6 +1415,63 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   stdout payload is untouched — `--format json` in particular is still a bare
   list. `mm search` also inherits the hidden-namespace hint the MCP tools
   already emitted.
+
+- **`mm config set search.tokenizer` actually rebuilds the FTS index.** It
+  called `SqliteBackend.rebuild_fts()` — an `async def` — without awaiting it.
+  The coroutine was discarded, its `repr` was printed as the row count, and
+  the user was told the index had been rebuilt when nothing had run:
+  `FTS index rebuilt (<coroutine object SqliteBackend.rebuild_fts ...>
+  chunks).` The tokenizer still landed in `config.json`, so every later search
+  tokenized queries one way against an index built the other. Awaiting alone
+  was not enough either: the backend was never `initialize()`d, so it had no
+  connection. Which tokenizer to rebuild *with* is the second half of the bug
+  — `config set` writes `config.json`, which `MEMTOMEM_SEARCH__TOKENIZER`
+  outranks, so building the index for the *requested* value would guarantee
+  the very mismatch the rebuild exists to prevent. The rebuild now uses the
+  effective value, measured once and shared with the report so the two cannot
+  disagree, and says so when it differs from what was asked for. It runs
+  unconditionally, including on a no-change set, which is what makes
+  re-running the command a working retry after a failure; a failed rebuild
+  exits non-zero and states that the value was saved. (#2112)
+
+- **`mm config set` reports what it actually persisted and what is actually in
+  effect.** `mm config set search.default_top_k 44` printed `7 -> 44` and
+  exited 0 while the effective value stayed 7, because
+  `MEMTOMEM_SEARCH__DEFAULT_TOP_K` outranks `config.json`. Worse, setting the
+  value the env var already supplies made the delta empty, so the write pruned
+  the pin the file already held — reported as `7 -> 7`, with a user's explicit
+  33 gone. Both behaviours are deliberate (env precedence; delta-only writes
+  keep env values from drag-pinning into the file); what was missing is that
+  the command never said which one happened. Now it does: when an env var owns
+  the key the write still lands but a warning names the variable and the value
+  that remains in effect; when nothing was stored — pin displaced or not — a
+  note says the file does not pin the key, what it held, and that
+  `mm config unset` is the way to remove one deliberately; and when a fresh
+  load disagrees with the write for any other reason, it says so rather than
+  blaming a precedence layer it cannot see. `save_config_overrides` returns a
+  `SaveReceipt` carrying the file's before/after contents captured *inside*
+  the write lock, and the reporting reads that receipt instead of re-reading
+  the file, so a concurrent writer cannot make the report describe someone
+  else's write. (#2108)
+
+- **A rejected `mm config set` key now names the way to change it.**
+  `mm config set embedding.provider onnx` exited 1 with "not a mutable field"
+  and a list of the three fields in `[embedding]` that are — none of which is
+  what the user wanted. The rejection never said how to change the key it had
+  just refused, and its trailing "Run 'mm config show'" line read as success,
+  which is how #2062 came to be filed as a silent no-op. The rejection is now
+  split by what the key actually is. A key that exists on the config model but
+  is restart-required says "not settable at runtime" and names the path that
+  does change it — a command only where `mm init` (or `mm mem init`) actually
+  prompts for that value, since the wizard hardcodes `embedding.base_url`,
+  `storage.backend` and `rerank.provider` and never touches `llm.api_key`, so
+  the rest get the config-file remedy rather than a command that cannot apply
+  the value. Keys in the embedding policy fingerprint also point at
+  `mm embedding-reset`, whose bare form is the non-destructive status mode.
+  Deprecated `rerank.top_k` names its successor as a runnable
+  `mm config set`, because its value does not carry over to
+  `rerank.min_pool`. Unknown keys keep the existing message, near-miss
+  suggestion included. (#2062)
 
 - **No config surface can persist a cross-field-invalid section any more.**
   `ConfigModel` sub-configs don't set `validate_assignment`, so a bare

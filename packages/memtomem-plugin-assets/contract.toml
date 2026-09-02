@@ -1,13 +1,13 @@
 [core]
-version = "0.4.0"
+version = "0.5.0"
 tool_mode = "core"
 
 [plugins]
-claude_version = "0.4.2"
-codex_version = "0.2.2"
-automation_version = "0.2.1"
-opencode_version = "0.2.2"
-kimi_version = "0.1.1"
+claude_version = "0.5.0"
+codex_version = "0.3.0"
+automation_version = "0.3.0"
+opencode_version = "0.3.0"
+kimi_version = "0.2.0"
 
 [opencode]
 package = "opencode-memtomem"

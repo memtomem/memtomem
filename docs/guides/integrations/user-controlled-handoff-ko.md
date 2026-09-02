@@ -24,7 +24,7 @@ Claude 작업 → Handoff 저장 → 사용자 확인 → Codex 재개
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.4.0' mm mem init --scope project_local
+uvx --from 'memtomem==0.5.0' mm mem init --scope project_local
 ```
 
 각 런타임은 같은 memtomem 데이터베이스와 프로젝트를 보고 있어야 합니다.
