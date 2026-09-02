@@ -79,23 +79,22 @@ async def mem_reflect(
 
     # 5. Cross-reference clusters
     #
-    # ``get_most_connected`` ranks by whole-store degree, so its order is not
-    # the caller's order: a hub with ten edges of which one is visible would
-    # outrank a hub with nine visible ones. Taking the first survivors of that
-    # ranking would both hide the genuinely most-connected visible hub and let
-    # the hidden edges decide what gets listed — the ranking itself becomes a
-    # channel. So every over-fetched candidate is scored on its *visible*
-    # degree and the page is cut after that re-ranking. Candidates beyond the
-    # over-fetch window are still lost, which needs a boundary-aware aggregate
-    # in SQL (#2244).
+    # ``get_most_connected`` is boundary-aware by construction (#2244): the
+    # hub and both endpoints of every counted edge are screened inside the
+    # aggregate, and the ranking and the LIMIT are applied after that. So the
+    # page it returns is already the caller's own top-N by *visible* degree —
+    # no over-fetch, no re-ranking, and no hidden edge can decide what gets
+    # listed. The tool still re-resolves each hub before printing it: the row
+    # carries an id, and ADR-0036 wants an id-addressed render checked against
+    # the caller's boundary at the point of use.
     want = min(limit, 5)
     connected = await storage.get_most_connected(
-        limit=max(want * 4, want),
+        limit=want,
         namespace=namespace,
         project_context_root=boundary,
     )
     if connected:
-        scored: list[tuple[int, str]] = []
+        rendered: list[str] = []
         for row in connected:
             chunk = None
             try:
@@ -107,26 +106,14 @@ async def mem_reflect(
                 pass
             # An unresolved hub is dropped, never degraded to its id prefix.
             # That fallback would print the uuid of a row the caller may not
-            # be allowed to know about, next to a whole-store degree — the
-            # two things ADR-0036 says a listing must not carry.
+            # be allowed to know about, next to its degree — the two things
+            # ADR-0036 says a listing must not carry.
             if chunk is None or not in_boundary(chunk, boundary):
                 continue
-            related = await storage.get_related(chunk.id)
-            neighbours = await storage.get_chunks_batch([rid for rid, _ in related])
-            visible_links = sum(
-                1
-                for related_id, _rel in related
-                if (n := neighbours.get(related_id)) is None or in_boundary(n, boundary)
-            )
-            if not visible_links:
-                continue
+            links = row["link_count"]
             preview = chunk.content[:50].replace("\n", " ")
-            scored.append((visible_links, f"  {visible_links} links — {preview}..."))
+            rendered.append(f"  {links} links — {preview}...")
 
-        # Stable sort, so hubs tied on visible degree keep the store's own
-        # ordering rather than an arbitrary one.
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        rendered = [line for _count, line in scored[:want]]
         if rendered:
             lines.append("### Most Connected Memories")
             lines.extend(rendered)

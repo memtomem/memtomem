@@ -23,6 +23,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   two sections in favour of one line saying why, and the watchdog's
   `full_health_report.active_sessions` is `null` for the same reason. (#2281)
 
+### Fixed
+
+- **"Most Connected Memories" no longer loses a small project's hubs to a
+  large one's.** `get_most_connected` used to rank by whole-store degree and
+  leave the project screen to its caller, so hubs the caller cannot see
+  consumed the top-N slots and `mem_reflect` could show an empty section to a
+  caller with perfectly good hubs of its own. The aggregate now screens the
+  hub and both endpoints of every counted edge before ranking, so `link_count`
+  is the visible degree and the limit cuts the caller's own ordering. The
+  `limit * 4` over-fetch and per-hub recount `mem_reflect` carried as a
+  mitigation are gone with it, which also removes the disagreement between the
+  two: the Python recount treated a neighbour it could not resolve as visible,
+  the aggregate requires both ends inside the boundary. A hub whose every edge
+  leaves the boundary is absent rather than reported as `0`. (#2244)
+
 ## [0.5.0] — 2026-09-02
 
 ### Breaking

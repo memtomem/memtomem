@@ -207,7 +207,16 @@ class AnalyticsMixin:
         namespace: str | None = None,
         project_context_root: Path | None = None,
     ) -> list[dict]:
-        """Return chunks with most cross-references — for reflection."""
+        """Return the caller's most cross-referenced chunks — for reflection.
+
+        Boundary-aware by construction (#2244): the hub row and *both*
+        endpoints of every counted edge are screened against the ADR-0011
+        scope fragment, so ``link_count`` is the visible degree, and the
+        ranking and ``limit`` are applied after that screen rather than
+        before it. A hub whose every edge leaves the boundary has no visible
+        degree and is absent from the result — it is never reported as zero.
+        Callers therefore do not need to over-fetch and re-rank.
+        """
         db = self._get_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
         rows = db.execute(
