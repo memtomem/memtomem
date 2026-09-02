@@ -543,7 +543,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # (#2181). ``FileWatcher`` exposes no running flag of its own.
         app.state.file_watcher_started = watcher_started
         # Set once a failed resume could not be cleaned up, which bars further
-        # in-process attempts — see ``ResumedWatcher.retryable``.
+        # in-process attempts — see ``WatcherResumer.can_retry``.
         app.state.file_watcher_resume_blocked = False
         hot_reload.initialize_reload_state(app)
         published = True

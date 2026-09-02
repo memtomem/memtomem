@@ -166,7 +166,16 @@ class FileWatcher:
         self._backfill_task: asyncio.Task[None] | None = None
         self._handler: _MarkdownEventHandler | None = None
         self._watches: dict[Path, ObservedWatch] = {}
-        self._reconfigure_lock = asyncio.Lock()
+        # Serializes every change to the observer/handler/task triple:
+        # ``start``, ``stop`` and ``reconfigure``. It used to guard only
+        # ``reconfigure``, which was enough while the only start and stop
+        # happened at lifespan entry and exit. A watcher that a degraded start
+        # leaves stopped can now be started later by an embedding reset
+        # (#2188), so a memory-dir route or the hot-reloader can be
+        # reconfiguring this instance while that start — or the stop that
+        # cleans up after a failed one — is midway through replacing the very
+        # handles ``reconfigure`` reads.
+        self._lifecycle_lock = asyncio.Lock()
 
     def _invalidate_if_mutated(self, stats: IndexingStats) -> None:
         """Drop the search result cache when a run actually wrote something.
@@ -181,35 +190,37 @@ class FileWatcher:
             self._search_pipeline.invalidate_cache()
 
     async def start(self) -> None:
-        loop = asyncio.get_running_loop()
-        handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
-        self._handler = handler
-        backend = effective_watcher_backend(self._config)
-        self._observer = _create_observer(self._config)
-        self._observer_backend = backend
-        logger.info("File watcher backend: %s", backend)
+        """Schedule the watched roots and start the observer and processor task."""
+        async with self._lifecycle_lock:
+            loop = asyncio.get_running_loop()
+            handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
+            self._handler = handler
+            backend = effective_watcher_backend(self._config)
+            self._observer = _create_observer(self._config)
+            self._observer_backend = backend
+            logger.info("File watcher backend: %s", backend)
 
-        watched: list[Path] = []
-        # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
-        # project-tier ``project_memory_dirs``) so files dropped into a
-        # registered project_shared / project_local dir trigger reindex
-        # the same way user-tier files do.
-        for watch_dir in self._config.all_index_roots():
-            expanded = Path(watch_dir).expanduser().resolve()
-            if expanded.exists():
-                watch = self._observer.schedule(handler, str(expanded), recursive=True)
-                self._watches[expanded] = watch
-                logger.info("Watching %s for changes", expanded)
-                watched.append(expanded)
+            watched: list[Path] = []
+            # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
+            # project-tier ``project_memory_dirs``) so files dropped into a
+            # registered project_shared / project_local dir trigger reindex
+            # the same way user-tier files do.
+            for watch_dir in self._config.all_index_roots():
+                expanded = Path(watch_dir).expanduser().resolve()
+                if expanded.exists():
+                    watch = self._observer.schedule(handler, str(expanded), recursive=True)
+                    self._watches[expanded] = watch
+                    logger.info("Watching %s for changes", expanded)
+                    watched.append(expanded)
 
-        self._observer.start()
-        self._task = asyncio.create_task(self._process_events())
-        if watched and self._config.startup_backfill:
-            self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
+            self._observer.start()
+            self._task = asyncio.create_task(self._process_events())
+            if watched and self._config.startup_backfill:
+                self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
 
     async def reconfigure(self, config: IndexingConfig) -> None:
         """Reconcile live watchdog roots after a successful config change."""
-        async with self._reconfigure_lock:
+        async with self._lifecycle_lock:
             observer = self._observer
             handler = self._handler
             if observer is None or handler is None:
@@ -322,39 +333,41 @@ class FileWatcher:
         self._search_pipeline = search_pipeline
 
     async def stop(self) -> None:
-        if self._backfill_task is not None and not self._backfill_task.done():
-            # Cancel — the backfill walk can take a while on large trees and
-            # we don't want shutdown to block on it.
-            self._backfill_task.cancel()
-            try:
-                await self._backfill_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                logger.warning("Startup backfill task error during stop: %s", exc)
-        if self._task is not None:
-            # Signal graceful shutdown — flush pending before exit
-            try:
-                self._queue.put_nowait(_STOP_SENTINEL)
-            except asyncio.QueueFull:
-                logger.warning("File watcher queue full; could not signal graceful shutdown")
-            try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except (TimeoutError, asyncio.CancelledError):
-                self._task.cancel()
+        """Stop the observer and the processor task, clearing their handles."""
+        async with self._lifecycle_lock:
+            if self._backfill_task is not None and not self._backfill_task.done():
+                # Cancel — the backfill walk can take a while on large trees and
+                # we don't want shutdown to block on it.
+                self._backfill_task.cancel()
                 try:
-                    await self._task
+                    await self._backfill_task
                 except asyncio.CancelledError:
                     pass
-        if self._observer:
-            self._observer.stop()
-            self._observer.join()
-        self._observer = None
-        self._observer_backend = None
-        self._handler = None
-        self._watches.clear()
-        self._task = None
-        self._backfill_task = None
+                except Exception as exc:
+                    logger.warning("Startup backfill task error during stop: %s", exc)
+            if self._task is not None:
+                # Signal graceful shutdown — flush pending before exit
+                try:
+                    self._queue.put_nowait(_STOP_SENTINEL)
+                except asyncio.QueueFull:
+                    logger.warning("File watcher queue full; could not signal graceful shutdown")
+                try:
+                    await asyncio.wait_for(self._task, timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    self._task.cancel()
+                    try:
+                        await self._task
+                    except asyncio.CancelledError:
+                        pass
+            if self._observer:
+                self._observer.stop()
+                self._observer.join()
+            self._observer = None
+            self._observer_backend = None
+            self._handler = None
+            self._watches.clear()
+            self._task = None
+            self._backfill_task = None
 
     async def _backfill_existing(self, dirs: list[Path]) -> None:
         """Index pre-existing files the observer can't see.
