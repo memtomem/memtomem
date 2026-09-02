@@ -212,6 +212,20 @@ class TestLocaleFiles:
                 f"the {{count}} placeholder"
             )
 
+    def test_health_not_project_scoped_keys_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The health cards for sessions / working memory render a
+        "not project-scoped" state instead of a count (#2281); both the label
+        and its tooltip need a real translation in each locale."""
+        for name, data in [("en", en), ("ko", ko)]:
+            for key in (
+                "settings.health.not_project_scoped",
+                "settings.health.not_project_scoped_hint",
+            ):
+                assert key in data, f"{name}.json missing {key}"
+                assert data[key].strip(), f"{name}.json has empty {key}"
+
     def test_runtime_probe_unavailable_keys_present(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:

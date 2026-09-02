@@ -307,6 +307,33 @@ class TestDeepChecks:
         app.storage.get_health_report.assert_awaited_once_with(project_context_root=None)
 
     @pytest.mark.asyncio
+    async def test_full_health_report_unavailable_sessions_stay_none(self, mock_app):
+        """An ``available: false`` sessions block records None, not 0 (#2281)."""
+        from memtomem.server.health_checks import check_full_health_report
+
+        app, _db = mock_app
+        app.storage.get_health_report = AsyncMock(
+            return_value={
+                "total_chunks": 10,
+                "dead_memories_pct": 10.0,
+                "access_coverage": {"pct": 90.0},
+                "tag_coverage": {"pct": 50.0},
+                "sessions": {
+                    "total": None,
+                    "active": None,
+                    "recent_7d": None,
+                    "available": False,
+                    "reason": "no_project_identity",
+                },
+                "cross_references": 1,
+            }
+        )
+
+        snap = await check_full_health_report(app)
+
+        assert snap.value["active_sessions"] is None
+
+    @pytest.mark.asyncio
     async def test_full_health_report_uses_registered_project_boundary(
         self, mock_app, tmp_path, monkeypatch
     ):

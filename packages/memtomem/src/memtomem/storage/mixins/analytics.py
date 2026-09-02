@@ -25,6 +25,26 @@ def _visible_chunks_where(
     return clause, params
 
 
+#: ``reason`` value on health-report blocks that carry no per-project answer.
+#: The rows behind them (``sessions``, ``working_memory``) have no
+#: ``project_root`` column, so a project-scoped report cannot compute them
+#: without leaking whole-store counts.
+NO_PROJECT_IDENTITY = "no_project_identity"
+
+
+def _unavailable_block(*fields: str) -> dict:
+    """Build a health-report block whose counts have no project-scoped answer.
+
+    Every count is ``None`` rather than ``0`` so a renderer can tell "not
+    applicable at this scope" from "genuinely empty"; ``available`` is the
+    flag to branch on and ``reason`` says why (#2281).
+    """
+    block: dict = dict.fromkeys(fields)
+    block["available"] = False
+    block["reason"] = NO_PROJECT_IDENTITY
+    return block
+
+
 class AnalyticsMixin:
     """Mixin providing analytics methods. Requires self._get_db() and
     self._in_transaction."""
@@ -35,7 +55,14 @@ class AnalyticsMixin:
         *,
         project_context_root: Path | None = None,
     ) -> dict:
-        """Compute a memory health report — replaces raw SQL in evaluation.py and web/routes/evaluation.py."""
+        """Compute a memory health report — replaces raw SQL in evaluation.py and web/routes/evaluation.py.
+
+        The ``sessions`` and ``working_memory`` blocks are always
+        ``available: false`` with ``None`` counts: those tables carry no
+        project identity, so there is no per-project answer to give (see
+        :func:`_unavailable_block`). Consumers must branch on ``available``
+        before formatting the counts.
+        """
         db = self._get_db()
         visible_sql, visible_params = _visible_chunks_where(namespace, project_context_root)
 
@@ -92,8 +119,11 @@ class AnalyticsMixin:
             # Sessions and scratch rows have no project identity. Public
             # reports fail closed instead of returning whole-store counts;
             # system-wide maintenance can query those tables explicitly.
-            "sessions": {"total": 0, "active": 0, "recent_7d": 0},
-            "working_memory": {"total": 0, "promoted": 0},
+            # The blocks stay in the payload but every count is ``None``
+            # behind ``available: false`` — a zero would read as "this
+            # install has no sessions", which is a different claim (#2281).
+            "sessions": _unavailable_block("total", "active", "recent_7d"),
+            "working_memory": _unavailable_block("total", "promoted"),
             "cross_references": relation_count,
         }
 

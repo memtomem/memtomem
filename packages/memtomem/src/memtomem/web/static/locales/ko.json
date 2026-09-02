@@ -1225,6 +1225,8 @@
   "settings.health.title": "메모리 상태",
   "settings.health.refresh": "새로고침",
   "settings.health.load_failed": "메모리 상태를 불러오지 못했습니다.",
+  "settings.health.not_project_scoped": "프로젝트 범위 아님",
+  "settings.health.not_project_scoped_hint": "세션과 작업 메모리에는 프로젝트 식별자가 없어 이 리포트에서는 프로젝트별 개수를 낼 수 없습니다.",
   "settings.health.watchdog_heading": "워치독",
   "settings.health.watchdog_desc": "주기적 백그라운드 상태 점검입니다. 수동 실행하면 즉시 업데이트됩니다.",
 

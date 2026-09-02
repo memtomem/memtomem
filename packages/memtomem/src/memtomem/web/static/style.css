@@ -4045,6 +4045,9 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 }
 .health-card-detail { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
 .health-card .stat-value { font-size: 1.8rem; font-weight: 600; }
+/* Health blocks with no project-scoped answer (#2281) show an em dash
+   in place of a count — muted so it does not read as a real value. */
+.health-card .stat-value--na { color: var(--muted); }
 
 .health-gauge {
   height: 8px; background: var(--border); border-radius: 4px; overflow: hidden;

@@ -416,17 +416,26 @@ class TestHealthReportConsolidated:
         assert report["dead_memories_pct"] == pytest.approx(33.3, abs=0.1)
 
     @pytest.mark.asyncio
-    async def test_session_and_scratch_counts(self, storage):
-        """Health report should include session and scratch counts."""
+    async def test_session_and_scratch_counts_are_marked_unavailable(self, storage):
+        """Session / scratch blocks signal "not project-scoped", not zero."""
         await storage.create_session("hr-s1", "agent", "default")
         await storage.scratch_set("key1", "val1")
         await storage.scratch_set("key2", "val2")
 
         report = await storage.get_health_report()
         # These tables have no project identity, so caller-bound public
-        # analytics fail closed rather than leaking whole-store counts.
-        assert report["sessions"]["total"] == 0
-        assert report["working_memory"]["total"] == 0
+        # analytics fail closed rather than leaking whole-store counts. The
+        # counts are None behind ``available: false`` — a 0 here would claim
+        # the install has no sessions, which is a different (false) statement
+        # given the rows written above (#2281).
+        for block, fields in (
+            (report["sessions"], ("total", "active", "recent_7d")),
+            (report["working_memory"], ("total", "promoted")),
+        ):
+            assert block["available"] is False
+            assert block["reason"] == "no_project_identity"
+            for field in fields:
+                assert block[field] is None
 
     @pytest.mark.asyncio
     async def test_relation_count(self, storage):

@@ -95,7 +95,8 @@
       "versions": {
         "9": "100a96cefa15a8c03bd9edffe8f918a852001355af923ead529246a95c3502b4",
         "10": "a19ac82af4bd68c04fe86f5fbeb5677d8b1fb2d8a5bd7cb1c423b2ba130a45bf",
-        "11": "b472906db4087dca7cb547ad5596c19787b22217008f44cd7258c5846c4e013c"
+        "11": "b472906db4087dca7cb547ad5596c19787b22217008f44cd7258c5846c4e013c",
+        "12": "da1ba623e07251da3532f76d348d54d8477ebcd8cf62cff2a38028118b712fed"
       }
     },
     "/settings-hooks-watchdog.js": {
@@ -123,7 +124,8 @@
     },
     "/style.css": {
       "versions": {
-        "141": "fd0ecf5baf75297359e54d7d38102611bafb469d067bcdf0dca12685e2f791f7"
+        "141": "fd0ecf5baf75297359e54d7d38102611bafb469d067bcdf0dca12685e2f791f7",
+        "142": "caffd6ba85c56b200e7468a21c7dce861449325efc7bc3753f52878989f06963"
       }
     },
     "/timeline.js": {
