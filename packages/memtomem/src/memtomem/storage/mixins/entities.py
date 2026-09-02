@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem.errors import StorageError
-from memtomem.storage.sqlite_scope import scope_context_sql
+from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
 
 if TYPE_CHECKING:
     from memtomem.models import Chunk, ScopeFilter
@@ -271,7 +271,15 @@ class EntityMixin:
         query += f"AND ({scope_frag}) "
         params.extend(scope_params)
 
-        query += "ORDER BY e.confidence DESC LIMIT ?"
+        # Confidence is the relevance key; equal-confidence rows fall back to
+        # the ADR-0011 §3 tier order (``project_local > project_shared >
+        # user``) so a restrictive ``limit`` cannot crowd this project's
+        # entities out behind user-tier rows. ``e.id`` finishes the sort:
+        # rows can tie on every other column here — the uniqueness index
+        # separates them by ``entity_type`` — and only the primary key makes
+        # the order total, so the same store answers the same query the same
+        # way at the ``limit`` boundary.
+        query += f"ORDER BY e.confidence DESC, {scope_sort_priority_case('c.')}, e.id LIMIT ?"
         params.append(limit)
 
         rows = db.execute(query, params).fetchall()

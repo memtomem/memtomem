@@ -9,6 +9,7 @@ from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
+from memtomem.server.helpers import _announce_dim_mismatch_once
 from memtomem.server.tool_registry import register
 from memtomem.server.validation import MAX_QUERY_LENGTH
 from memtomem.services.search_service import (
@@ -84,10 +85,12 @@ async def mem_ask(
     project_context_root = _resolve_project_context_root(app)
 
     # ``run_search`` owns the ``as_of`` parse and the
-    # ``namespace or current_namespace`` fallback this tool used to hand-roll;
-    # its result-derived hints belong to the search surfaces, not to a Q&A
-    # prompt, so they are dropped here.
-    results, _stats, _hints = await run_search(
+    # ``namespace or current_namespace`` fallback this tool used to hand-roll.
+    # Its result-derived hints are rendered below: a grounded prompt built
+    # from a keyword-only pool reads exactly like one from a healthy hybrid
+    # pool, so dropping the degradation notice would hide the one signal that
+    # tells the answer apart.
+    results, stats, hints = await run_search(
         app.search_pipeline,
         query=question,
         top_k=top_k,
@@ -101,11 +104,28 @@ async def mem_ask(
         origin="mcp",
     )
 
+    # The dimension-mismatch notice is per-process announcement state, not a
+    # property of this query, so it is appended here rather than in the core.
+    # Skipped when this query already carries the per-search degradation hint
+    # (#2063): that hint names the same dimensions and the same fix, so
+    # emitting both duplicates one notice. The announce flag is deliberately
+    # left unconsumed in that branch, so mem_add / mem_recall still get their
+    # one-shot on the write side.
+    if not stats.dense_suppressed_mismatch:
+        dim_notice = await _announce_dim_mismatch_once(app)
+        if dim_notice:
+            hints.append(dim_notice)
+
     if not results:
+        # Hints matter most on an empty result set, and ``hints`` can carry the
+        # one-shot dimension notice this call already consumed — returning
+        # without it would destroy the only announcement the process was going
+        # to make. Rendered exactly as mem_search renders its empty-result tail.
+        tail = "\n\n" + "\n".join(f"({h})" for h in hints) if hints else ""
         return (
             f'No relevant memories found for: "{question}"\n\n'
             "Try broader keywords, check `mem_status` for indexing state, "
-            "or add relevant notes with `mem_add`."
+            "or add relevant notes with `mem_add`." + tail
         )
 
     # Build grounded Q&A context
@@ -161,4 +181,8 @@ async def mem_ask(
             },
         )
 
-    return "\n".join(lines)
+    output = "\n".join(lines)
+    for hint in hints:
+        output += f"\n\n({hint})"
+
+    return output
