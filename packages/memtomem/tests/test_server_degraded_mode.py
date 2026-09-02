@@ -23,7 +23,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Sequence
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import sqlite_vec
@@ -584,6 +584,36 @@ async def test_reset_survives_a_failing_recovery_and_retries_it(degraded_app, ca
 
     degraded_app._watcher.start.assert_awaited_once()
     assert degraded_app._watcher_started is True
+
+
+async def test_a_cancelled_watcher_cleanup_bars_the_retry(degraded_app):
+    """Cancellation must not carry away the fact that the instance is barred.
+
+    The recovery start fails and the stop meant to clean up after it is
+    cancelled, so the observer and the processor task that failed start left
+    behind are still live. ``FileWatcher.start`` would overwrite both, and then
+    nothing could ever stop them — so a later reset must refuse, and only
+    shutdown may touch that instance. The flag therefore has to be settled
+    before the cancellation propagates out of recovery.
+    """
+    degraded_app._watcher = MagicMock()
+    degraded_app._watcher.start = AsyncMock(side_effect=OSError("no inotify"))
+    degraded_app._watcher.stop = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await degraded_app.recover_from_degraded()
+
+    assert degraded_app._watcher_started is False
+    assert degraded_app._watcher_cleanup_failed is True
+
+    # The barred instance is not started over on a later attempt.
+    degraded_app._watcher.start = AsyncMock()
+    await degraded_app.recover_from_degraded()
+    degraded_app._watcher.start.assert_not_awaited()
+
+    # Shutdown is the one thing still allowed to touch it, and the fixture's
+    # teardown does exactly that — leave it a stop it can complete.
+    degraded_app._watcher.stop = AsyncMock()
 
 
 async def test_revert_retries_recovery_without_a_destructive_reset(degraded_app):

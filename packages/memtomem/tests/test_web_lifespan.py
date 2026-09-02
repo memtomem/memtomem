@@ -271,9 +271,11 @@ async def test_policy_disabled_no_warning(caplog):
 # FileWatcher wiring — guards the regression where ``mm web`` ran with no
 # fs watcher at all. Files added to memory_dirs (whether while the server
 # was up, or before the dir was registered) were never auto-picked-up
-# until the user clicked Reindex. The lifespan now wires the same
-# FileWatcher that ``server/context.py`` uses, gated on the same
-# degraded-mode check.
+# until the user clicked Reindex. The lifespan wires the same FileWatcher
+# that ``server/context.py`` uses, and follows it in *constructing* one in
+# every mode while starting it only when the embedding is healthy — a
+# degraded start that built nothing left the embedding reset with nothing
+# to start, so auto-indexing stayed off for the process lifetime (#2188).
 # ---------------------------------------------------------------------------
 
 
@@ -296,6 +298,8 @@ async def test_lifespan_starts_and_stops_file_watcher():
         async with _lifespan(app):
             assert fake_watcher.start.await_count == 1
             assert app.state.file_watcher is fake_watcher
+            assert app.state.file_watcher_started is True
+            assert app.state.file_watcher_resume_blocked is False
             assert app.state.startup_state == "ready"
             assert app.state.config_signature is not None
             assert app.state.last_reload_error is None
@@ -304,11 +308,13 @@ async def test_lifespan_starts_and_stops_file_watcher():
     assert app.state.startup_state == "not_started"
 
 
-async def test_lifespan_skips_watcher_in_degraded_mode():
-    """When embedding is broken, the watcher must NOT start — the
-    indexer would crash on the missing ``chunks_vec`` table. Recovery
-    happens via ``mem_embedding_reset``; mirrors the same guard in
-    ``server/context.py``.
+async def test_lifespan_builds_but_does_not_start_the_watcher_in_degraded_mode():
+    """Degraded mode constructs the watcher and leaves it stopped.
+
+    Starting it would crash the indexer on the missing ``chunks_vec`` table,
+    but *not building it* is what stranded ``mm web``: the embedding reset had
+    no instance to start, so auto-indexing stayed off until a restart (#2188).
+    Mirrors the same shape in ``server/context.py``.
     """
     fake_watcher = MagicMock()
     fake_watcher.start = AsyncMock()
@@ -331,11 +337,21 @@ async def test_lifespan_skips_watcher_in_degraded_mode():
         patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
     ):
         async with _lifespan(app):
-            pass
+            started_state = (
+                app.state.file_watcher,
+                app.state.file_watcher_started,
+                app.state.file_watcher_resume_blocked,
+            )
 
     assert fake_watcher.start.await_count == 0
-    assert fake_watcher.stop.await_count == 0
+    assert started_state == (fake_watcher, False, False)
+    # Teardown stops it either way: ``stop`` on a watcher that never started
+    # clears handles that are already ``None``.
+    assert fake_watcher.stop.await_count == 1
+    # Published state is torn down with the rest, so a failed or finished
+    # lifespan leaves nothing for a later request to read as live.
     assert not hasattr(app.state, "file_watcher")
+    assert not hasattr(app.state, "file_watcher_started")
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +441,45 @@ def _teardown(*, storage_closed: bool):
     from memtomem.server.component_factory import TeardownResult
 
     return TeardownResult(storage_closed=storage_closed)
+
+
+async def test_a_degraded_lifespan_hands_the_reset_a_watcher_it_can_start():
+    """The seam #2188 was broken at, checked from both sides.
+
+    The lifespan and the reset route agree through ``app.state`` alone, so
+    each side passing its own tests is exactly the situation that shipped:
+    the route asked for a watcher the lifespan never published. This drives
+    the real recovery helper over the real published state.
+    """
+    from memtomem.web.routes.system import _resume_watching
+
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+    comp = _make_components(
+        embedding_broken={
+            "dimension_mismatch": True,
+            "model_mismatch": True,
+            "stored": {"dimension": 0, "provider": "none", "model": ""},
+            "configured": {"dimension": 1024, "provider": "onnx", "model": "bge-m3"},
+        },
+        stored_info={"dimension": 0, "provider": "none", "model": ""},
+    )
+
+    app = FastAPI()
+    with (
+        patch("memtomem.server.component_factory.create_components", AsyncMock(return_value=comp)),
+        patch("memtomem.server.component_factory.close_components", AsyncMock()),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        async with _lifespan(app):
+            assert fake_watcher.start.await_count == 0
+            message = await _resume_watching(app.state)
+            assert fake_watcher.start.await_count == 1
+            assert app.state.file_watcher_started is True
+
+    assert "File watching is on again" in message
 
 
 async def test_lifespan_takes_barrier_before_create_components():

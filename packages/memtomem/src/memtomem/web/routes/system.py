@@ -1526,15 +1526,6 @@ async def reset_embedding(
     """Reset embedding metadata to current config. Drops all vectors."""
     from memtomem.config import embedding_policy_fingerprint
 
-    # A degraded ``mm web`` startup never constructs the file watcher (see
-    # ``web/app.py``), and unlike the MCP server there is nothing here to
-    # start afterwards — clearing the mismatch repairs search but leaves
-    # auto-indexing off. Say so rather than reporting a bare success (#2181).
-    # Read the startup fact, not the live mismatch: this very call clears the
-    # mismatch, so a second reset would drop the caveat while the watcher is
-    # still missing.
-    watcher_missing = bool(getattr(request.app.state, "watcher_suppressed_at_startup", False))
-
     await storage.reset_embedding_meta(
         dimension=config.embedding.dimension,
         provider=config.embedding.provider,
@@ -1543,12 +1534,72 @@ async def reset_embedding(
         max_sequence_tokens=config.embedding.max_sequence_tokens,
     )
     message = "Embedding metadata reset. All indexed vectors deleted — run a forced re-index."
-    if watcher_missing:
-        message += (
-            " This server started in degraded mode, so file watching is off:"
+    # A degraded startup leaves the watcher stopped, so auto-indexing is off
+    # until something starts it. The MCP server does that in-process from its
+    # own reset (#2181); this one does the same (#2188) rather than telling the
+    # user to restart. Ordered after the write on purpose: the watcher's
+    # startup backfill indexes immediately, and the mismatch must be gone
+    # before the indexer touches the store.
+    message += await _resume_watching(request.app.state)
+    return EmbeddingResetResponse(ok=True, message=message)
+
+
+async def _resume_watching(state) -> str:
+    """Start the file watcher a degraded startup left stopped; report in words.
+
+    Returns the sentence to append to the reset message, empty when the
+    watcher was already running and there is nothing to say.
+    """
+    from memtomem.indexing.watcher import WatcherResumer
+
+    # Two resets arriving together must not both pass the "not started yet"
+    # check: ``start`` overwrites the observer and the processor task, so the
+    # second would strand the first pair with nothing able to stop them. Every
+    # app built by ``create_app`` publishes the lock; a hand-assembled state
+    # without one is single-caller by construction.
+    lock = getattr(state, "file_watcher_resume_lock", None)
+    if lock is None:
+        return await _resume_watching_locked(state, WatcherResumer)
+    async with lock:
+        return await _resume_watching_locked(state, WatcherResumer)
+
+
+async def _resume_watching_locked(state, resumer_cls) -> str:
+    watcher = getattr(state, "file_watcher", None)
+    # Read inside the lock: the reset that went first may have just started it.
+    started = getattr(state, "file_watcher_started", watcher is not None)
+    blocked = getattr(state, "file_watcher_resume_blocked", False)
+    if started:
+        return ""
+    if watcher is None or blocked:
+        # No instance to start, or an earlier attempt failed in a way that
+        # cannot be retried in this process.
+        return (
+            " File watching is off in this server and cannot be started here:"
             " restart `mm web` to resume auto-indexing."
         )
-    return EmbeddingResetResponse(ok=True, message=message)
+
+    resumer = resumer_cls(watcher, started=started, can_retry=not blocked)
+    try:
+        await resumer.resume()
+    finally:
+        # In ``finally`` for the same reason the MCP side settles there: a
+        # cancellation mid-start still decides whether this instance may be
+        # started again, and losing that would let a later reset start over
+        # handles nothing can stop.
+        state.file_watcher_started = resumer.started
+        state.file_watcher_resume_blocked = not resumer.can_retry
+    if resumer.started:
+        return " File watching is on again, so new edits are auto-indexed."
+    if resumer.can_retry:
+        return (
+            " Starting the file watcher failed, so auto-indexing is still off:"
+            " run this reset again, or restart `mm web`."
+        )
+    return (
+        " Starting the file watcher failed and it could not be cleaned up, so"
+        " auto-indexing is still off: restart `mm web` to resume it."
+    )
 
 
 @router.post("/reset", dependencies=[Depends(_require_localhost)])

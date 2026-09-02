@@ -205,6 +205,15 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     app.state.web_mode = mode
     app.state.startup_state = "not_started"
     app.state.startup_reason_code = None
+    # Serializes the file-watcher recovery ``POST /api/embedding-reset``
+    # performs (#2188). Created here rather than in the lifespan so that every
+    # app has one from construction — two concurrent resets must not both get
+    # past the "not started yet" check and call ``start`` twice, which would
+    # overwrite the observer and task handles of the first and leave nothing
+    # able to stop them. ``asyncio.Lock`` binds to a loop on first use, not
+    # here, so building it outside one is fine. The MCP side of the same
+    # recovery is already serialized by ``AppContext._init_lock``.
+    app.state.file_watcher_resume_lock = asyncio.Lock()
 
     # Per-process CSRF token (RFC #787). Generated fresh on every
     # ``create_app`` so token rotation is just a restart; never persisted.
@@ -404,6 +413,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     comp = None
     barrier: HeldBarrier | None = None
     watcher: FileWatcher | None = None
+    watcher_started = False
     published = False
     failed = False
     body_cancelled = False
@@ -489,21 +499,28 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # File watcher: monitors memory_dirs for fs-event-driven re-indexing
         # and runs a one-shot startup backfill so files added while ``mm web``
         # was down (or before the dir was registered) get indexed without the
-        # user clicking Reindex. Skipped in degraded mode (broken embedding) —
-        # the indexer would crash on the missing chunks_vec table; recovery
-        # via ``mem_embedding_reset``. Mirrors the wiring in
-        # ``server/context.py``; without this ``mm web`` ran with no fs
-        # watcher at all. The MCP server recovers in-process via
-        # ``AppContext.recover_from_degraded`` (#2181); ``mm web`` cannot yet —
-        # its own ``POST /api/embedding-reset`` clears the mismatch but
-        # nothing here holds a watcher to start, so that endpoint says a
-        # restart is still needed.
-        if comp.embedding_broken is None:
-            watcher = FileWatcher(
-                comp.index_engine,
-                comp.config.indexing,
-                search_pipeline=comp.search_pipeline,
-            )
+        # user clicking Reindex.
+        #
+        # Constructed in every mode and *started* only when the embedding is
+        # healthy, exactly as ``server/context.py`` does it. In degraded mode
+        # the indexer would crash on the missing chunks_vec table, so the
+        # instance sits stopped until ``POST /api/embedding-reset`` clears the
+        # mismatch and starts it (#2188). Constructing it only in the healthy
+        # branch is what left ``mm web`` with nothing for that reset to start,
+        # so auto-indexing stayed off for the life of the process while the
+        # MCP server recovered in place (#2181).
+        #
+        # A stopped watcher is safe to hold: ``reconfigure`` on one with no
+        # observer just records the new config, so the memory-dir routes and
+        # the hot-reloader keep working and a later start picks up their
+        # changes; ``stop`` on one is a no-op.
+        watcher = FileWatcher(
+            comp.index_engine,
+            comp.config.indexing,
+            search_pipeline=comp.search_pipeline,
+        )
+        watcher_started = comp.embedding_broken is None
+        if watcher_started:
             await watcher.start()
 
         # Publish one coherent state only after every startup step succeeded.
@@ -518,14 +535,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.summary_regen = None
         app.state.llm = comp.llm
-        # Whether this process started without a watcher because the embedding
-        # was broken. A startup fact, so it must be recorded here rather than
-        # re-derived later from the live mismatch: the first embedding reset
-        # clears that mismatch while the watcher stays absent for the rest of
-        # the process, and a second reset would then claim all is well (#2181).
-        app.state.watcher_suppressed_at_startup = watcher is None
-        if watcher is not None:
-            app.state.file_watcher = watcher
+        app.state.file_watcher = watcher
+        # Whether the watcher is *running*, which a degraded start leaves
+        # ``False``. Tracked rather than re-derived from the live mismatch: the
+        # first embedding reset clears that mismatch, so deriving it would
+        # claim all is well on a second reset even if the start had failed
+        # (#2181). ``FileWatcher`` exposes no running flag of its own.
+        app.state.file_watcher_started = watcher_started
+        # Set once a failed resume could not be cleaned up, which bars further
+        # in-process attempts — see ``WatcherResumer.can_retry``.
+        app.state.file_watcher_resume_blocked = False
         hot_reload.initialize_reload_state(app)
         published = True
         app.state.startup_state = "ready"
@@ -610,6 +629,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "fts_rebuild_pending",
                 "llm",
                 "file_watcher",
+                "file_watcher_started",
+                "file_watcher_resume_blocked",
                 "config_signature",
                 "last_reload_error",
             ):

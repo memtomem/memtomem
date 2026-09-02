@@ -166,7 +166,16 @@ class FileWatcher:
         self._backfill_task: asyncio.Task[None] | None = None
         self._handler: _MarkdownEventHandler | None = None
         self._watches: dict[Path, ObservedWatch] = {}
-        self._reconfigure_lock = asyncio.Lock()
+        # Serializes every change to the observer/handler/task triple:
+        # ``start``, ``stop`` and ``reconfigure``. It used to guard only
+        # ``reconfigure``, which was enough while the only start and stop
+        # happened at lifespan entry and exit. A watcher that a degraded start
+        # leaves stopped can now be started later by an embedding reset
+        # (#2188), so a memory-dir route or the hot-reloader can be
+        # reconfiguring this instance while that start — or the stop that
+        # cleans up after a failed one — is midway through replacing the very
+        # handles ``reconfigure`` reads.
+        self._lifecycle_lock = asyncio.Lock()
 
     def _invalidate_if_mutated(self, stats: IndexingStats) -> None:
         """Drop the search result cache when a run actually wrote something.
@@ -181,35 +190,47 @@ class FileWatcher:
             self._search_pipeline.invalidate_cache()
 
     async def start(self) -> None:
-        loop = asyncio.get_running_loop()
-        handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
-        self._handler = handler
-        backend = effective_watcher_backend(self._config)
-        self._observer = _create_observer(self._config)
-        self._observer_backend = backend
-        logger.info("File watcher backend: %s", backend)
+        """Schedule the watched roots and start the observer and processor task."""
+        async with self._lifecycle_lock:
+            loop = asyncio.get_running_loop()
+            # A fresh queue per lifecycle. ``stop`` signals the processor by
+            # enqueueing a sentinel, and a processor that misses it — the five
+            # second wait times out and the task is cancelled — leaves it
+            # sitting in the queue. Reusing that queue would hand the next
+            # processor a stale stop order: it would exit at once while the
+            # caller recorded a started watcher, so an embedding reset would
+            # report file watching back on with nothing draining events.
+            # Pending events from the stopped lifecycle go with it; a start
+            # runs a backfill over the watched roots anyway.
+            self._queue = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
+            handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
+            self._handler = handler
+            backend = effective_watcher_backend(self._config)
+            self._observer = _create_observer(self._config)
+            self._observer_backend = backend
+            logger.info("File watcher backend: %s", backend)
 
-        watched: list[Path] = []
-        # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
-        # project-tier ``project_memory_dirs``) so files dropped into a
-        # registered project_shared / project_local dir trigger reindex
-        # the same way user-tier files do.
-        for watch_dir in self._config.all_index_roots():
-            expanded = Path(watch_dir).expanduser().resolve()
-            if expanded.exists():
-                watch = self._observer.schedule(handler, str(expanded), recursive=True)
-                self._watches[expanded] = watch
-                logger.info("Watching %s for changes", expanded)
-                watched.append(expanded)
+            watched: list[Path] = []
+            # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
+            # project-tier ``project_memory_dirs``) so files dropped into a
+            # registered project_shared / project_local dir trigger reindex
+            # the same way user-tier files do.
+            for watch_dir in self._config.all_index_roots():
+                expanded = Path(watch_dir).expanduser().resolve()
+                if expanded.exists():
+                    watch = self._observer.schedule(handler, str(expanded), recursive=True)
+                    self._watches[expanded] = watch
+                    logger.info("Watching %s for changes", expanded)
+                    watched.append(expanded)
 
-        self._observer.start()
-        self._task = asyncio.create_task(self._process_events())
-        if watched and self._config.startup_backfill:
-            self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
+            self._observer.start()
+            self._task = asyncio.create_task(self._process_events())
+            if watched and self._config.startup_backfill:
+                self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
 
     async def reconfigure(self, config: IndexingConfig) -> None:
         """Reconcile live watchdog roots after a successful config change."""
-        async with self._reconfigure_lock:
+        async with self._lifecycle_lock:
             observer = self._observer
             handler = self._handler
             if observer is None or handler is None:
@@ -322,39 +343,49 @@ class FileWatcher:
         self._search_pipeline = search_pipeline
 
     async def stop(self) -> None:
-        if self._backfill_task is not None and not self._backfill_task.done():
-            # Cancel — the backfill walk can take a while on large trees and
-            # we don't want shutdown to block on it.
-            self._backfill_task.cancel()
-            try:
-                await self._backfill_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                logger.warning("Startup backfill task error during stop: %s", exc)
-        if self._task is not None:
-            # Signal graceful shutdown — flush pending before exit
-            try:
-                self._queue.put_nowait(_STOP_SENTINEL)
-            except asyncio.QueueFull:
-                logger.warning("File watcher queue full; could not signal graceful shutdown")
-            try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except (TimeoutError, asyncio.CancelledError):
-                self._task.cancel()
+        """Stop the observer and the processor task, clearing their handles."""
+        async with self._lifecycle_lock:
+            if self._backfill_task is not None and not self._backfill_task.done():
+                # Cancel — the backfill walk can take a while on large trees and
+                # we don't want shutdown to block on it.
+                self._backfill_task.cancel()
                 try:
-                    await self._task
+                    await self._backfill_task
                 except asyncio.CancelledError:
                     pass
-        if self._observer:
-            self._observer.stop()
-            self._observer.join()
-        self._observer = None
-        self._observer_backend = None
-        self._handler = None
-        self._watches.clear()
-        self._task = None
-        self._backfill_task = None
+                except Exception as exc:
+                    logger.warning("Startup backfill task error during stop: %s", exc)
+            if self._task is not None:
+                # Signal graceful shutdown — flush pending before exit
+                try:
+                    self._queue.put_nowait(_STOP_SENTINEL)
+                except asyncio.QueueFull:
+                    logger.warning("File watcher queue full; could not signal graceful shutdown")
+                try:
+                    await asyncio.wait_for(self._task, timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    self._task.cancel()
+                    try:
+                        await self._task
+                    except asyncio.CancelledError:
+                        pass
+            if self._observer:
+                self._observer.stop()
+                # Only join a thread that actually started. An observer whose
+                # ``start`` failed part-way has stopped emitters but no
+                # dispatcher thread, and watchdog raises ``RuntimeError:
+                # cannot join thread before it is started`` for that — which
+                # would reach the failed-start cleanup as a stop that failed
+                # and bar the retry over a watcher holding nothing. Same guard
+                # the replacement-observer cleanup in ``reconfigure`` uses.
+                if self._observer.is_alive():
+                    self._observer.join()
+            self._observer = None
+            self._observer_backend = None
+            self._handler = None
+            self._watches.clear()
+            self._task = None
+            self._backfill_task = None
 
     async def _backfill_existing(self, dirs: list[Path]) -> None:
         """Index pre-existing files the observer can't see.
@@ -628,3 +659,86 @@ class FileWatcher:
         except Exception as exc:
             logger.error("Auto-reindex failed for %s: %s", file_path, exc)
         return None
+
+
+class WatcherResumer:
+    """Starts a watcher a degraded startup left stopped, and remembers how it went.
+
+    Both server surfaces come here once an embedding reset has cleared the
+    mismatch: the MCP server through ``AppContext.recover_from_degraded`` and
+    ``mm web`` through ``POST /api/embedding-reset`` (#2181, #2188). They
+    construct and hold the watcher differently, but the start and its failure
+    policy are the same — and having been written twice is how ``mm web`` came
+    to have no recovery at all.
+
+    The state lives on this object rather than being returned, because the one
+    case that matters most cannot return: a cancellation arriving mid-start
+    unwinds through here, and the caller must still learn that the instance is
+    barred before the exception carries it away.
+
+    ``can_retry`` is about the *instance*, not the failure: unlike the
+    schedulers, a watcher is reused across attempts, and ``stop`` clears its
+    observer and task handles only on the way out. So a start that fails and
+    then cannot be stopped leaves both live where a later ``start`` would
+    overwrite them, and nothing would ever stop what the first attempt left
+    running. Refusing the retry is what keeps shutdown able to.
+    """
+
+    def __init__(
+        self,
+        watcher: FileWatcher | None,
+        *,
+        started: bool = False,
+        can_retry: bool = True,
+    ) -> None:
+        self._watcher = watcher
+        self.started = started
+        self.can_retry = can_retry
+
+    async def resume(self) -> bool:
+        """Start the watcher if it is stopped and startable; ``True`` if running.
+
+        A failure is reported, never raised. The recovery the user asked for —
+        a working index — has already happened by the time this runs, and
+        losing auto-indexing must not turn a successful reset into a failed
+        call. Idempotent: an already-started watcher is left alone, so a second
+        reset never starts a duplicate over live handles.
+        """
+        if self._watcher is None or self.started or not self.can_retry:
+            return self.started
+        try:
+            await self._watcher.start()
+        except asyncio.CancelledError:
+            await self._stop_failed_start()
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to start the file watcher after embedding recovery — "
+                "file edits are not auto-indexed until the next reset or restart",
+                exc_info=True,
+            )
+            # ``start`` publishes the observer and the processor task before it
+            # can fail, so whatever this attempt left running is stopped here
+            # or never.
+            await self._stop_failed_start()
+            return False
+        self.started = True
+        return True
+
+    async def _stop_failed_start(self) -> None:
+        """Stop what a failed ``start`` left running; bar the retry if it can't."""
+        if self._watcher is None:
+            return
+        try:
+            await self._watcher.stop()
+        except asyncio.CancelledError:
+            self.can_retry = False
+            logger.warning("Recovery cleanup of the file watcher was cancelled")
+            raise
+        except Exception:
+            self.can_retry = False
+            logger.warning(
+                "Recovery cleanup of the file watcher failed — no further in-process "
+                "retry will start over it; restart the server to recover auto-indexing",
+                exc_info=True,
+            )

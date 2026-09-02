@@ -797,24 +797,26 @@ class AppContext:
                 and not self._watcher_started
                 and not self._watcher_cleanup_failed
             ):
+                # The start, its logging and its failed-start cleanup live in
+                # ``indexing/watcher.py`` because ``mm web`` performs the same
+                # recovery on a watcher it holds differently (#2188). Only the
+                # bookkeeping is this context's.
+                from memtomem.indexing.watcher import WatcherResumer
+
+                resumer = WatcherResumer(
+                    self._watcher,
+                    started=self._watcher_started,
+                    can_retry=not self._watcher_cleanup_failed,
+                )
                 try:
-                    await self._watcher.start()
-                except asyncio.CancelledError:
-                    await self._clean_up_failed_watcher_start()
-                    raise
-                except Exception:
-                    logger.warning(
-                        "Failed to start the file watcher after embedding recovery — "
-                        "file edits are not auto-indexed until the next reset or restart",
-                        exc_info=True,
-                    )
-                    # ``start()`` publishes the observer and the processor task
-                    # before it can fail, and the retry a later reset makes will
-                    # overwrite both handles — so whatever this attempt left
-                    # running has to be stopped now or nothing ever stops it.
-                    await self._clean_up_failed_watcher_start()
-                else:
-                    self._watcher_started = True
+                    await resumer.resume()
+                finally:
+                    # In ``finally`` because a cancellation mid-start still
+                    # settles whether the instance may be started again, and
+                    # losing that would let a later reset start over handles
+                    # nothing can stop.
+                    self._watcher_started = resumer.started
+                    self._watcher_cleanup_failed = not resumer.can_retry
 
             if self.config.consolidation_schedule.enabled and self._scheduler is None:
                 from memtomem.server.scheduler import ConsolidationScheduler
@@ -1018,32 +1020,6 @@ class AppContext:
             logger.info(
                 "Reconciled watched index roots after a config change: %d root(s)",
                 len(indexing.all_index_roots()),
-            )
-
-    async def _clean_up_failed_watcher_start(self) -> None:
-        """Stop a watcher whose recovery start failed; bar the retry if it can't.
-
-        Unlike the schedulers the watcher instance is reused across retries, so
-        a stop that fails cannot be answered by dropping the reference —
-        ``FileWatcher.stop`` clears its observer/task handles only on the way
-        out, so a failure there can leave both live while ``start()`` would
-        replace them. Refusing the retry keeps ``close()`` able to stop what is
-        actually running; ``mem_watchdog`` already points at a restart.
-        """
-        if self._watcher is None:
-            return
-        try:
-            await self._watcher.stop()
-        except asyncio.CancelledError:
-            self._watcher_cleanup_failed = True
-            logger.warning("Recovery cleanup of the file watcher was cancelled")
-            raise
-        except Exception:
-            self._watcher_cleanup_failed = True
-            logger.warning(
-                "Recovery cleanup of the file watcher failed — no further in-process "
-                "retry will start over it; restart the server to recover auto-indexing",
-                exc_info=True,
             )
 
     async def _quarantine_failed_start(self, service: Any, label: str) -> None:
