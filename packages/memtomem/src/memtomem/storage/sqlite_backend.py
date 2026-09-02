@@ -480,7 +480,13 @@ class SqliteBackend(
                     try:
                         rconn.enable_load_extension(False)
                     except Exception:
-                        pass
+                        # Re-locking the extension loader is hygiene on a
+                        # connection already being discarded; the close below
+                        # is what actually matters.
+                        logger.debug(
+                            "Could not re-lock extension loading on a discarded reader",
+                            exc_info=True,
+                        )
                     rconn.close()
                     logger.warning("Discarding unusable read pool connection: %s", exc)
                     continue

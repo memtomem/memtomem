@@ -109,9 +109,13 @@ class AnalyticsMixin:
 
         db = self._get_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
+        # ``visible_sql`` is built by ``scope_context_sql`` from fixed column
+        # names with ``?`` placeholders; every caller value travels in
+        # ``params``. Interpolated because a scope predicate is structure, not
+        # a value, and SQLite cannot bind that.
         query = (
             "SELECT heading_hierarchy, source_file, SUM(access_count) as total_access "
-            f"FROM chunks WHERE access_count > 0 AND {visible_sql} "
+            f"FROM chunks WHERE access_count > 0 AND {visible_sql} "  # nosec B608
         )
         query += "GROUP BY heading_hierarchy, source_file ORDER BY total_access DESC LIMIT ?"
         params.append(limit)
@@ -203,9 +207,11 @@ class AnalyticsMixin:
 
         db = self._get_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root, alias="c.")
+        # Same contract as ``get_frequently_accessed`` above: structure is
+        # interpolated, values stay bound in ``params``.
         query = (
             "SELECT * FROM (WITH visible AS (SELECT c.* FROM chunks c WHERE "
-            f"{visible_sql}) "
+            f"{visible_sql}) "  # nosec B608
             "SELECT c.id, c.access_count, c.updated_at, c.tags, "
             "(SELECT COUNT(*) FROM chunk_relations cr "
             " WHERE (cr.source_id = c.id AND cr.target_id IN (SELECT id FROM visible)) "

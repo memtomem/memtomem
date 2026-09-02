@@ -480,10 +480,14 @@ async def _run_claims(
             if current is None or current.claim_id != claim_id:
                 continue
             settlement_outcome, settlement_exc = outcomes[path_str]
-            if settlement_outcome != "error":
+            if settlement_outcome != "error" or settlement_exc is None:
+                # ``error`` without an exception cannot happen — the two are
+                # recorded together — but ``assert`` is stripped under ``-O``,
+                # and treating the pair as settled is the safe reading either
+                # way: it drops the entry rather than recording a failure with
+                # no cause.
                 del entries[path_str]
                 continue
-            assert settlement_exc is not None
             current.claim_id = None
             current.claimed_at = None
             _record_failure(entries, path_str, current, settlement_exc, result)
