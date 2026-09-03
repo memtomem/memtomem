@@ -16,10 +16,13 @@ from memtomem.cli import cli
 from memtomem.cli.status_cmd import _style_status_lines
 from memtomem.config import Mem2MemConfig
 from memtomem.indexing.watcher import effective_watcher_backend
+from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 from memtomem.server.tools.status_config import (
     StatusLine,
     _shorten_status_path,
     _status_source_lines,
+    _status_source_matches_project_root,
+    _status_source_project_root,
     collect_status_report,
     iter_status_lines,
     render_status_report,
@@ -432,6 +435,54 @@ class TestStatusSourceRendering:
 
         assert lines[1].text == f"  - {current_source}"
         assert lines[-1].text == "  … (+1 more; use `mm status --json`)"
+
+    def test_priority_match_follows_the_project_context_resolver(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hoist rule must not be stricter than the rule that names the root.
+
+        ``_resolve_project_context_from_dirs`` accepts any leaf under
+        ``.memtomem``, so ``config.d`` entries and hand-edited ``config.json``
+        files can produce a ``Project root:`` line.  A leaf whitelist here
+        would print that root and then truncate its own source away.
+        """
+        project_root = tmp_path / "current"
+        source = project_root / ".memtomem" / "notes"
+        source.mkdir(parents=True)
+        monkeypatch.chdir(project_root)
+
+        resolved = _resolve_project_context_from_dirs([str(source)])
+
+        assert resolved == project_root.resolve()
+        assert _status_source_matches_project_root(str(source.resolve()), str(resolved))
+
+    def test_hand_registered_project_source_is_prioritized(self) -> None:
+        current_root = "/work/current"
+        current_source = f"{current_root}/.memtomem/notes"
+        other_sources = [f"/work/project-{i}/.memtomem/memories.local" for i in range(8)]
+
+        lines = _status_source_lines(
+            "Project sources",
+            [*other_sources, current_source],
+            group_providers=False,
+            priority_root=current_root,
+        )
+
+        assert lines[1].text == f"  - {current_source}"
+        assert lines[-1].text == "  … (+1 more; use `mm status --json`)"
+
+    def test_posix_backslash_in_a_directory_name_is_not_a_separator(self) -> None:
+        """``\\`` is a legal POSIX filename character, not a path separator.
+
+        Folding it would render a real directory as a different, non-existent
+        nested path in the report people paste into bug reports.
+        """
+        assert _shorten_status_path("/home/alice/my\\dir", home="/home/alice") == "~/my\\dir"
+        assert _status_source_project_root("/work/my\\dir/.memtomem/notes") == "/work/my\\dir"
+        assert _status_source_matches_project_root("/work/my\\dir/.memtomem/notes", "/work/my\\dir")
+        assert not _status_source_matches_project_root(
+            "/work/my\\dir/.memtomem/notes", "/work/my/dir"
+        )
 
     @pytest.mark.parametrize(
         ("path", "home", "expected"),

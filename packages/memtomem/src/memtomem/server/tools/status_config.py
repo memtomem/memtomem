@@ -460,22 +460,38 @@ class StatusLine:
         return self.key + self.value + self.suffix
 
 
+def _looks_windows_shaped(text: str) -> bool:
+    """Return whether *text* is shaped like a Windows path (drive letter or UNC)."""
+    return (len(text) >= 2 and text[1] == ":") or text.startswith(("//", "\\\\"))
+
+
+def _normalize_status_path(text: str, *, windows_style: bool) -> str:
+    """Fold a path to one slash style for comparison.
+
+    ``\\`` is only a separator on Windows-shaped paths; on POSIX it is a legal
+    filename character, so folding it there would rewrite a real directory into
+    a different, non-existent one in the human report.
+    """
+    normalized = text.replace("\\", "/") if windows_style else text
+    return normalized.rstrip("/")
+
+
 def _shorten_status_path(path: str, *, home: str | Path | None = None) -> str:
     """Contract a path below the user's home for deterministic human output.
 
     ``collect_status_report`` deliberately keeps resolved absolute paths for
     the JSON contract.  This helper is presentation-only and handles either
     slash style so a Windows-shaped fixture behaves the same on POSIX CI.
+    Slash style is decided by the *home* shape, so a POSIX directory whose
+    name contains a backslash stays verbatim.
     """
     home_text = str(Path.home().resolve() if home is None else home)
-    normalized_path = path.replace("\\", "/").rstrip("/")
-    normalized_home = home_text.replace("\\", "/").rstrip("/")
+    windows_style = _looks_windows_shaped(home_text)
+    normalized_path = _normalize_status_path(path, windows_style=windows_style)
+    normalized_home = _normalize_status_path(home_text, windows_style=windows_style)
     if not normalized_home:
         return path
 
-    windows_style = (
-        len(normalized_home) >= 2 and normalized_home[1] == ":"
-    ) or normalized_home.startswith("//")
     compared_path = normalized_path.casefold() if windows_style else normalized_path
     compared_home = normalized_home.casefold() if windows_style else normalized_home
     if compared_path != compared_home and not compared_path.startswith(compared_home + "/"):
@@ -484,7 +500,7 @@ def _shorten_status_path(path: str, *, home: str | Path | None = None) -> str:
     relative = normalized_path[len(normalized_home) :].lstrip("/")
     if not relative:
         return "~"
-    separator = "\\" if "\\" in path and "/" not in path else "/"
+    separator = "\\" if windows_style and "\\" in path and "/" not in path else "/"
     return f"~{separator}{relative.replace('/', separator)}"
 
 
@@ -516,10 +532,19 @@ def _status_source_entries(paths: list[str], *, group_providers: bool) -> list[t
 
 
 def _status_source_project_root(path: str) -> str | None:
-    """Derive the project root from a registered project-tier source path."""
-    normalized_path = path.replace("\\", "/").rstrip("/")
-    memory_parent, separator, leaf = normalized_path.rpartition("/")
-    if not separator or leaf not in {"memories", "memories.local"}:
+    """Derive the project root from a registered project-tier source path.
+
+    Mirrors ``_resolve_project_context_from_dirs`` — the authority that
+    produces ``project_context_root`` — which accepts any leaf whose parent
+    is named ``.memtomem``.  ``register_project_memory_dir`` writes the
+    canonical ``memories``/``memories.local`` leaf, but ``config.d`` entries
+    and hand-edited ``config.json`` files reach the resolver without it, and
+    a stricter rule here would leave exactly those sources unhoisted.
+    """
+    windows_style = _looks_windows_shaped(path)
+    normalized_path = _normalize_status_path(path, windows_style=windows_style)
+    memory_parent, separator, _leaf = normalized_path.rpartition("/")
+    if not separator:
         return None
 
     project_root, separator, marker = memory_parent.rpartition("/")
@@ -534,16 +559,14 @@ def _status_source_matches_project_root(path: str, root: str) -> bool:
     if source_root is None:
         return False
 
-    normalized_source_root = source_root.replace("\\", "/").rstrip("/") or "/"
-    normalized_root = root.replace("\\", "/").rstrip("/")
+    windows_style = _looks_windows_shaped(root)
+    normalized_source_root = source_root.rstrip("/") or "/"
+    normalized_root = _normalize_status_path(root, windows_style=windows_style)
     if not normalized_root:
         normalized_root = "/" if root.replace("\\", "/").startswith("/") else ""
     if not normalized_root:
         return False
 
-    windows_style = (
-        len(normalized_root) >= 2 and normalized_root[1] == ":"
-    ) or normalized_root.startswith("//")
     compared_source_root = (
         normalized_source_root.casefold() if windows_style else normalized_source_root
     )
