@@ -16,7 +16,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   --namespace`, a `scope` query parameter on the web API, a context-window
   neighbour screen). The matcher now walks the value once per wildcard
   instead. `LIKE` semantics are unchanged and still pinned against SQLite
-  itself, now including wildcard piles.
+  itself, now including wildcard piles. (#2294)
 
 - **`mm web` starts watching files again after an embedding reset, instead of
   asking for a restart.** A degraded start — a broken or mismatched embedding —
