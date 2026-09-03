@@ -180,9 +180,8 @@ In Claude Code (or run `/memtomem:status` if using the plugin):
 Call the mem_status tool
 ```
 
-Example of a successful response (Ollama config; first 13 lines of the
-full report — the `Embedding` and `Dimension` rows change with the
-provider picked in the wizard):
+Example of a successful response (abridged; the embedding, watcher, paths,
+and counts vary by install):
 
 ```
 memtomem Status
@@ -193,6 +192,18 @@ Embedding: ollama / nomic-embed-text
 Dimension: 768
 Top-K:     10
 RRF k:     60
+Watcher:   native
+
+Runtime context
+---------------
+CWD:             ~/my-project
+Project root:    ~/my-project
+User sources:    4
+  - ~/.memtomem/memories
+  - Claude project memories (3 dirs)
+  … (use `mm status --json` for full paths)
+Project sources: 1
+  - ~/my-project/.memtomem/memories.local
 
 Index stats
 -----------
@@ -200,6 +211,10 @@ Total chunks:  0
 Source files:  0
 ...
 ```
+
+Repeated provider roots are grouped in the human report and long source
+lists are capped. Use `mm status --json` to inspect every absolute source
+path.
 
 Or skip the editor and run the same check directly:
 

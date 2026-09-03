@@ -97,7 +97,7 @@ def _style_status_lines(lines: list[StatusLine]) -> str:
             value_fg = line.meta.get("value_fg")
             value = click.style(line.value, fg=value_fg) if value_fg else line.value
             styled.append(click.style(line.key, bold=True) + value + line.suffix)
-        else:  # "warning_kv" | "blank" — plain on purpose
+        else:  # source rows, warning rows, and blanks are plain on purpose
             styled.append(line.text)
 
     return "\n".join(styled)

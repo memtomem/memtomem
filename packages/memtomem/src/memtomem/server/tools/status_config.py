@@ -429,6 +429,13 @@ _IMMUTABLE_GUIDANCE = (
     "or `mm embedding-reset` to switch embedder (re-index required)."
 )
 
+_MAX_STATUS_SOURCE_ROWS = 8
+_PROVIDER_SOURCE_LABELS = {
+    "claude-memory": "Claude project memories",
+    "claude-plans": "Claude plans",
+    "codex": "Codex memories",
+}
+
 
 @dataclass(frozen=True)
 class StatusLine:
@@ -441,7 +448,8 @@ class StatusLine:
     """
 
     role: str  # "title" | "rule" | "section" | "kv" | "immutable_kv"
-    # | "dense" | "guidance" | "warning_kv" | "blank"
+    # | "dense" | "guidance" | "source_item" | "source_hint"
+    # | "warning_kv" | "blank"
     key: str = ""
     value: str = ""
     suffix: str = ""
@@ -450,6 +458,174 @@ class StatusLine:
     @property
     def text(self) -> str:
         return self.key + self.value + self.suffix
+
+
+def _looks_windows_shaped(text: str) -> bool:
+    """Return whether *text* is shaped like a Windows path (drive letter or UNC).
+
+    The drive check requires an ASCII letter before the colon: ``:`` is legal
+    inside a POSIX path, so a bare ``text[1] == ":"`` test would classify
+    ``/:foo/bar`` as Windows-shaped and case-fold it.
+    """
+    drive_letter = len(text) >= 2 and text[1] == ":" and text[0].isascii() and text[0].isalpha()
+    return drive_letter or text.startswith(("//", "\\\\"))
+
+
+def _normalize_status_path(text: str, *, windows_style: bool) -> str:
+    """Fold a path to one slash style for comparison.
+
+    ``\\`` is only a separator on Windows-shaped paths; on POSIX it is a legal
+    filename character, so folding it there would rewrite a real directory into
+    a different, non-existent one in the human report.
+    """
+    normalized = text.replace("\\", "/") if windows_style else text
+    return normalized.rstrip("/")
+
+
+def _shorten_status_path(path: str, *, home: str | Path | None = None) -> str:
+    """Contract a path below the user's home for deterministic human output.
+
+    ``collect_status_report`` deliberately keeps resolved absolute paths for
+    the JSON contract.  This helper is presentation-only and handles either
+    slash style so a Windows-shaped fixture behaves the same on POSIX CI.
+    Slash style is decided by the *home* shape, so a POSIX directory whose
+    name contains a backslash stays verbatim.
+    """
+    home_text = str(Path.home().resolve() if home is None else home)
+    windows_style = _looks_windows_shaped(home_text)
+    normalized_path = _normalize_status_path(path, windows_style=windows_style)
+    normalized_home = _normalize_status_path(home_text, windows_style=windows_style)
+    if not normalized_home:
+        return path
+
+    compared_path = normalized_path.casefold() if windows_style else normalized_path
+    compared_home = normalized_home.casefold() if windows_style else normalized_home
+    if compared_path != compared_home and not compared_path.startswith(compared_home + "/"):
+        return path
+
+    relative = normalized_path[len(normalized_home) :].lstrip("/")
+    if not relative:
+        return "~"
+    separator = "\\" if windows_style and "\\" in path and "/" not in path else "/"
+    return f"~{separator}{relative.replace('/', separator)}"
+
+
+def _status_source_entries(paths: list[str], *, group_providers: bool) -> list[tuple[str, int]]:
+    """Return stable display rows paired with the source count each represents."""
+    if not group_providers:
+        return [(_shorten_status_path(path), 1) for path in paths]
+
+    from memtomem.config import categorize_memory_dir
+
+    categories = [categorize_memory_dir(path) for path in paths]
+    category_counts: dict[str, int] = {}
+    for category in categories:
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+    entries: list[tuple[str, int]] = []
+    emitted_categories: set[str] = set()
+    for path, category in zip(paths, categories, strict=True):
+        count = category_counts[category]
+        if category != "user" and count > 1:
+            if category in emitted_categories:
+                continue
+            emitted_categories.add(category)
+            label = _PROVIDER_SOURCE_LABELS.get(category, category.replace("-", " ").title())
+            entries.append((f"{label} ({count} dirs)", count))
+            continue
+        entries.append((_shorten_status_path(path), 1))
+    return entries
+
+
+def _status_source_project_root(path: str) -> str | None:
+    """Derive the project root from a registered project-tier source path.
+
+    Mirrors ``_resolve_project_context_from_dirs`` — the authority that
+    produces ``project_context_root`` — which accepts any leaf whose parent
+    is named ``.memtomem``.  ``register_project_memory_dir`` writes the
+    canonical ``memories``/``memories.local`` leaf, but ``config.d`` entries
+    and hand-edited ``config.json`` files reach the resolver without it, and
+    a stricter rule here would leave exactly those sources unhoisted.
+    """
+    windows_style = _looks_windows_shaped(path)
+    normalized_path = _normalize_status_path(path, windows_style=windows_style)
+    memory_parent, separator, _leaf = normalized_path.rpartition("/")
+    if not separator:
+        return None
+
+    project_root, separator, marker = memory_parent.rpartition("/")
+    if not separator or marker != ".memtomem":
+        return None
+    return project_root or "/"
+
+
+def _status_source_matches_project_root(path: str, root: str) -> bool:
+    """Return whether *path* belongs to exactly *root* across slash styles."""
+    source_root = _status_source_project_root(path)
+    if source_root is None:
+        return False
+
+    windows_style = _looks_windows_shaped(root)
+    normalized_source_root = source_root.rstrip("/") or "/"
+    normalized_root = _normalize_status_path(root, windows_style=windows_style)
+    if not normalized_root:
+        normalized_root = "/" if root.replace("\\", "/").startswith("/") else ""
+    if not normalized_root:
+        return False
+
+    compared_source_root = (
+        normalized_source_root.casefold() if windows_style else normalized_source_root
+    )
+    compared_root = normalized_root.casefold() if windows_style else normalized_root
+    return compared_source_root == compared_root
+
+
+def _prioritize_status_paths(paths: list[str], priority_root: str | None) -> list[str]:
+    """Stable-partition paths so the active project's sources remain visible."""
+    if not priority_root:
+        return paths
+    matches = [_status_source_matches_project_root(path, priority_root) for path in paths]
+    active = [path for path, matches_root in zip(paths, matches, strict=True) if matches_root]
+    if not active:
+        return paths
+    other = [path for path, matches_root in zip(paths, matches, strict=True) if not matches_root]
+    return [*active, *other]
+
+
+def _status_source_lines(
+    label: str,
+    paths: list[str],
+    *,
+    group_providers: bool,
+    priority_root: str | None = None,
+) -> list[StatusLine]:
+    """Render one source tier as a count plus a bounded, readable list."""
+    header_key = f"{label}:".ljust(17)
+    if not paths:
+        return [StatusLine("kv", key=header_key, value="0 (none)")]
+
+    ordered_paths = _prioritize_status_paths(paths, priority_root)
+    entries = _status_source_entries(ordered_paths, group_providers=group_providers)
+    shown = entries[:_MAX_STATUS_SOURCE_ROWS]
+    lines = [StatusLine("kv", key=header_key, value=str(len(paths)))]
+    lines.extend(StatusLine("source_item", value=f"  - {text}") for text, _ in shown)
+
+    hidden_count = sum(count for _, count in entries[_MAX_STATUS_SOURCE_ROWS:])
+    if hidden_count:
+        lines.append(
+            StatusLine(
+                "source_hint",
+                value=f"  … (+{hidden_count} more; use `mm status --json`)",
+            )
+        )
+    elif any(count > 1 for _, count in shown):
+        lines.append(
+            StatusLine(
+                "source_hint",
+                value="  … (use `mm status --json` for full paths)",
+            )
+        )
+    return lines
 
 
 def iter_status_lines(data: dict) -> list[StatusLine]:
@@ -463,7 +639,12 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
         StatusLine("title", value="memtomem Status"),
         StatusLine("rule", value="==============", meta={"tone": "title"}),
         StatusLine("kv", key="Storage:".ljust(11), value=str(cfg["storage_backend"])),
-        StatusLine("kv", key="DB path:".ljust(11), value=cfg["db_path"], meta={"value_fg": "cyan"}),
+        StatusLine(
+            "kv",
+            key="DB path:".ljust(11),
+            value=_shorten_status_path(cfg["db_path"]),
+            meta={"value_fg": "cyan"},
+        ),
         StatusLine("kv", key="Embedding:".ljust(11), value=f"{emb['provider']} / {emb['model']}"),
         StatusLine("kv", key="Dimension:".ljust(11), value=str(emb["dimension"])),
         StatusLine("kv", key="Top-K:".ljust(11), value=str(cfg["top_k"])),
@@ -472,22 +653,43 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
         StatusLine("blank"),
         StatusLine("section", value="Runtime context", meta={"tone": "plain"}),
         StatusLine("rule", value="---------------", meta={"tone": "plain"}),
-        StatusLine("kv", key="CWD:".ljust(15), value=str(runtime.get("cwd") or "(unavailable)")),
         StatusLine(
             "kv",
-            key="Project root:".ljust(15),
-            value=str(runtime.get("project_context_root") or "(none registered for CWD)"),
+            key="CWD:".ljust(17),
+            value=(
+                _shorten_status_path(str(runtime["cwd"])) if runtime.get("cwd") else "(unavailable)"
+            ),
         ),
         StatusLine(
             "kv",
-            key="User sources:".ljust(15),
-            value=", ".join(cfg.get("memory_dirs", [])) or "(none)",
+            key="Project root:".ljust(17),
+            value=(
+                _shorten_status_path(str(runtime["project_context_root"]))
+                if runtime.get("project_context_root")
+                else "(none registered for CWD)"
+            ),
         ),
-        StatusLine(
-            "kv",
-            key="Project sources: ",
-            value=", ".join(cfg.get("project_memory_dirs", [])) or "(none)",
-        ),
+    ]
+    lines.extend(
+        _status_source_lines(
+            "User sources",
+            [str(path) for path in cfg.get("memory_dirs", [])],
+            group_providers=True,
+        )
+    )
+    lines.extend(
+        _status_source_lines(
+            "Project sources",
+            [str(path) for path in cfg.get("project_memory_dirs", [])],
+            group_providers=False,
+            priority_root=(
+                str(runtime["project_context_root"])
+                if runtime.get("project_context_root")
+                else None
+            ),
+        )
+    )
+    lines += [
         StatusLine("blank"),
         StatusLine("section", value="Index stats", meta={"tone": "plain"}),
         StatusLine("rule", value="-----------", meta={"tone": "plain"}),

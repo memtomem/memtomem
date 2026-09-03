@@ -16,8 +16,13 @@ from memtomem.cli import cli
 from memtomem.cli.status_cmd import _style_status_lines
 from memtomem.config import Mem2MemConfig
 from memtomem.indexing.watcher import effective_watcher_backend
+from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 from memtomem.server.tools.status_config import (
     StatusLine,
+    _shorten_status_path,
+    _status_source_lines,
+    _status_source_matches_project_root,
+    _status_source_project_root,
     collect_status_report,
     iter_status_lines,
     render_status_report,
@@ -304,6 +309,313 @@ class TestStatusOutput:
         assert "doc:        docs/guides/configuration.md#reset-flow" in result.output
 
 
+class TestStatusSourceRendering:
+    """Source roots stay useful when provider discovery registers many dirs."""
+
+    def test_empty_source_tier_renders_count_and_none(self) -> None:
+        lines = _status_source_lines("Project sources", [], group_providers=False)
+
+        assert [line.text for line in lines] == ["Project sources: 0 (none)"]
+
+    def test_single_source_uses_indented_short_home_path(self) -> None:
+        source = Path.home() / ".memtomem" / "memories"
+        lines = _status_source_lines("User sources", [str(source)], group_providers=True)
+
+        assert [line.text for line in lines] == [
+            "User sources:    1",
+            f"  - {Path('~') / '.memtomem' / 'memories'}",
+        ]
+
+    def test_repeated_provider_dirs_are_grouped_in_first_seen_order(self) -> None:
+        home = Path.home()
+        sources = [
+            str(home / ".memtomem" / "memories"),
+            str(home / ".claude" / "plans"),
+            *(str(home / ".claude" / "projects" / f"project-{i}" / "memory") for i in range(55)),
+            str(home / ".codex" / "memories"),
+        ]
+
+        lines = _status_source_lines("User sources", sources, group_providers=True)
+
+        assert [line.text for line in lines] == [
+            "User sources:    58",
+            f"  - {Path('~') / '.memtomem' / 'memories'}",
+            f"  - {Path('~') / '.claude' / 'plans'}",
+            "  - Claude project memories (55 dirs)",
+            f"  - {Path('~') / '.codex' / 'memories'}",
+            "  … (use `mm status --json` for full paths)",
+        ]
+
+    def test_exact_cap_has_no_hint_and_cap_plus_one_reports_remainder(self) -> None:
+        exact = [f"/opt/memtomem/source-{i}" for i in range(8)]
+        capped = _status_source_lines("Project sources", exact, group_providers=False)
+        overflow = _status_source_lines(
+            "Project sources", [*exact, "/opt/memtomem/source-8"], group_providers=False
+        )
+
+        assert len(capped) == 9  # header + eight paths
+        assert all("…" not in line.text for line in capped)
+        assert [line.text for line in overflow[1:9]] == [f"  - {path}" for path in exact]
+        assert overflow[-1].text == "  … (+1 more; use `mm status --json`)"
+
+    def test_remainder_counts_dirs_represented_by_hidden_group(self) -> None:
+        paths = [f"/opt/memtomem/custom-{i}" for i in range(8)]
+        paths.extend(rf"C:\Users\alice\.claude\projects\project-{i}\memory" for i in range(3))
+
+        lines = _status_source_lines("User sources", paths, group_providers=True)
+
+        assert lines[-1].text == "  … (+3 more; use `mm status --json`)"
+
+    def test_current_project_source_is_prioritized_before_cap(self) -> None:
+        current_root = "/work/current"
+        current_source = f"{current_root}/.memtomem/memories.local"
+        project_sources = [
+            *(f"/work/project-{i}/.memtomem/memories.local" for i in range(8)),
+            current_source,
+        ]
+        data = {
+            "config": {
+                "storage_backend": "sqlite",
+                "db_path": "/opt/mm/memtomem.db",
+                "embedding": {"provider": "none", "model": None, "dimension": 0},
+                "top_k": 10,
+                "rrf_k": 60,
+                "watcher_backend": "native",
+                "memory_dirs": [],
+                "project_memory_dirs": project_sources,
+            },
+            "runtime": {"cwd": current_root, "project_context_root": current_root},
+            "index": {
+                "total_chunks": 0,
+                "total_sources": 0,
+                "orphaned_sources": 0,
+                "dense_coverage": None,
+            },
+            "immutable": {},
+            "warnings": [],
+        }
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        project_header = rendered.index("Project sources: 9")
+
+        assert rendered[project_header + 1] == f"  - {current_source}"
+        assert rendered[project_header + 9] == "  … (+1 more; use `mm status --json`)"
+
+    def test_nested_project_sources_do_not_hide_current_root_source(self) -> None:
+        current_root = "/work/current"
+        current_source = f"{current_root}/.memtomem/memories.local"
+        nested_sources = [f"{current_root}/nested-{i}/.memtomem/memories.local" for i in range(8)]
+
+        lines = _status_source_lines(
+            "Project sources",
+            [*nested_sources, current_source],
+            group_providers=False,
+            priority_root=current_root,
+        )
+
+        assert lines[1].text == f"  - {current_source}"
+        assert [line.text for line in lines[2:9]] == [
+            f"  - {source}" for source in nested_sources[:7]
+        ]
+        assert lines[-1].text == "  … (+1 more; use `mm status --json`)"
+
+    def test_windows_current_project_match_is_case_insensitive(self) -> None:
+        current_source = r"C:\Users\Alice\project\.memtomem\memories.local"
+        sources = [
+            *(rf"D:\work\project-{i}\.memtomem\memories.local" for i in range(8)),
+            current_source,
+        ]
+
+        lines = _status_source_lines(
+            "Project sources",
+            sources,
+            group_providers=False,
+            priority_root=r"c:\users\alice\project",
+        )
+
+        assert lines[1].text == f"  - {current_source}"
+        assert lines[-1].text == "  … (+1 more; use `mm status --json`)"
+
+    def test_priority_match_follows_the_project_context_resolver(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hoist rule must not be stricter than the rule that names the root.
+
+        ``_resolve_project_context_from_dirs`` accepts any leaf under
+        ``.memtomem``, so ``config.d`` entries and hand-edited ``config.json``
+        files can produce a ``Project root:`` line.  A leaf whitelist here
+        would print that root and then truncate its own source away.
+
+        This pins the *structural* half only — both sides read a resolved
+        absolute path here, which is the shape ``collect_status_report``
+        feeds.  The normalization that makes that true for a registration
+        written as ``~/...`` or a relative string is a separate axis, pinned
+        by ``test_unresolved_registration_stays_hoisted_end_to_end``.
+        """
+        project_root = tmp_path / "current"
+        source = project_root / ".memtomem" / "notes"
+        source.mkdir(parents=True)
+        monkeypatch.chdir(project_root)
+
+        resolved = _resolve_project_context_from_dirs([str(source)])
+
+        assert resolved == project_root.resolve()
+        assert _status_source_matches_project_root(str(source.resolve()), str(resolved))
+
+    @staticmethod
+    def _collect_with_project_dirs(registrations: list[str]) -> dict:
+        """Run the real collector over *registrations* and return its report."""
+        import asyncio
+
+        from memtomem.server.context import AppContext
+
+        comp = _mock_components(
+            config=Mem2MemConfig(indexing={"project_memory_dirs": registrations}),
+        )
+        return asyncio.run(collect_status_report(AppContext.from_components(comp)))
+
+    @staticmethod
+    def _eight_other_project_dirs(tmp_path: Path) -> list[str]:
+        others = []
+        for index in range(8):
+            other = tmp_path / f"other-{index}" / ".memtomem" / "memories.local"
+            other.mkdir(parents=True)
+            others.append(str(other))
+        return others
+
+    @pytest.mark.parametrize("shape", ["relative", "tilde"])
+    def test_unresolved_registration_stays_hoisted_end_to_end(
+        self, shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The resolver resolves; the matcher compares strings — pin the bridge.
+
+        ``_resolve_project_context_from_dirs`` calls ``expanduser().resolve()``
+        on every registered dir, while ``_status_source_matches_project_root``
+        does a plain string comparison.  ``collect_status_report`` is the only
+        thing that makes the two agree, so a registration written as a relative
+        or ``~``-shaped string stays hoisted only while it publishes
+        ``project_memory_dirs`` in the same normalized form.  Both shapes are
+        exercised because ``expanduser()`` and ``resolve()`` each cover only
+        one of them.
+        """
+        project_root = tmp_path / "active-project"
+        active = project_root / ".memtomem" / "notes"
+        active.mkdir(parents=True)
+        others = self._eight_other_project_dirs(tmp_path)
+        monkeypatch.chdir(project_root)
+
+        if shape == "relative":
+            registration = ".memtomem/notes"
+        else:
+            monkeypatch.setenv("HOME", str(tmp_path))
+            monkeypatch.setenv("USERPROFILE", str(tmp_path))
+            registration = "~/active-project/.memtomem/notes"
+
+        data = self._collect_with_project_dirs([*others, registration])
+
+        # Asserted against the path built in this test, not against the
+        # renderer's own helper: the published entry must already be the
+        # resolved absolute path, or the string matcher has nothing to match.
+        assert data["config"]["project_memory_dirs"][-1] == str(active.resolve())
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        header = rendered.index("Project sources: 9")
+        assert "active-project" in rendered[header + 1]
+        assert rendered[header + 9] == "  … (+1 more; use `mm status --json`)"
+
+    def test_symlinked_registration_is_canonicalized_before_matching(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Canonicalization, not mere absolutization, is what the matcher needs.
+
+        The resolver compares a *resolved* cwd against a *resolved* registered
+        root, so an alias registration only lines up after ``resolve()``.
+        Swapping the collector to ``absolute()`` would publish the alias path
+        and silently drop the hoist — a shape the relative and ``~`` cases
+        above cannot tell apart.
+        """
+        real_root = tmp_path / "active-project"
+        active = real_root / ".memtomem" / "notes"
+        active.mkdir(parents=True)
+        alias = tmp_path / "alias"
+        try:
+            alias.symlink_to(real_root, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            pytest.skip("symlink creation is not permitted here")
+        others = self._eight_other_project_dirs(tmp_path)
+        monkeypatch.chdir(real_root)
+
+        data = self._collect_with_project_dirs([*others, str(alias / ".memtomem" / "notes")])
+
+        assert data["config"]["project_memory_dirs"][-1] == str(active.resolve())
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        header = rendered.index("Project sources: 9")
+        assert "active-project" in rendered[header + 1]
+
+    def test_posix_colon_root_is_not_treated_as_a_windows_drive(self) -> None:
+        """``:`` is legal in a POSIX path — only a leading ASCII letter is a drive.
+
+        Classifying such a root as Windows-shaped would case-fold it and fold
+        its backslashes, reviving the bug this module just fixed in a corner.
+        The ``é:`` cases pin the ASCII half of the rule specifically: a
+        Unicode letter is still a letter, so ``isalpha()`` alone would let it
+        through.
+        """
+        assert _shorten_status_path("/:foo/My Dir", home="/:foo") == "~/My Dir"
+        assert _shorten_status_path("/:FOO/dir", home="/:foo") == "/:FOO/dir"
+        assert not _status_source_matches_project_root("/:foo\\bar/.memtomem/notes", "/:foo/bar")
+
+        assert _shorten_status_path("é:/FOO/dir", home="é:/foo") == "é:/FOO/dir"
+        assert not _status_source_matches_project_root("é:/foo\\bar/.memtomem/notes", "é:/foo/bar")
+
+    def test_hand_registered_project_source_is_prioritized(self) -> None:
+        current_root = "/work/current"
+        current_source = f"{current_root}/.memtomem/notes"
+        other_sources = [f"/work/project-{i}/.memtomem/memories.local" for i in range(8)]
+
+        lines = _status_source_lines(
+            "Project sources",
+            [*other_sources, current_source],
+            group_providers=False,
+            priority_root=current_root,
+        )
+
+        assert lines[1].text == f"  - {current_source}"
+        assert lines[-1].text == "  … (+1 more; use `mm status --json`)"
+
+    def test_posix_backslash_in_a_directory_name_is_not_a_separator(self) -> None:
+        """``\\`` is a legal POSIX filename character, not a path separator.
+
+        Folding it would render a real directory as a different, non-existent
+        nested path in the report people paste into bug reports.
+        """
+        assert _shorten_status_path("/home/alice/my\\dir", home="/home/alice") == "~/my\\dir"
+        assert _status_source_project_root("/work/my\\dir/.memtomem/notes") == "/work/my\\dir"
+        assert _status_source_matches_project_root("/work/my\\dir/.memtomem/notes", "/work/my\\dir")
+        assert not _status_source_matches_project_root(
+            "/work/my\\dir/.memtomem/notes", "/work/my/dir"
+        )
+
+    @pytest.mark.parametrize(
+        ("path", "home", "expected"),
+        [
+            ("/Users/alice/notes", "/Users/alice", "~/notes"),
+            ("/Users/alice2/notes", "/Users/alice", "/Users/alice2/notes"),
+            (
+                r"C:\Users\Alice\Notes",
+                r"c:\users\alice",
+                r"~\Notes",
+            ),
+            (r"D:\Notes", r"C:\Users\alice", r"D:\Notes"),
+        ],
+    )
+    def test_home_contraction_is_boundary_and_windows_safe(
+        self, path: str, home: str, expected: str
+    ) -> None:
+        assert _shorten_status_path(path, home=home) == expected
+
+
 class TestStatusMcpParity:
     """``mm status`` and the MCP ``mem_status`` tool must render identical text.
 
@@ -370,11 +682,10 @@ class TestStatusTextPin:
     """Byte-level pin of the rendered report for a maxed-out fixture.
 
     The #1615 refactor split ``format_status_report`` into
-    ``collect_status_report`` + ``render_status_report``; this literal
-    pin (captured from the pre-refactor output) proves the split changed
-    no bytes — and from now on it is the canonical text-shape regression
-    net for the report. Update it deliberately, never to make a diff
-    pass.
+    ``collect_status_report`` + ``render_status_report``. This literal is
+    the canonical text-shape regression net for the report, including the
+    intentional compact source layout. Update it deliberately, never just
+    to make a diff pass.
     """
 
     def test_full_report_matches_captured_literal(self, tmp_path: Path) -> None:
@@ -385,6 +696,7 @@ class TestStatusTextPin:
 
         present = tmp_path / "present.md"
         present.write_text("hi")
+        project_source = tmp_path / "project" / ".memtomem" / "memories.local"
         comp = _mock_components(
             total_chunks=53,
             total_sources=25,
@@ -398,13 +710,16 @@ class TestStatusTextPin:
             config=Mem2MemConfig(
                 storage={"sqlite_path": "/opt/mm/memtomem.db"},
                 scheduler={"enabled": True},
+                indexing={"project_memory_dirs": [project_source]},
             ),
         )
 
         text = asyncio.run(format_status_report(AppContext.from_components(comp)))
 
-        # Resolve exactly like collect_status_report so Windows includes the
-        # drive prefix while POSIX keeps the absolute /opt path.
+        # Resolve exactly like collect_status_report, then apply the same
+        # presentation-only home contraction as the human report.
+        cwd_display = _shorten_status_path(str(Path.cwd().resolve()))
+        project_source_display = _shorten_status_path(str(project_source.resolve()))
         expected = f"""\
 memtomem Status
 ==============
@@ -418,10 +733,12 @@ Watcher:   {effective_watcher_backend(comp.config.indexing)}
 
 Runtime context
 ---------------
-CWD:           {Path.cwd().resolve()}
-Project root:  (none registered for CWD)
-User sources:  {Path("~/.memtomem/memories").expanduser().resolve()}
-Project sources: (none)
+CWD:             {cwd_display}
+Project root:    (none registered for CWD)
+User sources:    1
+  - {Path("~") / ".memtomem" / "memories"}
+Project sources: 1
+  - {project_source_display}
 
 Index stats
 -----------
@@ -504,6 +821,30 @@ class TestStatusJson:
 
         assert via_flag.exit_code == 0, via_flag.output
         assert via_flag.output == via_format.output
+
+    def test_json_keeps_every_absolute_source_path(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        user_sources = [tmp_path / f"user-{i}" for i in range(10)]
+        project_sources = [tmp_path / f"project-{i}" for i in range(3)]
+        comp = _mock_components(
+            config=Mem2MemConfig(
+                indexing={
+                    "memory_dirs": user_sources,
+                    "project_memory_dirs": project_sources,
+                }
+            )
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["config"]["memory_dirs"] == [str(path.resolve()) for path in user_sources]
+        assert data["config"]["project_memory_dirs"] == [
+            str(path.resolve()) for path in project_sources
+        ]
 
     def test_json_output_is_never_styled(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
