@@ -515,29 +515,51 @@ def _status_source_entries(paths: list[str], *, group_providers: bool) -> list[t
     return entries
 
 
-def _status_path_is_within(path: str, root: str) -> bool:
-    """Return whether *path* is at or below *root* across either slash style."""
+def _status_source_project_root(path: str) -> str | None:
+    """Derive the project root from a registered project-tier source path."""
     normalized_path = path.replace("\\", "/").rstrip("/")
+    memory_parent, separator, leaf = normalized_path.rpartition("/")
+    if not separator or leaf not in {"memories", "memories.local"}:
+        return None
+
+    project_root, separator, marker = memory_parent.rpartition("/")
+    if not separator or marker != ".memtomem":
+        return None
+    return project_root or "/"
+
+
+def _status_source_matches_project_root(path: str, root: str) -> bool:
+    """Return whether *path* belongs to exactly *root* across slash styles."""
+    source_root = _status_source_project_root(path)
+    if source_root is None:
+        return False
+
+    normalized_source_root = source_root.replace("\\", "/").rstrip("/") or "/"
     normalized_root = root.replace("\\", "/").rstrip("/")
-    if not normalized_path or not normalized_root:
+    if not normalized_root:
+        normalized_root = "/" if root.replace("\\", "/").startswith("/") else ""
+    if not normalized_root:
         return False
 
     windows_style = (
         len(normalized_root) >= 2 and normalized_root[1] == ":"
     ) or normalized_root.startswith("//")
-    compared_path = normalized_path.casefold() if windows_style else normalized_path
+    compared_source_root = (
+        normalized_source_root.casefold() if windows_style else normalized_source_root
+    )
     compared_root = normalized_root.casefold() if windows_style else normalized_root
-    return compared_path == compared_root or compared_path.startswith(compared_root + "/")
+    return compared_source_root == compared_root
 
 
 def _prioritize_status_paths(paths: list[str], priority_root: str | None) -> list[str]:
     """Stable-partition paths so the active project's sources remain visible."""
     if not priority_root:
         return paths
-    active = [path for path in paths if _status_path_is_within(path, priority_root)]
+    matches = [_status_source_matches_project_root(path, priority_root) for path in paths]
+    active = [path for path, matches_root in zip(paths, matches, strict=True) if matches_root]
     if not active:
         return paths
-    other = [path for path in paths if not _status_path_is_within(path, priority_root)]
+    other = [path for path, matches_root in zip(paths, matches, strict=True) if not matches_root]
     return [*active, *other]
 
 

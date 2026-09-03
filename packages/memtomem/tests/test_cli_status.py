@@ -398,6 +398,24 @@ class TestStatusSourceRendering:
         assert rendered[project_header + 1] == f"  - {current_source}"
         assert rendered[project_header + 9] == "  … (+1 more; use `mm status --json`)"
 
+    def test_nested_project_sources_do_not_hide_current_root_source(self) -> None:
+        current_root = "/work/current"
+        current_source = f"{current_root}/.memtomem/memories.local"
+        nested_sources = [f"{current_root}/nested-{i}/.memtomem/memories.local" for i in range(8)]
+
+        lines = _status_source_lines(
+            "Project sources",
+            [*nested_sources, current_source],
+            group_providers=False,
+            priority_root=current_root,
+        )
+
+        assert lines[1].text == f"  - {current_source}"
+        assert [line.text for line in lines[2:9]] == [
+            f"  - {source}" for source in nested_sources[:7]
+        ]
+        assert lines[-1].text == "  … (+1 more; use `mm status --json`)"
+
     def test_windows_current_project_match_is_case_insensitive(self) -> None:
         current_source = r"C:\Users\Alice\project\.memtomem\memories.local"
         sources = [
@@ -537,6 +555,7 @@ class TestStatusTextPin:
         # Resolve exactly like collect_status_report, then apply the same
         # presentation-only home contraction as the human report.
         cwd_display = _shorten_status_path(str(Path.cwd().resolve()))
+        project_source_display = _shorten_status_path(str(project_source.resolve()))
         expected = f"""\
 memtomem Status
 ==============
@@ -555,7 +574,7 @@ Project root:    (none registered for CWD)
 User sources:    1
   - {Path("~") / ".memtomem" / "memories"}
 Project sources: 1
-  - {project_source.resolve()}
+  - {project_source_display}
 
 Index stats
 -----------
