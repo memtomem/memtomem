@@ -412,6 +412,30 @@ class TestTheCallerOwnsTheVocabulary:
         assert "--namespace" not in message
 
     @pytest.mark.asyncio
+    async def test_the_count_suggestion_uses_the_caller_s_namespace_label(self) -> None:
+        """One message must not name two different options for one value.
+
+        A caller that supplies both a custom label and a count flag would
+        otherwise be told "the resolved agent namespace 'X' matches none…"
+        and, on the next line, "'-n' is --namespace" — naming an option it
+        just declined to name. No caller passes this pair today; the point is
+        that it cannot contradict itself when one does.
+        """
+        from memtomem.cli._empty_results import explain_empty_result
+
+        message = await explain_empty_result(
+            self._storage([("default", 7)]),
+            namespace="3",
+            filters=[],
+            count_flag="-k",
+            namespace_label="the resolved agent namespace",
+        )
+
+        assert "did you mean `-k 3`?" in message
+        assert "'-n' is the resolved agent namespace" in message
+        assert "--namespace" not in message
+
+    @pytest.mark.asyncio
     async def test_no_count_flag_means_no_count_suggestion(self) -> None:
         """The ``-n`` mix-up hint names two flags. A command with neither
         would be told to retype an option it does not accept, so the hint is

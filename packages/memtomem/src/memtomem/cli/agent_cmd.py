@@ -454,7 +454,11 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     "--include-shared/--no-include-shared",
     default=True,
     show_default=True,
-    help="Also search the shared namespace.",
+    help=(
+        "Also search the shared namespace. --no-include-shared drops the shared leg "
+        "of the merge, so it has no effect when no agent resolves: an unpinned search "
+        "still reaches the shared bucket."
+    ),
 )
 @click.option("--top-k", "-k", default=10, show_default=True, help="Number of results.")
 @click.option(
@@ -497,6 +501,14 @@ def agent_search(
     saying so, because a session whose binding could not be read resolves the
     same way, and a silently widened search is the one outcome the caller
     would not think to check for.
+
+    Default visibility hides ``agent-runtime:`` and ``archive:`` but **not**
+    ``shared``, so an unresolved agent also disregards
+    ``--no-include-shared``: the flag drops the shared leg of a merge, and
+    there is no merge to drop it from. That is ``mem_agent_search``'s rule as
+    well — this verb mirrors the tool rather than diverging from it — so the
+    flag is reported as disregarded instead of being made to fail or being
+    reinterpreted here.
 
     Output formats are ``mm search``'s, not the MCP tool's — this is a CLI
     command, and a shell pipeline expects ``--format json`` to mean what it
@@ -563,16 +575,64 @@ def _agent_search_scope_note(agent_ns: str | None, ns_filter: str | None) -> str
     otherwise report a healthy index and no options at all — true of the
     command line, and silent about the one thing that emptied the result.
 
+    The two halves of the merge have different origins and the note keeps them
+    apart: only ``agent_ns`` came from the session, while the shared leg came
+    from ``--include-shared``'s default or from ``--shared-namespace``.
+    Attributing the whole merged filter to the session would be the same kind
+    of misattribution this note exists to repair.
+
     ``None`` when there is nothing to disclose: an unresolved agent did not
     narrow anything, and the "no agent resolved" note already owns that case.
     """
 
     if ns_filter is None or agent_ns is None:
         return None
+    if ns_filter == agent_ns:
+        return (
+            f"This search was scoped to namespace '{agent_ns}', resolved from the "
+            "active session; pass --agent-id to scope it to a different agent."
+        )
     return (
-        f"This search was scoped to namespace '{ns_filter}', resolved from the "
-        "active session; pass --agent-id to scope it to a different agent."
+        f"This search was scoped to namespace '{ns_filter}', of which "
+        f"'{agent_ns}' was resolved from the active session and the rest is the "
+        "shared bucket; pass --agent-id to scope it to a different agent."
     )
+
+
+def _retarget_hidden_namespace_hint(payload):
+    """Rewrite the hidden-rows hint into this verb's vocabulary.
+
+    The shared search service ends that hint with a working query — for an
+    unpinned search over a store with agent rows, ``pass
+    namespace="agent-runtime:*" ... to include them``. Right on ``mem_search``,
+    unfollowable here: ``mm agent search`` takes no namespace argument, and the
+    glob it suggests would reach *every* agent's private scope rather than the
+    one the caller is asking about. Same defect as reporting a ``--namespace``
+    filter this verb has no flag for, one layer out — the empty-result path was
+    translated and the hint layer was not.
+
+    Matched by value, not by substring: the expected string is rebuilt from the
+    same producer and the same stats, so a reworded hint upstream still matches
+    and an unrelated hint is never swallowed. The count itself is kept — the
+    rows really are hidden — and only the remediation is replaced.
+    """
+
+    from dataclasses import replace
+
+    from memtomem.services.search_service import hidden_namespace_hint
+
+    stats = payload.stats
+    hidden = getattr(stats, "hidden_system_ns", 0)
+    if not hidden or not payload.hints:
+        return payload
+    upstream = hidden_namespace_hint(hidden, getattr(stats, "hidden_by_prefix", {}) or {})
+    if upstream not in payload.hints:
+        return payload
+    ours = (
+        f"{hidden} result(s) hidden in system namespaces — reach one agent's own "
+        "scope with --agent-id, not with a namespace pattern."
+    )
+    return replace(payload, hints=[ours if h == upstream else h for h in payload.hints])
 
 
 async def _run_agent_search(
@@ -648,6 +708,24 @@ async def _run_agent_search(
             err=True,
         )
 
+    # ``--no-include-shared`` drops the shared leg *of the merge*, and with no
+    # agent there is no merge: ``merge_agent_namespace_filter`` answers "no
+    # filter" before it ever looks at the flag. Default visibility then hides
+    # ``agent-runtime:`` and ``archive:`` but not ``shared``, so a query that
+    # asked to exclude the shared bucket can return rows from it. That is the
+    # MCP tool's rule too and this verb exists to mirror it — changing the
+    # merge would change ``mem_agent_search`` — but the flag being disregarded
+    # is the reader's to know, and the widening note above does not say which
+    # of their options it took with it. Whether the rule itself should change
+    # is #2296; this note is the disclosure, not the fix.
+    if ns_filter is None and not include_shared:
+        click.secho(
+            "(--no-include-shared was disregarded: with no agent there is no merge to "
+            "drop a leg from, and an unpinned search still reaches the shared bucket.)",
+            fg="yellow",
+            err=True,
+        )
+
     # ``--shared-namespace`` re-points the shared leg of the merge, so it is
     # validated and then has nothing to act on in the two cases where there is
     # no such leg. Both are accepted rather than refused — neither is a
@@ -666,7 +744,7 @@ async def _run_agent_search(
             err=True,
         )
 
-    render_search_results(query, fmt, payload)
+    render_search_results(query, fmt, _retarget_hidden_namespace_hint(payload))
 
 
 # ── debug-resolve (hidden) ──────────────────────────────────────────────

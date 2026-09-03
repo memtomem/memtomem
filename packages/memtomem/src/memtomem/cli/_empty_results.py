@@ -46,8 +46,14 @@ class _NamespaceLister(Protocol):
     async def list_namespaces(self) -> list[tuple[str, int]]: ...
 
 
-def _count_flag_suggestion(namespace: str, count_flag: str) -> str | None:
+def _count_flag_suggestion(namespace: str, count_flag: str, namespace_label: str) -> str | None:
     """The ``-n 3`` → ``-k 3`` hint, for values that are really a count.
+
+    Both flag names come from the caller. Hard-coding ``--namespace`` here
+    while the branch above prints a caller-supplied ``namespace_label`` would
+    let one message name two different options for the same value, so the
+    label is threaded rather than assumed — the combination is then unable to
+    contradict itself, instead of merely happening not to today.
 
     Strictly positive decimals only, and the conversion is guarded rather
     than assumed: ``"²".isdigit()`` is true while ``int("²")`` raises, and
@@ -68,7 +74,7 @@ def _count_flag_suggestion(namespace: str, count_flag: str) -> str | None:
         return None
     if count <= 0:
         return None
-    return f"'-n' is --namespace, not the result count: did you mean `{count_flag} {count}`?"
+    return f"'-n' is {namespace_label}, not the result count: did you mean `{count_flag} {count}`?"
 
 
 def _format_filters(filters: Sequence[tuple[str, str | None]]) -> str:
@@ -153,7 +159,9 @@ async def explain_empty_result(
                 f"Indexed namespaces: {_format_namespaces(known)}",
             ]
             suggestion = (
-                _count_flag_suggestion(namespace, count_flag) if count_flag is not None else None
+                _count_flag_suggestion(namespace, count_flag, namespace_label)
+                if count_flag is not None
+                else None
             )
             if suggestion is not None:
                 lines.append(suggestion)

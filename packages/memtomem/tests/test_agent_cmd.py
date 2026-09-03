@@ -668,9 +668,45 @@ class TestAgentSearch:
 
         assert result.exit_code == 0, result.output
         assert (
-            "This search was scoped to namespace 'agent-runtime:coder,shared', "
-            "resolved from the active session" in result.stderr
+            "This search was scoped to namespace 'agent-runtime:coder,shared', of which "
+            "'agent-runtime:coder' was resolved from the active session and the rest is "
+            "the shared bucket" in result.stderr
         )
+
+    def test_the_scope_note_does_not_credit_the_session_with_the_shared_leg(self, monkeypatch):
+        """Only the private leg came from the binding. ``--include-shared``'s
+        default put ``shared`` there, and ``--shared-namespace`` can put
+        something else — crediting the whole merge to the session is the same
+        misattribution this note exists to repair."""
+        comp = _search_components(namespaces=[("agent-runtime:coder", 3), ("shared", 1)])
+        result, _comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy", "--shared-namespace", "shared:myproj"],
+            comp=comp,
+            session_ns="agent-runtime:coder",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "'agent-runtime:coder' was resolved from the active session" in result.stderr
+        assert "'agent-runtime:coder,shared:myproj', resolved from" not in result.stderr
+
+    def test_a_private_only_scope_note_claims_no_shared_leg(self, monkeypatch):
+        """With ``--no-include-shared`` the merge is the session's namespace
+        and nothing else, so the note must not invent a shared half."""
+        comp = _search_components(namespaces=[("agent-runtime:coder", 3), ("default", 9)])
+        result, _comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy", "--no-include-shared"],
+            comp=comp,
+            session_ns="agent-runtime:coder",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "This search was scoped to namespace 'agent-runtime:coder', resolved from the "
+            "active session" in result.stderr
+        )
+        assert "shared bucket" not in result.stderr
 
     def test_an_explicit_agent_id_is_not_restated_as_a_scope_note(self, monkeypatch):
         """``--agent-id`` is already in the reported filters. Repeating the
@@ -729,6 +765,33 @@ class TestAgentSearch:
         assert result.exit_code == 0, result.output
         assert f"--shared-namespace 'shared:myproj' was ignored: {reason}." in result.stderr
 
+    def test_an_unresolved_agent_says_no_include_shared_was_disregarded(self, monkeypatch):
+        """``--no-include-shared`` drops the shared leg *of the merge*, and with
+        no agent there is no merge — the helper answers "no filter" before it
+        looks at the flag. Default visibility then hides ``agent-runtime:`` and
+        ``archive:`` but not ``shared``, so a query that asked to exclude the
+        shared bucket can return rows from it. The widening note above does not
+        say which of their options it took with it.
+        """
+        result, comp = self._run(monkeypatch, ["agent", "search", "deploy", "--no-include-shared"])
+
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) is None
+        assert "--no-include-shared was disregarded" in result.stderr
+        assert "an unpinned search still reaches the shared bucket" in result.stderr
+
+    def test_a_resolved_agent_honours_no_include_shared_silently(self, monkeypatch):
+        """With an agent the flag does exactly what it says, so there is
+        nothing to disclose."""
+        result, comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy", "-a", "planner", "--no-include-shared"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) == "agent-runtime:planner"
+        assert "disregarded" not in result.stderr
+
     def test_an_honoured_shared_namespace_says_nothing(self, monkeypatch):
         result, comp = self._run(
             monkeypatch,
@@ -738,6 +801,73 @@ class TestAgentSearch:
         assert result.exit_code == 0, result.output
         assert self._namespace(comp) == "agent-runtime:planner,shared:myproj"
         assert "was ignored" not in result.stderr
+
+    def test_the_hidden_rows_hint_is_retargeted_to_this_verb(self, monkeypatch):
+        """The shared service ends that hint with ``pass namespace="…"``.
+
+        Right on ``mem_search``; unfollowable here, since this verb takes no
+        namespace argument — and the glob it suggests reaches every agent's
+        private scope, not the one the caller asked about. Same defect as
+        naming a ``--namespace`` filter, one layer further out.
+        """
+        from memtomem.search.pipeline import RetrievalStats
+
+        comp = _search_components(namespaces=[("default", 9)])
+        comp.search_pipeline.search = AsyncMock(
+            return_value=(
+                [],
+                RetrievalStats(
+                    hidden_system_ns=3,
+                    hidden_by_prefix={"agent-runtime:": 2, "archive:": 1},
+                ),
+            )
+        )
+        result, _comp = self._run(monkeypatch, ["agent", "search", "deploy"], comp=comp)
+
+        assert result.exit_code == 0, result.output
+        assert "3 result(s) hidden in system namespaces" in result.stderr
+        assert "reach one agent's own scope with --agent-id" in result.stderr
+        assert 'namespace="agent-runtime:*"' not in result.stderr
+
+    def test_an_unrelated_hint_survives_the_swap(self, monkeypatch):
+        """The swap matches the upstream string by value, rebuilt from the same
+        producer and stats, so it replaces one hint and carries the rest.
+
+        Both hints are present here on purpose: with only the one being
+        rewritten, "the other hint was not swallowed" is a claim about a list
+        of length one, which any implementation satisfies.
+        """
+        from memtomem.search.pipeline import RetrievalStats
+
+        comp = _search_components(namespaces=[("default", 9)])
+        comp.search_pipeline.search = AsyncMock(
+            return_value=(
+                [],
+                RetrievalStats(
+                    dense_candidates=0,
+                    dense_suppressed_mismatch=True,
+                    mismatch_detail={
+                        "dimension_mismatch": True,
+                        "stored": {"provider": "none", "model": "", "dimension": 0},
+                        "configured": {
+                            "provider": "onnx",
+                            "model": "bge-small-en-v1.5",
+                            "dimension": 384,
+                        },
+                    },
+                    hidden_system_ns=3,
+                    hidden_by_prefix={"agent-runtime:": 2, "archive:": 1},
+                ),
+            )
+        )
+        result, _comp = self._run(monkeypatch, ["agent", "search", "deploy"], comp=comp)
+
+        assert result.exit_code == 0, result.output
+        # The one that was rewritten.
+        assert "reach one agent's own scope with --agent-id" in result.stderr
+        assert 'namespace="agent-runtime:*"' not in result.stderr
+        # The one that was not: still whatever the service said about it.
+        assert "dense retrieval did not contribute to this query" in result.stderr
 
     def test_json_format_is_a_bare_list(self, monkeypatch):
         """``--format json`` has to stay pipeable into ``mm agent share``."""

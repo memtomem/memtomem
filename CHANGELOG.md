@@ -112,7 +112,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   or, failing that, the active session's binding, and searches unpinned at
   default visibility when neither names one — which is not every namespace,
   since `search.system_namespace_prefixes` still hides `agent-runtime:` and
-  `archive:` from an unpinned query. `--include-shared/--no-include-shared`, `--top-k` and
+  `archive:` from an unpinned query. It does not hide `shared`, though, so an
+  unresolved agent also disregards `--no-include-shared` — that flag drops the
+  shared leg of a merge, and there is no merge to drop it from. This is the MCP
+  tool's rule too, so the verb reports the flag as disregarded rather than
+  diverging from the tool it mirrors.
+  `--include-shared/--no-include-shared`, `--top-k` and
   `--shared-namespace` mirror the tool's options; `--format` uses this CLI's
   vocabulary rather than the MCP tool's, so `--format json` stays the bare
   list a shell pipeline can feed to `mm agent share`. The merge rule itself is
@@ -122,10 +127,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   rather than being handed one, an empty result is explained in the verb's own
   vocabulary — the resolved namespace, `--agent-id`, `--shared-namespace` —
   instead of the `--namespace` and `-n` that `mm search` types and this one
-  does not accept. `--shared-namespace` re-points only the shared leg, so
-  `--no-include-shared` and an unresolved agent both leave it with nothing to
-  do; that is still accepted, and now says so on stderr rather than passing
-  silently. (#2195)
+  does not accept. The hidden-rows hint is retargeted the same way: it ends in
+  a working `namespace="…"` query on `mem_search`, which is not a thing this
+  verb takes, and the glob it suggests would reach every agent's private scope
+  rather than the one being asked about. `--shared-namespace` re-points only
+  the shared leg, so `--no-include-shared` and an unresolved agent both leave
+  it with nothing to do; that is still accepted, and now says so on stderr
+  rather than passing silently. (#2195)
 
 ### Breaking
 
