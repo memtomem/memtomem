@@ -445,6 +445,12 @@ class TestStatusSourceRendering:
         ``.memtomem``, so ``config.d`` entries and hand-edited ``config.json``
         files can produce a ``Project root:`` line.  A leaf whitelist here
         would print that root and then truncate its own source away.
+
+        This pins the *structural* half only — both sides read a resolved
+        absolute path here, which is the shape ``collect_status_report``
+        feeds.  The normalization that makes that true for a registration
+        written as ``~/...`` or a relative string is a separate axis, pinned
+        by ``test_unresolved_registration_stays_hoisted_end_to_end``.
         """
         project_root = tmp_path / "current"
         source = project_root / ".memtomem" / "notes"
@@ -455,6 +461,113 @@ class TestStatusSourceRendering:
 
         assert resolved == project_root.resolve()
         assert _status_source_matches_project_root(str(source.resolve()), str(resolved))
+
+    @staticmethod
+    def _collect_with_project_dirs(registrations: list[str]) -> dict:
+        """Run the real collector over *registrations* and return its report."""
+        import asyncio
+
+        from memtomem.server.context import AppContext
+
+        comp = _mock_components(
+            config=Mem2MemConfig(indexing={"project_memory_dirs": registrations}),
+        )
+        return asyncio.run(collect_status_report(AppContext.from_components(comp)))
+
+    @staticmethod
+    def _eight_other_project_dirs(tmp_path: Path) -> list[str]:
+        others = []
+        for index in range(8):
+            other = tmp_path / f"other-{index}" / ".memtomem" / "memories.local"
+            other.mkdir(parents=True)
+            others.append(str(other))
+        return others
+
+    @pytest.mark.parametrize("shape", ["relative", "tilde"])
+    def test_unresolved_registration_stays_hoisted_end_to_end(
+        self, shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The resolver resolves; the matcher compares strings — pin the bridge.
+
+        ``_resolve_project_context_from_dirs`` calls ``expanduser().resolve()``
+        on every registered dir, while ``_status_source_matches_project_root``
+        does a plain string comparison.  ``collect_status_report`` is the only
+        thing that makes the two agree, so a registration written as a relative
+        or ``~``-shaped string stays hoisted only while it publishes
+        ``project_memory_dirs`` in the same normalized form.  Both shapes are
+        exercised because ``expanduser()`` and ``resolve()`` each cover only
+        one of them.
+        """
+        project_root = tmp_path / "active-project"
+        active = project_root / ".memtomem" / "notes"
+        active.mkdir(parents=True)
+        others = self._eight_other_project_dirs(tmp_path)
+        monkeypatch.chdir(project_root)
+
+        if shape == "relative":
+            registration = ".memtomem/notes"
+        else:
+            monkeypatch.setenv("HOME", str(tmp_path))
+            monkeypatch.setenv("USERPROFILE", str(tmp_path))
+            registration = "~/active-project/.memtomem/notes"
+
+        data = self._collect_with_project_dirs([*others, registration])
+
+        # Asserted against the path built in this test, not against the
+        # renderer's own helper: the published entry must already be the
+        # resolved absolute path, or the string matcher has nothing to match.
+        assert data["config"]["project_memory_dirs"][-1] == str(active.resolve())
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        header = rendered.index("Project sources: 9")
+        assert "active-project" in rendered[header + 1]
+        assert rendered[header + 9] == "  … (+1 more; use `mm status --json`)"
+
+    def test_symlinked_registration_is_canonicalized_before_matching(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Canonicalization, not mere absolutization, is what the matcher needs.
+
+        The resolver compares a *resolved* cwd against a *resolved* registered
+        root, so an alias registration only lines up after ``resolve()``.
+        Swapping the collector to ``absolute()`` would publish the alias path
+        and silently drop the hoist — a shape the relative and ``~`` cases
+        above cannot tell apart.
+        """
+        real_root = tmp_path / "active-project"
+        active = real_root / ".memtomem" / "notes"
+        active.mkdir(parents=True)
+        alias = tmp_path / "alias"
+        try:
+            alias.symlink_to(real_root, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            pytest.skip("symlink creation is not permitted here")
+        others = self._eight_other_project_dirs(tmp_path)
+        monkeypatch.chdir(real_root)
+
+        data = self._collect_with_project_dirs([*others, str(alias / ".memtomem" / "notes")])
+
+        assert data["config"]["project_memory_dirs"][-1] == str(active.resolve())
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        header = rendered.index("Project sources: 9")
+        assert "active-project" in rendered[header + 1]
+
+    def test_posix_colon_root_is_not_treated_as_a_windows_drive(self) -> None:
+        """``:`` is legal in a POSIX path — only a leading ASCII letter is a drive.
+
+        Classifying such a root as Windows-shaped would case-fold it and fold
+        its backslashes, reviving the bug this module just fixed in a corner.
+        The ``é:`` cases pin the ASCII half of the rule specifically: a
+        Unicode letter is still a letter, so ``isalpha()`` alone would let it
+        through.
+        """
+        assert _shorten_status_path("/:foo/My Dir", home="/:foo") == "~/My Dir"
+        assert _shorten_status_path("/:FOO/dir", home="/:foo") == "/:FOO/dir"
+        assert not _status_source_matches_project_root("/:foo\\bar/.memtomem/notes", "/:foo/bar")
+
+        assert _shorten_status_path("é:/FOO/dir", home="é:/foo") == "é:/FOO/dir"
+        assert not _status_source_matches_project_root("é:/foo\\bar/.memtomem/notes", "é:/foo/bar")
 
     def test_hand_registered_project_source_is_prioritized(self) -> None:
         current_root = "/work/current"

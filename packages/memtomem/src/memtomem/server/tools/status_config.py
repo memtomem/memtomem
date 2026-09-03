@@ -461,8 +461,14 @@ class StatusLine:
 
 
 def _looks_windows_shaped(text: str) -> bool:
-    """Return whether *text* is shaped like a Windows path (drive letter or UNC)."""
-    return (len(text) >= 2 and text[1] == ":") or text.startswith(("//", "\\\\"))
+    """Return whether *text* is shaped like a Windows path (drive letter or UNC).
+
+    The drive check requires an ASCII letter before the colon: ``:`` is legal
+    inside a POSIX path, so a bare ``text[1] == ":"`` test would classify
+    ``/:foo/bar`` as Windows-shaped and case-fold it.
+    """
+    drive_letter = len(text) >= 2 and text[1] == ":" and text[0].isascii() and text[0].isalpha()
+    return drive_letter or text.startswith(("//", "\\\\"))
 
 
 def _normalize_status_path(text: str, *, windows_style: bool) -> str:
