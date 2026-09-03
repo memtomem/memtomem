@@ -363,6 +363,58 @@ class TestStatusSourceRendering:
 
         assert lines[-1].text == "  … (+3 more; use `mm status --json`)"
 
+    def test_current_project_source_is_prioritized_before_cap(self) -> None:
+        current_root = "/work/current"
+        current_source = f"{current_root}/.memtomem/memories.local"
+        project_sources = [
+            *(f"/work/project-{i}/.memtomem/memories.local" for i in range(8)),
+            current_source,
+        ]
+        data = {
+            "config": {
+                "storage_backend": "sqlite",
+                "db_path": "/opt/mm/memtomem.db",
+                "embedding": {"provider": "none", "model": None, "dimension": 0},
+                "top_k": 10,
+                "rrf_k": 60,
+                "watcher_backend": "native",
+                "memory_dirs": [],
+                "project_memory_dirs": project_sources,
+            },
+            "runtime": {"cwd": current_root, "project_context_root": current_root},
+            "index": {
+                "total_chunks": 0,
+                "total_sources": 0,
+                "orphaned_sources": 0,
+                "dense_coverage": None,
+            },
+            "immutable": {},
+            "warnings": [],
+        }
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        project_header = rendered.index("Project sources: 9")
+
+        assert rendered[project_header + 1] == f"  - {current_source}"
+        assert rendered[project_header + 9] == "  … (+1 more; use `mm status --json`)"
+
+    def test_windows_current_project_match_is_case_insensitive(self) -> None:
+        current_source = r"C:\Users\Alice\project\.memtomem\memories.local"
+        sources = [
+            *(rf"D:\work\project-{i}\.memtomem\memories.local" for i in range(8)),
+            current_source,
+        ]
+
+        lines = _status_source_lines(
+            "Project sources",
+            sources,
+            group_providers=False,
+            priority_root=r"c:\users\alice\project",
+        )
+
+        assert lines[1].text == f"  - {current_source}"
+        assert lines[-1].text == "  … (+1 more; use `mm status --json`)"
+
     @pytest.mark.parametrize(
         ("path", "home", "expected"),
         [

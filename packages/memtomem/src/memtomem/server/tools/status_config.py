@@ -515,18 +515,46 @@ def _status_source_entries(paths: list[str], *, group_providers: bool) -> list[t
     return entries
 
 
+def _status_path_is_within(path: str, root: str) -> bool:
+    """Return whether *path* is at or below *root* across either slash style."""
+    normalized_path = path.replace("\\", "/").rstrip("/")
+    normalized_root = root.replace("\\", "/").rstrip("/")
+    if not normalized_path or not normalized_root:
+        return False
+
+    windows_style = (
+        len(normalized_root) >= 2 and normalized_root[1] == ":"
+    ) or normalized_root.startswith("//")
+    compared_path = normalized_path.casefold() if windows_style else normalized_path
+    compared_root = normalized_root.casefold() if windows_style else normalized_root
+    return compared_path == compared_root or compared_path.startswith(compared_root + "/")
+
+
+def _prioritize_status_paths(paths: list[str], priority_root: str | None) -> list[str]:
+    """Stable-partition paths so the active project's sources remain visible."""
+    if not priority_root:
+        return paths
+    active = [path for path in paths if _status_path_is_within(path, priority_root)]
+    if not active:
+        return paths
+    other = [path for path in paths if not _status_path_is_within(path, priority_root)]
+    return [*active, *other]
+
+
 def _status_source_lines(
     label: str,
     paths: list[str],
     *,
     group_providers: bool,
+    priority_root: str | None = None,
 ) -> list[StatusLine]:
     """Render one source tier as a count plus a bounded, readable list."""
     header_key = f"{label}:".ljust(17)
     if not paths:
         return [StatusLine("kv", key=header_key, value="0 (none)")]
 
-    entries = _status_source_entries(paths, group_providers=group_providers)
+    ordered_paths = _prioritize_status_paths(paths, priority_root)
+    entries = _status_source_entries(ordered_paths, group_providers=group_providers)
     shown = entries[:_MAX_STATUS_SOURCE_ROWS]
     lines = [StatusLine("kv", key=header_key, value=str(len(paths)))]
     lines.extend(StatusLine("source_item", value=f"  - {text}") for text, _ in shown)
@@ -603,6 +631,11 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             "Project sources",
             [str(path) for path in cfg.get("project_memory_dirs", [])],
             group_providers=False,
+            priority_root=(
+                str(runtime["project_context_root"])
+                if runtime.get("project_context_root")
+                else None
+            ),
         )
     )
     lines += [
