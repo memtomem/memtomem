@@ -41,6 +41,11 @@ def _result() -> SearchResult:
     return SearchResult(chunk=chunk, score=1.5, rank=1, source="bm25")
 
 
+def _pipeline_of(fake):
+    """The pipeline mock behind a ``_mock_components`` factory."""
+    return fake.pipeline_mock
+
+
 def _mock_components(results, stats):
     pipeline_mock = AsyncMock(return_value=(results, stats))
     comp = SimpleNamespace(
@@ -52,12 +57,17 @@ def _mock_components(results, stats):
     async def fake():
         yield comp
 
+    fake.pipeline_mock = pipeline_mock
     return fake
 
 
-def _invoke(monkeypatch, *args, results=None, stats=_DEGRADED):
+def _invoke(monkeypatch, *args, results=None, stats=_DEGRADED, comp_box=None):
     fake = _mock_components([_result()] if results is None else results, stats)
     monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
+    if comp_box is not None:
+        # ``_mock_components`` closes over the pipeline mock; hand it back so a
+        # caller can assert on what the command actually searched with.
+        comp_box.append(fake)
     return CliRunner().invoke(cli, ["search", *args, "pipelines"])
 
 
@@ -145,6 +155,38 @@ class TestFilterSyntaxValidation:
         assert result.exit_code != 0
         assert "invalid --scope value 'project_*,user'" in result.stderr
 
+    def test_a_scope_that_is_not_a_tier_is_refused_with_its_own_reason(self, monkeypatch) -> None:
+        """Two failures share this catch, so the message must be the
+        exception's. The old wording asserted a comma/glob mix outright and
+        would have told someone who typed ``--scope User`` to stop combining
+        spellings they never combined."""
+        result = _invoke(monkeypatch, "--scope", "User")
+
+        assert result.exit_code != 0
+        assert "invalid --scope value 'User'" in result.stderr
+        assert "is not a scope tier" in result.stderr
+        assert "comma list" not in result.stderr
+
+    def test_a_scope_that_is_not_a_tier_is_refused_before_components_open(
+        self, monkeypatch
+    ) -> None:
+        """Parity with ``--as-of``: a value the CLI cannot honor must not pay
+        for opening the store."""
+        opened = False
+
+        @asynccontextmanager
+        async def fake():
+            nonlocal opened
+            opened = True
+            yield SimpleNamespace()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
+
+        result = CliRunner().invoke(cli, ["search", "--scope", "projet_local", "q"])
+
+        assert result.exit_code != 0
+        assert opened is False
+
     @pytest.mark.parametrize(
         ("flag", "value"),
         [("--namespace", "archive:*,work"), ("--scope", "project_*,user")],
@@ -178,3 +220,29 @@ class TestFilterSyntaxValidation:
         result = _invoke(monkeypatch, flag, value)
 
         assert result.exit_code == 0
+
+    @pytest.mark.parametrize(
+        ("typed", "searched"), [("  user  ", "user"), ("", None), ("   ", None)]
+    )
+    def test_the_normalized_scope_is_what_gets_searched(
+        self, monkeypatch, typed: str, searched: str | None
+    ) -> None:
+        """Exit code 0 does not prove the right value was searched.
+
+        ``--scope ""`` is unset and ``--scope "  user  "`` is ``user``; sending
+        either through as typed puts ``scope IN ('')`` or ``scope IN (' user ')``
+        into the SQL and answers an empty result set with no error at all.
+        """
+        captured: list = []
+        result = _invoke(monkeypatch, "--scope", typed, comp_box=captured)
+
+        assert result.exit_code == 0
+        pipeline_mock = _pipeline_of(captured[0])
+        assert pipeline_mock.await_args.kwargs["scope"] == searched
+
+    def test_a_glob_that_names_no_tier_is_refused(self, monkeypatch) -> None:
+        """``projet_*`` is the same typo as ``projet_local`` wearing a star."""
+        result = _invoke(monkeypatch, "--scope", "projet_*")
+
+        assert result.exit_code != 0
+        assert "matches no scope tier" in result.stderr

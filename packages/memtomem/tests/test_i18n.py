@@ -1624,6 +1624,38 @@ class TestNoHardcodedStrings:
             "index.html elements named in #698 missing required i18n bindings:\n" + "\n".join(bad)
         )
 
+    def test_search_filter_title_fallbacks_match_the_shipped_copy(self, en: dict[str, str]) -> None:
+        """A control's inline ``title`` is what a visitor reads until the
+        locale fetch lands — and what they keep reading if it fails. The
+        sibling filters keep it byte-identical to the key they bind, so a
+        drifting fallback shows one control's private wording (here, ADR
+        jargon) where every other control shows the shipped copy."""
+        html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        bad: list[str] = []
+        for el_id, key in (
+            ("ns-filter", "search.ns_filter_title"),
+            ("scope-filter", "search.scope_filter_title"),
+            ("chunk-type-filter", "search.type_filter_title"),
+        ):
+            tag_re = re.compile(rf'<[^>]*\bid="{re.escape(el_id)}"[^>]*>')
+            m = tag_re.search(html)
+            if not m:
+                bad.append(f"  id={el_id!r} missing from index.html")
+                continue
+            tag = m.group(0)
+            if f'data-i18n-title="{key}"' not in tag:
+                bad.append(f"  id={el_id!r} must bind data-i18n-title={key!r}")
+                continue
+            title = re.search(r'\stitle="([^"]*)"', tag)
+            if title is None:
+                bad.append(f"  id={el_id!r} has no inline title fallback")
+                continue
+            if title.group(1) != en[key]:
+                bad.append(f"  id={el_id!r} fallback {title.group(1)!r} != {key} {en[key]!r}")
+        assert not bad, (
+            "search filter title fallbacks drifted from their locale strings:\n" + "\n".join(bad)
+        )
+
     def test_home_quick_actions_describe_navigation_flow(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:

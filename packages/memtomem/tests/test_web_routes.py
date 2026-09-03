@@ -18,12 +18,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from memtomem.config import IndexingConfig, SearchConfig
+from memtomem.config import IndexingConfig, SearchConfig, TargetScope
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
@@ -1140,6 +1141,97 @@ class TestSearch:
 
         assert resp.status_code == 422, resp.text
         assert "project_*,user" in resp.json().get("detail", "")
+
+    async def test_an_empty_scope_param_is_unset_not_a_filter_matching_nothing(
+        self, app, client: AsyncClient
+    ):
+        """A client that always emits its declared params sends ``scope=``.
+
+        Unnormalized, that parses to ``scopes=("",)`` and the SQL emits
+        ``scope IN ('')`` — 200 with every row filtered out, indistinguishable
+        from an empty store.
+        """
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "scope": ""})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["scope"] is None
+
+    async def test_an_empty_namespace_param_is_unset_too(self, app, client: AsyncClient):
+        """Same hole on the axis scope was modelled after — same fix."""
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "namespace": ""})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["namespace"] is None
+
+    @pytest.mark.parametrize("bad", ["projet_local", "User", "user,projct_shared", "projet_*"])
+    async def test_search_rejects_a_scope_that_is_not_a_tier(self, bad, app, client: AsyncClient):
+        """The scope alphabet is closed, so a typo is answerable.
+
+        The parser stays permissive because it mirrors the open namespace
+        alphabet; without this guard a misspelled or miscased tier came back
+        200 with zero rows — the silent empty result set the comma/glob guard
+        exists to avoid.
+        """
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "scope": bad})
+
+        assert resp.status_code == 422, resp.text
+        assert "project_local" in resp.json().get("detail", "")
+        # A refused filter must not have run: the point of validating ahead of
+        # the search is that the caller pays nothing for a value the route
+        # cannot honor.
+        app.state.search_pipeline.search.assert_not_awaited()
+
+    async def test_a_padded_scope_is_stripped_before_it_reaches_the_pipeline(
+        self, app, client: AsyncClient
+    ):
+        """The guard must not read one value and forward another.
+
+        ``ScopeFilter.parse`` strips the elements of a comma list but not a
+        bare value, so forwarding the padded original would turn a request the
+        guard just accepted into ``scope IN (' user ')`` — zero rows, no error.
+        """
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "scope": "  user  "})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["scope"] == "user"
+
+    @pytest.mark.parametrize("tier", sorted(get_args(TargetScope)))
+    async def test_every_tier_name_is_accepted(self, tier, app, client: AsyncClient):
+        """The guard's allowed set is the ADR-0010 alphabet, whole.
+
+        Parameterized off ``TargetScope`` rather than a hand-written list, so
+        dropping a tier from the route's set fails here instead of silently
+        rejecting a value the rest of the system still writes.
+        """
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "scope": tier})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["scope"] == tier
+
+    async def test_a_valid_comma_list_reaches_the_pipeline_unchanged(
+        self, app, client: AsyncClient
+    ):
+        """The union spelling is not collateral damage of the tier check."""
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "scope": "user,project_local"})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["scope"] == "user,project_local"
+
+    async def test_a_scope_glob_that_selects_a_tier_is_accepted(self, app, client: AsyncClient):
+        """A glob is checked as a pattern, not as a name: it never equals a
+        tier, so the check asks whether it selects one — ``project_*`` does,
+        and the guard must not eat it on its way through."""
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get("/api/search", params={"q": "test", "scope": "project_*"})
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.search_pipeline.search.await_args.kwargs["scope"] == "project_*"
 
     async def test_scope_alone_is_not_a_search_axis(self, client: AsyncClient):
         """Scope narrows a result set; it never selects one. A scope-only

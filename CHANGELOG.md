@@ -54,16 +54,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **The web search API and the Search tab take a `scope`.** `GET /api/search`
   derived its ADR-0011 scope context from the server's working directory and
-  offered no way to override it, so the deliberate cross-project
-  `scope=project_shared` query that `mem_search(scope=)` and `mm search
-  --scope` both support was unreachable from a browser, as was narrowing to a
-  single tier. The endpoint now accepts the same spellings those surfaces do —
-  a value, a comma list or a glob — and rejects a comma/glob mix with `422`
-  rather than running a filter that matches nothing. The Search tab gets a
-  scope select beside the namespace one, with a chip, a filter count and a
-  Clear all that behave like the existing filters. Scope narrows a result set
+  offered no way to override it, so narrowing to a single tier was impossible
+  from a browser, as was the deliberate cross-project `scope=project_shared`
+  query that `mem_search(scope=)` and `mm search --scope` both support —
+  reachable, as on those surfaces, only when the server was started outside a
+  project, since an explicit `project_shared` still pins to the project root
+  whenever there is one. The endpoint now accepts the same spellings those
+  surfaces do — a value, a comma list or a glob — and rejects a comma/glob mix
+  with `422` rather than running a filter that matches nothing. The Search tab
+  gets a scope select beside the namespace one, with a chip, a filter count and
+  a Clear all that behave like the existing filters. Scope narrows a result set
   and never selects one, so a scope-only request is refused for having no
   search axis, exactly as a namespace-only one is. (#2193)
+
+- **A `scope` that is not a tier is refused, and refused the same way on all
+  three search surfaces.** The tier alphabet is closed, unlike the namespace
+  one, so `scope=User`, a typo like `projet_local`, or a glob like `projet_*`
+  that selects no tier was answerable all along — instead every surface ran it
+  and returned an empty result set the caller could not tell from "nothing
+  matched". The check now lives beside the rest of the surface-independent
+  search logic and runs before anything opens, so `GET /api/search` answers
+  `422`, `mem_search` answers with an error string and `mm search` with a
+  message naming `--scope` — one vocabulary, three idioms. An empty `scope=` /
+  `--scope ""` is read as unset rather than as a filter matching nothing, and a
+  padded value is stripped before it is searched, not only before it is
+  checked. `ScopeFilter.parse` itself stays permissive: it is a predicate
+  parser, and callers that need an unrecognized tier to reach no rows rather
+  than raise (portable eval cases) still get that. `mem_recall` and `mm recall`
+  are unchanged — they take a `scope` through the parser directly, so an
+  unrecognized tier is still an empty result there. (#2193)
 
 ### Breaking
 

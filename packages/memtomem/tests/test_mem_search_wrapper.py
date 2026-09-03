@@ -217,6 +217,41 @@ class TestArgumentValidation:
         assert out.startswith("Error: ")
         assert named in out
 
+    @pytest.mark.parametrize("bad", ["User", "projet_local", "user,projct_shared"])
+    async def test_a_scope_that_is_not_a_tier_is_refused_before_the_app_opens(
+        self, monkeypatch, bad: str
+    ):
+        """The web route answers this with 422; MCP has to answer it too.
+
+        The tier vocabulary is closed, so an unrecognized value is a caller
+        error, not a search that legitimately found nothing — and the answer
+        must not depend on which surface asked.
+        """
+        from memtomem.server.tools import search as search_mod
+
+        opener = AsyncMock(side_effect=AssertionError("too late"))
+        monkeypatch.setattr(search_mod, "_get_app_initialized", opener)
+
+        out = await search_mod.mem_search(query="hello", scope=bad, ctx=SimpleNamespace())
+
+        assert "is not a scope tier" in out
+        opener.assert_not_awaited()
+
+    async def test_a_padded_scope_is_normalized_before_the_core_sees_it(self, monkeypatch):
+        """Validated one value, forwarded another is the bug this guard has:
+        ``ScopeFilter.parse`` strips a comma list's elements but not a bare
+        value, so ``" user "`` would reach the SQL as ``scope IN (' user ')``.
+        """
+        from memtomem.server.tools import search as search_mod
+
+        core = AsyncMock(return_value=([], RetrievalStats(), []))
+        monkeypatch.setattr(search_mod, "run_search", core)
+        monkeypatch.setattr(search_mod, "_get_app_initialized", AsyncMock(return_value=_fake_app()))
+
+        await search_mod.mem_search(query="hello", scope="  user  ", ctx=SimpleNamespace())
+
+        assert core.await_args.kwargs["scope"] == "user"
+
     @pytest.mark.parametrize(
         "kwargs",
         [
