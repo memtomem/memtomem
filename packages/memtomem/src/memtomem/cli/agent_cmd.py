@@ -489,7 +489,11 @@ def agent_search(
     ``--agent-id`` the agent comes from the active session's binding, the
     way the MCP tool takes it from the session that started it; with no
     session and no flag there is no agent to scope to, and the search runs
-    across every namespace.
+    unpinned at default visibility — which is not "every namespace", since
+    the usual system-namespace hiding still applies. That case prints a note
+    saying so, because a session whose binding could not be read resolves the
+    same way, and a silently widened search is the one outcome the caller
+    would not think to check for.
 
     Output formats are ``mm search``'s, not the MCP tool's — this is a CLI
     command, and a shell pipeline expects ``--format json`` to mean what it
@@ -502,16 +506,23 @@ def agent_search(
             validate_namespace(shared_namespace)
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
-    asyncio.run(
-        _run_agent_search(
-            query=query,
-            agent_id=agent_id,
-            include_shared=include_shared,
-            top_k=top_k,
-            shared_namespace=shared_namespace,
-            fmt=fmt,
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(
+            _run_agent_search(
+                query=query,
+                agent_id=agent_id,
+                include_shared=include_shared,
+                top_k=top_k,
+                shared_namespace=shared_namespace,
+                fmt=fmt,
+            )
         )
-    )
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise_cli_error(e)
 
 
 async def _run_agent_search(
@@ -525,7 +536,7 @@ async def _run_agent_search(
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._session_state import resolve_session_write_namespace
-    from memtomem.cli.search import _search_with_components
+    from memtomem.cli.search import _search_with_components, render_search_results
     from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
 
     async with cli_components() as comp:
@@ -538,7 +549,7 @@ async def _run_agent_search(
             agent_ns = await resolve_session_write_namespace(comp.storage)
         ns_filter = merge_agent_namespace_filter(agent_ns, include_shared, shared_namespace)
 
-        await _search_with_components(
+        payload = await _search_with_components(
             comp,
             query=query,
             top_k=top_k,
@@ -549,6 +560,25 @@ async def _run_agent_search(
             as_of=None,
             fmt=fmt,
         )
+
+    # An unresolved agent widens the query from one agent's scope to the whole
+    # store, and the two ways to get here are indistinguishable from the
+    # caller's side: no session at all, or a session whose binding could not be
+    # read (an unreadable state file, a stale row, a malformed agent id — the
+    # resolver treats all of them as "unbound" by design). Both are legitimate,
+    # neither is worth failing on, and both produce results from namespaces the
+    # caller asked to be scoped away from. Say it on stderr so the widening is
+    # visible without changing what the resolver returns or what the MCP tool
+    # would have done with the same inputs.
+    if ns_filter is None:
+        click.secho(
+            "(no agent resolved — searching unpinned, not just this agent's scope. "
+            "Pass --agent-id, or start a session bound to an agent.)",
+            fg="yellow",
+            err=True,
+        )
+
+    render_search_results(query, fmt, payload)
 
 
 # ── debug-resolve (hidden) ──────────────────────────────────────────────

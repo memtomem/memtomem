@@ -516,14 +516,71 @@ class TestAgentSearch:
         ],
     )
     def test_hostile_names_are_refused_before_the_store_opens(self, monkeypatch, argv):
-        comp = _search_components()
-        monkeypatch.setattr(
-            "memtomem.cli._bootstrap.cli_components",
-            _patched_cli_components(comp),
-        )
+        """The components block must never be *entered*, not merely never
+        searched — validation moved inside an already-open store would still
+        leave the process paying to open one for an argument it rejects."""
+
+        @asynccontextmanager
+        async def exploding():
+            raise AssertionError("components opened for an invalid argument")
+            yield  # pragma: no cover - unreachable, satisfies the CM protocol
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", exploding)
         result = CliRunner().invoke(cli, argv)
         assert result.exit_code != 0
-        comp.search_pipeline.search.assert_not_awaited()
+        assert "components opened" not in result.output
+
+    def test_output_is_written_after_the_components_close(self, monkeypatch):
+        """Rendering holds stdout, and a consumer that stops reading a pipe
+        blocks the writer. Holding the SQLite connection, the embedder and the
+        reranker behind that block is a cost the finished query should not
+        still be paying, so retrieval releases them first."""
+        comp = _search_components()
+        state = {"open": False}
+        # Every render, not just the last: a stray render inside the block
+        # followed by the real one outside would look correct to a check that
+        # only reads the final observation.
+        open_at_render: list[bool] = []
+
+        @asynccontextmanager
+        async def tracking():
+            state["open"] = True
+            try:
+                yield comp
+            finally:
+                state["open"] = False
+
+        def fake_render(query, fmt, payload):
+            open_at_render.append(state["open"])
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", tracking)
+        monkeypatch.setattr("memtomem.cli.search.render_search_results", fake_render)
+        monkeypatch.setattr(
+            "memtomem.cli._session_state.resolve_session_write_namespace",
+            AsyncMock(return_value=None),
+        )
+
+        result = CliRunner().invoke(cli, ["agent", "search", "deploy", "-a", "planner"])
+
+        assert result.exit_code == 0, result.output
+        assert open_at_render == [False]
+
+    def test_an_unresolved_agent_says_the_search_was_widened(self, monkeypatch):
+        """No session and no flag resolves the same way a session whose
+        binding could not be read does, and both return results from
+        namespaces the caller asked to be scoped away from. Silence there is
+        the one outcome nobody thinks to check."""
+        result, comp = self._run(monkeypatch, ["agent", "search", "deploy"])
+
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) is None
+        assert "no agent resolved" in result.stderr
+
+    def test_a_resolved_agent_says_nothing(self, monkeypatch):
+        result, _comp = self._run(monkeypatch, ["agent", "search", "deploy", "-a", "planner"])
+
+        assert result.exit_code == 0, result.output
+        assert "no agent resolved" not in result.stderr
 
     def test_json_format_is_a_bare_list(self, monkeypatch):
         """``--format json`` has to stay pipeable into ``mm agent share``."""
