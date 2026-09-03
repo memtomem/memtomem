@@ -116,7 +116,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   list a shell pipeline can feed to `mm agent share`. The merge rule itself is
   now one function shared by the tool, the new verb and the hidden
   `mm agent debug-resolve`, which reports what the tool would resolve and had
-  been carrying its own copy of it. (#2195)
+  been carrying its own copy of it. Because the verb merges its namespace
+  rather than being handed one, an empty result is explained in the verb's own
+  vocabulary — the resolved namespace, `--agent-id`, `--shared-namespace` —
+  instead of the `--namespace` and `-n` that `mm search` types and this one
+  does not accept. `--shared-namespace` re-points only the shared leg, so
+  `--no-include-shared` and an unresolved agent both leave it with nothing to
+  do; that is still accepted, and now says so on stderr rather than passing
+  silently. (#2195)
 
 ### Breaking
 

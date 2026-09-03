@@ -462,7 +462,10 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     default=None,
     help=(
         "Shared bucket to merge in, for per-project agent teams "
-        "(e.g. ``shared:myproject``). Defaults to the global ``shared``."
+        "(e.g. shared:myproject). Defaults to the global 'shared'. Only the "
+        "shared leg is re-pointed, so this has no effect with "
+        "--no-include-shared, or when no agent resolves and the search runs "
+        "unpinned."
     ),
 )
 @click.option(
@@ -525,6 +528,32 @@ def agent_search(
         raise_cli_error(e)
 
 
+def _agent_search_typed_filters(
+    *,
+    agent_id: str | None,
+    include_shared: bool,
+    shared_namespace: str | None,
+) -> list[tuple[str, str | None]]:
+    """The options ``mm agent search`` was actually given, for the diagnostic.
+
+    Only what the command line carried, in this verb's own spelling. The
+    agent is omitted when it came from the session rather than from
+    ``--agent-id``, because the empty-result message reports the invocation
+    and a session binding is not part of it — the "no agent resolved" note
+    covers that axis separately. ``--no-include-shared`` takes no argument,
+    so it is reported bare.
+    """
+
+    typed: list[tuple[str, str | None]] = []
+    if agent_id is not None:
+        typed.append(("--agent-id", agent_id))
+    if not include_shared:
+        typed.append(("--no-include-shared", None))
+    if shared_namespace is not None:
+        typed.append(("--shared-namespace", shared_namespace))
+    return typed
+
+
 async def _run_agent_search(
     *,
     query: str,
@@ -559,6 +588,21 @@ async def _run_agent_search(
             scope=None,
             as_of=None,
             fmt=fmt,
+            # This verb has no ``--namespace`` and no ``-n``: the namespace it
+            # searches is merged here out of the three options below. Reporting
+            # it as ``--namespace`` — the shared helper's default, right for
+            # ``mm search`` — would answer an empty result by naming a flag
+            # ``mm agent search`` rejects, and a remediation the reader cannot
+            # carry out is worse than none. So the diagnostic gets this
+            # command's own vocabulary, and ``count_flag=None`` drops the
+            # ``-n`` / ``-k`` mix-up hint along with it.
+            namespace_label="the resolved agent namespace",
+            count_flag=None,
+            typed_filters=_agent_search_typed_filters(
+                agent_id=agent_id,
+                include_shared=include_shared,
+                shared_namespace=shared_namespace,
+            ),
         )
 
     # An unresolved agent widens the query from one agent's scope to the whole
@@ -574,6 +618,24 @@ async def _run_agent_search(
         click.secho(
             "(no agent resolved — searching unpinned, not just this agent's scope. "
             "Pass --agent-id, or start a session bound to an agent.)",
+            fg="yellow",
+            err=True,
+        )
+
+    # ``--shared-namespace`` re-points the shared leg of the merge, so it is
+    # validated and then has nothing to act on in the two cases where there is
+    # no such leg. Both are accepted rather than refused — neither is a
+    # mistake worth failing a search over — but a flag that parses, validates
+    # and then does nothing is exactly the kind of silence that gets read as
+    # "it worked". Say which case swallowed it.
+    if shared_namespace is not None and (ns_filter is None or not include_shared):
+        reason = (
+            "there is no agent scope to merge it with"
+            if ns_filter is None
+            else "--no-include-shared drops the shared leg it re-points"
+        )
+        click.secho(
+            f"(--shared-namespace {shared_namespace!r} was ignored: {reason}.)",
             fg="yellow",
             err=True,
         )

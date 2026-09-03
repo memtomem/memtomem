@@ -1,6 +1,7 @@
 """CLI: memtomem search <query>."""
 
 from __future__ import annotations
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -209,9 +210,20 @@ async def _search(
             tag_filter=tag_filter,
             namespace=namespace,
             scope=effective_scope,
-            typed_scope=scope,
             as_of=as_of,
             fmt=fmt,
+            typed_filters=[
+                (flag, value)
+                for flag, value in (
+                    ("--source-filter", source_filter),
+                    ("--tag-filter", tag_filter),
+                    ("--namespace", namespace),
+                    ("--scope", scope),
+                    ("--as-of", as_of),
+                )
+                if value is not None
+            ],
+            count_flag="-k",
             rerank=rerank,
         )
 
@@ -229,7 +241,9 @@ async def _search_with_components(
     scope: str | None,
     as_of: str | None,
     fmt: str,
-    typed_scope: str | None = None,
+    typed_filters: Sequence[tuple[str, str | None]] = (),
+    count_flag: str | None = None,
+    namespace_label: str = "--namespace",
     rerank: bool | None = None,
 ) -> SearchPayload:
     """Run one search against already-open components and return its payload.
@@ -246,10 +260,16 @@ async def _search_with_components(
     block, so a slow or blocked stdout cannot hold the SQLite connection,
     the embedder and the reranker open behind it.
 
-    ``scope`` is the value the search *runs with* — normalized by
-    ``validate_scope_vocabulary`` — while ``typed_scope`` is what the command
-    line carried. The empty-result diagnostic quotes the latter, so a caller
-    who typed ``--scope User`` is not shown the ``user`` it was folded to.
+    The retrieval arguments and the diagnostic ones are deliberately separate.
+    ``namespace`` and ``scope`` are what the search *runs with* — a merged
+    namespace one caller built, a scope the other normalized through
+    ``validate_scope_vocabulary`` — while ``typed_filters``, ``count_flag`` and
+    ``namespace_label`` are that command's own vocabulary, used only to explain
+    an empty result. Each verb reaching this helper has a different one:
+    ``mm search`` types ``--namespace``/``--scope`` directly, ``mm agent search``
+    types neither and derives its namespace from ``--agent-id`` and friends. A
+    caller that let this helper name the flags would report options the user
+    could not have typed, which is worse than saying nothing.
     """
     from memtomem.cli._empty_results import explain_empty_result
 
@@ -283,18 +303,9 @@ async def _search_with_components(
         await explain_empty_result(
             comp.storage,
             namespace=effective_namespace,
-            filters=[
-                (flag, value)
-                for flag, value in (
-                    ("--source-filter", source_filter),
-                    ("--tag-filter", tag_filter),
-                    ("--namespace", namespace),
-                    ("--scope", typed_scope),
-                    ("--as-of", as_of),
-                )
-                if value is not None
-            ],
-            count_flag="-k",
+            filters=typed_filters,
+            count_flag=count_flag,
+            namespace_label=namespace_label,
         )
         if not results and fmt in ("table", "plain")
         else ""

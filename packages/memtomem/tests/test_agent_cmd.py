@@ -411,15 +411,20 @@ class TestAgentDebugResolve:
         assert payload["resolved_namespace_filter"] is None
 
 
-def _search_components(results=None):
+def _search_components(results=None, namespaces=None):
     """Components stub for ``mm agent search``: a pipeline that records how it
-    was called, plus the config the empty-result explainer reads."""
+    was called, plus the config the empty-result explainer reads.
+
+    ``namespaces`` is what ``list_namespaces`` reports. It defaults to empty,
+    which short-circuits the explainer to the index hint — so a test that
+    wants the *explanation* has to say the store holds something.
+    """
     from memtomem.search.pipeline import RetrievalStats
 
     storage = SimpleNamespace(
         get_current_session=AsyncMock(return_value=None),
         count_chunks=AsyncMock(return_value=0),
-        list_namespaces=AsyncMock(return_value=[]),
+        list_namespaces=AsyncMock(return_value=list(namespaces or [])),
         list_namespace_meta=AsyncMock(return_value=[]),
     )
     return SimpleNamespace(
@@ -581,6 +586,111 @@ class TestAgentSearch:
 
         assert result.exit_code == 0, result.output
         assert "no agent resolved" not in result.stderr
+
+    def test_an_empty_result_names_the_resolved_namespace_not_a_flag(self, monkeypatch):
+        """This verb has no ``--namespace``.
+
+        The namespace it searches is merged here out of ``--agent-id`` and the
+        two shared-bucket options, so reporting it as ``--namespace`` — right
+        for ``mm search``, whose helper this shares — answers an empty result
+        by naming an option the command rejects. A remediation the reader
+        cannot carry out is worse than none.
+        """
+        comp = _search_components(namespaces=[("default", 7), ("work", 2)])
+        result, _comp = self._run(
+            monkeypatch, ["agent", "search", "deploy", "-a", "planner"], comp=comp
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "the resolved agent namespace 'agent-runtime:planner,shared' "
+            "matches none of the namespaces" in result.stderr
+        )
+        assert "--namespace" not in result.stderr
+
+    def test_the_reported_options_are_this_verb_s_own(self, monkeypatch):
+        """The inventory branch reports the invocation, so every flag it names
+        has to be one ``mm agent search`` accepts."""
+        comp = _search_components(namespaces=[("agent-runtime:planner", 3), ("shared", 1)])
+        result, _comp = self._run(
+            monkeypatch,
+            [
+                "agent",
+                "search",
+                "deploy",
+                "-a",
+                "planner",
+                "--shared-namespace",
+                "shared",
+            ],
+            comp=comp,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "This query included: --agent-id 'planner', --shared-namespace 'shared'" in (
+            result.stderr
+        )
+        assert "--namespace" not in result.stderr
+
+    def test_a_session_supplied_agent_is_not_reported_as_a_typed_option(self, monkeypatch):
+        """``filters`` is the command line, and a session binding was not on
+        it — the "no agent resolved" note owns that axis instead."""
+        comp = _search_components(namespaces=[("agent-runtime:coder", 3), ("shared", 1)])
+        result, _comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy"],
+            comp=comp,
+            session_ns="agent-runtime:coder",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "--agent-id" not in result.stderr
+
+    def test_no_include_shared_is_reported_without_an_argument(self, monkeypatch):
+        comp = _search_components(namespaces=[("agent-runtime:planner", 3)])
+        result, _comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy", "-a", "planner", "--no-include-shared"],
+            comp=comp,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "--no-include-shared" in result.stderr
+        assert "--no-include-shared '" not in result.stderr
+
+    @pytest.mark.parametrize(
+        ("argv", "reason"),
+        [
+            (
+                ["agent", "search", "deploy", "-a", "planner", "--no-include-shared"],
+                "--no-include-shared drops the shared leg it re-points",
+            ),
+            (
+                ["agent", "search", "deploy"],
+                "there is no agent scope to merge it with",
+            ),
+        ],
+    )
+    def test_an_ignored_shared_namespace_says_which_case_swallowed_it(
+        self, monkeypatch, argv, reason
+    ):
+        """``--shared-namespace`` re-points only the shared leg of the merge,
+        so both of these accept it, validate it and then have no leg to give
+        it to. Accepting is right; doing it silently reads as "it worked"."""
+        result, _comp = self._run(monkeypatch, [*argv, "--shared-namespace", "shared:myproj"])
+
+        assert result.exit_code == 0, result.output
+        assert f"--shared-namespace 'shared:myproj' was ignored: {reason}." in result.stderr
+
+    def test_an_honoured_shared_namespace_says_nothing(self, monkeypatch):
+        result, comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy", "-a", "planner", "--shared-namespace", "shared:myproj"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert self._namespace(comp) == "agent-runtime:planner,shared:myproj"
+        assert "was ignored" not in result.stderr
 
     def test_json_format_is_a_bare_list(self, monkeypatch):
         """``--format json`` has to stay pipeable into ``mm agent share``."""

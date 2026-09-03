@@ -71,8 +71,16 @@ def _count_flag_suggestion(namespace: str, count_flag: str) -> str | None:
     return f"'-n' is --namespace, not the result count: did you mean `{count_flag} {count}`?"
 
 
-def _format_filters(filters: Sequence[tuple[str, str]]) -> str:
-    return ", ".join(f"{flag} {value!r}" for flag, value in filters)
+def _format_filters(filters: Sequence[tuple[str, str | None]]) -> str:
+    """Render the options the caller reports having been given.
+
+    A ``None`` value is a flag that takes no argument (``--no-include-shared``),
+    printed bare. Absent options never reach here: each call site drops them
+    while building its own list, because only the command knows which of its
+    options were typed.
+    """
+
+    return ", ".join(flag if value is None else f"{flag} {value!r}" for flag, value in filters)
 
 
 def _format_namespaces(known: list[tuple[str, int]]) -> str:
@@ -92,8 +100,9 @@ async def explain_empty_result(
     storage: _NamespaceLister,
     *,
     namespace: str | None,
-    filters: Sequence[tuple[str, str]],
-    count_flag: str,
+    filters: Sequence[tuple[str, str | None]],
+    count_flag: str | None,
+    namespace_label: str = "--namespace",
 ) -> str:
     """Return the message to print when a query returned nothing.
 
@@ -103,6 +112,15 @@ async def explain_empty_result(
     rather than as a verdict on any option. ``count_flag`` is that command's
     "how many results" option (``-k`` for search, ``-l`` for recall) — the
     flag ``-n`` is most often mistaken for.
+
+    Both of the last two are the *caller's* vocabulary, not this module's, and
+    a command whose namespace is derived rather than typed has to say so:
+    ``mm agent search`` merges its namespace out of ``--agent-id``,
+    ``--include-shared`` and ``--shared-namespace``, has no ``--namespace`` and
+    no ``-n``, so it passes a ``namespace_label`` naming what it resolved and
+    ``count_flag=None`` to drop a suggestion about a flag it does not accept.
+    Naming an option the command does not have turns a diagnostic into an
+    instruction the reader cannot follow.
     """
 
     from memtomem.models import InvalidNamespaceFilterError, NamespaceFilter
@@ -121,11 +139,13 @@ async def explain_empty_result(
         # "no known namespace matches" is the same question the query asked.
         if parsed is not None and not any(parsed.matches(name) for name, _ in known):
             lines = [
-                f"No results found: --namespace {namespace!r} matches none of the "
+                f"No results found: {namespace_label} {namespace!r} matches none of the "
                 "namespaces this index has.",
                 f"Indexed namespaces: {_format_namespaces(known)}",
             ]
-            suggestion = _count_flag_suggestion(namespace, count_flag)
+            suggestion = (
+                _count_flag_suggestion(namespace, count_flag) if count_flag is not None else None
+            )
             if suggestion is not None:
                 lines.append(suggestion)
             return "\n".join(lines)
