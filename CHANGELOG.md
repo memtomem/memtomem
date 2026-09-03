@@ -7,6 +7,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A namespace or scope glob with many wildcards no longer burns CPU.**
+  `NamespaceFilter.matches` / `ScopeFilter.matches` compiled the pattern to a
+  regex, rendering each `*` as a greedy `.*`; a chain of those against a value
+  that cannot match backtracks through every way of splitting the value
+  between them. 15 wildcards against a 14-character value took ~0.5s and 20
+  took over 8s — reachable by anyone who can pass a pattern (`mm search
+  --namespace`, a `scope` query parameter on the web API, a context-window
+  neighbour screen). The matcher now walks the value once per wildcard
+  instead. `LIKE` semantics are unchanged and still pinned against SQLite
+  itself, now including wildcard piles. (#2294)
+
 - **`mm web` starts watching files again after an embedding reset, instead of
   asking for a restart.** A degraded start — a broken or mismatched embedding —
   leaves auto-indexing off by design, because the indexer would crash on the

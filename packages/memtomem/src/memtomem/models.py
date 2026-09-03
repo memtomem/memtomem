@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -92,25 +91,50 @@ def _like_glob_matches(pattern: str, value: str) -> bool:
     falling back to a literal backslash.
     """
     sql_pattern = _ascii_fold(pattern.replace("_", r"\_").replace("*", "%"))
-    regex_parts: list[str] = []
+
+    # Tokenized and matched with the two-pointer LIKE algorithm rather than
+    # compiled to a regex. A regex renders every ``%`` as a greedy ``.*``, and
+    # a chain of those against a value that cannot match backtracks through
+    # every way of splitting the value between them: 20 wildcards took ~16s on
+    # a 14-character value, which a caller reaches by typing a query
+    # parameter. This walks the value once per wildcard instead — worst case
+    # O(len(pattern) x len(value)), with no input that blows up.
+    tokens: list[tuple[str, str]] = []  # ("any", "") | ("one", "") | ("lit", ch)
     i = 0
     while i < len(sql_pattern):
         ch = sql_pattern[i]
         if ch == "\\":
             if i + 1 >= len(sql_pattern):
                 return False
-            regex_parts.append(re.escape(sql_pattern[i + 1]))
+            tokens.append(("lit", sql_pattern[i + 1]))
             i += 2
             continue
-        if ch == "%":
-            regex_parts.append(".*")
-        elif ch == "_":
-            regex_parts.append(".")
-        else:
-            regex_parts.append(re.escape(ch))
+        tokens.append(("any", "") if ch == "%" else ("one", "") if ch == "_" else ("lit", ch))
         i += 1
-    regex = re.compile("".join(regex_parts), re.DOTALL)
-    return regex.fullmatch(_ascii_fold(value)) is not None
+
+    folded = _ascii_fold(value)
+    # ``star`` remembers the last ``%`` and ``mark`` the value position it was
+    # first credited with, so a dead end backtracks by giving that one wildcard
+    # a single extra character — never by re-splitting the earlier ones.
+    t = v = 0
+    star = mark = -1
+    while v < len(folded):
+        if t < len(tokens) and (
+            tokens[t][0] == "one" or (tokens[t][0] == "lit" and tokens[t][1] == folded[v])
+        ):
+            t += 1
+            v += 1
+        elif t < len(tokens) and tokens[t][0] == "any":
+            star = t
+            mark = v
+            t += 1
+        elif star != -1:
+            t = star + 1
+            mark += 1
+            v = mark
+        else:
+            return False
+    return all(token[0] == "any" for token in tokens[t:])
 
 
 def _ascii_fold(value: str) -> str:
