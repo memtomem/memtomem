@@ -554,6 +554,27 @@ def _agent_search_typed_filters(
     return typed
 
 
+def _agent_search_scope_note(agent_ns: str | None, ns_filter: str | None) -> str | None:
+    """What narrowed the search, for a reader who did not narrow it.
+
+    Dropping the wrong ``--namespace`` label must not drop the fact it
+    carried. Without ``--agent-id`` this verb scopes to the active session's
+    agent, so the invocation is bare and the empty-result inventory would
+    otherwise report a healthy index and no options at all — true of the
+    command line, and silent about the one thing that emptied the result.
+
+    ``None`` when there is nothing to disclose: an unresolved agent did not
+    narrow anything, and the "no agent resolved" note already owns that case.
+    """
+
+    if ns_filter is None or agent_ns is None:
+        return None
+    return (
+        f"This search was scoped to namespace '{ns_filter}', resolved from the "
+        "active session; pass --agent-id to scope it to a different agent."
+    )
+
+
 async def _run_agent_search(
     *,
     query: str,
@@ -598,6 +619,11 @@ async def _run_agent_search(
             # ``-n`` / ``-k`` mix-up hint along with it.
             namespace_label="the resolved agent namespace",
             count_flag=None,
+            # An explicit --agent-id is already in the filters below; only a
+            # session-derived scope is invisible on the command line.
+            scope_note=(
+                _agent_search_scope_note(agent_ns, ns_filter) if agent_id is None else None
+            ),
             typed_filters=_agent_search_typed_filters(
                 agent_id=agent_id,
                 include_shared=include_shared,

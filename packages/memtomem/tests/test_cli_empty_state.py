@@ -428,6 +428,45 @@ class TestTheCallerOwnsTheVocabulary:
         assert "did you mean" not in message
 
     @pytest.mark.asyncio
+    async def test_a_scope_note_is_appended_only_to_the_inventory_branch(self) -> None:
+        """The branch above already names the namespace, so appending there
+        would print it twice; an empty store has nothing to have been scoped
+        away from, so the index hint stays the whole answer."""
+        from memtomem.cli._empty_results import INDEX_HINT, explain_empty_result
+
+        note = "This search was scoped to namespace 'agent-runtime:coder,shared'."
+        common = dict(filters=[], count_flag=None, scope_note=note)
+
+        empty_store = await explain_empty_result(
+            self._storage([]), namespace="agent-runtime:coder,shared", **common
+        )
+        no_match = await explain_empty_result(
+            self._storage([("default", 7)]), namespace="agent-runtime:coder,shared", **common
+        )
+        inventory = await explain_empty_result(
+            self._storage([("default", 7)]), namespace=None, **common
+        )
+
+        assert empty_store == INDEX_HINT
+        assert note not in no_match
+        assert inventory.endswith(note)
+
+    @pytest.mark.asyncio
+    async def test_no_scope_note_leaves_the_message_untouched(self) -> None:
+        """``mm search`` and ``mm recall`` pass none, so their output cannot
+        move when a sibling verb starts passing one."""
+        from memtomem.cli._empty_results import explain_empty_result
+
+        message = await explain_empty_result(
+            self._storage([("default", 7)]),
+            namespace=None,
+            filters=[("--scope", "user")],
+            count_flag="-k",
+        )
+
+        assert message.endswith("Review those options, or rerun with fewer of them.")
+
+    @pytest.mark.asyncio
     async def test_a_valueless_flag_is_reported_bare(self) -> None:
         """``--no-include-shared`` takes no argument; rendering it as
         ``--no-include-shared ''`` would quote a value nobody typed."""

@@ -85,8 +85,12 @@ def merge_agent_namespace_filter(
     ``shared:<project>`` so the merge stays inside that project's shared
     scope (ADR-0028); the private leg is untouched.
 
-    ``None`` means "no filter": an unresolved agent searches everything
-    rather than falling back to an ambient namespace.
+    ``None`` means "no filter": an unresolved agent searches unpinned at
+    default visibility rather than falling back to an ambient namespace. That
+    is not "every namespace" — ``search.system_namespace_prefixes`` still hides
+    ``agent-runtime:`` and ``archive:`` from an unpinned query, so an
+    unresolved agent sees less of the store than the merge would have shown it,
+    not more.
 
     Shared by ``mem_agent_search``, ``mm agent search`` and the hidden
     ``mm agent debug-resolve``, whose whole job is to report what the MCP

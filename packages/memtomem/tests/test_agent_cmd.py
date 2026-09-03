@@ -634,7 +634,7 @@ class TestAgentSearch:
 
     def test_a_session_supplied_agent_is_not_reported_as_a_typed_option(self, monkeypatch):
         """``filters`` is the command line, and a session binding was not on
-        it — the "no agent resolved" note owns that axis instead."""
+        it. The scope it produced is disclosed separately, below."""
         comp = _search_components(namespaces=[("agent-runtime:coder", 3), ("shared", 1)])
         result, _comp = self._run(
             monkeypatch,
@@ -644,7 +644,54 @@ class TestAgentSearch:
         )
 
         assert result.exit_code == 0, result.output
-        assert "--agent-id" not in result.stderr
+        assert "This query included" not in result.stderr
+        assert "--agent-id 'coder'" not in result.stderr
+
+    def test_a_session_derived_scope_is_disclosed_on_an_empty_result(self, monkeypatch):
+        """Dropping the wrong label must not drop the fact it carried.
+
+        Nothing on this command line narrowed anything, so the inventory branch
+        reports a healthy index and no options — and says nothing about the
+        session binding that scoped the query to two namespaces out of three.
+        Before the vocabulary split this leaked out as a mislabelled
+        ``--namespace``; the label was wrong, the fact was not.
+        """
+        comp = _search_components(
+            namespaces=[("agent-runtime:coder", 3), ("shared", 1), ("default", 9)]
+        )
+        result, _comp = self._run(
+            monkeypatch,
+            ["agent", "search", "deploy"],
+            comp=comp,
+            session_ns="agent-runtime:coder",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "This search was scoped to namespace 'agent-runtime:coder,shared', "
+            "resolved from the active session" in result.stderr
+        )
+
+    def test_an_explicit_agent_id_is_not_restated_as_a_scope_note(self, monkeypatch):
+        """``--agent-id`` is already in the reported filters. Repeating the
+        merge would restate what the reader typed."""
+        comp = _search_components(namespaces=[("agent-runtime:planner", 3), ("shared", 1)])
+        result, _comp = self._run(
+            monkeypatch, ["agent", "search", "deploy", "-a", "planner"], comp=comp
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "resolved from the active session" not in result.stderr
+
+    def test_an_unresolved_agent_gets_no_scope_note(self, monkeypatch):
+        """Nothing was scoped away, so there is nothing to disclose — and the
+        "no agent resolved" note already owns that case."""
+        comp = _search_components(namespaces=[("default", 9)])
+        result, _comp = self._run(monkeypatch, ["agent", "search", "deploy"], comp=comp)
+
+        assert result.exit_code == 0, result.output
+        assert "This search was scoped to" not in result.stderr
+        assert "no agent resolved" in result.stderr
 
     def test_no_include_shared_is_reported_without_an_argument(self, monkeypatch):
         comp = _search_components(namespaces=[("agent-runtime:planner", 3)])

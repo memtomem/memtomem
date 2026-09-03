@@ -244,6 +244,7 @@ async def _search_with_components(
     typed_filters: Sequence[tuple[str, str | None]] = (),
     count_flag: str | None = None,
     namespace_label: str = "--namespace",
+    scope_note: str | None = None,
     rerank: bool | None = None,
 ) -> SearchPayload:
     """Run one search against already-open components and return its payload.
@@ -269,7 +270,9 @@ async def _search_with_components(
     ``mm search`` types ``--namespace``/``--scope`` directly, ``mm agent search``
     types neither and derives its namespace from ``--agent-id`` and friends. A
     caller that let this helper name the flags would report options the user
-    could not have typed, which is worse than saying nothing.
+    could not have typed, which is worse than saying nothing. ``scope_note`` is
+    the other half of that: a caller that narrowed the query on its own has to
+    say so, or dropping the wrong label drops the fact along with it.
     """
     from memtomem.cli._empty_results import explain_empty_result
 
@@ -306,6 +309,7 @@ async def _search_with_components(
             filters=typed_filters,
             count_flag=count_flag,
             namespace_label=namespace_label,
+            scope_note=scope_note,
         )
         if not results and fmt in ("table", "plain")
         else ""

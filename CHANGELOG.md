@@ -109,8 +109,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   only from an MCP client, so a multi-agent setup could not be inspected or
   reproduced from a shell — the surface most likely to be used while debugging
   one. The verb resolves the agent the same way the tool does, from `--agent-id`
-  or, failing that, the active session's binding, and searches every namespace
-  when neither names one. `--include-shared/--no-include-shared`, `--top-k` and
+  or, failing that, the active session's binding, and searches unpinned at
+  default visibility when neither names one — which is not every namespace,
+  since `search.system_namespace_prefixes` still hides `agent-runtime:` and
+  `archive:` from an unpinned query. `--include-shared/--no-include-shared`, `--top-k` and
   `--shared-namespace` mirror the tool's options; `--format` uses this CLI's
   vocabulary rather than the MCP tool's, so `--format json` stays the bare
   list a shell pipeline can feed to `mm agent share`. The merge rule itself is

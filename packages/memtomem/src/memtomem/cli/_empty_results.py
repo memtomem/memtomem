@@ -103,6 +103,7 @@ async def explain_empty_result(
     filters: Sequence[tuple[str, str | None]],
     count_flag: str | None,
     namespace_label: str = "--namespace",
+    scope_note: str | None = None,
 ) -> str:
     """Return the message to print when a query returned nothing.
 
@@ -121,6 +122,14 @@ async def explain_empty_result(
     ``count_flag=None`` to drop a suggestion about a flag it does not accept.
     Naming an option the command does not have turns a diagnostic into an
     instruction the reader cannot follow.
+
+    ``scope_note`` is for a command that narrowed the query without being told
+    to on the command line — ``mm agent search`` scopes to the active session's
+    agent when no ``--agent-id`` is given. The inventory branch otherwise
+    reports a healthy index and no options at all, which is true of the
+    invocation and hides the narrowing that actually emptied it. It is appended
+    only there: the branch above already names the namespace, and an empty
+    store has nothing to have been scoped away from.
     """
 
     from memtomem.models import InvalidNamespaceFilterError, NamespaceFilter
@@ -155,12 +164,13 @@ async def explain_empty_result(
         f"No results found. The index has {_plural(total, 'chunk')} across "
         f"{_plural(len(known), 'namespace')}"
     )
+    trailer = f" {scope_note}" if scope_note else ""
     if not filters:
         # Only what was observed. "nothing matched" would be a claim about
         # retrieval that ``-k 0`` falsifies — it returns nothing without
         # matching being involved at all.
-        return f"{inventory}, so the index is not the empty one."
+        return f"{inventory}, so the index is not the empty one.{trailer}"
     return (
         f"{inventory}. This query included: {_format_filters(filters)}. "
-        "Review those options, or rerun with fewer of them."
+        f"Review those options, or rerun with fewer of them.{trailer}"
     )
