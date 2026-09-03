@@ -321,6 +321,15 @@ class TestFilterMatchesSqlParity:
         NamespaceFilter(pattern="back\\slash"),
         NamespaceFilter(pattern="back\\\\slash"),
         NamespaceFilter(pattern="*\\"),
+        # Wildcard piles: the shapes a regex renders as a chain of greedy
+        # ``.*`` and backtracks through. Parity matters here for the same
+        # reason it matters anywhere — SQLite is the authority — but these
+        # rows are also what keep the linear matcher honest about consecutive
+        # and trailing wildcards.
+        NamespaceFilter(pattern="**"),
+        NamespaceFilter(pattern="*a*b*"),
+        NamespaceFilter(pattern="a***"),
+        NamespaceFilter(pattern="*" * 8 + "z"),
         NamespaceFilter(exclude_prefixes=("back\\",)),
         NamespaceFilter(exclude_prefixes=("archive:", "agent-runtime:")),
         NamespaceFilter(exclude_prefixes=("ARCHIVE:",)),
@@ -372,6 +381,25 @@ class TestFilterMatchesSqlParity:
         """``fnmatch`` would get this wrong; the SQL escapes ``_``."""
         assert NamespaceFilter(pattern="archive_*").matches("archive_x")
         assert not NamespaceFilter(pattern="archive_*").matches("archiveYx")
+
+    def test_a_wildcard_pile_is_answered_promptly(self):
+        """The matcher walks the value; it does not backtrack through it.
+
+        Rendered as a regex, every ``*`` becomes a greedy ``.*``, and a chain
+        of them against a value that cannot match tries every way of
+        splitting that value between them. Measured on the old
+        implementation: 15 wildcards against a 14-character value took ~0.5s,
+        20 took over 8s. The pattern arrives from a user — a ``--namespace``
+        flag, a ``scope`` query parameter — so that cost is theirs to choose.
+        """
+        import time
+
+        pattern = "*" * 40 + "z"
+        start = time.perf_counter()
+
+        assert NamespaceFilter(pattern=pattern).matches("agent-runtime:planner") is False
+
+        assert time.perf_counter() - start < 1.0
 
     def test_trailing_escape_matches_nothing(self):
         """SQLite has nothing to escape there and matches no row."""
