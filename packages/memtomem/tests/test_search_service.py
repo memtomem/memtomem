@@ -7,10 +7,14 @@ from stats — the parts every surface inherits.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
+from memtomem.config import TargetScope
+from memtomem.models import InvalidFilterSyntaxError, InvalidScopeFilterError
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.services.search_service import (
     InvalidRrfWeightError,
@@ -20,6 +24,7 @@ from memtomem.services.search_service import (
     parse_as_of_bound,
     rrf_weights_from,
     run_search,
+    validate_scope_vocabulary,
 )
 
 # 2026-01-01T00:00:00Z, the lower bound ``as_of="2026-01-01"`` maps to.
@@ -585,3 +590,130 @@ async def test_the_hint_reads_the_stats_snapshot_not_live_storage():
 
     assert hints == [dense_degraded_hint(captured)]
     assert "DB stored none (0d)" in hints[0]
+
+
+class TestValidateScopeVocabulary:
+    """The closed ADR-0011 tier alphabet, enforced once for every surface.
+
+    ``ScopeFilter.parse`` stays permissive on purpose — callers depend on an
+    unrecognized tier reaching no rows rather than raising — so the public
+    vocabulary is checked here instead, and the read surfaces call this
+    before they open anything.
+    """
+
+    @pytest.mark.parametrize("tier", sorted(get_args(TargetScope)))
+    def test_every_tier_in_the_literal_is_accepted(self, tier: str) -> None:
+        """Read off ``TargetScope``, so a tier added there needs no edit here
+        and one dropped from the allowed set fails this."""
+        assert validate_scope_vocabulary(tier) == tier
+
+    @pytest.mark.parametrize("value", ["user,project_local", "project_shared,project_local,user"])
+    def test_a_comma_list_of_tiers_is_accepted_unchanged(self, value: str) -> None:
+        assert validate_scope_vocabulary(value) == value
+
+    @pytest.mark.parametrize("value", ["project_*", "*", "user*", "proj*"])
+    def test_a_glob_that_selects_a_tier_is_accepted(self, value: str) -> None:
+        """A glob is a pattern, not a name: it never equals a tier and must
+        not be checked as though it should."""
+        assert validate_scope_vocabulary(value) == value
+
+    @pytest.mark.parametrize("value", ["projet_*", "*_locale", "user_*"])
+    def test_a_glob_that_selects_no_tier_is_refused(self, value: str) -> None:
+        """The alphabet is finite, so "does this select anything" is
+        answerable — and ``projet_*`` is the same typo as ``projet_local``
+        wearing a star. Left through, it reaches the SQL and returns nothing,
+        which is the ambiguity this validator exists to remove."""
+        with pytest.raises(InvalidScopeFilterError) as exc:
+            validate_scope_vocabulary(value)
+
+        assert "matches no scope tier" in str(exc.value)
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_nothing_to_filter_by_normalizes_to_none(self, value: str | None) -> None:
+        """``scope=`` from a client that always emits its declared params is
+        "unset", not a filter matching nothing: unnormalized it parses to
+        ``scopes=("",)`` and the SQL emits ``scope IN ('')``."""
+        assert validate_scope_vocabulary(value) is None
+
+    def test_a_padded_value_comes_back_stripped(self) -> None:
+        """Surfaces forward what this returns, so the value they validated and
+        the value they search have to be the same one."""
+        assert validate_scope_vocabulary("  user  ") == "user"
+
+    @pytest.mark.parametrize(
+        ("value", "named"),
+        [
+            ("User", "'User'"),
+            ("projet_local", "'projet_local'"),
+            ("user,projct_shared", "'projct_shared'"),
+        ],
+    )
+    def test_a_value_outside_the_vocabulary_is_refused_by_name(
+        self, value: str, named: str
+    ) -> None:
+        with pytest.raises(InvalidScopeFilterError) as exc:
+            validate_scope_vocabulary(value)
+
+        assert named in str(exc.value)
+        assert "is not a scope tier" in str(exc.value)
+
+    def test_a_comma_glob_mix_keeps_its_own_reason(self) -> None:
+        """Validation runs after the parse, so the syntax error wins.
+
+        Checking the vocabulary first would answer ``project_*,user`` with
+        "matches no scope tier" — true of the string, useless to the person
+        who typed it, and it hides the one thing they can act on.
+        """
+        with pytest.raises(InvalidScopeFilterError) as exc:
+            validate_scope_vocabulary("project_*,user")
+
+        assert "mixes a comma list with a glob" in str(exc.value)
+        assert "matches no scope tier" not in str(exc.value)
+
+    def test_a_wildcard_pile_up_is_answered_promptly(self) -> None:
+        """Matching a glob against the vocabulary must not be a CPU sink.
+
+        The value arrives in a query parameter, so its cost is the caller's
+        to choose. Rendered as a regex, each ``%`` becomes a greedy ``.*``
+        and a failing chain of them backtracks through every split of the
+        value: 20 wildcards against a 14-character tier took ~16 seconds.
+        """
+        start = time.perf_counter()
+        with pytest.raises(InvalidScopeFilterError):
+            validate_scope_vocabulary("*" * 40 + "z")
+
+        assert time.perf_counter() - start < 1.0
+
+    def test_the_error_is_a_filter_syntax_error(self) -> None:
+        """Surfaces catch the parent type; this failure has to reach the same
+        handler the comma/glob mix does."""
+        with pytest.raises(InvalidFilterSyntaxError):
+            validate_scope_vocabulary("nope")
+
+
+@pytest.mark.asyncio
+async def test_run_search_refuses_a_scope_no_surface_would_have_accepted():
+    """The core is the backstop for callers that skip a surface.
+
+    Every user-facing surface validates ahead of initialization so it can
+    word the failure in its own idiom, but an in-process caller reaching
+    ``run_search`` directly would otherwise hand the pipeline a scope the
+    HTTP, MCP and CLI paths all refuse.
+    """
+    pipeline = StubPipeline()
+
+    with pytest.raises(InvalidScopeFilterError):
+        await _run(pipeline, scope="User")
+
+    assert pipeline.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_search_normalizes_the_scope_it_forwards():
+    """A padded value reaching the core directly is stripped there too —
+    otherwise the pipeline sees ``" user "`` and the SQL matches nothing."""
+    pipeline = StubPipeline()
+
+    await _run(pipeline, scope="  user  ")
+
+    assert pipeline.calls[-1]["scope"] == "user"

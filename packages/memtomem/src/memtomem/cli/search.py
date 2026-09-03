@@ -147,6 +147,7 @@ async def _search(
     from memtomem.services.search_service import (
         InvalidTemporalBoundError,
         parse_as_of_bound,
+        validate_scope_vocabulary,
     )
 
     # Validate before any component setup: a malformed bound must not pay for
@@ -170,13 +171,21 @@ async def _search(
             "cannot be combined. Use either '-n work,personal' or '-n proj:*', "
             "and run one query per pattern when you need several."
         ) from None
+    # Two failures reach this catch now — a comma/glob mix and a value that is
+    # not a tier — so the message has to be the exception's own. The previous
+    # wording asserted the mix unconditionally and would have told someone who
+    # typed ``--scope User`` to stop combining spellings they never combined.
+    # ``validate_scope_vocabulary`` also normalizes, so the searched value is
+    # kept apart from the typed one: ``run_search`` gets what was validated,
+    # while the error above and the empty-result diagnostic below still quote
+    # the command line as the user wrote it — ``--scope ""`` normalizes to no
+    # filter at all, and a diagnostic that dropped it would leave the caller
+    # looking for the option they actually typed.
     try:
-        ScopeFilter.parse(scope)
-    except InvalidScopeFilterError:
-        raise click.ClickException(
-            f"invalid --scope value '{scope}': a comma list and a glob cannot be "
-            "combined. Use either '--scope user,project_local' or '--scope project_*'."
-        ) from None
+        effective_scope = validate_scope_vocabulary(scope)
+        ScopeFilter.parse(effective_scope)
+    except InvalidScopeFilterError as e:
+        raise click.ClickException(f"invalid --scope value '{scope}': {e}") from None
 
     async with cli_components() as comp:
         project_context_root = _resolve_project_context_root_from_cwd(comp)
@@ -189,7 +198,7 @@ async def _search(
             namespace=namespace,
             current_namespace=None,
             as_of=as_of,
-            scope=scope,
+            scope=effective_scope,
             project_context_root=project_context_root,
             rerank=rerank,
             origin="cli",

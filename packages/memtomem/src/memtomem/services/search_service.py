@@ -22,9 +22,11 @@ map to HTTP status codes).
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 from memtomem.chunking.markdown import _parse_validity_bound
+from memtomem.config import TargetScope
+from memtomem.models import InvalidScopeFilterError, ScopeFilter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -80,6 +82,70 @@ def parse_as_of_bound(as_of: str | None) -> int | None:
 # So this is a rendering limit, not a parser limit: skip the suggestion rather
 # than print one that selects a different set than the count reported.
 _UNQUOTABLE_IN_GLOB = frozenset('%*\\"')
+
+
+#: The scope tier vocabulary, read off the ADR-0010 ``TargetScope`` literal
+#: so a tier added there is accepted here without a second edit.
+_SCOPE_TIERS = frozenset(get_args(TargetScope))
+
+
+def validate_scope_vocabulary(scope: str | None) -> str | None:
+    """Check a ``scope`` argument against the closed ADR-0011 tier vocabulary.
+
+    ``ScopeFilter.parse`` deliberately accepts any exact string: it is a
+    predicate parser, mirroring the *open* namespace alphabet, and several
+    callers depend on an unrecognized tier reaching no rows rather than
+    raising (portable eval cases, the CLI's empty-state diagnostics). The
+    public vocabulary is a different question, and this is where it is
+    answered — before a surface opens anything — so ``scope=User`` is the
+    same answer over HTTP, MCP and the CLI instead of a 422 on one and a
+    successful empty search on the others. The three search surfaces call
+    this; recall deliberately does not (see :meth:`ScopeFilter.parse`).
+
+    A glob is checked too, against the same vocabulary: the alphabet is
+    finite, so "does this pattern select any tier at all" is answerable, and
+    ``projet_*`` is the same typo as ``projet_local`` wearing a star. What a
+    glob is *not* checked for is naming a tier exactly — ``project_*`` is a
+    perfectly good pattern and no tier's name.
+
+    Returns:
+        The value with surrounding whitespace stripped, or ``None`` when
+        there is nothing to filter by (``None`` or blank). Surfaces must
+        forward what comes back, not the original: validating a stripped
+        copy while passing the padded value on would let ``" user "``
+        through the check and into ``scope IN (' user ')``.
+
+    Raises:
+        InvalidScopeFilterError: the value mixes a comma list with a glob
+            (raised by the parse this delegates to), an exact value or a
+            member of a comma list is not a scope tier, or a glob selects
+            no tier at all.
+    """
+    if scope is None:
+        return None
+    scope = scope.strip()
+    if not scope:
+        return None
+    # Parse first: a comma/glob mix is a syntax error, and it has an
+    # actionable message of its own. Checking the vocabulary ahead of the
+    # parse would answer ``project_*,user`` with "matches no scope tier",
+    # which is true of the string and useless to the person who typed it.
+    parsed = ScopeFilter.parse(scope)
+    if parsed is not None and parsed.pattern:
+        if not any(parsed.matches(tier) for tier in _SCOPE_TIERS):
+            raise InvalidScopeFilterError(
+                f"scope {scope!r} matches no scope tier. "
+                f"Patterns are matched against {', '.join(sorted(_SCOPE_TIERS))}."
+            )
+        return scope
+    unknown = sorted(set(parsed.scopes if parsed else ()) - _SCOPE_TIERS)
+    if unknown:
+        raise InvalidScopeFilterError(
+            f"scope {', '.join(repr(value) for value in unknown)} is not a scope tier. "
+            f"Use one or more of {', '.join(sorted(_SCOPE_TIERS))}, "
+            'or a glob ("project_*").'
+        )
+    return scope
 
 
 class InvalidRrfWeightError(ValueError):
@@ -267,10 +333,20 @@ async def run_search(
         InvalidRrfWeightError: a weight is negative or non-finite, or both
             weights are zero.
         InvalidFilterSyntaxError: ``namespace`` or ``scope`` mixes a comma
-            list with a glob. Raised from the pipeline's parse, so callers
-            that validate up front see it before this function is reached.
+            list with a glob (raised from the pipeline's parse), or ``scope``
+            names something outside the tier vocabulary — an unknown exact
+            value or a glob selecting no tier — raised here by
+            :func:`validate_scope_vocabulary`. The three search surfaces
+            validate up front, so they see all of these before reaching this
+            function; the check here is the backstop for in-process callers.
     """
     as_of_unix = parse_as_of_bound(as_of)
+    # Backstop for in-process callers. Every user-facing surface validates
+    # ahead of initialization, so it can fail before opening anything and
+    # word the message in its own idiom; this catches a caller that reaches
+    # the core directly and would otherwise hand the pipeline a scope no
+    # surface would have accepted.
+    scope = validate_scope_vocabulary(scope)
 
     effective_ns = namespace or current_namespace
 

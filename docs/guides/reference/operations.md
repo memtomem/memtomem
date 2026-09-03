@@ -40,8 +40,24 @@ is ready and `503` with `startup_unavailable` while required startup components
 are unavailable.
 
 Search requests support exact source matching (`source_exact`), `chunk_type`,
-and creation bounds (`created_from`, `created_before`). Timestamps must include
-a timezone; invalid or reversed ranges return `422`. Export accepts a namespace
+creation bounds (`created_from`, `created_before`) and the ADR-0011 tier filter
+(`scope` — a value, a comma list or a glob, matching `mem_search(scope=)` and
+`mm search --scope`). Timestamps must include a timezone; invalid or reversed
+ranges return `422`, as does a `scope` or `namespace` that mixes a comma list
+with a glob, or a `scope` naming something other than `user`,
+`project_shared` or `project_local`, or a glob selecting none of them — the
+tier check is shared with `mem_search` and `mm search --scope`, so the same
+spelling is refused on all three search surfaces (recall takes its `scope`
+through the parser directly and is unaffected). An empty `scope=` / `namespace=` is read as unset, so a client that
+always emits its declared parameters gets the default merge rather than a
+filter that matches nothing.
+
+`source_exact` and `chunk_type` are deliberately web-API-only. The nine core
+MCP tool descriptions are at their character budget (`test_core_tool_descriptions`),
+and every `mem_search` parameter costs roughly 200 characters that every
+request in every session pays for, so these two filters are not worth that
+per-call price for the demand they have seen. The HTTP API is the surface for
+them; see issue #2196 for the decision and what would reopen it. Export accepts a namespace
 filter. Initial indexing reports `success`, `partial`, or `failed` so automation
 can distinguish a usable partial index from a clean completion and a total
 failure.

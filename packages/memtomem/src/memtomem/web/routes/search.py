@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
+from memtomem.services.search_service import validate_scope_vocabulary
 from memtomem.web.deps import get_project_context_root, get_search_pipeline
 from memtomem.web.schemas.core import RetrievalStatsOut, to_result_out
 from memtomem.web.schemas.search import SearchResponse
@@ -28,6 +29,16 @@ async def search(
     created_before: datetime | None = Query(None),
     tag_filter: str | None = Query(None),
     namespace: str | None = Query(None),
+    scope: str | None = Query(
+        None,
+        description=(
+            "ADR-0011 tier filter — a value, a comma list (user,project_local) "
+            "or a glob (project_*), not both. Omitted, the default merge "
+            "applies: inside a project, user plus that project's tiers; "
+            "outside one, user only. project_shared from outside a project "
+            "is a deliberate cross-project search"
+        ),
+    ),
     context_window: int = Query(
         0,
         ge=0,
@@ -58,12 +69,27 @@ async def search(
     if created_from is not None and created_before is not None and created_from >= created_before:
         raise HTTPException(status_code=422, detail="created_from must be before created_before")
 
+    # An empty query param is a caller that emitted its declared params without
+    # filling them in — "unset", not "a filter that matches nothing". Neither
+    # parser reads it that way: ``parse("")`` yields ``scopes=("",)``, which the
+    # SQL emits as ``scope IN ('')`` and answers 200 with zero rows, so the
+    # normalization has to happen before the parse. ``scope`` gets its own
+    # normalization from the shared validator below; ``namespace`` is left
+    # unstripped because its alphabet is open, so leading or trailing space
+    # could belong to a namespace someone actually indexed.
+    namespace = namespace or None
+
     # Parse the namespace here rather than letting the pipeline do it: the
     # ``except Exception`` around the search call below turns anything raised
     # there into a 500, and a filter the caller spelled wrong is a request
     # problem, not a server fault.
+    # ``validate_scope_vocabulary`` is the surface-independent half: the same
+    # spelling has to mean the same thing here, in ``mem_search`` and in
+    # ``mm search``, and it returns the value the pipeline should receive.
     try:
         NamespaceFilter.parse(namespace)
+        scope = validate_scope_vocabulary(scope)
+        ScopeFilter.parse(scope)
     except InvalidFilterSyntaxError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -89,6 +115,7 @@ async def search(
             created_before=created_before,
             tag_filter=tag_filter,
             namespace=namespace,
+            scope=scope,
             context_window=context_window if context_window > 0 else None,
             project_context_root=project_context_root,
             origin="web",

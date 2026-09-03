@@ -2947,6 +2947,10 @@ function _buildSearchParams(topK) {
   if (q) params.set('q', q);
   if (tf) params.set('tag_filter', tf);
   if (nsFilter) params.set('namespace', nsFilter);
+  // Scope is a filter, never an axis: an empty value means "let the server
+  // apply the ADR-0011 default merge", which is not the same as "user".
+  const scopeFilter = qs('scope-filter')?.value || '';
+  if (scopeFilter) params.set('scope', scopeFilter);
   const ctxWin = parseInt((qs('context-window') || {}).value || '0', 10);
   if (ctxWin > 0) params.set('context_window', ctxWin);
   const selectedSources = _getSelectedSourceFilters();
@@ -2966,6 +2970,8 @@ function _renderActiveFilters() {
   const chips = [];
   const ns = qs('ns-filter').value;
   if (ns) chips.push({ label: `ns: ${ns}`, clear: () => { qs('ns-filter').value = ''; } });
+  const scope = qs('scope-filter')?.value || '';
+  if (scope) chips.push({ label: `scope: ${scope}`, clear: () => { qs('scope-filter').value = ''; } });
   const tag = qs('tag-filter').value.trim();
   if (tag) chips.push({ label: `tag: ${tag}`, clear: () => { qs('tag-filter').value = ''; } });
   const ct = qs('chunk-type-filter').value;
@@ -3003,6 +3009,7 @@ function _renderActiveFilters() {
   qs('clear-search-filters').addEventListener('click', e => {
     e.stopPropagation();
     qs('ns-filter').value = '';
+    if (qs('scope-filter')) qs('scope-filter').value = '';
     qs('tag-filter').value = '';
     qs('chunk-type-filter').value = '';
     _clearSourceFilters();
@@ -3022,11 +3029,12 @@ function _renderActiveFilters() {
 }
 
 // Count of currently-applied search filters. Kept in sync with the chip
-// set built by _renderActiveFilters above \u2014 same four categories so the
+// set built by _renderActiveFilters above \u2014 same categories so the
 // toggle-button badge and the chip row never disagree.
 function _countActiveFilters() {
   let n = 0;
   if (qs('ns-filter')?.value) n++;
+  if (qs('scope-filter')?.value) n++;
   if (qs('tag-filter')?.value.trim()) n++;
   if (qs('chunk-type-filter')?.value) n++;
   if (_getSelectedSourceFilters().length) n++;
@@ -7593,6 +7601,11 @@ qs('chunk-type-filter').addEventListener('change', () => {
   if (_hasSearchAxis()) doSearch();
 });
 qs('ns-filter').addEventListener('change', () => {
+  _updateFilterCountBadge();
+  renderResults(STATE.lastResults);
+  if (_hasSearchAxis()) doSearch();
+});
+qs('scope-filter')?.addEventListener('change', () => {
   _updateFilterCountBadge();
   renderResults(STATE.lastResults);
   if (_hasSearchAxis()) doSearch();

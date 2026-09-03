@@ -270,10 +270,16 @@ class TestEmptyResultNamesTheFilter:
         assert result.exit_code == 0, result.output
         assert result.output.strip() == "[]"
 
-    def test_an_empty_scope_is_reported_because_it_really_filters(self, monkeypatch) -> None:
-        """``ScopeFilter.parse("")`` is ``scopes=('',)`` and ``run_search``
-        passes scope through unnormalized, so an empty ``--scope`` empties a
-        healthy store — exactly the case that must not print the index hint."""
+    def test_an_empty_scope_is_reported_as_typed(self, monkeypatch) -> None:
+        """The diagnostic quotes the command line, not the searched value.
+
+        ``mm search`` normalizes ``--scope ""`` to no filter now (#2193), so
+        the empty scope is no longer what emptied the result — but someone
+        reading the diagnostic is looking for the options they typed, and one
+        that silently disappeared is one they cannot account for. Recall,
+        which does not normalize, still has the filtering version of this:
+        see ``test_recall_reports_an_empty_scope_too``.
+        """
         result = self._search(monkeypatch, ["--scope", "", "hello"], namespaces=[("default", 7)])
 
         assert "This query included: --scope ''" in result.stderr
@@ -330,10 +336,10 @@ class TestEmptyResultNamesTheFilter:
         Asserting which option is responsible is what could not be kept
         honest across every option and value."""
         result = self._search(
-            monkeypatch, ["-t", "x", "--scope", "y", "hello"], namespaces=[("default", 7)]
+            monkeypatch, ["-t", "x", "--scope", "user", "hello"], namespaces=[("default", 7)]
         )
 
-        assert "This query included: --tag-filter 'x', --scope 'y'." in result.stderr
+        assert "This query included: --tag-filter 'x', --scope 'user'." in result.stderr
         assert "excluding matches" not in result.stderr
         assert "responsible" not in result.stderr
 

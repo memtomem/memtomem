@@ -171,7 +171,15 @@ class InvalidNamespaceFilterError(InvalidFilterSyntaxError):
 
 
 class InvalidScopeFilterError(InvalidFilterSyntaxError):
-    """The ``scope`` argument mixes a comma list with a glob."""
+    """The ``scope`` argument cannot be honored as written.
+
+    Two failures, raised from two places: :meth:`ScopeFilter.parse` raises
+    it for a comma/glob mix, which no single filter can express; and
+    :func:`memtomem.services.search_service.validate_scope_vocabulary`
+    raises it for a value outside the ADR-0011 tier vocabulary. Surfaces
+    that render this must use the exception's own message rather than
+    assuming the mix.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,12 +307,20 @@ class ScopeFilter:
         it as an opt-in — so collapsing it here would change nothing and
         would only make those two guards look like dead code.
         ``"project_*"`` parses as a glob. Comma
-        list and bare exact match work the same as for namespaces. The
-        scope alphabet is small (3 values), so this parser deliberately
-        does NOT validate against ``user`` / ``project_shared`` /
-        ``project_local`` — invalid scope strings produce an empty
-        result set rather than an error, mirroring the namespace parser
-        which also accepts arbitrary strings.
+        list and bare exact match work the same as for namespaces. Parsing
+        and vocabulary are deliberately separate concerns: this parser
+        builds a predicate out of whatever it is handed and does NOT check
+        the value against ``user`` / ``project_shared`` / ``project_local``,
+        so callers who need an unrecognized tier to reach no rows rather
+        than raise still get that (portable eval cases, the CLI's
+        empty-state diagnostics). The *public* vocabulary is enforced one
+        level up, in
+        :func:`memtomem.services.search_service.validate_scope_vocabulary`,
+        which the three *search* surfaces (``GET /api/search``,
+        ``mem_search``, ``mm search``) call before they open anything — so a
+        misspelled tier is the same answer on HTTP, MCP and the CLI. Recall
+        does not: it parses ``scope`` here directly, and an unrecognized tier
+        stays an empty result set there.
 
         Mixing a comma list with a glob is rejected for the same reason as
         in :meth:`NamespaceFilter.parse` — the two spellings map to

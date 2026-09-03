@@ -43,6 +43,7 @@ from memtomem.services.search_service import (
     parse_as_of_bound,
     rrf_weights_from,
     run_search,
+    validate_scope_vocabulary,
 )
 from memtomem.config import MAX_CONTEXT_WINDOW_CHUNKS
 from memtomem.server.validation import MAX_QUERY_LENGTH
@@ -138,6 +139,12 @@ async def mem_search(
         parse_as_of_bound(as_of)
         rrf_weights_from(bm25_weight, dense_weight)
         NamespaceFilter.parse(namespace)
+        # The tier vocabulary is closed, so a misspelled tier is answerable
+        # here rather than served as an empty result set — and answered the
+        # same way the web route and ``mm search`` answer it. The normalized
+        # value is what the core must receive: validating a stripped copy and
+        # forwarding the padded one would put ``" user "`` into the SQL.
+        scope = validate_scope_vocabulary(scope)
         ScopeFilter.parse(scope)
     except (
         InvalidTemporalBoundError,
