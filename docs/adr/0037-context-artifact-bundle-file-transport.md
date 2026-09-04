@@ -87,27 +87,28 @@ trigger are about. §10 is what keeps that true.
 ```
 
 **Normative schema.** Every listed key is required and none may be null except
-`source.wiki_commit` (40 lowercase hex or null) and `provenance` (always null in
-v1). `format` is the exact literal; `version` is the integer 1; `kind` is one of
-`agents` / `commands` / `skills`; `name` satisfies the store's artifact-name
-rules **and**, because it becomes a path segment on the receiver, the same
-portability rules the path grammar below applies — no trailing dot, not a
-reserved device word, and not a forbidden component — and is refused outright if
-it has the shape of an internal staging or move-aside directory, which the name validator accepts today
-but every discovery walk skips, so such an artifact would land invisible to
-`mm context status` and unusable as a skill. Both rules apply to a `--as`
-landing name as well; `source.tier` is one of the three tiers; `exported_at` is an RFC 3339
-UTC timestamp with a `Z` suffix; `versions_included` is a boolean that must
-agree with whether the payload actually contains a version surface, and is
+`source.wiki_commit` (40 lowercase hex or null) and `provenance` (always null
+in v1). `format` is the exact literal; `version` is the integer 1; `kind` is
+one of `agents` / `commands` / `skills`; `name` satisfies the store's
+artifact-name rules **and**, because it becomes a path segment on the
+receiver, the same portability rules the path grammar below applies — no
+trailing dot, not a reserved device word, and not a forbidden component — and
+is refused outright if it has the shape of an internal staging or move-aside
+directory, which the name validator accepts today but every discovery walk
+skips, so such an artifact would land invisible to `mm context status` and
+unusable as a skill. Both rules apply to a `--as` landing name as well;
+`source.tier` is one of the three tiers; `exported_at` is an RFC 3339 UTC
+timestamp with a `Z` suffix; `versions_included` is a boolean that must agree
+with whether the payload actually contains a version surface, and is
 re-derived on receipt rather than trusted for anything but a mismatch refusal;
 every digest is exactly 64 lowercase hex characters. `files` is sorted by
 `path` and `dirs` likewise, and an unsorted array is refused rather than
 re-sorted — a reader that re-sorts would accept two byte-different bundles as
 the same artifact. Unknown **top-level** keys are tolerated so a later version
 can add an informational field; unknown keys **inside `source` and inside a
-`files` entry** are refused, because those are the security-relevant units and a
-future behavior-carrying field must not be silently ignored by an older reader.
-`source` has exactly the two keys `tier` and `wiki_commit`.
+`files` entry** are refused, because those are the security-relevant units and
+a future behavior-carrying field must not be silently ignored by an older
+reader. `source` has exactly the two keys `tier` and `wiki_commit`.
 
 `dirs` lists directories that contain no files anywhere beneath them. Without
 it, the payload writer — which creates only the parents of files it writes —
@@ -153,20 +154,20 @@ equality: file `A` and file `a/b` are distinct as written, yet on a
 case-insensitive filesystem they demand that `A` be a file and a directory at
 once. These are exactly the shapes that cannot be materialized consistently.
 
-**`payload_sha256` binds the structure**, not just the contents. It is
-SHA-256 over the byte string formed by the domain-separation line
+**`payload_sha256` binds the structure**, not just the contents. It is SHA-256
+over the byte string formed by the domain-separation line
 `memtomem-context-artifact-bundle/v1\n`, then the identity line
 `i\n<kind>\n<name>\n` — both fields are inside the digest because both steer
 validation, the destination, and the manifest rewrite, so leaving them out
 would let a tampered bundle change where bytes land while every digest still
-verified — then, for each `files` entry in array order, `f\n<path>\n<exec as 0 or 1>\n<sha256>\n`, then for each `dirs` entry
-`d\n<path>\n`, with every path encoded as UTF-8 and every field terminated by
-a newline that the grammar above forbids inside a path — so the framing is
-unambiguous without a length prefix. A reordered, added, removed, renamed, or
-mode-flipped entry therefore fails the bundle digest even when every surviving
-per-file content digest still matches. It is deliberately not
-`skill_payload.payload_digest`, which is the ADR-0030 §10 content-only tree
-digest and would notice none of those.
+verified — then, for each `files` entry in array order, `f\n<path>\n<exec as 0
+or 1>\n<sha256>\n`, then for each `dirs` entry `d\n<path>\n`, with every path
+encoded as UTF-8 and every field terminated by a newline that the grammar
+above forbids inside a path — so the framing is unambiguous without a length
+prefix. A reordered, added, removed, renamed, or mode-flipped entry therefore
+fails the bundle digest even when every surviving per-file content digest
+still matches. It is deliberately not `skill_payload.payload_digest`, which is
+the ADR-0030 §10 content-only tree digest and would notice none of those.
 
 A bundle is always dir-layout. A legacy flat source (`agents/foo.md`) exports as
 the single entry `_DIR_MANIFEST[kind]` (`agent.md`), so receipt never has to
@@ -255,24 +256,26 @@ tier, for any recipient including oneself. The remediation is the same one
 transfer prints — remove the secret, or drop the snapshot that carries it.
 
 **The source walk is descriptor-based and strict.** Enumeration `lstat`s each
-entry, and each file is then opened no-follow and non-blocking and verified with
-`fstat` on that descriptor, with both the bytes and the `exec` bit taken from it.
-Walking with `lstat` and then reading by path would let an external writer swap a
-vetted regular file for a symlink or a FIFO between the two, escaping the
-artifact or hanging the export while it holds the canonical lock, and would let
-`exec` come from a different inode than the content. A symlink anywhere in the
-artifact — including the artifact root itself — is refused by name rather than
-skipped, because a skipped link is a silent drop the sender never learns about
-and the mcp-servers copy adapter already refuses symlinked canonicals for the
-same scanned-bytes-equal-promoted-bytes reason. The copier-reserved names
-(`.git`, `.DS_Store`, `__pycache__`) and anything named `.bak` — a file or a
-whole subtree — are excluded at **every** depth, matching the filtered tree walk
-the wiki install and dirty-check paths share, rather than `mm context copy`,
-whose `shutil.copytree` carries them. Exclusion is decided **before** the type
+entry, and each file is then opened no-follow and non-blocking and verified
+with `fstat` on that descriptor, with both the bytes and the `exec` bit taken
+from it. Walking with `lstat` and then reading by path would let an external
+writer swap a vetted regular file for a symlink or a FIFO between the two,
+escaping the artifact or hanging the export while it holds the canonical lock,
+and would let `exec` come from a different inode than the content. A symlink
+at any path the bundle would otherwise carry — including the artifact root
+itself — is refused by name rather than skipped, because a skipped link is a
+silent drop the sender never learns about and the mcp-servers copy adapter
+already refuses symlinked canonicals for the same
+scanned-bytes-equal-promoted-bytes reason. The copier-reserved names (`.git`,
+`.DS_Store`, `__pycache__`) and anything named `.bak` — a file or a whole
+subtree — are excluded at **every** depth, matching the filtered tree walk the
+wiki install and dirty-check paths share, rather than `mm context copy`, whose
+`shutil.copytree` carries them. Exclusion is decided **before** the type
 check, so an excluded name that happens to be a symlink is skipped as excluded
-rather than refused as a link; only a link at a path the bundle would otherwise
-have carried is an error. Every exclusion is listed in the export summary. Enumeration is fail-closed:
-an unreadable entry aborts the export instead of shrinking the payload.
+rather than refused as a link; only a link at a path the bundle would
+otherwise have carried is an error. Every exclusion is listed in the export
+summary. Enumeration is fail-closed: an unreadable entry aborts the export
+instead of shrinking the payload.
 
 **Destination safety.** `--out` is resolved and refused if it lands inside the
 source artifact directory: the artifact's own bytes have already been captured
@@ -360,9 +363,6 @@ created exclusively and never merged into a leftover of the same name, with a
 fresh suffix on collision. It must share the destination's parent directory: the
 native no-replace rename refuses a cross-parent promote with `EXDEV` by design,
 so a staging location outside the store cannot be promoted atomically at all.
-An earlier revision of this ADR put staging beside the store to dodge a
-discovery problem and would not have promoted.
-
 That discovery problem is real and is closed here instead of dodged. The skills
 lister and the status walk already consult the internal-artifact predicate, but
 the **agent and command canonical lister does not** — it accepts any directory
@@ -502,12 +502,11 @@ snapshot declaring `name: victim`, and a later `mm context sync --label v1`
 would write `victim`'s runtime target.
 
 ADR-0023 §7 accepts the same mechanism for a renamed local copy — "restoring a
-pre-rename version resurrects the old name, which is versioning semantics, not a
-transfer bug" — and an earlier revision of this ADR inherited that precedent.
-That inheritance was wrong. A copy's snapshots are bytes this machine already
-had; §5 defines a bundle as foreign ingress, and the same mechanism applied to
-attacker-chosen bytes is a delayed name-injection rather than a surprising
-restore.
+pre-rename version resurrects the old name, which is versioning semantics, not
+a transfer bug" — but that precedent does not carry here. A copy's snapshots
+are bytes this machine already had; §5 defines a bundle as foreign ingress,
+and the same mechanism applied to attacker-chosen bytes is a delayed
+name-injection rather than a surprising restore.
 
 So for `agents` and `commands`, **every snapshot's parsed name must equal the
 artifact identity**, checked on export against the source name and on receipt
@@ -522,13 +521,14 @@ derives the name from the file path it was handed. A snapshot parsed with its
 own path (`versions/v1.md`) would resolve to `v1`, which is nobody's identity,
 so snapshots are parsed **as the working manifest they would become**: the
 parser is handed the artifact's manifest path and layout, not the snapshot's.
-An omitted `name:` therefore resolves to the artifact identity and passes, which
-is correct — such a snapshot carries no name to inject. Second, because that
-makes an omitted-name snapshot pass under any landing name, the rename case gets
-its own rule rather than relying on the parse: **a renamed import that carries
-versions is refused outright** for agents and commands, and the message says the sender must re-export
-with `--no-versions`, since dropping history is an export transformation and the
-receiver has no way to produce a bundle that never carried it. Relying on the name check alone would refuse the
+An omitted `name:` therefore resolves to the artifact identity and passes,
+which is correct — such a snapshot carries no name to inject. Second, because
+that makes an omitted-name snapshot pass under any landing name, the rename
+case gets its own rule rather than relying on the parse: **a renamed import
+that carries versions is refused outright** for agents and commands, and the
+message says the sender must re-export with `--no-versions`, since dropping
+history is an export transformation and the receiver has no way to produce a
+bundle that never carried it. Relying on the name check alone would refuse the
 snapshots that declare a name and quietly relabel the ones that do not.
 
 The name rewrite in the working manifest follows the same principle: an absent
@@ -570,11 +570,11 @@ names, but not that the manifest agrees with what is on disk. The rules:
   into an empty record;
 - for agents and commands, every snapshot parses and names the artifact (§8).
 
-The last two directions are why an **orphan snapshot** — a `vN.md` written
-before the manifest entry it belongs to, which is the crash state the tag
-allocator is deliberately written to survive — makes export refuse rather than
-carry. Carrying it would mean specifying what a receiver does with an
-unreferenced snapshot. Refusing on export is also what keeps
+The two manifest-versus-disk directions above are why an **orphan snapshot** —
+a `vN.md` written before the manifest entry it belongs to, which is the crash
+state the tag allocator is deliberately written to survive — makes export
+refuse rather than carry. Carrying it would mean specifying what a receiver
+does with an unreferenced snapshot. Refusing on export is also what keeps
 `versions_included` honest: there is no state where `versions/` exists without
 its manifest.
 
@@ -621,8 +621,10 @@ The existing exact-set assertion over registered context actions pins this: a
 future verb has to flip that test deliberately.
 
 `--to` is required on import. The bundle's `source.tier` is untrusted input, and
-a foreign file choosing its own landing tier would also read as a second way to
-resolve a write target, which ADR-0016 §5 reserves to the explicit flag.
+a foreign file choosing its own landing tier would be a write target chosen by
+the thing being written. ADR-0016 §5 does give agents, skills, and commands a v1
+default tier, so this is not that ADR forbidding a default — it is this transport
+declining to derive one from untrusted input.
 
 **Gate B applies unchanged.** ADR-0011 §5 pairs the explicit tier flag with a
 confirmation at the surface, and `--to project_shared` supplies only the first
@@ -641,13 +643,15 @@ mm context import <file> --to <tier> [--to-project <selector>] [--as <name>]
                          [--force-unsafe-import]
 ```
 
-Export resolves its source the way the transfer engine already does, and adopts
-that contract rather than restating it: `--from` names the tier explicitly, and
-when it is omitted the source tier is auto-detected, with the same refusal the
-transfer engine raises when one name resolves in more than one tier. The project
-is the current working directory's, since export reads and writes nothing in
-another project. Import is dry-run by default and `--apply` performs the write,
-the family convention every transfer surface follows.
+Export resolves its source the way the transfer engine already does, and
+adopts that contract rather than restating it: `--from` names the tier
+explicitly, and when it is omitted the source tier is auto-detected, with the
+same refusal the transfer engine raises when one name resolves in more than
+one tier. The project is the current working directory's: export neither
+resolves nor mutates another project's canonical store, though `--out` itself
+is an operator-named path anywhere on the machine. Import is dry-run by
+default and `--apply` performs the write, the family convention every transfer
+surface follows.
 
 ## Consequences
 
@@ -656,20 +660,21 @@ the family convention every transfer surface follows.
   this format defines.
 - **What the transport refuses or changes, stated exactly**, since
   "byte-identical" is not true without qualification. Refused loudly, never
-  silently dropped: symlinks anywhere in the artifact; any path outside the §2
-  ASCII allowlist, which includes every non-ASCII filename; a case-colliding or
-  ancestor-colliding path pair; an unhealthy version surface, including a
-  crash-orphan snapshot; for agents and commands, a version snapshot whose
-  manifest name disagrees with the artifact; and any renamed import of an agent
-  or command bundle that carries versions at all, which needs a fresh export
-  from the sender. Changed on purpose: the working
-  manifest's `name:` line is rewritten to the landing name. Excluded rather than
-  carried, and listed in the export summary so the omission is visible: `.git`,
-  `.DS_Store`, `__pycache__`, and `.bak` files at every depth — which means a
-  bundle is not identical to what `mm context copy` would produce, since that
-  copies them. Carried, unlike a naive payload write: empty directories via
-  `dirs`, and the executable bit via `exec`, with every other mode bit and every
-  timestamp dropped.
+  silently dropped: a symlink at any path the bundle would otherwise carry (an
+  excluded name is skipped as excluded first, whatever its type); any path
+  outside the §2 ASCII allowlist, which includes every non-ASCII filename; a
+  case-colliding or ancestor-colliding path pair; an unhealthy version surface,
+  including a crash-orphan snapshot; for agents and commands, a version snapshot
+  whose manifest name disagrees with the artifact; and any renamed import of an
+  agent or command bundle that carries versions at all, which needs a fresh
+  export from the sender. Changed on purpose: the working manifest's `name:`
+  line is rewritten to the landing name. Excluded rather than carried, and
+  listed in the export summary so the omission is visible: `.git`, `.DS_Store`,
+  `__pycache__`, and `.bak` files at every depth — which means a bundle is not
+  identical to what `mm context copy` would produce, since that copies them.
+  Carried, unlike a naive payload write: empty directories via `dirs`, and the
+  executable bit via `exec`, with every other mode bit and every timestamp
+  dropped.
 - **Non-ASCII artifact filenames cannot be bundled in v1.** This is a real cost
   paid to make the path rules an allowlist with no tail of forgotten refusals.
   Revisit trigger: a report of an artifact that cannot be shared because of it,
@@ -678,14 +683,18 @@ the family convention every transfer surface follows.
 - A secret-bearing artifact cannot be exported at all, from any tier. This is
   stricter than what the user could do by hand with `tar`, and it is the point:
   the first-party primitive does not become a redistribution path.
-- A received artifact is never "installed". It shows as untracked or local-draft
-  in `mm context status` until the receiver adopts it against their own wiki,
-  so `mm context update` can never clobber received bytes it never installed.
+- A received artifact is never "installed", so `mm context update` can never
+  clobber bytes it did not install. A same-name `project_shared` receipt shows
+  as untracked and can be adopted against the receiver's own wiki; a renamed
+  one, or a `user` / `project_local` receipt, has no adoption path at all and
+  stays a local draft permanently.
 - The bundle reader is a parser over untrusted input and will keep finding new
-  input shapes. Its recognized grammar is §7 plus the store-name rules, declared
-  in the module docstring, and each refused shape is pinned as a case in the
-  parametrized reader tests, so the surface is bounded by what is written down
-  rather than by what the author happened to think of.
+  input shapes. Its recognized grammar is §§2, 7 and 9 plus the store-name rules
+  — the wire schema, the path and topology rules, the parser bounds, and the
+  version-surface rules — declared in the module docstring, and each refused
+  shape is pinned as a case in the parametrized reader tests, so the surface is
+  bounded by what is written down rather than by what the author happened to
+  think of.
 
 ## Considered & rejected
 
@@ -696,11 +705,11 @@ the family convention every transfer surface follows.
 - **Carrying the ADR-0006 F.3 HMAC marker.** §3: no surviving consumer, and it
   imports a fail-closed key dependency into a command that needs no key. The
   `provenance` key is reserved so the decision is reversible.
-- **Dropping the executable bit.** An earlier revision did, on the premise that
-  the copier drops it too. That premise was false: `mm context copy` copies with
-  metadata preserved, so dropping the bit would have made a received skill's
-  script non-runnable where the equivalent copy kept it. `exec` is carried and
-  bound into `payload_sha256` (§2).
+- **Dropping the executable bit**, on the reasoning that the payload writer
+  lands everything at one mode anyway. `mm context copy` copies with metadata
+  preserved, so dropping the bit would make a received skill's script
+  non-runnable where the equivalent copy kept it. `exec` is carried and bound
+  into `payload_sha256` (§2).
 - **A denylist of unportable path shapes.** §2: the refusal list has no end, and
   a missed entry lands a file the sender did not describe.
 - **A `tar`/`zip` archive instead of JSON.** Archive formats carry symlinks,
