@@ -285,6 +285,23 @@ class TestEmptyResultNamesTheFilter:
         assert "This query included: --scope ''" in result.stderr
         assert HINT not in result.stderr
 
+    def test_a_padded_scope_is_reported_as_typed_not_as_normalized(self, monkeypatch) -> None:
+        """The searched value and the reported one come from different places.
+
+        ``validate_scope_vocabulary`` strips before ``run_search`` sees it, so
+        a helper handed the normalized value for both would quote ``'user'``
+        at someone who typed ``'  user  '`` — and the option they are being
+        asked to review would not be the one on their screen. ``--scope ''``
+        cannot catch this: it normalizes to ``None``, and both spellings of
+        the bug print the same thing.
+        """
+        result = self._search(
+            monkeypatch, ["--scope", "  user  ", "hello"], namespaces=[("default", 7)]
+        )
+
+        assert result.exit_code == 0
+        assert "This query included: --scope '  user  '" in result.stderr
+
     def test_recall_reports_an_empty_scope_too(self, monkeypatch) -> None:
         result = self._recall(monkeypatch, ["--scope", ""], namespaces=[("default", 7)])
 
@@ -359,3 +376,131 @@ class TestEmptyResultNamesTheFilter:
         result = self._search(monkeypatch, ["-n", " 3 ", "hello"], namespaces=[("default", 7)])
 
         assert "did you mean `-k 3`?" in result.stderr
+
+
+class TestTheCallerOwnsTheVocabulary:
+    """``explain_empty_result`` is shared by commands with different flags.
+
+    ``mm search`` and ``mm recall`` both type ``--namespace`` and both have an
+    ``-n`` to confuse with their count flag. ``mm agent search`` has neither:
+    its namespace is merged out of ``--agent-id`` and the shared-bucket
+    options. So the two pieces of vocabulary in the message — what to call the
+    namespace, and which count flag ``-n`` gets mistaken for — belong to the
+    call site, and a command that has no such flag must be able to say so.
+    """
+
+    @staticmethod
+    def _storage(namespaces: list[tuple[str, int]]):
+        return SimpleNamespace(list_namespaces=AsyncMock(return_value=namespaces))
+
+    @pytest.mark.asyncio
+    async def test_the_namespace_label_is_the_caller_s(self) -> None:
+        from memtomem.cli._empty_results import explain_empty_result
+
+        message = await explain_empty_result(
+            self._storage([("default", 7)]),
+            namespace="agent-runtime:planner,shared",
+            filters=[],
+            count_flag=None,
+            namespace_label="the resolved agent namespace",
+        )
+
+        assert message.startswith(
+            "No results found: the resolved agent namespace "
+            "'agent-runtime:planner,shared' matches none of"
+        )
+        assert "--namespace" not in message
+
+    @pytest.mark.asyncio
+    async def test_the_count_suggestion_uses_the_caller_s_namespace_label(self) -> None:
+        """One message must not name two different options for one value.
+
+        A caller that supplies both a custom label and a count flag would
+        otherwise be told "the resolved agent namespace 'X' matches none…"
+        and, on the next line, "'-n' is --namespace" — naming an option it
+        just declined to name. No caller passes this pair today; the point is
+        that it cannot contradict itself when one does.
+        """
+        from memtomem.cli._empty_results import explain_empty_result
+
+        message = await explain_empty_result(
+            self._storage([("default", 7)]),
+            namespace="3",
+            filters=[],
+            count_flag="-k",
+            namespace_label="the resolved agent namespace",
+        )
+
+        assert "did you mean `-k 3`?" in message
+        assert "'-n' is the resolved agent namespace" in message
+        assert "--namespace" not in message
+
+    @pytest.mark.asyncio
+    async def test_no_count_flag_means_no_count_suggestion(self) -> None:
+        """The ``-n`` mix-up hint names two flags. A command with neither
+        would be told to retype an option it does not accept, so the hint is
+        the call site's to enable."""
+        from memtomem.cli._empty_results import explain_empty_result
+
+        message = await explain_empty_result(
+            self._storage([("default", 7)]),
+            namespace="3",
+            filters=[],
+            count_flag=None,
+        )
+
+        assert "did you mean" not in message
+
+    @pytest.mark.asyncio
+    async def test_a_scope_note_is_appended_only_to_the_inventory_branch(self) -> None:
+        """The branch above already names the namespace, so appending there
+        would print it twice; an empty store has nothing to have been scoped
+        away from, so the index hint stays the whole answer."""
+        from memtomem.cli._empty_results import INDEX_HINT, explain_empty_result
+
+        note = "This search was scoped to namespace 'agent-runtime:coder,shared'."
+        common = dict(filters=[], count_flag=None, scope_note=note)
+
+        empty_store = await explain_empty_result(
+            self._storage([]), namespace="agent-runtime:coder,shared", **common
+        )
+        no_match = await explain_empty_result(
+            self._storage([("default", 7)]), namespace="agent-runtime:coder,shared", **common
+        )
+        inventory = await explain_empty_result(
+            self._storage([("default", 7)]), namespace=None, **common
+        )
+
+        assert empty_store == INDEX_HINT
+        assert note not in no_match
+        assert inventory.endswith(note)
+
+    @pytest.mark.asyncio
+    async def test_no_scope_note_leaves_the_message_untouched(self) -> None:
+        """``mm search`` and ``mm recall`` pass none, so their output cannot
+        move when a sibling verb starts passing one."""
+        from memtomem.cli._empty_results import explain_empty_result
+
+        message = await explain_empty_result(
+            self._storage([("default", 7)]),
+            namespace=None,
+            filters=[("--scope", "user")],
+            count_flag="-k",
+        )
+
+        assert message.endswith("Review those options, or rerun with fewer of them.")
+
+    @pytest.mark.asyncio
+    async def test_a_valueless_flag_is_reported_bare(self) -> None:
+        """``--no-include-shared`` takes no argument; rendering it as
+        ``--no-include-shared ''`` would quote a value nobody typed."""
+        from memtomem.cli._empty_results import explain_empty_result
+
+        message = await explain_empty_result(
+            self._storage([("default", 7)]),
+            namespace=None,
+            filters=[("--no-include-shared", None), ("--agent-id", "planner")],
+            count_flag=None,
+        )
+
+        assert "This query included: --no-include-shared, --agent-id 'planner'." in message

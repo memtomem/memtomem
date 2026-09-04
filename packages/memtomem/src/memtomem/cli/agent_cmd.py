@@ -439,6 +439,314 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     click.echo(f"- Indexed chunks: {stats.indexed_chunks}")
 
 
+# ── search ──────────────────────────────────────────────────────────────
+
+
+@agent.command("search")
+@click.argument("query")
+@click.option(
+    "--agent-id",
+    "-a",
+    default=None,
+    help="Agent whose scope to search. Defaults to the active session's agent.",
+)
+@click.option(
+    "--include-shared/--no-include-shared",
+    default=True,
+    show_default=True,
+    help=(
+        "Also search the shared namespace. --no-include-shared drops the shared leg "
+        "of the merge, so it has no effect when no agent resolves: an unpinned search "
+        "still reaches the shared bucket."
+    ),
+)
+@click.option("--top-k", "-k", default=10, show_default=True, help="Number of results.")
+@click.option(
+    "--shared-namespace",
+    default=None,
+    help=(
+        "Shared bucket to merge in, for per-project agent teams "
+        "(e.g. shared:myproject). Defaults to the global 'shared'. Only the "
+        "shared leg is re-pointed, so this has no effect with "
+        "--no-include-shared, or when no agent resolves and the search runs "
+        "unpinned."
+    ),
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json", "plain", "context", "smart"]),
+    default="table",
+    show_default=True,
+    help="Output format.",
+)
+def agent_search(
+    query: str,
+    agent_id: str | None,
+    include_shared: bool,
+    top_k: int,
+    shared_namespace: str | None,
+    fmt: str,
+) -> None:
+    """Search an agent's memories, merged with the shared namespace.
+
+    The shell twin of the ``mem_agent_search`` MCP tool, resolving the same
+    two buckets by the same rule: the agent's own ``agent-runtime:<id>``
+    scope plus, unless ``--no-include-shared``, the shared one. Without
+    ``--agent-id`` the agent comes from the active session's binding, the
+    way the MCP tool takes it from the session that started it; with no
+    session and no flag there is no agent to scope to, and the search runs
+    unpinned at default visibility — which is not "every namespace", since
+    the usual system-namespace hiding still applies. That case prints a note
+    saying so, because a session whose binding could not be read resolves the
+    same way, and a silently widened search is the one outcome the caller
+    would not think to check for.
+
+    Default visibility hides ``agent-runtime:`` and ``archive:`` but **not**
+    ``shared``, so an unresolved agent also disregards
+    ``--no-include-shared``: the flag drops the shared leg of a merge, and
+    there is no merge to drop it from. That is ``mem_agent_search``'s rule as
+    well — this verb mirrors the tool rather than diverging from it — so the
+    flag is reported as disregarded instead of being made to fail or being
+    reinterpreted here.
+
+    Output formats are ``mm search``'s, not the MCP tool's — this is a CLI
+    command, and a shell pipeline expects ``--format json`` to mean what it
+    means everywhere else in this CLI.
+    """
+    try:
+        if agent_id is not None:
+            validate_agent_id(agent_id)
+        if shared_namespace is not None:
+            validate_namespace(shared_namespace)
+    except InvalidNameError as e:
+        raise click.ClickException(str(e)) from e
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(
+            _run_agent_search(
+                query=query,
+                agent_id=agent_id,
+                include_shared=include_shared,
+                top_k=top_k,
+                shared_namespace=shared_namespace,
+                fmt=fmt,
+            )
+        )
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise_cli_error(e)
+
+
+def _agent_search_typed_filters(
+    *,
+    agent_id: str | None,
+    include_shared: bool,
+    shared_namespace: str | None,
+) -> list[tuple[str, str | None]]:
+    """The options ``mm agent search`` was actually given, for the diagnostic.
+
+    Only what the command line carried, in this verb's own spelling. The
+    agent is omitted when it came from the session rather than from
+    ``--agent-id``, because the empty-result message reports the invocation
+    and a session binding is not part of it — the "no agent resolved" note
+    covers that axis separately. ``--no-include-shared`` takes no argument,
+    so it is reported bare.
+    """
+
+    typed: list[tuple[str, str | None]] = []
+    if agent_id is not None:
+        typed.append(("--agent-id", agent_id))
+    if not include_shared:
+        typed.append(("--no-include-shared", None))
+    if shared_namespace is not None:
+        typed.append(("--shared-namespace", shared_namespace))
+    return typed
+
+
+def _agent_search_scope_note(agent_ns: str | None, ns_filter: str | None) -> str | None:
+    """What narrowed the search, for a reader who did not narrow it.
+
+    Dropping the wrong ``--namespace`` label must not drop the fact it
+    carried. Without ``--agent-id`` this verb scopes to the active session's
+    agent, so the invocation is bare and the empty-result inventory would
+    otherwise report a healthy index and no options at all — true of the
+    command line, and silent about the one thing that emptied the result.
+
+    The two halves of the merge have different origins and the note keeps them
+    apart: only ``agent_ns`` came from the session, while the shared leg came
+    from ``--include-shared``'s default or from ``--shared-namespace``.
+    Attributing the whole merged filter to the session would be the same kind
+    of misattribution this note exists to repair.
+
+    ``None`` when there is nothing to disclose: an unresolved agent did not
+    narrow anything, and the "no agent resolved" note already owns that case.
+    """
+
+    if ns_filter is None or agent_ns is None:
+        return None
+    if ns_filter == agent_ns:
+        return (
+            f"This search was scoped to namespace '{agent_ns}', resolved from the "
+            "active session; pass --agent-id to scope it to a different agent."
+        )
+    return (
+        f"This search was scoped to namespace '{ns_filter}', of which "
+        f"'{agent_ns}' was resolved from the active session and the rest is the "
+        "shared bucket; pass --agent-id to scope it to a different agent."
+    )
+
+
+def _retarget_hidden_namespace_hint(payload):
+    """Rewrite the hidden-rows hint into this verb's vocabulary.
+
+    The shared search service ends that hint with a working query — for an
+    unpinned search over a store with agent rows, ``pass
+    namespace="agent-runtime:*" ... to include them``. Right on ``mem_search``,
+    unfollowable here: ``mm agent search`` takes no namespace argument, and the
+    glob it suggests would reach *every* agent's private scope rather than the
+    one the caller is asking about. Same defect as reporting a ``--namespace``
+    filter this verb has no flag for, one layer out — the empty-result path was
+    translated and the hint layer was not.
+
+    Matched by value, not by substring: the expected string is rebuilt from the
+    same producer and the same stats, so a reworded hint upstream still matches
+    and an unrelated hint is never swallowed. The count itself is kept — the
+    rows really are hidden — and only the remediation is replaced.
+    """
+
+    from dataclasses import replace
+
+    from memtomem.services.search_service import hidden_namespace_hint
+
+    stats = payload.stats
+    hidden = getattr(stats, "hidden_system_ns", 0)
+    if not hidden or not payload.hints:
+        return payload
+    upstream = hidden_namespace_hint(hidden, getattr(stats, "hidden_by_prefix", {}) or {})
+    if upstream not in payload.hints:
+        return payload
+    ours = (
+        f"{hidden} result(s) hidden in system namespaces — reach one agent's own "
+        "scope with --agent-id, not with a namespace pattern."
+    )
+    return replace(payload, hints=[ours if h == upstream else h for h in payload.hints])
+
+
+async def _run_agent_search(
+    *,
+    query: str,
+    agent_id: str | None,
+    include_shared: bool,
+    top_k: int,
+    shared_namespace: str | None,
+    fmt: str,
+) -> None:
+    from memtomem.cli._bootstrap import cli_components
+    from memtomem.cli._session_state import resolve_session_write_namespace
+    from memtomem.cli.search import _search_with_components, render_search_results
+    from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
+
+    async with cli_components() as comp:
+        # Priority mirrors ``_resolve_agent_namespace``: an explicit flag
+        # overrides the session, and the MCP chain's third step (the ambient
+        # ``current_namespace``) has no CLI equivalent, so it is simply absent.
+        if agent_id:
+            agent_ns: str | None = f"{_CURRENT_PREFIX}{agent_id}"
+        else:
+            agent_ns = await resolve_session_write_namespace(comp.storage)
+        ns_filter = merge_agent_namespace_filter(agent_ns, include_shared, shared_namespace)
+
+        payload = await _search_with_components(
+            comp,
+            query=query,
+            top_k=top_k,
+            source_filter=None,
+            tag_filter=None,
+            namespace=ns_filter,
+            scope=None,
+            as_of=None,
+            fmt=fmt,
+            # This verb has no ``--namespace`` and no ``-n``: the namespace it
+            # searches is merged here out of the three options below. Reporting
+            # it as ``--namespace`` — the shared helper's default, right for
+            # ``mm search`` — would answer an empty result by naming a flag
+            # ``mm agent search`` rejects, and a remediation the reader cannot
+            # carry out is worse than none. So the diagnostic gets this
+            # command's own vocabulary, and ``count_flag=None`` drops the
+            # ``-n`` / ``-k`` mix-up hint along with it.
+            namespace_label="the resolved agent namespace",
+            count_flag=None,
+            # An explicit --agent-id is already in the filters below; only a
+            # session-derived scope is invisible on the command line.
+            scope_note=(
+                _agent_search_scope_note(agent_ns, ns_filter) if agent_id is None else None
+            ),
+            typed_filters=_agent_search_typed_filters(
+                agent_id=agent_id,
+                include_shared=include_shared,
+                shared_namespace=shared_namespace,
+            ),
+        )
+
+    # An unresolved agent widens the query from one agent's scope to the whole
+    # store, and the two ways to get here are indistinguishable from the
+    # caller's side: no session at all, or a session whose binding could not be
+    # read (an unreadable state file, a stale row, a malformed agent id — the
+    # resolver treats all of them as "unbound" by design). Both are legitimate,
+    # neither is worth failing on, and both produce results from namespaces the
+    # caller asked to be scoped away from. Say it on stderr so the widening is
+    # visible without changing what the resolver returns or what the MCP tool
+    # would have done with the same inputs.
+    if ns_filter is None:
+        click.secho(
+            "(no agent resolved — searching unpinned, not just this agent's scope. "
+            "Pass --agent-id, or start a session bound to an agent.)",
+            fg="yellow",
+            err=True,
+        )
+
+    # ``--no-include-shared`` drops the shared leg *of the merge*, and with no
+    # agent there is no merge: ``merge_agent_namespace_filter`` answers "no
+    # filter" before it ever looks at the flag. Default visibility then hides
+    # ``agent-runtime:`` and ``archive:`` but not ``shared``, so a query that
+    # asked to exclude the shared bucket can return rows from it. That is the
+    # MCP tool's rule too and this verb exists to mirror it — changing the
+    # merge would change ``mem_agent_search`` — but the flag being disregarded
+    # is the reader's to know, and the widening note above does not say which
+    # of their options it took with it. Whether the rule itself should change
+    # is #2296; this note is the disclosure, not the fix.
+    if ns_filter is None and not include_shared:
+        click.secho(
+            "(--no-include-shared was disregarded: with no agent there is no merge to "
+            "drop a leg from, and an unpinned search still reaches the shared bucket.)",
+            fg="yellow",
+            err=True,
+        )
+
+    # ``--shared-namespace`` re-points the shared leg of the merge, so it is
+    # validated and then has nothing to act on in the two cases where there is
+    # no such leg. Both are accepted rather than refused — neither is a
+    # mistake worth failing a search over — but a flag that parses, validates
+    # and then does nothing is exactly the kind of silence that gets read as
+    # "it worked". Say which case swallowed it.
+    if shared_namespace is not None and (ns_filter is None or not include_shared):
+        reason = (
+            "there is no agent scope to merge it with"
+            if ns_filter is None
+            else "--no-include-shared drops the shared leg it re-points"
+        )
+        click.secho(
+            f"(--shared-namespace {shared_namespace!r} was ignored: {reason}.)",
+            fg="yellow",
+            err=True,
+        )
+
+    render_search_results(query, fmt, _retarget_hidden_namespace_hint(payload))
+
+
 # ── debug-resolve (hidden) ──────────────────────────────────────────────
 
 
@@ -475,7 +783,10 @@ def debug_resolve(
     from types import SimpleNamespace
 
     from memtomem.server.context import AppContext
-    from memtomem.server.tools.multi_agent import _resolve_agent_namespace
+    from memtomem.server.tools.multi_agent import (
+        _resolve_agent_namespace,
+        merge_agent_namespace_filter,
+    )
 
     fake_app = SimpleNamespace(
         current_agent_id=current_agent_id,
@@ -483,12 +794,7 @@ def debug_resolve(
     )
     agent_ns = _resolve_agent_namespace(cast(AppContext, fake_app), agent_id)
 
-    if include_shared and agent_ns:
-        ns_filter: str | None = f"{agent_ns},{SHARED_NAMESPACE}"
-    elif agent_ns:
-        ns_filter = agent_ns
-    else:
-        ns_filter = None
+    ns_filter = merge_agent_namespace_filter(agent_ns, include_shared)
 
     click.echo(
         _json.dumps(

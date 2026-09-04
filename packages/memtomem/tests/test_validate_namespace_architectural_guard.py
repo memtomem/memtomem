@@ -124,6 +124,17 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # and still leave the callers' own parameters ungated, so it is
         # deferred with them and moves when they do.
         ("_provenance.py", "capture_session_and_namespace", "namespace"),
+        # Not a surface of its own (#2195): ``merge_agent_namespace_filter``
+        # is a pure string-merge helper that picks which shared bucket the
+        # agent's private scope is joined with. Both callers gate the value
+        # before handing it over — ``mem_agent_search`` via the
+        # ``VALIDATED_NS_SURFACES`` entry above, ``mm agent search`` via the
+        # same ``validate_namespace`` call on its ``--shared-namespace``
+        # option — so gating here would double-validate the same value while
+        # leaving neither caller's own parameter any safer. Same reasoning as
+        # the ``_provenance.py`` forwarders below; it moves if a caller that
+        # does not validate is ever added.
+        ("multi_agent.py", "merge_agent_namespace_filter", "shared_namespace"),
         # Same rationale for the split form (#2104): it forwards the caller's
         # already-classified ``namespace`` and only reports which of the two
         # sources answered. Gating here would double-validate the same value.

@@ -318,6 +318,7 @@ mm quality experiment --baseline base-profile.json --profile cand-a.json --profi
 # Multi-agent memory — per-agent scopes (see the MCP server's multi-agent workflow)
 mm agent register planner --description "research agent"  # register an agent id (optional --color)
 mm agent list                          # list registered agents (--json for scripting)
+mm agent search "deploy" -a planner    # search that agent's scope + shared (--no-include-shared, --shared-namespace shared:<project>, --top-k, --format); without -a the active session supplies the agent
 mm search "deployment" --format json   # every item carries chunk_id (canonical UUID) — the capture path for the command below
 mm agent share <chunk_id> --target shared    # copy a chunk into the shared scope (default target: shared)
 mm agent migrate                       # migrate legacy agent records into the registry (--dry-run to preview)

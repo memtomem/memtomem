@@ -430,3 +430,42 @@ class TestNormalizeBoundAgentId:
     def test_non_str_still_raises(self, value):
         with pytest.raises(InvalidNameError):
             normalize_bound_agent_id(value)
+
+
+class TestMergeAgentNamespaceFilter:
+    """The one merge rule ``mem_agent_search``, ``mm agent search`` and
+    ``mm agent debug-resolve`` share. It lived inline in each of them, which
+    is how the debug helper could come to disagree with the tool it exists to
+    describe.
+    """
+
+    def test_an_agent_and_the_shared_bucket_merge_into_one_filter(self):
+        from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
+
+        assert (
+            merge_agent_namespace_filter("agent-runtime:planner", True)
+            == "agent-runtime:planner,shared"
+        )
+
+    def test_excluding_shared_leaves_the_private_bucket_alone(self):
+        from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
+
+        assert (
+            merge_agent_namespace_filter("agent-runtime:planner", False) == "agent-runtime:planner"
+        )
+
+    def test_a_custom_shared_bucket_repoints_only_the_shared_leg(self):
+        from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
+
+        assert (
+            merge_agent_namespace_filter("agent-runtime:planner", True, "shared:proj")
+            == "agent-runtime:planner,shared:proj"
+        )
+
+    def test_no_agent_means_no_filter_even_when_shared_is_requested(self):
+        """ "Search everything", not "search shared" — an unbound caller is
+        not implicitly a member of the shared bucket."""
+        from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
+
+        assert merge_agent_namespace_filter(None, True) is None
+        assert merge_agent_namespace_filter(None, True, "shared:proj") is None

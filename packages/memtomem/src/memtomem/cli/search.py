@@ -1,10 +1,13 @@
 """CLI: memtomem search <query>."""
 
 from __future__ import annotations
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from memtomem.models import SearchResult
+    from memtomem.search.pipeline import RetrievalStats
 
 import asyncio
 import json
@@ -21,6 +24,18 @@ from memtomem.services.search_service import run_search
 from memtomem.server.tools.search import (
     _resolve_project_context_root as _resolve_project_context_root_from_cwd,
 )
+
+
+@dataclass(frozen=True)
+class SearchPayload:
+    """One search's results and everything derived from them that needs the
+    store, so rendering can happen with the store already closed."""
+
+    results: list[SearchResult]
+    stats: RetrievalStats
+    hints: list[str]
+    empty_message: str
+
 
 # ``\b`` is Click's raw-paragraph marker: without it Click rewraps the epilog as
 # prose and the examples collapse into one run-on paragraph, which is exactly
@@ -137,7 +152,6 @@ async def _search(
     rerank: bool | None = None,
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.cli._empty_results import explain_empty_result
     from memtomem.models import (
         InvalidNamespaceFilterError,
         InvalidScopeFilterError,
@@ -188,52 +202,137 @@ async def _search(
         raise click.ClickException(f"invalid --scope value '{scope}': {e}") from None
 
     async with cli_components() as comp:
-        project_context_root = _resolve_project_context_root_from_cwd(comp)
-        results, stats, hints = await run_search(
-            comp.search_pipeline,
+        payload = await _search_with_components(
+            comp,
             query=query,
             top_k=top_k,
             source_filter=source_filter,
             tag_filter=tag_filter,
             namespace=namespace,
-            current_namespace=None,
-            as_of=as_of,
             scope=effective_scope,
-            project_context_root=project_context_root,
+            as_of=as_of,
+            fmt=fmt,
+            typed_filters=[
+                (flag, value)
+                for flag, value in (
+                    ("--source-filter", source_filter),
+                    ("--tag-filter", tag_filter),
+                    ("--namespace", namespace),
+                    ("--scope", scope),
+                    ("--as-of", as_of),
+                )
+                if value is not None
+            ],
+            count_flag="-k",
             rerank=rerank,
-            origin="cli",
         )
-        # Built inside the block: naming the filter that emptied the result
-        # needs the store, and ``cli_components`` has closed it by the time
-        # the message is printed (#2255). Gated on the format that prints it
-        # so ``--format json`` keeps its bare ``[]`` — and cannot start
-        # failing on a store read whose answer it would never show.
-        # ``run_search`` resolves the namespace as ``namespace or
-        # current_namespace``, so an empty one is no namespace at all — the
-        # branch that names a namespace as the cause must see what the query
-        # saw. ``filters`` is separate: it reports the command line as typed,
-        # claiming nothing about which option narrowed anything.
-        effective_namespace = namespace or None
-        empty_message = (
-            await explain_empty_result(
-                comp.storage,
-                namespace=effective_namespace,
-                filters=[
-                    (flag, value)
-                    for flag, value in (
-                        ("--source-filter", source_filter),
-                        ("--tag-filter", tag_filter),
-                        ("--namespace", namespace),
-                        ("--scope", scope),
-                        ("--as-of", as_of),
-                    )
-                    if value is not None
-                ],
-                count_flag="-k",
-            )
-            if not results and fmt in ("table", "plain")
-            else ""
+
+    render_search_results(query, fmt, payload)
+
+
+async def _search_with_components(
+    comp,
+    *,
+    query: str,
+    top_k: int,
+    source_filter: str | None,
+    tag_filter: str | None,
+    namespace: str | None,
+    scope: str | None,
+    as_of: str | None,
+    fmt: str,
+    typed_filters: Sequence[tuple[str, str | None]] = (),
+    count_flag: str | None = None,
+    namespace_label: str = "--namespace",
+    scope_note: str | None = None,
+    rerank: bool | None = None,
+) -> SearchPayload:
+    """Run one search against already-open components and return its payload.
+
+    Split out of :func:`_search` so a sibling verb that has to resolve
+    something from the store first — ``mm agent search`` reads the active
+    session's agent binding — shares one retrieval and one renderer instead
+    of opening a second set of components or growing a third copy of the
+    formats (``mm search`` and the interactive shell already have one each).
+    The caller owns validation; by the time this runs, the flags parsed.
+
+    Everything here needs the store; nothing here writes to stdout. The
+    caller renders the returned payload **after** leaving the components
+    block, so a slow or blocked stdout cannot hold the SQLite connection,
+    the embedder and the reranker open behind it.
+
+    The retrieval arguments and the diagnostic ones are deliberately separate.
+    ``namespace`` and ``scope`` are what the search *runs with* — a merged
+    namespace one caller built, a scope the other normalized through
+    ``validate_scope_vocabulary`` — while ``typed_filters``, ``count_flag`` and
+    ``namespace_label`` are that command's own vocabulary, used only to explain
+    an empty result. Each verb reaching this helper has a different one:
+    ``mm search`` types ``--namespace``/``--scope`` directly, ``mm agent search``
+    types neither and derives its namespace from ``--agent-id`` and friends. A
+    caller that let this helper name the flags would report options the user
+    could not have typed, which is worse than saying nothing. ``scope_note`` is
+    the other half of that: a caller that narrowed the query on its own has to
+    say so, or dropping the wrong label drops the fact along with it.
+    """
+    from memtomem.cli._empty_results import explain_empty_result
+
+    project_context_root = _resolve_project_context_root_from_cwd(comp)
+    results, stats, hints = await run_search(
+        comp.search_pipeline,
+        query=query,
+        top_k=top_k,
+        source_filter=source_filter,
+        tag_filter=tag_filter,
+        namespace=namespace,
+        current_namespace=None,
+        as_of=as_of,
+        scope=scope,
+        project_context_root=project_context_root,
+        rerank=rerank,
+        origin="cli",
+    )
+    # Built inside the block: naming the filter that emptied the result
+    # needs the store, and ``cli_components`` has closed it by the time
+    # the message is printed (#2255). Gated on the format that prints it
+    # so ``--format json`` keeps its bare ``[]`` — and cannot start
+    # failing on a store read whose answer it would never show.
+    # ``run_search`` resolves the namespace as ``namespace or
+    # current_namespace``, so an empty one is no namespace at all — the
+    # branch that names a namespace as the cause must see what the query
+    # saw. ``filters`` is separate: it reports the command line as typed,
+    # claiming nothing about which option narrowed anything.
+    effective_namespace = namespace or None
+    empty_message = (
+        await explain_empty_result(
+            comp.storage,
+            namespace=effective_namespace,
+            filters=typed_filters,
+            count_flag=count_flag,
+            namespace_label=namespace_label,
+            scope_note=scope_note,
         )
+        if not results and fmt in ("table", "plain")
+        else ""
+    )
+
+    return SearchPayload(results=results, stats=stats, hints=hints, empty_message=empty_message)
+
+
+def render_search_results(query: str, fmt: str, payload: SearchPayload) -> None:
+    """Write one search's output, with no store open.
+
+    The counterpart to :func:`_search_with_components`. Kept separate so
+    retrieval releases its components before anything touches stdout — a
+    consumer that stops reading a pipe blocks the writer, and holding the
+    SQLite connection, the embedder and the reranker for the duration of
+    that block is a cost the query itself already finished paying.
+    """
+    results, stats, hints, empty_message = (
+        payload.results,
+        payload.stats,
+        payload.hints,
+        payload.empty_message,
+    )
 
     # Hints go to stderr for every format, and before any format-specific
     # return: ``context``/``smart`` return early on an empty result set, which

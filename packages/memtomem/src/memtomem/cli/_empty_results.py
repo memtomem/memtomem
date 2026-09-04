@@ -46,8 +46,14 @@ class _NamespaceLister(Protocol):
     async def list_namespaces(self) -> list[tuple[str, int]]: ...
 
 
-def _count_flag_suggestion(namespace: str, count_flag: str) -> str | None:
+def _count_flag_suggestion(namespace: str, count_flag: str, namespace_label: str) -> str | None:
     """The ``-n 3`` → ``-k 3`` hint, for values that are really a count.
+
+    Both flag names come from the caller. Hard-coding ``--namespace`` here
+    while the branch above prints a caller-supplied ``namespace_label`` would
+    let one message name two different options for the same value, so the
+    label is threaded rather than assumed — the combination is then unable to
+    contradict itself, instead of merely happening not to today.
 
     Strictly positive decimals only, and the conversion is guarded rather
     than assumed: ``"²".isdigit()`` is true while ``int("²")`` raises, and
@@ -68,11 +74,19 @@ def _count_flag_suggestion(namespace: str, count_flag: str) -> str | None:
         return None
     if count <= 0:
         return None
-    return f"'-n' is --namespace, not the result count: did you mean `{count_flag} {count}`?"
+    return f"'-n' is {namespace_label}, not the result count: did you mean `{count_flag} {count}`?"
 
 
-def _format_filters(filters: Sequence[tuple[str, str]]) -> str:
-    return ", ".join(f"{flag} {value!r}" for flag, value in filters)
+def _format_filters(filters: Sequence[tuple[str, str | None]]) -> str:
+    """Render the options the caller reports having been given.
+
+    A ``None`` value is a flag that takes no argument (``--no-include-shared``),
+    printed bare. Absent options never reach here: each call site drops them
+    while building its own list, because only the command knows which of its
+    options were typed.
+    """
+
+    return ", ".join(flag if value is None else f"{flag} {value!r}" for flag, value in filters)
 
 
 def _format_namespaces(known: list[tuple[str, int]]) -> str:
@@ -92,8 +106,10 @@ async def explain_empty_result(
     storage: _NamespaceLister,
     *,
     namespace: str | None,
-    filters: Sequence[tuple[str, str]],
-    count_flag: str,
+    filters: Sequence[tuple[str, str | None]],
+    count_flag: str | None,
+    namespace_label: str = "--namespace",
+    scope_note: str | None = None,
 ) -> str:
     """Return the message to print when a query returned nothing.
 
@@ -103,6 +119,23 @@ async def explain_empty_result(
     rather than as a verdict on any option. ``count_flag`` is that command's
     "how many results" option (``-k`` for search, ``-l`` for recall) — the
     flag ``-n`` is most often mistaken for.
+
+    Both of the last two are the *caller's* vocabulary, not this module's, and
+    a command whose namespace is derived rather than typed has to say so:
+    ``mm agent search`` merges its namespace out of ``--agent-id``,
+    ``--include-shared`` and ``--shared-namespace``, has no ``--namespace`` and
+    no ``-n``, so it passes a ``namespace_label`` naming what it resolved and
+    ``count_flag=None`` to drop a suggestion about a flag it does not accept.
+    Naming an option the command does not have turns a diagnostic into an
+    instruction the reader cannot follow.
+
+    ``scope_note`` is for a command that narrowed the query without being told
+    to on the command line — ``mm agent search`` scopes to the active session's
+    agent when no ``--agent-id`` is given. The inventory branch otherwise
+    reports a healthy index and no options at all, which is true of the
+    invocation and hides the narrowing that actually emptied it. It is appended
+    only there: the branch above already names the namespace, and an empty
+    store has nothing to have been scoped away from.
     """
 
     from memtomem.models import InvalidNamespaceFilterError, NamespaceFilter
@@ -121,11 +154,15 @@ async def explain_empty_result(
         # "no known namespace matches" is the same question the query asked.
         if parsed is not None and not any(parsed.matches(name) for name, _ in known):
             lines = [
-                f"No results found: --namespace {namespace!r} matches none of the "
+                f"No results found: {namespace_label} {namespace!r} matches none of the "
                 "namespaces this index has.",
                 f"Indexed namespaces: {_format_namespaces(known)}",
             ]
-            suggestion = _count_flag_suggestion(namespace, count_flag)
+            suggestion = (
+                _count_flag_suggestion(namespace, count_flag, namespace_label)
+                if count_flag is not None
+                else None
+            )
             if suggestion is not None:
                 lines.append(suggestion)
             return "\n".join(lines)
@@ -135,12 +172,13 @@ async def explain_empty_result(
         f"No results found. The index has {_plural(total, 'chunk')} across "
         f"{_plural(len(known), 'namespace')}"
     )
+    trailer = f" {scope_note}" if scope_note else ""
     if not filters:
         # Only what was observed. "nothing matched" would be a claim about
         # retrieval that ``-k 0`` falsifies — it returns nothing without
         # matching being involved at all.
-        return f"{inventory}, so the index is not the empty one."
+        return f"{inventory}, so the index is not the empty one.{trailer}"
     return (
         f"{inventory}. This query included: {_format_filters(filters)}. "
-        "Review those options, or rerun with fewer of them."
+        f"Review those options, or rerun with fewer of them.{trailer}"
     )
