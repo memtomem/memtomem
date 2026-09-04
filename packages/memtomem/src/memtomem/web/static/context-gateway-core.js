@@ -563,6 +563,71 @@ let _ctxProjectsCache = [];
 // the controls disabled until the run's ``finally`` clears it (Codex review).
 let _ctxSyncControlsLocked = false;
 
+// -- Drag-to-choose-a-destination state (#2297) -------------------------------
+//
+// Dragging an artifact card onto another project's group header or onto a tier
+// chip does NOT transfer anything: it opens the existing Move/Copy modal with
+// that destination pre-filled. The drop handlers therefore need to know what is
+// being dragged. The modal derives the SOURCE from live globals
+// (``_ctxOpenMoveCopyModal``: ``_ctxTargetScope`` + the active roster scope), so
+// the same values are snapshot HERE at ``dragstart`` and the drop makes its own
+// decisions — the user-tier remap, the same-project refusal — from the snapshot
+// rather than from globals that may have moved. (They cannot move far: every
+// path that changes them repaints, and the repaint cancels the drag.)
+//
+// ``dataTransfer`` deliberately carries no payload the handlers rely on: it is
+// unreadable during ``dragover`` in every browser's protected mode, and JSDOM
+// has neither ``DragEvent`` nor ``DataTransfer``. It is set (text/plain) only so
+// the gesture behaves like a normal drag for the OS / other drop targets.
+//
+// ``id`` is a per-drag session counter: the group drop targets keep an
+// enter/leave counter (a ``<summary>`` has element children, so moving onto one
+// fires ``dragleave`` on the summary itself), and those counters are closure-
+// local — global cleanup can't reset them. Keying each counter by ``id`` makes a
+// stale count from an interrupted drag self-invalidating.
+let _ctxDragSource = null;
+let _ctxDragSeq = 0;
+
+// Announce a drag/drop affordance into the polite live region. Writes only on
+// change so a ``dragover``-rate repaint can't spam a screen reader.
+function _ctxDragAnnounce(text) {
+  const el = document.getElementById('ctx-drag-announce');
+  if (!el) return;
+  const next = text || '';
+  if (el.textContent === next) return;
+  el.textContent = next;
+}
+
+// Drop the drag session and every visual trace of it. Idempotent: the drop
+// handler runs it BEFORE opening the modal (which makes the background inert,
+// so ``dragend`` on the source card is only a backstop), and ``dragend`` runs it
+// again. Also called by the list / control-bar repaints, which replace the very
+// nodes a live drag is anchored to.
+function _ctxDragCleanup() {
+  _ctxDragSource = null;
+  document.querySelectorAll('.ctx-card--dragging')
+    .forEach((el) => el.classList.remove('ctx-card--dragging'));
+  document.querySelectorAll('.ctx-drop-target--over')
+    .forEach((el) => el.classList.remove('ctx-drop-target--over'));
+  _ctxDragAnnounce('');
+}
+
+// True while a drag is live and still anchored to the DOM it started in.
+//
+// The invariant a drop needs is that the modal's source (which it re-derives
+// from the live tier + active project) is still the source the user picked up.
+// Every path that can change either of those — the tier chips, the project
+// switcher, a roster refresh — repaints the list or the control bar, and both
+// repaints call ``_ctxDragCleanup`` first, so the session is already gone by
+// the time the drop lands. What repaint-cleanup does NOT cover is a card that
+// left the DOM without one, so that is what this checks; the pinned ``tier`` /
+// ``srcScopeIdRaw`` are carried for the drop's own decisions (the user-tier
+// remap, the same-project comparison), not re-checked here.
+function _ctxDragActive() {
+  const src = _ctxDragSource;
+  return !!(src && src.el && src.el.isConnected);
+}
+
 // De-dup memo for the `/api/context/projects` failure toast (#1101).
 // ``_ctxFetchProjects`` runs from three independent panel-load paths
 // (overview, settings projects, hooks sync), so a single persistent outage

@@ -384,6 +384,16 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     // text (and stays localized). Readonly cards (other-scope groups)
     // stay non-interactive and inherit ``ctx-card--readonly``.
     const a11yAttrs = clickable ? ' role="button" tabindex="0"' : '';
+    // #2297 drag source. Kept in its OWN variable: ``test_web_a11y`` pins the
+    // ``a11yAttrs`` ternary verbatim, and the two gates differ anyway. A card is
+    // draggable only where a Move/Copy is actually reachable — the active
+    // project's group (readonly cards have no handlers at all), a transfer kind,
+    // and a real canonical: a runtime-only item has no file to transfer (its
+    // detail pane offers no Move/Copy either) and the dry-run would 404. Simple
+    // mode never surfaces the gesture (ADR-0026: the whole control bar is gone).
+    const dragAttr = (clickable && item.canonical_path && _ctxCanMoveCopy(type) && !_ctxSimpleMode)
+      ? ' draggable="true"'
+      : '';
     let cardAriaLabel = '';
     if (clickable) {
       const statusSet = new Set();
@@ -411,7 +421,7 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
       const suffix = parts.length ? ` — ${parts.join(', ')}` : '';
       cardAriaLabel = ` aria-label="${escapeHtml(item.name + suffix)}"`;
     }
-    html += `<div class="${cardClass}"${a11yAttrs}${cardAriaLabel} data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}"${statusesAttr}>
+    html += `<div class="${cardClass}"${a11yAttrs}${dragAttr}${cardAriaLabel} data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}"${statusesAttr}>
       <div class="ctx-card-header">
         <div>
           <div class="ctx-card-name">${escapeHtml(item.name)}${tierBadge}</div>
@@ -504,6 +514,50 @@ async function _loadScopeGroupItems(type, scope, container, seq, signal) {
               card.click();
             }
           });
+          // #2297 drag source. The ``draggable`` attribute was decided at render
+          // time; re-check the live gates here because a mode flip or a roster
+          // change can outlive the render that painted the attribute.
+          card.addEventListener('dragstart', (e) => {
+            if (_ctxSimpleMode || !_ctxCanMoveCopy(type) || !card.dataset.canonicalPath) {
+              e.preventDefault();
+              return;
+            }
+            const activeScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
+            _ctxDragSource = {
+              id: ++_ctxDragSeq,
+              type,
+              name: card.dataset.name,
+              isMcp: type === _CTX_MCP_COPY_TYPE,
+              el: card,
+              // Pinned for the drop's own decisions — the user-tier remap and
+              // the same-project comparison — so they read the source the user
+              // picked up rather than whatever the globals say at drop time.
+              // (A change to either global repaints and cancels the drag.)
+              tier: _ctxTargetScope,
+              srcScopeIdRaw: activeScope ? activeScope.scope_id : (_ctxActiveScopeId || ''),
+            };
+            // Payload is advisory only — protected mode makes it unreadable
+            // during ``dragover``, so every decision reads ``_ctxDragSource``.
+            if (e.dataTransfer) {
+              try { e.dataTransfer.setData('text/plain', card.dataset.name); } catch { /* no-op */ }
+              e.dataTransfer.effectAllowed = 'copyMove';
+            }
+            card.classList.add('ctx-card--dragging');
+            // No explicit focus() here: the card is ``tabindex=0``, so the
+            // pointer press that starts the drag already focuses it, which is
+            // what the modal's focus-restore reads on Cancel
+            // (``test_context_gateway_dnd`` pins that outcome).
+            // mcp-servers have no store axis and refuse every tier chip, so the
+            // generic "another project or a store" opening would send a screen
+            // reader user at targets that can only answer "no".
+            _ctxDragAnnounce(t(
+              _ctxDragSource.isMcp ? 'settings.ctx.dnd_start_mcp' : 'settings.ctx.dnd_start',
+              { name: card.dataset.name },
+            ));
+          });
+          // Backstop only: the drop handler cleans up BEFORE opening the modal,
+          // which makes this subtree inert. Cleanup is idempotent.
+          card.addEventListener('dragend', () => _ctxDragCleanup());
         });
       }
 
@@ -743,6 +797,11 @@ async function loadCtxList(type) {
   if (statusEl) statusEl.innerHTML = '';
   panelLoading(listEl);
   _ctxCurrentDetail = { type: null, name: null, runtimeOnly: false };
+  // Cancel any live drag up front (#2297). The ``panelLoading`` below already
+  // detaches the dragged card, so a stale drop is refused either way; what this
+  // adds is stopping the live region from narrating a gesture whose surface is
+  // gone, for the whole duration of the reload's fetch.
+  _ctxDragCleanup();
   // Clear stale gating attribute so a failed reload doesn't keep the buttons
   // pinned to a previous canonical-count state. _ctxRefreshSectionState resets
   // it when the cwd group resolves successfully.
@@ -878,6 +937,84 @@ async function loadCtxList(type) {
       };
       if (groupEl.open) fetchOnce();
       groupEl.addEventListener('toggle', () => { if (groupEl.open) fetchOnce(); });
+
+      // #2297 drop target A — this project's group header. Dropping a card here
+      // opens Move/Copy with this project pre-selected; it never transfers, and
+      // it deliberately never opens the group: expanding is what triggers the
+      // lazy item fetch above, and a hover must not fire a request.
+      //
+      // ``scope`` comes from this loop's closure, so the drop resolves against
+      // the very roster entry the header was painted from (no re-lookup, no
+      // ``'' vs undefined`` ambiguity).
+      const summaryEl = groupEl.querySelector(':scope > summary');
+      if (summaryEl) {
+        // A ``<summary>`` has element children (label, count, badges), so moving
+        // the pointer onto one fires ``dragleave`` on the summary itself. Count
+        // enter/leave instead of toggling on each. The counter is closure-local
+        // and global cleanup cannot reset it, so it is keyed by drag session:
+        // a stale count from an interrupted drag invalidates itself.
+        const enter = { id: -1, n: 0 };
+        const eligible = () => {
+          const src = _ctxDragSource;
+          if (!src || !_ctxDragActive()) return false;
+          if (_ctxScopeIsActive(scope)) return false;   // source project — nothing to pre-fill
+          return _ctxMoveCopyDestFilter(src.isMcp, src.srcScopeIdRaw)(scope);
+        };
+        summaryEl.addEventListener('dragenter', () => {
+          const src = _ctxDragSource;
+          if (!src) return;
+          if (enter.id !== src.id) { enter.id = src.id; enter.n = 0; }
+          enter.n += 1;
+          if (eligible()) {
+            summaryEl.classList.add('ctx-drop-target--over');
+            // mcp is copy-only, so name the operation it can actually perform.
+            _ctxDragAnnounce(t(
+              src.isMcp ? 'settings.ctx.dnd_drop_project_mcp' : 'settings.ctx.dnd_drop_project',
+              { name: src.name, project: _ctxScopeDisplayLabel(scope) },
+            ));
+          } else {
+            _ctxDragAnnounce(t('settings.ctx.dnd_refused', {
+              name: src.name, target: _ctxScopeDisplayLabel(scope),
+            }));
+          }
+        });
+        // Only an eligible target calls preventDefault — the browser then shows
+        // the copy cursor. An ineligible one keeps the native no-drop cursor.
+        summaryEl.addEventListener('dragover', (e) => {
+          if (!eligible()) return;
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        });
+        summaryEl.addEventListener('dragleave', () => {
+          enter.n = Math.max(0, enter.n - 1);
+          if (enter.n === 0) summaryEl.classList.remove('ctx-drop-target--over');
+        });
+        summaryEl.addEventListener('drop', (e) => {
+          e.preventDefault();
+          enter.n = 0;
+          summaryEl.classList.remove('ctx-drop-target--over');
+          const src = _ctxDragSource;
+          // Re-check rather than trust the dragover gate: a synthetic drop can
+          // skip dragover entirely, and the roster may have moved meanwhile.
+          if (!src || !eligible()) { _ctxDragCleanup(); return; }
+          const { name, tier } = src;
+          const label = _ctxScopeDisplayLabel(scope);
+          // Clean up BEFORE opening: the modal makes this subtree inert, so
+          // ``dragend`` on the source card is not a dependable cleanup hook.
+          _ctxDragCleanup();
+          // Project axis only. The tier carries over from the source, except a
+          // user-tier source: the user tier is global, and pairing it with a
+          // project destination is a hard 400 at the route, so it lands in the
+          // target project's shared store. mcp-servers have no tier axis at all
+          // (single store, pinned by the modal), so they get no tier request —
+          // asking for one there is refused as a caller bug.
+          const ok = _ctxOpenMoveCopyModal(type, name, {
+            toScopeId: scope.scope_id,
+            ...(src.isMcp ? {} : { toTier: tier === 'user' ? 'project_shared' : tier }),
+          });
+          if (!ok) _ctxDragAnnounce(t('settings.ctx.dnd_refused', { name, target: label }));
+        });
+      }
 
       // × is a sibling of <details> inside ``.ctx-scope-group-wrap`` (rank
       // 15), so reach it through the wrapper rather than ``groupEl`` itself.

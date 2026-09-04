@@ -4295,6 +4295,14 @@ body.app-simple [data-ui-adv="advanced"] { display: none; }
 .ctx-card.active { border-color: var(--accent); background: rgba(108, 143, 255, 0.06); }
 .ctx-card--readonly { cursor: default; }
 .ctx-card--readonly:hover { border-color: var(--border); }
+/* Drag-to-choose-a-destination (#2297). ``draggable`` is emitted only on cards
+   that can actually start a Move/Copy, so the grab cursor advertises exactly
+   the cards the gesture works on. */
+.ctx-card[draggable="true"] { cursor: grab; }
+.ctx-card--dragging { opacity: 0.55; }
+/* Shared hover state for both drop targets (project group header, tier chip).
+   An outline, not a border, so it can't shift the target's layout mid-drag. */
+.ctx-drop-target--over { outline: 2px dashed var(--accent); outline-offset: 2px; }
 .ctx-card-header { display: flex; align-items: center; justify-content: space-between; }
 .ctx-card-name { font-weight: 600; font-size: 0.9rem; }
 .ctx-card-path { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
