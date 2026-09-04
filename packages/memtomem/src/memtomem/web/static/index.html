@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=142" />
+  <link rel="stylesheet" href="/style.css?v=143" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -645,6 +645,13 @@
              own roster. The inner controls carry their own labels/aria, so the
              host stays a plain styling container. -->
         <div id="ctx-control-bar" class="ctx-control-bar" hidden></div>
+
+        <!-- Drag-to-choose-a-destination announcements (#2297). A drag gesture
+             is invisible to a screen reader, so each hovered drop target says
+             what dropping there would do. Polite: it narrates an in-progress
+             gesture, never an error. Sits beside the control bar so it is not
+             inside a section the nav hides mid-drag. -->
+        <div id="ctx-drag-announce" class="sr-only" role="status" aria-live="polite"></div>
 
         <!-- Context Gateway: Overview -->
         <div class="settings-section active" id="settings-ctx-overview">
@@ -1931,11 +1938,11 @@
   <script src="/settings-harness.js?v=12"></script>
   <script src="/settings-hooks-watchdog.js?v=23"></script>
   <script src="/timeline.js?v=4"></script>
-  <script src="/context-gateway-core.js?v=3"></script>
-  <script src="/context-gateway-controls.js?v=2"></script>
+  <script src="/context-gateway-core.js?v=4"></script>
+  <script src="/context-gateway-controls.js?v=3"></script>
   <script src="/context-gateway-overview.js?v=7"></script>
-  <script src="/context-gateway-list.js?v=2"></script>
-  <script src="/context-gateway-conflict.js?v=2"></script>
+  <script src="/context-gateway-list.js?v=4"></script>
+  <script src="/context-gateway-conflict.js?v=3"></script>
   <script src="/context-gateway-detail.js?v=7"></script>
   <script src="/context-gateway-actions.js?v=4"></script>
   <script src="/context-gateway-pull.js?v=3"></script>

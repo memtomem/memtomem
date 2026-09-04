@@ -87,3 +87,55 @@ def test_missing_scope_badge_carries_non_color_cue() -> None:
     body = block.group("body")
     # A border (shape cue) and/or opacity (brightness cue) in addition to color.
     assert "border" in body or "opacity" in body
+
+
+# -- Drag-to-choose-a-destination (#2297) -------------------------------------
+#
+# The gesture itself is pinned behaviorally by ``tests-js/ctx-move-copy-dnd.test.mjs``
+# (which target accepts, what the modal is pre-filled with, what each hover
+# announces). What is pinned HERE is the part that lives in the shipped markup
+# and cannot be asserted by driving the DOM: that the region the drag narrates
+# into exists, and that it is polite rather than assertive.
+
+
+def test_drag_announcer_is_a_polite_live_region() -> None:
+    """A drag is invisible to a screen reader, so each hovered target narrates.
+
+    Mutation that bites: dropping ``aria-live`` (the announcements become
+    silent) or raising it to ``assertive`` (a hover-rate gesture interrupting
+    whatever the user was reading).
+    """
+    html = _html()
+    region = re.search(r"<div id=\"ctx-drag-announce\"[^>]*>", html)
+    assert region is not None, "index.html must define #ctx-drag-announce"
+    tag = region.group(0)
+    assert 'role="status"' in tag
+    assert 'aria-live="polite"' in tag
+    assert "assertive" not in tag
+    # Visually hidden, in the a11y tree: it is narration, not visible UI.
+    assert 'class="sr-only"' in tag
+
+
+def test_drag_source_attribute_is_gated_on_move_copy_eligibility() -> None:
+    """``draggable`` must not outrun the action it accelerates.
+
+    The gesture only makes sense where a Move/Copy is actually reachable: a
+    transfer kind, a real canonical file, the active project's (clickable)
+    group, and Advanced mode. Pinning the gate in the renderer keeps a future
+    edit from marking cards draggable whose drop would dead-end in a 404 or in
+    a modal the user cannot reach any other way.
+    """
+    from ..helpers import ctx_gateway_js_text
+
+    js = ctx_gateway_js_text()
+    start = js.index("function _ctxRenderItemsHtml(")
+    end = js.index("async function _loadScopeGroupItems(")
+    body = js[start:end]
+    match = re.search(r"const dragAttr = \((?P<gate>.*?)\)\s*\n", body, re.S)
+    assert match is not None, "_ctxRenderItemsHtml must compute a gated dragAttr"
+    gate = match.group("gate")
+    for token in ("clickable", "item.canonical_path", "_ctxCanMoveCopy(type)", "!_ctxSimpleMode"):
+        assert token in gate, f"draggable gate must include {token}; got: {gate}"
+    # The attribute rides its own variable — ``test_web_a11y`` pins the
+    # ``a11yAttrs`` ternary verbatim, and the two gates are not the same.
+    assert "${a11yAttrs}${dragAttr}" in body

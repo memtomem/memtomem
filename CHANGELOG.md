@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **Drag an artifact onto a project or a store to start a Move/Copy.** Sending a
+  skill, command, or agent somewhere else meant opening the card, clicking
+  **Move / Copy**, and then finding the destination by name in a dropdown that
+  lists every enrolled project — while those projects were already grouped on
+  screen a few hundred pixels away, and the stores were already a row of chips
+  in the control bar. In the Advanced view those two surfaces now accept a
+  dragged card. The drop performs no transfer: it opens the same Move/Copy
+  dialog with the destination already chosen and the preview already running, so
+  the confirmation step, the collision handling, and the shared-store disclosure
+  are unchanged. Dropping on a project keeps the artifact's current store (a
+  user-level artifact lands in that project's shared store, which is the only
+  destination the transfer accepts); dropping on a chip keeps the project.
+  Dragging is an accelerator — the card and its **Move / Copy** button remain the
+  keyboard route — and each drop target announces what dropping there would do.
+  Projects that cannot receive the artifact refuse the drop instead of failing
+  later in the preview, and for the same reason the destination dropdown no
+  longer lists another project that has no memtomem store yet — picking one
+  could only ever end in the "initialize it first" conflict. (#2297)
+
 ### Fixed
 
 - **`--no-include-shared` / `include_shared=False` no longer returns the one

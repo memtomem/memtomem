@@ -171,8 +171,38 @@ const _CTX_TRANSFER_TYPES = new Set(['skills', 'commands', 'agents']);
 // and ``_ctxOpenMoveCopyModal``; ``_CTX_TRANSFER_TYPES`` stays the full-surface
 // set so the body builder / visibility toggles can branch on it.
 const _CTX_MCP_COPY_TYPE = 'mcp-servers';
+// The destination tiers the transfer body accepts — the same three the modal's
+// radios offer. Used to validate a dropped tier (#2297) before it is applied.
+const _CTX_TRANSFER_TIERS = new Set(['user', 'project_shared', 'project_local']);
 function _ctxCanMoveCopy(type) {
   return _CTX_TRANSFER_TYPES.has(type) || type === _CTX_MCP_COPY_TYPE;
+}
+
+// Which roster scopes may be a transfer DESTINATION. Extracted (#2297) so the
+// modal's option list and the drag-and-drop drop targets gate on ONE predicate —
+// a drop that pre-fills a destination the option list would have refused is a
+// dry-run failure the user never asked for.
+//
+// ``missing`` (root gone) is out either way. A CROSS-project destination must
+// also not be ``stale``: stale means the root exists but has no ``.memtomem/``
+// store, and the route rejects exactly that with 409 ``no_memtomem_store``
+// (CLI-parity gate #1274) — offering it can only produce a dead end. The
+// same-project case is exempt: a within-project transfer keeps migrate's
+// implicit-store behavior, so the source project stays selectable even before
+// its store exists.
+//
+// mcp-servers (#1314) are cross-project only, so the source is excluded and
+// every option must be sync-eligible. Full kinds keep the source project (the
+// same-project promote default) even when it is paused — dry-run surfaces that
+// inline rather than hiding the only destination the user can reason about.
+function _ctxMoveCopyDestFilter(isMcp, srcScopeIdRaw) {
+  return (s) => {
+    if (!s || s.missing) return false;
+    const isSource = s.scope_id === srcScopeIdRaw;
+    if (!isSource && s.stale) return false;
+    if (isMcp) return !isSource && _ctxScopeSyncEligible(s);
+    return _ctxScopeSyncEligible(s) || _ctxScopeIsActive(s);
+  };
 }
 
 // Open-modal state, shared with the ``langchange`` re-render; ``null`` when
@@ -594,12 +624,50 @@ function _ctxResetMoveCopyControls(modalEl) {
   if (applyBtn) btnLoading(applyBtn, false);
 }
 
+// Apply a dropped destination onto the freshly-defaulted modal controls.
+// Returns false when a REQUESTED axis cannot be honored — the caller then
+// refuses to open (see ``_ctxOpenMoveCopyModal``); an omitted axis is not a
+// failure and keeps its default.
+function _ctxApplyMoveCopyPrefill(modalEl, state, opts) {
+  const o = opts || {};
+  if (o.toTier !== undefined) {
+    // mcp-servers are project_shared-pinned and their tier radios are hidden;
+    // a tier request there is a caller bug, not a user choice to honor.
+    if (state.isMcp || !_CTX_TRANSFER_TIERS.has(o.toTier)) return false;
+    const radio = modalEl.querySelector(`input[name="ctx-mc-tier"][value="${CSS.escape(o.toTier)}"]`);
+    if (!radio) return false;
+    modalEl.querySelectorAll('input[name="ctx-mc-tier"]').forEach((el) => { el.checked = el === radio; });
+  }
+  if (o.toScopeId !== undefined) {
+    // ``''`` is a legitimate scope_id (the synthetic server-cwd fallback), so
+    // this is a type check, never a truthiness check.
+    if (typeof o.toScopeId !== 'string') return false;
+    const projSel = qs('ctx-mc-project');
+    if (!projSel || !Array.from(projSel.options).some((op) => op.value === o.toScopeId)) return false;
+    projSel.value = o.toScopeId;
+  }
+  return true;
+}
+
 // Open the modal for one artifact. Pins source identity + scope/tier ONCE
 // (ADR-0021 §C). skills/commands/agents (full surface) + mcp-servers
 // (constrained copy-only variant, #1314).
-function _ctxOpenMoveCopyModal(srcType, srcName) {
+//
+// ``opts`` (#2297) pre-selects a destination the user already pointed at by
+// dropping the card on it — ``{ toScopeId }`` for a project group header,
+// ``{ toTier }`` for a tier chip. Both are applied AFTER the defaults below and
+// BEFORE the visibility sync + first dry-run, so the modal opens on the dropped
+// destination rather than racing it. Omitting a key keeps that axis's default.
+//
+// A requested destination that cannot be applied (the roster refreshed and the
+// option is gone, an unknown tier, a tier on the tier-less mcp variant) FAILS
+// CLOSED: the modal does not open and the caller gets ``false``. Falling back to
+// the default would silently preview a destination the user never chose — for
+// full kinds that default is the SOURCE project, i.e. the drop would look like
+// it worked and target the wrong place. Returns ``true`` when opened.
+function _ctxOpenMoveCopyModal(srcType, srcName, opts = {}) {
   const modalEl = qs('ctx-move-copy-modal');
-  if (!modalEl || !_ctxCanMoveCopy(srcType)) return;
+  if (!modalEl || !_ctxCanMoveCopy(srcType)) return false;
   const isMcp = srcType === _CTX_MCP_COPY_TYPE;
   // Clear any stale disabled/loading DOM left by an interrupted prior session.
   _ctxResetMoveCopyControls(modalEl);
@@ -625,19 +693,14 @@ function _ctxOpenMoveCopyModal(srcType, srcName) {
   };
   _ctxMoveCopyState = state;
 
-  // Destination project options. Full kinds: sync-eligible scopes plus always
-  // the source project (same-project promote must be offered; a paused source
-  // surfaces inline at dry-run). mcp-servers (#1314): cross-project ONLY, so
-  // the source project is EXCLUDED and every option must be sync-eligible (the
-  // route 409s a paused/never-enrolled destination — no point offering it).
-  // Missing scopes excluded either way.
+  // Destination project options — see ``_ctxMoveCopyDestFilter`` for the rule
+  // (shared with the drag-and-drop drop targets, #2297): missing scopes and
+  // store-less cross-project scopes are out; mcp is cross-project + sync-eligible
+  // only; full kinds keep the source project for the same-project promote.
   const projSel = qs('ctx-mc-project');
   if (projSel) {
-    const list = (_ctxProjectsCache || []).filter(s => {
-      if (!s || s.missing) return false;
-      if (isMcp) return s.scope_id !== state.srcScopeIdRaw && _ctxScopeSyncEligible(s);
-      return _ctxScopeSyncEligible(s) || _ctxScopeIsActive(s);
-    });
+    const list = (_ctxProjectsCache || [])
+      .filter(_ctxMoveCopyDestFilter(isMcp, state.srcScopeIdRaw));
     projSel.innerHTML = list.map(s => {
       // Full kinds preselect the source (same-project promote default); mcp
       // leaves the browser's first-option default (any of them is valid).
@@ -656,6 +719,15 @@ function _ctxOpenMoveCopyModal(srcType, srcName) {
   modalEl.querySelectorAll('input[name="ctx-mc-tier"]').forEach(el => { el.checked = el.value === defaultTier; });
   const renameEl = qs('ctx-mc-rename');
   if (renameEl) renameEl.value = '';
+
+  // Dropped-destination pre-fill (#2297). Applied over the defaults and before
+  // the visibility sync, so ``_ctxSyncMoveCopyVisibility`` reads the FINAL tier
+  // (a ``user`` destination hides the project row) and the first dry-run below
+  // previews the dropped destination on its first request.
+  if (!_ctxApplyMoveCopyPrefill(modalEl, state, opts)) {
+    _ctxMoveCopyState = null;
+    return false;
+  }
   _ctxSyncMoveCopyVisibility(state);
 
   const applyBtn = qs('ctx-mc-apply-btn');
@@ -706,6 +778,7 @@ function _ctxOpenMoveCopyModal(srcType, srcName) {
     : (modalEl.querySelector('input[name="ctx-mc-mode"]:checked')
       || modalEl.querySelector('input, select, button'));
   firstControl?.focus();
+  return true;
 }
 
 // Re-paint the open Move/Copy modal's JS-owned lines on a locale flip. The

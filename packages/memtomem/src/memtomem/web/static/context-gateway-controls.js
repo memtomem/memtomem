@@ -65,6 +65,10 @@ function _ctxRenderControlBar() {
     return;
   }
   host.hidden = false;
+  // The repaint replaces the tier chips a live drag may be hovering (#2297) —
+  // and this runs from stale loaders too, so it can land mid-drag. Drop the
+  // session before the nodes go away.
+  _ctxDragCleanup();
   host.innerHTML = _ctxProjectControls(type) + _ctxTierControls(type);
   _ctxWireProjectControls();
   _ctxWireTierControls();
@@ -176,6 +180,50 @@ function _ctxWireTierControls() {
   document.querySelectorAll('.ctx-tier-filter button').forEach(btn => {
     if (btn.dataset.tierWired === 'true') return;
     btn.dataset.tierWired = 'true';
+    // #2297 drop target B — the tier chips. Dropping a card on a chip opens
+    // Move/Copy with that store as the destination, keeping the destination
+    // project as the modal's default (the source project, i.e. an in-place
+    // promote/demote). mcp-servers are single-tier, so they are refused here;
+    // their only transfer axis is the project, which drop target A covers.
+    const eligibleTier = () => {
+      const src = _ctxDragSource;
+      if (!src || !_ctxDragActive() || src.isMcp) return false;
+      // The pressed chip IS the source store — a same-store no-op.
+      if (!btn.dataset.scope || btn.dataset.scope === _ctxTargetScope) return false;
+      // A Sync All run disables the chips; a disabled control is not a target.
+      return !btn.disabled;
+    };
+    btn.addEventListener('dragenter', () => {
+      const src = _ctxDragSource;
+      if (!src) return;
+      const label = _ctxTierLabel(btn.dataset.scope);
+      if (eligibleTier()) {
+        btn.classList.add('ctx-drop-target--over');
+        _ctxDragAnnounce(t('settings.ctx.dnd_drop_tier', { name: src.name, tier: label }));
+      } else {
+        _ctxDragAnnounce(t('settings.ctx.dnd_refused', { name: src.name, target: label }));
+      }
+    });
+    btn.addEventListener('dragover', (e) => {
+      if (!eligibleTier()) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    // A chip has no element children, so a plain leave is enough here — no
+    // enter/leave counter (unlike the group ``<summary>`` targets).
+    btn.addEventListener('dragleave', () => btn.classList.remove('ctx-drop-target--over'));
+    btn.addEventListener('drop', (e) => {
+      e.preventDefault();
+      btn.classList.remove('ctx-drop-target--over');
+      const src = _ctxDragSource;
+      if (!src || !eligibleTier()) { _ctxDragCleanup(); return; }
+      const { type: srcType, name } = src;
+      const toTier = btn.dataset.scope;
+      const label = _ctxTierLabel(toTier);
+      _ctxDragCleanup();
+      const ok = _ctxOpenMoveCopyModal(srcType, name, { toTier });
+      if (!ok) _ctxDragAnnounce(t('settings.ctx.dnd_refused', { name, target: label }));
+    });
     btn.addEventListener('click', () => {
       const next = btn.dataset.scope;
       if (!next || next === _ctxTargetScope) return;
