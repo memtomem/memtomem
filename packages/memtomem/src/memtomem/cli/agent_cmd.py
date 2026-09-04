@@ -456,8 +456,8 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     show_default=True,
     help=(
         "Also search the shared namespace. --no-include-shared drops the shared leg "
-        "of the merge, so it has no effect when no agent resolves: an unpinned search "
-        "still reaches the shared bucket."
+        "of the merge, so it requires an agent to scope to: with none resolved it "
+        "would select nothing, and the command refuses instead."
     ),
 )
 @click.option("--top-k", "-k", default=10, show_default=True, help="Number of results.")
@@ -469,7 +469,7 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         "(e.g. shared:myproject). Defaults to the global 'shared'. Only the "
         "shared leg is re-pointed, so this has no effect with "
         "--no-include-shared, or when no agent resolves and the search runs "
-        "unpinned."
+        "unpinned over the shared bucket."
     ),
 )
 @click.option(
@@ -502,13 +502,14 @@ def agent_search(
     same way, and a silently widened search is the one outcome the caller
     would not think to check for.
 
-    Default visibility hides ``agent-runtime:`` and ``archive:`` but **not**
-    ``shared``, so an unresolved agent also disregards
-    ``--no-include-shared``: the flag drops the shared leg of a merge, and
-    there is no merge to drop it from. That is ``mem_agent_search``'s rule as
-    well — this verb mirrors the tool rather than diverging from it — so the
-    flag is reported as disregarded instead of being made to fail or being
-    reinterpreted here.
+    ``--no-include-shared`` is the one combination that does not survive an
+    unresolved agent. It drops the shared bucket, so with no agent scope to
+    keep it selects nothing, and the command refuses rather than running the
+    search (#2296). It has to refuse: default visibility hides
+    ``agent-runtime:`` and ``archive:`` but **not** ``shared``, so the widened
+    search this used to fall back on returned rows from the one bucket the
+    flag exists to exclude. ``mem_agent_search`` refuses the same combination
+    for the same reason — the rule is one function, not a copy per surface.
 
     Output formats are ``mm search``'s, not the MCP tool's — this is a CLI
     command, and a shell pipeline expects ``--format json`` to mean what it
@@ -647,7 +648,10 @@ async def _run_agent_search(
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.cli.search import _search_with_components, render_search_results
-    from memtomem.server.tools.multi_agent import merge_agent_namespace_filter
+    from memtomem.server.tools.multi_agent import (
+        AgentScopeRequiredError,
+        merge_agent_namespace_filter,
+    )
 
     async with cli_components() as comp:
         # Priority mirrors ``_resolve_agent_namespace``: an explicit flag
@@ -657,7 +661,21 @@ async def _run_agent_search(
             agent_ns: str | None = f"{_CURRENT_PREFIX}{agent_id}"
         else:
             agent_ns = await resolve_session_write_namespace(comp.storage)
-        ns_filter = merge_agent_namespace_filter(agent_ns, include_shared, shared_namespace)
+        try:
+            ns_filter = merge_agent_namespace_filter(agent_ns, include_shared, shared_namespace)
+        except AgentScopeRequiredError as exc:
+            # Re-stated, not re-raised. The merge's own message names
+            # ``agent_id`` / ``mem_session_start`` / ``mem_search`` because the
+            # MCP path surfaces it verbatim; this verb has none of those, and
+            # remediation naming a command the reader just failed to run is the
+            # defect ``test_agent_search_remediation_vocabulary`` exists to
+            # catch. The refusal is the same one — only the vocabulary moves.
+            raise click.UsageError(
+                "--no-include-shared needs an agent to scope to, and none resolved. "
+                "It drops the shared bucket, so with no agent scope left to search it "
+                "selects nothing. Pass --agent-id, start an agent-bound session with "
+                "`mm session start`, or run `mm search` for an unpinned search."
+            ) from exc
 
         payload = await _search_with_components(
             comp,
@@ -708,24 +726,6 @@ async def _run_agent_search(
             err=True,
         )
 
-    # ``--no-include-shared`` drops the shared leg *of the merge*, and with no
-    # agent there is no merge: ``merge_agent_namespace_filter`` answers "no
-    # filter" before it ever looks at the flag. Default visibility then hides
-    # ``agent-runtime:`` and ``archive:`` but not ``shared``, so a query that
-    # asked to exclude the shared bucket can return rows from it. That is the
-    # MCP tool's rule too and this verb exists to mirror it — changing the
-    # merge would change ``mem_agent_search`` — but the flag being disregarded
-    # is the reader's to know, and the widening note above does not say which
-    # of their options it took with it. Whether the rule itself should change
-    # is #2296; this note is the disclosure, not the fix.
-    if ns_filter is None and not include_shared:
-        click.secho(
-            "(--no-include-shared was disregarded: with no agent there is no merge to "
-            "drop a leg from, and an unpinned search still reaches the shared bucket.)",
-            fg="yellow",
-            err=True,
-        )
-
     # ``--shared-namespace`` re-points the shared leg of the merge, so it is
     # validated and then has nothing to act on in the two cases where there is
     # no such leg. Both are accepted rather than refused — neither is a
@@ -733,6 +733,9 @@ async def _run_agent_search(
     # and then does nothing is exactly the kind of silence that gets read as
     # "it worked". Say which case swallowed it.
     if shared_namespace is not None and (ns_filter is None or not include_shared):
+        # Both reasons stay reachable, but they no longer overlap: an
+        # unresolved agent now only gets this far with --include-shared, and
+        # --no-include-shared now only gets this far with an agent.
         reason = (
             "there is no agent scope to merge it with"
             if ns_filter is None
@@ -784,6 +787,7 @@ def debug_resolve(
 
     from memtomem.server.context import AppContext
     from memtomem.server.tools.multi_agent import (
+        AgentScopeRequiredError,
         _resolve_agent_namespace,
         merge_agent_namespace_filter,
     )
@@ -794,7 +798,17 @@ def debug_resolve(
     )
     agent_ns = _resolve_agent_namespace(cast(AppContext, fake_app), agent_id)
 
-    ns_filter = merge_agent_namespace_filter(agent_ns, include_shared)
+    # A refusal is one of the outcomes this command exists to report, so it is
+    # reported rather than raised: an integration script asserting what the MCP
+    # tool would do needs to see "refused, and why" as a value. Printing a null
+    # filter with no ``refused`` field would describe a search that never runs
+    # as an unpinned one that does.
+    refused: str | None = None
+    try:
+        ns_filter = merge_agent_namespace_filter(agent_ns, include_shared)
+    except AgentScopeRequiredError as exc:
+        ns_filter = None
+        refused = str(exc)
 
     click.echo(
         _json.dumps(
@@ -807,6 +821,7 @@ def debug_resolve(
                 },
                 "agent_namespace": agent_ns,
                 "resolved_namespace_filter": ns_filter,
+                "refused": refused,
             },
             indent=2,
         )

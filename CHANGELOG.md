@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`--no-include-shared` / `include_shared=False` no longer returns the one
+  namespace it excludes.** With no agent resolved — no `--agent-id`, no
+  agent-bound session — the merge answered "no filter" before it looked at the
+  argument, and an unpinned search reaches `shared` because that is not a
+  system-namespace prefix. The caller asked for the shared bucket to be dropped
+  and got rows from it. That combination selects no bucket at all, so
+  `mm agent search` and `mem_agent_search` now refuse it and name the ways to
+  make it meaningful, instead of running a search that contradicts an explicit
+  argument. `mm agent debug-resolve` reports the refusal as a `refused` field
+  rather than printing a null filter. Every other combination is unchanged.
+  (#2296)
+
 - **A namespace or scope glob with many wildcards no longer burns CPU.**
   `NamespaceFilter.matches` / `ScopeFilter.matches` compiled the pattern to a
   regex, rendering each `*` as a greedy `.*`; a chain of those against a value
