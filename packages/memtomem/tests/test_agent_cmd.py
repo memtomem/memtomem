@@ -387,6 +387,26 @@ class TestAgentDebugResolve:
         assert payload["agent_namespace"] == "agent-runtime:planner"
         assert payload["resolved_namespace_filter"] == "agent-runtime:planner"
 
+    def test_a_refused_combination_is_reported_not_raised(self):
+        """``debug-resolve`` exists to report what the MCP tool would resolve,
+        and "refused" is one of those answers. Printing a null filter with no
+        ``refused`` field would describe a search that never runs as an
+        unpinned one that does — the failure mode this command exists to
+        prevent."""
+        result = CliRunner().invoke(cli, ["agent", "debug-resolve", "--no-include-shared"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["agent_namespace"] is None
+        assert payload["resolved_namespace_filter"] is None
+        assert "include_shared=False needs a resolved agent" in payload["refused"]
+
+    def test_a_resolved_combination_reports_no_refusal(self):
+        result = CliRunner().invoke(cli, ["agent", "debug-resolve", "--agent-id", "planner"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["refused"] is None
+
     def test_legacy_current_namespace_fallback(self):
         result = CliRunner().invoke(
             cli,
@@ -765,20 +785,56 @@ class TestAgentSearch:
         assert result.exit_code == 0, result.output
         assert f"--shared-namespace 'shared:myproj' was ignored: {reason}." in result.stderr
 
-    def test_an_unresolved_agent_says_no_include_shared_was_disregarded(self, monkeypatch):
-        """``--no-include-shared`` drops the shared leg *of the merge*, and with
-        no agent there is no merge — the helper answers "no filter" before it
-        looks at the flag. Default visibility then hides ``agent-runtime:`` and
-        ``archive:`` but not ``shared``, so a query that asked to exclude the
-        shared bucket can return rows from it. The widening note above does not
-        say which of their options it took with it.
-        """
-        result, comp = self._run(monkeypatch, ["agent", "search", "deploy", "--no-include-shared"])
+    def test_an_unresolved_agent_refuses_no_include_shared(self, monkeypatch):
+        """#2296. This combination selects no bucket at all, so it is refused.
 
-        assert result.exit_code == 0, result.output
-        assert self._namespace(comp) is None
-        assert "--no-include-shared was disregarded" in result.stderr
-        assert "an unpinned search still reaches the shared bucket" in result.stderr
+        The pin that matters is ``await_count``: the previous behaviour ran the
+        search with ``namespace=None``, and asserting the *argument* is what let
+        the bug through — ``None`` is a correct argument and a wrong outcome.
+        A query that never runs cannot return a shared row whatever default
+        visibility does, which is a stronger statement than any assertion about
+        the filter it would have been given.
+        """
+        comp = _search_components(namespaces=[("shared", 4), ("default", 9)])
+        result, comp = self._run(
+            monkeypatch, ["agent", "search", "deploy", "--no-include-shared"], comp=comp
+        )
+
+        assert result.exit_code != 0
+        assert comp.search_pipeline.search.await_count == 0
+        assert "--no-include-shared needs an agent to scope to" in result.stderr
+        assert "Pass --agent-id" in result.stderr
+
+    def test_the_refusal_names_this_verb_and_not_the_mcp_tool(self, monkeypatch):
+        """The merge raises in ``mem_agent_search``'s vocabulary because
+        ``tool_handler`` prints it verbatim. Passing that through here would
+        tell a CLI reader to pass ``agent_id`` and call ``mem_search``, neither
+        of which is reachable from a shell."""
+        result, _comp = self._run(monkeypatch, ["agent", "search", "deploy", "--no-include-shared"])
+
+        assert result.exit_code != 0
+        assert "agent_id" not in result.stderr
+        assert "mem_session_start" not in result.stderr
+        assert "mem_search" not in result.stderr
+
+    def test_the_shared_bucket_is_still_visible_by_default(self):
+        """Why the refusal exists, pinned separately from the refusal itself.
+
+        ``shared`` is not a system-namespace prefix (ADR-0028), so an unpinned
+        search reaches it — that is the whole reason answering this combination
+        with "no filter" returned the rows it was told to exclude. If ``shared``
+        ever joins the default hide-list this test fails, and whoever makes that
+        change is the right person to re-decide the refusal.
+        """
+        from memtomem.constants import _DEFAULT_SYSTEM_PREFIXES
+        from memtomem.models import NamespaceFilter
+
+        unpinned = NamespaceFilter.parse(None, system_prefixes=_DEFAULT_SYSTEM_PREFIXES)
+
+        assert unpinned is not None
+        assert unpinned.matches("shared") is True
+        assert unpinned.matches("shared:myproject") is True
+        assert unpinned.matches("agent-runtime:planner") is False
 
     def test_a_resolved_agent_honours_no_include_shared_silently(self, monkeypatch):
         """With an agent the flag does exactly what it says, so there is

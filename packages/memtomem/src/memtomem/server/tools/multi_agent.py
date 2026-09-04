@@ -72,6 +72,24 @@ def _resolve_agent_namespace(app: AppContext, agent_id: str | None) -> str | Non
     return app.current_namespace
 
 
+class AgentScopeRequiredError(ValueError):
+    """``include_shared=False`` was asked for with no agent to scope to.
+
+    A ``ValueError`` so the MCP path renders it through ``tool_handler``'s
+    ``_KNOWN_EXCEPTIONS`` branch without a second mapping, and its message is
+    written in **that** surface's vocabulary — ``agent_id``,
+    ``mem_session_start``, ``mem_search`` — because ``tool_handler`` surfaces
+    the string verbatim and has nowhere to translate it.
+
+    Every other surface catches it and re-states the same refusal in its own
+    names: ``mm agent search`` has no ``agent_id`` argument and no
+    ``mem_search`` command, so passing this message through unchanged would
+    hand the reader remediation they cannot carry out. A distinct type rather
+    than a bare ``ValueError`` is what lets them tell this refusal apart from
+    the validation errors raised a few lines earlier.
+    """
+
+
 def merge_agent_namespace_filter(
     agent_ns: str | None,
     include_shared: bool,
@@ -85,20 +103,44 @@ def merge_agent_namespace_filter(
     ``shared:<project>`` so the merge stays inside that project's shared
     scope (ADR-0028); the private leg is untouched.
 
-    ``None`` means "no filter": an unresolved agent searches unpinned at
-    default visibility rather than falling back to an ambient namespace. That
-    is not "every namespace" — ``search.system_namespace_prefixes`` still hides
-    ``agent-runtime:`` and ``archive:`` from an unpinned query, so an
-    unresolved agent sees less of the store than the merge would have shown it,
-    not more.
+    ``None`` means "no filter": an unresolved agent searching *with* the
+    shared bucket runs unpinned at default visibility rather than falling back
+    to an ambient namespace. That is not "every namespace" —
+    ``search.system_namespace_prefixes`` still hides ``agent-runtime:`` and
+    ``archive:`` from an unpinned query, so an unresolved agent sees less of
+    the store than the merge would have shown it, not more.
+
+    ``include_shared=False`` with no agent is refused rather than answered
+    (#2296). It selects **zero** buckets: there is no private leg to keep and
+    the caller asked for the shared one to be dropped. Answering it with
+    ``None`` used to run an unpinned search instead, and default visibility
+    hides ``agent-runtime:`` and ``archive:`` but *not* ``shared`` — so the one
+    namespace the argument exists to exclude was the one namespace the query
+    still reached. Disclosing that in prose was the previous state and is not
+    the same as honoring the argument.
+
+    The alternative — emitting "default visibility, except shared" — is not a
+    narrowing of this merge but a new negative-filter meaning, and it does not
+    have one obvious reading: ADR-0028 documents ``shared:<project>`` as
+    deliberately *not* a system prefix, so whether the exclusion covers
+    ``shared`` exactly or ``shared:*`` as well is an open product decision that
+    ADR defers. Refusing costs nothing and forecloses neither answer.
 
     Shared by ``mem_agent_search``, ``mm agent search`` and the hidden
     ``mm agent debug-resolve``, whose whole job is to report what the MCP
     tool would resolve — three copies of one rule is how the debug helper
-    would come to disagree with the thing it exists to describe.
+    would come to disagree with the thing it exists to describe. The refusal
+    lives here for the same reason the merge does.
     """
     shared_ns = shared_namespace or SHARED_NAMESPACE
     if not agent_ns:
+        if not include_shared:
+            raise AgentScopeRequiredError(
+                "include_shared=False needs a resolved agent: with no agent there is "
+                "no private bucket to keep, and dropping the shared one selects "
+                "nothing at all. Pass agent_id, start an agent-bound session with "
+                "mem_session_start, or call mem_search for an unpinned search."
+            )
         return None
     if include_shared:
         return f"{agent_ns},{shared_ns}"
@@ -190,6 +232,13 @@ async def mem_agent_search(
     through :func:`validate_namespace` and is ignored when
     ``include_shared=False``. The ``agent_id`` axis remains the private
     isolation boundary; this only re-points the *shared* leg of the merge.
+
+    ``include_shared=False`` requires an agent to have resolved, from
+    ``agent_id`` or from the session, and raises otherwise (#2296): with no
+    agent there is no private bucket to keep, so dropping the shared one
+    selects nothing. It used to run an unpinned search instead, which reaches
+    ``shared`` — that bucket is deliberately not a system-namespace prefix
+    (ADR-0028) — and so returned the one namespace the argument excludes.
 
     Args:
         query: Search query

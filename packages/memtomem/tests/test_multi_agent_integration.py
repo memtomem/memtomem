@@ -247,6 +247,47 @@ class TestCaseBShareTrail:
         )
         assert "No results found" in out_no_shared
 
+    @pytest.mark.asyncio
+    async def test_dropping_shared_with_no_agent_is_refused_against_real_rows(
+        self, bm25_only_components
+    ):
+        """#2296, checked against rows rather than against an argument.
+
+        The bug was that ``include_shared=False`` with no agent answered "no
+        filter", and an unpinned search reaches ``shared`` — so the caller got
+        back the very bucket they excluded. Asserting ``namespace=None`` is
+        what let that through, because ``None`` was a correct argument and a
+        wrong outcome. So this puts a real, findable row in ``shared`` first
+        and then asserts the text of that row is not in the answer.
+        """
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk(
+                    "the database connection pool tuning notes",
+                    namespace=SHARED_NAMESPACE,
+                )
+            ]
+        )
+
+        # No agent_id and no session binding: nothing resolves an agent.
+        reachable = await mem_agent_search(  # type: ignore[arg-type]
+            query="connection pool", agent_id=None, include_shared=True, ctx=ctx
+        )
+        assert "connection pool" in reachable, (
+            "the row must be reachable by an unpinned search, or the assertion "
+            "below would pass for the wrong reason"
+        )
+
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="connection pool", agent_id=None, include_shared=False, ctx=ctx
+        )
+        assert "connection pool" not in out
+        assert "include_shared=False needs a resolved agent" in out
+
 
 # ── Case C — session→agent_id inheritance (PR-2) ────────────────────────
 

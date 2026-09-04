@@ -169,13 +169,13 @@ team-shared notes in a per-project bucket —
 See ADR-0028.
 
 agent_search with no agent_id, no session agent and no current namespace does
-not fail, and it does not sweep every namespace either: it runs UNPINNED, and
-the system-namespace filter then hides, by default, exactly the scopes you were
-probably after ("agent-runtime:" and "archive:"), while default / shared /
-custom namespaces are still searched. That filter is an exclusion list the
-operator can change (search.system_namespace_prefixes): extra prefixes hide
-more, an empty list hides nothing, so on a customized server the scopes an
-unpinned search reaches may be wider OR narrower than the default. Pass
+not fail, though include_shared=false is refused there, and it does not sweep
+every namespace either: it runs UNPINNED, and the system-namespace filter then
+hides, by default, exactly the scopes you were probably after
+("agent-runtime:" and "archive:"), while default / shared / custom namespaces
+are still searched. That filter is an exclusion list the operator can change
+(search.system_namespace_prefixes): extra prefixes hide more, an empty list
+hides nothing, so a customized server may reach wider or narrower scopes. Pass
 agent_id, or start an agent-bound session first, when you mean to search one
 agent's scope.
 

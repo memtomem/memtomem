@@ -110,6 +110,37 @@ class TestMemAgentSearchRecordParam:
         assert app.search_pipeline.search.await_args.kwargs["record"] is False
         assert "Error" not in str(result)[:40]
 
+    async def test_the_dispatcher_route_refuses_and_runs_no_search(self):
+        """#2296 on the fourth surface, and the *normal* one in core mode.
+
+        ``mem_do`` invokes the registered function directly, so the refusal
+        travels to its outer ``tool_handler`` rather than the one on the tool.
+        That renders it correctly today by virtue of the exception's base
+        class; nothing pinned it, and "correct by accident" is how the other
+        three surfaces would have drifted apart too.
+        """
+        from memtomem.server.tools.meta import mem_do
+
+        app = _fake_app()
+        app.current_agent_id = None
+        app.current_namespace = None
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                "memtomem.server.tools.multi_agent._get_app_initialized",
+                AsyncMock(return_value=app),
+            )
+            result = await mem_do(
+                "agent_search", params={"query": "hello", "include_shared": False}
+            )
+
+        # The refusal reaches the caller as a rendered error, not as an
+        # "internal error" wrapper and not as an empty result set.
+        assert "include_shared=False needs a resolved agent" in str(result)
+        assert "internal error" not in str(result)
+        # And retrieval never ran, which is what keeps a shared row out of the
+        # answer regardless of what default visibility does.
+        app.search_pipeline.search.assert_not_awaited()
+
 
 class TestEndToEndNoWrites:
     """The DoD: ``record=false`` at the MCP surface mutates no stored state."""

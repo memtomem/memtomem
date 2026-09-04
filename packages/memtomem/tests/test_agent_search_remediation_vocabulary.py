@@ -224,6 +224,12 @@ _STORES: dict[str, tuple[list[tuple[str, int]], RetrievalStats, str, frozenset[s
 
 #: Every way the three scoping options can be combined, plus the agent origins
 #: the command distinguishes. ``None`` session means unresolved.
+#:
+#: One pair does not run a search at all: ``--no-include-shared`` with no agent
+#: selects no bucket and is refused (#2296). Those cells stay in the matrix
+#: because a refusal is remediation — it tells the reader what to do instead,
+#: in two flag names — and dropping them would exempt the message most likely
+#: to name one.
 _AGENT_ORIGINS: dict[str, tuple[list[str], str | None]] = {
     "explicit-flag": (["-a", "planner"], None),
     "session-binding": ([], "agent-runtime:coder"),
@@ -241,6 +247,15 @@ _SHARED_OPTIONS: dict[str, list[str]] = {
 }
 
 
+#: The ``shared`` spellings that drop the shared bucket. With ``origin`` also
+#: unresolved there is nothing left to search, and the verb refuses.
+_DROPS_SHARED = frozenset({"no-include-shared", "no-include-shared-and-repointed"})
+
+#: What the refusal says. Its own witness: a refusal that stopped explaining
+#: itself would leave those cells scanning an empty string.
+_REFUSAL = "--no-include-shared needs an agent to scope to"
+
+
 def _emit(monkeypatch, origin: str, shared: str, store: str):
     """Run one cell and hand back its stderr, having checked it is not empty.
 
@@ -250,7 +265,13 @@ def _emit(monkeypatch, origin: str, shared: str, store: str):
     """
 
     namespaces, stats, witness, origins = _STORES[store]
-    if origins is not None and origin not in origins:
+    # A refused cell never reaches retrieval, so no store-shaped producer can
+    # speak in it and the store axis collapses. The refusal is what it says
+    # instead, and it is the same for every store.
+    refused = origin == "unresolved" and shared in _DROPS_SHARED
+    if refused:
+        witness = _REFUSAL
+    elif origins is not None and origin not in origins:
         witness = _ALWAYS
     agent_argv, session_ns = _AGENT_ORIGINS[origin]
 
@@ -263,7 +284,13 @@ def _emit(monkeypatch, origin: str, shared: str, store: str):
         session_ns=session_ns,
     )
 
-    assert result.exit_code == 0, result.output
+    # Pinned in both directions: a cell that starts refusing when it should
+    # not is as much a defect as one that stops.
+    assert (result.exit_code != 0) is refused, (
+        f"{origin}/{shared}/{store} exited {result.exit_code}, "
+        f"{'expected a refusal' if refused else 'expected it to run'}.\n"
+        f"stderr: {result.stderr}"
+    )
     assert witness in result.stderr, (
         f"{origin}/{shared}/{store} produced nothing from the producer this cell "
         f"exists to exercise ({witness!r}); the scans below would pass on silence.\n"

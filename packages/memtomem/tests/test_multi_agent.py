@@ -469,3 +469,40 @@ class TestMergeAgentNamespaceFilter:
 
         assert merge_agent_namespace_filter(None, True) is None
         assert merge_agent_namespace_filter(None, True, "shared:proj") is None
+
+    def test_no_agent_and_no_shared_selects_nothing_and_is_refused(self):
+        """#2296. The two buckets are the private one and the shared one; with
+        no agent the first does not exist and the argument drops the second.
+
+        Answering ``None`` ran an unpinned search instead, which reaches
+        ``shared`` because that is not a system prefix — the excluded bucket
+        was the one bucket still returned.
+        """
+        from memtomem.server.tools.multi_agent import (
+            AgentScopeRequiredError,
+            merge_agent_namespace_filter,
+        )
+
+        with pytest.raises(AgentScopeRequiredError):
+            merge_agent_namespace_filter(None, False)
+
+    def test_a_repointed_shared_bucket_does_not_rescue_the_refusal(self):
+        """``shared_namespace`` re-points the leg that ``include_shared=False``
+        removes, so naming one cannot supply the agent scope that is missing.
+        Resolving it instead of raising would search a bucket the caller
+        excluded, under the name they gave it."""
+        from memtomem.server.tools.multi_agent import (
+            AgentScopeRequiredError,
+            merge_agent_namespace_filter,
+        )
+
+        with pytest.raises(AgentScopeRequiredError):
+            merge_agent_namespace_filter(None, False, "shared:proj")
+
+    def test_the_refusal_is_a_value_error_the_mcp_handler_surfaces(self):
+        """``tool_handler`` renders ``ValueError`` verbatim and anything else as
+        "internal error". A refusal the caller can act on must land in the
+        first branch, so the base class is part of the contract."""
+        from memtomem.server.tools.multi_agent import AgentScopeRequiredError
+
+        assert issubclass(AgentScopeRequiredError, ValueError)
