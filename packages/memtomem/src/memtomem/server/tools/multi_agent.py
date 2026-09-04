@@ -233,8 +233,10 @@ async def mem_agent_search(
     ``include_shared=False``. The ``agent_id`` axis remains the private
     isolation boundary; this only re-points the *shared* leg of the merge.
 
-    ``include_shared=False`` requires an agent to have resolved, from
-    ``agent_id`` or from the session, and raises otherwise (#2296): with no
+    ``include_shared=False`` requires an agent to have resolved — from
+    ``agent_id``, from the session, or from the legacy ``current_namespace``
+    fallback, the three steps :func:`_resolve_agent_namespace` tries in order
+    — and raises otherwise (#2296): with no
     agent there is no private bucket to keep, so dropping the shared one
     selects nothing. It used to run an unpinned search instead, which reaches
     ``shared`` — that bucket is deliberately not a system-namespace prefix

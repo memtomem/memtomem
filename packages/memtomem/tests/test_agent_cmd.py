@@ -52,6 +52,32 @@ def _patched_cli_components(comp):
     return fake
 
 
+def _tracking_cli_components(comp):
+    """``_patched_cli_components`` plus a record of whether the block exited.
+
+    Scoped claim, and worth stating because it is easy to over-read: this
+    proves the command *leaves* the ``async with`` block on the path under
+    test, exceptions included. It does not prove the real ``cli_components``
+    closes anything — that helper is replaced here, so its ``finally`` never
+    runs and a test asserting against this stand-in would be asserting its own
+    fixture. The production teardown contract belongs to ``_bootstrap``.
+    """
+
+    state = {"exited": False, "exception": None}
+
+    @asynccontextmanager
+    async def fake():
+        try:
+            yield comp
+        except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised
+            state["exception"] = type(exc).__name__
+            raise
+        finally:
+            state["exited"] = True
+
+    return fake, state
+
+
 class TestAgentMigrate:
     def test_no_legacy_namespaces_nothing_to_do(self, monkeypatch):
         comp = _mock_components([])
@@ -800,22 +826,61 @@ class TestAgentSearch:
             monkeypatch, ["agent", "search", "deploy", "--no-include-shared"], comp=comp
         )
 
-        assert result.exit_code != 0
+        # 2, not merely non-zero: this is deliberately a ``UsageError`` and
+        # not a ``ClickException``. Swapping the class would still refuse, but
+        # would drop the usage-error exit code scripts branch on.
+        assert result.exit_code == 2, result.output
         assert comp.search_pipeline.search.await_count == 0
         assert "--no-include-shared needs an agent to scope to" in result.stderr
         assert "Pass --agent-id" in result.stderr
+
+    def test_the_refusal_unwinds_the_component_context(self, monkeypatch):
+        """The refusal is raised *inside* ``async with cli_components()``,
+        because resolving the session needs the store that block opens. So the
+        error path has to leave that block the way the success path does.
+
+        What this pins is the unwind, not the teardown: the stand-in above
+        replaces the real context manager, so its ``finally`` is the one
+        observed here. That is the honest limit of a test at this layer, and
+        it still catches the shape that would break — a refusal raised from
+        somewhere the block never sees, or swallowed before it propagates.
+        """
+        comp = _search_components(namespaces=[("shared", 4)])
+        fake, state = _tracking_cli_components(comp)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
+        monkeypatch.setattr(
+            "memtomem.cli._session_state.resolve_session_write_namespace",
+            AsyncMock(return_value=None),
+        )
+
+        result = CliRunner().invoke(cli, ["agent", "search", "deploy", "--no-include-shared"])
+
+        assert result.exit_code == 2, result.output
+        assert state["exited"] is True
+        assert state["exception"] == "UsageError"
 
     def test_the_refusal_names_this_verb_and_not_the_mcp_tool(self, monkeypatch):
         """The merge raises in ``mem_agent_search``'s vocabulary because
         ``tool_handler`` prints it verbatim. Passing that through here would
         tell a CLI reader to pass ``agent_id`` and call ``mem_search``, neither
-        of which is reachable from a shell."""
+        of which is reachable from a shell.
+
+        Asserted on the error line itself rather than as three substrings
+        missing from all of stderr. Absence over the whole stream is weak in
+        both directions: it would still pass if the line recommended
+        ``mem_agent_search`` (which contains none of the three), and it would
+        fail if some unrelated diagnostic happened to mention one.
+        """
         result, _comp = self._run(monkeypatch, ["agent", "search", "deploy", "--no-include-shared"])
 
-        assert result.exit_code != 0
-        assert "agent_id" not in result.stderr
-        assert "mem_session_start" not in result.stderr
-        assert "mem_search" not in result.stderr
+        assert result.exit_code == 2, result.output
+        (line,) = [ln for ln in result.stderr.splitlines() if ln.startswith("Error: ")]
+        assert line == (
+            "Error: --no-include-shared needs an agent to scope to, and none resolved. "
+            "It drops the shared bucket, so with no agent scope left to search it "
+            "selects nothing. Pass --agent-id, start an agent-bound session with "
+            "`mm session start`, or run `mm search` for an unpinned search."
+        )
 
     def test_the_shared_bucket_is_still_visible_by_default(self):
         """Why the refusal exists, pinned separately from the refusal itself.
