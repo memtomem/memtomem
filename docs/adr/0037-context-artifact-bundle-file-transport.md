@@ -6,8 +6,8 @@
 discussion (#2297) as the "share outside this machine" question that accelerator
 deliberately excluded.
 **Extends:** [ADR-0023](0023-cross-project-artifact-transfer.md) — the
-move/copy engine, whose staging → Gate A → promote transaction this reuses for
-receipt
+move/copy engine, whose locking, staging and promote skeleton receipt adapts,
+with Gate A deliberately moved ahead of staging (§6)
 **Qualifies:** [ADR-0006](0006-web-ui-folder-upload-redaction.md) Axis F (the
 bundle-provenance marker, deliberately not adopted here)
 
@@ -267,8 +267,9 @@ itself — is refused by name rather than skipped, because a skipped link is a
 silent drop the sender never learns about and the mcp-servers copy adapter
 already refuses symlinked canonicals for the same
 scanned-bytes-equal-promoted-bytes reason. The copier-reserved names (`.git`,
-`.DS_Store`, `__pycache__`) and anything named `.bak` — a file or a whole
-subtree — are excluded at **every** depth, matching the filtered tree walk the
+`.DS_Store`, `__pycache__`) and any entry whose name ends in `.bak` — a file or
+a whole subtree, matched case-sensitively as the walker does — are excluded at
+**every** depth, matching the filtered tree walk the
 wiki install and dirty-check paths share, rather than `mm context copy`, whose
 `shutil.copytree` carries them. Exclusion is decided **before** the type
 check, so an excluded name that happens to be a symlink is skipped as excluded
@@ -541,7 +542,15 @@ wrote for no behavioral gain.
 A bundle carries a **healthy** version surface or none at all. `--no-versions`
 drops `versions/` and `versions.json` together, recorded as `versions_included:
 false`, and the choice is echoed in the export summary so the receiver is never
-left guessing whether history was withheld. A secret inside a frozen snapshot
+left guessing whether history was withheld.
+
+**`--no-versions` removes the version paths before anything else looks at
+them.** They are excluded from the file walk, so they are neither scanned nor
+health-checked, and the rules below about a secret in a snapshot or an
+unhealthy version surface apply only when versions are being carried. This is
+what makes `--no-versions` a usable remedy rather than advice that cannot be
+followed: an artifact whose history refuses the export must still be
+exportable without that history. A secret inside a frozen snapshot
 fails the whole export naming that snapshot — never a per-file strip, which
 would hand the receiver a tree the sender believes is complete.
 
@@ -670,8 +679,9 @@ surface follows.
   export from the sender. Changed on purpose: the working manifest's `name:`
   line is rewritten to the landing name. Excluded rather than carried, and
   listed in the export summary so the omission is visible: `.git`, `.DS_Store`,
-  `__pycache__`, and `.bak` files at every depth — which means a bundle is not
-  identical to what `mm context copy` would produce, since that copies them.
+  `__pycache__`, and any `*.bak` file or directory at every depth — which means a
+  bundle is not identical to what `mm context copy` would produce, since that
+  copies them.
   Carried, unlike a naive payload write: empty directories via `dirs`, and the
   executable bit via `exec`, with every other mode bit and every timestamp
   dropped.
@@ -685,13 +695,19 @@ surface follows.
   the first-party primitive does not become a redistribution path.
 - A received artifact is never "installed", so `mm context update` can never
   clobber bytes it did not install. A same-name `project_shared` receipt shows
-  as untracked and can be adopted against the receiver's own wiki; a renamed
-  one, or a `user` / `project_local` receipt, has no adoption path at all and
-  stays a local draft permanently.
+  as untracked and the result names `mm context adopt` as the follow-up. Every
+  other receipt lands without that hint — but adopt keys on the landing name
+  against the receiver's own wiki and never reads bundle provenance, so a
+  renamed receipt whose new name happens to exist in that wiki can still be
+  adopted, and a `user` or `project_local` receipt can reach an adoptable
+  state by being migrated to `project_shared` first. The hint is withheld
+  where it would mislead, not because the path is closed.
 - The bundle reader is a parser over untrusted input and will keep finding new
-  input shapes. Its recognized grammar is §§2, 7 and 9 plus the store-name rules
-  — the wire schema, the path and topology rules, the parser bounds, and the
-  version-surface rules — declared in the module docstring, and each refused
+  input shapes. Its recognized grammar is §§2 and 7–9 plus the
+  store-name rules — the wire schema, the path and topology rules, the parser
+  bounds, the artifact-form rules (manifest and kind agreement, the multiple
+  `name:` refusal, the permitted override pairs), and the version-surface
+  rules — declared in the module docstring, and each refused
   shape is pinned as a case in the parametrized reader tests, so the surface is
   bounded by what is written down rather than by what the author happened to
   think of.
