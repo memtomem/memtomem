@@ -252,7 +252,9 @@ def internal_artifact_owner(name: str) -> str | None:
     ``foo``'s lock, and hyphenated skill names are the norm.
 
     The split is unambiguous because the suffix is both **anchored to the end**
-    (``-<decimal pid>-<6 hex>`` then a literal ``.tmp`` and ``\\Z``) and matched
+    (``-<decimal pid>-<the kind's hex width>`` — six for ``staging`` / ``old``,
+    eight for ``migrate``, see :data:`_KIND_RAND_HEX` — then a literal ``.tmp``
+    and ``\\Z``) and matched
     after a **greedy** ``.+``: the match must consume the whole name and the
     owner takes as much of it as it can, so the suffix is necessarily the LAST
     pid+rand run. So ``.old-foo-bar-123-abc123.tmp`` parses as ``foo-bar``,

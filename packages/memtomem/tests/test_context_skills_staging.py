@@ -691,11 +691,14 @@ class TestTransferStagingIsHiddenButNotReaped:
         assert is_internal_artifact_dir(staging.name), staging.name
         assert internal_artifact_owner(staging.name) == "reviewer"
 
-        # The generated ENTROPY, pinned on its own rather than through the
+        # The generated suffix WIDTH, pinned on its own rather than through the
         # predicate. Parity alone cannot see a narrowing: shrink the stager and
         # widen the pattern together and every assertion above still passes,
-        # which is exactly how 32 bits could quietly become 24 on a path whose
-        # collision handler deletes what it collides with.
+        # which is exactly how the 32-bit collision space could quietly become
+        # 24 bits on a path whose collision handler deletes what it collides
+        # with. This pins the width, i.e. the size of that space; the
+        # randomness itself comes from the ``secrets.token_hex`` call the
+        # helper makes.
         generated_rand = re.fullmatch(
             r"\.migrate-reviewer-\d+-(?P<rand>[0-9a-f]+)\.tmp", staging.name
         )
@@ -707,21 +710,43 @@ class TestTransferStagingIsHiddenButNotReaped:
         # version. Spelled literally so it does not ride on the helper.
         assert is_internal_artifact_dir(".migrate-reviewer-4242-abcd1234.tmp")
         assert internal_artifact_owner(".migrate-reviewer-4242-abcd1234.tmp") == "reviewer"
-        # Widths no version ever generated are NOT ours. Being excluded from
-        # reaping is not a licence to over-match: a swallowed directory still
-        # vanishes from listing, status, snapshots and fan-out.
-        assert not is_internal_artifact_dir(".migrate-reviewer-4242-abc123.tmp")
-        assert not is_internal_artifact_dir(".migrate-reviewer-4242-abc1234.tmp")
-        # The reaped kinds stay pinned to exactly the shape they generate —
-        # widening them would let the reaper delete a user directory (#1229).
-        assert not is_internal_artifact_dir(".staging-reviewer-4242-abcd1234.tmp")
-        assert not is_internal_artifact_dir(".old-reviewer-4242-abcd1234.tmp")
-
         # A hyphenated destination still parses to the whole name, same as the
         # other kinds (the reaper's owner-equality rule depends on it).
         assert (
             internal_artifact_owner(".migrate-code-reviewer-4242-abcd1234.tmp") == "code-reviewer"
         )
+
+    @pytest.mark.parametrize(
+        ("kind", "valid_width"),
+        [("staging", 6), ("old", 6), ("migrate", 8)],
+    )
+    def test_each_kind_matches_its_width_and_nothing_on_either_side(
+        self, kind: str, valid_width: int
+    ) -> None:
+        """Every kind is pinned from BOTH directions, at literal widths.
+
+        A one-sided negative is only half a pin. Checking six and seven for
+        ``migrate`` leaves ``"{8,}"`` and ``"{8,9}"`` green; checking eight for
+        ``staging`` leaves ``"{6,7}"`` green — and that one widens
+        :func:`_iter_own_internal_dirs` into DELETING a seven-hex user
+        directory, which is the #1229 hazard rather than a cosmetic
+        over-match. So each kind asserts its own width matches and every
+        neighbouring width does not.
+
+        The widths are written out here rather than read from
+        ``_KIND_RAND_HEX``: a test that derives its expectation from the table
+        it is guarding certifies whatever the table happens to say.
+        """
+        from memtomem.context._names import is_internal_artifact_dir
+
+        def name(width: int) -> str:
+            return f".{kind}-reviewer-4242-{'a' * width}.tmp"
+
+        assert is_internal_artifact_dir(name(valid_width)), name(valid_width)
+        # Both sides, including the widths the OTHER kinds use — a single
+        # shared width is exactly what #2304 had to undo.
+        for wrong in (valid_width - 2, valid_width - 1, valid_width + 1, valid_width + 2):
+            assert not is_internal_artifact_dir(name(wrong)), name(wrong)
 
     def test_every_classified_kind_declares_a_suffix_width(self) -> None:
         """The width map is indexed by the kinds tuple, so a kind added without
