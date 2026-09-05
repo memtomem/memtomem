@@ -29,6 +29,7 @@ __all__ = [
     "InvalidNameError",
     "Layout",
     "OVERRIDE_FORMATS",
+    "REAPABLE_INTERNAL_ARTIFACT_KINDS",
     "internal_artifact_owner",
     "is_internal_artifact_dir",
     "override_vendors",
@@ -158,22 +159,85 @@ class InvalidNameError(ValueError):
 # and let the sync-time reaper delete — a legitimately named user skill like
 # ``.staging-notes.tmp`` (Codex review on #1229).
 #
+# The cross-store transfer engine is the third producer, and it stages under a
+# kind of its own: ``.migrate-<name>-<pid>-<rand>.tmp``
+# (``migrate._stage_move`` / ``transfer._stage_copy``, both through
+# ``migrate.transfer_staging_path``). ``mm context move`` / ``copy`` crashing
+# between stage and promote leaves one of those in the DESTINATION store, and
+# until #2304 no consumer of this predicate matched it (#2304).
+#
 # The kinds are a named constant and the pattern is built from it, because the
 # reaper scans by kind (``skills._iter_own_internal_dirs`` globs
 # ``.<kind>-<dst>-*.tmp``) while everything else classifies by this pattern.
-# Spelling the alternation twice is how "hidden" and "deletable" drift apart:
-# a third transient added to the regex alone becomes invisible to discovery
-# and immortal on disk, and one added to the scan alone is deleted by a reaper
-# that cannot prove it owns it.
+# Deriving both from named constants is what keeps "hidden" and "deletable"
+# from drifting by accident: a kind hand-spelled into the pattern alone would
+# be invisible to discovery and uncollectable, and one added to the scan alone
+# would be deleted by a reaper that cannot prove it owns it. ``migrate`` IS
+# hidden-and-uncollectable, but by declaration rather than by omission — it is
+# absent from the reapable tuple on purpose, for the reason below.
 #
 # ``re.escape`` on each kind rather than raw interpolation: the whole point of
 # the constant is that a third kind is safe to add in one place, and a raw join
 # would make that true only for the alphanumeric ones.
-INTERNAL_ARTIFACT_KINDS: tuple[str, ...] = ("staging", "old")
+#
+# **Classified is not the same as deletable, and the two tuples are why.**
+# Hiding is safe for every transient: a leftover belonging to anyone is not a
+# canonical artifact. Deleting is not. The skills reaper's licence to remove a
+# ``.staging-*`` rests on "a staging tree is a copy whose source is still on
+# disk" (``skills._recover_and_reap_internal_dirs``) — true for the skills
+# copier, FALSE for a transfer move: ``migrate._stage_move`` renames the source
+# into staging on the same filesystem, so between that rename and the promote
+# the staging tree is the ONLY copy of the artifact. A reaper that swept it
+# would turn a recoverable crash into data loss, which is exactly the ADR-0030
+# §10 rule that keeps ``.old-*`` alive while its canonical is absent. So
+# ``migrate`` is classified (hidden everywhere) and deliberately left out of
+# the reapable set; a leaked directory is cheap, a deleted canonical is not.
+# Reclaiming those leftovers needs a copy-vs-move provenance the name does not
+# carry today (#2304).
+INTERNAL_ARTIFACT_KINDS: tuple[str, ...] = ("staging", "old", "migrate")
 
-_INTERNAL_DIR_RE = re.compile(
-    rf"^\.(?:{'|'.join(re.escape(k) for k in INTERNAL_ARTIFACT_KINDS)})"
-    rf"-(?P<owner>.+)-\d+-[0-9a-f]{{6}}\.tmp\Z"
+# The subset the skills reaper may DELETE. A strict subset of
+# :data:`INTERNAL_ARTIFACT_KINDS` by construction (pinned by test) — every
+# reapable kind must first be a classified one, or the reaper would delete
+# something discovery still shows.
+REAPABLE_INTERNAL_ARTIFACT_KINDS: tuple[str, ...] = ("staging", "old")
+
+# Random-suffix width, per kind, as a regex quantifier. The widths are NOT the
+# same, because the producers never agreed on one: the skills sync and the
+# directory swap allocate ``token_hex(3)`` (6 hex), the transfer engine
+# ``token_hex(4)`` (8 hex). One shared width cannot serve both: pinning six
+# classified none of the eight-hex leftovers already on disk from released
+# versions, and narrowing the transfer suffix to match would have cut its
+# collision entropy from 32 bits to 24 on a path whose collision handler
+# DELETES the colliding entry (#2304).
+#
+# Every kind is pinned to EXACTLY the width it generates — the #1229 rule
+# applied per kind rather than once globally. Being excluded from the reapable
+# set buys a kind no slack here, because hiding is not a harmless false
+# positive: a wrongly classified directory vanishes from canonical listing and
+# resolution, from status, from snapshots, and from the sync fan-out. It is
+# merely not deleted while it disappears. A user directory that happens to look
+# like transfer staging must not be swallowed just because we would never
+# remove it.
+#
+# So ``migrate`` is eight hex and nothing else. No released version has
+# produced a six- or seven-hex ``.migrate-*`` name, and a range would only
+# widen what we swallow without recognizing one more real leftover. (The
+# reproduction on #2304 hand-wrote a six-hex name; the engine's own name is
+# what matters, and it is eight.)
+_KIND_RAND_HEX: dict[str, str] = {
+    "staging": "{6}",
+    "old": "{6}",
+    "migrate": "{8}",
+}
+
+# One anchored pattern per kind rather than one alternation, because the width
+# is per-kind. Built by indexing :data:`_KIND_RAND_HEX` with every classified
+# kind, so a kind added without a declared width raises ``KeyError`` at import
+# rather than silently matching nothing.
+_INTERNAL_DIR_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(rf"^\.{re.escape(kind)}-(?P<owner>.+)-\d+-[0-9a-f]{_KIND_RAND_HEX[kind]}\.tmp\Z")
+    for kind in INTERNAL_ARTIFACT_KINDS
 )
 
 
@@ -202,8 +266,11 @@ def internal_artifact_owner(name: str) -> str | None:
     non-leftover names outright, and greediness is what keeps the parse correct
     if the anchor is ever loosened.
     """
-    match = _INTERNAL_DIR_RE.match(name)
-    return match.group("owner") if match else None
+    for pattern in _INTERNAL_DIR_RES:
+        match = pattern.match(name)
+        if match:
+            return match.group("owner")
+    return None
 
 
 def is_internal_artifact_dir(name: str) -> bool:
@@ -212,9 +279,14 @@ def is_internal_artifact_dir(name: str) -> bool:
     These are *our own* crash artifacts, not user content — discovery loops
     (canonical listing, runtime scans, extract, detect, status) skip them
     silently rather than warning about an invalid name, and
-    ``skills._recover_and_reap_internal_dirs`` deletes them under the destination
-    sidecar lock. Both sides MUST use this one predicate so "hidden" and
-    "deletable" can never drift apart.
+    ``skills._recover_and_reap_internal_dirs`` deletes the REAPABLE ones under
+    the destination sidecar lock. Both sides read from the same kind tuples, so
+    "hidden" and "deletable" cannot drift apart — but they are deliberately not
+    the same set: this predicate answers for every kind in
+    :data:`INTERNAL_ARTIFACT_KINDS`, while the reaper is scoped to
+    :data:`REAPABLE_INTERNAL_ARTIFACT_KINDS`. Transfer staging (``migrate``) is
+    hidden and never reaped, because a same-filesystem move leaves it holding
+    the only copy of the artifact.
 
     Hiding is name-shape-only and stays that way: a leftover belonging to
     *another* destination must still be hidden from discovery. Deleting is

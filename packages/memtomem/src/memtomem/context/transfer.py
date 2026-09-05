@@ -53,7 +53,6 @@ import contextlib
 import hashlib
 import logging
 import os
-import secrets
 import shlex
 import shutil
 import stat
@@ -106,6 +105,7 @@ from memtomem.context.migrate import (
     _promote_move,
     _remove_runtime_fanout_for,
     _stage_move,
+    transfer_staging_path,
 )
 from memtomem.context.privacy_scan import raise_or_collect, scan_artifact_tree
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
@@ -513,9 +513,9 @@ def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
     Copy-mode sibling of :func:`memtomem.context.migrate._stage_move`:
     the source is NEVER consumed or mutated — staging is built from a
     byte copy, so a Gate A block or promote failure needs no rename-back
-    rollback, only staging removal. Uses the same ``.migrate-…`` naming
-    convention as ``_stage_move`` so every existing internal-artifact
-    exclusion treats both alike.
+    rollback, only staging removal. Shares ``_stage_move``'s staging grammar
+    through :func:`~memtomem.context.migrate.transfer_staging_path`, so every
+    internal-artifact exclusion treats both alike (#2304).
 
     Symlinks are preserved as links (``symlinks=True`` /
     ``follow_symlinks=False``) — same no-deref contract as the
@@ -525,8 +525,7 @@ def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
     (``_atomic.copy_tree_atomic``).
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
-    suffix = f"{os.getpid()}-{secrets.token_hex(4)}"
-    staging = dst_parent / f".migrate-{name_hint}-{suffix}.tmp"
+    staging = transfer_staging_path(dst_parent, name_hint)
     if staging.exists():
         # Crashed prior run with a colliding suffix (extremely unlikely
         # given pid+rand) — leftover is from us; safe to clear. The clear

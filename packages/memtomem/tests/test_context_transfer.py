@@ -98,6 +98,28 @@ def _write_canonical(
     return manifest
 
 
+def test_stage_copy_produces_an_internal_artifact_name(tmp_path: Path) -> None:
+    """Copy staging must be hidden from discovery (#2304).
+
+    Pins the name ``_stage_copy`` really creates, not the shared helper's
+    return value: a stager that goes back to spelling its own f-string is
+    exactly how the destination store ended up enumerating a crashed
+    transfer's leftover as a canonical agent.
+    """
+    from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
+    from memtomem.context.transfer import _stage_copy
+
+    src = tmp_path / "reviewer"
+    src.mkdir()
+    (src / "agent.md").write_text("---\nname: reviewer\n---\nbody\n", encoding="utf-8")
+
+    staging = _stage_copy(src, tmp_path / "dest", name_hint="reviewer")
+
+    assert staging.is_dir()
+    assert is_internal_artifact_dir(staging.name), staging.name
+    assert internal_artifact_owner(staging.name) == "reviewer"
+
+
 def _write_versions(artifact_dir: Path, body: str) -> Path:
     """Seed a minimal ADR-0022 version store inside *artifact_dir*."""
     versions = artifact_dir / "versions"

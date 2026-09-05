@@ -384,10 +384,13 @@ name-addressed resolver as well, and an attempt to update, delete, or transfer a
 internal-shaped name is refused rather than served. That closes the window for
 this transport and for the transfer engine at the same time, and the pins cover
 all three verbs. The transfer engine's
-`.migrate-…` staging name is **not** matched by the predicate and so stays
-exposed even after that fix; that is a pre-existing transfer-engine defect,
-filed with its reproduction as #2304, and this transport avoids it by using the
-predicate's own grammar rather than inventing a second one.
+`.migrate-…` staging name was **not** matched by the predicate when this was
+written, so it stayed exposed even after that fix; that pre-existing
+transfer-engine defect was filed with its reproduction as #2304 and has since
+been closed by teaching the predicate that kind and its own suffix width. This
+transport still uses the predicate's own `.staging-…` grammar rather than
+inventing a second one, which is what made it immune to that defect in the
+first place.
 
 Because staging sits inside the store, it inherits the store's own git posture:
 a `project_local` landing stages inside `<kind>.local/`, already covered by the
@@ -767,9 +770,9 @@ surface follows.
 
 - Issue #2298 — this decision's subject. Issue #2297 — the drag-and-drop
   accelerator this was split out of, whose "not in scope" section named the gap.
-- Issue #2304 — the transfer engine's `.migrate-…` staging name is not matched
+- Issue #2304 — the transfer engine's `.migrate-…` staging name was not matched
   by the internal-artifact predicate, found while designing §6's staging rules
-  and left to its own fix.
+  and left to its own fix, which added the kind and a per-kind suffix width.
 - [ADR-0011](0011-canonical-artifact-scope-hierarchy.md) §3 (the `project_local`
   draft tier with no fan-out) and §5 (Gate A at the chokepoint, Gate B at the
   surface, and the no-valve rule for `project_shared`).

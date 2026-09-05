@@ -54,7 +54,7 @@ from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import (
     GENERATOR_VENDOR,
-    INTERNAL_ARTIFACT_KINDS,
+    REAPABLE_INTERNAL_ARTIFACT_KINDS,
     InvalidNameError,
     Layout,
     internal_artifact_owner,
@@ -430,16 +430,23 @@ def _remove_internal_artifact(path: Path) -> None:
 
 
 def _iter_own_internal_dirs(
-    dst: Path, *, kinds: tuple[str, ...] = INTERNAL_ARTIFACT_KINDS
+    dst: Path, *, kinds: tuple[str, ...] = REAPABLE_INTERNAL_ARTIFACT_KINDS
 ) -> Iterator[tuple[str, Path]]:
     """Yield ``(kind, path)`` for the REAPABLE internal trees belonging to ``dst``.
 
-    ``kind`` is one of :data:`memtomem.context._names.INTERNAL_ARTIFACT_KINDS`;
-    the two are not interchangeable (see
-    :func:`_recover_and_reap_internal_dirs`), so callers get it rather than
-    re-deriving it from the name. The default scans them all, and comes from
-    the same constant the name pattern is built from so a future third
-    transient cannot be classifiable but unscannable.
+    ``kind`` is one of
+    :data:`memtomem.context._names.REAPABLE_INTERNAL_ARTIFACT_KINDS`; the two
+    are not interchangeable (see :func:`_recover_and_reap_internal_dirs`), so
+    callers get it rather than re-deriving it from the name.
+
+    **The default is the reapable subset, not every classified kind.** A
+    transient is hidden from discovery on name shape alone, but deleting one
+    needs the stronger claim that its bytes exist somewhere else — true for the
+    skills copier's own staging, false for the transfer engine's ``.migrate-*``
+    (``migrate._stage_move`` renames the source into staging on the same
+    filesystem, so it holds the only copy until the promote). Scanning by the
+    reapable tuple is what keeps this reaper from collecting another engine's
+    only copy; the classification tuple stays wider on purpose (#2304).
 
     **The owner equality is the guarantee.** A glob cannot express "this
     destination and no other": ``.old-foo-*.tmp`` matches

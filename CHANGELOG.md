@@ -28,6 +28,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A crashed Move/Copy no longer leaves a directory the gateway treats as one
+  of your artifacts.** `mm context move` and `mm context copy` build the new
+  artifact in a staging directory inside the destination store and then promote
+  it into place. A refused transfer cleans up after itself; but if the process
+  is killed in between, or a failed move cannot safely put the source back,
+  that directory stays behind. It holds a complete
+  artifact, manifest and all, so every discovery walk that only asks "is there a
+  manifest in here" counted it as a real skill, command, or agent: it showed up
+  in status, in detection, and in the skill payload walk. The gateway already
+  had one predicate for recognizing its own crash leftovers, but it knew only
+  the two names the skills sync produces, and the transfer engine stages under a
+  third. It now knows that one too, so a leftover is skipped everywhere the
+  predicate is consulted, including leftovers already on disk from an earlier
+  version. Two details were load-bearing. The transfer engine allocates a wider
+  random suffix than the other two, so the pattern learned that width per kind
+  rather than the engine being narrowed to fit it — narrowing would have missed
+  every leftover already on disk and cut the engine's collision entropy on a
+  path that deletes what it collides with. And the leftover is hidden but never
+  deleted automatically, because a same-filesystem move renames your artifact
+  into that directory, making it the only copy until the promote completes.
+  Recovering those bytes is still a manual step, they are not yet surfaced
+  anywhere now that they are hidden, and the canonical listing for agents and
+  commands does not consult the predicate yet, so a leftover can still be
+  enumerated there. (#2304)
+
 - **`--no-include-shared` / `include_shared=False` no longer returns the one
   namespace it excludes.** With no agent resolved — no `--agent-id`, no
   agent-bound session — the merge answered "no filter" before it looked at the

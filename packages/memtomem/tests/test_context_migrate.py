@@ -37,6 +37,32 @@ from memtomem.context.migrate import (
 _ASSET_DIR_FILES = {"agents": "agent.md", "commands": "command.md"}
 
 
+def test_stage_move_produces_an_internal_artifact_name(tmp_path: Path) -> None:
+    """Move staging must be hidden from discovery (#2304).
+
+    The move path matters more than the copy path: ``os.rename`` consumes the
+    source, so between this call and the promote the staging tree is the only
+    copy of the artifact. Hiding it is what keeps a crash from publishing it as
+    a second canonical under the same frontmatter name.
+    """
+    from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
+    from memtomem.context.migrate import _stage_move
+
+    src = tmp_path / "reviewer"
+    src.mkdir()
+    (src / "agent.md").write_text("---\nname: reviewer\n---\nbody\n", encoding="utf-8")
+
+    staging, src_consumed = _stage_move(src, tmp_path / "dest", name_hint="reviewer")
+
+    assert staging.is_dir()
+    assert is_internal_artifact_dir(staging.name), staging.name
+    assert internal_artifact_owner(staging.name) == "reviewer"
+    # Pins the premise of the never-reap rule: on a same-fs move the source is
+    # gone, so this staging tree is the only copy in existence.
+    assert src_consumed is True
+    assert not src.exists()
+
+
 def _write_flat(project: Path, asset_type: str, name: str, body: bytes) -> Path:
     target = project / ".memtomem" / asset_type / f"{name}.md"
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -660,6 +660,129 @@ class TestStaleLeftoverReaping:
         assert (dst / SKILL_MANIFEST).is_file()
 
 
+class TestTransferStagingIsHiddenButNotReaped:
+    """``.migrate-*`` is classified as our own transient and never reaped (#2304).
+
+    The cross-store transfer engine stages under its own kind. Before #2304 the
+    predicate did not know that kind at all, so a crash between stage and
+    promote left a full artifact tree that every discovery walk treated as a
+    canonical artifact. Classifying it fixes that; adding it to the REAPABLE
+    set would introduce a worse bug, because ``migrate._stage_move`` renames
+    the source into staging on the same filesystem — the staging tree is the
+    only copy of the artifact until the promote.
+    """
+
+    def test_generated_transfer_staging_names_match_the_predicate(self, tmp_path: Path) -> None:
+        """Construction↔predicate parity for the names the transfer engine
+        actually creates — the half the original defect turned on.
+
+        Adding ``migrate`` to the kinds tuple alone would NOT have fixed this:
+        the stagers allocate ``token_hex(4)`` while the shared pattern pinned
+        six hex, so a real leftover still classified as nobody's. The predicate
+        carries a per-kind width now, rather than the stagers being narrowed to
+        fit it.
+        """
+        import re
+
+        from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
+        from memtomem.context.migrate import transfer_staging_path
+
+        staging = transfer_staging_path(tmp_path, "reviewer")
+        assert is_internal_artifact_dir(staging.name), staging.name
+        assert internal_artifact_owner(staging.name) == "reviewer"
+
+        # The generated ENTROPY, pinned on its own rather than through the
+        # predicate. Parity alone cannot see a narrowing: shrink the stager and
+        # widen the pattern together and every assertion above still passes,
+        # which is exactly how 32 bits could quietly become 24 on a path whose
+        # collision handler deletes what it collides with.
+        generated_rand = re.fullmatch(
+            r"\.migrate-reviewer-\d+-(?P<rand>[0-9a-f]+)\.tmp", staging.name
+        )
+        assert generated_rand is not None, staging.name
+        assert len(generated_rand.group("rand")) == 8, staging.name
+
+        # Eight hex has been the shape since the engine shipped, so this is also
+        # every leftover already sitting in a user's store from a released
+        # version. Spelled literally so it does not ride on the helper.
+        assert is_internal_artifact_dir(".migrate-reviewer-4242-abcd1234.tmp")
+        assert internal_artifact_owner(".migrate-reviewer-4242-abcd1234.tmp") == "reviewer"
+        # Widths no version ever generated are NOT ours. Being excluded from
+        # reaping is not a licence to over-match: a swallowed directory still
+        # vanishes from listing, status, snapshots and fan-out.
+        assert not is_internal_artifact_dir(".migrate-reviewer-4242-abc123.tmp")
+        assert not is_internal_artifact_dir(".migrate-reviewer-4242-abc1234.tmp")
+        # The reaped kinds stay pinned to exactly the shape they generate —
+        # widening them would let the reaper delete a user directory (#1229).
+        assert not is_internal_artifact_dir(".staging-reviewer-4242-abcd1234.tmp")
+        assert not is_internal_artifact_dir(".old-reviewer-4242-abcd1234.tmp")
+
+        # A hyphenated destination still parses to the whole name, same as the
+        # other kinds (the reaper's owner-equality rule depends on it).
+        assert (
+            internal_artifact_owner(".migrate-code-reviewer-4242-abcd1234.tmp") == "code-reviewer"
+        )
+
+    def test_every_classified_kind_declares_a_suffix_width(self) -> None:
+        """The width map is indexed by the kinds tuple, so a kind added without
+        one raises at import. Pinned so the coupling is stated, not inferred
+        from an import that happens to work."""
+        from memtomem.context._names import (
+            INTERNAL_ARTIFACT_KINDS,
+            _INTERNAL_DIR_RES,
+            _KIND_RAND_HEX,
+        )
+
+        assert set(_KIND_RAND_HEX) == set(INTERNAL_ARTIFACT_KINDS)
+        assert len(_INTERNAL_DIR_RES) == len(INTERNAL_ARTIFACT_KINDS)
+
+    def test_reapable_kinds_are_a_strict_subset_that_excludes_migrate(self) -> None:
+        """Every reapable kind must be a classified one, and ``migrate`` must
+        not be reapable. Two separate claims: the subset relation keeps the
+        reaper from deleting something discovery still shows, and the exclusion
+        is the only-copy rule."""
+        from memtomem.context._names import (
+            INTERNAL_ARTIFACT_KINDS,
+            REAPABLE_INTERNAL_ARTIFACT_KINDS,
+        )
+
+        assert set(REAPABLE_INTERNAL_ARTIFACT_KINDS) < set(INTERNAL_ARTIFACT_KINDS)
+        assert "migrate" in INTERNAL_ARTIFACT_KINDS
+        assert "migrate" not in REAPABLE_INTERNAL_ARTIFACT_KINDS
+
+    def test_reaper_leaves_a_transfer_staging_tree_alone(self, tmp_path: Path) -> None:
+        """The skills reaper must not collect the transfer engine's staging.
+
+        Mutation that this catches: switching ``_iter_own_internal_dirs``'s
+        default back to ``INTERNAL_ARTIFACT_KINDS``. The canonical is present
+        here, so the ``.old-*`` state rule is not what spares the tree — only
+        the kind scoping is.
+        """
+        root = tmp_path / ".memtomem/skills"
+        root.mkdir(parents=True)
+        dst = root / "foo"
+        dst.mkdir()
+        (dst / SKILL_MANIFEST).write_text("canonical\n", encoding="utf-8")
+
+        migrate_staging = root / ".migrate-foo-999999-abcd1234.tmp"
+        migrate_staging.mkdir()
+        (migrate_staging / SKILL_MANIFEST).write_text("in flight\n", encoding="utf-8")
+        # A sibling the reaper DOES own, so the call is proven to have reaped.
+        skills_staging = root / ".staging-foo-999999-abc123.tmp"
+        skills_staging.mkdir()
+        (skills_staging / SKILL_MANIFEST).write_text("rebuildable\n", encoding="utf-8")
+
+        yielded = {path.name for _, path in _iter_own_internal_dirs(dst)}
+        assert skills_staging.name in yielded
+        assert migrate_staging.name not in yielded
+
+        _recover_and_reap_internal_dirs(dst)
+
+        assert not skills_staging.exists(), "the reapable sibling proves the reap ran"
+        assert migrate_staging.is_dir()
+        assert (migrate_staging / SKILL_MANIFEST).read_text(encoding="utf-8") == "in flight\n"
+
+
 class TestMoveAsideReapingIsStateAware:
     """ADR-0030 §10: an ``.old-*`` is reaped only while the canonical is
     present.
