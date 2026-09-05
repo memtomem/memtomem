@@ -175,6 +175,13 @@ For *single-machine backup*, use `mem_export` / `mem_import`
 ([Reference](reference/data-config-cli.md#6-data--mem_export-mem_import)). The bundle format
 embeds absolute paths and is not designed for cross-device restore.
 
+That caveat is about *memory* bundles. A single **context artifact** — one
+skill, command, or agent — does have a cross-device format: `mm context export`
+writes a file with no absolute paths and no hostnames, and `mm context import`
+lands it on the other machine. It refuses to pack an artifact carrying a
+secret, from any tier and with no override, because a file you have handed over
+cannot be taken back.
+
 ## The layout — namespace-aligned directory tree
 
 Recommended on-disk layout under your local

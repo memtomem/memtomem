@@ -54,7 +54,12 @@ from memtomem.context._runtime_targets import (
     runtime_fanout_root,
 )
 from memtomem.context._sync_atomic import AtomicSyncAdapter
-from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
+from memtomem.context._names import is_internal_artifact_dir
+from memtomem.context.scope_resolver import (
+    ArtifactKind,
+    ContextScopeError,
+    canonical_artifact_dir,
+)
 
 T = TypeVar("T")
 
@@ -82,7 +87,15 @@ def resolve_artifact_under_root(
     Directory layout wins when both the legacy flat file and the ADR-0008
     directory layout are present (with a WARNING so the silently divergent
     flat file stays visible).
+
+    An internal-shaped *name* resolves to nothing (ADR-0037 §6). Hiding these
+    from the lister is not enough on its own: a caller that already knows a
+    staging directory's name — a web update or delete, another transfer's
+    source probe — can address it directly and mutate a tree mid-transaction.
     """
+    if is_internal_artifact_dir(name):
+        logger.debug("refusing to resolve internal artifact name %s", name)
+        return None
     dir_target = canonical_root / name / dir_filename
     flat_target = canonical_root / f"{name}.md"
     has_dir = dir_target.is_file()
@@ -129,10 +142,23 @@ def list_canonical_artifacts(
     if not root.is_dir():
         return []
 
-    flat: dict[str, Path] = {p.stem: p for p in sorted(root.glob("*.md")) if p.is_file()}
+    flat: dict[str, Path] = {
+        p.stem: p
+        for p in sorted(root.glob("*.md"))
+        if p.is_file() and not is_internal_artifact_dir(p.stem)
+    }
     dirs: dict[str, Path] = {}
     for entry in sorted(root.iterdir()):
         if entry.is_dir():
+            if is_internal_artifact_dir(entry.name):
+                # Crash-leftover staging / move-aside trees from our own
+                # transactions (#1229, ADR-0037 §6). The skills lister has
+                # skipped these since #1229 with the same rationale; agents and
+                # commands did not, so a leftover was enumerable as a canonical
+                # artifact and reached the sync fan-out through
+                # ``list_canonical_agents`` / ``list_canonical_commands``.
+                logger.debug("skip internal artifact dir %s", entry)
+                continue
             item_md = entry / dir_filename
             if item_md.is_file():
                 dirs[entry.name] = item_md
@@ -178,6 +204,15 @@ def resolve_artifact_extract_target(
     )
     if resolved is not None:
         return resolved
+    if is_internal_artifact_dir(name):
+        # ``resolve_artifact_under_root`` already refuses to READ one of these;
+        # returning a creation target for the same name would turn that refusal
+        # into a writable path and undo it.
+        raise ContextScopeError(
+            f"{name!r} has the shape of an internal staging or move-aside directory; "
+            f"every discovery walk skips it, so an artifact created there would be "
+            f"invisible to `mm context status`."
+        )
     return canonical_root / name / dir_filename, "dir"
 
 

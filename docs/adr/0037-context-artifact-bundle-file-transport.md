@@ -1,6 +1,6 @@
 # ADR-0037: Sharing one context artifact as a file — bundle format and receipt gate
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-04
 **Context:** Issue #2298, split out of the Context Gateway drag-and-drop
 discussion (#2297) as the "share outside this machine" question that accelerator
@@ -226,8 +226,8 @@ payload.
 
 Export resolves the source, acquires its canonical lock, runs the swap prelude
 so an interrupted skills swap is resolved before anything reads the tree and
-re-verifies the artifact is complete afterwards, reads each file once, scans
-those in-memory bytes with `scope="project_shared"` semantics, and
+re-verifies the artifact is complete afterwards, reads each file once through a
+verified descriptor, scans those in-memory bytes with no force valve, and
 base64-encodes the same bytes. A hit anywhere fails the whole export, names the
 offending relative path, and writes nothing to `--out`.
 
@@ -244,10 +244,49 @@ git-history side of that line, and `promote_asset` — which scans at
 `scope="project_shared"` regardless of anything, because the wiki can be pushed
 — is the precedent this follows.
 
-There is consequently **no `--force-unsafe` option on `mm context export`**. The
-chokepoint would return `blocked_project_shared` for it anyway; an option that
-can only ever be refused is worse than no option, because it advertises a valve
-that does not exist.
+There is consequently **no `--force-unsafe` option on `mm context export`**, and
+that absence is what enforces this section. An option that can only ever be
+refused is worse than no option, because it advertises a valve that does not
+exist.
+
+**One exemption, and it is not a flag** (amended after the first real-data run;
+see Consequences). Every skill on the author's machine was refused — 44 hits
+across two artifacts, all of them Python type annotations like `api_key: str`
+and keyword arguments referencing a settings attribute, none of them a secret.
+A feature whose primary use case is "hand a colleague a skill about writing API
+code" that refuses every such skill is not shipping a strict gate, it is
+shipping nothing. So export honors the per-file `redaction: documents-patterns`
+declaration this project already defines (ADR-0006 Axis E.5), read once from
+the artifact's manifest and applied to the whole artifact rather than per file:
+the per-file reader only recognizes it in Markdown frontmatter, so a skill whose
+`SKILL.md` may declare it and whose `scripts/*.py` may not would be refused for
+a distinction its author cannot act on. Receipt reads the same declaration from
+the same manifest bytes, so a bundle cannot export cleanly and then refuse to
+land.
+
+The ceiling is narrower than a flag but it is not what an earlier draft of this
+section claimed. The declaration waives only the two unquoted-label rules, and
+only when **every** hit in a file is one of them, so a provider token or a
+serialized credential anywhere in the artifact still refuses the whole export.
+It does **not** distinguish `api_key: str` in a code sample from
+`password=<a real value>` in a config file — both are the same unquoted-label
+shape — and because the declaration is artifact-wide, one line in the manifest
+waives that shape in files the author may not have re-read.
+
+So the exemption is paired with **disclosure on both sides**: export lists every
+file whose matches were waived, in its summary and in a `redaction_exempted`
+field inside the bundle, and import repeats that list to the receiver. Neither
+end is told "clean"; both are told exactly which files were let through and on
+whose say-so. Disclosure is not a substitute for a gate — it is what makes an
+artifact-wide waiver auditable instead of silent, which is the honest trade for
+a feature that is otherwise unusable on real artifacts. It also does not open the git-tracked tier: `project_shared` refuses
+a declaration exactly as it refuses `force_unsafe` (ADR-0011 §5), so an artifact
+that exports under a declaration still cannot be imported into `project_shared`.
+
+Because the declaration must be honored, the egress scan does **not** run at
+`project_shared` scope, which would refuse it: it runs with no force valve at a
+scope that permits the declaration, and every uncovered hit blocks there exactly
+as it would anywhere else.
 
 What this refuses is narrow and worth stating exactly: an artifact with no
 secret-shaped content exports from any tier, including to the author's own
@@ -643,8 +682,14 @@ confirmation at the surface, and `--to project_shared` supplies only the first
 half. A `project_shared` landing additionally requires
 `--confirm-project-shared` — `--yes` alone does not satisfy it, matching every
 transfer and migrate surface — and the write records
-`project_shared.confirmed_via` in the audit line. The confirmation is evaluated
-before any destination mutation, and a dry run never prompts.
+`project_shared.confirmed_via` in the audit line — except that **no surface in
+this repository emits that field**, including the ones ADR-0011 §5 wrote it for,
+so this transport does not either. Adding it here alone would make one of six
+gating surfaces behave differently from the rest, which reads worse than a
+uniform gap: someone who found the record in one place would reasonably assume
+the others have it. The gap is filed as #2306 and is a repo-wide change with its
+own decision about what the record should be. The confirmation itself is
+evaluated before any destination mutation, and a dry run never prompts.
 
 **Command surfaces.**
 
@@ -693,9 +738,17 @@ surface follows.
   Revisit trigger: a report of an artifact that cannot be shared because of it,
   at which point the question to settle is a Unicode normalization and
   collision policy, not a longer denylist.
-- A secret-bearing artifact cannot be exported at all, from any tier. This is
-  stricter than what the user could do by hand with `tar`, and it is the point:
-  the first-party primitive does not become a redistribution path.
+- A secret-bearing artifact cannot be exported at all, from any tier, unless
+  every hit is a documented credential *shape* and the artifact's manifest
+  declares `redaction: documents-patterns` (§4). This is stricter than what the
+  user could do by hand with `tar`, and it is the point: the first-party
+  primitive does not become a redistribution path.
+- **The declaration is not optional polish.** The first run against real
+  artifacts refused 2 of 2 skills on 44 false positives, every one of them in
+  the label class the declaration waives. Any future tightening of the export
+  gate has to be measured against real artifacts before it ships, not against
+  fixtures, because the fixtures in this repo are clean by construction and the
+  real ones are not.
 - A received artifact is never "installed", so `mm context update` can never
   clobber bytes it did not install. A same-name `project_shared` receipt shows
   as untracked and the result names `mm context adopt` as the follow-up. Every
