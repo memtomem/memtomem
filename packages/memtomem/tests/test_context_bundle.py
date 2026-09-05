@@ -1402,9 +1402,7 @@ class TestReceiptContracts:
         assert is_internal_artifact_dir(migrate_leftover.name)
         assert "migrate" not in REAPABLE_INTERNAL_ARTIFACT_KINDS
 
-        receive_artifact_bundle(
-            out, dst_project_root=dst, to_scope="project_local", apply_=True
-        )
+        receive_artifact_bundle(out, dst_project_root=dst, to_scope="project_local", apply_=True)
 
         assert migrate_leftover.is_dir()
         assert (migrate_leftover / "agent.md").read_bytes() == b"the only copy\n"
