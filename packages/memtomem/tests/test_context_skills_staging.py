@@ -728,10 +728,10 @@ class TestTransferStagingIsHiddenButNotReaped:
         A one-sided negative is only half a pin. Checking six and seven for
         ``migrate`` leaves ``"{8,}"`` and ``"{8,9}"`` green; checking eight for
         ``staging`` leaves ``"{6,7}"`` green — and that one widens
-        :func:`_iter_own_internal_dirs` into DELETING a seven-hex user
-        directory, which is the #1229 hazard rather than a cosmetic
-        over-match. So each kind asserts its own width matches and every
-        neighbouring width does not.
+        :func:`_iter_own_internal_dirs` into YIELDING a seven-hex user
+        directory, which the reaper around it then deletes. That is the #1229
+        hazard rather than a cosmetic over-match. So each kind asserts its own
+        width matches and every neighbouring width does not.
 
         The widths are written out here rather than read from
         ``_KIND_RAND_HEX``: a test that derives its expectation from the table

@@ -816,7 +816,10 @@ def transfer_staging_path(dst_parent: Path, name_hint: str) -> Path:
     ``.migrate-<name>-<decimal pid>-<8 lowercase hex>.tmp``, which is exactly
     what :func:`~memtomem.context._names.is_internal_artifact_dir` matches —
     so a leftover from a crash between stage and promote is hidden from every
-    discovery walk instead of being enumerated as a canonical artifact (#2304).
+    predicate-aware discovery walk instead of being enumerated as a canonical
+    artifact (#2304). "Predicate-aware" is the real scope, not a hedge: the
+    agent/command canonical lister does not consult it yet, so a leftover is
+    still enumerable there until that gap closes.
 
     The width stays at ``token_hex(4)`` and the predicate was taught this
     kind's width instead. Narrowing it to the six hex the other kinds use would
