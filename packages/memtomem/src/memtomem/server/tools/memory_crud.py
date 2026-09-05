@@ -402,6 +402,7 @@ async def _mem_add_core(
     allow_namespace_mix: bool = False,
     *,
     event_type: str,
+    confirmation_surface: str = "mem_add",
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
     need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
@@ -547,6 +548,21 @@ async def _mem_add_core(
             "Error: scope='project_shared' writes to a git-tracked "
             f"directory. Pass confirm_project_shared=True to proceed.{hint}",
             None,
+        )
+
+    # ADR-0011 §5 Gate B: record the consent that just cleared the gate
+    # (#2306). ``confirmation_surface`` names the public tool the caller
+    # reached us through — this helper also backs ``mem_consolidate_apply``,
+    # whose consent belongs to that tool, not to ``mem_add``. Gate A runs
+    # next and can still refuse: the line records the consent, not the write.
+    if effective_scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface=confirmation_surface,
+            mechanism="param",
+            audit_context={
+                "namespace": namespace,
+                "scope_inferred_from_path": effective_scope != scope,
+            },
         )
 
     # Gate A (chokepoint). enforce_write_guard hard-refuses
@@ -1071,6 +1087,7 @@ async def mem_delete(
         namespace: Namespace to delete all chunks from
         confirm_project_shared: Required for project_shared chunks
     """
+    from memtomem import privacy
     from memtomem.tools.memory_writer import remove_lines
 
     app = await _get_app_initialized(ctx)
@@ -1104,6 +1121,16 @@ async def mem_delete(
                 return (
                     "Error: deleting scope='project_shared' chunks requires "
                     "confirm_project_shared=True."
+                )
+            # Mirrors the gate's scope predicate: falling through also covers
+            # an ordinary user-tier delete, which asked for no consent and
+            # must not be recorded as having given one.
+            if inferred_scope == "project_shared":
+                privacy.emit_project_shared_confirmation(
+                    surface="mem_delete",
+                    mechanism="param",
+                    action="delete",
+                    audit_context={"chunk_id": chunk_id},
                 )
             stats, mutate_err = await _mutate_file_and_reindex(
                 app,
@@ -1160,6 +1187,15 @@ async def mem_delete(
                         "pass confirm_project_shared=True to proceed. Bulk source deletes are "
                         "all-or-nothing; use chunk_id for per-chunk control."
                     )
+                # Same predicate as the gate — a source holding no
+                # project_shared chunks needed no consent.
+                if "project_shared" in scopes:
+                    privacy.emit_project_shared_confirmation(
+                        surface="mem_delete",
+                        mechanism="param",
+                        action="delete",
+                        audit_context={"source_file": sf_path.name, "scopes": len(scopes)},
+                    )
                 deleted = await app.storage.delete_by_source(sf_path)
         except TimeoutError:
             return (
@@ -1210,6 +1246,15 @@ async def mem_delete(
                     "scope='project_shared' chunks; pass confirm_project_shared=True "
                     "to proceed. Bulk namespace deletes are all-or-nothing; use "
                     "chunk_id for per-chunk control."
+                )
+            # Same predicate as the gate — a namespace holding no
+            # project_shared chunks needed no consent.
+            if "project_shared" in ns_scopes:
+                privacy.emit_project_shared_confirmation(
+                    surface="mem_delete",
+                    mechanism="param",
+                    action="delete",
+                    audit_context={"namespace": namespace, "scopes": len(ns_scopes)},
                 )
             deleted = await app.storage.delete_by_namespace(namespace)
         app.search_pipeline.invalidate_cache()
@@ -1365,6 +1410,20 @@ async def mem_batch_add(
         return (
             "Error: scope='project_shared' writes to a git-tracked "
             f"directory. Pass confirm_project_shared=True to proceed.{hint}"
+        )
+
+    # ADR-0011 §5 Gate B consent (#2306). One line per batch: one
+    # confirmation authorised the whole set, and every entry lands in the
+    # same tier. The count says how much it covered.
+    if effective_scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="mem_batch_add",
+            mechanism="param",
+            audit_context={
+                "namespace": namespace,
+                "entries": len(entries),
+                "scope_inferred_from_path": effective_scope != scope,
+            },
         )
 
     # Trust-boundary redaction guard. Each entry routes through

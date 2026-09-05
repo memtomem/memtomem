@@ -892,3 +892,158 @@ class TestExemptionAudit:
             )
         assert "AKIATESTKEY1234567890" not in caplog.text
         assert privacy._AUDIT_REDACTED_MARKER in caplog.text
+
+
+class TestProjectSharedConfirmationAudit:
+    """The Gate B consent line — ADR-0011 §5's ``project_shared.confirmed_via``.
+
+    Gate A's refusal has been audited since ADR-0011 shipped; the consent
+    half was specified and never emitted (#2306). These pin the shape an
+    operator query depends on, and the two decisions that shape carries:
+    the line records consent rather than a landed write, and it is a log
+    line rather than a counter.
+    """
+
+    SECRET = "AKIATESTKEY1234567890"
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    @staticmethod
+    def _line(caplog) -> str:
+        return next(
+            (
+                r.getMessage()
+                for r in caplog.records
+                if "project_shared consent recorded" in r.getMessage()
+            ),
+            "",
+        )
+
+    def test_line_carries_the_adr_named_confirmed_via_field(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(surface="mem_add", mechanism="param")
+        assert "project_shared.confirmed_via=mem_add" in self._line(caplog)
+
+    def test_line_carries_mechanism_and_defaults_action_to_write(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(surface="cli_mm_add", mechanism="flag")
+        line = self._line(caplog)
+        assert "mechanism=flag" in line
+        assert "action=write" in line
+
+    def test_action_override_is_rendered(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(
+                surface="mem_delete", mechanism="param", action="delete"
+            )
+        line = self._line(caplog)
+        assert "action=delete" in line
+        assert "action=write" not in line
+
+    def test_emits_warning_on_the_privacy_logger(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(surface="web_api_add", mechanism="request")
+        rec = next(r for r in caplog.records if "project_shared consent recorded" in r.getMessage())
+        assert rec.name == "memtomem.privacy"
+        assert rec.levelno == logging.WARNING
+
+    def test_context_is_repr_quoted_after_the_action_field(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(
+                surface="cli_context_move",
+                mechanism="flag",
+                action="move",
+                audit_context={"name": "reviewer", "entries": 3},
+            )
+        line = self._line(caplog)
+        assert "name='reviewer'" in line
+        assert "entries=3" in line
+        assert line.index("action=move") < line.index("name=")
+
+    @pytest.mark.parametrize("ctx", [None, {}, {"name": "reviewer"}])
+    def test_no_double_comma_artefact_with_or_without_context(self, caplog, ctx):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(
+                surface="mem_add", mechanism="param", audit_context=ctx
+            )
+        line = self._line(caplog)
+        assert ", , " not in line
+        assert line.endswith(")")
+
+    def test_secret_shaped_context_value_is_redacted(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(
+                surface="mem_add",
+                mechanism="param",
+                audit_context={"name": f"api_key={self.SECRET}"},
+            )
+        assert self.SECRET not in caplog.text
+        assert privacy._AUDIT_REDACTED_MARKER in self._line(caplog)
+
+    def test_long_context_value_is_truncated(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(
+                surface="mem_add", mechanism="param", audit_context={"name": "x" * 5000}
+            )
+        line = self._line(caplog)
+        assert "...(truncated)" in line
+        assert len(line) < 1000
+
+    def test_action_is_sanitized_too(self, caplog):
+        """Every interpolated value, not just the context ones.
+
+        No caller builds ``action`` from input today; the sanitizer is
+        here so a future one cannot make the audit line the leak.
+        """
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(
+                surface="mem_add", mechanism="param", action=f"api_key={self.SECRET}"
+            )
+        assert self.SECRET not in caplog.text
+        assert f"action={privacy._AUDIT_REDACTED_MARKER}" in self._line(caplog)
+
+    def test_surface_itself_is_sanitized(self, caplog):
+        """A surface built from user input must not turn the line into the leak."""
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(
+                surface=f"web:api_key={self.SECRET}", mechanism="request"
+            )
+        assert self.SECRET not in caplog.text
+        marker = privacy._AUDIT_REDACTED_MARKER
+        assert f"project_shared.confirmed_via={marker}" in self._line(caplog)
+
+    @pytest.mark.parametrize("mechanism", ["yes", "", "FLAG", "cli"])
+    def test_unknown_mechanism_raises_before_logging(self, caplog, mechanism):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            with pytest.raises(ValueError, match="mechanism"):
+                privacy.emit_project_shared_confirmation(surface="mem_add", mechanism=mechanism)
+        assert self._line(caplog) == ""
+
+    @pytest.mark.parametrize("mechanism", sorted(privacy.CONSENT_MECHANISMS))
+    def test_every_declared_mechanism_is_accepted(self, caplog, mechanism):
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(surface="mem_add", mechanism=mechanism)
+        assert f"mechanism={mechanism}" in self._line(caplog)
+
+    def test_consent_does_not_touch_the_redaction_counters(self, caplog):
+        """The no-counter decision, pinned. ``_VALID_OUTCOMES`` labels the
+        outcome of a content scan; a consent is not a scan, and counting it
+        would break the per-scan reading of ``mem_add_redaction_stats``.
+        """
+        before = privacy.snapshot()
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            privacy.emit_project_shared_confirmation(surface="mem_add", mechanism="param")
+        assert privacy.snapshot() == before
+
+    def test_outcome_labels_are_unchanged_by_this_feature(self):
+        assert privacy._VALID_OUTCOMES == (
+            "blocked",
+            "pass",
+            "bypassed",
+            "blocked_project_shared",
+            "exempted",
+        )

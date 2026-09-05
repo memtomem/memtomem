@@ -154,6 +154,16 @@ class MemtomemBaseStore(BaseStore):
             raise ValueError(
                 "scope='project_shared' requires confirm_project_shared=True because writes are git-tracked"
             )
+        # ADR-0011 §5 Gate B consent (#2306). The consent is per-store, not
+        # per-put: constructing the store with this scope authorises every
+        # later ``put``, so it is recorded once, here. Each put still runs
+        # Gate A under ``langgraph_basestore_put``.
+        if scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface="langgraph_basestore_init",
+                mechanism="param",
+                action="init",
+            )
         config = Mem2MemConfig()
         if root is None:
             from memtomem.config import load_config_d, load_config_overrides

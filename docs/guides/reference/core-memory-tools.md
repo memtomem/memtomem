@@ -430,7 +430,7 @@ mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags=["
 | `namespace` | Namespace assignment |
 | `template` | Structured template (`adr`, `meeting`, `debug`, `decision`, `procedure`) |
 | `scope` | Write tier: `user`, `project_local`, or `project_shared` |
-| `confirm_project_shared` | Required `true` consent for Git-tracked shared writes |
+| `confirm_project_shared` | Required `true` consent for Git-tracked shared writes; each confirmed call is audit-logged (`project_shared.confirmed_via=mem_add`) so the opt-in is reviewable afterwards |
 | `force_unsafe` | Bypass a reviewed false-positive privacy match; forbidden for shared-tier writes |
 | `idempotency_key` | Optional client key (max 256 chars) preventing duplicate successful writes for 24 hours |
 

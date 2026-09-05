@@ -775,15 +775,20 @@ declining to derive one from untrusted input.
 confirmation at the surface, and `--to project_shared` supplies only the first
 half. A `project_shared` landing additionally requires
 `--confirm-project-shared` — `--yes` alone does not satisfy it, matching every
-transfer and migrate surface — and the write records
-`project_shared.confirmed_via` in the audit line — except that **no surface in
-this repository emits that field**, including the ones ADR-0011 §5 wrote it for,
-so this transport does not either. Adding it here alone would make one of six
-gating surfaces behave differently from the rest, which reads worse than a
-uniform gap: someone who found the record in one place would reasonably assume
-the others have it. The gap is filed as #2306 and is a repo-wide change with its
-own decision about what the record should be. The confirmation itself is
-evaluated before any destination mutation, and a dry run never prompts.
+transfer and migrate surface — and the consent records
+`project_shared.confirmed_via=cli_context_import` in the audit line, as every
+other gating surface does. The confirmation itself is evaluated before any
+destination mutation, and a dry run never prompts, so it records nothing.
+
+> **2026-09 (#2306):** When this ADR was written, no surface in the
+> repository emitted `confirmed_via`, including the ones ADR-0011 §5 wrote
+> it for. Adding it to this transport alone would have made one of six
+> gating surfaces behave differently from the rest, which reads worse than a
+> uniform gap: someone who found the record in one place would reasonably
+> assume the others have it. The gap was filed as #2306 and closed there,
+> across all of them at once; the paragraph above now describes what the
+> import surface actually does. See ADR-0011 §5's rider of the same date for
+> the line's shape and the log-line-not-counter decision.
 
 **Command surfaces.**
 

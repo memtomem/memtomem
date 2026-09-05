@@ -2195,6 +2195,15 @@ async def add_memory(
             },
         )
 
+    # ADR-0011 §5 Gate B consent (#2306). Gate A below can still refuse:
+    # the line records the consent, not the landed write.
+    if req.scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="web_api_add",
+            mechanism="request",
+            audit_context={"namespace": req.namespace},
+        )
+
     # Trust-boundary redaction guard. Mirrors MCP ``mem_add`` so the
     # same secret patterns block writes regardless of which surface
     # the agent or user came in through. ``force_unsafe`` is opt-in

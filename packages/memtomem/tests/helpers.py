@@ -76,6 +76,23 @@ def ctx_gateway_js_text() -> str:
     )
 
 
+def consent_lines(caplog) -> list[str]:
+    """ADR-0011 §5 Gate B consent lines captured so far (#2306).
+
+    The audit line's whole value is that a confirmed ``project_shared``
+    write leaves a record and an ordinary one leaves none, so surface
+    tests assert on the *list*: one entry naming the surface on a
+    confirmed run, and an empty list on a refused, dry-run, or
+    other-tier run. Callers must wrap the exercise in
+    ``caplog.at_level(logging.WARNING, logger="memtomem.privacy")``.
+    """
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if "project_shared.confirmed_via=" in record.getMessage()
+    ]
+
+
 def isolate_memtomem_env(monkeypatch) -> None:
     """Strip ``MEMTOMEM_*`` env vars and stub out ``load_config_overrides``
     so a freshly constructed ``Mem2MemConfig`` is not mutated by the

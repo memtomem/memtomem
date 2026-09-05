@@ -347,6 +347,18 @@ prompt) — a new command does not inherit `init`'s legacy implicit
 default into a git-tracked write. `mm context sync` gains an additive
 `--runtime` filter (default: all detected runtimes, unchanged).
 
+> **2026-09 (#2306):** The `project_shared` confirmation here now emits
+> ADR-0011 §5's `project_shared.confirmed_via=cli_context_pull` audit
+> line, on both the `--yes` and the prompt path, with the line naming
+> which of the two carried the consent. Note what the sentence above
+> makes this command: the only CLI surface where `--yes` satisfies
+> Gate B. Every other one requires `--confirm-project-shared` and
+> refuses `--yes` alone, and this command's own MCP tool
+> (`mem_context_pull`) and web route both require an explicit
+> `confirm_project_shared`. That divergence is recorded here rather
+> than resolved: closing it would break existing `--yes` invocations
+> and belongs in its own change.
+
 ### 12. Source-runtime vocabulary is a first-class table
 
 Which runtimes are pull-eligible per artifact kind becomes a single

@@ -20,13 +20,14 @@ file-index, and the storage chunk lookup.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
-from helpers import StubCtx
+from helpers import StubCtx, consent_lines
 from memtomem import privacy
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
@@ -992,3 +993,283 @@ def test_validate_path_empty_memory_dirs_no_cwd_fallback(tmp_path):
     out, err = memory_crud._validate_path(str(team_file), [], [project_dir])
     assert err is None
     assert out == team_file.resolve()
+
+
+# ── ADR-0011 §5 Gate B consent line (#2306) ──────────────────────────────
+#
+# The AST guard in ``test_project_shared_confirmation_audit_guard.py``
+# proves every gate is *followed* by an emit; it cannot prove the emit is
+# reached on the right runs. These carry that half for the MCP write
+# surface: a confirmed project_shared call records exactly one line, and a
+# call that needed no consent records none. The negative direction is the
+# load-bearing one — the first draft of ``mem_delete``'s three emits was
+# unconditional, so every ordinary user-tier delete logged a consent that
+# was never asked for.
+
+
+async def _seed_two_scope_chunks(comp, tmp_path, namespace="default"):
+    """One project_shared chunk and one user chunk, same namespace.
+
+    Both source files are written to disk: a chunk delete rewrites its
+    source, so a row pointing at a missing file fails before it reaches
+    any gate — which would let a "no consent recorded" assertion pass for
+    the wrong reason.
+    """
+    project_root = tmp_path / "proj_consent"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+    comp.config.indexing.memory_dirs = [tmp_path]
+    (proj_dir / "rule.md").write_text("## team rule\n\nteam rule body\n", encoding="utf-8")
+    (tmp_path / "personal.md").write_text("## personal\n\npersonal note body\n", encoding="utf-8")
+    shared = Chunk(
+        content="team rule body",
+        metadata=ChunkMetadata(
+            source_file=proj_dir / "rule.md",
+            scope="project_shared",
+            project_root=project_root,
+            namespace=namespace,
+        ),
+        embedding=[0.1] * 1024,
+    )
+    personal = Chunk(
+        content="personal note body",
+        metadata=ChunkMetadata(
+            source_file=tmp_path / "personal.md",
+            scope="user",
+            project_root=None,
+            namespace=namespace,
+            start_line=1,
+            end_line=3,
+        ),
+        embedding=[0.1] * 1024,
+    )
+    await comp.storage.upsert_chunks([shared, personal])
+    return shared, personal
+
+
+@pytest.mark.asyncio
+async def test_confirmed_project_shared_add_records_one_consent_line(
+    bm25_only_components, tmp_path, caplog
+):
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_add_consent"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        await memory_crud.mem_add(
+            content="team decision body",
+            file=str(proj_dir / "team.md"),
+            scope="project_shared",
+            confirm_project_shared=True,
+            ctx=ctx,
+        )
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=mem_add" in lines[0]
+    assert "mechanism=param" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_user_tier_add_records_no_consent(bm25_only_components, tmp_path, caplog):
+    """The tier that never asked for consent must not claim to have had it."""
+    comp, _ = bm25_only_components
+    user_dir = tmp_path / "user_mem"
+    user_dir.mkdir()
+    comp.config.indexing.memory_dirs = [user_dir]
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_add(content="personal note", scope="user", ctx=ctx)
+    # Assert the write happened first: "no consent line" is also true of a
+    # call that errored out before reaching any gate, which would make this
+    # pass for the wrong reason.
+    assert "Memory added to" in out
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_refused_project_shared_add_records_no_consent(
+    bm25_only_components, tmp_path, caplog
+):
+    """A refusal is not a consent — the gate returns before the line."""
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_refused"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_add(
+            content="team decision body",
+            file=str(proj_dir / "team.md"),
+            scope="project_shared",
+            ctx=ctx,
+        )
+    assert "confirm_project_shared=True" in out
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_gate_a_refusal_after_consent_still_records_the_consent(
+    bm25_only_components, tmp_path, caplog
+):
+    """Consent recorded ≠ write landed.
+
+    Gate B passes, then Gate A hard-refuses the secret. The line stays:
+    someone did authorise a git-tracked write, and that is the fact with
+    no other record.
+    """
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_gate_a"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_add(
+            content=_SECRET,
+            file=str(proj_dir / "team.md"),
+            scope="project_shared",
+            confirm_project_shared=True,
+            force_unsafe=True,
+            ctx=ctx,
+        )
+    assert "force_unsafe=True is not permitted" in out
+    assert len(consent_lines(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_user_tier_chunk_delete_records_no_consent(bm25_only_components, tmp_path, caplog):
+    """Regression: the emit must mirror the gate's scope predicate.
+
+    ``mem_delete`` reaches its post-gate code on two different paths —
+    consent given, and no consent needed — and only the first is a
+    consent.
+    """
+    comp, _ = bm25_only_components
+    _, personal = await _seed_two_scope_chunks(comp, tmp_path)
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_delete(chunk_id=str(personal.id), ctx=ctx)
+    assert "Error" not in out
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_user_only_namespace_delete_records_no_consent(
+    bm25_only_components, tmp_path, caplog
+):
+    comp, _ = bm25_only_components
+    await _seed_two_scope_chunks(comp, tmp_path, namespace="solo")
+    # Re-stage: a namespace holding only user chunks.
+    user_only = Chunk(
+        content="only mine",
+        metadata=ChunkMetadata(
+            source_file=tmp_path / "solo.md",
+            scope="user",
+            project_root=None,
+            namespace="useronly",
+        ),
+        embedding=[0.1] * 1024,
+    )
+    await comp.storage.upsert_chunks([user_only])
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_delete(namespace="useronly", ctx=ctx)
+    assert "Removed 0 " not in out, out  # a no-op delete would make the next line vacuous
+    assert "Removed" in out
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_namespace_delete_records_one_consent(
+    bm25_only_components, tmp_path, caplog
+):
+    comp, _ = bm25_only_components
+    await _seed_two_scope_chunks(comp, tmp_path, namespace="mixed")
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_delete(namespace="mixed", confirm_project_shared=True, ctx=ctx)
+    assert "Removed 0 " not in out, out  # a no-op delete would make the next line vacuous
+    assert "Removed" in out
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=mem_delete" in lines[0]
+    assert "action=delete" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_user_only_source_delete_records_no_consent(bm25_only_components, tmp_path, caplog):
+    """The third ``mem_delete`` branch, which the first two tests left open.
+
+    Chunk and namespace deletes are covered above; the source_file branch
+    has its own gate and its own emit, so it needs its own witness — the
+    AST guard cannot tell whether that emit carries the gate's predicate.
+    """
+    comp, _ = bm25_only_components
+    user_dir = tmp_path / "user_mem_src"
+    user_dir.mkdir()
+    comp.config.indexing.memory_dirs = [user_dir]
+    user_source = user_dir / "mine.md"
+    user_source.write_text("personal body\n", encoding="utf-8")
+    user_chunk = Chunk(
+        content="personal body",
+        metadata=ChunkMetadata(
+            source_file=user_source,
+            scope="user",
+            project_root=None,
+            namespace="default",
+        ),
+        embedding=[0.1] * 1024,
+    )
+    await comp.storage.upsert_chunks([user_chunk])
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_delete(source_file=str(user_source), ctx=ctx)
+    assert "Removed 0 " not in out, out  # a no-op delete would make the next line vacuous
+    assert "Removed" in out
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_source_delete_records_one_consent(bm25_only_components, tmp_path, caplog):
+    comp, _ = bm25_only_components
+    project_root = tmp_path / "proj_src_consent"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+    shared_source = proj_dir / "rule.md"
+    shared_source.write_text("team rule body\n", encoding="utf-8")
+    shared_chunk = Chunk(
+        content="team rule body",
+        metadata=ChunkMetadata(
+            source_file=shared_source,
+            scope="project_shared",
+            project_root=project_root,
+            namespace="default",
+        ),
+        embedding=[0.1] * 1024,
+    )
+    await comp.storage.upsert_chunks([shared_chunk])
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_delete(
+            source_file=str(shared_source), confirm_project_shared=True, ctx=ctx
+        )
+    assert "Removed 0 " not in out, out  # a no-op delete would make the next line vacuous
+    assert "Removed" in out
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=mem_delete" in lines[0]
+    assert "action=delete" in lines[0]

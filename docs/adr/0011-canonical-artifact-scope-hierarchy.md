@@ -278,9 +278,56 @@ This file is git-tracked. Anyone with repo access can read this.
 Continue? [y/N]:
 ```
 
-`--yes` overrides the prompt; MCP `confirm_project_shared=True`
-overrides for tool calls. Both produce a
+`--confirm-project-shared` answers the prompt ahead of time on the CLI;
+`confirm_project_shared=True` does the same for MCP tool calls and web
+requests, neither of which has a terminal to prompt at. On every surface
+that takes `--confirm-project-shared`, `--yes` alone does **not** satisfy
+Gate B — it is a generic "skip prompts" flag users alias for unrelated
+reasons. The exception is `mm context pull`, which has no
+`--confirm-project-shared` of its own and whose Gate B is satisfied by
+`--yes` or the prompt (ADR-0030 §11); its CLI shape diverges from the
+`mem_context_pull` tool and the web pull route, which both require the
+explicit argument. Every one of those consents produces a
 `project_shared.confirmed_via=<surface>` audit line.
+
+> **2026-09 (#2306):** Two corrections to the paragraph above, which
+> described an intent rather than the code. First, `--yes` was said to
+> override the prompt; it has been refused since PR-D review round 7 on
+> every CLI surface that carries `--confirm-project-shared`, and the
+> sentence above now says so — including the one surface where it is
+> still accepted, `mm context pull`, whose divergence from its own MCP
+> and web twins is left as a separate question rather than settled here.
+> Second, the `confirmed_via` line was specified here and emitted by
+> **nothing** — a repository-wide grep found the string only in this
+> file. Every Gate B site now calls
+> `privacy.emit_project_shared_confirmation` once the consent is
+> established, producing one WARNING on the `memtomem.privacy` logger:
+>
+> ```
+> project_shared consent recorded (project_shared.confirmed_via=<surface>,
+> mechanism=<flag|prompt|param|request>, action=<write|delete|…>[, <context>])
+> ```
+>
+> `mechanism` says how the consent arrived: `flag` for a CLI flag that
+> satisfies Gate B, `prompt` for an answered CLI confirm, `param` for an
+> MCP or library kwarg, `request` for a web body field. That flag is
+> `--confirm-project-shared` everywhere except `mm context pull`, which
+> has none and accepts `--yes` (see ADR-0030 §11); when the flag is not
+> the usual one the line names it in the context, as `flag='--yes'`, so
+> the two are told apart without a second mechanism value for a single
+> command.
+> Three properties are deliberate. The line records that consent was
+> **given**, not that the write **landed** — Gate A, a host-write gate,
+> a lock timeout, or a collision can still refuse afterwards, and the
+> consent is the half with no other record. It is a log line and not a
+> counter: the `record()` outcomes count the result of a content scan,
+> and a consent is not a scan, so `mem_add_redaction_stats` and
+> Settings → Redaction are unchanged. And a dry run writes nothing, so it
+> records no consent — note that this says what is *recorded*, not what is
+> *asked*: `mem_context_memory_migrate` still requires the confirmation
+> argument on a preview call, which is its own pre-existing contract and
+> not part of what this line reports. Like `blocked_project_shared`, the
+> line is LTM-only and does not sync to STM.
 
 `mem_edit` and `mem_delete` infer scope from the loaded chunk's
 persisted `metadata.scope`, not the caller's parameter — a client that

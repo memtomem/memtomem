@@ -1413,6 +1413,19 @@ async def copy_hook_to_project(
             confirm="confirm_project_shared",
             plan=_serialize_hook_copy_plan(plan),
         )
+    # ADR-0011 §5 Gate B consent (#2306). Mirrors ``git_tracked_write``
+    # exactly — it fires for a user/project_local destination too, because
+    # the canonical settings file is git-tracked in every tier. The
+    # host-write gate below and the copy itself can still refuse.
+    if git_tracked_write:
+        from memtomem import privacy
+
+        privacy.emit_project_shared_confirmation(
+            surface="web_context_settings_hook_copy",
+            mechanism="request",
+            action="copy",
+            audit_context={"event": body.event, "dst_scope": body.to_target_scope},
+        )
     if plan.pending_target_write and body.to_target_scope == "user" and not body.allow_host_writes:
         return needs_confirmation_envelope(
             "The destination tier is the user tier — a host path outside "

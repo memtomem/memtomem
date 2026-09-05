@@ -328,6 +328,10 @@ async def mem_consolidate_apply(
             confirm_project_shared=confirm_project_shared,
             project_root_override=project_root_override,
             event_type="consolidate_apply",
+            # The consent was given to *this* tool, so the ADR-0011 §5 line
+            # the shared core emits must name it (#2306). ``mem_add`` never
+            # saw this call.
+            confirmation_surface="mem_consolidate_apply",
         )
 
         if stats is None or not stats.new_chunk_ids:

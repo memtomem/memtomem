@@ -112,6 +112,10 @@ async def mem_pinned_set(
         priority=priority,
         confirm_project_shared=confirm_project_shared,
         force_unsafe=force_unsafe,
+        # The store carries Gate B for every caller, so the ADR-0011 §5
+        # consent line has to be told which one this is (#2306).
+        consent_surface="mem_pinned_set",
+        consent_mechanism="param",
     )
     return json.dumps(block.as_dict())
 
@@ -148,6 +152,8 @@ async def mem_pinned_delete(
                 scope=scope,
                 agent_id=agent_id,
                 confirm_project_shared=confirm_project_shared,
+                consent_surface="mem_pinned_delete",
+                consent_mechanism="param",
             )
         }
     )
