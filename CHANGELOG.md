@@ -69,6 +69,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An artifact written with Windows line endings can be exported again.**
+  `mm context export` refused any CRLF-authored skill, command, or agent whose
+  manifest declared `redaction: documents-patterns`, and the refusal advised
+  adding the declaration the file already carried. Every other reader in the
+  project sees that file through a newline-translating read, so it was a valid
+  artifact everywhere except at the one gate deciding whether it may leave the
+  machine. Export and import now read the manifest the same way, and the bytes
+  they pack and land are still the author's, byte for byte. Nothing about what
+  the declaration may waive has changed: a real token still refuses. (#2310)
+
 - **A crashed Move/Copy no longer leaves a directory the gateway treats as one
   of your artifacts.** `mm context move` and `mm context copy` build the new
   artifact in a staging directory inside the destination store and then promote

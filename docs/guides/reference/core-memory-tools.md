@@ -137,8 +137,9 @@ reads. In exchange it is deliberately narrow:
   field, duplicated, or any other value means no exemption. The block itself
   must be one memtomem already recognises — same rule as the frontmatter your
   `tags:` and `valid_from:` keys live in, so a file whose frontmatter memtomem
-  does not read (CRLF line endings, a leading byte-order mark, a `---` opener
-  with trailing spaces) cannot declare either.
+  does not read (a leading byte-order mark, a `---` opener with trailing
+  spaces) cannot declare either. Line endings are not one of those: CRLF files
+  are read the same as LF ones, on every surface that reads a declaration.
 - **Label hits only.** It waives only the two unquoted `api_key`/`password`
   label rules. A provider token, private-key header, AWS key, or a quoted-JSON
   credential (`"password": "…"`) re-blocks the file even with the declaration
