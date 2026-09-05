@@ -101,7 +101,7 @@ from memtomem.context.versioning import (
 # the two would drift on what counts as a declaration. It is a leaf (it imports
 # only ``privacy``), ``indexing/__init__`` is empty, and nothing here reaches
 # the indexing engine — so this does not close a cycle or pull in that weight.
-from memtomem.indexing.redaction_exemption import declared_exemption
+from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 from memtomem.privacy import DECLARED_EXEMPTION_DOCUMENTS_PATTERNS, exemption_covers
 from memtomem.context.transfer import (
     TransferCollisionError,
@@ -1357,11 +1357,21 @@ def _artifact_exemption(kind: ArtifactKind, captured: dict[str, bytes]) -> str |
     ``SKILL.md`` documents credential shapes could declare it while the
     ``scripts/*.py`` showing the same shapes could not, which refuses the
     artifact for a distinction its author cannot act on.
+
+    The captured bytes are verbatim — the reads keep ``O_BINARY``, so what is
+    packed is what was read, and receipt writes those bytes through unchanged
+    except for the ``name:`` line that ``--as`` rewrites — so they are decoded
+    through ``indexer_text`` for the declaration read, giving the reader the
+    same newline-translated view the indexer has of that file on disk. Without
+    it a CRLF-authored manifest
+    declares nothing here while declaring fine through ``mm index``, and export
+    refuses the artifact while advising the declaration it already carries
+    (#2310). Receipt decodes the same way, so the two ends cannot disagree.
     """
     data = captured.get(_DIR_MANIFEST[kind])
     if data is None:
         return None
-    return declared_exemption(Path(_DIR_MANIFEST[kind]), data.decode("utf-8", errors="replace"))
+    return declared_exemption(Path(_DIR_MANIFEST[kind]), indexer_text(data, errors="replace"))
 
 
 def export_artifact_bundle(
@@ -1917,6 +1927,10 @@ def _scan_payload(
     to land. That symmetry is the point: an artifact whose author declared it
     documents credential shapes must not export cleanly and then refuse on
     arrival, and the receiver is reading the same declaration in the same file.
+    That includes the decode: both ends read the manifest through
+    ``indexer_text`` (#2310), so a CRLF manifest cannot be exempt on one side
+    and undeclared on the other.
+
     The ceiling is untouched — a ``project_shared`` landing refuses a
     declaration exactly as it refuses ``force_unsafe`` (ADR-0011 §5), and
     ``exemption_covers`` still waives only label-class hits, all-or-nothing.
@@ -1925,9 +1939,7 @@ def _scan_payload(
     artifact_exemption: str | None = None
     for rel, data, _ in payload:
         if rel == manifest_rel:
-            artifact_exemption = declared_exemption(
-                Path(rel), data.decode("utf-8", errors="replace")
-            )
+            artifact_exemption = declared_exemption(Path(rel), indexer_text(data, errors="replace"))
             break
     exempted: list[str] = []
     declared = artifact_exemption == DECLARED_EXEMPTION_DOCUMENTS_PATTERNS

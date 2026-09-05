@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from memtomem import privacy
-from memtomem.indexing.redaction_exemption import declared_exemption
+from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 
 _DECL = "documents-patterns"
 
@@ -105,6 +105,9 @@ class TestFailClosed:
             # defect as the mid-file boundary case, at the other end.
             ("opening_with_trailing_spaces", "---   \nredaction: documents-patterns\n---\n"),
             ("byte_order_mark", "\ufeff---\nredaction: documents-patterns\n---\n"),
+            # Str-level contract, and it stays: a caller holding verbatim bytes
+            # gets the indexer's newline-translated view from ``indexer_text``
+            # before calling here, rather than this parser folding CRLF (#2310).
             ("crlf_line_endings", "---\r\nredaction: documents-patterns\r\n---\r\n"),
             # A collection value is never the literal, but it is still a
             # second ``redaction`` key: dropping it made the pair look
@@ -430,3 +433,90 @@ class TestNeverEchoesTheValue:
         logged = "\n".join(r.getMessage() for r in caplog.records)
         assert "AKIATESTKEY1234567890" not in logged
         assert privacy._AUDIT_REDACTED_MARKER in logged
+
+
+class TestIndexerText:
+    """The decode a bytes-holding caller owes ``declared_exemption`` (#2310).
+
+    The indexing path reaches the reader through ``Path.read_text``, so the
+    reader — and the chunker it mirrors — are specified over newline-translated
+    text. A caller that kept verbatim bytes (the bundle transport, `O_BINARY`)
+    must reproduce that view or the two readers see different files.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "data"),
+        [
+            ("lf", b"---\nredaction: documents-patterns\n---\nbody\n"),
+            ("crlf", b"---\r\nredaction: documents-patterns\r\n---\r\nbody\r\n"),
+            ("cr", b"---\rredaction: documents-patterns\r---\rbody\r"),
+            ("mixed", b"---\r\nredaction: documents-patterns\n---\r\nbody\n"),
+            ("no_trailing_newline", b"---\r\nname: x\r\n---\r\nbody"),
+            ("empty", b""),
+            # Separators `str.splitlines` treats as line breaks and the io
+            # newline machinery does not. They belong here because the obvious
+            # wrong rewrite of this helper is a `splitlines`/`join` — which
+            # would fold these, and the case below says why that is not a
+            # cosmetic difference.
+            ("next_line", "---\u0085redaction: documents-patterns\u0085---\u0085".encode()),
+            ("line_separator", "---\u2028name: x\u2028---\u2028body".encode()),
+            ("paragraph_separator", "---\u2029name: x\u2029---\u2029body".encode()),
+            ("form_feed", b"---\x0cname: x\x0c---\x0c"),
+        ],
+    )
+    def test_matches_what_read_text_would_have_produced(
+        self, label: str, data: bytes, tmp_path: Path
+    ) -> None:
+        """The producer is the twin, not a hand-written expectation.
+
+        Fails if the helper ever stops being ``open(path)``'s own translation —
+        a hand-rolled ``.replace("\r\n", "\n")`` passes the first two cases and
+        drops the lone-CR one.
+        """
+        target = tmp_path / "note.md"
+        target.write_bytes(data)
+
+        assert indexer_text(data) == target.read_text(encoding="utf-8")
+
+    def test_a_unicode_separator_does_not_open_frontmatter(self) -> None:
+        """Folding more than the io machinery does would breach the boundary.
+
+        `str.splitlines` breaks on U+0085, U+2028, U+2029 and form feed; the
+        universal-newline decoder does not. A helper rewritten around
+        `splitlines` would turn a `---` followed by U+0085 into an opener the
+        chunker, reading the same file, still does not see — which is the exact
+        divergence the declaration reader's boundary rule exists to prevent,
+        arrived at from the opposite direction to #2310.
+        """
+        from memtomem.chunking.markdown import _FRONT_MATTER_RE
+
+        raw = "---\u0085redaction: documents-patterns\u0085---\u0085".encode()
+        text = indexer_text(raw)
+
+        # Pin the premise: the chunker sees no frontmatter in this file.
+        assert _FRONT_MATTER_RE.match(text) is None
+        assert declared_exemption(Path("SKILL.md"), text) is None
+
+    def test_the_translation_is_what_lets_a_crlf_file_declare(self) -> None:
+        """Pins the mechanism, not just the outcome (#2310).
+
+        Both halves matter: the raw decode must still fail closed (that is the
+        boundary rule the reader keeps), and the indexer's view must declare.
+        """
+        raw = b"---\nname: demo\nredaction: documents-patterns\n---\nbody\n".replace(b"\n", b"\r\n")
+
+        assert declared_exemption(Path("SKILL.md"), raw.decode("utf-8")) is None
+        assert declared_exemption(Path("SKILL.md"), indexer_text(raw)) == _DECL
+
+    def test_undeclared_crlf_stays_undeclared(self) -> None:
+        """Translation is not permission: no declaration in, none out."""
+        raw = b"---\r\nname: demo\r\n---\r\nbody\r\n"
+
+        assert declared_exemption(Path("SKILL.md"), indexer_text(raw)) is None
+
+    def test_invalid_utf8_is_raised_not_swallowed(self) -> None:
+        """The default is strict, so a caller opts into ``errors=`` knowingly."""
+        with pytest.raises(UnicodeDecodeError):
+            indexer_text(b"---\n\xff\n---\n")
+
+        assert "\ufffd" in indexer_text(b"---\n\xff\n---\n", errors="replace")

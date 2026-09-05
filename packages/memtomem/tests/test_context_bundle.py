@@ -1444,20 +1444,154 @@ class TestReceiptContracts:
         assert (store / "demo" / "agent.md").exists()
 
 
+class TestCrlfAuthoredArtifacts:
+    """A CRLF manifest declares exactly as its LF twin does (#2310).
+
+    The population is every artifact authored on Windows, through a CRLF
+    editor, or checked out with `core.autocrlf=true`. Such a file parses fine
+    everywhere else — the agent manifest parser reads its `name:`, the rename
+    rewrite tolerates it, the transport carries it byte-identically — so the
+    egress gate refusing it was the one reader out of step, and the refusal it
+    printed advised the declaration the file already carried.
+    """
+
+    _DECLARED = (
+        b"---\r\nname: demo\r\nredaction: documents-patterns\r\n---\r\n"
+        b"Settings carry an api_key: str field.\r\n"
+    )
+
+    def _crlf_skill(self, root: Path, manifest: bytes) -> Path:
+        art = root / ".memtomem" / "skills" / "demo"
+        art.mkdir(parents=True)
+        (art / "SKILL.md").write_bytes(manifest)
+        return art
+
+    def test_a_crlf_manifest_declaration_is_honoured_on_export(self, tmp_path: Path) -> None:
+        """The issue's own repro: this exported nothing but an error before.
+
+        Fails if the export-side read goes back to a verbatim `.decode()` — the
+        declaration then reads as body text and Gate A refuses `api_key: str`.
+        """
+        root = tmp_path / "p"
+        self._crlf_skill(root, self._DECLARED)
+        out = tmp_path / "b.json"
+
+        result = _export(root, out)
+
+        assert result.redaction_exempted == ["SKILL.md"]
+        assert load_bundle(out).redaction_exempted == ["SKILL.md"]
+
+    def test_the_declaration_does_not_cost_the_artifact_its_line_endings(
+        self, tmp_path: Path, dst: Path
+    ) -> None:
+        """Honouring it is a change of *view*, never of the bytes packed.
+
+        Fails if the fix is ever implemented by normalising the payload instead
+        of the text the reader is handed.
+        """
+        root = tmp_path / "p"
+        self._crlf_skill(root, self._DECLARED)
+        out = tmp_path / "b.json"
+        _export(root, out)
+
+        receive_artifact_bundle(out, dst_project_root=dst, to_scope="project_local", apply_=True)
+
+        landed = dst / ".memtomem" / "skills.local" / "demo" / "SKILL.md"
+        assert landed.read_bytes() == self._DECLARED
+
+    def test_a_crlf_manifest_declaration_is_honoured_on_receipt(
+        self, tmp_path: Path, dst: Path
+    ) -> None:
+        """Both ends read the same way, or the wire disclosure contradicts the scan.
+
+        Fails if only the export site is fixed: receipt re-derives the waiver
+        and cross-checks it against `redaction_exempted`, so a receiver that
+        still decodes verbatim refuses the bundle it was just handed.
+        """
+        root = tmp_path / "p"
+        self._crlf_skill(root, self._DECLARED)
+        out = tmp_path / "b.json"
+        _export(root, out)
+
+        result = receive_artifact_bundle(
+            out, dst_project_root=dst, to_scope="project_local", apply_=True
+        )
+
+        assert result.redaction_exempted == ["SKILL.md"]
+
+    def test_a_crlf_agent_manifest_declares_too(self, tmp_path: Path) -> None:
+        """Agents are the kind whose parser already tolerated CRLF.
+
+        So an agent was valid to every reader in the codebase except the one
+        gating its egress — the sharpest form of the asymmetry.
+        """
+        root = tmp_path / "p"
+        art = root / ".memtomem" / "agents" / "demo"
+        art.mkdir(parents=True)
+        (art / "agent.md").write_bytes(self._DECLARED)
+        out = tmp_path / "b.json"
+
+        result = _export(root, out, kind="agents")
+
+        assert result.redaction_exempted == ["agent.md"]
+
+    def test_the_declaration_never_waives_a_real_token_in_a_crlf_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        """The ceiling is not what moved: label hits only, all-or-nothing.
+
+        Fails if translating the scan view is ever mistaken for widening what
+        the declaration may cover.
+        """
+        root = tmp_path / "p"
+        self._crlf_skill(
+            root,
+            b"---\r\nname: demo\r\nredaction: documents-patterns\r\n---\r\n"
+            + SECRET.encode()
+            + b"\r\ntoken=sk-"
+            + b"a" * 24
+            + b"\r\n",
+        )
+        out = tmp_path / "b.json"
+
+        with pytest.raises(PrivacyBlockedError):
+            _export(root, out)
+        assert not out.exists()
+
+    def test_an_undeclared_crlf_manifest_is_still_refused(self, tmp_path: Path) -> None:
+        """Translation is not permission.
+
+        Fails if the newline fix is ever written as "CRLF artifacts skip Gate
+        A" rather than "CRLF artifacts get their declaration read".
+        """
+        root = tmp_path / "p"
+        self._crlf_skill(root, b"---\r\nname: demo\r\n---\r\n" + SECRET.encode() + b"\r\n")
+        out = tmp_path / "b.json"
+
+        with pytest.raises(PrivacyBlockedError) as excinfo:
+            _export(root, out)
+        assert "documents-patterns" in excinfo.value.message
+
+
 def test_every_fixture_write_pins_its_line_endings() -> None:
     """No fixture in this file may let the host decide its newlines.
 
     `Path.write_text` without `newline=` translates `\\n` to `\\r\\n` on Windows,
     so a fixture written that way lands different bytes per platform. This file
     tests a byte-exact transport, and once export reads through a binary
-    descriptor those bytes reach the assertions: on Windows the round-trip
-    comparison saw CRLF, and a CRLF SKILL.md has no frontmatter as far as the
-    markdown chunker — and therefore the redaction declaration — is concerned,
-    so six declaration tests failed with a privacy block instead.
+    descriptor those bytes reach the assertions, so a fixture that follows the
+    host is testing the host.
+
+    The failure that prompted this was six declaration tests going red on
+    Windows only, because export handed the declaration reader verbatim CRLF
+    bytes and it read them as having no frontmatter. That asymmetry is fixed
+    (#2310, `TestCrlfAuthoredArtifacts`) — but the guard is not about it. A
+    fixture whose bytes depend on the runner cannot pin a byte-exact format at
+    all, whichever way each reader happens to jump.
 
     A guard rather than a one-time sweep, because the sweep certifies only the
-    calls that existed when it ran. CRLF payloads are still covered, by a test
-    that writes those bytes explicitly.
+    calls that existed when it ran. CRLF payloads are still covered, by tests
+    that write those bytes explicitly.
     """
     import ast
 

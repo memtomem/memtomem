@@ -425,7 +425,9 @@ artifact's manifest — `redaction: documents-patterns` in the frontmatter of
 credential shapes rather than carrying one, which is the common case for a skill
 about API code. It waives only the unquoted-label patterns and only when every
 hit in a file is one of them, so a real token still refuses, and it travels
-inside the bundle so the person receiving it reads the same declaration. The reasoning is the same one that makes
+inside the bundle so the person receiving it reads the same declaration. The
+manifest's line endings do not matter — a CRLF-authored artifact declares
+exactly as an LF one does, and export packs its bytes unchanged either way. The reasoning is the same one that makes
 Project (shared) absolute — once a file has been handed to someone, no local
 edit takes it back — so a bundle is gated like a git-tracked write even when
 the artifact it came from was private to you. `mm context import` treats an

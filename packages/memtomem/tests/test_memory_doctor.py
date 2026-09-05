@@ -2252,6 +2252,27 @@ class TestStaleIndexBlocked:
         assert by["stale_index"].items == ["note.md"]
         assert "mm index <file>" in by["stale_index"].summary
 
+    def test_a_crlf_declaration_is_honoured_on_the_indexing_path(self, stale_env):
+        """CRLF frontmatter declares here, because the indexer reads text (#2310).
+
+        `Path.read_text` folds CRLF before the declaration reader or the chunker
+        ever sees the file, so a Windows-authored note is not a special case on
+        this path — a fact `docs/guides/reference/core-memory-tools.md` states
+        and the bundle transport had to re-establish for verbatim bytes.
+
+        Fails if the indexer ever switches to a byte-verbatim read without
+        routing it through ``indexer_text``.
+        """
+        config, mem_dir, note, _reindex = stale_env
+        note.write_bytes(
+            b"---\r\nredaction: documents-patterns\r\n---\r\n\r\n"
+            b"The guard matches `api_key=` on the keyword alone.\r\n"
+        )
+
+        by = _stale_findings(config, mem_dir)
+        assert "stale_index_blocked" not in by
+        assert by["stale_index"].items == ["note.md"]
+
     def test_declared_exemption_with_a_real_token_stays_blocked(self, stale_env):
         """The declaration waives label rules only; a token re-blocks."""
         config, mem_dir, note, _reindex = stale_env

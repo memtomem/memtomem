@@ -52,10 +52,18 @@ alias is an ``AliasEvent`` and a quoted scalar carries its style. The contract
 is lexical, which is the point: the declaration has to be the one shape a
 reviewer opening the file can see, not any shape that happens to evaluate to
 it.
+
+**What ``content`` must be.** This module parses the text the *indexer* reads —
+``Path.read_text`` output, newline-translated — because that is the text
+``chunking/markdown.py`` is specified over, and the two must agree about where
+a file's frontmatter is. It normalises nothing itself; a caller that holds
+verbatim bytes instead of a ``read_text`` string decodes them through
+:func:`indexer_text` first (#2310).
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 from pathlib import Path
@@ -273,6 +281,29 @@ def _top_level_declaration_values(block: str) -> list[tuple[object, int]] | None
     return values
 
 
+def indexer_text(data: bytes, *, errors: str = "strict") -> str:
+    """Decode ``data`` into the text the indexer would have read (#2310).
+
+    UTF-8 with universal newlines, i.e. exactly what ``Path.read_text`` yields:
+    ``\r\n`` and a lone ``\r`` both become ``\n``. The wrapper below is the one
+    ``open(path)`` itself builds, so the parity is structural rather than a
+    second implementation of the translation that could drift from it.
+
+    :func:`declared_exemption` and ``chunking/markdown.py`` are both specified
+    over *this* text, because every reader on the indexing path reaches them
+    through ``read_text``. A caller holding verbatim bytes must therefore come
+    through here: the artifact bundle transport reads with ``O_BINARY`` to keep
+    byte fidelity across the wire (#2307), and handing those bytes straight to
+    the declaration reader made a CRLF-authored manifest declare nothing while
+    the same file on disk declared fine through ``mm index``.
+
+    Translating the *scan view* is not the normalisation this module refuses to
+    do. The refusal is about not finding frontmatter the chunker cannot see;
+    here the chunker, reading that same file, sees the translated text too.
+    """
+    return io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors=errors).read()
+
+
 def declared_exemption(path: Path, content: str) -> str | None:
     """Return the exemption ``path`` declares, or ``None``.
 
@@ -300,12 +331,18 @@ def declared_exemption(path: Path, content: str) -> str | None:
     """
     if path.suffix.lower() not in _MARKDOWN_SUFFIXES:
         return None
-    # Deliberately no normalisation. Stripping a BOM or folding CRLF would
-    # make this module find frontmatter where ``chunking/markdown.py`` finds
-    # none — and a declaration the rest of the codebase reads as body text is
-    # exactly what the boundary rule exists to prevent. Such a file has no
-    # frontmatter here either, so it declares nothing (and gets no frontmatter
-    # tags or validity window either, for the same reason).
+    # Deliberately no normalisation of ``content``. Stripping a BOM or folding
+    # CRLF *here* would make this module find frontmatter where
+    # ``chunking/markdown.py`` finds none — and a declaration the rest of the
+    # codebase reads as body text is exactly what the boundary rule exists to
+    # prevent. Such a file has no frontmatter here either, so it declares
+    # nothing (and gets no frontmatter tags or validity window either, for the
+    # same reason).
+    #
+    # The newline translation the indexer's ``read_text`` applies before the
+    # chunker ever runs is a different thing and belongs to the *caller*: a
+    # caller holding verbatim bytes decodes them with :func:`indexer_text`, so
+    # that both readers are looking at the same text (#2310).
     block = _frontmatter_block(content)
     if block is None:
         return None
@@ -346,4 +383,4 @@ def declared_exemption(path: Path, content: str) -> str | None:
     return None
 
 
-__all__ = ["declared_exemption"]
+__all__ = ["declared_exemption", "indexer_text"]
