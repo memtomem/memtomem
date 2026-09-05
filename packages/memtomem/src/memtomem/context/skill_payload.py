@@ -14,7 +14,7 @@ and fan-out would push internal metadata into runtimes. §10 resolves it with
 * :func:`iter_skill_payload_files` — the **NARROW payload surface**: the
   artifact *content*, excluding the Store-owned top-level ``overrides/`` /
   ``versions/`` / ``versions.json`` (plus that manifest's lock/temp sidecars)
-  and our own ``.staging-*`` / ``.old-*`` crash leftovers. It drives the
+  and our own ``.staging-*`` / ``.old-*`` / ``.migrate-*`` crash leftovers. It drives the
   snapshot content, the tree digest, the Store↔candidate comparison, the
   fan-out staging surface, and the sync diff.
 
@@ -68,7 +68,7 @@ def is_payload_top_name(name: str) -> bool:
 
     ``False`` for the Store-owned ``overrides/`` / ``versions/`` directories,
     the ``versions.json`` manifest and its ``.lock`` / ``.tmp`` sidecars, and
-    our own ``.staging-*`` / ``.old-*`` crash-leftover trees
+    our own ``.staging-*`` / ``.old-*`` / ``.migrate-*`` crash-leftover trees
     (:func:`~memtomem.context._names.is_internal_artifact_dir` — the same
     predicate the extract/reap paths use, so "hidden" and "excluded" can't
     drift apart).

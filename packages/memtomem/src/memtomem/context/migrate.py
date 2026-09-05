@@ -806,6 +806,32 @@ def _acquire_pair_lock(
         yield
 
 
+def transfer_staging_path(dst_parent: Path, name_hint: str) -> Path:
+    """Where a cross-store transfer stages one artifact under *dst_parent*.
+
+    The one place the transfer staging grammar is spelled, shared by
+    :func:`_stage_move` (move) and
+    :func:`memtomem.context.transfer._stage_copy` (copy) so the two cannot
+    drift. The shape is
+    ``.migrate-<name>-<decimal pid>-<8 lowercase hex>.tmp``, which is exactly
+    what :func:`~memtomem.context._names.is_internal_artifact_dir` matches —
+    so a leftover from a crash between stage and promote is hidden from every
+    predicate-aware discovery walk instead of being enumerated as a canonical
+    artifact (#2304). "Predicate-aware" is the real scope, not a hedge: the
+    agent/command canonical lister does not consult it yet, so a leftover is
+    still enumerable there until that gap closes.
+
+    The width stays at ``token_hex(4)`` and the predicate was taught this
+    kind's width instead. Narrowing it to the six hex the other kinds use would
+    have cut collision entropy from 32 bits to 24 on a path whose collision
+    handler deletes the colliding entry, and it would still have left every
+    eight-hex leftover already on disk from a released version unclassified —
+    which is most of what #2304 is about. A construction↔predicate parity test
+    pins the generated name.
+    """
+    return dst_parent / f".migrate-{name_hint}-{os.getpid()}-{secrets.token_hex(4)}.tmp"
+
+
 def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool]:
     """Move *src* into a same-fs staging entry under *dst_parent*.
 
@@ -820,8 +846,7 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool
     on the EXDEV fallback path until the caller signals promote success.
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
-    suffix = f"{os.getpid()}-{secrets.token_hex(4)}"
-    staging = dst_parent / f".migrate-{name_hint}-{suffix}.tmp"
+    staging = transfer_staging_path(dst_parent, name_hint)
     if staging.exists():
         # Crashed prior run with a colliding suffix (extremely unlikely
         # given pid+rand) — leftover is from us; safe to clear.
