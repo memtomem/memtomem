@@ -453,6 +453,15 @@ class TestIndexerText:
             ("mixed", b"---\r\nredaction: documents-patterns\n---\r\nbody\n"),
             ("no_trailing_newline", b"---\r\nname: x\r\n---\r\nbody"),
             ("empty", b""),
+            # Separators `str.splitlines` treats as line breaks and the io
+            # newline machinery does not. They belong here because the obvious
+            # wrong rewrite of this helper is a `splitlines`/`join` — which
+            # would fold these, and the case below says why that is not a
+            # cosmetic difference.
+            ("next_line", "---\u0085redaction: documents-patterns\u0085---\u0085".encode()),
+            ("line_separator", "---\u2028name: x\u2028---\u2028body".encode()),
+            ("paragraph_separator", "---\u2029name: x\u2029---\u2029body".encode()),
+            ("form_feed", b"---\x0cname: x\x0c---\x0c"),
         ],
     )
     def test_matches_what_read_text_would_have_produced(
@@ -468,6 +477,25 @@ class TestIndexerText:
         target.write_bytes(data)
 
         assert indexer_text(data) == target.read_text(encoding="utf-8")
+
+    def test_a_unicode_separator_does_not_open_frontmatter(self) -> None:
+        """Folding more than the io machinery does would breach the boundary.
+
+        `str.splitlines` breaks on U+0085, U+2028, U+2029 and form feed; the
+        universal-newline decoder does not. A helper rewritten around
+        `splitlines` would turn a `---` followed by U+0085 into an opener the
+        chunker, reading the same file, still does not see — which is the exact
+        divergence the declaration reader's boundary rule exists to prevent,
+        arrived at from the opposite direction to #2310.
+        """
+        from memtomem.chunking.markdown import _FRONT_MATTER_RE
+
+        raw = "---\u0085redaction: documents-patterns\u0085---\u0085".encode()
+        text = indexer_text(raw)
+
+        # Pin the premise: the chunker sees no frontmatter in this file.
+        assert _FRONT_MATTER_RE.match(text) is None
+        assert declared_exemption(Path("SKILL.md"), text) is None
 
     def test_the_translation_is_what_lets_a_crlf_file_declare(self) -> None:
         """Pins the mechanism, not just the outcome (#2310).

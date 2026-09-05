@@ -1358,10 +1358,12 @@ def _artifact_exemption(kind: ArtifactKind, captured: dict[str, bytes]) -> str |
     ``scripts/*.py`` showing the same shapes could not, which refuses the
     artifact for a distinction its author cannot act on.
 
-    The captured bytes are verbatim — the reads keep ``O_BINARY`` so what lands
-    is what was packed — so they are decoded through ``indexer_text`` for the
-    declaration read, giving the reader the same newline-translated view the
-    indexer has of that file on disk. Without it a CRLF-authored manifest
+    The captured bytes are verbatim — the reads keep ``O_BINARY``, so what is
+    packed is what was read, and receipt writes those bytes through unchanged
+    except for the ``name:`` line that ``--as`` rewrites — so they are decoded
+    through ``indexer_text`` for the declaration read, giving the reader the
+    same newline-translated view the indexer has of that file on disk. Without
+    it a CRLF-authored manifest
     declares nothing here while declaring fine through ``mm index``, and export
     refuses the artifact while advising the declaration it already carries
     (#2310). Receipt decodes the same way, so the two ends cannot disagree.
