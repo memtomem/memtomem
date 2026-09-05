@@ -45,15 +45,15 @@ SECRET = "api_key=" + "AKIA" + "TESTKEY" + "1234567890"
 def _write_skill(root: Path, name: str = "demo", *, body: str | None = None) -> Path:
     art = root / ".memtomem" / "skills" / name
     (art / "references").mkdir(parents=True)
-    (art / "SKILL.md").write_text(body or f"---\nname: {name}\n---\nbody\n")
-    (art / "references" / "a.md").write_text("notes\n")
+    (art / "SKILL.md").write_text(body or f"---\nname: {name}\n---\nbody\n", newline="\n")
+    (art / "references" / "a.md").write_text("notes\n", newline="\n")
     return art
 
 
 def _write_agent(root: Path, name: str = "demo", *, body: str | None = None) -> Path:
     art = root / ".memtomem" / "agents" / name
     art.mkdir(parents=True)
-    (art / "agent.md").write_text(body or f"---\nname: {name}\n---\nbody\n")
+    (art / "agent.md").write_text(body or f"---\nname: {name}\n---\nbody\n", newline="\n")
     return art
 
 
@@ -62,13 +62,13 @@ def _write_versions(art: Path, *, tags: dict[str, str] | None = None, labels: di
     vdir = art / "versions"
     vdir.mkdir(exist_ok=True)
     for tag, text in tags.items():
-        (vdir / f"{tag}.md").write_text(text)
+        (vdir / f"{tag}.md").write_text(text, newline="\n")
     manifest = {
         "schema_version": 1,
         "versions": {tag: {"created_at": "2026-01-01T00:00:00Z", "note": ""} for tag in tags},
         "labels": labels or {},
     }
-    (art / "versions.json").write_text(json.dumps(manifest))
+    (art / "versions.json").write_text(json.dumps(manifest), newline="\n")
 
 
 def _export(root: Path, out: Path, *, kind="skills", name="demo", **kw):
@@ -107,7 +107,7 @@ class TestExport:
         root = tmp_path / "p"
         art = _write_skill(root)
         (art / "overrides").mkdir()
-        (art / "overrides" / "claude.md").write_text("vendor\n")
+        (art / "overrides" / "claude.md").write_text("vendor\n", newline="\n")
         _write_versions(art)
         out = tmp_path / "b.json"
 
@@ -147,7 +147,7 @@ class TestExport:
         root = tmp_path / "p"
         store = root / ".memtomem" / "agents"
         store.mkdir(parents=True)
-        (store / "demo.md").write_text("---\nname: demo\n---\nbody\n")
+        (store / "demo.md").write_text("---\nname: demo\n---\nbody\n", newline="\n")
         out = tmp_path / "b.json"
 
         result = _export(root, out, kind="agents")
@@ -161,7 +161,7 @@ class TestExport:
         art = _write_skill(root)
         (art / "references" / "__pycache__").mkdir()
         (art / "references" / "__pycache__" / "x.pyc").write_bytes(b"\x00")
-        (art / "SKILL.md.bak").write_text("stale\n")
+        (art / "SKILL.md.bak").write_text("stale\n", newline="\n")
         out = tmp_path / "b.json"
 
         result = _export(root, out)
@@ -227,7 +227,7 @@ class TestExport:
         home = tmp_path / "home"
         art = home / ".memtomem" / "skills" / "demo"
         art.mkdir(parents=True)
-        (art / "SKILL.md").write_text(f"---\nname: demo\n---\n{SECRET}\n")
+        (art / "SKILL.md").write_text(f"---\nname: demo\n---\n{SECRET}\n", newline="\n")
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
         out = tmp_path / "b.json"
 
@@ -286,7 +286,7 @@ class TestExport:
             ),
         )
         (art / "scripts").mkdir()
-        (art / "scripts" / "conf.py").write_text("secret_key: str = ...\n")
+        (art / "scripts" / "conf.py").write_text("secret_key: str = ...\n", newline="\n")
         out = tmp_path / "b.json"
 
         result = _export(root, out)
@@ -310,7 +310,7 @@ class TestExport:
                 "Documents an api_key: str field.\n"
             ),
         )
-        (art / "config.env").write_text("password=" + "hunter2" + "\n")
+        (art / "config.env").write_text("password=" + "hunter2" + "\n", newline="\n")
         out = tmp_path / "b.json"
 
         result = _export(root, out)
@@ -381,7 +381,7 @@ class TestExport:
         root = tmp_path / "p"
         art = _write_skill(root)
         _write_versions(art)
-        (art / "versions" / "v2.md").write_text("orphan\n")
+        (art / "versions" / "v2.md").write_text("orphan\n", newline="\n")
         out = tmp_path / "b.json"
 
         with pytest.raises(BundleSourceError) as excinfo:
@@ -409,8 +409,8 @@ class TestExport:
         """
         outside = tmp_path / "outside" / "demo"
         outside.mkdir(parents=True)
-        (outside / "SKILL.md").write_text("---\nname: demo\n---\nbody\n")
-        (outside / "elsewhere.md").write_text("not in the store\n")
+        (outside / "SKILL.md").write_text("---\nname: demo\n---\nbody\n", newline="\n")
+        (outside / "elsewhere.md").write_text("not in the store\n", newline="\n")
         store = tmp_path / "p" / ".memtomem" / "skills"
         store.mkdir(parents=True)
         (store / "demo").symlink_to(outside)
@@ -453,7 +453,9 @@ class TestExport:
         root = tmp_path / "p"
         art = _write_agent(root)
         (art / "versions" / "v1").mkdir(parents=True)
-        (art / "versions" / "v1" / "agent.md").write_text("---\nname: demo\n---\nold\n")
+        (art / "versions" / "v1" / "agent.md").write_text(
+            "---\nname: demo\n---\nold\n", newline="\n"
+        )
         (art / "versions.json").write_text(
             json.dumps(
                 {
@@ -461,7 +463,8 @@ class TestExport:
                     "versions": {"v1": {"created_at": "2026-01-01T00:00:00Z", "layout": "tree"}},
                     "labels": {},
                 }
-            )
+            ),
+            newline="\n",
         )
         out = tmp_path / "b.json"
 
@@ -474,7 +477,7 @@ class TestExport:
         _write_versions(art)
         manifest = json.loads((art / "versions.json").read_text())
         manifest["schema_version"] = 999
-        (art / "versions.json").write_text(json.dumps(manifest))
+        (art / "versions.json").write_text(json.dumps(manifest), newline="\n")
         out = tmp_path / "b.json"
 
         with pytest.raises(BundleSourceError, match="schema_version"):
@@ -491,7 +494,7 @@ class TestExport:
         root = tmp_path / "p"
         _write_skill(root)
         out = tmp_path / "b.json"
-        out.write_text("previous\n")
+        out.write_text("previous\n", newline="\n")
 
         with pytest.raises(BundleSourceError, match="already exists"):
             _export(root, out)
@@ -528,7 +531,7 @@ def _mutate(bundle: Path, tmp_path: Path, mutate, name: str = "m") -> Path:
     doc = json.loads(bundle.read_text())
     mutate(doc)
     path = tmp_path / f"{name}.json"
-    path.write_text(json.dumps(doc))
+    path.write_text(json.dumps(doc), newline="\n")
     return path
 
 
@@ -643,13 +646,13 @@ class TestReaderRefusals:
     def test_duplicate_json_key_is_refused(self, bundle, tmp_path) -> None:
         text = bundle.read_text().replace('"kind"', '"kind": "skills", "kind"', 1)
         bad = tmp_path / "dup.json"
-        bad.write_text(text)
+        bad.write_text(text, newline="\n")
         with pytest.raises(BundleFormatError, match="duplicate"):
             load_bundle(bad)
 
     def test_memory_export_bundle_is_named_and_redirected(self, tmp_path) -> None:
         bad = tmp_path / "mem.json"
-        bad.write_text(json.dumps({"version": "2", "total_chunks": 0, "chunks": []}))
+        bad.write_text(json.dumps({"version": "2", "total_chunks": 0, "chunks": []}), newline="\n")
         with pytest.raises(BundleFormatError, match="mem_import"):
             load_bundle(bad)
 
@@ -682,7 +685,7 @@ class TestReaderRefusals:
 
         monkeypatch.setattr(bundle_mod, "_MAX_BUNDLE_BYTES", 16)
         fat = tmp_path / "fat.json"
-        fat.write_text(json.dumps({"format": BUNDLE_FORMAT, "version": 1}) + " " * 64)
+        fat.write_text(json.dumps({"format": BUNDLE_FORMAT, "version": 1}) + " " * 64, newline="\n")
         with pytest.raises(BundleFormatError, match="cap"):
             load_bundle(fat)
 
@@ -750,7 +753,7 @@ class TestReceipt:
         """mm context copy preserves it, so dropping it would strip a runnable script."""
         root = tmp_path / "src"
         art = _write_skill(root)
-        (art / "run.sh").write_text("#!/bin/sh\n")
+        (art / "run.sh").write_text("#!/bin/sh\n", newline="\n")
         (art / "run.sh").chmod(0o755)
         out = tmp_path / "b.json"
         _export(root, out)
@@ -786,7 +789,7 @@ class TestReceipt:
             json.loads(out.read_text()), "SKILL.md", f"---\nname: demo\n---\n{SECRET}\n".encode()
         )
         tainted = tmp_path / "tainted.json"
-        tainted.write_text(json.dumps(doc))
+        tainted.write_text(json.dumps(doc), newline="\n")
 
         called: list[object] = []
         monkeypatch.setattr(
@@ -815,7 +818,7 @@ class TestReceipt:
             json.loads(out.read_text()), "SKILL.md", f"---\nname: demo\n---\n{SECRET}\n".encode()
         )
         tainted = tmp_path / "tainted.json"
-        tainted.write_text(json.dumps(doc))
+        tainted.write_text(json.dumps(doc), newline="\n")
 
         with pytest.raises(PrivacyBlockedError) as excinfo:
             receive_artifact_bundle(
@@ -841,7 +844,7 @@ class TestReceipt:
             json.loads(out.read_text()), "SKILL.md", f"---\nname: demo\n---\n{SECRET}\n".encode()
         )
         tainted = tmp_path / "tainted.json"
-        tainted.write_text(json.dumps(doc))
+        tainted.write_text(json.dumps(doc), newline="\n")
 
         with pytest.raises(BundlePrivacyError) as excinfo:
             receive_artifact_bundle(
@@ -877,7 +880,7 @@ class TestReceipt:
                 "Documents an api_key: str field.\n"
             ),
         )
-        (art / "config.env").write_text("password=" + "hunter2" + "\n")
+        (art / "config.env").write_text("password=" + "hunter2" + "\n", newline="\n")
         out = tmp_path / "b.json"
         _export(root, out)
 
@@ -885,7 +888,7 @@ class TestReceipt:
         assert doc["redaction_exempted"]
         doc["redaction_exempted"] = []
         stripped = tmp_path / "stripped.json"
-        stripped.write_text(json.dumps(doc))
+        stripped.write_text(json.dumps(doc), newline="\n")
 
         with pytest.raises(BundleFormatError, match="redaction_exempted"):
             receive_artifact_bundle(
@@ -938,7 +941,7 @@ class TestReceipt:
         """A directory landing would otherwise silently shadow a legacy flat file."""
         store = dst / ".memtomem" / "skills.local"
         store.mkdir(parents=True)
-        (store / "demo.md").write_text("legacy\n")
+        (store / "demo.md").write_text("legacy\n", newline="\n")
 
         with pytest.raises(TransferCollisionError):
             receive_artifact_bundle(
@@ -950,7 +953,7 @@ class TestReceipt:
         root = tmp_path / "src"
         art = _write_skill(root)
         (art / "overrides").mkdir()
-        (art / "overrides" / "claude.md").write_text("name: demo\n")
+        (art / "overrides" / "claude.md").write_text("name: demo\n", newline="\n")
         out = tmp_path / "b.json"
         _export(root, out)
 
@@ -973,7 +976,7 @@ class TestReceipt:
         store.mkdir(parents=True)
         art = store / "demo"
         art.mkdir()
-        (art / "agent.md").write_text("---\nname: victim\n---\nbody\n")
+        (art / "agent.md").write_text("---\nname: victim\n---\nbody\n", newline="\n")
         out = tmp_path / "b.json"
         _export(root, out, kind="agents")
 
@@ -1050,10 +1053,10 @@ class TestExportReadPath:
         """
         root = tmp_path / "art"
         (root / "sub").mkdir(parents=True)
-        (root / "sub" / "a.md").write_text("real\n")
+        (root / "sub" / "a.md").write_text("real\n", newline="\n")
         outside = tmp_path / "outside"
         outside.mkdir()
-        (outside / "a.md").write_text("stolen\n")
+        (outside / "a.md").write_text("stolen\n", newline="\n")
 
         with _SourceReader(root) as reader:
             assert reader.read("sub/a.md", budget=1024)[0] == b"real\n"
@@ -1170,7 +1173,7 @@ class TestTypedPathValidation:
         root = tmp_path / "src"
         art = _write_skill(root)
         (art / "overrides").mkdir()
-        (art / "overrides" / "claude.md").write_text("o\n")
+        (art / "overrides" / "claude.md").write_text("o\n", newline="\n")
         out = tmp_path / "b.json"
         _export(root, out)
 
@@ -1198,7 +1201,7 @@ class TestTypedPathValidation:
         _write_versions(art)
         manifest = json.loads((art / "versions.json").read_text())
         manifest["schema_version"] = SCHEMA_VERSION
-        (art / "versions.json").write_text(json.dumps(manifest))
+        (art / "versions.json").write_text(json.dumps(manifest), newline="\n")
         out = tmp_path / "b.json"
 
         _export(root, out)
@@ -1239,7 +1242,7 @@ class TestGrammarBounds:
         the depth bound moves back to after the parse.
         """
         deep = tmp_path / "deep.json"
-        deep.write_text("[" * 200_000)
+        deep.write_text("[" * 200_000, newline="\n")
 
         with pytest.raises(BundleFormatError, match="nesting"):
             load_bundle(deep)
@@ -1423,7 +1426,7 @@ class TestReceiptContracts:
         store.mkdir(parents=True)
         mine = store / ".staging-demo-999-abcdef.tmp"
         mine.mkdir()
-        (mine / "agent.md").write_text("half-written\n")
+        (mine / "agent.md").write_text("half-written\n", newline="\n")
         neighbour = store / ".staging-demo-other-999-abcdef.tmp"
         neighbour.mkdir()
 
@@ -1432,3 +1435,36 @@ class TestReceiptContracts:
         assert not mine.exists()
         assert neighbour.exists()
         assert (store / "demo" / "agent.md").exists()
+
+
+def test_every_fixture_write_pins_its_line_endings() -> None:
+    """No fixture in this file may let the host decide its newlines.
+
+    `Path.write_text` without `newline=` translates `\\n` to `\\r\\n` on Windows,
+    so a fixture written that way lands different bytes per platform. This file
+    tests a byte-exact transport, and once export reads through a binary
+    descriptor those bytes reach the assertions: on Windows the round-trip
+    comparison saw CRLF, and a CRLF SKILL.md has no frontmatter as far as the
+    markdown chunker — and therefore the redaction declaration — is concerned,
+    so six declaration tests failed with a privacy block instead.
+
+    A guard rather than a one-time sweep, because the sweep certifies only the
+    calls that existed when it ran. CRLF payloads are still covered, by a test
+    that writes those bytes explicitly.
+    """
+    import ast
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    offenders = [
+        node.lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "write_text"
+        and not any(kw.arg == "newline" for kw in node.keywords)
+    ]
+    assert not offenders, (
+        f"write_text without newline= at line(s) {offenders} — the host decides "
+        f"the bytes, so this file's assertions would test the platform. Pass "
+        f'newline="\\n", or write_bytes when the test is about the bytes.'
+    )
