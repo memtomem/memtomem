@@ -120,6 +120,140 @@ def test_stage_copy_produces_an_internal_artifact_name(tmp_path: Path) -> None:
     assert internal_artifact_owner(staging.name) == "reviewer"
 
 
+class TestStageCopyNeverClearsTheCollider:
+    """#2309: copy staging claims its name exclusively and never deletes.
+
+    Copy mode's own staging is rebuildable, so the loss here is not its own —
+    it is that the name cannot say WHOSE leftover it found. A move's staging
+    under the same grammar is the only copy of an artifact, and clearing by
+    name cannot tell the two apart.
+
+    The two file-source cells are the ones that pin real behaviour rather than
+    an error type: ``shutil.copy2`` onto an existing file overwrites it, and
+    onto an existing DIRECTORY it copies INTO it — the hazard the old
+    clear-the-leftover comment described and then handled by deleting.
+    """
+
+    @staticmethod
+    def _force(monkeypatch, *hexes: str) -> None:
+        from memtomem.context import migrate as migrate_mod
+
+        remaining = list(hexes)
+
+        def fake_token_hex(_n: int) -> str:
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+        monkeypatch.setattr(migrate_mod.os, "getpid", lambda: 424242)
+        monkeypatch.setattr(migrate_mod.secrets, "token_hex", fake_token_hex)
+
+    @staticmethod
+    def _staged(dst_parent: Path, hexpart: str) -> Path:
+        return dst_parent / f".migrate-reviewer-424242-{hexpart}.tmp"
+
+    @pytest.mark.parametrize(
+        ("collider", "src_kind"),
+        [
+            ("file", "file"),
+            ("dir", "file"),
+            ("dir", "dir"),
+            ("file", "dir"),
+        ],
+    )
+    def test_refuses_and_keeps_both_sides(self, tmp_path, monkeypatch, collider, src_kind):
+        from memtomem.context.migrate import TransferStagingBusyError
+        from memtomem.context.transfer import _stage_copy
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        self._force(monkeypatch, "aaaaaaaa")
+        planted = self._staged(dst_parent, "aaaaaaaa")
+        if collider == "file":
+            planted.write_text("leftover", encoding="utf-8")
+        else:
+            planted.mkdir()
+            (planted / "agent.md").write_text("leftover", encoding="utf-8")
+
+        if src_kind == "file":
+            src = tmp_path / "reviewer.md"
+            src.write_text("source", encoding="utf-8")
+        else:
+            src = tmp_path / "reviewer"
+            src.mkdir()
+            (src / "agent.md").write_text("source", encoding="utf-8")
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_copy(src, dst_parent, name_hint="reviewer")
+
+        if collider == "file":
+            assert planted.read_text(encoding="utf-8") == "leftover"
+        else:
+            assert sorted(p.name for p in planted.iterdir()) == ["agent.md"]
+            assert (planted / "agent.md").read_text(encoding="utf-8") == "leftover"
+        assert sorted(p.name for p in dst_parent.iterdir()) == [planted.name]
+        # The copy source is never consumed, collision or not.
+        assert src.exists()
+
+    @pytest.mark.requires_symlinks
+    def test_refuses_a_dangling_symlink_collider(self, tmp_path, monkeypatch):
+        from memtomem.context.migrate import TransferStagingBusyError
+        from memtomem.context.transfer import _stage_copy
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        self._force(monkeypatch, "aaaaaaaa")
+        planted = self._staged(dst_parent, "aaaaaaaa")
+        planted.symlink_to(tmp_path / "nowhere")
+        assert not planted.exists() and planted.is_symlink()
+        src = tmp_path / "reviewer.md"
+        src.write_text("source", encoding="utf-8")
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_copy(src, dst_parent, name_hint="reviewer")
+
+        assert planted.is_symlink()
+        assert src.read_text(encoding="utf-8") == "source"
+
+    def test_retries_once_onto_a_fresh_suffix(self, tmp_path, monkeypatch):
+        from memtomem.context.transfer import _stage_copy
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        self._force(monkeypatch, "aaaaaaaa", "bbbbbbbb")
+        planted = self._staged(dst_parent, "aaaaaaaa")
+        planted.mkdir()
+        (planted / "agent.md").write_text("leftover", encoding="utf-8")
+        src = tmp_path / "reviewer"
+        src.mkdir()
+        (src / "agent.md").write_text("source", encoding="utf-8")
+
+        staging = _stage_copy(src, dst_parent, name_hint="reviewer")
+
+        assert staging == self._staged(dst_parent, "bbbbbbbb")
+        assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
+        assert (planted / "agent.md").read_text(encoding="utf-8") == "leftover"
+
+    @pytest.mark.requires_symlinks
+    def test_remove_staging_unlinks_an_owned_link_without_touching_its_target(self, tmp_path):
+        """``_stage_copy`` can produce a LINK, so cleanup must handle one.
+
+        ``exists()`` and ``is_dir()`` both follow links: a link to a directory
+        would reach ``rmtree``, which refuses one, and a dangling link answers
+        False to ``exists()`` and would be skipped entirely.
+        """
+        from memtomem.context.transfer import _remove_staging
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "keep.md").write_text("keep", encoding="utf-8")
+        staging = tmp_path / ".migrate-reviewer-424242-aaaaaaaa.tmp"
+        staging.symlink_to(target)
+
+        _remove_staging(staging)
+
+        assert not staging.is_symlink()
+        assert (target / "keep.md").read_text(encoding="utf-8") == "keep"
+
+
 def _write_versions(artifact_dir: Path, body: str) -> Path:
     """Seed a minimal ADR-0022 version store inside *artifact_dir*."""
     versions = artifact_dir / "versions"
@@ -956,21 +1090,21 @@ def test_destination_appeared_during_promote(two_projects, monkeypatch, mode):
 
 def test_exdev_fallback_cross_project_move(two_projects, monkeypatch):
     """EXDEV on the staging rename falls back to copy; move still completes."""
-    import os as os_mod
+    from memtomem.context import migrate as migrate_mod
 
     src_manifest = _write_canonical(
         two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
     )
-    real_rename = os_mod.rename
+    real_rename = migrate_mod.rename_no_replace
 
-    def exdev_rename(src, dst):
+    def exdev_rename(src, dst, **kwargs):
         if ".migrate-" in str(dst):
             raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
-        return real_rename(src, dst)
+        return real_rename(src, dst, **kwargs)
 
-    # _stage_move reads ``os`` from the migrate module namespace; the
-    # module object is shared, so patch the attribute it actually calls.
-    monkeypatch.setattr("memtomem.context.migrate.os.rename", exdev_rename)
+    # _stage_move stages with the no-replace rename it imported by name
+    # (#2309), so patch that binding in the migrate module namespace.
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", exdev_rename)
 
     result = transfer_artifact(
         "agents",
@@ -994,26 +1128,26 @@ def test_exdev_fallback_cross_project_move(two_projects, monkeypatch):
 
 def test_exdev_src_cleanup_failure_cross_root_partial_error(two_projects, monkeypatch):
     """Cross-root partial move raises with root-qualified remediation wording."""
-    import os as os_mod
+    from memtomem.context import migrate as migrate_mod
 
     src_manifest = _write_canonical(
         two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
     )
     src_dir = src_manifest.parent
-    real_rename = os_mod.rename
+    real_rename = migrate_mod.rename_no_replace
     real_rmtree = shutil.rmtree
 
-    def exdev_rename(src, dst):
+    def exdev_rename(src, dst, **kwargs):
         if ".migrate-" in str(dst):
             raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
-        return real_rename(src, dst)
+        return real_rename(src, dst, **kwargs)
 
     def failing_rmtree(path, *args, **kwargs):
         if Path(path) == src_dir:
             raise OSError(13, "Permission denied", str(path))
         return real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr("memtomem.context.migrate.os.rename", exdev_rename)
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", exdev_rename)
     monkeypatch.setattr("memtomem.context.transfer.shutil.rmtree", failing_rmtree)
 
     with pytest.raises(MigratePartialError) as exc_info:

@@ -1007,6 +1007,69 @@ class TestRenameNoReplace:
         assert (dst / "f.md").read_text() == "new"
         assert not src.exists()
 
+    def test_cross_parent_allowed_when_asked(self, tmp_path: Path) -> None:
+        """The shared-parent rule is a promote-shape invariant, not a kernel
+        limit — the transfer stage-in opts out of it (#2309)."""
+        src = tmp_path / "a" / "artifact"
+        src.mkdir(parents=True)
+        (src / "f.md").write_text("new")
+        dst = tmp_path / "b" / ".migrate-artifact-1-aaaaaaaa.tmp"
+        dst.parent.mkdir(parents=True)
+
+        rename_no_replace(src, dst, allow_cross_parent=True)
+
+        assert (dst / "f.md").read_text() == "new"
+        assert not src.exists()
+
+    @pytest.mark.parametrize("shape", ["file", "empty_dir"])
+    def test_cross_parent_allowed_still_refuses_an_occupied_destination(
+        self, tmp_path: Path, shape: str
+    ) -> None:
+        """Opting out of the parent check must not opt out of exclusivity.
+
+        Both shapes are ones plain ``os.rename`` would take: it replaces a file
+        and it replaces an EMPTY directory.
+        """
+        src = tmp_path / "a" / "artifact"
+        src.mkdir(parents=True)
+        (src / "f.md").write_text("new")
+        dst = tmp_path / "b" / "occupied"
+        dst.parent.mkdir(parents=True)
+        if shape == "file":
+            dst.write_text("theirs")
+        else:
+            dst.mkdir()
+
+        with pytest.raises(OSError) as exc:
+            rename_no_replace(src, dst, allow_cross_parent=True)
+
+        assert exc.value.errno != errno.EXDEV
+        assert (src / "f.md").read_text() == "new"
+        if shape == "file":
+            assert dst.read_text() == "theirs"
+        else:
+            assert dst.is_dir() and list(dst.iterdir()) == []
+
+    @pytest.mark.requires_symlinks
+    def test_cross_parent_allowed_still_refuses_a_dangling_symlink(self, tmp_path: Path) -> None:
+        """The destination shape an ``exists()`` guard cannot see at all —
+        ``Path.exists()`` is False for a dangling link, and plain ``os.rename``
+        unlinks it."""
+        src = tmp_path / "a" / "artifact"
+        src.mkdir(parents=True)
+        (src / "f.md").write_text("new")
+        dst = tmp_path / "b" / "occupied"
+        dst.parent.mkdir(parents=True)
+        dst.symlink_to(tmp_path / "nowhere")
+        assert not dst.exists()
+
+        with pytest.raises(OSError) as exc:
+            rename_no_replace(src, dst, allow_cross_parent=True)
+
+        assert exc.value.errno != errno.EXDEV
+        assert dst.is_symlink()
+        assert (src / "f.md").read_text() == "new"
+
 
 class TestStrictTreeWalkers:
     """The carry-then-delete strict walkers — REFUSE symlinks/special files

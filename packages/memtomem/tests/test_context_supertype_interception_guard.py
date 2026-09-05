@@ -1298,12 +1298,29 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
     ("context/migrate.py", "_stage_move", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
-        "os.rename with EXDEV copy fallback; migrate-local, no swap; " + _RO,
+        "No-replace staging rename with EXDEV copy fallback; migrate-local, no swap; " + _RO,
     ),
-    ("context/migrate.py", "_stage_move", ("BaseException",), 0): (
+    ("context/migrate.py", "_claim_transfer_staging", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "First exclusive claim: an occupied-name errno falls through to one "
+        "retry, everything else re-raises unchanged; " + _RO,
+    ),
+    ("context/migrate.py", "_claim_transfer_staging", ("OSError",), 1): (
+        _U,
+        "no_recovery_callee",
+        "Second exclusive claim: an occupied-name errno becomes the typed "
+        "TransferStagingBusyError (chained), everything else re-raises; " + _RO,
+    ),
+    ("context/migrate.py", "_stage_copy_into", ("BaseException",), 0): (
         _R,
         "bare",
-        "Copy-fallback rollback: clean staging and re-raise.",
+        "Tree-copy rollback: remove the staging root this call claimed, re-raise.",
+    ),
+    ("context/migrate.py", "_stage_copy_into", ("BaseException",), 1): (
+        _R,
+        "bare",
+        "File-copy rollback: remove the placeholder this call claimed, re-raise.",
     ),
     ("context/migrate.py", "_fanout_target_matches", ("OSError",), 0): (
         _U,
@@ -1830,11 +1847,6 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         _U,
         "no_recovery_callee",
         "Lockfile.upsert_entry → not_carried; " + _RO,
-    ),
-    ("context/transfer.py", "_stage_copy", ("BaseException",), 0): (
-        _R,
-        "bare",
-        "Copy staging rollback: remove staging and re-raise.",
     ),
     ("context/transfer.py", "transfer_artifact", ("SwapRecoveryError",), 0): (
         _T,

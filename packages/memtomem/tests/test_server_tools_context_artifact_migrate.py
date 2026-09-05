@@ -187,6 +187,41 @@ async def test_scope_refuses_on_destination_conflict(layout):
     assert "destination already exists" in out
 
 
+@pytest.mark.anyio
+async def test_scope_refuses_on_staging_collision(layout, monkeypatch):
+    """A staging leftover is ``refused:``, not a flattened ``error:`` (#2309).
+
+    ``migrate_scope`` is a thin wrapper over the transfer engine, so this is
+    the shape a blocked staging claim arrives in here too. The engine will not
+    clear an occupied staging name — an entry under one can be an interrupted
+    move's only copy of an artifact — which is an actionable state conflict,
+    and the twin surfaces agree on the reason (the web route answers 409
+    ``transfer_staging_busy``). Both wires truncate an engine reason at 200
+    characters, so the instruction has to arrive ahead of the paths.
+    """
+    from memtomem.context import migrate as migrate_mod
+
+    src = _write_dir_canonical(layout, "agents", "user", "foo")
+    monkeypatch.setattr(migrate_mod.os, "getpid", lambda: 424242)
+    monkeypatch.setattr(migrate_mod.secrets, "token_hex", lambda _n: "deadbeef")
+    dst_store = _canonical_root(layout, "agents", "project_local")
+    dst_store.mkdir(parents=True, exist_ok=True)
+    leftover = dst_store / ".migrate-foo-424242-deadbeef.tmp"
+    leftover.mkdir()
+    (leftover / "agent.md").write_text("only copy\n", encoding="utf-8")
+
+    out = await mem_context_artifact_migrate(
+        asset_type="agents", name="foo", from_scope="user", to_scope="project_local", apply=True
+    )
+
+    assert out.startswith("refused: transfer_staging_busy:"), out
+    assert "was NOT removed" in out, out
+    assert "Inspect it by hand, then retry." in out, out
+    # Both sides survived: nothing moved, nothing was deleted.
+    assert src.exists()
+    assert (leftover / "agent.md").read_text(encoding="utf-8") == "only copy\n"
+
+
 # ── validation gates (mirror the CLI; Codex review fold) ─────────────────
 
 

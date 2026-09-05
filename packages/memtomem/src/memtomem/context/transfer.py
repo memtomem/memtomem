@@ -104,8 +104,8 @@ from memtomem.context.migrate import (
     _existing_fanout_targets,
     _promote_move,
     _remove_runtime_fanout_for,
+    _stage_copy_into,
     _stage_move,
-    transfer_staging_path,
 )
 from memtomem.context.privacy_scan import raise_or_collect, scan_artifact_tree
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
@@ -498,7 +498,19 @@ def _provenance_fields(
 
 
 def _remove_staging(staging: Path) -> None:
-    """Best-effort removal of a staging entry whose bytes are safe elsewhere."""
+    """Best-effort removal of a staging entry whose bytes are safe elsewhere.
+
+    The symlink test comes first, and both other tests are reached only when
+    the entry is not a link: ``exists()`` and ``is_dir()`` follow links, so a
+    dangling staging link answers False to the first (leaked, never removed)
+    and a link to a directory answers True to the second (``rmtree`` refuses a
+    link, also a leak). Staging can be a link since ``_stage_copy_into``
+    preserves a symlink source as a link rather than dereferencing it.
+    """
+    if staging.is_symlink():
+        with contextlib.suppress(OSError):
+            staging.unlink()
+        return
     if staging.exists():
         if staging.is_dir():
             shutil.rmtree(staging, ignore_errors=True)
@@ -513,38 +525,18 @@ def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
     Copy-mode sibling of :func:`memtomem.context.migrate._stage_move`:
     the source is NEVER consumed or mutated — staging is built from a
     byte copy, so a Gate A block or promote failure needs no rename-back
-    rollback, only staging removal. Shares ``_stage_move``'s staging grammar
-    through :func:`~memtomem.context.migrate.transfer_staging_path`, so every
-    internal-artifact exclusion treats both alike (#2304).
+    rollback, only staging removal. Both modes share one staging
+    implementation, :func:`~memtomem.context.migrate._stage_copy_into` (the
+    move mode's EXDEV fallback is a byte copy too), so the grammar, the
+    no-deref symlink handling and the exclusive name claim cannot drift
+    between them (#2304, #2309).
 
-    Symlinks are preserved as links (``symlinks=True`` /
-    ``follow_symlinks=False``) — same no-deref contract as the
-    ``_stage_move`` EXDEV fallback: dereferencing would materialize
-    out-of-tree target bytes into the (possibly git-tracked) destination
-    tier, violating the package's no-deref mirror contract
-    (``_atomic.copy_tree_atomic``).
+    The name is claimed exclusively and a colliding entry is never cleared:
+    a copy's staging is rebuildable but the name cannot say whose leftover it
+    found, and a move's staging can be the only copy of an artifact.
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
-    staging = transfer_staging_path(dst_parent, name_hint)
-    if staging.exists():
-        # Crashed prior run with a colliding suffix (extremely unlikely
-        # given pid+rand) — leftover is from us; safe to clear. The clear
-        # must stay LOUD here (pre-copy): a survivor — e.g. a symlink
-        # rmtree refuses, or an undeletable dir — would make the
-        # file-source copy below write INTO the leftover instead of
-        # replacing the staging path.
-        _remove_staging(staging)
-        if staging.exists():
-            raise OSError(f"could not clear leftover staging entry: {staging}")
-    try:
-        if src.is_dir():
-            shutil.copytree(src, staging, symlinks=True)
-        else:
-            shutil.copy2(src, staging, follow_symlinks=False)
-    except BaseException:
-        _remove_staging(staging)
-        raise
-    return staging
+    return _stage_copy_into(src, dst_parent, name_hint)
 
 
 def _rewrite_staged_manifest_name(

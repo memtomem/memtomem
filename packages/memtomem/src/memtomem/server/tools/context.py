@@ -1543,6 +1543,7 @@ async def mem_context_artifact_migrate(
     from memtomem.context.migrate import (
         MigratePartialError,
         SCOPE_MIGRATABLE_KINDS,
+        TransferStagingBusyError,
         classify_migrate,
         migrate_scope,
     )
@@ -1613,6 +1614,14 @@ async def mem_context_artifact_migrate(
             return f"privacy block: {exc.message}"
         except MigratePartialError as exc:
             return f"error: {exc.message}"
+        except TransferStagingBusyError as exc:
+            # A staging name is occupied and was NOT cleared (#2309) — an entry
+            # under it can be an interrupted move's only copy of an artifact.
+            # ``refused:`` rather than ``error:``: nothing is broken, a leftover
+            # is in the way and the caller's operator has to look at it. The
+            # message embeds canonical staging paths, so it is redacted like
+            # the arms around it.
+            return f"refused: transfer_staging_busy: {_redact_reason(str(exc), project_root)}"
         except TransferRecoveryError as exc:
             # ``migrate_scope`` is a thin wrapper over the transfer engine, so
             # this is the shape an interrupted swap arrives in. BEFORE the
@@ -1961,6 +1970,7 @@ async def mem_context_artifact_transfer(
         SCOPE_MIGRATABLE_KINDS,
         ArtifactNotFoundError,
         MigratePartialError,
+        TransferStagingBusyError,
         _detect_source_scope,
     )
     from memtomem.context.privacy_scan import PrivacyScanError
@@ -2173,6 +2183,12 @@ async def mem_context_artifact_transfer(
         return f"refused: swap_recovery_pending: {_redact_reason(exc.message, src_root, dst_root)}"
     except TransferCollisionError as exc:
         return f"refused: {exc.message}"
+    except TransferStagingBusyError as exc:
+        # Twin of the migrate action's arm and of the web route's 409
+        # ``transfer_staging_busy``: a leftover occupies a staging name and was
+        # deliberately left alone (#2309). Both roots are stripped, since the
+        # occupied names live under the destination store.
+        return f"refused: transfer_staging_busy: {_redact_reason(str(exc), src_root, dst_root)}"
     except PrivacyScanError as exc:
         return f"privacy block: {exc.message}"
     except MigratePartialError as exc:

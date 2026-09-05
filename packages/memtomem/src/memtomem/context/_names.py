@@ -208,8 +208,11 @@ REAPABLE_INTERNAL_ARTIFACT_KINDS: tuple[str, ...] = ("staging", "old")
 # ``token_hex(4)`` (8 hex). One shared width cannot serve both: pinning six
 # classified none of the eight-hex leftovers already on disk from released
 # versions, and narrowing the transfer suffix to match would have cut its
-# collision entropy from 32 bits to 24 on a path whose collision handler
-# DELETES the colliding entry (#2304).
+# collision entropy from 32 bits to 24 (#2304). Since #2309 the transfer
+# stagers claim their name exclusively and never clear a collider, so that
+# entropy bounds how often a transfer FAILS CLOSED on someone else's leftover
+# rather than how often one gets destroyed — a smaller stake than before, and
+# still not a reason to shrink it.
 #
 # Every kind is pinned to EXACTLY the width it generates — the #1229 rule
 # applied per kind rather than once globally. Being excluded from the reapable

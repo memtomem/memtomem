@@ -169,12 +169,42 @@ engine's collision identity is the destination **path**
 (`<dst_store>/<dst_name>`); `--as <new-name>` is the supported way to
 land a copy next to an existing same-name artifact.
 
+**Amendment (2026-09, #2309): a collision on the STAGING name is also a
+hard fail.** Staging carries the process's pid and 32 random bits, so an
+occupied staging name is almost certainly our own leftover from a crash
+between stage and promote — and that is precisely why it may not be
+cleared. `_stage_move` reaches staging by renaming the source on the same
+filesystem, so in that window the staging tree is the artifact and the
+source no longer exists; deleting it to make room would turn a
+recoverable crash into permanent loss. This is the same asymmetry
+`REAPABLE_INTERNAL_ARTIFACT_KINDS` encodes by classifying `.migrate-…`
+as ours while never reaping it (#2304).
+
+Both stagers therefore CLAIM the staging name exclusively — a no-replace
+rename for move, `mkdir(exist_ok=False)` / `O_EXCL` / `os.symlink` for
+copy — retry once with a fresh suffix, and raise
+`TransferStagingBusyError` on a second collision, naming the occupied
+paths and stating that nothing was removed. Every surface gives that
+state its own reason rather than folding it into `destination_exists`
+(the destination is free) or into an internal error (nothing is broken):
+409 `transfer_staging_busy` on the web route, `refused:
+transfer_staging_busy:` from both MCP actions, a one-line CLI error. The
+remediation is written ahead of the paths because both wires truncate an
+engine reason at 200 characters. The exclusive claim also
+removes the check-then-act window an `exists()` guard left open, and
+refuses destination shapes such a check cannot see (a dangling symlink)
+or would lose (an empty directory, which plain `rename` replaces). The
+cost is that a transfer can fail on a leftover nothing reaps; the
+leftover is inert, hidden from discovery, and removable by hand.
+
 ### 7. Copy mode and `--as` rename
 
-Copy stages by **byte copy** (`_stage_copy`: `copytree(symlinks=True)`
-/ `copy2(follow_symlinks=False)` — the same no-deref contract as the
-EXDEV fallback), so the source is never consumed or mutated and
-rollback is trivially safe. `versions/` + `versions.json` live inside
+Copy stages by **byte copy** (`_stage_copy`, which since #2309 delegates
+to the one shared copy-mode stager the EXDEV fallback also uses:
+`copytree(symlinks=True)` / `copy2(follow_symlinks=False)`, dispatching on
+linkness before shape so a top-level symlink lands as a link in both
+modes), so the source is never consumed or mutated and rollback is
+trivially safe. `versions/` + `versions.json` live inside
 the artifact dir and travel implicitly in both modes (move and copy);
 version history is content, not provenance.
 
@@ -585,7 +615,8 @@ is not the web server's event loop.
   #1282 (settings hooks / mcp-servers transfer mechanisms), #1283
   (A-13 MCP action); #895 P2 (stale fan-out orphans), #1123 B4-1
   (dangling lock.json entry), #1247 id 6 (byte-verified fan-out
-  cleanup).
+  cleanup), #2304 (transfer staging classified but never reaped), #2309
+  (§6 amendment: staging collisions claim exclusively, never clear).
 - ADRs: ADR-0011 (§3 no project_local fan-out; §5 no force valve;
   PR-E4 scope move + Row 15), ADR-0015 / ADR-0016 (scope vocabulary;
   §5 write-target rule this ADR carves the bounded exception into;

@@ -66,6 +66,7 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    TransferStagingBusyError,
 )
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.projects import ProjectScope, compute_scope_id
@@ -523,6 +524,28 @@ async def transfer_context_artifact(
                 "error_kind": "conflict",
                 "reason_code": "destination_exists",
                 "message": exc.message,
+            },
+        ) from exc
+    except TransferStagingBusyError as exc:
+        # A staging name this transfer would have used is occupied and was
+        # NOT cleared (#2309), because an entry under that name can be an
+        # interrupted move's only copy of an artifact. Conflict, not a 500:
+        # nothing is broken, a leftover is in the way and a human has to look
+        # at it. Its own reason code, never ``destination_exists`` — the
+        # destination is free; the remediation is to inspect the staging
+        # entries the message names, not to remove the destination.
+        #
+        # Redacted like every other raw engine string on this route: unlike
+        # ``MigratePartialError``, whose paths ARE the recovery steps for the
+        # operator who ran it, this one can reach a remote caller who has no
+        # business learning the destination store's absolute layout, and the
+        # unredacted text stays in the server log via ``raise ... from``.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_kind": "conflict",
+                "reason_code": "transfer_staging_busy",
+                "message": _redact_message(str(exc)),
             },
         ) from exc
     except MigratePartialError as exc:

@@ -69,6 +69,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A cross-store transfer no longer deletes a crashed transfer's only copy of
+  an artifact** (#2309) — `mm context move` and `mm context copy` stage the
+  artifact under a temporary name carrying the process id and 32 random bits,
+  and on the astronomically rare chance that name was already taken, they used
+  to delete what was there on the theory that it could only be their own
+  leftover. It can be, and that is exactly the problem: a move reaches staging
+  by renaming the source, so between that rename and the promote the staging
+  tree is the artifact and the source no longer exists on disk. Clearing it to
+  make room turned a recoverable crash into permanent loss. Both stagers now
+  claim the name exclusively, retry once with a fresh one, and then stop rather
+  than delete, naming the occupied path and saying plainly that nothing was
+  removed. The CLI prints that as a one-line error, the web transfer route
+  answers 409 `transfer_staging_busy`, and both MCP actions refuse with the same
+  reason; the leftover stays hidden from discovery and can be inspected or
+  removed by hand. The exclusive claim
+  also closes the gap between the old existence check and the write that
+  followed it, and refuses two destination shapes that check could not handle —
+  a dangling symlink, which it reported as absent, and an empty directory,
+  which a plain rename replaces silently.
+
 - **An artifact written with Windows line endings can be exported again.**
   `mm context export` refused any CRLF-authored skill, command, or agent whose
   manifest declared `redaction: documents-patterns`, and the refusal advised

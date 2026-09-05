@@ -43,13 +43,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal
 
 import click
 
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
-from memtomem.context._atomic import _file_lock, _lock_path_for
+from memtomem.context._atomic import _file_lock, _lock_path_for, rename_no_replace
 from memtomem.context._canonical_txn import canonical_sidecar_lock
 from memtomem.context._dir_swap import has_pending_swap
 from memtomem.context._names import (
@@ -99,6 +99,7 @@ __all__ = [
     "MigrateRow",
     "MigrateScopeResult",
     "MigrateState",
+    "TransferStagingBusyError",
     "adopt_flat_to_dir",
     "classify_migrate",
     "migrate_one",
@@ -828,72 +829,253 @@ def transfer_staging_path(dst_parent: Path, name_hint: str) -> Path:
 
     The width stays at ``token_hex(4)`` and the predicate was taught this
     kind's width instead. Narrowing it to the six hex the other kinds use would
-    have cut collision entropy from 32 bits to 24 on a path whose collision
-    handler deletes the colliding entry, and it would still have left every
-    eight-hex leftover already on disk from a released version unclassified —
-    which is most of what #2304 is about. A construction↔predicate parity test
-    pins the generated name.
+    have cut collision entropy from 32 bits to 24, and it would still have left
+    every eight-hex leftover already on disk from a released version
+    unclassified — which is most of what #2304 is about. A
+    construction↔predicate parity test pins the generated name.
+
+    Callers claim this name EXCLUSIVELY and never clear a collider
+    (:func:`_claim_transfer_staging`, #2309), so the entropy now bounds how
+    often a transfer fails closed on someone else's leftover rather than how
+    often one gets destroyed.
     """
     return dst_parent / f".migrate-{name_hint}-{os.getpid()}-{secrets.token_hex(4)}.tmp"
+
+
+class TransferStagingBusyError(OSError):
+    """Two staging names in a row were already occupied (#2309).
+
+    Classified by PROVENANCE, not by errno: raised only by
+    :func:`_claim_transfer_staging`, and only for a failed exclusive CLAIM.
+    An ``EEXIST`` raised later, while filling an entry this process already
+    owns, is a different failure with a different cause and must not be
+    reported as a name collision.
+
+    Constructed with a single argument so ``str(exc)`` is the remediation
+    sentence rather than the ``[Errno 17] …: '<path>'`` form a three-argument
+    ``OSError`` renders — the CLI prints that string as a one-line error.
+    ``errno`` is therefore ``None``, which also keeps it clear of
+    :func:`_stage_move`'s ``EXDEV`` test.
+    """
+
+
+#: Errnos a claim reports when the staging name is taken. A no-replace rename
+#: reports the richer set (a directory onto a non-empty directory is
+#: ``ENOTEMPTY``, a shape mismatch ``EISDIR`` / ``ENOTDIR``); ``mkdir``,
+#: ``O_EXCL`` and ``os.symlink`` only ever report ``EEXIST``. Same tuple the
+#: receipt transport maps to its typed collision. ``EXDEV`` is deliberately
+#: absent — it means the source is on another filesystem, which selects the
+#: copy fallback rather than a retry.
+#:
+#: Necessary but NOT sufficient: see :func:`_claim_hit_an_occupied_name`.
+_CLAIM_OCCUPIED_ERRNOS: frozenset[int] = frozenset(
+    {errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR, errno.ENOTDIR}
+)
+
+
+def _claim_hit_an_occupied_name(exc: OSError, staging: Path) -> bool:
+    """True when *exc* really means "that staging name is taken".
+
+    The errno alone is not the answer, because ``ENOTDIR`` is overloaded:
+    ``rename`` reports it both for "the destination name holds a non-directory
+    while the source is a directory" (occupied) and for "a component of one of
+    the paths is not a directory" (a broken source or parent — a genuine
+    failure that has nothing to do with our name). Retrying the second kind
+    burns the retry and then reports a busy name for two paths that were never
+    there, which is exactly the confident-but-wrong diagnosis this whole change
+    exists to avoid (Codex review).
+
+    So the ambiguous errno is settled by looking: ``lexists`` rather than
+    ``exists`` because a dangling symlink occupies the name just as firmly as a
+    directory does. Both outcomes are safe — nothing is removed either way —
+    and the probe only ever converts a wrong "busy" into the original error.
+    """
+    if exc.errno not in _CLAIM_OCCUPIED_ERRNOS:
+        return False
+    if exc.errno == errno.ENOTDIR:
+        return os.path.lexists(staging)
+    return True
+
+
+def _claim_transfer_staging(
+    dst_parent: Path,
+    name_hint: str,
+    claim: Callable[[Path], None],
+) -> Path:
+    """Claim a fresh transfer staging name exclusively, or fail closed (#2309).
+
+    *claim* must be an exclusive-create and NOTHING else — a no-replace
+    rename, ``mkdir(exist_ok=False)``, an ``O_EXCL`` open, ``os.symlink``. Each
+    reports an occupied name through :data:`_CLAIM_OCCUPIED_ERRNOS`; any other
+    ``OSError`` is a real failure and propagates unchanged, so a missing source
+    or a permission problem is never mistaken for a busy name.
+
+    Filling the claimed entry happens in the CALLER, after this returns. That
+    split is the point: an ``EEXIST`` raised deeper inside a tree copy is not a
+    collision on our own name, and retrying it against a fresh name would be
+    nonsense. Keeping the claim alone inside this helper is what lets the
+    typed error below mean "the name was taken" and nothing else.
+
+    **Nothing here removes anything.** The predecessor cleared a colliding
+    entry on the theory that a name carrying our pid and eight random hex could
+    only be our own crashed leftover. The first half held; the second did not.
+    :func:`_stage_move` renames the source into staging on the same filesystem,
+    so between that rename and the promote the staging tree IS the artifact —
+    the source is gone from disk. Clearing a collider to make room could
+    therefore delete the only surviving copy of somebody's artifact. That is
+    the same asymmetry ``_names`` encodes by classifying ``.migrate-*`` as ours
+    while keeping it out of ``REAPABLE_INTERNAL_ARTIFACT_KINDS``: a leaked
+    directory is cheap, a deleted canonical is not.
+
+    One retry with a fresh suffix, then :class:`TransferStagingBusyError`,
+    naming both occupied paths so the operator can decide what they are. Matches
+    the receipt transport's staging claim
+    (``bundle.receive_artifact_bundle``). Retrying forever would spin against a
+    permanent obstruction — two independent collisions on 32 bits of entropy
+    means something other than chance.
+    """
+    first = transfer_staging_path(dst_parent, name_hint)
+    try:
+        claim(first)
+    except OSError as exc:
+        if not _claim_hit_an_occupied_name(exc, first):
+            raise
+    else:
+        return first
+
+    second = transfer_staging_path(dst_parent, name_hint)
+    try:
+        claim(second)
+    except OSError as exc:
+        if not _claim_hit_an_occupied_name(exc, second):
+            raise
+        # dict.fromkeys, not a set: order matters for the reader, and the two
+        # names coincide whenever a caller has pinned the suffix (the forced
+        # -collision tests do exactly that), where naming one path twice
+        # would read as a bug in the message rather than in the world.
+        occupied = " and ".join(dict.fromkeys((str(first), str(second))))
+        # Instruction FIRST, inside 188 characters, paths LAST. Both wires
+        # (``error_redact`` for MCP, the web route's twin) hard-truncate an
+        # engine reason to 200 characters, so a remediation written after the
+        # paths reaches a remote caller as a promise with no instruction
+        # attached. The CLI prints this string whole, which is where the paths
+        # are worth having; on the wire they are what gets cut. A surface test
+        # on each wire pins that the instruction survives.
+        raise TransferStagingBusyError(
+            "transfer staging is blocked: a name it needs is already taken and "
+            "was NOT removed, because that entry can be an interrupted move's "
+            "only copy of an artifact. Inspect it by hand, then retry. "
+            f"Occupied: {occupied}"
+        ) from exc
+    return second
+
+
+def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
+    """Build a staging entry under *dst_parent* from a byte copy of *src*.
+
+    Shared by the :func:`_stage_move` EXDEV fallback and by
+    ``transfer._stage_copy``, so copy-mode staging has one implementation. The
+    source is never consumed or mutated.
+
+    Symlinks are preserved as links, never dereferenced: the same-FS rename
+    path moves a link as a link, and the stdlib copy default would instead
+    materialize out-of-tree target bytes into staging — and from there into the
+    (possibly git-tracked) destination tier — violating the package's no-deref
+    mirror contract (``_atomic.copy_tree_atomic``). Preserving links also makes
+    dangling ones non-fatal (#1247 id 7).
+
+    The symlink test comes FIRST because :meth:`Path.is_dir` follows links: a
+    top-level symlink to a directory would otherwise take the tree branch and
+    land here as a real directory while the rename path lands it as a link.
+
+    Cleanup on a failed fill removes only an entry this call created — the
+    claim ran first and succeeded, so the entry is provably ours. A failed
+    claim creates nothing and therefore cleans nothing.
+    """
+    if src.is_symlink():
+        # The link IS the payload; there is nothing to fill afterwards.
+        # ``os.symlink`` refuses an existing name natively, so it doubles as
+        # the exclusive claim.
+        target = os.readlink(src)
+        staging = _claim_transfer_staging(
+            dst_parent, name_hint, lambda path: os.symlink(target, path)
+        )
+        with contextlib.suppress(OSError, NotImplementedError):
+            shutil.copystat(src, staging, follow_symlinks=False)
+        return staging
+
+    if src.is_dir():
+        staging = _claim_transfer_staging(
+            dst_parent, name_hint, lambda path: path.mkdir(exist_ok=False)
+        )
+        try:
+            # ``dirs_exist_ok`` because the claim already created the root —
+            # the directory copytree would otherwise refuse is the empty one we
+            # just made and own.
+            shutil.copytree(src, staging, symlinks=True, dirs_exist_ok=True)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return staging
+
+    def _create_placeholder(path: Path) -> None:
+        # ``O_EXCL`` is the file-shaped claim. ``O_BINARY`` is absent off
+        # Windows and suppresses newline translation on it; the placeholder is
+        # empty either way, but the flag keeps the idiom uniform.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        os.close(os.open(path, flags, 0o600))
+
+    staging = _claim_transfer_staging(dst_parent, name_hint, _create_placeholder)
+    try:
+        # Writes through our own placeholder. ``copy2`` onto an existing
+        # DIRECTORY would instead copy INTO it, which is exactly the hazard the
+        # old clear-the-collider comment worried about; the claim makes the
+        # destination a regular file we created, so that shape cannot arise.
+        shutil.copy2(src, staging, follow_symlinks=False)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            staging.unlink(missing_ok=True)
+        raise
+    return staging
 
 
 def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool]:
     """Move *src* into a same-fs staging entry under *dst_parent*.
 
-    Returns ``(staging_path, src_consumed)``. ``src_consumed=True`` when
-    ``os.rename`` succeeded (same-FS fast path) and the source is now
+    Returns ``(staging_path, src_consumed)``. ``src_consumed=True`` when the
+    no-replace rename succeeded (same-FS fast path) and the source is now
     gone from disk. ``False`` when EXDEV forced a copy fallback; the
     caller is responsible for removing the source after a successful
     promote.
 
-    Cleanup discipline: on any error the staging entry is removed before
-    re-raising so callers do not have to. The src side is never touched
-    on the EXDEV fallback path until the caller signals promote success.
+    The staging name is claimed exclusively and a collider is never removed
+    (:func:`_claim_transfer_staging`). The rename carries the no-replace flag
+    rather than being guarded by an ``exists()`` check, which closes the
+    check-then-act window between the two and refuses shapes a check cannot
+    see — a dangling symlink is invisible to :meth:`Path.exists`, and plain
+    ``rename`` replaces an empty directory.
+
+    Cleanup discipline: a no-replace rename that fails created nothing, so
+    there is nothing to clean up on that path; the copy fallback owns its own
+    post-claim cleanup. The src side is never touched on the EXDEV fallback
+    path until the caller signals promote success.
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
-    staging = transfer_staging_path(dst_parent, name_hint)
-    if staging.exists():
-        # Crashed prior run with a colliding suffix (extremely unlikely
-        # given pid+rand) — leftover is from us; safe to clear.
-        if staging.is_dir():
-            shutil.rmtree(staging)
-        else:
-            staging.unlink()
     try:
-        os.rename(src, staging)
+        staging = _claim_transfer_staging(
+            dst_parent,
+            name_hint,
+            lambda path: rename_no_replace(src, path, allow_cross_parent=True),
+        )
     except OSError as exc:
         if exc.errno != errno.EXDEV:
-            # Non-EXDEV failure (permissions, missing src, etc.) — surface.
-            with contextlib.suppress(OSError):
-                if staging.exists():
-                    if staging.is_dir():
-                        shutil.rmtree(staging, ignore_errors=True)
-                    else:
-                        staging.unlink()
+            # Non-EXDEV failure (permissions, missing src, a second collision,
+            # a filesystem without the primitive) — surface. Nothing was
+            # created: the rename is atomic and it did not happen.
             raise
-        # EXDEV fallback: copy bytes into staging without touching src.
-        # ``symlinks=True`` / ``follow_symlinks=False`` keep cross-FS
-        # semantics identical to the same-FS ``os.rename`` path above,
-        # which moves symlinks as links. The stdlib default would
-        # dereference them, materializing out-of-tree target bytes into
-        # staging — and from there into the (possibly git-tracked)
-        # destination tier — violating the package's no-deref mirror
-        # contract (``_atomic.copy_tree_atomic``). Preserving links also
-        # makes dangling ones non-fatal (#1247 id 7).
-        try:
-            if src.is_dir():
-                shutil.copytree(src, staging, symlinks=True)
-            else:
-                shutil.copy2(src, staging, follow_symlinks=False)
-        except BaseException:
-            if staging.exists():
-                if staging.is_dir():
-                    shutil.rmtree(staging, ignore_errors=True)
-                else:
-                    with contextlib.suppress(OSError):
-                        staging.unlink()
-            raise
-        return staging, False
+        # EXDEV: src is on another filesystem, so fall back to copying bytes
+        # into staging without touching src.
+        return _stage_copy_into(src, dst_parent, name_hint), False
     return staging, True
 
 

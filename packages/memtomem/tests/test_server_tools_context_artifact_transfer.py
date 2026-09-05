@@ -726,3 +726,54 @@ async def test_mcp_same_project_destination_rejected(projects) -> None:
     )
     assert out.startswith("error:")
     assert "resolves to the source project" in out
+
+
+@pytest.mark.anyio
+async def test_staging_collision_refuses_with_its_own_reason_code(
+    projects, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A staging leftover is a ``refused:`` state, not an internal error (#2309).
+
+    The engine will not clear an occupied staging name, because an entry under
+    one can be an interrupted move's only copy of an artifact. That is an
+    actionable state conflict, so it takes the documented ``refused:`` prefix
+    with its own reason — the web twin returns 409 ``transfer_staging_busy``.
+    Falling through to the generic handler would hand the calling agent
+    ``Error: internal error`` and nothing to act on.
+
+    Redaction is the other half: the message names absolute staging paths under
+    the destination store, and those must not reach the caller's transcript.
+    """
+    from memtomem.context import migrate as migrate_mod
+
+    src = _seed_agent(projects, "project_shared")
+    sid = _register_b(projects)
+
+    monkeypatch.setattr(migrate_mod.os, "getpid", lambda: 424242)
+    monkeypatch.setattr(migrate_mod.secrets, "token_hex", lambda _n: "deadbeef")
+    dst_store = projects["b"] / ".memtomem" / "agents"
+    dst_store.mkdir(parents=True, exist_ok=True)
+    leftover = dst_store / ".migrate-foo-424242-deadbeef.tmp"
+    leftover.mkdir()
+    (leftover / "agent.md").write_text("only copy\n", encoding="utf-8")
+
+    out = await mem_context_artifact_transfer(
+        asset_type="agents",
+        name="foo",
+        mode="move",
+        to_scope="project_shared",
+        to_project_scope_id=sid,
+        apply=True,
+        confirm_project_shared=True,
+    )
+
+    assert out.startswith("refused: transfer_staging_busy:"), out
+    # The instruction is what the caller acts on, and both wires hard-truncate
+    # an engine reason at 200 characters — a remediation written after the
+    # paths arrives as a promise with no instruction attached.
+    assert "was NOT removed" in out, out
+    assert "Inspect it by hand, then retry." in out, out
+    assert str(projects["b"]) not in out, out
+    # Both sides intact: the source never moved and the leftover is untouched.
+    assert src.exists()
+    assert (leftover / "agent.md").read_text(encoding="utf-8") == "only copy\n"
