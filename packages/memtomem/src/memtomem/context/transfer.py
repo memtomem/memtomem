@@ -593,16 +593,47 @@ def _rewrite_staged_manifest_name(
     surfaces a :attr:`TransferResult.notes` entry when overrides exist.
     """
     manifest = staging if layout == "flat" else staging / _DIR_MANIFEST[kind]
-    text = manifest.read_bytes().decode("utf-8")
+    original = manifest.read_bytes()
+    rewritten = rewrite_manifest_name_bytes(original, new_name, manifest_label=manifest.name)
+    if rewritten == original:
+        return
+    # Staging is private pre-promote, but the atomic-write invariant is
+    # surface-wide (test_context_atomic_write_guard): no bare writes on
+    # gateway modules. Mode is preserved from the copied manifest —
+    # copy semantics, not the helper's 0600 default.
+    atomic_write_bytes(manifest, rewritten, mode=stat.S_IMODE(manifest.stat().st_mode))
+
+
+def rewrite_manifest_name_bytes(
+    data: bytes,
+    new_name: str,
+    *,
+    manifest_label: str = "manifest",
+) -> bytes:
+    """Return *data* with its frontmatter ``name:`` set to *new_name*.
+
+    The byte-level half of :func:`_rewrite_staged_manifest_name`, split out so
+    the bundle transport (ADR-0037 §6) can apply the identical rewrite to
+    in-memory payload bytes BEFORE they are ever written — its receipt scans
+    the final bytes and materializes once, so it has no staged file to edit.
+    Two copies of this parsing would be two chances to drift on the BOM/CRLF
+    tolerance below, which is the part that is easy to get subtly wrong.
+
+    Returns *data* unchanged when there is nothing to rewrite (no frontmatter,
+    unterminated frontmatter, or no ``name:`` key — the dir/stem fallback
+    already yields the right name in each case). *manifest_label* only names
+    the file in the multiple-``name:`` refusal.
+    """
+    text = data.decode("utf-8")
     bom = "\ufeff" if text.startswith("\ufeff") else ""
     lines = text[len(bom) :].splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
-        return
+        return data
     fence = next((i for i in range(1, len(lines)) if lines[i].rstrip("\r\n") == "---"), None)
     if fence is None:
         # Unterminated frontmatter — the canonical parser rejects this
         # file outright at sync time; not this function's to repair.
-        return
+        return data
     name_lines = [
         i
         for i in range(1, fence)
@@ -610,25 +641,29 @@ def _rewrite_staged_manifest_name(
         and kv.group(1) == "name"
     ]
     if not name_lines:
-        return
+        return data
+    if all(
+        (kv := _KEY_VALUE_RE.match(lines[i].rstrip("\r\n"))) is not None
+        and kv.group(2).strip() == new_name
+        for i in name_lines
+    ):
+        # Nothing to rewrite. Checked BEFORE the ambiguity refusal because that
+        # refusal is about which line to change, and there is no such question
+        # when no line needs changing. Refusing first meant a manifest with a
+        # duplicated but already-correct ``name:`` — which the store tolerates
+        # and reads last-wins — could be exported and then never imported
+        # anywhere, blaming the receiver for a rename nobody requested.
+        return data
     if len(name_lines) > 1:
         raise click.ClickException(
-            f"cannot rename: {manifest.name} frontmatter has {len(name_lines)} 'name:' "
+            f"cannot rename: {manifest_label} frontmatter has {len(name_lines)} 'name:' "
             f"lines; fix the source artifact so it has exactly one, then retry."
         )
     idx = name_lines[0]
     content = lines[idx].rstrip("\r\n")
     ending = lines[idx][len(content) :]
     lines[idx] = f"name: {new_name}{ending}"
-    # Staging is private pre-promote, but the atomic-write invariant is
-    # surface-wide (test_context_atomic_write_guard): no bare writes on
-    # gateway modules. Mode is preserved from the copied manifest —
-    # copy semantics, not the helper's 0600 default.
-    atomic_write_bytes(
-        manifest,
-        (bom + "".join(lines)).encode("utf-8"),
-        mode=stat.S_IMODE(manifest.stat().st_mode),
-    )
+    return (bom + "".join(lines)).encode("utf-8")
 
 
 def _offending_file_hint(blocked_path: Path, staging: Path, src_path: Path) -> str:

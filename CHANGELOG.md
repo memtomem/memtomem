@@ -7,6 +7,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Hand one skill, command, or agent to someone else as a file.**
+  `mm context export <kind> <name> --out <file>` packs a single canonical
+  artifact — its manifest, its per-vendor overrides, its frozen version history,
+  even its empty directories and executable bits — into one JSON file with no
+  absolute paths and no hostnames, and `mm context import <file> --to <tier>`
+  lands it on another machine or in a colleague's checkout. Until now the only
+  routes off this machine were committing the whole `project_shared` tier to git
+  or pushing the entire wiki; neither answers "send this one skill".
+
+  Both directions are gated, and the export side has no override flag at all: a
+  detected secret refuses the export from **every** source tier, because the
+  reasoning that makes a `project_shared` write absolute is that git history
+  cannot be retracted, and a file you have handed over cannot be either. The one
+  exemption is not a flag — an artifact whose manifest declares `redaction:
+  documents-patterns` may carry documented credential *shapes* (`api_key: str`
+  in a code sample), waiving only the two unquoted-label rules and only when
+  every hit in a file is one of them, so a real token still refuses. The
+  declaration travels inside the bundle, so the receiver reads the same claim,
+  and it never opens the git-tracked tier. Because that waiver is artifact-wide
+  and the label shape it waives covers a real `password=<value>` as well as an
+  `api_key: str` annotation, both sides are told exactly which files it let
+  through — export lists them and refuses to call the artifact clean, and import
+  repeats the list to the person receiving it. On the receiving side a bundle is
+  foreign by definition: every entry is scanned no matter which tier it lands
+  in, a `project_shared` landing hard-refuses, and `user` / `project_local`
+  landings accept `--force-unsafe-import` after review. Everything a receipt can decide —
+  the wire schema, path safety, digests, the version surface, the manifest name
+  rewrite — is decided in memory before the destination store is touched, so the
+  bytes that were scanned are exactly the bytes that land and a refusal leaves
+  nothing behind.
+
+  A received artifact lands **untracked**: a wiki commit recorded by the sender
+  proves nothing about the receiver's wiki, so `mm context update` never manages
+  it until `mm context adopt` verifies it against your own. Dry-run is the
+  default; `--apply` writes. `--as` renames, `--no-versions` drops history
+  (both files together, never one), and a collision is refused rather than
+  overwritten. Design and the full wire format are in
+  [ADR-0037](docs/adr/0037-context-artifact-bundle-file-transport.md). CLI only
+  by design — no MCP tool and no web route, for the same reason
+  `mm context install` has none. (#2298)
+
 - **Drag an artifact onto a project or a store to start a Move/Copy.** Sending a
   skill, command, or agent somewhere else meant opening the card, clicking
   **Move / Copy**, and then finding the destination by name in a dropdown that

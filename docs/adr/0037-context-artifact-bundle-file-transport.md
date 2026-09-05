@@ -1,6 +1,6 @@
 # ADR-0037: Sharing one context artifact as a file — bundle format and receipt gate
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-04
 **Context:** Issue #2298, split out of the Context Gateway drag-and-drop
 discussion (#2297) as the "share outside this machine" question that accelerator
@@ -94,9 +94,11 @@ artifact-name rules **and**, because it becomes a path segment on the
 receiver, the same portability rules the path grammar below applies — no
 trailing dot, not a reserved device word, and not a forbidden component — and
 is refused outright if it has the shape of an internal staging or move-aside
-directory, which the name validator accepts today but every discovery walk
-skips, so such an artifact would land invisible to `mm context status` and
-unusable as a skill. Both rules apply to a `--as` landing name as well;
+directory: every discovery walk skips those, so such an artifact would land
+invisible to `mm context status` and unusable as a skill. That refusal now lives
+in the shared name validator, so it holds for every surface that names an
+artifact rather than for this transport alone (§6). Both rules apply to a `--as`
+landing name as well;
 `source.tier` is one of the three tiers; `exported_at` is an RFC 3339 UTC
 timestamp with a `Z` suffix; `versions_included` is a boolean that must agree
 with whether the payload actually contains a version surface, and is
@@ -153,6 +155,24 @@ entry may not prefix a file. Folding matters for ancestry and not only for
 equality: file `A` and file `a/b` are distinct as written, yet on a
 case-insensitive filesystem they demand that `A` be a file and a directory at
 once. These are exactly the shapes that cannot be materialized consistently.
+
+Folding covers **implicit** parents too — the directories no entry names but
+materialization creates. `Docs/a.md` and `docs/b.md` collide in no listed path,
+yet a case-insensitive receiver lands both under one directory and still reports
+the whole listed tree as arrived. Two spellings of the same folded parent prefix
+are therefore refused. This is not only a crafted shape: a sender on a
+case-sensitive filesystem produces it from two genuinely different directories.
+
+**A path's type is part of its identity.** `files` and `dirs` are validated as
+two typed sets and never merged into one list of names. Where a rule requires a
+regular file — the kind's manifest, a per-vendor override, a file-layout version
+snapshot — a `dirs` entry spelling that same path does not satisfy it and is
+refused: merging the two let a *directory* named `versions/v1.md` stand in for a
+snapshot `resolve_version` cannot read, and one named `overrides/claude.md`
+stand in for an override no renderer can parse. The converse matters as well, so
+an `overrides/` directory carrying no vendor file travels as a `dirs` entry and
+is accepted as the empty directory it is, rather than refused for having one
+path segment.
 
 **`payload_sha256` binds the structure**, not just the contents. It is SHA-256
 over the byte string formed by the domain-separation line
@@ -226,8 +246,8 @@ payload.
 
 Export resolves the source, acquires its canonical lock, runs the swap prelude
 so an interrupted skills swap is resolved before anything reads the tree and
-re-verifies the artifact is complete afterwards, reads each file once, scans
-those in-memory bytes with `scope="project_shared"` semantics, and
+re-verifies the artifact is complete afterwards, reads each file once through a
+verified descriptor, scans those in-memory bytes with no force valve, and
 base64-encodes the same bytes. A hit anywhere fails the whole export, names the
 offending relative path, and writes nothing to `--out`.
 
@@ -244,10 +264,49 @@ git-history side of that line, and `promote_asset` — which scans at
 `scope="project_shared"` regardless of anything, because the wiki can be pushed
 — is the precedent this follows.
 
-There is consequently **no `--force-unsafe` option on `mm context export`**. The
-chokepoint would return `blocked_project_shared` for it anyway; an option that
-can only ever be refused is worse than no option, because it advertises a valve
-that does not exist.
+There is consequently **no `--force-unsafe` option on `mm context export`**, and
+that absence is what enforces this section. An option that can only ever be
+refused is worse than no option, because it advertises a valve that does not
+exist.
+
+**One exemption, and it is not a flag** (amended after the first real-data run;
+see Consequences). Every skill on the author's machine was refused — 44 hits
+across two artifacts, all of them Python type annotations like `api_key: str`
+and keyword arguments referencing a settings attribute, none of them a secret.
+A feature whose primary use case is "hand a colleague a skill about writing API
+code" that refuses every such skill is not shipping a strict gate, it is
+shipping nothing. So export honors the per-file `redaction: documents-patterns`
+declaration this project already defines (ADR-0006 Axis E.5), read once from
+the artifact's manifest and applied to the whole artifact rather than per file:
+the per-file reader only recognizes it in Markdown frontmatter, so a skill whose
+`SKILL.md` may declare it and whose `scripts/*.py` may not would be refused for
+a distinction its author cannot act on. Receipt reads the same declaration from
+the same manifest bytes, so a bundle cannot export cleanly and then refuse to
+land.
+
+The ceiling is narrower than a flag but it is not what an earlier draft of this
+section claimed. The declaration waives only the two unquoted-label rules, and
+only when **every** hit in a file is one of them, so a provider token or a
+serialized credential anywhere in the artifact still refuses the whole export.
+It does **not** distinguish `api_key: str` in a code sample from
+`password=<a real value>` in a config file — both are the same unquoted-label
+shape — and because the declaration is artifact-wide, one line in the manifest
+waives that shape in files the author may not have re-read.
+
+So the exemption is paired with **disclosure on both sides**: export lists every
+file whose matches were waived, in its summary and in a `redaction_exempted`
+field inside the bundle, and import repeats that list to the receiver. Neither
+end is told "clean"; both are told exactly which files were let through and on
+whose say-so. Disclosure is not a substitute for a gate — it is what makes an
+artifact-wide waiver auditable instead of silent, which is the honest trade for
+a feature that is otherwise unusable on real artifacts. It also does not open the git-tracked tier: `project_shared` refuses
+a declaration exactly as it refuses `force_unsafe` (ADR-0011 §5), so an artifact
+that exports under a declaration still cannot be imported into `project_shared`.
+
+Because the declaration must be honored, the egress scan does **not** run at
+`project_shared` scope, which would refuse it: it runs with no force valve at a
+scope that permits the declaration, and every uncovered hit blocks there exactly
+as it would anywhere else.
 
 What this refuses is narrow and worth stating exactly: an artifact with no
 secret-shaped content exports from any tier, including to the author's own
@@ -261,7 +320,18 @@ with `fstat` on that descriptor, with both the bytes and the `exec` bit taken
 from it. Walking with `lstat` and then reading by path would let an external
 writer swap a vetted regular file for a symlink or a FIFO between the two,
 escaping the artifact or hanging the export while it holds the canonical lock,
-and would let `exec` come from a different inode than the content. A symlink
+and would let `exec` come from a different inode than the content. The same
+discipline covers the **directory** components, not just the final file: each
+directory on the way down is opened relative to its parent's descriptor with
+symlinks and non-directories refused at open time, and the file is opened
+relative to the descriptor of the directory actually walked. Type-checking a
+directory by path and reading through it later by path leaves the identical swap
+window one level up, where `O_NOFOLLOW` on the last component cannot see it.
+Where a platform has no directory descriptors the traversal degrades to paths —
+the same POSIX-strength asymmetry §6 states for the no-follow open. Each file is
+then read with the remaining payload budget as its limit, stopping at the cap
+plus one byte, so a file that would exceed the §7 caps is refused without ever
+being held in memory whole. A symlink
 at any path the bundle would otherwise carry — including the artifact root
 itself — is refused by name rather than skipped, because a skipped link is a
 silent drop the sender never learns about and the mcp-servers copy adapter
@@ -298,6 +368,17 @@ tier:
   `mm context init` already uses for the runtime→canonical ingress. The flag is
   threaded into the scan; the chokepoint still hard-refuses `project_shared`
   with it set, so the flag cannot widen the tier above.
+
+The flag decides **admission**; it does not answer what the artifact's own
+declaration covered. Inside the privacy chokepoint `--force-unsafe-import` wins
+over the declaration by design — its audit line is the one that describes what
+happened — so the receipt's `redaction_exempted` disclosure is derived from the
+hits that scan already returned, not read off its verdict. Collapsing the two
+questions made every declared file re-derive as waiving nothing whenever the
+flag was set, and the mismatch check against the wire then rejected the sender's
+honest disclosure as malformed: a bundle carrying a declaration plus a genuine
+secret was importable to **no** tier at all — refused without the flag, and
+refused as malformed with it.
 
 This deliberately departs from transfer parity, where Gate A runs **only** for a
 `project_shared` destination (`transfer.py`, both the copy and move branches).
@@ -345,14 +426,23 @@ store is touched at all. The order is:
 4. **Produce the final payload**: the manifest's frontmatter `name:` is
    rewritten to the landing name (§8). No later step changes a byte.
 5. **Scan that payload** entry by entry, fail-fast, per §5.
-6. **Take the destination artifact's canonical lock**, run the swap prelude,
+6. **Prepare the destination**, for a `project_local` landing: establish the
+   `.gitignore` marker, failing closed if the tier cannot be protected. This
+   sits here, after every in-memory gate and before the lock, and the placement
+   is load-bearing in both directions — running it earlier let a malformed,
+   privacy-blocked or colliding bundle still modify the destination project's
+   `.gitignore` for an artifact that never landed, and running it after the
+   write leaves a window in which the received bytes are present and unignored.
+7. **Take the destination artifact's canonical lock**, run the swap prelude,
    and re-check for a collision inside the lock against **both** identities:
    `lstat` of `<store>/<name>` and of `<store>/<name>.md`. Either one existing
    is a collision, including a dangling symlink or an entry of the wrong type.
-7. **Materialize once** into an exclusively created staging directory, from the
+   Only "the entry is not there" counts as absent: a probe that fails for any
+   other reason propagates rather than answering "nothing is in the way".
+8. **Materialize once** into an exclusively created staging directory, from the
    same `bytes` objects the scan judged, creating the `dirs` entries and
    applying `exec` per §2.
-8. **Promote**, and remove staging on any failure.
+9. **Promote**, and remove staging on any failure.
 
 Nothing but the promote happens after materialization, so the only crash window
 leaves a staging tree whose bytes were already validated and scanned.
@@ -383,13 +473,34 @@ the fix is the same predicate in one more place, so the refusal goes into the
 name-addressed resolver as well, and an attempt to update, delete, or transfer an
 internal-shaped name is refused rather than served. That closes the window for
 this transport and for the transfer engine at the same time, and the pins cover
-all three verbs. The transfer engine's
-`.migrate-…` staging name was **not** matched by the predicate when this was
-written, so it stayed exposed even after that fix; that pre-existing
-transfer-engine defect was filed with its reproduction as #2304 and has since
-been closed by teaching the predicate that kind and its own suffix width. This
-transport still uses the predicate's own `.staging-…` grammar rather than
-inventing a second one, which is what made it immune to that defect in the
+all three verbs. The refusal lives in the **shared name validator**, not at each
+call site: guarding only the read side would leave the create side accepting an
+internal-shaped name and writing an artifact that the lister then hides and the
+resolver then cannot address, so read and delete both answer "no such artifact"
+and nothing can remove it — trading a visible phantom for an immortal one.
+
+**Hidden from discovery is only half a contract; something has to delete these.**
+The skills reaper runs for skills alone, while this transport stages for every
+migratable kind, so an interrupted `agents` or `commands` receipt would leave a
+staging tree that no lister shows and no reaper collects — exactly the
+"invisible to discovery and immortal on disk" state the predicate's own module
+warns about. Receipt therefore reaps its own leftovers for the destination name,
+under that destination's lock, and only for the kinds named by
+`REAPABLE_INTERNAL_ARTIFACT_KINDS`. Reaping the classified set instead would be
+a data-loss bug: the predicate also classifies `.migrate-…`, and a transfer move
+renames its source into staging, so between that rename and the promote the
+staging tree is the only copy of the artifact. Ownership is decided by parsing
+the owner out of the name rather than by a `.staging-<name>-*` prefix match: the
+prefix form would let a reaper holding only `foo`'s lock delete the in-flight
+tree of `foo-bar`, and hyphenated artifact names are the norm. Reaping is
+best-effort — a leftover that cannot be removed must not turn an otherwise valid
+import into a failure, since staging uses a fresh random suffix regardless.
+
+The transfer engine's `.migrate-…` staging name is matched by the predicate now
+that #2304 has been closed by teaching it that kind and its own suffix width, so
+it is hidden from discovery like the rest while staying out of every reapable
+set. This transport still uses the predicate's own `.staging-…` grammar rather
+than inventing a second one, which is what made it immune to that defect in the
 first place.
 
 Because staging sits inside the store, it inherits the store's own git posture:
@@ -455,6 +566,13 @@ object is depth 1, a `files` entry is depth 3, and a scalar leaf adds nothing �
 so the schema above sits at depth 3 and a tolerated unknown key may nest five
 containers deeper before it is refused.
 
+The nesting bound is enforced on the **raw bytes, before they reach the JSON
+parser**, by scanning for structural brackets outside string literals. A parser
+recurses once per nesting level, so a file far under every byte and entry cap
+can exhaust the interpreter's stack inside the decode itself and raise an error
+that is not in any caller's translation table — surfacing as a traceback rather
+than a refusal. A bound checked after the parse is not a bound on the parse.
+
 The decoded `versions.json` is parsed under the **same** rules as the outer
 document — duplicate object keys refused, the same nesting bound — rather than
 through the version reader's ordinary decoder, whose last-key-wins behavior
@@ -467,6 +585,14 @@ legitimate binary asset in a skill, and skipping what will not decode would
 route those bytes around the gate entirely; replacing undecodable sequences
 keeps an ASCII secret embedded in an otherwise-binary file visible to the
 scanner. This is the rule the sync-side scan and wiki promotion already use.
+
+The one entry that must genuinely be **text** is the manifest the kind requires.
+It is strictly UTF-8 decoded as part of artifact-form validation, which runs on
+the export side as well as on receipt, because its frontmatter `name:` is parsed
+and rewritten (§8). A non-UTF-8 manifest is therefore refused by name at export
+rather than travelling and failing on the receiver with a decoder error about a
+file only the sender can repair. Every other entry keeps the `errors="replace"`
+treatment above, so a binary asset inside a skill still travels.
 
 Parsing rules: duplicate JSON object keys are refused, which requires the parser
 to see the raw member pairs rather than the last-wins mapping a default decoder
@@ -567,8 +693,15 @@ names, but not that the manifest agrees with what is on disk. The rules:
   empty directory without a manifest, or a manifest with no directory, is
   refused rather than treated as "no versions";
 - every recorded tag has its snapshot at the exact path its layout implies
-  (`versions/vN.md` for a file record, `versions/vN/` for a tree record), and no
-  tag has both forms;
+  (`versions/vN.md` for a file record, `versions/vN/` for a tree record), **of
+  the type that layout implies**, and no tag has both forms — a `dirs` entry
+  spelling `versions/vN.md` does not satisfy a file record (§2, "a path's type
+  is part of its identity");
+- the manifest's `schema_version` is one the store itself reads. That ceiling is
+  taken from the version store's own constant rather than restated here: a
+  second, literal list in this transport becomes quietly stricter the moment the
+  store's schema is bumped, and export would then refuse — claiming the store
+  cannot read them — artifacts the store reads fine;
 - the **immediate children** of `versions/` are exactly the set the manifest
   implies — nothing extra, whether a stray file or an orphan `vN/` directory,
   and nothing missing;
@@ -643,8 +776,14 @@ confirmation at the surface, and `--to project_shared` supplies only the first
 half. A `project_shared` landing additionally requires
 `--confirm-project-shared` — `--yes` alone does not satisfy it, matching every
 transfer and migrate surface — and the write records
-`project_shared.confirmed_via` in the audit line. The confirmation is evaluated
-before any destination mutation, and a dry run never prompts.
+`project_shared.confirmed_via` in the audit line — except that **no surface in
+this repository emits that field**, including the ones ADR-0011 §5 wrote it for,
+so this transport does not either. Adding it here alone would make one of six
+gating surfaces behave differently from the rest, which reads worse than a
+uniform gap: someone who found the record in one place would reasonably assume
+the others have it. The gap is filed as #2306 and is a repo-wide change with its
+own decision about what the record should be. The confirmation itself is
+evaluated before any destination mutation, and a dry run never prompts.
 
 **Command surfaces.**
 
@@ -693,9 +832,17 @@ surface follows.
   Revisit trigger: a report of an artifact that cannot be shared because of it,
   at which point the question to settle is a Unicode normalization and
   collision policy, not a longer denylist.
-- A secret-bearing artifact cannot be exported at all, from any tier. This is
-  stricter than what the user could do by hand with `tar`, and it is the point:
-  the first-party primitive does not become a redistribution path.
+- A secret-bearing artifact cannot be exported at all, from any tier, unless
+  every hit is a documented credential *shape* and the artifact's manifest
+  declares `redaction: documents-patterns` (§4). This is stricter than what the
+  user could do by hand with `tar`, and it is the point: the first-party
+  primitive does not become a redistribution path.
+- **The declaration is not optional polish.** The first run against real
+  artifacts refused 2 of 2 skills on 44 false positives, every one of them in
+  the label class the declaration waives. Any future tightening of the export
+  gate has to be measured against real artifacts before it ships, not against
+  fixtures, because the fixtures in this repo are clean by construction and the
+  real ones are not.
 - A received artifact is never "installed", so `mm context update` can never
   clobber bytes it did not install. A same-name `project_shared` receipt shows
   as untracked and the result names `mm context adopt` as the follow-up. Every

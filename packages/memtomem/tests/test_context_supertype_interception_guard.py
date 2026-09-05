@@ -1723,6 +1723,99 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "diff_settings read → diff_errors; " + _RO,
     ),
     # ── context/transfer.py ──────────────────────────────────────────────
+    # ── context/bundle.py (ADR-0037) ─────────────────────────────────────
+    ("context/bundle.py", "_snapshot_declared_name", ("<dynamic>",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Parsing a frozen snapshot through the store's OWN adapter. The caught "
+        "type is that adapter's declared parse_error_type (a variable, hence "
+        "<dynamic>) — AgentParseError / CommandParseError, neither of which is "
+        "a recovery type nor a supertype of one. The guarded call is a pure "
+        "text parse with no filesystem access, so nothing recovery-capable is "
+        "reachable, and a parse failure becomes a loud BundleSourceError "
+        "naming the snapshot rather than a silent fallback.",
+    ),
+    ("context/bundle.py", "_publish_bundle", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Best-effort removal of the sibling temp file inside the BaseException "
+        "arm below it. Narrow on purpose: a failed unlink is logged and the "
+        "PRIMARY exception continues to propagate, so this arm can neither "
+        "swallow a recovery error nor replace one.",
+    ),
+    ("context/bundle.py", "_read_capped", ("OSError",), 0): (_U, "no_recovery_callee", _RO),
+    ("context/bundle.py", "_read_source_file", ("OSError",), 0): (_U, "no_recovery_callee", _RO),
+    ("context/bundle.py", "_read_source_file", ("OSError",), 1): (_U, "no_recovery_callee", _RO),
+    ("context/bundle.py", "_walk_source.walk", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Fail-closed source enumeration: iterdir only, no recovery-capable "
+        "symbol in the guarded call. Classified rather than silenced — an "
+        "unreadable subtree must abort the export, not shrink the payload.",
+    ),
+    ("context/bundle.py", "export_artifact_bundle", ("SwapRecoveryError",), 0): (
+        _T,
+        "",
+        "Export's C0 prelude: translated to TransferRecoveryError via "
+        "swap_failure_text, the transfer engine's own wording. Recovery is "
+        "translated, never demoted to a partial export.",
+    ),
+    ("context/bundle.py", "_publish_bundle", ("BaseException",), 0): (
+        _R,
+        "bare",
+        "Publishing the bundle to --out. Broad on purpose so an interrupt "
+        "between the temp write and the rename cannot leave a sibling temp "
+        "file: the arm removes it and then re-raises anything that is not an "
+        "OSError bare, so a recovery error keeps its type. The rename targets "
+        "a path outside any canonical store, so nothing recovery-capable is "
+        "reachable here in the first place; EEXIST and its family become the "
+        "no-overwrite refusal and every other errno keeps its text.",
+    ),
+    ("context/bundle.py", "receive_artifact_bundle", ("SwapRecoveryError",), 0): (
+        _T,
+        "",
+        "Receipt's C0 prelude: same translation as export, before the in-lock "
+        "collision re-check that recovery would otherwise decide on a stale tree.",
+    ),
+    ("context/bundle.py", "receive_artifact_bundle", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Promote arm, wrapped tightly around rename_no_replace alone. "
+        "SwapRecoveryError IS an OSError, but the prelude that can raise one "
+        "already ran and returned before this try opens, and a rename raises no "
+        "recovery error of its own — so nothing recovery-shaped reaches here. "
+        "The EEXIST family becomes the typed collision; every other errno "
+        "re-raises bare.",
+    ),
+    ("context/bundle.py", "receive_artifact_bundle", ("BaseException",), 0): (
+        _R,
+        "bare",
+        "Staging cleanup: removes the staged tree and re-raises bare, so a "
+        "TransferRecoveryError or SwapRecoveryError passes through with its "
+        "type intact. The catch is broad on purpose — a KeyboardInterrupt "
+        "must not leave a staging directory behind either.",
+    ),
+    ("context/bundle.py", "_open_dir_at", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Opening one directory component of the source artifact with "
+        "O_NOFOLLOW during export enumeration; the guarded call is a bare "
+        "os.open. " + _RO,
+    ),
+    ("context/bundle.py", "_open_dir_at", ("OSError",), 1): (
+        _U,
+        "no_recovery_callee",
+        "The lstat that decides whether the refusal above was a symlink or a "
+        "non-directory; a probe that cannot answer falls back to the errno. " + _RO,
+    ),
+    ("context/bundle.py", "_reap_own_staging", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Listing the destination store to find this destination's own staging "
+        "leftovers, under its sidecar lock. Reaping is best-effort — a store "
+        "that cannot be scanned must not turn a valid import into a failure — "
+        "and the guarded call is a plain iterdir. " + _RO,
+    ),
     ("context/transfer.py", "_classify_provenance_carry", ("OSError",), 0): (
         _U,
         "no_recovery_callee",

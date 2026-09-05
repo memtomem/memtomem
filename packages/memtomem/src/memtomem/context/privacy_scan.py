@@ -314,6 +314,7 @@ def scan_text_content(
     scope: TargetScope,
     project_root: Path | None,
     force_unsafe: bool = False,
+    declared_exemption: str | None = None,
 ) -> FileScan:
     """Scan an already-loaded content string against :func:`enforce_write_guard`.
 
@@ -330,6 +331,13 @@ def scan_text_content(
     ``project_shared`` stays hard-refused (``blocked_project_shared``)
     even when ``True``; only ``user`` / ``project_local`` flip a hit to
     ``bypassed``. Default ``False`` keeps every non-forced sync blocking.
+
+    ``declared_exemption`` forwards a per-file ``redaction:
+    documents-patterns`` declaration (ADR-0006 Axis E.5). It is narrower than
+    ``force_unsafe`` in every direction — it waives only the two unquoted-label
+    rules, all-or-nothing, and it lives visibly in the file rather than in a
+    command — and it obeys the same ceiling: ``project_shared`` refuses it too.
+    Default ``None`` leaves every existing caller unchanged.
 
     Returns a :class:`FileScan` with the path attribution preserved for
     downstream messaging; caller branches on
@@ -348,6 +356,7 @@ def scan_text_content(
         surface=surface,
         force_unsafe=force_unsafe,
         scope=scope,
+        declared_exemption=declared_exemption,
         audit_context=audit_context,
         record_outcome=True,
     )

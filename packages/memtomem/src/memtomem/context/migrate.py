@@ -52,7 +52,12 @@ from memtomem.context import override as _override
 from memtomem.context._atomic import _file_lock, _lock_path_for
 from memtomem.context._canonical_txn import canonical_sidecar_lock
 from memtomem.context._dir_swap import has_pending_swap
-from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
+from memtomem.context._names import (
+    GENERATOR_VENDOR,
+    InvalidNameError,
+    is_internal_artifact_dir,
+    validate_name,
+)
 from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context.agents import (
     AGENT_DIR_FILENAME,
@@ -1278,6 +1283,13 @@ def _detect_source_scope(
         except ContextScopeError:
             continue
         if not root.is_dir():
+            continue
+        if is_internal_artifact_dir(name):
+            # A crash leftover is not a transferable source. The lister and the
+            # name resolver both refuse these (ADR-0037 §6); this probe reaches
+            # the filesystem directly, so it has to refuse them too or every
+            # verb built on it — migrate, transfer, bundle export — inherits the
+            # bypass.
             continue
         dir_candidate = root / name
         if dir_candidate.is_dir() and (dir_candidate / manifest).is_file():

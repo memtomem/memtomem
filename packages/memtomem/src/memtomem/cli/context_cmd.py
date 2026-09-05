@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import shlex
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -79,6 +80,13 @@ from memtomem.context.migrate import (
     migrate_scope,
 )
 from memtomem.context._dir_swap import SwapRecoveryError, swap_failure_text
+from memtomem.context.bundle import (
+    BundleFormatError,
+    BundlePrivacyError,
+    BundleSourceError,
+    export_artifact_bundle,
+    receive_artifact_bundle,
+)
 from memtomem.context.transfer import TransferMode, TransferResult, transfer_artifact
 from memtomem.context.mcp_servers import (
     PROJECT_MCP_CONFIG,
@@ -724,7 +732,7 @@ def _append_gitignore_marker(project_root: Path) -> tuple[bool, str]:
     return True, "appended"
 
 
-def _ensure_local_tier_gitignored(project_root: Path) -> None:
+def _ensure_local_tier_gitignored(project_root: Path, *, required: bool = False) -> None:
     """Append the project_local gitignore marker at *project_root* and report.
 
     Shared by every verb that can land a canonical on the project_local
@@ -733,6 +741,14 @@ def _ensure_local_tier_gitignored(project_root: Path) -> None:
     DESTINATION root). ``already_present`` is deliberately silent: the
     marker is already there, the user does not need a redundant green
     tick on every transfer.
+
+    *required* makes an unprotectable tier a refusal instead of a warning.
+    ADR-0037 §6 says receipt establishes the marker "failing closed if the
+    tier cannot be protected", and a bundle is the one input that arrives from
+    another machine: warning and landing it anyway puts foreign bytes in a
+    directory the next ``git add -A`` would stage. The in-machine verbs keep
+    the warning, where the content was already on this disk and already the
+    user's.
     """
     wrote, msg = _append_gitignore_marker(project_root)
     if wrote:
@@ -740,18 +756,23 @@ def _ensure_local_tier_gitignored(project_root: Path) -> None:
             "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
             fg="green",
         )
-    elif msg == "no_git_repo_pyproject_only":
-        click.secho(
-            "  warning: project root resolved via pyproject.toml but `.git` "
-            "missing — .gitignore not appended. Run `git init` first to "
-            "git-protect the local tier.",
-            fg="yellow",
+        return
+    if msg == "no_git_repo_pyproject_only":
+        detail = (
+            "project root resolved via pyproject.toml but `.git` missing. "
+            "Run `git init` first to git-protect the local tier."
         )
     elif msg == "no_project_signal":
-        click.secho(
-            "  warning: no .git and no pyproject.toml in project root — .gitignore append skipped.",
-            fg="yellow",
+        detail = "no .git and no pyproject.toml in project root."
+    else:
+        return
+    if required:
+        raise click.ClickException(
+            f"cannot protect the project_local tier at {project_root}: {detail}\n"
+            f"  The .gitignore marker is what keeps a received artifact out of "
+            f"`git add -A`, so import refuses rather than land unprotected bytes."
         )
+    click.secho(f"  warning: {detail} .gitignore not appended.", fg="yellow")
 
 
 def _print_settings_detect(root: Path, scope: str) -> None:
@@ -4661,6 +4682,251 @@ def copy_cmd(
         yes=yes,
         confirm_project_shared=confirm_project_shared,
     )
+
+
+@context.command("export")
+@click.argument("asset_type", type=click.Choice(list(SCOPE_MIGRATABLE_KINDS)))
+@click.argument("name")
+@click.option(
+    "--from",
+    "from_scope",
+    type=click.Choice(["user", "project_shared", "project_local"]),
+    default=None,
+    help="Source tier. Auto-detected when omitted (refuses if the name resolves in more than one).",
+)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    metavar="FILE",
+    help="Where to write the bundle. Never overwritten; pick another path to re-export.",
+)
+@click.option(
+    "--no-versions",
+    is_flag=True,
+    help=(
+        "Drop versions/ and versions.json together. They are removed before the "
+        "walk, so a secret or an unhealthy manifest in frozen history cannot "
+        "block the export."
+    ),
+)
+def export_cmd(
+    asset_type: str, name: str, from_scope: str | None, out_path: Path, no_versions: bool
+) -> None:
+    """Pack one canonical artifact into a portable bundle file (ADR-0037).
+
+    The bundle is a single JSON file with no absolute paths and no hostnames,
+    so it can be handed to a colleague or carried to another machine and landed
+    with ``mm context import``.
+
+    A secret anywhere in the artifact fails the export from EVERY source tier
+    and there is no force flag: a file you have handed over is as unretractable
+    as a pushed commit, so it is gated like a git-tracked write.
+    """
+    with _translate_to_click(
+        FileNotFoundError,
+        ValueError,
+        InvalidNameError,
+        PrivacyScanError,
+        BundleFormatError,
+        BundleSourceError,
+        OSError,
+    ):
+        result = export_artifact_bundle(
+            cast(ArtifactKind, asset_type),
+            name,
+            src_project_root=_find_project_root(),
+            from_scope=cast("TargetScope | None", from_scope),
+            out_path=out_path,
+            include_versions=not no_versions,
+        )
+    click.echo(
+        f"exported {result.kind}/{result.name} from {result.from_scope} "
+        f"({result.file_count} file{'s' if result.file_count != 1 else ''}"
+        f"{', with version history' if result.versions_included else ', no version history'})"
+    )
+    click.echo(f"  -> {result.out_path}")
+    for note in result.notes:
+        click.echo(f"  note: {note}")
+    if result.redaction_exempted:
+        click.secho(
+            f"  warning: redaction: documents-patterns waived credential-shaped matches in "
+            f"{', '.join(result.redaction_exempted)}",
+            fg="yellow",
+        )
+        click.secho(
+            "           confirm none of them is a real value before sending this file.",
+            fg="yellow",
+        )
+    if result.source_wiki_commit:
+        click.echo(f"  source is wiki-installed at {result.source_wiki_commit[:12]}")
+    click.echo(
+        f"  land it with: mm context import {shlex.quote(str(result.out_path))} --to <tier> --apply"
+    )
+
+
+@context.command("import")
+@click.argument("bundle", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--to",
+    "to_scope",
+    required=True,
+    type=click.Choice(["user", "project_shared", "project_local"]),
+    help="Landing tier. Required: a foreign file must not choose where it lands.",
+)
+@click.option(
+    "--to-project",
+    default=None,
+    metavar="SCOPE_ID|PATH",
+    help="Land in another registered project (or a typed path, which is consent).",
+)
+@click.option(
+    "--as",
+    "new_name",
+    default=None,
+    metavar="NEW_NAME",
+    help="Land under a different name. The manifest's name: is rewritten to match.",
+)
+@click.option("--apply", "apply_", is_flag=True, help="Perform the write (default is a preview).")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--confirm-project-shared",
+    is_flag=True,
+    help="Required for a project_shared landing; --yes alone is not sufficient.",
+)
+@click.option(
+    "--force-unsafe-import",
+    "force_unsafe",
+    is_flag=True,
+    help=(
+        "Accept a secret-shaped value into user / project_local after review. "
+        "project_shared refuses regardless — git history is forever (ADR-0011 §5)."
+    ),
+)
+def import_cmd(
+    bundle: Path,
+    to_scope: str,
+    to_project: str | None,
+    new_name: str | None,
+    apply_: bool,
+    yes: bool,
+    confirm_project_shared: bool,
+    force_unsafe: bool,
+) -> None:
+    """Land a context artifact bundle in a canonical store (ADR-0037).
+
+    A bundle is foreign by definition, so every entry is scanned no matter
+    which tier it lands in. Default is a dry-run preview; pass --apply.
+    """
+    to_scope_t = cast(TargetScope, to_scope)
+    if to_scope_t == "user" and to_project is not None:
+        raise click.UsageError("--to user is the global tier; --to-project does not apply to it.")
+    if force_unsafe and to_scope_t == "project_shared":
+        raise click.UsageError(
+            "--force-unsafe-import cannot be combined with --to project_shared. "
+            "That tier is git-tracked and refuses a secret regardless of the flag "
+            "(ADR-0011 §5). Import to project_local, or ask the sender to re-export."
+        )
+
+    src_root = _find_project_root()
+    if to_project is not None:
+        cfg = _projects_gateway_cfg()
+        try:
+            dst_root, dst_scope_rec = resolve_project_selector(to_project, _projects_discover(cfg))
+        except UnknownProjectSelectorError as exc:
+            raise click.ClickException(str(exc)) from exc
+        if dst_scope_rec is not None and not dst_scope_rec.enabled:
+            raise click.ClickException(
+                f"destination project {dst_scope_rec.scope_id} ({dst_root}) is "
+                f"paused — sync enrollment is disabled, so the imported artifact "
+                f"would not fan out there. Run `mm context projects resume "
+                f"{dst_scope_rec.scope_id}` first, or pick another destination."
+            )
+        if to_scope_t != "user" and not (dst_root / ".memtomem").is_dir():
+            raise click.ClickException(
+                f"destination project has no .memtomem/ store: {dst_root}\n"
+                f"  Initialize it first: cd {dst_root} && mm context init"
+            )
+    else:
+        dst_root = src_root
+
+    if to_scope_t == "project_shared" and apply_ and not confirm_project_shared:
+        if yes:
+            raise click.ClickException(
+                "--to project_shared requires --confirm-project-shared. "
+                "--yes alone is not sufficient: project_shared writes go "
+                "to the git-tracked tier and require explicit opt-in."
+            )
+        if not click.confirm(
+            "\nThis will land a bundle in the git-tracked project_shared tier. Continue?",
+            default=False,
+        ):
+            raise click.Abort()
+
+    # The project_local tier is protected BEFORE anything can land in it — the
+    # marker is what keeps a received artifact out of a `git add -A`, so
+    # appending it after the write leaves a window where the bytes are present
+    # and unignored — but AFTER every gate has passed (ADR-0037 §6). Handed to
+    # the receipt as its pre-materialize step rather than run here: run here it
+    # fired before the bundle was even parsed, so a malformed, privacy-blocked
+    # or colliding import still edited the destination project's .gitignore.
+    # Dry-run never materializes, so it never asks for the marker.
+    def _protect_local_tier() -> None:
+        if to_scope_t == "project_local":
+            _ensure_local_tier_gitignored(dst_root, required=True)
+
+    # BundlePrivacyError carries only the neutral condition; the CLI owns the
+    # flag spelling (#1869), so it is translated here rather than in the
+    # shared ladder below.
+    try:
+        with _translate_to_click(
+            FileNotFoundError,
+            ValueError,
+            InvalidNameError,
+            PrivacyScanError,
+            BundleFormatError,
+            BundleSourceError,
+            OSError,
+        ):
+            result = receive_artifact_bundle(
+                bundle,
+                dst_project_root=dst_root,
+                to_scope=to_scope_t,
+                apply_=apply_,
+                new_name=new_name,
+                force_unsafe=force_unsafe,
+                pre_materialize=_protect_local_tier,
+            )
+    except BundlePrivacyError as exc:
+        raise click.ClickException(remediation.append_hint(exc.message, exc.code, "cli")) from exc
+
+    verb = "imported" if result.received else "would import"
+    click.echo(
+        f"{verb} {result.kind}/{result.dst_name} to {result.to_scope} "
+        f"({result.file_count} file{'s' if result.file_count != 1 else ''})"
+    )
+    click.echo(f"  -> {result.dst_path}")
+    if result.dst_name != result.name:
+        click.echo(f"  renamed from {result.name}")
+    if not result.versions_included:
+        click.echo("  no version history in this bundle")
+    if result.redaction_exempted:
+        click.secho(
+            f"  warning: the sender declared redaction: documents-patterns, waiving "
+            f"credential-shaped matches in {', '.join(result.redaction_exempted)}",
+            fg="yellow",
+        )
+    for note in result.notes:
+        click.echo(f"  note: {note}")
+    if not result.received:
+        click.echo("  preview only — re-run with --apply to write")
+        return
+    click.echo("  landed untracked: mm context update does not manage it")
+    if result.adopt_hint:
+        click.echo(f"  adopt it against your own wiki: {result.adopt_hint}")
+    if result.sync_command:
+        click.echo(f"  fan it out with: {result.sync_command}")
 
 
 @context.command("settings-doctor")

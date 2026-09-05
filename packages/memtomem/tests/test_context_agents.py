@@ -2,6 +2,7 @@
 
 import shutil
 import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -396,6 +397,35 @@ class TestExtractAgentsToCanonical:
         # New agents land in directory layout per ADR-0008.
         assert (tmp_path / CANONICAL_AGENT_ROOT / "helper" / "agent.md").is_file()
         assert result.skipped == []
+
+    def test_a_staging_leftover_skips_one_row_and_the_run_completes(self, tmp_path):
+        """One unusable name costs that one item, never the whole run.
+
+        A crash leftover in a runtime directory has a name `validate_name` used
+        to accept, and `resolve_artifact_extract_target` raises `ContextScopeError`
+        for it. That is a `ValueError` no caller catches — the web route answered
+        500 and the MCP tool propagated — so every good agent beside it went
+        unimported. Fails if the resolver is called before the shape is skipped.
+        """
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        for stem in ("aaa-good", "zzz-good"):
+            (claude_dir / f"{stem}.md").write_text(
+                SAMPLE_MINIMAL_AGENT.replace("helper", stem), encoding="utf-8"
+            )
+        (claude_dir / ".staging-foo-123-abcdef.tmp.md").write_text(
+            SAMPLE_MINIMAL_AGENT, encoding="utf-8"
+        )
+
+        result = extract_agents_to_canonical(tmp_path)
+
+        assert sorted(Path(p).parent.name for p, _layout in result.imported) == [
+            "aaa-good",
+            "zzz-good",
+        ]
+        leftover = [row for row in result.skipped if row[0].startswith(".staging-")]
+        assert len(leftover) == 1
+        assert "internal staging leftover" in leftover[0][1]
 
     def test_dedup_across_runtimes(self, tmp_path):
         for runtime in (".claude/agents", ".gemini/agents"):

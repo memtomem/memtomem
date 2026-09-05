@@ -160,3 +160,23 @@ def test_generator_vendor_matches_real_registries() -> None:
         "GENERATOR_VENDOR drifted from the real *_GENERATORS registries — "
         "renderable_vendors would mis-report which vendors can render."
     )
+
+
+def test_validate_name_refuses_an_internal_artifact_shape():
+    """The create side needs the same refusal the read side got (ADR-0037 §6).
+
+    The lister hides these names and the resolver returns nothing for them, so
+    a create that accepts one writes an artifact that cannot afterwards be
+    listed, read or deleted — a worse state than the visible phantom it
+    replaced. One rule in the shared validator covers every create surface.
+    """
+    from memtomem.context._names import InvalidNameError, validate_name
+
+    for name in (".staging-foo-123-abcdef.tmp", ".old-foo-1-abc123.tmp"):
+        with pytest.raises(InvalidNameError, match="internal staging"):
+            validate_name(name, kind="skill name")
+
+    # The OWNER of a leftover is an ordinary name, and reapers validate that.
+    assert validate_name("foo", kind="skill name") == "foo"
+    # Neighbouring dot-names that are not the generated shape stay legal.
+    assert validate_name(".staging-notes.tmp") == ".staging-notes.tmp"

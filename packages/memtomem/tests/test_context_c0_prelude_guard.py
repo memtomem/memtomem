@@ -421,6 +421,18 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "first",
         "Cross-scope transfer MOVES the tree; recovers both roots (G4a-3b).",
     ),
+    ("context/bundle.py", "export_artifact_bundle", 0, "canonical_sidecar_lock"): (
+        RUNS_SWAP_PRELUDE,
+        "first",
+        "Bundle export READS the whole tree under the lock; a mid-swap source would "
+        "otherwise be packed half-rendered (ADR-0037 §4).",
+    ),
+    ("context/bundle.py", "receive_artifact_bundle", 0, "canonical_sidecar_lock"): (
+        RUNS_SWAP_PRELUDE,
+        "first",
+        "Bundle receipt materializes and promotes a canonical; recovery must precede "
+        "the in-lock collision re-check (ADR-0037 §6).",
+    ),
     ("context/install.py", "_install_asset", 0, "canonical_lock_shared_budget"): (
         RUNS_SWAP_PRELUDE,
         "first",
@@ -763,6 +775,8 @@ KNOWN_SKILLS_C0_SITES: frozenset[tuple[str, str]] = frozenset(
         ("context/install.py", "_install_asset"),
         ("context/install.py", "_apply_update"),
         ("context/install.py", "_apply_pinned_install"),
+        ("context/bundle.py", "export_artifact_bundle"),
+        ("context/bundle.py", "receive_artifact_bundle"),
         ("context/transfer.py", "transfer_artifact"),
         ("context/_validation_seed.py", "seed_adr0026_validation_states"),
         ("context/skills.py", "copy_skill"),

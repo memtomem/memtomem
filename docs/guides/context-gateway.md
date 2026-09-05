@@ -417,6 +417,22 @@ The override flag has two spellings, one per direction: `mm context sync
 (existing runtime files being pulled into the Store). Both follow the tier
 rules above — a `project_shared` destination always hard-refuses.
 
+**Sharing one artifact off this machine** (`mm context export`) is stricter than
+any of the above: a detected secret refuses the export from **every** tier, and
+there is no override flag at all. What it does accept is a declaration in the
+artifact's manifest — `redaction: documents-patterns` in the frontmatter of
+`SKILL.md` / `agent.md` / `command.md` — for an artifact that *documents*
+credential shapes rather than carrying one, which is the common case for a skill
+about API code. It waives only the unquoted-label patterns and only when every
+hit in a file is one of them, so a real token still refuses, and it travels
+inside the bundle so the person receiving it reads the same declaration. The reasoning is the same one that makes
+Project (shared) absolute — once a file has been handed to someone, no local
+edit takes it back — so a bundle is gated like a git-tracked write even when
+the artifact it came from was private to you. `mm context import` treats an
+incoming bundle as foreign and scans every entry: a Project (shared) landing
+hard-refuses, and User / Project (local) landings accept
+`--force-unsafe-import` after you have reviewed the file.
+
 See [`configuration.md#context-gateway`](configuration.md#context-gateway) for
 the related environment variables.
 

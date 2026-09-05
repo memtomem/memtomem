@@ -419,6 +419,13 @@ mm context copy agents foo --to-project ~/work/other --as foo2 --apply  # path d
 mm context copy mcp-servers pg --to-project <scope_id> --apply --confirm-project-shared  # copy one MCP server definition
 mm context move agents foo --from user --to project_local --apply       # --from disambiguates a multi-tier source
 
+# Sharing one artifact off this machine as a file (ADR-0037)
+mm context export skills my-skill --out ~/my-skill.json      # pack one artifact; refuses if it carries a secret
+mm context export agents foo --out ~/foo.json --no-versions  # drop frozen history (versions/ + versions.json together)
+mm context import ~/foo.json --to project_local              # dry-run preview by default
+mm context import ~/foo.json --to project_shared --apply --confirm-project-shared  # git-tracked landing
+mm context import ~/foo.json --to project_local --apply --as foo2  # land under a different name
+
 # Note: cursor / codex / copilot fold ## Rules + ## Style into a single block;
 # `generate` warns on stderr when both sections are populated. context.md is
 # the source of truth — edit there, not in generated files.
