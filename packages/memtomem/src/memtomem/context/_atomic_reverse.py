@@ -301,6 +301,18 @@ def import_passthrough_runtime(
             continue
         if runtime_candidates is not None:
             runtime_candidates.setdefault(name, []).append(runtime)
+        if is_internal_artifact_dir(name):
+            # One of our own crash leftovers sitting in a runtime directory.
+            # Skipped as a ROW, not raised: this loop's contract is that a name
+            # it cannot use costs that one item and nothing else, and
+            # ``resolve_artifact_extract_target`` below raises for this shape.
+            # Letting that raise escape aborted the whole run — every good
+            # artifact in the same directory went unimported, and no caller
+            # translates the exception, so the web route answered 500.
+            reason = "internal staging leftover, not an artifact"
+            skipped.append((name, reason, skip_codes.INVALID_NAME))
+            logger.warning("skip %r from %s: %s", name, runtime_label, reason)
+            continue
         try:
             validate_name(name, kind=name_kind)
         except InvalidNameError as exc:

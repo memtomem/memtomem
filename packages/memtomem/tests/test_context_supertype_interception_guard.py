@@ -1795,7 +1795,27 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "type intact. The catch is broad on purpose — a KeyboardInterrupt "
         "must not leave a staging directory behind either.",
     ),
-    ("context/bundle.py", "_collides", ("OSError",), 0): (_U, "no_recovery_callee", _RO),
+    ("context/bundle.py", "_open_dir_at", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Opening one directory component of the source artifact with "
+        "O_NOFOLLOW during export enumeration; the guarded call is a bare "
+        "os.open. " + _RO,
+    ),
+    ("context/bundle.py", "_open_dir_at", ("OSError",), 1): (
+        _U,
+        "no_recovery_callee",
+        "The lstat that decides whether the refusal above was a symlink or a "
+        "non-directory; a probe that cannot answer falls back to the errno. " + _RO,
+    ),
+    ("context/bundle.py", "_reap_own_staging", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Listing the destination store to find this destination's own staging "
+        "leftovers, under its sidecar lock. Reaping is best-effort — a store "
+        "that cannot be scanned must not turn a valid import into a failure — "
+        "and the guarded call is a plain iterdir. " + _RO,
+    ),
     ("context/transfer.py", "_classify_provenance_carry", ("OSError",), 0): (
         _U,
         "no_recovery_callee",

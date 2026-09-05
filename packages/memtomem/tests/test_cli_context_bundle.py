@@ -217,6 +217,45 @@ class TestImportCli:
         gitignore = (projects["a"] / ".gitignore").read_text()
         assert ".memtomem/*.local/" in gitignore
 
+    def test_a_refused_import_leaves_the_destination_project_untouched(
+        self, projects, bundle
+    ) -> None:
+        """The marker used to be appended before the bundle was even parsed.
+
+        A malformed, privacy-blocked or colliding import then still edited the
+        destination's .gitignore — a write the user never got an artifact for.
+        Fails if the marker moves back ahead of the gates.
+        """
+        bad = projects["tmp"] / "bad.json"
+        bad.write_text("{not json")
+        gitignore = projects["a"] / ".gitignore"
+        assert not gitignore.exists()
+
+        result = _run("import", str(bad), "--to", "project_local", "--apply")
+
+        assert result.exit_code == 1
+        assert not gitignore.exists()
+
+    def test_an_unprotectable_local_tier_refuses_instead_of_landing(
+        self, projects, bundle, monkeypatch
+    ) -> None:
+        """ADR-0037 §6: receipt fails closed when the tier cannot be protected.
+
+        The marker is what keeps a received artifact out of `git add -A`, and a
+        bundle is the one input that arrives from another machine — warning and
+        landing it anyway puts foreign bytes in a directory the next commit
+        would stage. Fails if this reverts to a yellow warning.
+        """
+        import shutil
+
+        shutil.rmtree(projects["a"] / ".git")
+
+        result = _run("import", str(bundle), "--to", "project_local", "--apply")
+
+        assert result.exit_code == 1
+        assert "cannot protect the project_local tier" in result.output
+        assert not (projects["a"] / ".memtomem" / "skills.local" / "foo").exists()
+
     def test_renamed_import_reports_both_names(self, projects, bundle) -> None:
         result = _run("import", str(bundle), "--to", "project_local", "--as", "foo2", "--apply")
 

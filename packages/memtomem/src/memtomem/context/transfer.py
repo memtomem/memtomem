@@ -642,6 +642,18 @@ def rewrite_manifest_name_bytes(
     ]
     if not name_lines:
         return data
+    if all(
+        (kv := _KEY_VALUE_RE.match(lines[i].rstrip("\r\n"))) is not None
+        and kv.group(2).strip() == new_name
+        for i in name_lines
+    ):
+        # Nothing to rewrite. Checked BEFORE the ambiguity refusal because that
+        # refusal is about which line to change, and there is no such question
+        # when no line needs changing. Refusing first meant a manifest with a
+        # duplicated but already-correct ``name:`` — which the store tolerates
+        # and reads last-wins — could be exported and then never imported
+        # anywhere, blaming the receiver for a rename nobody requested.
+        return data
     if len(name_lines) > 1:
         raise click.ClickException(
             f"cannot rename: {manifest_label} frontmatter has {len(name_lines)} 'name:' "

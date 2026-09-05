@@ -312,7 +312,23 @@ def validate_name(s: object, *, kind: str = "name") -> str:
     * not ``"."`` or ``".."`` (path-traversal tokens allowed by the regex),
     * does not start with ``-`` (would collide with CLI flag parsing),
     * ``Path(s).name == s`` (belt-and-suspenders against platform-specific
-      path parsing on Windows / weird separators).
+      path parsing on Windows / weird separators),
+    * not the shape of one of our own internal staging / move-aside
+      directories (:func:`is_internal_artifact_dir`).
+
+    That last rule is here, in the one validator every surface already calls,
+    rather than at each create site. The read side learned to refuse these
+    names — the lister hides them and the resolver returns nothing — but the
+    CREATE side still accepted one, which is a worse state than before: the
+    artifact is written, then hidden by the lister and unaddressable by the
+    resolver, so read and delete both answer 404 and nothing can remove it. A
+    guard on reads alone turns a visible phantom into an immortal one.
+
+    Callers that legitimately handle a leftover do not come through here: they
+    ask :func:`internal_artifact_owner` whose leftover it is and then validate
+    the OWNER, which is an ordinary name. Every discovery loop in the package
+    already tests :func:`is_internal_artifact_dir` before validating, so this
+    changes what they refuse, not whether they refuse.
     """
     if not isinstance(s, str):
         raise InvalidNameError(f"invalid {kind}: expected str, got {type(s).__name__}")
@@ -331,4 +347,10 @@ def validate_name(s: object, *, kind: str = "name") -> str:
         )
     if Path(s).name != s:
         raise InvalidNameError(f"invalid {kind} {s!r}: contains path separator")
+    if is_internal_artifact_dir(s):
+        raise InvalidNameError(
+            f"invalid {kind} {s!r}: has the shape of an internal staging or move-aside "
+            f"directory, which every discovery walk skips — an artifact created under it "
+            f"would be invisible to listing and unaddressable for read or delete"
+        )
     return s

@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 
+import click
 import pytest
 
 from memtomem.context.bundle import (
@@ -23,6 +24,10 @@ from memtomem.context.bundle import (
     BundleIntegrityError,
     BundlePrivacyError,
     BundleSourceError,
+    _KNOWN_VERSION_SCHEMAS,
+    _SourceReader,
+    _collides,
+    _read_source_file,
     _structure_digest,
     export_artifact_bundle,
     load_bundle,
@@ -31,6 +36,7 @@ from memtomem.context.bundle import (
 from memtomem.context.lockfile import Lockfile
 from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.context.transfer import TransferCollisionError
+from memtomem.context.versioning import SCHEMA_VERSION
 
 # Assembled at runtime — never a literal in the tree.
 SECRET = "api_key=" + "AKIA" + "TESTKEY" + "1234567890"
@@ -1030,3 +1036,399 @@ class TestReceipt:
             bundle, dst_project_root=dst, to_scope="project_shared", apply_=False
         )
         assert plain.adopt_hint is None  # no wiki_commit on this source
+
+
+class TestExportReadPath:
+    """The descriptor discipline export claims, pinned as behavior."""
+
+    def test_a_directory_swapped_for_a_symlink_after_the_walk_is_refused(self, tmp_path) -> None:
+        """The walk vets `sub/` by name; the read must not trust that vetting.
+
+        Fails if the reader goes back to opening `root / rel` by path: only the
+        final component carries O_NOFOLLOW there, so an ancestor repointed
+        after the walk hands the bundle bytes from outside the artifact.
+        """
+        root = tmp_path / "art"
+        (root / "sub").mkdir(parents=True)
+        (root / "sub" / "a.md").write_text("real\n")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "a.md").write_text("stolen\n")
+
+        with _SourceReader(root) as reader:
+            assert reader.read("sub/a.md", budget=1024)[0] == b"real\n"
+            (root / "sub").rename(tmp_path / "moved-away")
+            (root / "sub").symlink_to(outside)
+            with pytest.raises(BundleSourceError, match="symlink"):
+                reader.read("sub/a.md", budget=1024)
+
+    def test_reads_are_opened_in_binary_mode(self, tmp_path) -> None:
+        """Windows `os.open` defaults to TEXT mode and rewrites CRLF to LF.
+
+        Both readers must set O_BINARY, which is 0 on POSIX. Pinned on the flag
+        rather than on bytes because the corruption it prevents is invisible on
+        this platform: a CRLF round trip passes here either way, and the digests
+        verify on Windows too, since they are computed over the already
+        translated bytes. Fails if either open drops the flag.
+        """
+        import inspect
+
+        from memtomem.context import bundle as bundle_mod
+
+        for fn in (bundle_mod._read_capped, bundle_mod._read_source_file):
+            src = inspect.getsource(fn)
+            assert 'getattr(os, "O_BINARY", 0)' in src, (
+                f"{fn.__name__} opens without O_BINARY; on Windows that reads "
+                f"through the CRLF-translating text mode"
+            )
+
+    def test_a_crlf_payload_round_trips_byte_identical(self, tmp_path, dst) -> None:
+        """The bytes on disk are the bytes in the bundle are the bytes that land."""
+        root = tmp_path / "src"
+        art = root / ".memtomem" / "skills" / "demo"
+        art.mkdir(parents=True)
+        raw = b"---\r\nname: demo\r\n---\r\nbody\r\n"
+        (art / "SKILL.md").write_bytes(raw)
+        out = tmp_path / "b.json"
+        _export(root, out)
+
+        receive_artifact_bundle(out, dst_project_root=dst, to_scope="project_local", apply_=True)
+
+        landed = dst / ".memtomem" / "skills.local" / "demo" / "SKILL.md"
+        assert landed.read_bytes() == raw
+
+    def test_the_read_stops_at_the_cap_rather_than_loading_the_file(self, tmp_path) -> None:
+        """Cap plus one byte is enough to refuse; more is the allocation the cap forbids.
+
+        Fails if the reader drains the descriptor and leaves the size check to
+        the caller.
+        """
+        big = tmp_path / "big.md"
+        big.write_bytes(b"x" * 50_000)
+
+        data, _ = _read_source_file(big, "big.md", budget=100)
+
+        assert len(data) == 101
+
+    def test_an_oversize_file_is_refused_by_export(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("memtomem.context.bundle._MAX_ENTRY_DECODED_BYTES", 64)
+        root = tmp_path / "src"
+        art = _write_skill(root)
+        (art / "references" / "a.md").write_bytes(b"y" * 5000)
+        out = tmp_path / "b.json"
+
+        with pytest.raises(BundleSourceError, match="payload caps"):
+            _export(root, out)
+        assert not out.exists()
+
+
+class TestTypedPathValidation:
+    """A path's TYPE is part of what the version and form rules validate."""
+
+    def test_a_directory_spelling_a_file_snapshot_is_refused(self, tmp_path, dst) -> None:
+        """`versions/v1.md` as a DIRECTORY satisfied a file-layout record.
+
+        Fails if files and dirs are merged into one list of names again: the
+        receiver then gets a manifest whose snapshot resolve_version cannot
+        read.
+        """
+        root = tmp_path / "src"
+        art = _write_skill(root)
+        _write_versions(art)
+        out = tmp_path / "b.json"
+        _export(root, out)
+
+        def _swap(doc: dict) -> None:
+            doc["files"] = [f for f in doc["files"] if f["path"] != "versions/v1.md"]
+            doc["dirs"] = sorted([*doc["dirs"], "versions/v1.md"])
+            _reseal(doc)
+
+        bad = _mutate(out, tmp_path, _swap)
+        with pytest.raises(BundleSourceError, match="directory"):
+            load_bundle(bad)
+
+    def test_an_empty_overrides_directory_round_trips(self, tmp_path, dst) -> None:
+        """One path segment is the empty directory, not a malformed override.
+
+        Fails if the override-name check is applied to directory entries.
+        """
+        root = tmp_path / "src"
+        art = _write_skill(root)
+        (art / "overrides").mkdir()
+        out = tmp_path / "b.json"
+
+        _export(root, out)
+
+        assert "overrides" in json.loads(out.read_text())["dirs"]
+        result = receive_artifact_bundle(
+            out, dst_project_root=dst, to_scope="project_local", apply_=True
+        )
+        assert result.received is True
+        assert (dst / ".memtomem" / "skills.local" / "demo" / "overrides").is_dir()
+
+    def test_a_directory_standing_where_an_override_file_belongs_is_refused(self, tmp_path) -> None:
+        root = tmp_path / "src"
+        art = _write_skill(root)
+        (art / "overrides").mkdir()
+        (art / "overrides" / "claude.md").write_text("o\n")
+        out = tmp_path / "b.json"
+        _export(root, out)
+
+        def _swap(doc: dict) -> None:
+            doc["files"] = [f for f in doc["files"] if f["path"] != "overrides/claude.md"]
+            doc["dirs"] = sorted([*doc["dirs"], "overrides/claude.md"])
+            _reseal(doc)
+
+        bad = _mutate(out, tmp_path, _swap)
+        with pytest.raises(BundleFormatError, match="regular file"):
+            load_bundle(bad)
+
+    def test_the_stores_current_schema_version_is_exportable(self, tmp_path) -> None:
+        """A literal set here becomes a second, stricter rule on the next bump.
+
+        Pinned by BEHAVIOR at the store's own ceiling rather than by comparing
+        the constant to itself: asserting the set equals `range(1, SCHEMA
+        _VERSION + 1)` passes for a hardcoded `{1, 2}` too, for as long as the
+        ceiling happens to be 2. This fails the moment SCHEMA_VERSION is bumped
+        and the bundle set is not, which is the drift — export refusing, with a
+        message claiming the store cannot read it, a manifest the store reads.
+        """
+        root = tmp_path / "src"
+        art = _write_skill(root)
+        _write_versions(art)
+        manifest = json.loads((art / "versions.json").read_text())
+        manifest["schema_version"] = SCHEMA_VERSION
+        (art / "versions.json").write_text(json.dumps(manifest))
+        out = tmp_path / "b.json"
+
+        _export(root, out)
+
+        assert load_bundle(out).versions_included is True
+        assert SCHEMA_VERSION in _KNOWN_VERSION_SCHEMAS
+
+
+class TestGrammarBounds:
+    def test_case_variant_implicit_parents_are_refused(self, bundle, tmp_path) -> None:
+        """`Docs/a.md` + `docs/b.md` merge into one directory on a folding filesystem.
+
+        Neither parent is itself an entry, so a check over listed paths only
+        finds no collision. Fails if implicit parents stop being folded.
+        """
+
+        def _add(doc: dict) -> None:
+            for rel, text in (("Docs/a.md", b"one\n"), ("docs/b.md", b"two\n")):
+                doc["files"].append(
+                    {
+                        "path": rel,
+                        "exec": False,
+                        "sha256": hashlib.sha256(text).hexdigest(),
+                        "content_b64": base64.b64encode(text).decode(),
+                    }
+                )
+            doc["files"].sort(key=lambda f: f["path"])
+            _reseal(doc)
+
+        bad = _mutate(bundle, tmp_path, _add)
+        with pytest.raises(BundleFormatError, match="case folding"):
+            load_bundle(bad)
+
+    def test_deep_nesting_is_refused_before_the_parser_recurses(self, tmp_path) -> None:
+        """json.loads recurses per level, and RecursionError is a RuntimeError.
+
+        No CLI translator lists that, so it escaped as a raw traceback. Fails if
+        the depth bound moves back to after the parse.
+        """
+        deep = tmp_path / "deep.json"
+        deep.write_text("[" * 200_000)
+
+        with pytest.raises(BundleFormatError, match="nesting"):
+            load_bundle(deep)
+
+    def test_a_non_utf8_manifest_is_refused_at_export(self, tmp_path) -> None:
+        """It used to export cleanly and die on the receiver with a codec message.
+
+        Fails if the manifest text check is dropped from the shared form rules,
+        which is what makes export and receipt agree here.
+        """
+        root = tmp_path / "src"
+        art = root / ".memtomem" / "skills" / "demo"
+        art.mkdir(parents=True)
+        (art / "SKILL.md").write_bytes("---\nname: demo\ndesc: caf\xe9\n---\n".encode("latin-1"))
+        out = tmp_path / "b.json"
+
+        with pytest.raises(BundleFormatError, match="UTF-8"):
+            _export(root, out)
+        assert not out.exists()
+
+
+class TestReceiptContracts:
+    def test_force_unsafe_import_keeps_the_declaration_disclosure(self, tmp_path, dst) -> None:
+        """The valve decides ADMISSION; it does not answer what was waived.
+
+        Reading coverage off the admission decision made every declared file
+        re-derive as waiving nothing under the flag, so receipt refused the
+        sender's honest disclosure as malformed — leaving such a bundle
+        importable to no tier at all. Fails if the two questions collapse again.
+        """
+        root = tmp_path / "src"
+        _write_skill(
+            root,
+            body=(
+                "---\nname: demo\nredaction: documents-patterns\n---\n"
+                "Settings carry an api_key: str field.\n"
+            ),
+        )
+        out = tmp_path / "b.json"
+        _export(root, out)
+        assert json.loads(out.read_text())["redaction_exempted"] == ["SKILL.md"]
+
+        result = receive_artifact_bundle(
+            out,
+            dst_project_root=dst,
+            to_scope="project_local",
+            apply_=True,
+            force_unsafe=True,
+        )
+
+        assert result.received is True
+        assert result.redaction_exempted == ["SKILL.md"]
+
+    def test_as_with_the_artifact_s_own_name_is_not_a_rename(self, tmp_path, dst) -> None:
+        """A scripted import always passes --as; the same name is a no-op.
+
+        Fails if the rename consequences key on the flag being present rather
+        than on the name differing.
+        """
+        root = tmp_path / "src"
+        art = _write_agent(root)
+        _write_versions(art)
+        out = tmp_path / "b.json"
+        _export(root, out, kind="agents")
+
+        result = receive_artifact_bundle(
+            out,
+            dst_project_root=dst,
+            to_scope="project_local",
+            apply_=True,
+            new_name="demo",
+        )
+
+        assert result.received is True
+        assert result.dst_name == "demo"
+
+    def test_an_already_correct_duplicate_name_line_still_imports(self, tmp_path, dst) -> None:
+        """The store tolerates duplicate keys; export never inspects frontmatter.
+
+        So such an artifact exported cleanly and then failed every import with a
+        rename error for a rename nobody asked for. Fails if the ambiguity
+        refusal runs before asking whether anything needs rewriting.
+        """
+        root = tmp_path / "src"
+        _write_skill(root, body="---\nname: demo\nname: demo\n---\nbody\n")
+        out = tmp_path / "b.json"
+        _export(root, out)
+
+        result = receive_artifact_bundle(
+            out, dst_project_root=dst, to_scope="project_local", apply_=True
+        )
+
+        assert result.received is True
+
+    def test_a_real_rename_of_an_ambiguous_manifest_is_still_refused(self, tmp_path, dst) -> None:
+        """The refusal is about WHICH line to change, and that question is real here."""
+        root = tmp_path / "src"
+        _write_skill(root, body="---\nname: demo\nname: other\n---\nbody\n")
+        out = tmp_path / "b.json"
+        _export(root, out)
+
+        with pytest.raises(click.ClickException, match="exactly one"):
+            receive_artifact_bundle(
+                out,
+                dst_project_root=dst,
+                to_scope="project_local",
+                apply_=True,
+                new_name="demo2",
+            )
+
+    def test_a_probe_that_cannot_answer_is_not_an_absence(self, tmp_path, monkeypatch) -> None:
+        """EACCES while probing the legacy identity is not "nothing is there".
+
+        Treating it as absent lands a directory that silently shadows the flat
+        artifact — the exact case the collision check exists to catch.
+        """
+        store = tmp_path / "store"
+        store.mkdir()
+
+        def _denied(self: Path) -> object:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "lstat", _denied)
+        with pytest.raises(PermissionError):
+            _collides(store, "demo")
+
+    def test_a_missing_entry_is_still_an_absence(self, tmp_path) -> None:
+        assert _collides(tmp_path, "nothing-here") is False
+
+    def test_a_transfer_migrate_leftover_is_never_reaped(self, tmp_path, dst) -> None:
+        """Classified is not deletable — reaping `.migrate-*` is data loss (#2304).
+
+        `is_internal_artifact_dir` hides every internal transient, `.migrate-*`
+        included, so a reaper keyed on classification alone would collect one.
+        But `migrate._stage_move` renames the source into staging on the same
+        filesystem, so until the promote that tree is the ONLY copy of the
+        artifact. Fails if this reaper goes back to keying on the classified
+        set instead of REAPABLE_INTERNAL_ARTIFACT_KINDS.
+        """
+        from memtomem.context._names import (
+            REAPABLE_INTERNAL_ARTIFACT_KINDS,
+            is_internal_artifact_dir,
+        )
+
+        root = tmp_path / "src"
+        _write_agent(root)
+        out = tmp_path / "b.json"
+        _export(root, out, kind="agents")
+
+        store = dst / ".memtomem" / "agents.local"
+        store.mkdir(parents=True)
+        migrate_leftover = store / ".migrate-demo-999-abcdef12.tmp"
+        migrate_leftover.mkdir()
+        (migrate_leftover / "agent.md").write_bytes(b"the only copy\n")
+
+        # The premise: it IS classified, and it is NOT reapable.
+        assert is_internal_artifact_dir(migrate_leftover.name)
+        assert "migrate" not in REAPABLE_INTERNAL_ARTIFACT_KINDS
+
+        receive_artifact_bundle(
+            out, dst_project_root=dst, to_scope="project_local", apply_=True
+        )
+
+        assert migrate_leftover.is_dir()
+        assert (migrate_leftover / "agent.md").read_bytes() == b"the only copy\n"
+
+    def test_a_leftover_staging_tree_is_reaped_and_only_ours(self, tmp_path, dst) -> None:
+        """Hidden from discovery is half a contract; something must delete these.
+
+        The skills reaper returns immediately for any other kind, so an agents
+        leftover was invisible and immortal. Ownership is by the parsed owner,
+        never a `.staging-<name>-*` prefix: that glob would delete `demo-other`'s
+        in-flight tree while holding only `demo`'s lock.
+        """
+        root = tmp_path / "src"
+        _write_agent(root)
+        out = tmp_path / "b.json"
+        _export(root, out, kind="agents")
+
+        store = dst / ".memtomem" / "agents.local"
+        store.mkdir(parents=True)
+        mine = store / ".staging-demo-999-abcdef.tmp"
+        mine.mkdir()
+        (mine / "agent.md").write_text("half-written\n")
+        neighbour = store / ".staging-demo-other-999-abcdef.tmp"
+        neighbour.mkdir()
+
+        receive_artifact_bundle(out, dst_project_root=dst, to_scope="project_local", apply_=True)
+
+        assert not mine.exists()
+        assert neighbour.exists()
+        assert (store / "demo" / "agent.md").exists()

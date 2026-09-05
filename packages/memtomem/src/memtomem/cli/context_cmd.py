@@ -732,7 +732,7 @@ def _append_gitignore_marker(project_root: Path) -> tuple[bool, str]:
     return True, "appended"
 
 
-def _ensure_local_tier_gitignored(project_root: Path) -> None:
+def _ensure_local_tier_gitignored(project_root: Path, *, required: bool = False) -> None:
     """Append the project_local gitignore marker at *project_root* and report.
 
     Shared by every verb that can land a canonical on the project_local
@@ -741,6 +741,14 @@ def _ensure_local_tier_gitignored(project_root: Path) -> None:
     DESTINATION root). ``already_present`` is deliberately silent: the
     marker is already there, the user does not need a redundant green
     tick on every transfer.
+
+    *required* makes an unprotectable tier a refusal instead of a warning.
+    ADR-0037 §6 says receipt establishes the marker "failing closed if the
+    tier cannot be protected", and a bundle is the one input that arrives from
+    another machine: warning and landing it anyway puts foreign bytes in a
+    directory the next ``git add -A`` would stage. The in-machine verbs keep
+    the warning, where the content was already on this disk and already the
+    user's.
     """
     wrote, msg = _append_gitignore_marker(project_root)
     if wrote:
@@ -748,18 +756,23 @@ def _ensure_local_tier_gitignored(project_root: Path) -> None:
             "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
             fg="green",
         )
-    elif msg == "no_git_repo_pyproject_only":
-        click.secho(
-            "  warning: project root resolved via pyproject.toml but `.git` "
-            "missing — .gitignore not appended. Run `git init` first to "
-            "git-protect the local tier.",
-            fg="yellow",
+        return
+    if msg == "no_git_repo_pyproject_only":
+        detail = (
+            "project root resolved via pyproject.toml but `.git` missing. "
+            "Run `git init` first to git-protect the local tier."
         )
     elif msg == "no_project_signal":
-        click.secho(
-            "  warning: no .git and no pyproject.toml in project root — .gitignore append skipped.",
-            fg="yellow",
+        detail = "no .git and no pyproject.toml in project root."
+    else:
+        return
+    if required:
+        raise click.ClickException(
+            f"cannot protect the project_local tier at {project_root}: {detail}\n"
+            f"  The .gitignore marker is what keeps a received artifact out of "
+            f"`git add -A`, so import refuses rather than land unprotected bytes."
         )
+    click.secho(f"  warning: {detail} .gitignore not appended.", fg="yellow")
 
 
 def _print_settings_detect(root: Path, scope: str) -> None:
@@ -4851,13 +4864,17 @@ def import_cmd(
         ):
             raise click.Abort()
 
-    # The project_local tier is protected BEFORE anything can land in it: the
+    # The project_local tier is protected BEFORE anything can land in it — the
     # marker is what keeps a received artifact out of a `git add -A`, so
     # appending it after the write leaves a window where the bytes are present
-    # and unignored (ADR-0037 §6). Dry-run does not write, so it does not
-    # need the marker either.
-    if to_scope_t == "project_local" and apply_:
-        _ensure_local_tier_gitignored(dst_root)
+    # and unignored — but AFTER every gate has passed (ADR-0037 §6). Handed to
+    # the receipt as its pre-materialize step rather than run here: run here it
+    # fired before the bundle was even parsed, so a malformed, privacy-blocked
+    # or colliding import still edited the destination project's .gitignore.
+    # Dry-run never materializes, so it never asks for the marker.
+    def _protect_local_tier() -> None:
+        if to_scope_t == "project_local":
+            _ensure_local_tier_gitignored(dst_root, required=True)
 
     # BundlePrivacyError carries only the neutral condition; the CLI owns the
     # flag spelling (#1869), so it is translated here rather than in the
@@ -4879,6 +4896,7 @@ def import_cmd(
                 apply_=apply_,
                 new_name=new_name,
                 force_unsafe=force_unsafe,
+                pre_materialize=_protect_local_tier,
             )
     except BundlePrivacyError as exc:
         raise click.ClickException(remediation.append_hint(exc.message, exc.code, "cli")) from exc

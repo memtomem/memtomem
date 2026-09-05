@@ -47,6 +47,8 @@ import os
 import re
 import secrets
 import stat
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -65,7 +67,9 @@ from memtomem.context._canonical_txn import canonical_sidecar_lock
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._names import (
     OVERRIDE_FORMATS,
+    REAPABLE_INTERNAL_ARTIFACT_KINDS,
     InvalidNameError,
+    internal_artifact_owner,
     is_internal_artifact_dir,
     validate_name,
 )
@@ -85,6 +89,7 @@ from memtomem.context.privacy_scan import (
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
 from memtomem.context.skills import SwapRecoveryError, run_swap_prelude, swap_failure_text
 from memtomem.context.versioning import (
+    SCHEMA_VERSION,
     VersionError,
     _validate_label_name,
     _validate_tag,
@@ -97,6 +102,7 @@ from memtomem.context.versioning import (
 # only ``privacy``), ``indexing/__init__`` is empty, and nothing here reaches
 # the indexing engine — so this does not close a cycle or pull in that weight.
 from memtomem.indexing.redaction_exemption import declared_exemption
+from memtomem.privacy import DECLARED_EXEMPTION_DOCUMENTS_PATTERNS, exemption_covers
 from memtomem.context.transfer import (
     TransferCollisionError,
     TransferRecoveryError,
@@ -149,8 +155,15 @@ _MAX_JSON_DEPTH = 8
 #: artifact so the receiver sees the same claim.
 _EGRESS_SCAN_SCOPE: TargetScope = "user"
 
-#: Manifest schema versions the store can read (``versioning._SCHEMA_*``).
-_KNOWN_VERSION_SCHEMAS: frozenset[int] = frozenset({1, 2})
+#: Manifest schema versions the store can read. DERIVED from the store's own
+#: ceiling rather than written out: ``versioning.resolve_schema_version``
+#: accepts anything at or below :data:`versioning.SCHEMA_VERSION`, so a literal
+#: set here becomes a second, quietly stricter rule the moment that constant is
+#: bumped — export would then refuse, with a message claiming the store cannot
+#: read it, artifacts the store reads fine. The surrounding code already
+#: borrows ``_validate_tag`` and ``_validate_label_name`` from that module for
+#: exactly this reason; the schema gate was the one rule that was copied.
+_KNOWN_VERSION_SCHEMAS: frozenset[int] = frozenset(range(1, SCHEMA_VERSION + 1))
 
 #: The store's own parsers, so a snapshot's name is read the way the sync
 #: fan-out reads it rather than by a second matcher that can disagree.
@@ -342,13 +355,32 @@ def _validate_topology(files: list[str], dirs: list[str]) -> None:
     file and a directory at once. Only directory-to-directory ancestry is
     allowed, so a ``files`` entry may not prefix anything and a ``dirs`` entry
     may not prefix a file.
+
+    IMPLICIT parents are folded too. Checking only the listed paths compared
+    ``Docs/a.md`` against ``docs/b.md`` and found no collision, because neither
+    ``Docs`` nor ``docs`` is itself an entry — yet materializing creates the
+    parents, so on a case-insensitive filesystem both files land in ONE
+    directory and the receiver is told the whole listed tree arrived. A Linux
+    sender produces that bundle from two genuinely different directories, so it
+    is a real bundle, not only a crafted one.
     """
     folded: dict[tuple[str, ...], str] = {}
+    parents: dict[tuple[str, ...], str] = {}
     for rel in [*files, *dirs]:
-        key = tuple(part.lower() for part in PurePosixPath(rel).parts)
+        parts = PurePosixPath(rel).parts
+        key = tuple(part.lower() for part in parts)
         if key in folded:
             raise BundleFormatError(f"paths {folded[key]!r} and {rel!r} collide under case folding")
         folded[key] = rel
+        for cut in range(1, len(parts)):
+            prefix_key = key[:cut]
+            spelling = "/".join(parts[:cut])
+            seen = parents.setdefault(prefix_key, spelling)
+            if seen != spelling:
+                raise BundleFormatError(
+                    f"directories {seen!r} and {spelling!r} collide under case folding; "
+                    f"they would materialize as one directory and merge the files under them"
+                )
     dir_keys = {tuple(part.lower() for part in PurePosixPath(rel).parts) for rel in dirs}
     for key, rel in folded.items():
         for cut in range(1, len(key)):
@@ -417,6 +449,43 @@ def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return dict(pairs)
 
 
+def _check_raw_depth(raw: bytes, *, where: str) -> None:
+    """Bound container nesting on the RAW text, before ``json.loads`` runs.
+
+    ``json.loads`` recurses per nesting level, so a 200 KB file of ``[`` — far
+    under every byte and entry cap — raised ``RecursionError`` from inside the
+    parser. That is a ``RuntimeError``: no CLI translator lists it, so it
+    escaped as a 41-line traceback, and §7's promise that the bounds are
+    "enforced before anything is decoded" was false for this one bound.
+
+    A byte scan is enough to decide it. Only structural brackets count, so the
+    scanner tracks string state and escapes; it deliberately does not validate
+    anything else, because a malformed document is still the parser's to
+    report — this only refuses to hand the parser something that would take it
+    past its own limit.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # closing quote
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):  # [ {
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                raise BundleFormatError(f"{where}: JSON nesting exceeds {_MAX_JSON_DEPTH} levels")
+        elif byte in (0x5D, 0x7D):  # ] }
+            depth -= 1
+
+
 def _check_depth(node: object, depth: int = 1) -> None:
     """Container nesting only — a scalar leaf adds nothing (§7).
 
@@ -441,8 +510,19 @@ def _read_capped(path: Path) -> bytes:
     are zero and a reparse point is still followed, the same asymmetry the
     swap-marker reader documents — so the ``fstat`` type check below is what
     runs everywhere.
+
+    ``O_BINARY`` runs the other way: it is a no-op on POSIX and load-bearing on
+    Windows, where ``os.open`` defaults to TEXT mode and the C runtime silently
+    rewrites ``\\r\\n`` to ``\\n`` on the way in. Reading a bundle through a
+    translating descriptor would corrupt every byte the format promises to carry
+    verbatim.
     """
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         fd = os.open(path, flags)
     except OSError as exc:
@@ -531,9 +611,17 @@ def _validate_version_surface(
     # ``dirs`` counts: an empty ``versions/`` carried as a directory entry is
     # still a version surface, and an orphan empty ``versions/v2/`` is still an
     # orphan. Looking only at files made both invisible.
-    relpaths = list(entries) + list(dirs)
+    #
+    # But the two arrays are kept APART. Merging them into one list of names
+    # threw away the one fact that distinguishes a snapshot from a directory
+    # that merely spells one: a ``dirs`` entry ``versions/v1.md`` then satisfied
+    # a file-layout record, and the receiver got a manifest whose snapshot
+    # ``resolve_version`` cannot read. A path's type is part of what is being
+    # validated here, so it travels with the path.
     manifest_bytes = entries.get("versions.json")
-    version_paths = [rel for rel in relpaths if rel.split("/", 1)[0] == "versions"]
+    version_paths: list[tuple[str, bool]] = [
+        (rel, True) for rel in entries if rel.split("/", 1)[0] == "versions"
+    ] + [(rel, False) for rel in dirs if rel.split("/", 1)[0] == "versions"]
 
     # Co-presence. Either both halves travel or neither does; one alone is a
     # state no receiver can interpret.
@@ -550,6 +638,7 @@ def _validate_version_surface(
             f"{where}: versions.json is present without any versions/ snapshot."
         )
 
+    _check_raw_depth(manifest_bytes, where=f"{where}: versions.json")
     try:
         payload = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_no_duplicate_keys)
     except UnicodeDecodeError as exc:
@@ -612,11 +701,31 @@ def _validate_version_surface(
 
     actual_files: set[str] = set()
     actual_trees: set[str] = set()
-    for rel in version_paths:
+    for rel, is_file in version_paths:
         parts = rel.split("/")
+        if len(parts) == 1:
+            # A bare ``versions`` entry. As a directory it is the empty version
+            # surface the co-presence check above already accounted for; as a
+            # FILE it is a regular file standing where the snapshot directory
+            # belongs, which no reader can descend.
+            if is_file:
+                raise BundleSourceError(
+                    f"{where}: versions is a file, but the version surface is a directory"
+                )
+            continue
         if len(parts) == 2 and parts[1].endswith(".md"):
+            if not is_file:
+                raise BundleSourceError(
+                    f"{where}: {rel} is a directory, but a file-layout snapshot must be a "
+                    f"regular file; resolve_version cannot read a directory here"
+                )
             actual_files.add(parts[1][: -len(".md")])
         elif len(parts) >= 3:
+            actual_trees.add(parts[1])
+        elif not is_file:
+            # ``versions/<tag>/`` carried as an empty directory entry: an
+            # orphan tree snapshot, reported as such by the expected/actual
+            # comparison below rather than as an unrecognized path.
             actual_trees.add(parts[1])
         else:
             raise BundleSourceError(f"{where}: {rel} is not a recognized snapshot path")
@@ -702,20 +811,47 @@ def _validate_artifact_form(
             f"manifest its kind requires — a mismatched 'kind' would promote a tree no "
             f"adapter can parse."
         )
+    try:
+        entries[manifest].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # Refused HERE, which is on both the export and the receipt path, so a
+        # non-UTF-8 manifest never becomes a bundle in the first place. It used
+        # to export cleanly — the scan reads with ``errors="replace"`` and the
+        # bytes travel verbatim — and then die on the receiver with a raw
+        # ``UnicodeDecodeError`` from the name rewrite: a codec message with no
+        # bundle vocabulary, naming a file the receiver cannot fix.
+        raise BundleFormatError(
+            f"{where}: {manifest} is not valid UTF-8. The manifest is parsed on arrival "
+            f"(its 'name:' is rewritten for the landing), so it must be text — re-save it "
+            f"as UTF-8 in the source artifact and export again."
+        ) from exc
     other_manifests = {m for k, m in _DIR_MANIFEST.items() if k != kind}
     for wrong in sorted(other_manifests & entries.keys()):
         raise BundleFormatError(f"{where}: carries {wrong} but declares kind {kind!r}")
     allowed_overrides = {
         f"{vendor}.{ext}" for (k, vendor), (_, ext) in OVERRIDE_FORMATS.items() if k == kind
     }
-    for rel in [*entries, *dirs]:
+    # Files and directories are classified separately for the same reason
+    # :func:`_validate_version_surface` keeps them apart: merged, a DIRECTORY
+    # named ``overrides/claude.md`` passed the override-name check and landed
+    # where a file belongs, while a legitimately empty ``overrides/`` directory
+    # was refused as "not a known override" because it has one path segment.
+    for rel, is_file in [(r, True) for r in entries] + [(r, False) for r in dirs]:
         parts = rel.split("/")
         top = parts[0]
         if top == "overrides":
+            if len(parts) == 1 and not is_file:
+                # The empty overrides directory. Carrying it is how an artifact
+                # that has the directory but no vendor file round-trips.
+                continue
             if len(parts) != 2 or parts[1] not in allowed_overrides:
                 raise BundleFormatError(
                     f"{where}: {rel!r} is not a known override for {kind}; expected one of "
                     f"{sorted(allowed_overrides)}"
+                )
+            if not is_file:
+                raise BundleFormatError(
+                    f"{where}: {rel!r} is a directory, but an override is a regular file"
                 )
         elif top == "versions.json":
             if rel != "versions.json":
@@ -743,6 +879,7 @@ def load_bundle(path: Path) -> ArtifactBundle:
     nothing behind by construction rather than by cleanup.
     """
     raw = _read_capped(path)
+    _check_raw_depth(raw, where=path.name)
     try:
         doc = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_keys)
     except UnicodeDecodeError as exc:
@@ -935,7 +1072,13 @@ def _validate_landing_name(name: str, *, where: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def _read_source_file(path: Path, rel: str) -> tuple[bytes, bool]:
+def _read_source_file(
+    path: Path | str,
+    rel: str,
+    *,
+    budget: int,
+    dir_fd: int | None = None,
+) -> tuple[bytes, bool]:
     """Read one source file through a verified descriptor.
 
     Walking with ``lstat`` and then reading by path would let an external
@@ -943,22 +1086,50 @@ def _read_source_file(path: Path, rel: str) -> tuple[bytes, bool]:
     escaping the artifact or hanging the export while it holds the canonical
     lock — and would let ``exec`` come from a different inode than the content.
     Both come from this descriptor.
+
+    *budget* is the largest payload this file may still contribute. Reading is
+    stopped at ``budget + 1`` bytes, which is enough for the caller to refuse
+    and no more: enforcing the cap only after the whole file is in memory made
+    the promised refusal reachable solely by first allocating the thing the cap
+    exists to prevent.
+
+    When *dir_fd* is given, *path* is a single component resolved relative to
+    it. That is what closes the directory half of the swap window: the walk's
+    type check and this open then name the same inode by construction, rather
+    than agreeing only because nothing moved in between.
+
+    ``O_BINARY`` is a no-op on POSIX and required on Windows, where ``os.open``
+    defaults to TEXT mode: without it the C runtime strips the ``\\r`` from every
+    ``\\r\\n`` on the way in, so a Windows export packed bytes that were not the
+    bytes on disk. That silently broke the byte-identical round trip for any
+    CRLF text file and would have mangled a binary asset containing ``0D 0A``,
+    while the digests still verified — they were computed over the already
+    translated bytes.
     """
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        fd = os.open(path, flags)
+        fd = os.open(path, flags) if dir_fd is None else os.open(path, flags, dir_fd=dir_fd)
     except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise BundleSourceError(f"{rel} is a symlink; refusing to read it") from exc
         raise BundleSourceError(f"cannot read {rel}: {exc.strerror}") from exc
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise BundleSourceError(f"{rel} is not a regular file")
         chunks: list[bytes] = []
-        while True:
-            chunk = os.read(fd, 1 << 20)
+        remaining = budget + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
             if not chunk:
                 break
             chunks.append(chunk)
+            remaining -= len(chunk)
     except OSError as exc:
         raise BundleSourceError(f"cannot read {rel}: {exc.strerror}") from exc
     finally:
@@ -967,68 +1138,207 @@ def _read_source_file(path: Path, rel: str) -> tuple[bytes, bool]:
     return b"".join(chunks), is_exec
 
 
-def _walk_source(
-    root: Path, *, include_versions: bool
-) -> tuple[list[tuple[str, Path]], list[str], list[str]]:
-    """Enumerate the artifact strictly. Returns ``(files, empty_dirs, notes)``.
+#: Whether this platform can enumerate and open relative to a directory
+#: descriptor. POSIX can; Windows exposes neither, and there the walk falls
+#: back to path-based traversal with the same rules but without the inode
+#: guarantee — the same asymmetry ``_read_capped`` documents for
+#: ``O_NOFOLLOW``.
+_HAS_DIR_FD = os.scandir in os.supports_fd and os.open in os.supports_dir_fd
+
+_DIR_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+
+
+def _classify_entry(entry: os.DirEntry[str] | Path) -> tuple[bool, bool, bool]:
+    """``(is_symlink, is_dir, is_file)`` for either walk flavour.
+
+    The two enumerations answer the same three questions with different
+    spellings — ``os.DirEntry`` needs ``follow_symlinks=False`` where ``Path``
+    has no such parameter at all — so asking them through one function keeps
+    the walk body free of a platform branch, and keeps a ``Path`` from ever
+    being handed a keyword that would raise at runtime.
+    """
+    if isinstance(entry, Path):
+        return entry.is_symlink(), entry.is_dir(), entry.is_file()
+    return (
+        entry.is_symlink(),
+        entry.is_dir(follow_symlinks=False),
+        entry.is_file(follow_symlinks=False),
+    )
+
+
+def _open_dir_at(name: str, rel: str, *, dir_fd: int | None) -> int:
+    """Open one directory component, refusing a symlink at open time.
+
+    ``O_DIRECTORY`` and ``O_NOFOLLOW`` together are what make this a check that
+    cannot be raced: the kernel resolves the name and enforces both in the same
+    operation, where an ``is_dir()`` test followed by a separate open leaves a
+    window in which the name can be repointed.
+
+    The two flags report the same refusal differently across platforms — Linux
+    raises ``ELOOP`` for a symlinked directory, macOS raises ``ENOTDIR`` — so
+    the *reason* is recovered from an ``lstat`` of the same name rather than
+    from the errno alone. A caller told "not a directory" about a symlink would
+    go looking for the wrong problem.
+    """
+    try:
+        if dir_fd is None:
+            return os.open(name, _DIR_OPEN_FLAGS)
+        return os.open(name, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        symlink = False
+        if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+            try:
+                probe = os.lstat(name) if dir_fd is None else os.lstat(name, dir_fd=dir_fd)
+                symlink = stat.S_ISLNK(probe.st_mode)
+            except OSError:
+                symlink = exc.errno in (errno.ELOOP, errno.EMLINK)
+        if symlink:
+            raise BundleSourceError(
+                f"{rel or 'the artifact root'} is a symlink. A bundle carries the "
+                f"canonical tree itself, not whatever a link points at."
+            ) from exc
+        if exc.errno == errno.ENOTDIR:
+            raise BundleSourceError(f"{rel or 'the artifact root'} is not a directory") from exc
+        raise BundleSourceError(f"cannot enumerate {rel or '.'}: {exc.strerror}") from exc
+
+
+class _SourceReader:
+    """Reads artifact files through descriptors anchored at the artifact root.
+
+    The export walk checks each entry's type and then, in a second pass, reads
+    the files it accepted. Doing that second pass by path is what left the
+    directory half of the swap window open: ``O_NOFOLLOW`` on the final
+    component cannot see that an ancestor turned into a symlink after the walk
+    vetted it, so the bytes read could come from outside the artifact. This
+    re-descends from the root descriptor instead, opening every component with
+    ``O_NOFOLLOW`` so any component that changed type is refused rather than
+    followed.
+
+    On a platform without ``dir_fd`` support this degrades to path-based reads,
+    which is what the module did everywhere before.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._fd: int | None = None
+
+    def __enter__(self) -> _SourceReader:
+        if _HAS_DIR_FD:
+            self._fd = _open_dir_at(str(self._root), "", dir_fd=None)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+
+    def read(self, rel: str, *, budget: int) -> tuple[bytes, bool]:
+        if self._fd is None:
+            return _read_source_file(self._root / rel, rel, budget=budget)
+        parts = rel.split("/")
+        opened: list[int] = []
+        try:
+            cursor = self._fd
+            for i, part in enumerate(parts[:-1]):
+                cursor = _open_dir_at(part, "/".join(parts[: i + 1]), dir_fd=cursor)
+                opened.append(cursor)
+            return _read_source_file(parts[-1], rel, budget=budget, dir_fd=cursor)
+        finally:
+            for fd in reversed(opened):
+                os.close(fd)
+
+
+def _walk_source(root: Path, *, include_versions: bool) -> tuple[list[str], list[str], list[str]]:
+    """Enumerate the artifact strictly. Returns ``(relpaths, empty_dirs, notes)``.
 
     Fail-closed: an unreadable entry aborts rather than shrinking the payload.
     Exclusion is decided BEFORE the type check, so an excluded name that
     happens to be a symlink is skipped as excluded rather than refused; only a
     link at a path the bundle would otherwise carry is an error.
+
+    Returns relative paths rather than :class:`Path` objects on purpose. A
+    resolved path invites the caller to read it later by name, which is the
+    race :class:`_SourceReader` exists to close; the relpath is the only thing
+    a caller needs, and it can only be used through the reader.
     """
-    files: list[tuple[str, Path]] = []
+    files: list[str] = []
     empty_dirs: list[str] = []
     notes: list[str] = []
 
-    def walk(current: Path, prefix: str) -> bool:
+    def walk(dir_fd: int | None, current: Path, prefix: str) -> bool:
         """Returns True when this directory contributed at least one file."""
-        if current.is_symlink():
-            # Reached only for the root: children are type-checked below before
-            # recursing. A symlinked root reads an out-of-store tree, so the
-            # bundle would carry bytes the canonical store never held.
+        if dir_fd is None and current.is_symlink():
+            # Path-based fallback only; the descriptor walk refuses a symlinked
+            # component at open time. A symlinked root reads an out-of-store
+            # tree, so the bundle would carry bytes the canonical store never
+            # held.
             raise BundleSourceError(
                 f"{prefix or 'the artifact root'} is a symlink. A bundle carries the "
                 f"canonical tree itself, not whatever a link points at."
             )
+        names: list[tuple[str, os.DirEntry[str] | Path]] = []
         try:
-            entries = sorted(current.iterdir(), key=lambda p: p.name)
+            if dir_fd is None:
+                names = [(p.name, p) for p in sorted(current.iterdir(), key=lambda p: p.name)]
+            else:
+                with os.scandir(dir_fd) as it:
+                    names = sorted(((e.name, e) for e in it), key=lambda item: item[0])
         except OSError as exc:
             raise BundleSourceError(f"cannot enumerate {prefix or '.'}: {exc.strerror}") from exc
         contributed = False
-        for entry in entries:
-            rel = f"{prefix}{entry.name}"
-            if entry.name in COPY_SKIP_NAMES or entry.suffix in DIRTY_SKIP_SUFFIXES:
+        for name, entry in names:
+            rel = f"{prefix}{name}"
+            if name in COPY_SKIP_NAMES or PurePosixPath(name).suffix in DIRTY_SKIP_SUFFIXES:
                 notes.append(f"excluded {rel} (not carried by a bundle)")
                 continue
-            if is_internal_artifact_dir(entry.name):
+            if is_internal_artifact_dir(name):
                 notes.append(f"excluded {rel} (crash leftover)")
                 continue
-            if (
-                not include_versions
-                and prefix == ""
-                and entry.name in ("versions", "versions.json")
-            ):
+            if not include_versions and prefix == "" and name in ("versions", "versions.json"):
                 continue
-            if entry.is_symlink():
+            is_symlink, is_dir, is_file = _classify_entry(entry)
+            if is_symlink:
                 raise BundleSourceError(
                     f"{rel} is a symlink. A bundle carries regular files only, and skipping "
                     f"it silently would hand the receiver a tree you believe is complete — "
                     f"replace it with its contents or remove it."
                 )
-            if entry.is_dir() and not entry.is_symlink():
-                if walk(entry, f"{rel}/"):
+            if is_dir:
+                if dir_fd is None:
+                    child_fd = None
+                    child_path = current / name
+                else:
+                    child_fd = _open_dir_at(name, rel, dir_fd=dir_fd)
+                    child_path = current / name
+                try:
+                    contributed_here = walk(child_fd, child_path, f"{rel}/")
+                finally:
+                    if child_fd is not None:
+                        os.close(child_fd)
+                if contributed_here:
                     contributed = True
                 else:
                     empty_dirs.append(rel)
-            elif entry.is_file() and not entry.is_symlink():
-                files.append((rel, entry))
+            elif is_file:
+                files.append(rel)
                 contributed = True
             else:
                 raise BundleSourceError(f"{rel} is not a regular file or directory")
         return contributed
 
-    walk(root, "")
+    if _HAS_DIR_FD:
+        root_fd = _open_dir_at(str(root), "", dir_fd=None)
+        try:
+            walk(root_fd, root, "")
+        finally:
+            os.close(root_fd)
+    else:
+        walk(None, root, "")
     return files, empty_dirs, notes
 
 
@@ -1066,11 +1376,13 @@ def export_artifact_bundle(
 ) -> BundleExportResult:
     """Pack one canonical artifact into a bundle file at *out_path*.
 
-    Gate A runs at ``project_shared`` semantics from EVERY source tier and has
-    no force valve (ADR-0037 §4): a file handed to someone else is as
-    unretractable as a pushed commit, so this follows the wiki-promote
-    precedent rather than the transfer one. Only secret-bearing artifacts are
-    refused; a clean artifact exports from any tier.
+    Gate A runs from EVERY source tier and has no force valve (ADR-0037 §4): a
+    file handed to someone else is as unretractable as a pushed commit, so this
+    follows the wiki-promote precedent rather than the transfer one. The scan
+    itself runs at :data:`_EGRESS_SCAN_SCOPE`, whose docstring explains why that
+    is ``user`` and not ``project_shared`` — the no-valve promise is kept by
+    never passing ``force_unsafe``, not by the scope label. Only secret-bearing
+    artifacts are refused; a clean artifact exports from any tier.
     """
     if kind not in SCOPE_MIGRATABLE_KINDS:
         raise click.ClickException(f"unsupported artifact kind: {kind}")
@@ -1110,7 +1422,7 @@ def export_artifact_bundle(
         else:
             if not src_path.is_file():
                 raise ArtifactNotFoundError(f"{kind}/{name} is no longer present.")
-            walked, empty_dirs = [(_DIR_MANIFEST[kind], src_path)], []
+            walked, empty_dirs = [_DIR_MANIFEST[kind]], []
             notes.append(
                 f"flat-layout source packed as {_DIR_MANIFEST[kind]} (bundles are always "
                 f"directory layout)"
@@ -1135,19 +1447,31 @@ def export_artifact_bundle(
 
         # Capture every file first, so the declaration and the scan and the
         # encoded payload all read ONE set of bytes (the promote_asset rule).
+        # Each read is capped at what the caps still allow PLUS ONE byte, which
+        # is exactly enough to detect the overrun: a file that would blow the
+        # budget is refused without ever being held in memory whole.
         captured: dict[str, tuple[bytes, bool]] = {}
         running = 0
-        for rel, file_path in sorted(walked, key=lambda item: item[0]):
-            _validate_relpath(rel, where=f"{kind}/{name}")
-            data, is_exec = _read_source_file(file_path, rel)
-            running += len(data)
-            if len(data) > _MAX_ENTRY_DECODED_BYTES or running > _MAX_DECODED_BYTES:
-                raise BundleSourceError(
-                    f"{kind}/{name} exceeds the bundle payload caps "
-                    f"({_MAX_ENTRY_DECODED_BYTES} bytes per file, "
-                    f"{_MAX_DECODED_BYTES} total)"
-                )
-            captured[rel] = (data, is_exec)
+        with ExitStack() as stack:
+            # A flat source is a single file with no directory to descend, so
+            # it is read directly; only the directory layout needs the anchored
+            # reader.
+            reader = stack.enter_context(_SourceReader(src_path)) if layout == "dir" else None
+            for rel in sorted(walked):
+                _validate_relpath(rel, where=f"{kind}/{name}")
+                budget = min(_MAX_ENTRY_DECODED_BYTES, _MAX_DECODED_BYTES - running)
+                if reader is not None:
+                    data, is_exec = reader.read(rel, budget=budget)
+                else:
+                    data, is_exec = _read_source_file(src_path, rel, budget=budget)
+                running += len(data)
+                if len(data) > _MAX_ENTRY_DECODED_BYTES or running > _MAX_DECODED_BYTES:
+                    raise BundleSourceError(
+                        f"{kind}/{name} exceeds the bundle payload caps "
+                        f"({_MAX_ENTRY_DECODED_BYTES} bytes per file, "
+                        f"{_MAX_DECODED_BYTES} total)"
+                    )
+                captured[rel] = (data, is_exec)
 
         entries: list[tuple[str, bool, str, str]] = []
         decoded: dict[str, bytes] = {}
@@ -1156,7 +1480,9 @@ def export_artifact_bundle(
             kind, {rel: data for rel, (data, _) in captured.items()}
         )
         for rel, (data, is_exec) in captured.items():
-            file_path = dict(walked)[rel]
+            # Display only — the bytes were already read through a verified
+            # descriptor, and nothing re-opens this path.
+            file_path = src_path / rel if layout == "dir" else src_path
             # errors="replace" so non-UTF8 bytes cannot mask an embedded ASCII
             # secret from the scanner (the wiki-promote rule).
             text = data.decode("utf-8", errors="replace")
@@ -1307,12 +1633,61 @@ def _staging_path(dst_store: Path, dst_name: str) -> Path:
     """A staging directory discovery skips, sharing the destination's parent.
 
     The name matches the central internal-artifact predicate, so every
-    canonical lister, runtime scan and status walk skips it and the skills
-    reaper deletes it under the destination's own lock. It must share the
+    canonical lister, runtime scan and status walk skips it. It must share the
     destination's parent: the native no-replace rename refuses a cross-parent
     promote with ``EXDEV`` by design.
+
+    Being skipped by discovery is only half a contract — something has to
+    delete these. The skills reaper does it for skills and *only* for skills
+    (``run_swap_prelude`` returns immediately for any other kind), while this
+    transport stages for every migratable kind, so an agents or commands
+    leftover was hidden from every lister and reaped by nothing: the
+    "invisible to discovery and immortal on disk" state ``_names`` warns
+    about. :func:`_reap_own_staging` is the other half, and it runs for every
+    kind under the destination's own lock.
     """
     return dst_store / f".staging-{dst_name}-{os.getpid()}-{secrets.token_hex(3)}.tmp"
+
+
+def _reap_own_staging(dst_store: Path, dst_name: str) -> None:
+    """Delete leftover staging trees belonging to *dst_name*, under its lock.
+
+    Two independent conditions, and both are load-bearing.
+
+    **The kind must be reapable.** Classified and deletable are different
+    questions (#2304): the predicate hides every internal transient, but
+    ``.migrate-*`` is deliberately absent from
+    :data:`REAPABLE_INTERNAL_ARTIFACT_KINDS` because ``migrate._stage_move``
+    renames the source into staging on the same filesystem, so between that
+    rename and the promote that tree is the ONLY copy of the artifact.
+    Reaping by classification would turn another engine's recoverable crash
+    into data loss. Receipt only ever creates ``.staging-*`` itself, so
+    restricting to the reapable subset costs it nothing.
+
+    **The owner must match**, decided by :func:`internal_artifact_owner` and
+    never by a ``.staging-<name>-*`` glob: that prefix match would make a
+    reaper holding only ``foo``'s lock delete ``foo-bar``'s in-flight tree, and
+    hyphenated artifact names are the norm.
+
+    Best-effort by design. A leftover that cannot be removed must not turn a
+    working import into a failure — the caller stages under a fresh random
+    name regardless, so the worst case is the disk residue we already had.
+    """
+    if not dst_store.is_dir():
+        return
+    try:
+        entries = list(dst_store.iterdir())
+    except OSError as exc:
+        logger.warning("could not scan %s for staging leftovers: %s", dst_store, exc)
+        return
+    reapable = tuple(f".{kind}-" for kind in REAPABLE_INTERNAL_ARTIFACT_KINDS)
+    for entry in entries:
+        if not entry.name.startswith(reapable):
+            continue
+        if internal_artifact_owner(entry.name) != dst_name:
+            continue
+        logger.info("removing staging leftover %s", entry)
+        _remove_staging(entry)
 
 
 def receive_artifact_bundle(
@@ -1325,6 +1700,7 @@ def receive_artifact_bundle(
     new_name: str | None = None,
     force_unsafe: bool = False,
     lock_timeout: float | None = None,
+    pre_materialize: Callable[[], None] | None = None,
 ) -> BundleReceiveResult:
     """Validate a bundle and land it in a canonical store.
 
@@ -1334,6 +1710,16 @@ def receive_artifact_bundle(
     ``mm context init --force-unsafe-import`` valve. Everything decidable is
     decided in memory first, so the bytes scanned are the bytes that land and a
     refusal leaves zero residue under the destination store.
+
+    *pre_materialize* runs once every in-memory gate has passed and this call
+    is definitely going to write, just before the destination lock is taken. It
+    is the seam for destination-side preparation that must not happen for a
+    refused import — establishing the ``project_local`` gitignore marker, in
+    the CLI's case. Doing that work before the gates meant a malformed,
+    privacy-blocked or colliding bundle still modified the destination project;
+    doing it after the write would leave a window where the bytes are present
+    and unignored. It may raise, and its exception propagates unchanged: a
+    destination that cannot be prepared is not a destination.
     """
     bundle = load_bundle(bundle_path)
     kind = bundle.kind
@@ -1341,29 +1727,42 @@ def receive_artifact_bundle(
     if new_name is not None:
         dst_name = validate_name(new_name, kind=f"{kind[:-1]} name")
         _validate_landing_name(dst_name, where="--as")
-        if bundle.versions_included and kind in ("agents", "commands"):
-            raise BundleFormatError(
-                f"cannot rename a {kind[:-1]} bundle that carries version history: a labeled "
-                f"sync resolves a frozen snapshot and fans out under the name inside it, so "
-                f"the renamed copy would write {bundle.name!r}'s runtime target. Ask the "
-                f"sender to re-export with --no-versions."
-            )
+    # Every rename consequence below keys on the name actually DIFFERING, not
+    # on the flag being present. ``--as <the-name-it-already-has>`` is a no-op a
+    # scripted import passes routinely, and keying on the flag made it refuse a
+    # rename it was not performing, print an overrides warning about a rewrite
+    # that never happened, and suppress the adopt hint. The CLI already reports
+    # "renamed from" on this same predicate.
+    renamed = dst_name != bundle.name
+    if renamed and bundle.versions_included and kind in ("agents", "commands"):
+        raise BundleFormatError(
+            f"cannot rename a {kind[:-1]} bundle that carries version history: a labeled "
+            f"sync resolves a frozen snapshot and fans out under the name inside it, so "
+            f"the renamed copy would write {bundle.name!r}'s runtime target. Ask the "
+            f"sender to re-export with --no-versions."
+        )
 
     dst_store = canonical_artifact_dir(kind, to_scope, dst_project_root)
     dst_path = dst_store / dst_name
     needs_sync, sync_command = _sync_followup(to_scope, dst_project_root)
     notes: list[str] = []
-    if any(rel.startswith("overrides/") for rel, _, _ in bundle.payload) and new_name is not None:
+    if any(rel.startswith("overrides/") for rel, _, _ in bundle.payload) and renamed:
         notes.append(
             "overrides/ travel verbatim and were not rewritten for the new name — review them"
         )
 
     adopt_hint: str | None = None
-    if to_scope == "project_shared" and new_name is None and bundle.source_wiki_commit:
+    if to_scope == "project_shared" and not renamed and bundle.source_wiki_commit:
         adopt_hint = f"mm context adopt {kind[:-1]} {dst_name}"
 
     # Rewrite the manifest name in memory BEFORE the scan, so the scan sees the
     # final bytes and no later step changes one (ADR-0037 §6 step 4).
+    #
+    # Unconditional, INCLUDING when nothing is being renamed: the fan-out keys
+    # on the parsed ``name:``, not on the directory, so landing a manifest that
+    # disagrees with its own path would write another artifact's runtime target
+    # — the same hazard the version-history refusal above describes. The rewrite
+    # is a no-op when the manifest already agrees, which is the common case.
     manifest_rel = _DIR_MANIFEST[kind]
     payload: list[tuple[str, bytes, bool]] = []
     for rel, data, is_exec in bundle.payload:
@@ -1389,31 +1788,45 @@ def receive_artifact_bundle(
             f"actually covers."
         )
 
-    result_kwargs = dict(
-        kind=kind,
-        name=bundle.name,
-        dst_name=dst_name,
-        to_scope=to_scope,
-        dst_project_root=dst_project_root,
-        dst_path=dst_path,
-        bundle_path=bundle_path,
-        file_count=len(payload),
-        needs_sync=needs_sync,
-        sync_command=sync_command,
-        versions_included=bundle.versions_included,
-        redaction_exempted=exempted,
-        source_tier=bundle.source_tier,
-        source_wiki_commit=bundle.source_wiki_commit,
-        adopt_hint=adopt_hint,
-        notes=notes,
-    )
+    def _result(*, received: bool) -> BundleReceiveResult:
+        """The dry-run and the applied result differ in exactly one field.
+
+        Built through a typed closure rather than a ``dict`` splatted into the
+        constructor: the dict widened every field to one union, so the checker
+        could no longer tell ``kind`` from ``file_count`` and reported the whole
+        call as twenty type errors. Naming the fields once here keeps the two
+        return paths identical without giving that up.
+        """
+        return BundleReceiveResult(
+            received=received,
+            kind=kind,
+            name=bundle.name,
+            dst_name=dst_name,
+            to_scope=to_scope,
+            dst_project_root=dst_project_root,
+            dst_path=dst_path,
+            bundle_path=bundle_path,
+            file_count=len(payload),
+            needs_sync=needs_sync,
+            sync_command=sync_command,
+            versions_included=bundle.versions_included,
+            redaction_exempted=exempted,
+            source_tier=bundle.source_tier,
+            source_wiki_commit=bundle.source_wiki_commit,
+            adopt_hint=adopt_hint,
+            notes=notes,
+        )
+
     if _collides(dst_store, dst_name):
         raise TransferCollisionError(
             f"{kind}/{dst_name} already exists at scope={to_scope} ({dst_path}). "
             f"Import does not overwrite; use --as <new-name> to land it alongside."
         )
     if not apply_:
-        return BundleReceiveResult(received=False, **result_kwargs)
+        return _result(received=False)
+
+    if pre_materialize is not None:
+        pre_materialize()
 
     with canonical_sidecar_lock(dst_store, dst_name, timeout=lock_timeout):
         try:
@@ -1423,6 +1836,9 @@ def receive_artifact_bundle(
         if _collides(dst_store, dst_name):
             raise TransferCollisionError(f"destination appeared during lock acquire: {dst_path}.")
         dst_store.mkdir(parents=True, exist_ok=True)
+        # Under the destination's lock, so a leftover removed here is provably
+        # ours and not another process's in-flight staging.
+        _reap_own_staging(dst_store, dst_name)
         staging = _staging_path(dst_store, dst_name)
         try:
             staging.mkdir(parents=False, exist_ok=False)
@@ -1448,7 +1864,7 @@ def receive_artifact_bundle(
         except BaseException:
             _remove_staging(staging)
             raise
-    return BundleReceiveResult(received=True, **result_kwargs)
+    return _result(received=True)
 
 
 def _collides(dst_store: Path, dst_name: str) -> bool:
@@ -1459,11 +1875,20 @@ def _collides(dst_store: Path, dst_name: str) -> bool:
     shadowed by a directory landing next to it, since the canonical lister
     gives the directory layout precedence. ``lstat`` so a dangling symlink or
     an entry of the wrong type counts too.
+
+    Only "the entry is not there" counts as absent. Treating every ``OSError``
+    as absent made a transient ``EACCES``/``EIO`` while probing the legacy
+    ``<name>.md`` identity read as "nothing in the way", which is precisely the
+    case this collision check exists to catch — the import would then land a
+    directory that silently shadows the existing flat artifact. A probe that
+    cannot answer must propagate, not answer "no".
     """
     for candidate in (dst_store / dst_name, dst_store / f"{dst_name}.md"):
         try:
             candidate.lstat()
-        except (OSError, ValueError):
+        except (FileNotFoundError, NotADirectoryError):
+            # NotADirectoryError: an ancestor is a file, so this path cannot
+            # exist — a genuine absence, not a failure to look.
             continue
         return True
     return False
@@ -1505,6 +1930,7 @@ def _scan_payload(
             )
             break
     exempted: list[str] = []
+    declared = artifact_exemption == DECLARED_EXEMPTION_DOCUMENTS_PATTERNS
     for rel, data, _ in payload:
         scan = scan_text_content(
             data.decode("utf-8", errors="replace"),
@@ -1515,7 +1941,22 @@ def _scan_payload(
             force_unsafe=force_unsafe,
             declared_exemption=artifact_exemption,
         )
-        if scan.decision == "exempted":
+        if scan.decision == "exempted" or (
+            # ``force_unsafe`` wins over the declaration inside the guard and
+            # returns "bypassed" before the declaration is ever consulted, by
+            # design — its audit line is the one that describes what happened.
+            # But the disclosure this function returns answers a DIFFERENT
+            # question ("what did the declaration cover?"), and reading it off
+            # the admission decision made the two collapse: with the valve set,
+            # every declared file re-derived as waiving nothing, and the
+            # equality check against the wire then refused the sender's honest
+            # disclosure as malformed. So coverage is computed from the hits the
+            # same scan already returned, independently of what was admitted.
+            scan.decision == "bypassed"
+            and declared
+            and bool(scan.hits)
+            and exemption_covers(list(scan.hits))
+        ):
             exempted.append(rel)
         if scan.decision not in ("blocked", "blocked_project_shared"):
             continue

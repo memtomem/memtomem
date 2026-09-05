@@ -94,9 +94,11 @@ artifact-name rules **and**, because it becomes a path segment on the
 receiver, the same portability rules the path grammar below applies — no
 trailing dot, not a reserved device word, and not a forbidden component — and
 is refused outright if it has the shape of an internal staging or move-aside
-directory, which the name validator accepts today but every discovery walk
-skips, so such an artifact would land invisible to `mm context status` and
-unusable as a skill. Both rules apply to a `--as` landing name as well;
+directory: every discovery walk skips those, so such an artifact would land
+invisible to `mm context status` and unusable as a skill. That refusal now lives
+in the shared name validator, so it holds for every surface that names an
+artifact rather than for this transport alone (§6). Both rules apply to a `--as`
+landing name as well;
 `source.tier` is one of the three tiers; `exported_at` is an RFC 3339 UTC
 timestamp with a `Z` suffix; `versions_included` is a boolean that must agree
 with whether the payload actually contains a version surface, and is
@@ -153,6 +155,24 @@ entry may not prefix a file. Folding matters for ancestry and not only for
 equality: file `A` and file `a/b` are distinct as written, yet on a
 case-insensitive filesystem they demand that `A` be a file and a directory at
 once. These are exactly the shapes that cannot be materialized consistently.
+
+Folding covers **implicit** parents too — the directories no entry names but
+materialization creates. `Docs/a.md` and `docs/b.md` collide in no listed path,
+yet a case-insensitive receiver lands both under one directory and still reports
+the whole listed tree as arrived. Two spellings of the same folded parent prefix
+are therefore refused. This is not only a crafted shape: a sender on a
+case-sensitive filesystem produces it from two genuinely different directories.
+
+**A path's type is part of its identity.** `files` and `dirs` are validated as
+two typed sets and never merged into one list of names. Where a rule requires a
+regular file — the kind's manifest, a per-vendor override, a file-layout version
+snapshot — a `dirs` entry spelling that same path does not satisfy it and is
+refused: merging the two let a *directory* named `versions/v1.md` stand in for a
+snapshot `resolve_version` cannot read, and one named `overrides/claude.md`
+stand in for an override no renderer can parse. The converse matters as well, so
+an `overrides/` directory carrying no vendor file travels as a `dirs` entry and
+is accepted as the empty directory it is, rather than refused for having one
+path segment.
 
 **`payload_sha256` binds the structure**, not just the contents. It is SHA-256
 over the byte string formed by the domain-separation line
@@ -300,7 +320,18 @@ with `fstat` on that descriptor, with both the bytes and the `exec` bit taken
 from it. Walking with `lstat` and then reading by path would let an external
 writer swap a vetted regular file for a symlink or a FIFO between the two,
 escaping the artifact or hanging the export while it holds the canonical lock,
-and would let `exec` come from a different inode than the content. A symlink
+and would let `exec` come from a different inode than the content. The same
+discipline covers the **directory** components, not just the final file: each
+directory on the way down is opened relative to its parent's descriptor with
+symlinks and non-directories refused at open time, and the file is opened
+relative to the descriptor of the directory actually walked. Type-checking a
+directory by path and reading through it later by path leaves the identical swap
+window one level up, where `O_NOFOLLOW` on the last component cannot see it.
+Where a platform has no directory descriptors the traversal degrades to paths —
+the same POSIX-strength asymmetry §6 states for the no-follow open. Each file is
+then read with the remaining payload budget as its limit, stopping at the cap
+plus one byte, so a file that would exceed the §7 caps is refused without ever
+being held in memory whole. A symlink
 at any path the bundle would otherwise carry — including the artifact root
 itself — is refused by name rather than skipped, because a skipped link is a
 silent drop the sender never learns about and the mcp-servers copy adapter
@@ -337,6 +368,17 @@ tier:
   `mm context init` already uses for the runtime→canonical ingress. The flag is
   threaded into the scan; the chokepoint still hard-refuses `project_shared`
   with it set, so the flag cannot widen the tier above.
+
+The flag decides **admission**; it does not answer what the artifact's own
+declaration covered. Inside the privacy chokepoint `--force-unsafe-import` wins
+over the declaration by design — its audit line is the one that describes what
+happened — so the receipt's `redaction_exempted` disclosure is derived from the
+hits that scan already returned, not read off its verdict. Collapsing the two
+questions made every declared file re-derive as waiving nothing whenever the
+flag was set, and the mismatch check against the wire then rejected the sender's
+honest disclosure as malformed: a bundle carrying a declaration plus a genuine
+secret was importable to **no** tier at all — refused without the flag, and
+refused as malformed with it.
 
 This deliberately departs from transfer parity, where Gate A runs **only** for a
 `project_shared` destination (`transfer.py`, both the copy and move branches).
@@ -384,14 +426,23 @@ store is touched at all. The order is:
 4. **Produce the final payload**: the manifest's frontmatter `name:` is
    rewritten to the landing name (§8). No later step changes a byte.
 5. **Scan that payload** entry by entry, fail-fast, per §5.
-6. **Take the destination artifact's canonical lock**, run the swap prelude,
+6. **Prepare the destination**, for a `project_local` landing: establish the
+   `.gitignore` marker, failing closed if the tier cannot be protected. This
+   sits here, after every in-memory gate and before the lock, and the placement
+   is load-bearing in both directions — running it earlier let a malformed,
+   privacy-blocked or colliding bundle still modify the destination project's
+   `.gitignore` for an artifact that never landed, and running it after the
+   write leaves a window in which the received bytes are present and unignored.
+7. **Take the destination artifact's canonical lock**, run the swap prelude,
    and re-check for a collision inside the lock against **both** identities:
    `lstat` of `<store>/<name>` and of `<store>/<name>.md`. Either one existing
    is a collision, including a dangling symlink or an entry of the wrong type.
-7. **Materialize once** into an exclusively created staging directory, from the
+   Only "the entry is not there" counts as absent: a probe that fails for any
+   other reason propagates rather than answering "nothing is in the way".
+8. **Materialize once** into an exclusively created staging directory, from the
    same `bytes` objects the scan judged, creating the `dirs` entries and
    applying `exec` per §2.
-8. **Promote**, and remove staging on any failure.
+9. **Promote**, and remove staging on any failure.
 
 Nothing but the promote happens after materialization, so the only crash window
 leaves a staging tree whose bytes were already validated and scanned.
@@ -422,13 +473,34 @@ the fix is the same predicate in one more place, so the refusal goes into the
 name-addressed resolver as well, and an attempt to update, delete, or transfer an
 internal-shaped name is refused rather than served. That closes the window for
 this transport and for the transfer engine at the same time, and the pins cover
-all three verbs. The transfer engine's
-`.migrate-…` staging name was **not** matched by the predicate when this was
-written, so it stayed exposed even after that fix; that pre-existing
-transfer-engine defect was filed with its reproduction as #2304 and has since
-been closed by teaching the predicate that kind and its own suffix width. This
-transport still uses the predicate's own `.staging-…` grammar rather than
-inventing a second one, which is what made it immune to that defect in the
+all three verbs. The refusal lives in the **shared name validator**, not at each
+call site: guarding only the read side would leave the create side accepting an
+internal-shaped name and writing an artifact that the lister then hides and the
+resolver then cannot address, so read and delete both answer "no such artifact"
+and nothing can remove it — trading a visible phantom for an immortal one.
+
+**Hidden from discovery is only half a contract; something has to delete these.**
+The skills reaper runs for skills alone, while this transport stages for every
+migratable kind, so an interrupted `agents` or `commands` receipt would leave a
+staging tree that no lister shows and no reaper collects — exactly the
+"invisible to discovery and immortal on disk" state the predicate's own module
+warns about. Receipt therefore reaps its own leftovers for the destination name,
+under that destination's lock, and only for the kinds named by
+`REAPABLE_INTERNAL_ARTIFACT_KINDS`. Reaping the classified set instead would be
+a data-loss bug: the predicate also classifies `.migrate-…`, and a transfer move
+renames its source into staging, so between that rename and the promote the
+staging tree is the only copy of the artifact. Ownership is decided by parsing
+the owner out of the name rather than by a `.staging-<name>-*` prefix match: the
+prefix form would let a reaper holding only `foo`'s lock delete the in-flight
+tree of `foo-bar`, and hyphenated artifact names are the norm. Reaping is
+best-effort — a leftover that cannot be removed must not turn an otherwise valid
+import into a failure, since staging uses a fresh random suffix regardless.
+
+The transfer engine's `.migrate-…` staging name is matched by the predicate now
+that #2304 has been closed by teaching it that kind and its own suffix width, so
+it is hidden from discovery like the rest while staying out of every reapable
+set. This transport still uses the predicate's own `.staging-…` grammar rather
+than inventing a second one, which is what made it immune to that defect in the
 first place.
 
 Because staging sits inside the store, it inherits the store's own git posture:
@@ -494,6 +566,13 @@ object is depth 1, a `files` entry is depth 3, and a scalar leaf adds nothing �
 so the schema above sits at depth 3 and a tolerated unknown key may nest five
 containers deeper before it is refused.
 
+The nesting bound is enforced on the **raw bytes, before they reach the JSON
+parser**, by scanning for structural brackets outside string literals. A parser
+recurses once per nesting level, so a file far under every byte and entry cap
+can exhaust the interpreter's stack inside the decode itself and raise an error
+that is not in any caller's translation table — surfacing as a traceback rather
+than a refusal. A bound checked after the parse is not a bound on the parse.
+
 The decoded `versions.json` is parsed under the **same** rules as the outer
 document — duplicate object keys refused, the same nesting bound — rather than
 through the version reader's ordinary decoder, whose last-key-wins behavior
@@ -506,6 +585,14 @@ legitimate binary asset in a skill, and skipping what will not decode would
 route those bytes around the gate entirely; replacing undecodable sequences
 keeps an ASCII secret embedded in an otherwise-binary file visible to the
 scanner. This is the rule the sync-side scan and wiki promotion already use.
+
+The one entry that must genuinely be **text** is the manifest the kind requires.
+It is strictly UTF-8 decoded as part of artifact-form validation, which runs on
+the export side as well as on receipt, because its frontmatter `name:` is parsed
+and rewritten (§8). A non-UTF-8 manifest is therefore refused by name at export
+rather than travelling and failing on the receiver with a decoder error about a
+file only the sender can repair. Every other entry keeps the `errors="replace"`
+treatment above, so a binary asset inside a skill still travels.
 
 Parsing rules: duplicate JSON object keys are refused, which requires the parser
 to see the raw member pairs rather than the last-wins mapping a default decoder
@@ -606,8 +693,15 @@ names, but not that the manifest agrees with what is on disk. The rules:
   empty directory without a manifest, or a manifest with no directory, is
   refused rather than treated as "no versions";
 - every recorded tag has its snapshot at the exact path its layout implies
-  (`versions/vN.md` for a file record, `versions/vN/` for a tree record), and no
-  tag has both forms;
+  (`versions/vN.md` for a file record, `versions/vN/` for a tree record), **of
+  the type that layout implies**, and no tag has both forms — a `dirs` entry
+  spelling `versions/vN.md` does not satisfy a file record (§2, "a path's type
+  is part of its identity");
+- the manifest's `schema_version` is one the store itself reads. That ceiling is
+  taken from the version store's own constant rather than restated here: a
+  second, literal list in this transport becomes quietly stricter the moment the
+  store's schema is bumped, and export would then refuse — claiming the store
+  cannot read them — artifacts the store reads fine;
 - the **immediate children** of `versions/` are exactly the set the manifest
   implies — nothing extra, whether a stray file or an orphan `vN/` directory,
   and nothing missing;
