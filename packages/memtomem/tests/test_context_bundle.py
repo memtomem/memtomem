@@ -20,6 +20,7 @@ import pytest
 from memtomem.context.bundle import (
     BUNDLE_FORMAT,
     BUNDLE_VERSION,
+    _HAS_DIR_FD,
     BundleFormatError,
     BundleIntegrityError,
     BundlePrivacyError,
@@ -1044,6 +1045,14 @@ class TestReceipt:
 class TestExportReadPath:
     """The descriptor discipline export claims, pinned as behavior."""
 
+    @pytest.mark.skipif(
+        not _HAS_DIR_FD,
+        reason=(
+            "the refusal is descriptor-based, and this platform has no dir_fd — "
+            "ADR-0037 §4 states the guarantee as POSIX-strength and degrades the "
+            "traversal to paths, where O_NOFOLLOW is 0 and the link is followed"
+        ),
+    )
     def test_a_directory_swapped_for_a_symlink_after_the_walk_is_refused(self, tmp_path) -> None:
         """The walk vets `sub/` by name; the read must not trust that vetting.
 
