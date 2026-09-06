@@ -1393,7 +1393,7 @@ def transfer_artifact(
                         "that held the pre-move bytes (%s) — nothing to rename "
                         "back.",
                         src_path,
-                        restore_from,
+                        restore_from.path,
                     )
 
                 if not cleanup_staging:

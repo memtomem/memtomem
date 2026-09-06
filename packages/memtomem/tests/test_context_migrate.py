@@ -4941,6 +4941,27 @@ def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
     ), messages
 
 
+def test_a_claim_renders_as_its_path_not_as_a_dataclass():
+    """A claim in a message must read as the path, on every platform.
+
+    Rollback ERRORs are the whole of what a hand recovery has to go on, and
+    ``logger`` takes its arguments as ``object`` — so a claim passed to a
+    ``%s`` is a mistake no type checker sees. The default repr would render
+    ``StagingClaim(path=WindowsPath('C:/…'))``: on POSIX that still contains
+    ``str(path)`` as a substring, so a caller matching on the path finds it
+    and the damage stays invisible; on Windows the repr spells separators the
+    other way and the match fails. This pins the rendering rather than the
+    absence of the mistake, because the mistake is the kind that comes back.
+    """
+    from memtomem.context.migrate import StagingClaim
+
+    claim = StagingClaim(path=Path("dest") / ".migrate-foo-1-aaaaaaaa.tmp", identity=(1, 2))
+
+    assert str(claim) == str(claim.path)
+    assert f"preserved at {claim}" == f"preserved at {claim.path}"
+    assert "StagingClaim" not in f"{claim}"
+
+
 class TestTheHoldingEntryIsCarriedAsAnObject:
     """#2314 on the #2313 holding entry: a parked source is claimed too.
 

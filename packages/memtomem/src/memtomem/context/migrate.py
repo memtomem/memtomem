@@ -963,6 +963,21 @@ class StagingClaim:
     path: Path
     identity: StagingIdentity | None
 
+    def __str__(self) -> str:
+        """Render as the path this claim names.
+
+        Every message that mentions a claim means its path, and ``logger``
+        arguments are typed ``object`` — so a claim handed to a ``%s`` is a
+        mistake mypy cannot see, and the default dataclass repr turns a
+        recovery instruction into ``StagingClaim(path=WindowsPath('C:/…'))``.
+        That is not merely ugly: a caller matching on the path finds it on
+        POSIX, where the repr happens to contain ``str(path)`` as a substring,
+        and not on Windows, where the repr spells separators the other way —
+        so the damage shows up on one platform only (#2314, caught by #2327's
+        cell on the Windows shard).
+        """
+        return str(self.path)
+
     @classmethod
     def capture(cls, path: Path) -> "StagingClaim":
         """Record the identity of the entry a claim just created at *path*."""
