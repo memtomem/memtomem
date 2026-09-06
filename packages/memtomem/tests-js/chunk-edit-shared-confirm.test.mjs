@@ -257,7 +257,11 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
      * caller that stopped existing.
      */
     const { window, toasts, patches } = await bootEdit({
-      responses: [redaction403(undefined), SHARED_ENVELOPE],
+      // Scoped, because the URL below is this route's and this route always
+      // reports one. The wrapper never reads the field — that is exactly
+      // what is being pinned — so an unscoped fixture would only add a wire
+      // shape the named route cannot produce.
+      responses: [redaction403('user'), SHARED_ENVELOPE],
       confirmAnswers: [true],
     });
 

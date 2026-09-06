@@ -107,12 +107,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   nothing was lost; it cost an attempt and an unclear message. The editor now
   carries the whole exchange: it asks for whichever consent the server's last
   answer actually asked for, sends the text you were shown rather than
-  whatever the editor holds by then, and never carries one tier's consent into
-  another tier's request. A note whose tier keeps changing stops after a
-  bounded number of attempts and says nothing was saved, instead of asking
-  again indefinitely. The override is offered only on the tiers that honour
-  it, named individually — a refusal that does not say which tier it was
-  decided under is treated as unknown and offered nothing.
+  whatever the editor holds by then, and never sends two consents at once or
+  lets one linger into the next request. A note whose tier keeps changing
+  stops after a bounded number of attempts and says nothing was saved,
+  instead of asking again indefinitely. The override is offered only on the
+  tiers that honour it, named individually — a refusal that does not say
+  which tier it was decided under is treated as unknown and offered nothing.
 
 - **A transfer's cleanup and promote now act on the staging entry they
   created, not on its name** (#2314) — `mm context move` / `copy`, receiving a

@@ -610,14 +610,21 @@ const _MAX_CHUNK_SAVE_ATTEMPTS = 4;
 //   * The body never changes. The editor's textarea can move under an open
 //     dialog, and a caller may reuse one object across saves; re-reading it
 //     on a retry would send bytes no warning ever described.
-//   * ``force_unsafe`` is never carried into a shared-tier attempt.
-//     ``enforce_write_guard`` hard-refuses that combination unconditionally
-//     (privacy.py, ADR-0011 §5 Gate A), so carrying it only converts an
-//     honest redaction refusal into a ``blocked_project_shared`` one.
-//   * ``confirm_project_shared`` is never carried into a bypass attempt. It
-//     means nothing on a private tier, and if the chunk flips back to shared
-//     before that attempt lands it records a SECOND Gate B consent line for
-//     one human answer — corrupting the very audit record #2306 added.
+//   * The two flags are never combined, and neither survives into the
+//     attempt after its own. This is a claim about what we *send*, not about
+//     the tier the request lands on — an attempt carrying ``force_unsafe``
+//     can still be judged on the shared tier if a re-scope beats it there,
+//     and answering the envelope that comes back is the point of the loop.
+//     What it rules out is sending ``force_unsafe`` on an attempt we already
+//     know is shared, where ``enforce_write_guard`` hard-refuses the
+//     combination unconditionally (privacy.py, ADR-0011 §5 Gate A) and
+//     carrying it only converts an honest redaction refusal into a
+//     ``blocked_project_shared`` one; and re-sending
+//     ``confirm_project_shared`` on a bypass attempt, where it means nothing
+//     on the private tier that asked for the bypass and would record a
+//     SECOND Gate B consent line for one human answer if the chunk flipped
+//     back to shared before that attempt landed — corrupting the very audit
+//     record #2306 added.
 //
 // Returns ``null`` when the user declines at any dialog, matching the cancel
 // contract ``apiWithRedactionRetry`` has, so call sites keep one check.
