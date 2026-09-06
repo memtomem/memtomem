@@ -1655,7 +1655,7 @@ class TestExtractLock:
         assert [p.name for p in result.imported] == ["bar"]
         assert not list(canonical.glob(".staging-*")), "orphaned staging tree left behind"
 
-    def test_swap_recovery_is_never_a_promote_race(self) -> None:
+    def test_swap_recovery_is_never_a_promote_race(self, tmp_path: Path) -> None:
         """G4a-3c review: ``_promote_race_conflict`` classifies a
         ``SwapRecoveryError`` as NOT a race for EVERY errno — including the
         ENOTEMPTY/EEXIST shapes a plain OSError would demote — so the promote
@@ -1667,15 +1667,99 @@ class TestExtractLock:
         from memtomem.context._dir_swap import SwapForeignDestination, SwapRecoveryError
         from memtomem.context.skills import _promote_race_conflict
 
+        absent = tmp_path / "no-such-destination"
         for exc in (
             SwapRecoveryError(_errno.EBUSY, "wedged"),
             SwapRecoveryError(_errno.EEXIST, "wedged"),
             SwapRecoveryError(_errno.ENOTEMPTY, "wedged"),
             SwapForeignDestination(_errno.EEXIST, "foreign"),
         ):
-            assert _promote_race_conflict(exc) is False, exc
+            assert _promote_race_conflict(exc, absent) is False, exc
         # A plain ENOTEMPTY OSError still IS a race (the behavior this preserves).
-        assert _promote_race_conflict(OSError(_errno.ENOTEMPTY, "plain")) is True
+        assert _promote_race_conflict(OSError(_errno.ENOTEMPTY, "plain"), absent) is True
+        # ``dst`` is deliberately ABSENT above: the recovery types must be
+        # refused on TYPE before the errno half looks at anything, and
+        # ENOTEMPTY must stay a race without needing an occupant. Only the
+        # ambiguous ENOTDIR consults the path (#2319) — with nothing there it
+        # is not a race, and with an occupant it is.
+        assert _promote_race_conflict(OSError(_errno.ENOTDIR, "broken"), absent) is False
+        occupied = tmp_path / "occupied"
+        occupied.write_text("someone else", encoding="utf-8")
+        assert _promote_race_conflict(OSError(_errno.ENOTDIR, "shape"), occupied) is True
+
+    def test_target_conflict_refusals_carry_no_errno(self, tmp_path: Path) -> None:
+        """#2319 — the discriminator ``_promote_race_conflict`` relies on.
+
+        Python maps ``ENOTDIR``/``EISDIR`` onto the SAME two classes
+        ``_target_conflict`` builds, so a bare isinstance check demoted every
+        kernel refusal of those shapes to a skip. What separates them is that
+        our own refusals are constructed with a single string and therefore
+        carry no errno. If a future edit gives one of them an errno, the
+        discriminator silently starts re-raising a conflict it used to skip —
+        so pin the property here, at the producer.
+        """
+        from memtomem.context.skills import _target_conflict
+
+        flat = tmp_path / "flat"
+        flat.write_text("not a directory", encoding="utf-8")
+        not_a_dir = _target_conflict(flat)
+        assert isinstance(not_a_dir, NotADirectoryError)
+        assert not_a_dir.errno is None
+
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        (foreign / "unrelated.txt").write_text("x", encoding="utf-8")
+        is_a_dir = _target_conflict(foreign)
+        assert isinstance(is_a_dir, IsADirectoryError)
+        assert is_a_dir.errno is None
+
+        # The kernel's versions of the same two classes DO carry one.
+        assert OSError(errno.ENOTDIR, "kernel").errno == errno.ENOTDIR
+        assert OSError(errno.EISDIR, "kernel").errno == errno.EISDIR
+
+    def test_move_aside_failure_is_not_a_destination_race(self, tmp_path: Path) -> None:
+        """#2319 — a failure moving the OLD tree aside is not about ``dst``.
+
+        ``_promote_staging`` parks the existing tree at a ``.old-*`` name
+        before renaming staging in. If that park fails, nothing landed and
+        ``dst`` is still sitting there — so a classifier that probes the
+        destination sees it occupied and would call this a routine race,
+        dropping the destination as a skip. The re-raise chains the cause,
+        which is the marker the race predicate already refuses to demote.
+        """
+        import memtomem.context.skills as skills_mod
+        from memtomem.context.skills import _promote_race_conflict
+
+        dst = tmp_path / "canonical"
+        dst.mkdir()
+        (dst / SKILL_MANIFEST).write_text("---\nname: foo\n---\n", encoding="utf-8")
+        staging = tmp_path / ".staging"
+        staging.mkdir()
+        (staging / SKILL_MANIFEST).write_text("---\nname: foo\n---\n", encoding="utf-8")
+
+        real_replace = skills_mod.os.replace
+
+        def fail_the_park(src, target):
+            if ".old-" in str(target):
+                raise OSError(errno.ENOTDIR, "Not a directory", str(target))
+            return real_replace(src, target)
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(skills_mod.os, "replace", fail_the_park)
+            with pytest.raises(OSError) as exc_info:
+                skills_mod._promote_staging(staging, dst, replace_existing=True)
+        finally:
+            monkeypatch.undo()
+
+        exc = exc_info.value
+        # Names the path that actually refused, not the destination.
+        assert ".old-" in str(exc)
+        # Chained — so the race predicate refuses to demote it to a skip even
+        # though ``dst`` is occupied and the errno is an occupancy shape.
+        assert exc.__cause__ is not None
+        assert dst.is_dir(), "the destination must be untouched"
+        assert _promote_race_conflict(exc, dst) is False
 
     def test_promote_nonrace_oserror_reraises_loud(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

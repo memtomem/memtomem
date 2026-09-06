@@ -1608,6 +1608,16 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "Best-effort reap of .old-* trees (swallowed OSError); references only "
         "the internal-dir enumerator, no swap primitive; " + _RO,
     ),
+    ("context/skills.py", "_promote_staging", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Move-aside arm, wrapped tightly around os.replace(dst, old) alone (#2319). "
+        "A plain rename raises no recovery error of its own, and the swap prelude "
+        "that can raise one already ran and returned before this line. The re-raise "
+        "chains the cause deliberately: __cause__ is the marker "
+        "_promote_race_conflict reads to refuse demoting a state to a skip, so a "
+        "move-aside failure can never be misread as a destination race at dst.",
+    ),
     ("context/skills.py", "_promote_staging", ("BaseException",), 0): (
         _R,
         "bare",

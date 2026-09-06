@@ -96,7 +96,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
-from memtomem.context._atomic import atomic_write_bytes, fsync_dir, rename_no_replace
+from memtomem.context._atomic import (
+    atomic_write_bytes,
+    fsync_dir,
+    rename_no_replace,
+    rename_refused_by_occupant,
+)
 from memtomem.context._names import validate_name
 
 logger = logging.getLogger(__name__)
@@ -893,7 +898,7 @@ def _rename_recovery(src: Path, dst: Path) -> None:
     try:
         rename_no_replace(src, dst)
     except OSError as exc:
-        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+        if rename_refused_by_occupant(exc, dst):
             raise SwapForeignDestination(
                 errno.EBUSY,
                 f"'{dst}' was recreated by a non-gateway writer while recovering the swap; "

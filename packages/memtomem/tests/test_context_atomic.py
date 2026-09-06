@@ -29,6 +29,7 @@ from memtomem.context._atomic import (
     iter_installed_files,
     link_or_copy_file,
     rename_no_replace,
+    rename_refused_by_occupant,
     validate_tree_strict,
     write_tree_payload,
 )
@@ -1069,6 +1070,145 @@ class TestRenameNoReplace:
         assert exc.value.errno != errno.EXDEV
         assert dst.is_symlink()
         assert (src / "f.md").read_text() == "new"
+
+
+class TestRenameRefusedByOccupant:
+    """#2319 — one predicate for "did this rename refuse because dst is taken".
+
+    Five call sites were answering this in four spellings: the transfer
+    promote, both bundle promotes, the swap recovery rename-in, and the skills
+    promote race. The narrow copies missed ``EISDIR``; the wide ones took
+    ``ENOTDIR`` as proof of occupancy when it is not.
+    """
+
+    @pytest.mark.parametrize("code", ["EEXIST", "ENOTEMPTY", "EISDIR"])
+    def test_unambiguous_codes_need_no_probe(self, tmp_path: Path, code: str) -> None:
+        """These mean "occupied" whatever is or is not at the path.
+
+        Deliberately probed against an ABSENT dst: a no-replace rename answers
+        ``EEXIST`` for an occupied target, so if the path reads as empty by the
+        time we look, the rename still refused and the caller still must not
+        treat it as success.
+        """
+        absent = tmp_path / "nothing-here"
+        exc = OSError(getattr(errno, code), "refused")
+
+        assert rename_refused_by_occupant(exc, absent) is True
+
+    def test_enotdir_with_nothing_there_is_not_occupancy(self, tmp_path: Path) -> None:
+        """The conjunction. ``ENOTDIR`` also means "a path component is broken"."""
+        assert (
+            rename_refused_by_occupant(OSError(errno.ENOTDIR, "broken"), tmp_path / "gone") is False
+        )
+
+    @pytest.mark.parametrize("shape", ["file", "empty_dir", "full_dir"])
+    def test_enotdir_with_an_occupant_is_occupancy(self, tmp_path: Path, shape: str) -> None:
+        dst = tmp_path / "taken"
+        if shape == "file":
+            dst.write_text("occupant", encoding="utf-8")
+        else:
+            dst.mkdir()
+            if shape == "full_dir":
+                (dst / "child.md").write_text("x", encoding="utf-8")
+
+        assert rename_refused_by_occupant(OSError(errno.ENOTDIR, "shape"), dst) is True
+
+    @pytest.mark.requires_symlinks
+    def test_a_dangling_symlink_occupies_the_name(self, tmp_path: Path) -> None:
+        """``lexists``, not ``exists`` — the shape a check cannot see."""
+        dst = tmp_path / "link"
+        dst.symlink_to(tmp_path / "no-such-target")
+        assert not dst.exists()
+
+        assert rename_refused_by_occupant(OSError(errno.ENOTDIR, "shape"), dst) is True
+
+    @pytest.mark.parametrize("code", ["ENOENT", "EXDEV", "EIO", "EACCES", "ENOSPC"])
+    def test_unrelated_codes_are_never_occupancy(self, tmp_path: Path, code: str) -> None:
+        """Even with the destination occupied.
+
+        This is the half that a rule of "occupied, OR something is at dst"
+        would get wrong, and it is the expensive direction: ``ENOENT`` means
+        the staging tree is gone, and for a move staging is the only copy.
+        A deliberate cross-parent ``EXDEV`` would likewise be downgraded to a
+        routine collision.
+        """
+        occupied = tmp_path / "taken"
+        occupied.write_text("occupant", encoding="utf-8")
+
+        exc = OSError(getattr(errno, code), "unrelated")
+
+        assert rename_refused_by_occupant(exc, occupied) is False
+
+    def test_it_answers_and_does_not_act(self, tmp_path: Path) -> None:
+        """Pure predicate: nothing is created, removed, or renamed."""
+        dst = tmp_path / "taken"
+        dst.mkdir()
+        (dst / "keep.md").write_text("intact", encoding="utf-8")
+
+        rename_refused_by_occupant(OSError(errno.EEXIST, "refused"), dst)
+        rename_refused_by_occupant(OSError(errno.ENOTDIR, "refused"), dst)
+        rename_refused_by_occupant(OSError(errno.ENOENT, "refused"), dst)
+
+        assert (dst / "keep.md").read_text(encoding="utf-8") == "intact"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["taken"]
+
+
+class TestFileLockOnANonDirectoryParent:
+    """#2319 — the lock reports an unusable store path as what it is.
+
+    ``_file_lock`` creates the lock's parent before anything else, so this
+    fires ahead of any guard in the caller's body — which is why translating
+    it at the call site was not enough. Left as ``FileExistsError`` it arrives
+    wearing the costume of a routine collision: several callers use that exact
+    type as their "the destination is taken" signal, and one web route mapped
+    it straight to a 409 naming a conflict that does not exist.
+    """
+
+    @pytest.mark.parametrize(
+        "shape", ["file", pytest.param("dangling_symlink", marks=pytest.mark.requires_symlinks)]
+    )
+    def test_translated_to_enotdir_and_body_never_runs(self, tmp_path: Path, shape: str) -> None:
+        store = tmp_path / "agents"
+        if shape == "file":
+            store.write_text("not a directory", encoding="utf-8")
+        else:
+            store.symlink_to(tmp_path / "no-such-target")
+
+        entered = False
+
+        with pytest.raises(NotADirectoryError) as exc_info:
+            with _file_lock(store / ".foo.lock"):
+                entered = True  # pragma: no cover - the point is that it does not run
+
+        assert entered is False, "the lock body ran on an unusable store path"
+        assert exc_info.value.errno == errno.ENOTDIR
+        # NOT the collision signal several callers key on.
+        assert not isinstance(exc_info.value, FileExistsError)
+        # The original is chained so the cause is still recoverable.
+        assert isinstance(exc_info.value.__cause__, FileExistsError)
+        assert str(store) in str(exc_info.value)
+
+    def test_a_real_directory_still_locks(self, tmp_path: Path) -> None:
+        """The guard is narrow: an ordinary store is untouched by it."""
+        store = tmp_path / "agents"
+        store.mkdir()
+        entered = False
+
+        with _file_lock(store / ".foo.lock"):
+            entered = True
+
+        assert entered is True
+
+    def test_a_missing_parent_is_still_created(self, tmp_path: Path) -> None:
+        """``exist_ok=True`` semantics survive — this only refuses non-directories."""
+        store = tmp_path / "deep" / "agents"
+        entered = False
+
+        with _file_lock(store / ".foo.lock"):
+            entered = True
+
+        assert entered is True
+        assert store.is_dir()
 
 
 class TestStrictTreeWalkers:

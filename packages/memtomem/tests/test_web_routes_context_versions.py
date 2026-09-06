@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import errno
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -100,6 +101,46 @@ def _by_name(items: list[dict], name: str) -> dict:
 # ---------------------------------------------------------------------------
 # List
 # ---------------------------------------------------------------------------
+
+
+class TestBrokenStorePathIsNotAConflict:
+    """#2319 — an unusable store path must not be reported as a collision.
+
+    Taking the lock that guards an artifact creates the store folder first, so
+    a store path replaced by a plain file failed there with the same signal the
+    engine uses for "the destination is taken". This route mapped that signal
+    straight to 409 ``destination_exists``, naming a conflict with an artifact
+    that does not exist and sending the operator to remove it. The lock now
+    reports ``ENOTDIR``, which no collision arm claims.
+
+    The trigger is a race (the store is replaced after the artifact resolves),
+    so the failure is injected rather than staged on disk. What is pinned is
+    the ROUTING: whatever this becomes, it is never the false conflict.
+    """
+
+    async def test_enotdir_is_not_reported_as_destination_exists(
+        self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import memtomem.web.routes.context_versions as route_mod
+
+        _make_flat_agent(tmp_path, "legacy")
+
+        def store_path_is_a_file(*_a, **_kw):
+            raise NotADirectoryError(
+                errno.ENOTDIR,
+                "lock directory is not a directory: /store/agents",
+                "/store/agents/.legacy.lock",
+            )
+
+        monkeypatch.setattr(route_mod, "adopt_flat_to_dir", store_path_is_a_file)
+
+        r = await client.post("/api/context/agents/legacy/versions/enable", json={})
+
+        assert r.status_code != 409, r.text
+        body = r.json()
+        assert "destination_exists" not in r.text, r.text
+        # Whatever it is, it names the real problem rather than a conflict.
+        assert "not a directory" in r.text.lower(), body
 
 
 class TestListVersions:
