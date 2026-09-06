@@ -379,6 +379,70 @@ instead.
 > `project_shared` write takes two gates" is a claim about the memory
 > CRUD and context surfaces, not about every writer in the tree.
 
+> **2026-09 (#2321):** The LangGraph `MemtomemStore.add()` adapter named
+> above now carries both gates, on every destination it writes to — the
+> caller-supplied `file=` and the derived daily file alike.
+> `confirm_project_shared` is required when the destination lands in the
+> `project_shared` tier, the consent line records
+> `confirmed_via=langgraph_add`, and Gate A is handed that same tier
+> instead of the `user` default it had been scanning under. #2322 remains
+> open, so the paragraph's closing sentence still holds as written.
+>
+> The derived branch is gated too, which is worth saying because it was
+> briefly left out. A daily file lands wherever `memory_dirs` points, and
+> asking an automatic write to carry a confirmation argument looked like
+> #2322's question rather than this one's — but #2322 enumerates four
+> other writers and says in its own text that the caller-controlled case
+> belongs here, so there was nothing to defer it to. Where one directory
+> is registered as both a user and a project memory directory, that daily
+> file really is in the tracked tier, and both gates now say so.
+>
+> What this surface had to settle that the CRUD tools did not — and the
+> caution for any future writer that takes a path from its caller.
+> `classify_scope` decides the tier from the path's *spelling*, and a
+> path can be spelled to defeat it in both directions. A target nested at
+> `<registered-shared-root>/sub/.memtomem/memories.local/note.md` matches
+> the `project_local` pattern first — a tier that asks for no
+> confirmation and admits `force_unsafe=True` — while every byte of it
+> lands inside the tree the shared root registered. And the default user
+> memory directory is literally `~/.memtomem/memories`, which matches the
+> `project_shared` pattern exactly, so a refusal keyed on "canonical
+> shape but unregistered" rejects the most ordinary target there is.
+>
+> The adapter therefore decides the tier by **ownership rather than
+> spelling**: the registered project root that covers the target decides,
+> most specific root winning; failing that, a target covered by a
+> configured user memory directory is `user` whatever it looks like; and
+> only a target covered by nothing is refused for wearing a canonical
+> shape it has not registered.
+>
+> Ownership alone is not sufficient, because the gates and the *rows*
+> answer to different judges. The gates protect the write; `mem_edit` and
+> `mem_delete` read the tier from the persisted chunk, which the indexer
+> labels with `classify_scope` — the spelling answer. So the adapter
+> requires the two to agree and refuses the write when they do not,
+> rather than leaving behind a row it could not gate again. Both
+> directions are real. Gated `project_shared` but stored `project_local`
+> is the nested path above: the add is protected and the later edit is
+> not. Gated `user` but stored `project_shared` is a
+> `project_memory_dirs` entry whose own path is not canonical — it cannot
+> name its own tier, so it does not get to decide one, and without the
+> round-trip check the target would fall through to the user branch and
+> reach the tracked tier having passed neither gate. Making the two
+> judges agree in general means changing the classifier every read
+> surface shares, which is a decision for the classifier and not for one
+> adapter.
+>
+> Two limits are stated rather than closed. The pattern is
+> case-sensitive, so on a case-insensitive filesystem an alternate-case
+> spelling of `.memtomem/memories` is not recognised by the ownership
+> rule or by `classify_scope`: the two agree on `user`, the round-trip
+> check is satisfied, and the write proceeds ungated onto a path the
+> repository still tracks. And the tier is decided before the write lock,
+> as in `_mem_add_core`, so a rename of an ancestor between the resolve
+> and the append is not covered. Both belong to the classifier and the
+> lock contract rather than to any one surface.
+
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious
 bypass route. PR-D refactored `mem_batch_add` (`server/tools/memory_crud.py:668`)
