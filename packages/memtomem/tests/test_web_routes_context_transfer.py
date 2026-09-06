@@ -309,6 +309,56 @@ async def test_collision_409_destination_exists(client, cwd_root: Path, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_staging_collision_409_transfer_staging_busy(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A staging leftover is a conflict, not a 500 (#2309).
+
+    Its own reason code, never ``destination_exists``: the destination is
+    free — a leftover under a staging name is in the way, and the remediation
+    is to inspect that entry, not to remove anything at the destination. The
+    engine refuses to clear it because it can be an interrupted move's only
+    copy of an artifact, so the caller has to be told which state this is.
+    """
+    from memtomem.context import migrate as migrate_mod
+
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    # Pin the suffix and plant a leftover under it — a real collision, built
+    # the way the engine's own tests build one.
+    monkeypatch.setattr(migrate_mod.os, "getpid", lambda: 424242)
+    monkeypatch.setattr(migrate_mod.secrets, "token_hex", lambda _n: "deadbeef")
+    dst_store = _shared_agents(other)
+    dst_store.mkdir(parents=True, exist_ok=True)
+    leftover = dst_store / ".migrate-foo-424242-deadbeef.tmp"
+    leftover.mkdir()
+    (leftover / "agent.md").write_text("only copy\n", encoding="utf-8")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "move",
+            "to_target_scope": "project_shared",
+            "to_project_scope_id": scope_b,
+            "confirm_project_shared": True,
+        },
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "conflict"
+    assert detail["reason_code"] == "transfer_staging_busy"
+    # The wire truncates an engine reason at 200 characters, so the whole
+    # remediation has to live in front of the paths.
+    assert "was NOT removed" in detail["message"]
+    assert "Inspect it by hand, then retry." in detail["message"]
+    # The leftover survived the request, which is the entire point.
+    assert (leftover / "agent.md").read_text(encoding="utf-8") == "only copy\n"
+
+
+@pytest.mark.asyncio
 async def test_paused_destination_409_sync_paused(client, cwd_root: Path, tmp_path: Path) -> None:
     _write_agent(_shared_agents(cwd_root), "foo")
     other = _other_project(tmp_path)

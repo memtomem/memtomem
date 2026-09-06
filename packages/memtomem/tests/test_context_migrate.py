@@ -12,6 +12,8 @@ need a ``wiki_root`` fixture.
 
 from __future__ import annotations
 
+import errno
+import shutil
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +37,20 @@ from memtomem.context.migrate import (
 
 
 _ASSET_DIR_FILES = {"agents": "agent.md", "commands": "command.md"}
+
+
+def _real_stage_rename():
+    """The unpatched staging rename, captured before a test swaps it out.
+
+    ``_stage_move`` stages with ``rename_no_replace`` rather than a bare
+    ``os.rename`` (#2309), so an EXDEV simulation has to patch that name in
+    migrate's namespace. Reading it off the module keeps a fake's passthrough
+    honest: capturing ``os.rename`` instead would silently drop the
+    exclusivity the staging claim depends on.
+    """
+    from memtomem.context import migrate as migrate_mod
+
+    return migrate_mod.rename_no_replace
 
 
 def test_stage_move_produces_an_internal_artifact_name(tmp_path: Path) -> None:
@@ -61,6 +77,661 @@ def test_stage_move_produces_an_internal_artifact_name(tmp_path: Path) -> None:
     # gone, so this staging tree is the only copy in existence.
     assert src_consumed is True
     assert not src.exists()
+
+
+# ── #2309: a colliding staging name is never cleared ─────────────────
+
+
+_FORCED_PID = "424242"
+_FORCED_HEX = ("aaaaaaaa", "bbbbbbbb")
+
+
+def _force_staging_suffix(monkeypatch, *hexes: str) -> None:
+    """Pin the staging suffix so a collision can be built on purpose.
+
+    Reaching one for real needs pid reuse AND a 32-bit hex collision. The
+    guard is what is under test, not the odds, so the suffix is forced. Both
+    stagers spell the name in migrate's namespace, so patching it here covers
+    move and copy alike.
+    """
+    from memtomem.context import migrate as migrate_mod
+
+    remaining = list(hexes)
+
+    def fake_token_hex(_n: int) -> str:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    monkeypatch.setattr(migrate_mod.os, "getpid", lambda: int(_FORCED_PID))
+    monkeypatch.setattr(migrate_mod.secrets, "token_hex", fake_token_hex)
+
+
+def _exdev_always(monkeypatch) -> None:
+    """Force every staging rename to report EXDEV, selecting the copy path."""
+    import errno as _errno
+
+    def always_exdev(src, dst, **kwargs):
+        raise OSError(_errno.EXDEV, "Cross-device link", str(src))
+
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", always_exdev)
+
+
+def _forced_staging_path(dst_parent: Path, name: str, hexpart: str) -> Path:
+    return dst_parent / f".migrate-{name}-{_FORCED_PID}-{hexpart}.tmp"
+
+
+def _plant(path: Path, kind: str, body: str = "leftover") -> Path:
+    """Create a collider of *kind* at *path* and return it."""
+    if kind == "file":
+        path.write_text(body, encoding="utf-8")
+    elif kind == "empty_dir":
+        path.mkdir()
+    elif kind == "full_dir":
+        path.mkdir()
+        (path / "agent.md").write_text(body, encoding="utf-8")
+    elif kind == "dangling_link":
+        path.symlink_to(path.parent / "nowhere-at-all")
+    else:  # pragma: no cover - test bug
+        raise AssertionError(f"unknown collider kind: {kind}")
+    return path
+
+
+def _collider_state(path: Path) -> tuple[str, str]:
+    """What the collider is right now, as ``(shape, payload)``.
+
+    Compared before and after, so a cell fails whether the entry was deleted,
+    replaced by a different shape, or rewritten in place.
+    """
+    if path.is_symlink():
+        return "link", os.readlink(path)
+    if path.is_dir():
+        names = sorted(p.name for p in path.iterdir())
+        bodies = [(path / n).read_text(encoding="utf-8") for n in names if (path / n).is_file()]
+        return "dir", repr((names, bodies))
+    return "file", path.read_text(encoding="utf-8")
+
+
+def _same_link_target(a: Path, b: Path) -> bool:
+    """Whether two symlinks point at the same place, spelling aside.
+
+    ``os.readlink`` on Windows reports an absolute link's substitution path in
+    the extended-length ``\\\\?\\`` form, and that form is what production hands
+    back to ``os.symlink`` — normalizing it there would damage UNC and
+    long-path semantics, so the comparison is what has to be semantic. Both
+    sides are dangling in one of the cells below, which rules out ``resolve``:
+    ``os.path.realpath`` answers for a missing target too.
+    """
+    return os.path.realpath(os.readlink(a)) == os.path.realpath(os.readlink(b))
+
+
+def _src_tree(tmp_path: Path, body: str = "source") -> Path:
+    src = tmp_path / "src" / "reviewer"
+    src.mkdir(parents=True)
+    (src / "agent.md").write_text(body, encoding="utf-8")
+    return src
+
+
+def _src_file(tmp_path: Path, body: str = "source") -> Path:
+    src = tmp_path / "src" / "reviewer.md"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(body, encoding="utf-8")
+    return src
+
+
+class TestStagingCollisionNeverClearsTheCollider:
+    """#2309: a staging-name collision fails closed; it never deletes.
+
+    ``_stage_move`` reaches staging by renaming the source on the same
+    filesystem, so between that rename and the promote the staging tree is the
+    ONLY copy of the artifact. The predecessor cleared a colliding entry on the
+    theory that pid plus 32 random bits made it our own crashed leftover — true,
+    and still not a licence to delete it. Every cell below plants a collider,
+    forces the collision, and pins that the collider's bytes AND the source
+    both survive.
+
+    The cells also pin what a plain ``os.rename`` cannot do: it replaces a file
+    and an empty directory silently, and it cannot even see a dangling symlink
+    (``Path.exists`` is False for one), so the old ``exists()`` guard skipped
+    straight to a replace that unlinked it.
+    """
+
+    @pytest.mark.parametrize("collider", ["file", "empty_dir", "full_dir"])
+    def test_move_refuses_and_keeps_both_sides(self, tmp_path, monkeypatch, collider):
+        from memtomem.context.migrate import _stage_move, TransferStagingBusyError
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), collider)
+        before = _collider_state(planted)
+        src = _src_tree(tmp_path)
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert _collider_state(planted) == before
+        # The source is the other half: a stager that consumed src and THEN
+        # failed would leave the artifact nowhere at all.
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+        assert sorted(p.name for p in dst_parent.iterdir()) == [planted.name]
+
+    @pytest.mark.requires_symlinks
+    def test_move_refuses_a_dangling_symlink_collider(self, tmp_path, monkeypatch):
+        """``Path.exists()`` is False for a dangling link — the old guard never
+        fired on one and the replace below it unlinked it."""
+        from memtomem.context.migrate import _stage_move, TransferStagingBusyError
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        planted = _plant(
+            _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), "dangling_link"
+        )
+        assert not planted.exists() and planted.is_symlink()
+        before = _collider_state(planted)
+        src = _src_tree(tmp_path)
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert planted.is_symlink()
+        assert _collider_state(planted) == before
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+
+    @pytest.mark.parametrize(
+        ("collider", "make_src"),
+        [("file", _src_tree), ("full_dir", _src_file)],
+        ids=["dir-src-file-collider", "file-src-dir-collider"],
+    )
+    def test_move_refuses_across_shape_mismatches(self, tmp_path, monkeypatch, collider, make_src):
+        """A type mismatch is a different kernel refusal (``ENOTDIR`` /
+        ``EISDIR`` / ``ENOTEMPTY``), and it must still preserve both sides."""
+        from memtomem.context.migrate import _stage_move, TransferStagingBusyError
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), collider)
+        before = _collider_state(planted)
+        src = make_src(tmp_path)
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert _collider_state(planted) == before
+        assert src.exists()
+
+    def test_a_broken_source_path_is_not_reported_as_a_busy_name(self, tmp_path, monkeypatch):
+        """A failure that is not about our name must not become a busy name.
+
+        Classifying by errno burned the retry and then announced a busy name for
+        two paths that were never created — the confident-but-wrong diagnosis
+        this whole change exists to avoid (Codex review). The errno itself is
+        not portable and is deliberately NOT asserted: a regular file used as a
+        directory component reports ``ENOTDIR`` on POSIX and ``ENOENT`` on
+        Windows, and pinning either would pass on one platform while pinning
+        nothing about the behaviour. What matters is the classification, so
+        that is what this asserts.
+
+        Pin: the original error escapes untyped, and neither staging name was
+        left on disk to be mistaken for a leftover later.
+        """
+        from memtomem.context.migrate import TransferStagingBusyError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, *_FORCED_HEX)
+        # A regular file used as a directory component: nothing about this
+        # failure involves a staging name.
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("regular file", encoding="utf-8")
+        src = blocker / "reviewer"
+
+        with pytest.raises(OSError) as exc:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert not isinstance(exc.value, TransferStagingBusyError)
+        assert list(dst_parent.iterdir()) == []
+        assert blocker.read_text(encoding="utf-8") == "regular file"
+
+    def test_move_retries_once_onto_a_fresh_suffix(self, tmp_path, monkeypatch):
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, *_FORCED_HEX)
+        planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), "full_dir")
+        before = _collider_state(planted)
+        src = _src_tree(tmp_path)
+
+        staging, src_consumed = _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert staging == _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[1])
+        assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
+        assert src_consumed is True
+        assert not src.exists()
+        assert _collider_state(planted) == before
+
+    @pytest.mark.parametrize("src_kind", ["dir", "file"])
+    def test_an_eexist_while_filling_is_not_a_name_collision(self, tmp_path, monkeypatch, src_kind):
+        """The claim/fill split is the design; this is the cell that pins it.
+
+        Only the exclusive-create runs inside the retry. An ``EEXIST`` raised
+        LATER — while copying into an entry this process already owns — has a
+        different cause, and retrying it against a fresh name would report a
+        busy name for something that never collided. Pin: the original error
+        escapes unchanged, no second staging name is even generated, and the
+        cleanup removes exactly the one entry the claim created.
+        """
+        from memtomem.context import migrate as migrate_mod
+        from memtomem.context.migrate import TransferStagingBusyError, _stage_copy_into
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, *_FORCED_HEX)
+
+        names: list[Path] = []
+        real_path = migrate_mod.transfer_staging_path
+
+        def recording_path(parent, hint):
+            generated = real_path(parent, hint)
+            names.append(generated)
+            return generated
+
+        monkeypatch.setattr(migrate_mod, "transfer_staging_path", recording_path)
+
+        sentinel = FileExistsError(errno.EEXIST, "File exists", "somewhere/inside")
+
+        def exploding_fill(*args, **kwargs):
+            raise sentinel
+
+        if src_kind == "dir":
+            monkeypatch.setattr(migrate_mod.shutil, "copytree", exploding_fill)
+            src = _src_tree(tmp_path)
+        else:
+            monkeypatch.setattr(migrate_mod.shutil, "copy2", exploding_fill)
+            src = _src_file(tmp_path)
+
+        with pytest.raises(FileExistsError) as exc:
+            _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+        assert exc.value is sentinel
+        assert not isinstance(exc.value, TransferStagingBusyError)
+        # One name generated means the fill failure never reached the retry.
+        assert len(names) == 1, names
+        # Cleanup removed the entry the claim created, and nothing else.
+        assert list(dst_parent.iterdir()) == []
+        assert src.exists()
+
+    def test_move_fails_closed_on_a_second_collision(self, tmp_path, monkeypatch):
+        """Two distinct collided suffixes: one retry, then stop. Both leftovers
+        stay — retrying forever would spin against a permanent obstruction, and
+        clearing either is the bug this issue is about."""
+        from memtomem.context.migrate import _stage_move, TransferStagingBusyError
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, *_FORCED_HEX)
+        first = _plant(
+            _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), "full_dir", "first"
+        )
+        second = _plant(
+            _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[1]), "full_dir", "second"
+        )
+        states = (_collider_state(first), _collider_state(second))
+        src = _src_tree(tmp_path)
+
+        with pytest.raises(TransferStagingBusyError) as exc:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert (_collider_state(first), _collider_state(second)) == states
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+
+        # The message is the whole remediation: a leftover nothing reaps needs
+        # the operator to look at it, so it has to say which paths and that
+        # they were left alone. Constructed one-argument on purpose, so this is
+        # the sentence the CLI prints rather than an ``[Errno …]`` form.
+        message = str(exc.value)
+        assert str(first) in message
+        assert str(second) in message
+        assert "was NOT removed" in message
+        assert not message.startswith("[Errno")
+
+    @pytest.mark.parametrize("collider", ["file", "empty_dir", "full_dir"])
+    def test_exdev_fallback_refuses_and_keeps_both_sides(self, tmp_path, monkeypatch, collider):
+        """The copy fallback claims exclusively too. Its cleanup runs only
+        after a successful claim, so a refused claim leaves the collider
+        untouched rather than tidying away someone else's bytes."""
+        from memtomem.context.migrate import _stage_move, TransferStagingBusyError
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+        planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), collider)
+        before = _collider_state(planted)
+        src = _src_tree(tmp_path)
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert _collider_state(planted) == before
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+
+    def test_exdev_fallback_retries_onto_a_fresh_suffix(self, tmp_path, monkeypatch):
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, *_FORCED_HEX)
+        _exdev_always(monkeypatch)
+        planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), "full_dir")
+        before = _collider_state(planted)
+        src = _src_tree(tmp_path)
+
+        staging, src_consumed = _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert staging == _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[1])
+        assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
+        # The copy fallback never consumes the source.
+        assert src_consumed is False
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+        assert _collider_state(planted) == before
+
+    @pytest.mark.requires_symlinks
+    @pytest.mark.parametrize("target", ["dir", "file", "dangling"])
+    def test_exdev_fallback_lands_a_symlink_source_as_a_link(self, tmp_path, monkeypatch, target):
+        """The copy fallback must mirror the rename's symlink semantics.
+
+        ``Path.is_dir`` follows links, so a top-level link to a DIRECTORY is
+        the cell that catches a dispatch testing shape before linkness: that
+        order takes the tree branch and materializes out-of-tree bytes into a
+        possibly git-tracked destination tier. A dangling link is the cell that
+        catches a copy which reads through the link.
+
+        The two links are compared for the same TARGET, not the same string.
+        Windows deliberately reports an absolute link's substitution path in the
+        extended-length ``\\\\?\\`` form, and that form is what must be handed
+        back to ``os.symlink`` — normalizing it in production would damage UNC
+        and long-path semantics. A literal comparison would fail there while
+        testing nothing about the behaviour.
+        """
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        if target == "dir":
+            outside.mkdir()
+            (outside / "secret.md").write_text("out-of-tree", encoding="utf-8")
+        elif target == "file":
+            outside.write_text("out-of-tree", encoding="utf-8")
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.symlink_to(outside)
+
+        staging, src_consumed = _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert staging.is_symlink()
+        assert _same_link_target(staging, src)
+        assert src_consumed is False
+        assert src.is_symlink()
+
+        # A link and a copy both answer is_symlink()-adjacent questions the
+        # same way through the link, so distinguish them by taking the target
+        # away: a link goes dangling, a materialized copy would survive.
+        if target == "dir":
+            shutil.rmtree(outside)
+            assert staging.is_symlink()
+            assert not (dst_parent / staging.name / "secret.md").exists()
+
+    @pytest.mark.requires_symlinks
+    def test_a_file_claim_that_followed_a_link_is_not_a_claim(self, tmp_path, monkeypatch):
+        """The exclusivity of the file claim, pinned as a property of the result.
+
+        POSIX specifies ``O_CREAT | O_EXCL`` to fail with ``EEXIST`` when the
+        final component is a symlink. Windows does not: its ``open`` follows a
+        reparse point, so a dangling link on our staging name lets the create
+        succeed against the link's missing target while the directory entry
+        still belongs to whoever made the link. Believing we owned it would
+        write the artifact through someone else's link, promote their link into
+        the canonical destination, and let a later cleanup unlink an entry we
+        never created.
+
+        This cell states the guarantee without naming a platform: after a
+        claim, whatever we hold is a regular file we created — never a link we
+        followed. The real create runs against a planted dangling link, which
+        POSIX refuses in the kernel.
+        """
+        from memtomem.context.migrate import _create_exclusive_file
+
+        staging = tmp_path / "claimed"
+        victim = tmp_path / "victims-target"
+        staging.symlink_to(victim)
+        assert staging.is_symlink() and not victim.exists()
+
+        with pytest.raises(FileExistsError):
+            _create_exclusive_file(staging)
+
+        # The collider is intact and still a link, and nothing was left at the
+        # target the create may have reached through it.
+        assert staging.is_symlink()
+        assert not victim.exists()
+
+    @pytest.mark.requires_symlinks
+    def test_a_windows_shaped_create_that_follows_a_link_is_undone(self, tmp_path, monkeypatch):
+        """The same guarantee, with the Windows behaviour actually exercised.
+
+        The cell above passes on POSIX because the kernel refuses first, so it
+        witnesses nothing about the verification that carries the guarantee on
+        Windows — delete that verification and the cell stays green here. This
+        one supplies the missing witness by making ``os.open`` behave the way
+        Windows does: follow the link, create the missing target, and hand back
+        a descriptor as though the claim succeeded.
+
+        Pin: the helper notices it holds a link rather than a file it created,
+        removes the file it made at the link's target, and reports the name as
+        taken so the caller moves to a fresh suffix.
+        """
+        from memtomem.context import migrate as migrate_mod
+        from memtomem.context.migrate import _create_exclusive_file
+
+        staging = tmp_path / "claimed"
+        victim = tmp_path / "victims-target"
+        staging.symlink_to(victim)
+
+        real_open = os.open
+
+        def following_open(path, flags, mode=0o777, **kwargs):
+            # What Windows does: the reparse point is followed, so the create
+            # lands on the link's target and the entry stays the link.
+            if Path(path) == staging:
+                return real_open(victim, flags & ~os.O_EXCL | os.O_CREAT, mode)
+            return real_open(path, flags, mode, **kwargs)
+
+        monkeypatch.setattr(migrate_mod.os, "open", following_open)
+
+        with pytest.raises(FileExistsError):
+            _create_exclusive_file(staging)
+
+        assert staging.is_symlink()
+        # The file the create made through the link is gone: O_EXCL proved we
+        # made it, so undoing it restores what the other writer had.
+        assert not victim.exists()
+
+    @pytest.mark.requires_symlinks
+    @pytest.mark.parametrize("target", ["dir", "dangling"])
+    def test_the_recreated_link_keeps_the_sources_link_kind(self, tmp_path, monkeypatch, target):
+        """Windows has two kinds of symlink and cannot infer which to make.
+
+        ``os.symlink`` there takes ``target_is_directory`` and infers it from
+        the target — which is exactly what a DANGLING link does not have, so a
+        directory link would come back as a file link. POSIX has one kind and
+        ignores the flag, so this cell runs everywhere and only bites on
+        Windows.
+
+        Pinned through the observable property rather than the flag: the
+        recreated entry reports the same link kind as the source did.
+        """
+        from memtomem.context.migrate import _link_target_is_directory, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        if target == "dir":
+            outside.mkdir()
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.symlink_to(outside, target_is_directory=(target == "dir"))
+
+        staging, _ = _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert staging.is_symlink()
+        assert _link_target_is_directory(staging) == _link_target_is_directory(src)
+
+    @pytest.mark.requires_symlinks
+    @pytest.mark.parametrize("target", ["dir", "dangling"])
+    def test_the_link_kind_flag_is_passed_to_symlink(self, tmp_path, monkeypatch, target):
+        """The everywhere-witness for the link-kind flag.
+
+        The cell above compares the two links' kinds, which on POSIX is
+        ``False == False`` however the flag is passed — drop the argument
+        entirely and it stays green here, so it witnesses nothing off Windows.
+        This one watches the call instead: whatever ``os.symlink`` is asked to
+        make must carry the source link's own kind, which is the fact Windows
+        needs and cannot infer for a dangling target.
+        """
+        from memtomem.context import migrate as migrate_mod
+        from memtomem.context.migrate import _link_target_is_directory, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        if target == "dir":
+            outside.mkdir()
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.symlink_to(outside, target_is_directory=(target == "dir"))
+
+        seen: list[object] = []
+        real_symlink = os.symlink
+
+        def recording_symlink(target_, path, *args, **kwargs):
+            seen.append(kwargs.get("target_is_directory", "<not passed>"))
+            return real_symlink(target_, path, *args, **kwargs)
+
+        monkeypatch.setattr(migrate_mod.os, "symlink", recording_symlink)
+
+        _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert seen == [_link_target_is_directory(src)], seen
+
+    def test_a_junction_shaped_source_is_refused_rather_than_followed(self, tmp_path, monkeypatch):
+        """The everywhere-witness for the junction refusal.
+
+        Junctions exist only on Windows, so the real-junction cell below skips
+        everywhere else and the rule would ship unwitnessed on the platform
+        this runs on. Here ``is_junction`` is made to answer True for the
+        source, which is the only thing the dispatch consults, so the refusal
+        is exercised on every platform.
+        """
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("out-of-tree", encoding="utf-8")
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.mkdir()
+        (src / "agent.md").write_text("source", encoding="utf-8")
+
+        real_is_junction = Path.is_junction
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == src or real_is_junction(self))
+
+        with pytest.raises(OSError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        # Nothing was staged, and the source is untouched.
+        assert list(dst_parent.iterdir()) == []
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+
+    @pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-only")
+    def test_a_directory_junction_source_is_refused_rather_than_followed(
+        self, tmp_path, monkeypatch
+    ):
+        """A junction is not a symlink, and copytree recurses INTO one.
+
+        So it slips past a linkness test and reaches the tree branch, where
+        ``copytree(symlinks=True)`` walks through it and materializes
+        out-of-tree bytes into the destination store — the no-deref contract
+        broken by a shape the check did not name. It cannot be reproduced with
+        ``os.symlink`` either, so the engine refuses instead of silently
+        turning it into something else.
+        """
+        import subprocess
+
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("out-of-tree", encoding="utf-8")
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(src), str(outside)],
+            check=True,
+            capture_output=True,
+        )
+        assert src.is_junction()
+
+        with pytest.raises(OSError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        # Nothing was materialized, and the junction itself is untouched.
+        assert list(dst_parent.iterdir()) == []
+        assert src.is_junction()
+        assert (outside / "secret.md").read_text(encoding="utf-8") == "out-of-tree"
+
+    @pytest.mark.requires_symlinks
+    def test_exdev_fallback_refuses_a_symlink_source_onto_a_collider(self, tmp_path, monkeypatch):
+        from memtomem.context.migrate import _stage_move, TransferStagingBusyError
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+        planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), "full_dir")
+        before = _collider_state(planted)
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.symlink_to(outside)
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert _collider_state(planted) == before
+        assert src.is_symlink()
 
 
 def _write_flat(project: Path, asset_type: str, name: str, body: bytes) -> Path:
@@ -1157,28 +1828,26 @@ def test_e4_row10_skills_project_shared_to_project_local_clean(scope_layout):
 
 
 def test_e4_row11_exdev_fallback_copytree(scope_layout, monkeypatch):
-    """Row 11: EXDEV — first ``os.rename`` raises EXDEV; staging falls back to copytree.
+    """Row 11: EXDEV — the staging rename raises EXDEV; staging falls back to copytree.
 
-    Monkeypatches ``os.rename`` once so the ``src → staging`` step
-    (the only ``os.rename`` call inside ``migrate_scope`` before
-    ``_promote_move``) hits EXDEV. The promote-side ``os.replace`` is
-    a different function and therefore unaffected.
+    Monkeypatches ``rename_no_replace`` once so the ``src → staging`` step
+    (the only call to it inside ``migrate_scope``) hits EXDEV. The
+    promote-side ``os.replace`` is a different function and therefore
+    unaffected.
     """
-    import os as os_mod
-
     src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
-    real_rename = os_mod.rename
+    real_rename = _real_stage_rename()
     raised: dict[str, bool] = {"once": False}
 
-    def fake_rename(a, b):
+    def fake_rename(a, b, **kwargs):
         if not raised["once"]:
             raised["once"] = True
             import errno as _errno
 
             raise OSError(_errno.EXDEV, "Cross-device link", str(a))
-        return real_rename(a, b)
+        return real_rename(a, b, **kwargs)
 
-    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", fake_rename)
 
     result = _invoke_migrate(
         _migrate_args(
@@ -1507,23 +2176,22 @@ def test_e4_exdev_then_gate_a_blocks_src_untouched(scope_layout, monkeypatch):
     no staging leftover, exit non-zero.
     """
     import errno as _errno
-    import os as os_mod
 
     src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
-    real_rename = os_mod.rename
+    real_rename = _real_stage_rename()
     raised: dict[str, bool] = {"once": False}
 
-    def fake_rename(a, b):
-        # Trigger EXDEV on the FIRST os.rename call (the src→staging
+    def fake_rename(a, b, **kwargs):
+        # Trigger EXDEV on the FIRST staging rename (the src→staging
         # step inside _stage_move). Subsequent renames (none expected
         # in this path because Gate A blocks before _promote_move) go
         # through.
         if not raised["once"]:
             raised["once"] = True
             raise OSError(_errno.EXDEV, "Cross-device link", str(a))
-        return real_rename(a, b)
+        return real_rename(a, b, **kwargs)
 
-    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", fake_rename)
 
     result = _invoke_migrate(
         _migrate_args(
@@ -1910,21 +2578,19 @@ def test_e4_exdev_src_cleanup_failure_raises_partial_error(scope_layout, monkeyp
     canonicals and the user has no remediation hint.
     """
     import errno as _errno
-    import os as os_mod
     import shutil as shutil_mod
 
     src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
-    real_rename = os_mod.rename
+    real_rename = _real_stage_rename()
     rename_state: dict[str, int] = {"calls": 0}
 
-    def fake_rename(a, b):
-        # EXDEV on the FIRST os.rename (the src→staging step). The
-        # second os.rename (staging→dst) is allowed through so the
-        # copy lands at dst.
+    def fake_rename(a, b, **kwargs):
+        # EXDEV on the FIRST staging rename (the src→staging step). Any
+        # later one is allowed through so the copy lands at dst.
         rename_state["calls"] += 1
         if rename_state["calls"] == 1:
             raise OSError(_errno.EXDEV, "Cross-device link", str(a))
-        return real_rename(a, b)
+        return real_rename(a, b, **kwargs)
 
     real_rmtree = shutil_mod.rmtree
 
@@ -1935,7 +2601,7 @@ def test_e4_exdev_src_cleanup_failure_raises_partial_error(scope_layout, monkeyp
             raise PermissionError(13, "Permission denied", str(path))
         return real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", fake_rename)
     monkeypatch.setattr("memtomem.context.migrate.shutil.rmtree", fake_rmtree)
 
     result = _invoke_migrate(
@@ -2037,21 +2703,19 @@ def test_e4_project_shared_blocked_override_leaves_no_partial_fanout_commands(sc
 
 
 def _exdev_once(monkeypatch) -> dict[str, bool]:
-    """Make the first ``os.rename`` inside migrate raise EXDEV (Row-11 pattern)."""
-    import os as os_mod
-
-    real_rename = os_mod.rename
+    """Make the first staging rename inside migrate raise EXDEV (Row-11 pattern)."""
+    real_rename = _real_stage_rename()
     raised: dict[str, bool] = {"once": False}
 
-    def fake_rename(a, b):
+    def fake_rename(a, b, **kwargs):
         if not raised["once"]:
             raised["once"] = True
             import errno as _errno
 
             raise OSError(_errno.EXDEV, "Cross-device link", str(a))
-        return real_rename(a, b)
+        return real_rename(a, b, **kwargs)
 
-    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", fake_rename)
     return raised
 
 

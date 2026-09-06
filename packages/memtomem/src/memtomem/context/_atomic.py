@@ -1004,7 +1004,7 @@ def _hardlink_tree_strict(src: Path, dst: Path, *, created: list[Path], durable:
             raise StrictTreeError(entry, "refusing to carry a non-regular file")
 
 
-def rename_no_replace(staging: Path, dst: Path) -> None:
+def rename_no_replace(staging: Path, dst: Path, *, allow_cross_parent: bool = False) -> None:
     """Atomically rename ``staging`` to an absent ``dst`` or fail closed.
 
     Directory promotion needs an OS no-replace primitive: plain POSIX
@@ -1020,8 +1020,20 @@ def rename_no_replace(staging: Path, dst: Path) -> None:
     Lives here rather than in ``skills.py`` because the version store's
     write-once snapshot promote needs the identical primitive; a second copy is
     exactly how one call site would silently lose exclusivity.
+
+    **The shared-parent guard is a promote-shape invariant, not a kernel
+    limit.** A promote moves staging onto the canonical name beside it, so a
+    cross-parent call there is a caller bug worth catching early — the default
+    keeps refusing one. The syscalls themselves are exclusive across
+    directories on one filesystem, and a genuinely cross-filesystem call
+    returns the kernel's own ``EXDEV``. ``allow_cross_parent=True`` opts into
+    that second shape: renaming an artifact INTO a store's staging name from
+    somewhere else on the same filesystem (``migrate._stage_move``), where the
+    caller wants exclusivity AND wants a real ``EXDEV`` to select its copy
+    fallback. Pass it only for a stage-in; a promote keeps the default so the
+    early refusal survives.
     """
-    if staging.parent != dst.parent:
+    if staging.parent != dst.parent and not allow_cross_parent:
         raise OSError(
             errno.EXDEV,
             "atomic no-replace promote requires a shared parent directory",

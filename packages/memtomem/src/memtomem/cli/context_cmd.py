@@ -73,6 +73,7 @@ from memtomem.context.migrate import (
     MigrateRow,
     MigrateScopeResult,
     SCOPE_MIGRATABLE_KINDS,
+    TransferStagingBusyError,
     _detect_source_scope,
     adopt_flat_to_dir,
     classify_migrate,
@@ -629,7 +630,9 @@ def _translate_to_click(*error_types: type[Exception]) -> Iterator[None]:
     instead of a raw traceback. ``PrivacyScanError`` /
     ``MigratePartialError`` surface their pre-formatted ``exc.message``
     (the secret-free remediation text — ADR-0011 §5 for Gate A
-    refusals); ``SwapRecoveryError`` surfaces
+    refusals); ``TransferStagingBusyError`` is constructed with a single
+    argument precisely so its ``str(exc)`` is already that sentence rather
+    than the errno form below; ``SwapRecoveryError`` surfaces
     :func:`~memtomem.context._dir_swap.swap_failure_text`, because its
     three-argument ``OSError`` form renders ``str(exc)`` as
     ``[Errno 16] <sentence>: '<path>'`` — listing the type here without this
@@ -3757,7 +3760,12 @@ def _migrate_scope_dispatch(
     # the result rendering — the user sees only the recovery hint
     # embedded in exc.message.
     with _translate_to_click(
-        FileNotFoundError, ValueError, InvalidNameError, PrivacyScanError, MigratePartialError
+        FileNotFoundError,
+        ValueError,
+        InvalidNameError,
+        PrivacyScanError,
+        MigratePartialError,
+        TransferStagingBusyError,
     ):
         result = migrate_scope(
             asset_type,  # type: ignore[arg-type]
@@ -4430,7 +4438,12 @@ def _transfer_dispatch(
     # deep filesystem paths can surface OS errors; without this the
     # CLI dies with a traceback instead of a one-line error.
     with _translate_to_click(
-        FileNotFoundError, ValueError, InvalidNameError, PrivacyScanError, MigratePartialError
+        FileNotFoundError,
+        ValueError,
+        InvalidNameError,
+        PrivacyScanError,
+        MigratePartialError,
+        TransferStagingBusyError,
     ):
         if is_mcp:
             # Cross-project-only, copy-only; the adapter re-raises the

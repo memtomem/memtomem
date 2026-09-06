@@ -695,10 +695,10 @@ class TestTransferStagingIsHiddenButNotReaped:
         # predicate. Parity alone cannot see a narrowing: shrink the stager and
         # widen the pattern together and every assertion above still passes,
         # which is exactly how the 32-bit collision space could quietly become
-        # 24 bits on a path whose collision handler deletes what it collides
-        # with. This pins the width, i.e. the size of that space; the
-        # randomness itself comes from the ``secrets.token_hex`` call the
-        # helper makes.
+        # 24 bits. Since #2309 a collision costs a failed transfer rather than a
+        # deleted artifact, but the space is still worth pinning. This pins the
+        # width, i.e. the size of that space; the randomness itself comes from
+        # the ``secrets.token_hex`` call the helper makes.
         generated_rand = re.fullmatch(
             r"\.migrate-reviewer-\d+-(?P<rand>[0-9a-f]+)\.tmp", staging.name
         )
