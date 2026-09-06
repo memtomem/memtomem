@@ -1027,11 +1027,18 @@ def rename_no_replace(staging: Path, dst: Path, *, allow_cross_parent: bool = Fa
     keeps refusing one. The syscalls themselves are exclusive across
     directories on one filesystem, and a genuinely cross-filesystem call
     returns the kernel's own ``EXDEV``. ``allow_cross_parent=True`` opts into
-    that second shape: renaming an artifact INTO a store's staging name from
-    somewhere else on the same filesystem (``migrate._stage_move``), where the
-    caller wants exclusivity AND wants a real ``EXDEV`` to select its copy
-    fallback. Pass it only for a stage-in; a promote keeps the default so the
-    early refusal survives.
+    that second shape, and two callers legitimately need it — both of them
+    moving an artifact BETWEEN stores rather than promoting inside one:
+
+    - ``migrate._stage_move`` renames an artifact INTO a store's staging name
+      from somewhere else on the same filesystem, where the caller wants
+      exclusivity AND wants a real ``EXDEV`` to select its copy fallback;
+    - ``transfer.transfer_artifact``'s rollback renames staging back OUT to
+      the source path in another store (#2312). Same-filesystem by
+      construction: that rollback is only reached because the forward
+      staging rename already succeeded.
+
+    A promote keeps the default so the early refusal survives.
     """
     if staging.parent != dst.parent and not allow_cross_parent:
         raise OSError(

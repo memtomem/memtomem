@@ -1300,6 +1300,15 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "No-replace staging rename with EXDEV copy fallback; migrate-local, no swap; " + _RO,
     ),
+    ("context/migrate.py", "_promote_move", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Promote arm, wrapped tightly around rename_no_replace alone. The "
+        "occupied-destination errnos become the FileExistsError both transfer "
+        "call sites translate into the typed collision; every other errno "
+        "re-raises bare, so an ENOENT or an EXDEV is never reported as a "
+        "collision; " + _RO,
+    ),
     ("context/migrate.py", "_link_target_is_directory", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
@@ -1868,13 +1877,13 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
     ("context/transfer.py", "transfer_artifact", ("BaseException",), 1): (
         _R,
         "bare",
-        "Move-branch rollback: os.replace back, then re-raise.",
+        "Move-branch rollback: no-replace rename back, then re-raise.",
     ),
     ("context/transfer.py", "transfer_artifact", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
-        "Nested rollback os.replace(staging, src) — logs, preserves staging, the "
-        "outer handler re-raises; " + _RO,
+        "Nested rollback rename_no_replace(staging, src) — logs, preserves "
+        "staging on every failure, the outer handler re-raises; " + _RO,
     ),
     ("context/transfer.py", "transfer_artifact", ("OSError",), 1): (
         _U,

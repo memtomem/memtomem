@@ -1152,18 +1152,102 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool
     return staging, True
 
 
+#: Rename refusals that can ONLY mean "the destination name is occupied".
+#:
+#: A no-replace rename reports an occupied target as ``EEXIST`` whatever
+#: shape it is — measured on macOS, where a directory renamed onto an
+#: existing FILE answers ``EEXIST`` rather than the ``ENOTDIR`` a plain
+#: ``rename`` would give. ``ENOTEMPTY`` and ``EISDIR`` are the other
+#: spellings POSIX kernels are permitted to choose. Windows needs none of
+#: them (its :func:`os.rename` refuses every existing destination with
+#: ``FileExistsError``) but they cost nothing there.
+#:
+#: ``ENOTDIR`` is deliberately NOT in this tuple — see
+#: :data:`_RENAME_AMBIGUOUS_ERRNOS`.
+_RENAME_COLLISION_ERRNOS = (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR)
+
+#: Refusals that mean "occupied" OR something else entirely (#2312).
+#:
+#: ``ENOTDIR`` is reported both for an occupied destination and for a
+#: **broken path component** on either side, and only a look can tell them
+#: apart. An earlier version of this code claimed the second reading was
+#: impossible here because :func:`_promote_move` ensures ``dst.parent``
+#: immediately beforehand. That was wrong, and the Codex review that caught
+#: it reproduced the counter-example: ensuring a directory does not PIN it,
+#: so a writer outside our lock that replaces the store directory with a
+#: file in that window produces ``ENOTDIR`` with nothing at ``dst`` at all.
+#: Reporting that as "destination already exists" sends the operator to
+#: look for a collision that is not there, while the real event — the
+#: parent, and therefore the staged artifact inside it, is gone — goes
+#: unnamed.
+#:
+#: The probe is a CONJUNCTION, which is what keeps it safe: it can only
+#: ever turn a wrong "collision" back into the error that actually
+#: happened. The inverse rule ("collision, OR something is at dst") was
+#: rejected at the design gate for the opposite reason — it would report an
+#: ``ENOENT`` (staging gone, and for a move staging is the ONLY copy), the
+#: deliberate cross-parent ``EXDEV``, or an ``EIO`` as an ordinary
+#: collision whenever the name happened to be taken.
+#:
+#: ``lexists``, not ``exists``: a dangling symlink occupies a name just as
+#: firmly as anything else. Same rule, same reason, as
+#: :func:`_claim_hit_an_occupied_name`.
+_RENAME_AMBIGUOUS_ERRNOS = (errno.ENOTDIR,)
+
+
 def _promote_move(staging: Path, dst: Path) -> None:
-    """Atomic ``os.replace(staging, dst)``; refuse if dst already exists.
+    """Promote *staging* onto an absent *dst*, or refuse atomically (#2312).
 
     Pre-condition (pinned by :func:`migrate_scope` Row 15 contract): dst
-    must not exist. Re-checking inside the lock window avoids the rare
-    race where the dry-run preview observed an empty dst but an external
-    actor created one before the apply phase took the lock.
+    must not exist. The refusal is the SYSCALL's, not a check of ours.
+
+    The predecessor read ``dst.exists()`` and then called
+    :func:`os.replace`, which loses three destination shapes. A regular
+    file or an empty directory created in the window between the two calls
+    is silently replaced (POSIX ``rename`` replaces both), and a dangling
+    symlink is invisible to :meth:`Path.exists` altogether, so the guard
+    never fired and the replace unlinked somebody's link. Only a non-empty
+    directory happened to fail, which is why the destination-race coverage
+    could not tell a real guard from that one (ADR-0037 §6).
+
+    :func:`rename_no_replace` refuses all three in the kernel, with no
+    window to race. Its shared-parent default is kept: a promote moves
+    staging onto the canonical name beside it, so a cross-parent call here
+    is a caller bug and the early ``EXDEV`` is worth keeping.
+
+    Raises :class:`FileExistsError` on an occupied destination — the
+    boundary contract both call sites in :mod:`~memtomem.context.transfer`
+    translate into the typed :class:`TransferCollisionError` the surfaces
+    declare. Every other ``OSError`` propagates unchanged, including an
+    ``ENOTDIR`` that turns out not to be about the destination at all
+    (:data:`_RENAME_AMBIGUOUS_ERRNOS`).
     """
-    if dst.exists():
-        raise FileExistsError(f"destination already exists: {dst}")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staging, dst)
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as exc:
+        # ``exist_ok=True`` swallows the error only when what is already
+        # there IS a directory; a plain file or a dangling symlink on the
+        # store's own path still raises. That must NOT reach the caller as
+        # a bare FileExistsError, which is this function's signal for "the
+        # destination is taken" — the destination does not even have a
+        # directory to live in, and reporting a collision would send the
+        # operator looking for an artifact that is not there. ENOTDIR says
+        # what is actually wrong, and is not a FileExistsError, so the
+        # caller re-raises it instead of translating it.
+        raise NotADirectoryError(
+            errno.ENOTDIR,
+            f"destination parent is not a directory: {dst.parent}",
+            str(dst),
+        ) from exc
+    try:
+        rename_no_replace(staging, dst)
+    except OSError as exc:
+        occupied = exc.errno in _RENAME_COLLISION_ERRNOS or (
+            exc.errno in _RENAME_AMBIGUOUS_ERRNOS and os.path.lexists(dst)
+        )
+        if occupied:
+            raise FileExistsError(f"destination already exists: {dst}") from exc
+        raise
 
 
 # Per-(kind, runtime) file suffix for non-skill fan-out cleanup. Source of

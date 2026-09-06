@@ -68,6 +68,7 @@ from memtomem.context._atomic import (
     atomic_write_bytes,
     installed_at_from_dest,
     iter_installed_files,
+    rename_no_replace,
 )
 from memtomem.context._names import validate_name
 from memtomem.context._skip_reasons import (
@@ -818,9 +819,11 @@ def transfer_artifact(
        ``(dst_store, dst_name)`` — ``str(lock_path)`` sort is a total
        order across two project roots; ADR-0030 §6).
     5. Stage via rename (EXDEV → copy fallback), Gate A scan on staging
-       iff ``to_scope == "project_shared"``, promote via ``os.replace``.
-       Rollback preserves "staging deleted only when the bytes are
-       verified safe elsewhere".
+       iff ``to_scope == "project_shared"``, promote via a no-replace
+       rename — an occupied destination is refused by the kernel and
+       surfaces as the typed collision, never replaced (#2312). Rollback
+       renames back with the same primitive and preserves "staging
+       deleted only when the bytes are verified safe elsewhere".
     6. Still INSIDE the canonical-lock span (ADR-0030 §6 — so a wiki
        reinstall can't interleave; bookkeeping stays best-effort via
        try/except, not by releasing the lock, and shares the canonical
@@ -1198,23 +1201,57 @@ def transfer_artifact(
                         src_path,
                         staging,
                     )
-                elif staging.exists():
+                elif os.path.lexists(staging):
                     # Same-FS path consumed src; src is gone as expected;
                     # try the rename-back. Success consumes staging (cleanup
                     # is a no-op then); failure preserves staging.
+                    #
+                    # ``lexists``, not ``exists``: a flat artifact that is
+                    # itself a symlink stages AS a link (``_stage_copy_into``
+                    # preserves one rather than dereferencing it), and if its
+                    # target went away mid-transfer the link is dangling —
+                    # invisible to ``exists()``. That fell through to "nothing
+                    # to do" and stranded the link in staging with src empty.
+                    #
+                    # The rename-back is cross-parent by construction (staging
+                    # lives in the DESTINATION store, src_path in the source
+                    # one), so it opts out of the promote-shape guard. It is
+                    # still same-filesystem: ``src_consumed`` is only True
+                    # because the staging rename succeeded (#2309/#2312).
                     try:
-                        os.replace(staging, src_path)
+                        rename_no_replace(staging, src_path, allow_cross_parent=True)
                         cleanup_staging = True
                     except OSError as exc:
-                        logger.error(
-                            "transfer rollback: rename-back failed (%s); "
-                            "staging at %s is the ONLY surviving copy of the "
-                            "source bytes — manual recovery required (mv it "
-                            "back to %s).",
-                            exc,
-                            staging,
-                            src_path,
-                        )
+                        # Preserve staging on EVERY failure — it is the only
+                        # copy of the source bytes. Which message to print is
+                        # decided by LOOKING at src_path rather than by the
+                        # errno: "something is at src" is a claim about the
+                        # world, and the errno spellings for an occupied
+                        # rename target differ per platform. Both branches
+                        # keep staging; only the remediation differs, because
+                        # "mv it back" is wrong advice when moving it back
+                        # would land on top of somebody else's entry.
+                        if os.path.lexists(src_path):
+                            logger.error(
+                                "transfer rollback: rename-back refused (%s) — "
+                                "an entry we did not create occupies src %s; "
+                                "preserving staging at %s as the ONLY surviving "
+                                "copy of the source bytes — manual "
+                                "reconciliation required.",
+                                exc,
+                                src_path,
+                                staging,
+                            )
+                        else:
+                            logger.error(
+                                "transfer rollback: rename-back failed (%s); "
+                                "staging at %s is the ONLY surviving copy of the "
+                                "source bytes — manual recovery required (mv it "
+                                "back to %s).",
+                                exc,
+                                staging,
+                                src_path,
+                            )
                 # else: src_consumed and staging is gone too — nothing to do.
 
                 if cleanup_staging:

@@ -24,14 +24,14 @@ Deliberate divergences from the artifact engine, each load-bearing:
   bytes past it (Codex design-gate fold).
 - **Promotion refuses to clobber, atomically.** The mcp web CRUD routes
   serialize on the in-process gateway lock only — they do not take the
-  per-file sidecar locks this adapter takes — so the engine's
-  ``exists() → os.replace()`` promote could overwrite a canonical that a
-  web create landed between the two calls. ``os.link`` refuses an
+  per-file sidecar locks this adapter takes — so the engine's promote of
+  the day (``exists() → os.replace()``) could overwrite a canonical that
+  a web create landed between the two calls. ``os.link`` refuses an
   existing target atomically (EEXIST → the engine's collision error),
   closing that window for this single-file copy (Codex design-gate
-  blocker). Filesystems without hard-link support fall back to the
-  engine's re-check + replace semantics, no worse than every artifact
-  transfer today.
+  blocker). Filesystems without hard-link support fall back to a re-check
+  + replace; the artifact transfer engine no longer shares that shape,
+  having moved to the no-replace rename in #2312.
 - **Symlinked canonicals are refused.** The engine preserves symlinks
   by contract; here a link would break the scanned-bytes ==
   promoted-bytes invariant (reads follow the link, and the hard-link
@@ -247,11 +247,12 @@ def _promote_no_clobber(staging: Path, dst: Path) -> None:
     created by a writer outside our sidecar pair lock (the mcp web CRUD
     routes hold only the in-process gateway lock) cannot be silently
     overwritten between a re-check and a rename — the Codex design-gate
-    blocker on reusing the engine's ``exists() → os.replace()`` promote
-    here. On filesystems without hard links the fallback keeps the
-    engine's promote semantics (re-check + replace; the residual
-    check-to-replace window is the same one every artifact transfer
-    carries today). Success consumes staging on both paths.
+    blocker on reusing the engine's then-current ``exists() →
+    os.replace()`` promote here. On filesystems without hard links the
+    fallback keeps those older semantics (re-check + replace); the
+    artifact transfer engine no longer carries that window itself, having
+    moved to a no-replace rename in #2312. Success consumes staging on
+    both paths.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:

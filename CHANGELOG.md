@@ -69,6 +69,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A cross-store transfer no longer replaces something that appears at the
+  destination while it is landing** (#2312) — `mm context move` and `mm context
+  copy` finish by renaming the staged artifact onto its final name, and they
+  used to ask `exists()` first and then rename. Anything created in the gap
+  between those two calls was replaced rather than detected: a regular file was
+  overwritten, an empty directory was replaced outright, and a dangling symlink
+  was not even visible to the question, so the rename unlinked somebody else's
+  link. Only a directory with files in it happened to fail, which is why the
+  existing coverage could not tell a real guard from this one. Both the promote
+  and the move's rollback rename now refuse in the kernel, with no window to
+  race, the way receiving a shared artifact file already did.
+  A refused promote is the same destination-collision every surface already
+  reports — a one-line CLI error, 409 `destination_exists` on the web route,
+  and the same refusal text from the MCP actions (`refused:` from the transfer
+  action, `error:` from the migrate one, unchanged in both) — and it is now the
+  syscall's refusal rather than a check that could be outrun. A refused rollback is different and is
+  reported differently: the failure that triggered the rollback stays the error
+  you see, the staged tree is kept as the only copy of the source bytes, and the
+  logged message names both paths and says the source is occupied instead of
+  advising you to move the tree back on top of whatever is sitting there. An
+  unrelated failure is never dressed up as a collision: a missing staging tree
+  or a cross-directory promote still reports what actually went wrong.
+
 - **A cross-store transfer no longer deletes a crashed transfer's only copy of
   an artifact** (#2309) — `mm context move` and `mm context copy` stage the
   artifact under a temporary name carrying the process id and 32 random bits,
