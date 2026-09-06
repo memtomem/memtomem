@@ -96,6 +96,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The browser offers a privacy-scan bypass that became available while you
+  were reading the warning** (#2332) — a note can move between storage tiers
+  while a save is in progress: a re-index re-derives the tier from the file's
+  path, and the confirmation dialog stays open for as long as you take to
+  answer it. If a shared-tier note moved to a private one in that window, the
+  save came back refused by the privacy scanner — on a tier where overriding
+  the scanner *is* allowed — but the editor only showed a failed-save toast,
+  so the override was never offered. Pressing Save again reached it, so
+  nothing was lost; it cost an attempt and an unclear message. The editor now
+  carries the whole exchange: it asks for whichever consent the server's last
+  answer actually asked for, sends the text you were shown rather than
+  whatever the editor holds by then, and never carries one tier's consent into
+  another tier's request. A note whose tier keeps changing stops after a
+  bounded number of attempts and says nothing was saved, instead of asking
+  again indefinitely. The override is offered only on the tiers that honour
+  it, named individually — a refusal that does not say which tier it was
+  decided under is treated as unknown and offered nothing.
+
 - **A transfer's cleanup and promote now act on the staging entry they
   created, not on its name** (#2314) — `mm context move` / `copy`, receiving a
   shared artifact file, and `mm context copy mcp-servers` all stage under a

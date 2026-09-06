@@ -509,10 +509,30 @@ async function fetchIndexStream(body, { signal, onEvent } = {}) {
   }
 }
 
+// The bypass prompt, factored out of ``apiWithRedactionRetry`` so a caller
+// that already holds a thrown ``RedactionBlockedError`` can offer the same
+// choice in the same words (#2332). It asks and nothing else: it does not
+// re-issue the request, and it does not decide whether the bypass is even
+// available — that judgement needs the tier the server refused under, which
+// only the caller knows.
+async function confirmRedactionBypass(err) {
+  const surfaceKey = 'surface.' + err.surface;
+  const localized = t(surfaceKey);
+  const surfaceLabel = localized === surfaceKey ? err.surface : localized;
+  return await showConfirm({
+    title: t('confirm.redaction_blocked_title'),
+    message: t('confirm.redaction_blocked_message', {
+      hits: err.hits,
+      surface: surfaceLabel,
+    }),
+    confirmText: t('confirm.redaction_blocked_proceed'),
+  });
+}
+
 // Wraps ``api()`` for write surfaces guarded by the trust-boundary redaction
-// filter. On a 403, prompts the user via ``showConfirm`` with the matched
-// pattern count and the localized surface label, then re-issues the same
-// request with ``body.force_unsafe = true``.
+// filter. On a 403, prompts the user via ``confirmRedactionBypass`` with the
+// matched pattern count and the localized surface label, then re-issues the
+// same request with ``body.force_unsafe = true``.
 //
 // Returns the JSON response on success (initial or retry), ``null`` if the
 // user declined the bypass. Non-redaction errors (and a second-pass error
@@ -520,33 +540,32 @@ async function fetchIndexStream(body, { signal, onEvent } = {}) {
 // working unchanged. Emits ``toast.redaction_bypassed`` on retry success
 // so the audit-log bypass is visible to the operator without forcing each
 // call site to add its own affirmation.
+//
+// This is the surface-agnostic wrapper: it offers the bypass on *any*
+// redaction refusal, because the surfaces reaching it (``/api/add``, scratch
+// promote, the settings harness) do not report which tier they judged under,
+// and none of them has a tier where the bypass is refused. A surface that
+// does report one — the chunk edit route — has to branch on it instead,
+// which is why ``saveChunkBody`` below drives its own loop.
 async function apiWithRedactionRetry(method, path, body, opts = {}) {
   try {
     return await api(method, path, body, opts);
   } catch (err) {
     if (!(err instanceof RedactionBlockedError)) throw err;
-    const surfaceKey = 'surface.' + err.surface;
-    const localized = t(surfaceKey);
-    const surfaceLabel = localized === surfaceKey ? err.surface : localized;
-    const ok = await showConfirm({
-      title: t('confirm.redaction_blocked_title'),
-      message: t('confirm.redaction_blocked_message', {
-        hits: err.hits,
-        surface: surfaceLabel,
-      }),
-      confirmText: t('confirm.redaction_blocked_proceed'),
-    });
+    const ok = await confirmRedactionBypass(err);
     if (!ok) return null;
     const retryBody = Object.assign({}, body || {}, { force_unsafe: true });
     const data = await api(method, path, retryBody, opts);
-    // A 200 is not proof of a write. Since #2317 one route answers an
-    // un-consented request with the ``needs_confirmation`` envelope at 200
-    // and writes nothing, and a chunk can be re-scoped into that tier
-    // *between* the first request and this retry — the confirm dialog above
-    // holds the window open for however long the user takes. Announcing the
-    // bypass here would then be the only toast the user sees, saying the
-    // entry was written when nothing was, and the caller still has an
-    // envelope to answer. Say nothing and let the caller decide.
+    // A 200 is not proof of a write. A route can answer at 200 with the
+    // ``needs_confirmation`` envelope and write nothing (ADR-0011 §5 Gate
+    // B), and the confirm dialog above holds a window open for however long
+    // the user takes to answer — long enough for a re-index to move the
+    // target into a tier that answers that way. Announcing the bypass here
+    // would then be the only toast the user sees, saying the entry was
+    // written when nothing was, and the caller would still have an envelope
+    // to answer. Say nothing and let the caller decide. Since #2332 no
+    // caller of this wrapper reaches a route that can return one; the guard
+    // is the property, not the reachability.
     if (!data || data.status !== 'needs_confirmation') {
       showToast(t('toast.redaction_bypassed', { hits: err.hits }), 'info');
     }
@@ -554,76 +573,127 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
   }
 }
 
-// ADR-0011 §5 Gate B on a chunk edit (#2317). Saving a chunk that lives in
-// the project_shared tier comes back as the shared ``needs_confirmation``
-// envelope at HTTP 200 with no write performed; disclose what the second leg
-// would do, then re-issue carrying the flag the server named.
+// The tiers on which ``force_unsafe`` is honoured, as an allow-list rather
+// than "anything that is not project_shared". A refusal that reports no
+// scope, or one naming a tier this build does not know, is *unknown* — and
+// unknown must not be treated as private and offered a bypass any more than
+// it is treated as shared and refused one (#2317, #2332).
+const _BYPASSABLE_TIERS = new Set(['user', 'project_local']);
+
+// One hop more than the longest exchange that ends in a write — envelope →
+// confirm → refusal → bypass, or its mirror — so a single extra re-scope is
+// still answerable. A tier that keeps moving past that is not a conversation
+// worth continuing: stop and say so rather than loop.
+const _MAX_CHUNK_SAVE_ATTEMPTS = 4;
+
+// Saving a chunk is a conversation, not a request (#2317, #2332).
 //
-// Two properties this helper exists to hold, both of which a per-call-site
-// copy got wrong on the first attempt:
+// ADR-0011 §5 puts two gates on ``PATCH /api/chunks/{id}``. Gate B answers
+// an un-consented ``project_shared`` write with the ``needs_confirmation``
+// envelope at HTTP 200, having written nothing; Gate A refuses a redaction
+// hit with a 403 that names the tier it judged under. Neither answer is
+// stable across the exchange: an incremental re-index re-derives scope from
+// the path each pass and chunk ids survive it, while every dialog below
+// holds a window open for as long as the user takes to answer. So each hop
+// can land on a different tier than the previous answer implied — including
+// shared → private, where the bypass the last refusal ruled out is suddenly
+// on offer.
 //
-//   * The retry sends the *same body*. The editor's textarea can change
-//     while a dialog is open, and re-reading it on the retry would save
-//     bytes the user never saw the warning for.
-//   * The confirmed leg does NOT go back through ``apiWithRedactionRetry``.
-//     The first leg may — we do not know the tier yet — but once the
-//     envelope has told us the chunk is project_shared, offering the
-//     force_unsafe bypass is offering something the server can never
-//     accept: ``enforce_write_guard`` hard-refuses that combination
-//     unconditionally (privacy.py, ADR-0011 §5 Gate A). Routing it through
-//     the generic retry asked the user to authorise a bypass that was going
-//     to be refused, spent an extra request doing it, and — because the
-//     retry re-sent ``confirm_project_shared`` — recorded a SECOND Gate B
-//     consent line for one human consent, corrupting the very audit record
-//     #2306 added. So the confirmed leg uses plain ``api()`` and a redaction
-//     hit surfaces as a shared-tier refusal the caller reports as-is.
+// Hence a loop over one invariant, which is the whole design:
 //
-// Returns ``null`` when the user declines, matching the cancel contract
-// ``apiWithRedactionRetry`` already has, so call sites keep one check.
+//     each attempt carries exactly the flag the server's LAST answer asked
+//     for, applied to the body disclosed before the first request.
+//
+// That single rule is what keeps apart the three things a straight-line
+// version got wrong in turn:
+//
+//   * The body never changes. The editor's textarea can move under an open
+//     dialog, and a caller may reuse one object across saves; re-reading it
+//     on a retry would send bytes no warning ever described.
+//   * ``force_unsafe`` is never carried into a shared-tier attempt.
+//     ``enforce_write_guard`` hard-refuses that combination unconditionally
+//     (privacy.py, ADR-0011 §5 Gate A), so carrying it only converts an
+//     honest redaction refusal into a ``blocked_project_shared`` one.
+//   * ``confirm_project_shared`` is never carried into a bypass attempt. It
+//     means nothing on a private tier, and if the chunk flips back to shared
+//     before that attempt lands it records a SECOND Gate B consent line for
+//     one human answer — corrupting the very audit record #2306 added.
+//
+// Returns ``null`` when the user declines at any dialog, matching the cancel
+// contract ``apiWithRedactionRetry`` has, so call sites keep one check.
 async function saveChunkBody(chunkId, body, opts = {}) {
   const path = `/api/chunks/${chunkId}`;
-  // Snapshot BEFORE the first request, not between the dialog and the
-  // retry. Copying at the retry copies whatever the caller's object holds
-  // by then, and an editor that writes straight into it — or a caller that
-  // reuses one object across saves — would send bytes no dialog described.
+  // Snapshot BEFORE the first request, not between a dialog and its retry.
+  // Copying at the retry copies whatever the caller's object holds by then.
   // The first version of this helper did exactly that and its own test
   // caught it.
   const disclosed = Object.assign({}, body || {});
-  const resp = await apiWithRedactionRetry('PATCH', path, disclosed, opts);
-  if (resp === null) return null;
-  if (!resp || resp.status !== 'needs_confirmation') return resp;
-  if (resp.confirm !== 'confirm_project_shared') {
-    // An envelope this build does not know how to answer. Failing loudly
-    // beats silently returning it as if the save had happened.
-    throw new Error(`unsupported confirmation: ${resp.confirm}`);
-  }
-  const agreed = await showConfirm({
-    title: t('confirm.chunk_edit_shared_title'),
-    message: t('confirm.chunk_edit_shared_msg'),
-    confirmText: t('common.save'),
-    danger: true,
-  });
-  if (!agreed) return null;
-  const confirmedBody = Object.assign({}, disclosed, { confirm_project_shared: true });
-  try {
-    return await api('PATCH', path, confirmedBody, opts);
-  } catch (err) {
-    if (!(err instanceof RedactionBlockedError)) throw err;
-    // Branch on the tier the SERVER decided this refusal under, not on the
-    // one the envelope implied a moment ago. A re-index can re-scope the
-    // chunk while the confirm dialog is open, and then the bypass this
-    // message says is unavailable is in fact available — telling the user
-    // otherwise denies them a real option on a claim that is false.
-    // ``scope`` absent means the surface did not report one: unknown, so
-    // fall through to the generic redaction error rather than assert.
-    if (err.scope !== 'project_shared') throw err;
-    // Still the shared tier: the bypass genuinely is not on offer, because
-    // enforce_write_guard refuses force_unsafe there unconditionally.
-    throw new ProjectTierBlockedError({
-      surface: err.surface,
-      scope: err.scope,
-      message: t('toast.chunk_edit_shared_redaction_blocked', { hits: err.hits }),
+  // The flag the last server answer asked for — replaced, never merged, so
+  // the two consents can never ride along together.
+  let extra = {};
+  let bypassHits = 0;
+  let attempt = 0;
+  // Called before either dialog, and the loop's only bound. Both dialogs
+  // spend their answer on a *further* request; on the last attempt there is
+  // none, so asking would solicit an authorisation this helper cannot act
+  // on — a bad trade anywhere and worse on a consent surface, where the
+  // answer the user gave would simply be discarded. Stopping before the
+  // question is the honest order. One site, so the two prompts cannot drift
+  // apart, and every path out of the loop is a return or a throw.
+  const requireAnotherAttempt = () => {
+    if (attempt >= _MAX_CHUNK_SAVE_ATTEMPTS) {
+      throw new Error(t('toast.chunk_save_tier_kept_changing'));
+    }
+  };
+  for (;;) {
+    attempt += 1;
+    let resp;
+    try {
+      resp = await api('PATCH', path, Object.assign({}, disclosed, extra), opts);
+    } catch (err) {
+      if (!(err instanceof RedactionBlockedError)) throw err;
+      if (err.scope === 'project_shared') {
+        // The bypass genuinely is not on offer: enforce_write_guard refuses
+        // force_unsafe on this tier unconditionally. Say so, do not ask.
+        throw new ProjectTierBlockedError({
+          surface: err.surface,
+          scope: err.scope,
+          message: t('toast.chunk_edit_shared_redaction_blocked', { hits: err.hits }),
+        });
+      }
+      if (!_BYPASSABLE_TIERS.has(err.scope)) throw err;
+      requireAnotherAttempt();
+      if (!(await confirmRedactionBypass(err))) return null;
+      extra = { force_unsafe: true };
+      bypassHits = err.hits;
+      continue;
+    }
+    if (!resp || resp.status !== 'needs_confirmation') {
+      // A write actually happened, and ``extra`` says what that write
+      // carried — so the bypass is announced when one was used and only
+      // then, rather than because one was granted at an earlier hop and
+      // then dropped answering an envelope.
+      if (extra.force_unsafe) {
+        showToast(t('toast.redaction_bypassed', { hits: bypassHits }), 'info');
+      }
+      return resp;
+    }
+    if (resp.confirm !== 'confirm_project_shared') {
+      // An envelope this build does not know how to answer. Failing loudly
+      // beats silently returning it as if the save had happened. Checked
+      // against the one name we can answer rather than followed dynamically,
+      // so a future consent is never answered with the wrong flag.
+      throw new Error(`unsupported confirmation: ${resp.confirm}`);
+    }
+    requireAnotherAttempt();
+    const agreed = await showConfirm({
+      title: t('confirm.chunk_edit_shared_title'),
+      message: t('confirm.chunk_edit_shared_msg'),
+      confirmText: t('common.save'),
+      danger: true,
     });
+    if (!agreed) return null;
+    extra = { confirm_project_shared: true };
   }
 }
 
