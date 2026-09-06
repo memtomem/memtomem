@@ -360,7 +360,11 @@ bytes were. Every arm now ends in a single message written from an
 their number; `lexists`, so a parked flat artifact that is itself a dangling
 symlink still counts. The rename-back stays cardinality-neutral — it is handed
 one entry and cannot see the other — and the caller, which knows whether the
-EXDEV path is holding a second copy, does the counting. Nothing about what is
+EXDEV path is holding a second copy, does the counting. It probes the entry it
+was handed all the same: the writer that can occupy the source name inside the
+syscall window can also remove that entry, and `_stage_move`'s own unwind calls
+the rename-back with no caller line after it, so a false "preserved at" there
+would be the last word. Nothing about what is
 preserved changes; these messages are the entire interface a hand recovery
 has, so a path named in one must be a path that exists.
 

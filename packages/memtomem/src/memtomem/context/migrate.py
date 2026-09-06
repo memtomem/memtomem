@@ -1241,11 +1241,21 @@ def _restore_source(entry: Path, src: Path, *, allow_cross_parent: bool) -> bool
 
     No-replace, never :func:`os.replace`: an external writer can recreate the
     source path while we are staging, and a replacing rename would delete
-    bytes that are not ours to delete. Which of the two messages to log is
-    decided by LOOKING at *src* rather than by the errno — "something is at
-    src" is a claim about the world, and the errno spellings for an occupied
-    rename target differ per platform. ``lexists``, so a dangling symlink
-    counts as occupying the name.
+    bytes that are not ours to delete. Which message to log is decided by
+    LOOKING rather than by the errno — "something is at src" is a claim about
+    the world, and the errno spellings for an occupied rename target differ
+    per platform. ``lexists`` on both probes, so a dangling symlink counts:
+    at *src* it occupies the name, at *entry* it is still the parked
+    artifact's only name.
+
+    **Both halves of the message are probed.** The failure says why the
+    rename was refused AND where the bytes are, and the second half used to
+    be assumed — *entry* is ours, so it must still be there. That is the
+    assumption #2327 removed from the rest of this ladder, and the same
+    writer that can occupy *src* can remove *entry* inside the same window.
+    A path named as a recovery copy has to be a path that exists; when it
+    does not, the message says the bytes are gone rather than sending a hand
+    recovery after them.
 
     *allow_cross_parent* is the caller's assertion that the two paths are on
     one filesystem while living in different directories: true for the
@@ -1256,20 +1266,41 @@ def _restore_source(entry: Path, src: Path, *, allow_cross_parent: bool) -> bool
     try:
         rename_no_replace(entry, src, allow_cross_parent=allow_cross_parent)
     except OSError as exc:
+        preserved = os.path.lexists(entry)
         if os.path.lexists(src):
-            logger.error(
-                "transfer rollback: rename-back refused (%s) — an entry we did "
-                "not create occupies src %s; preserving the pre-move bytes at "
-                "%s — manual reconciliation required.",
-                exc,
-                src,
-                entry,
-            )
-        else:
+            if preserved:
+                logger.error(
+                    "transfer rollback: rename-back refused (%s) — an entry we "
+                    "did not create occupies src %s; preserving the pre-move "
+                    "bytes at %s — manual reconciliation required.",
+                    exc,
+                    src,
+                    entry,
+                )
+            else:
+                logger.error(
+                    "transfer rollback: rename-back refused (%s) — an entry we "
+                    "did not create occupies src %s, and %s, which held the "
+                    "pre-move bytes, is gone too — manual reconciliation "
+                    "required.",
+                    exc,
+                    src,
+                    entry,
+                )
+        elif preserved:
             logger.error(
                 "transfer rollback: rename-back failed (%s); the pre-move bytes "
                 "are preserved at %s — manual recovery required (mv it back to "
                 "%s).",
+                exc,
+                entry,
+                src,
+            )
+        else:
+            logger.error(
+                "transfer rollback: rename-back failed (%s) and %s, which held "
+                "the pre-move bytes, is gone too — nothing left to put back at "
+                "%s.",
                 exc,
                 entry,
                 src,

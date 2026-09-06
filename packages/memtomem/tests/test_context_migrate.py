@@ -3970,6 +3970,156 @@ def test_e4_exdev_a_failed_rename_back_names_both_surviving_copies(
     assert str(staged[0]) in survivor_lines[0], survivor_lines
 
 
+def _exdev_then_break_the_rename_back(monkeypatch, src: Path, sabotage) -> dict[str, bool]:
+    """EXDEV on the staging rename, then let *sabotage* run inside the rename-back.
+
+    The rename-back is where two of ``_restore_source``'s four states are only
+    reachable: the window between the ladder's probe of the holding entry and
+    the syscall is exactly long enough for an out-of-band writer to occupy the
+    source name, or to remove the entry we were about to put back. *sabotage*
+    is that writer; the real primitive then reports whatever the sabotaged
+    filesystem actually gives it, so the errno is the kernel's, not ours.
+    """
+    real_rename = _real_stage_rename()
+    raised: dict[str, bool] = {"once": False}
+
+    def fake_rename(a, b, **kwargs):
+        if not raised["once"] and _crosses_stores(a, b):
+            raised["once"] = True
+            raise OSError(errno.EXDEV, "Cross-device link", str(a))
+        if Path(b) == src:
+            sabotage(Path(a))
+        return real_rename(a, b, **kwargs)
+
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", fake_rename)
+    return raised
+
+
+def test_e4_exdev_rename_back_refused_mid_flight_claims_no_uniqueness(
+    scope_layout, monkeypatch, caplog
+):
+    """The refusal arm, on the path where two copies exist.
+
+    The ladder only calls the rename-back when src looked FREE, so
+    ``_restore_source``'s "an entry we did not create occupies src" arm is
+    reached from here only through a racer that lands inside the syscall
+    window. That arm carried the same "the ONLY surviving copy" claim as its
+    sibling, and this is the shape where the claim is false: the EXDEV path
+    keeps the destination-side copy on purpose (#2313).
+
+    Mutation: restore the uniqueness wording to the refusal arm — the sibling
+    cell above only exercises the failure arm and stays green — and the
+    "no message claims uniqueness" assertion here fails.
+    """
+    import logging as _logging
+
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN).parent
+
+    def occupy(_entry: Path) -> None:
+        # A writer outside our lock recreates the canonical name in the
+        # window the ladder's probe left open; the real rename then refuses.
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "agent.md").write_text(_WRITER_BODY, encoding="utf-8")
+
+    raised = _exdev_then_break_the_rename_back(monkeypatch, src, occupy)
+    _fail_promote(monkeypatch, src)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+    with pytest.raises(OSError):
+        _invoke_migrate(
+            _migrate_args(
+                "agents",
+                "foo",
+                from_scope="user",
+                to_scope="project_shared",
+                confirm_project_shared=True,
+            )
+        )
+
+    assert raised["once"]
+    # The racer keeps what it wrote; both of our copies are preserved.
+    assert (src / "agent.md").read_text(encoding="utf-8") == _WRITER_BODY
+    leftovers = list(root.glob(".migrate-foo-*.tmp"))
+    assert len(leftovers) == 1, leftovers
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    staged = list(dst_root.glob(".migrate-foo-*.tmp"))
+    assert len(staged) == 1, staged
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "rename-back refused" in m and "preserving the pre-move bytes at " + str(leftovers[0]) in m
+        for m in messages
+    ), messages
+    assert not any("surviving copy of the source bytes" in m for m in messages), messages
+    survivor_lines = [m for m in messages if "surviving" in m]
+    assert len(survivor_lines) == 1, messages
+    assert "2 surviving copies: " in survivor_lines[0], survivor_lines
+    assert str(leftovers[0]) in survivor_lines[0], survivor_lines
+    assert str(staged[0]) in survivor_lines[0], survivor_lines
+
+
+def test_e4_exdev_rename_back_of_a_vanished_entry_says_it_is_gone(
+    scope_layout, monkeypatch, caplog
+):
+    """The entry we were about to put back can go while we are putting it back.
+
+    The ladder probes the holding entry, then hands it to the rename-back —
+    and the message that comes out of a failure names it as preserved. That
+    half was assumed rather than looked at, so a writer removing the entry
+    inside that window produced a recovery path that did not exist (#2327).
+
+    Mutation: drop the ``lexists(entry)`` probe and this cell reports the
+    vanished holding entry as holding the bytes, while the survivor line
+    (which does probe) names only the staged copy — the two lines contradict
+    each other.
+    """
+    import logging as _logging
+    import shutil as shutil_mod
+
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN).parent
+    vanished: list[Path] = []
+
+    def remove_it(entry: Path) -> None:
+        vanished.append(entry)
+        shutil_mod.rmtree(entry)
+
+    raised = _exdev_then_break_the_rename_back(monkeypatch, src, remove_it)
+    _fail_promote(monkeypatch, src)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+    with pytest.raises(OSError):
+        _invoke_migrate(
+            _migrate_args(
+                "agents",
+                "foo",
+                from_scope="user",
+                to_scope="project_shared",
+                confirm_project_shared=True,
+            )
+        )
+
+    assert raised["once"]
+    assert len(vanished) == 1, vanished
+    assert not list(root.glob(".migrate-foo-*.tmp"))
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    staged = list(dst_root.glob(".migrate-foo-*.tmp"))
+    assert len(staged) == 1, staged
+    assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "rename-back failed" in m and str(vanished[0]) + ", which held the" in m for m in messages
+    ), messages
+    assert not any("preserved at " + str(vanished[0]) in m for m in messages), messages
+    survivor_lines = [m for m in messages if "surviving" in m]
+    assert len(survivor_lines) == 1, messages
+    assert "1 surviving copy: " + str(staged[0]) in survivor_lines[0], survivor_lines
+
+
 def test_e4_rollback_with_nothing_left_offers_no_recovery_path(scope_layout, monkeypatch, caplog):
     """When no copy survives, the log says that — it does not name one.
 
@@ -4199,6 +4349,10 @@ def test_e4_exdev_a_vanished_holding_entry_names_the_staged_copy(scope_layout, m
     # back" line, which is a different claim.
     assert len(vanished) == 1, vanished
     assert str(vanished[0]) not in survivor_lines[0], survivor_lines
+    # ...and the arm that DID look at it says so, naming it as gone. Restoring
+    # the old ``elif holding is None`` drops this line on the EXDEV path and
+    # the operator is never told why no rename was attempted.
+    assert any("nothing to rename back" in m and str(vanished[0]) in m for m in messages), messages
 
 
 def _vanish_holding_before_our_removal(monkeypatch, root: Path, layout: str) -> None:
@@ -4360,9 +4514,12 @@ def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
     _exdev_always(monkeypatch)
     caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
 
+    vanished: list[Path] = []
+
     def fill_then_vanish(source, target, *args, **kwargs):
         # A partial fill lands, then an outside actor removes the holding
         # entry we were reading, and only then does the copy fail.
+        vanished.append(Path(source))
         if shape == "dir":
             Path(target).mkdir(parents=True, exist_ok=True)
             (Path(target) / "agent.md").write_text("source", encoding="utf-8")
@@ -4390,6 +4547,15 @@ def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
     assert any("preserving the partial copy" in m and str(survivors[0]) in m for m in messages), (
         messages
     )
+    # ``_stage_move`` unwinds itself here, so its rename-back is the LAST word
+    # — no caller survivor line follows it (#2327). It must therefore not
+    # report the holding entry it could not put back as holding anything: that
+    # entry is what just went away.
+    assert len(vanished) == 1, vanished
+    assert not any("preserved at " + str(vanished[0]) in m for m in messages), messages
+    assert any(
+        "rename-back failed" in m and str(vanished[0]) + ", which held the" in m for m in messages
+    ), messages
 
 
 @pytest.mark.parametrize("shape", ["dir", "flat"])
