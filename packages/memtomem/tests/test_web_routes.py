@@ -2959,8 +2959,9 @@ class TestEditChunkProjectSharedGateB:
         assert resp.status_code == 200, resp.text
         payload = resp.json()
         assert payload["status"] == "needs_confirmation"
-        # The envelope names the field to re-send, so the SPA does not have
-        # to hard-code the vocabulary.
+        # The envelope names the field to re-send. The SPA matches that name
+        # against the one confirmation it can answer and refuses anything
+        # else, so this string is a contract with the client, not decoration.
         assert payload["confirm"] == "confirm_project_shared"
         assert payload["reason"]
         # Nothing that would read as a completed edit came back.

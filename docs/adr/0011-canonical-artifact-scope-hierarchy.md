@@ -333,9 +333,14 @@ explicit argument. Every one of those consents produces a
 persisted `metadata.scope`, not the caller's parameter — a client that
 omits `scope` while editing a project_shared chunk cannot bypass the
 gate by accident. Both re-read that scope from the chunk re-fetched
-*under the source file's lock*, so a migrate that re-scopes the chunk
-between the caller's read and the write cannot carry an edit into the
-shared tier on a consent given for another one.
+*under the source file's lock*, so a re-scope landing between the
+caller's read and the write cannot carry an edit into the shared tier on
+a consent given for another one. The writer that produces a same-path
+re-scope is an incremental **re-index** after `project_memory_dirs`
+changes — `index_file` re-derives scope from the path each pass and
+chunk ids survive re-index; `memory-migrate` rewrites path and scope
+together and so arrives on the lock helper's re-key / "moved" branch
+instead.
 
 > **2026-09 (#2317):** Gate B now applies to `mem_edit` and its web twin
 > `PATCH /api/chunks/{id}`, which until this release had Gate A alone.

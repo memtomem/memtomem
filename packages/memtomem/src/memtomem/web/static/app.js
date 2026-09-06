@@ -550,12 +550,18 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
 //   * The retry sends the *same body*. The editor's textarea can change
 //     while a dialog is open, and re-reading it on the retry would save
 //     bytes the user never saw the warning for.
-//   * Gate B is checked before the redaction scan server-side, so a
-//     confirmed retry can still hit Gate A. Routing the retry back through
-//     ``apiWithRedactionRetry`` keeps that second dialog working instead of
-//     surfacing a raw 403 — and Gate A's own project_shared hard-refusal,
-//     which no confirmation can satisfy, still arrives as a thrown
-//     ProjectTierBlockedError for the caller's catch-arm to report.
+//   * The confirmed leg does NOT go back through ``apiWithRedactionRetry``.
+//     The first leg may — we do not know the tier yet — but once the
+//     envelope has told us the chunk is project_shared, offering the
+//     force_unsafe bypass is offering something the server can never
+//     accept: ``enforce_write_guard`` hard-refuses that combination
+//     unconditionally (privacy.py, ADR-0011 §5 Gate A). Routing it through
+//     the generic retry asked the user to authorise a bypass that was going
+//     to be refused, spent an extra request doing it, and — because the
+//     retry re-sent ``confirm_project_shared`` — recorded a SECOND Gate B
+//     consent line for one human consent, corrupting the very audit record
+//     #2306 added. So the confirmed leg uses plain ``api()`` and a redaction
+//     hit surfaces as a shared-tier refusal the caller reports as-is.
 //
 // Returns ``null`` when the user declines, matching the cancel contract
 // ``apiWithRedactionRetry`` already has, so call sites keep one check.
@@ -584,7 +590,20 @@ async function saveChunkBody(chunkId, body, opts = {}) {
   });
   if (!agreed) return null;
   const confirmedBody = Object.assign({}, disclosed, { confirm_project_shared: true });
-  return await apiWithRedactionRetry('PATCH', path, confirmedBody, opts);
+  try {
+    return await api('PATCH', path, confirmedBody, opts);
+  } catch (err) {
+    if (!(err instanceof RedactionBlockedError)) throw err;
+    // The scanner refused, and on this tier the bypass is not on offer.
+    // Re-thrown as a shared-tier refusal so the caller's catch-arm reports
+    // "cannot be bypassed here" rather than the generic redaction wording,
+    // which would read as though a force_unsafe retry were available.
+    throw new ProjectTierBlockedError({
+      surface: err.surface,
+      scope: 'project_shared',
+      message: t('toast.chunk_edit_shared_redaction_blocked', { hits: err.hits }),
+    });
+  }
 }
 
 // Multipart upload variant of ``apiWithRedactionRetry``. ``/api/upload``

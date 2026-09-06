@@ -143,7 +143,11 @@ class ChunkEditNeedsConfirmation(BaseModel):
     a client seeing it cannot tell "ask the user and retry" from "stop".
 
     ``confirm`` names the exact request-body field whose ``true`` completes
-    the round-trip, so the SPA does not hard-code the vocabulary.
+    the round-trip. The SPA checks that name against the one confirmation
+    it knows how to answer and refuses anything else, rather than following
+    it dynamically — so a future envelope asking for a *different* consent
+    fails loudly instead of being answered with the wrong flag. The field
+    still earns its place: it is what makes that check possible.
     """
 
     status: Literal["needs_confirmation"]

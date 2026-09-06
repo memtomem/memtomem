@@ -140,20 +140,46 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
     expect(toasts).toHaveLength(0);
   });
 
-  it('still offers the redaction dialog when the confirmed re-send trips Gate A', async () => {
+  it('does not offer a force_unsafe bypass the shared tier can never accept', async () => {
+    /* The first draft of this test asserted a third request carrying
+     * force_unsafe that came back SAVED. The real backend cannot answer
+     * that: enforce_write_guard hard-refuses force_unsafe on
+     * project_shared unconditionally (ADR-0011 §5 Gate A). So the fiction
+     * was in the fixture, and it hid a real defect — the helper prompted
+     * for a bypass that was going to be refused, and the extra request
+     * carried confirm_project_shared again, recording a SECOND Gate B
+     * consent line for one human consent.
+     */
     const { window, confirms, patches } = await bootEdit({
-      responses: [SHARED_ENVELOPE, REDACTION_403, SAVED],
+      responses: [SHARED_ENVELOPE, REDACTION_403],
       confirmAnswers: [true, true],
     });
 
-    const resp = await window.saveChunkBody(CHUNK_ID, BODY);
+    await expect(window.saveChunkBody(CHUNK_ID, BODY)).rejects.toThrow();
 
-    // Gate B, then Gate A, then the write: three requests, two dialogs.
-    expect(patches).toHaveLength(3);
+    // Gate B, then the confirmed leg. No third request: the bypass is not
+    // on offer here, so nothing re-sends the consent.
+    expect(patches).toHaveLength(2);
     expect(patches[1].confirm_project_shared).toBe(true);
-    expect(patches[2].confirm_project_shared).toBe(true);
-    expect(patches[2].force_unsafe).toBe(true);
-    expect(confirms).toHaveLength(2);
-    expect(resp).toEqual(SAVED);
+    expect(patches.every((p) => p.force_unsafe === undefined)).toBe(true);
+    // One dialog — the shared-tier disclosure. The redaction dialog must
+    // not appear; a second confirmAnswer was staged precisely so that an
+    // extra prompt would be answerable and therefore visible here.
+    expect(confirms).toHaveLength(1);
+  });
+
+  it('reports the shared-tier refusal in its own words, not the bypass wording', async () => {
+    const { window } = await bootEdit({
+      responses: [SHARED_ENVELOPE, REDACTION_403],
+      confirmAnswers: [true],
+    });
+
+    const err = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    // A RedactionBlockedError would make the caller's toast say "retry with
+    // force_unsafe", which is false on this tier.
+    expect(err.name).toBe('ProjectTierBlockedError');
+    expect(err.message).toContain('2');
+    expect(err.message).not.toMatch(/redaction_blocked/);
   });
 });
