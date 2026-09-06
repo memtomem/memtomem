@@ -2739,6 +2739,12 @@ class TestEditChunkRedaction:
         assert resp.status_code == 403, resp.text
         snap = privacy.snapshot()["by_tool"]["web_api_chunk_edit"]
         assert snap["blocked"] == 1
+        # #2317: the refusal reports the tier it was decided under, so a
+        # client can tell "the bypass is available here" from "it is not".
+        # Pinned on the server side because the JS tests cannot: their
+        # fixtures build this payload themselves, so deleting the field in
+        # the route leaves every one of them green.
+        assert resp.json()["detail"]["scope"] == "user"
 
     async def test_force_unsafe_passes_guard(self, app, client: AsyncClient, tmp_path: Path):
         from memtomem import privacy
@@ -2971,6 +2977,36 @@ class TestEditChunkProjectSharedGateB:
         assert "rewritten body" not in source.read_text(encoding="utf-8")
         # A refusal is not a consent.
         assert consent_lines(caplog) == []
+
+    async def test_confirmed_shared_edit_with_a_secret_reports_its_tier(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
+    ):
+        """The combination the SPA branches on, and the one no test reached.
+
+        Consent given, no ``force_unsafe``, secret present: Gate B passes,
+        Gate A returns the ordinary ``blocked`` (not
+        ``blocked_project_shared``, which needs the bypass flag). The client
+        has to decide whether to offer that bypass, and on this tier it must
+        not — so the refusal has to say which tier it was decided under.
+        Without this the field is only ever asserted for ``user``.
+        """
+        source, _calls = self._stage(app, monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={
+                    "new_content": "secret token=sk-" + "a" * 30,
+                    "confirm_project_shared": True,
+                },
+            )
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        assert detail["detail"] == "redaction_blocked"
+        assert detail["scope"] == "project_shared"
+        assert "original body" in source.read_text(encoding="utf-8")
+        # Gate B passed before Gate A refused, so the consent is on record.
+        assert len(consent_lines(caplog)) == 1
 
     async def test_gate_a_refusal_stays_a_403_and_is_not_confirmable(
         self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog

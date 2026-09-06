@@ -10,14 +10,29 @@
  * These pin the JS half:
  *
  *   - a user-scope chunk still saves on one request, no modal;
- *   - the envelope opens a confirm and the re-send carries the flag the
- *     SERVER named, not a hardcoded client guess;
+ *   - the envelope opens a confirm and the re-send carries the field the
+ *     SERVER named — the client matches that name against the one
+ *     confirmation it can answer and refuses anything else (an allow-list
+ *     check, not dynamic following);
  *   - the re-send carries the SAME body — the editor can change under an
  *     open dialog, and saving the newer bytes would write content the user
  *     was never warned about;
  *   - declining sends nothing further and reports no success;
- *   - a confirmed re-send that then trips the redaction guard still gets its
- *     own dialog, rather than surfacing a raw 403.
+ *   - a confirmed re-send that trips the scanner is converted to a
+ *     non-overridable shared-tier refusal, with NO bypass dialog: Gate A
+ *     refuses force_unsafe on that tier unconditionally.
+ *
+ * And the two cross-request races, which exist because a re-index can
+ * re-scope a chunk while a dialog is open (the window is however long the
+ * user takes to answer):
+ *
+ *   - private → shared between the redaction retry and its response: the
+ *     retry gets the envelope and writes nothing, so no success toast may
+ *     be shown;
+ *   - shared → private between the envelope and the confirmed request: the
+ *     bypass IS available now, so the refusal must not claim otherwise.
+ *     Both branch on the scope the server reports with the refusal, never
+ *     on the tier an earlier response implied.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -36,13 +51,21 @@ const SHARED_ENVELOPE = {
 
 const SAVED = { id: CHUNK_ID, content: 'the reviewed text' };
 
-const REDACTION_403 = {
+// The route reports the tier it decided the refusal under, so the client
+// branches on what the server just saw rather than on the earlier envelope.
+const redaction403 = (scope) => ({
   ok: false,
   status: 403,
   json: async () => ({
-    detail: { detail: 'redaction_blocked', hits: 2, surface: 'web_api_chunk_edit' },
+    detail: {
+      detail: 'redaction_blocked',
+      hits: 2,
+      surface: 'web_api_chunk_edit',
+      ...(scope === undefined ? {} : { scope }),
+    },
   }),
-};
+});
+const REDACTION_403 = redaction403('project_shared');
 
 async function bootEdit({ responses, confirmAnswers }) {
   const dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
@@ -90,7 +113,7 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
     expect(resp).toEqual(SAVED);
   });
 
-  it('discloses then re-sends with the flag the envelope names', async () => {
+  it('re-sends with the field the envelope names, after checking it is one we answer', async () => {
     const { window, confirms, patches } = await bootEdit({
       responses: [SHARED_ENVELOPE, SAVED],
       confirmAnswers: [true],
@@ -181,5 +204,61 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
     expect(err.name).toBe('ProjectTierBlockedError');
     expect(err.message).toContain('2');
     expect(err.message).not.toMatch(/redaction_blocked/);
+  });
+
+  it('claims no success when a re-scope turns the bypass retry into an envelope', async () => {
+    /* private → shared, in the window the redaction dialog holds open.
+     * The force_unsafe retry then answers 200 needs_confirmation and writes
+     * NOTHING. Announcing the bypass at that point would be the only toast
+     * the user ever sees, saying the entry was written when it was not —
+     * and if they decline the shared-tier confirm, they lose the edit
+     * believing it saved.
+     */
+    const { window, toasts, patches } = await bootEdit({
+      responses: [redaction403(undefined), SHARED_ENVELOPE],
+      // 1st: bypass the scanner. 2nd: decline the shared-tier disclosure.
+      confirmAnswers: [true, false],
+    });
+
+    const resp = await window.saveChunkBody(CHUNK_ID, BODY);
+
+    expect(patches).toHaveLength(2);
+    expect(patches[1].force_unsafe).toBe(true);
+    expect(resp).toBeNull();
+    // The load-bearing assertion: nothing told the user this worked.
+    expect(toasts).toHaveLength(0);
+  });
+
+  it('does not claim the bypass is unavailable when a re-scope made it available', async () => {
+    /* shared → private, in the window the shared-tier modal holds open.
+     * The confirmed request is refused by the scanner, but on the tier it
+     * now lives in force_unsafe IS permitted. Converting that to a
+     * shared-tier refusal would deny a real option on a false claim, so
+     * the generic redaction error must survive instead.
+     */
+    const { window } = await bootEdit({
+      responses: [SHARED_ENVELOPE, redaction403('user')],
+      confirmAnswers: [true],
+    });
+
+    const err = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(err.name).toBe('RedactionBlockedError');
+    expect(err.scope).toBe('user');
+  });
+
+  it('does not assert a tier the server declined to report', async () => {
+    /* A surface that sends no scope leaves the tier unknown. Unknown is
+     * not "shared": asserting it would put the false claim back for every
+     * caller that has not been taught to report one.
+     */
+    const { window } = await bootEdit({
+      responses: [SHARED_ENVELOPE, redaction403(undefined)],
+      confirmAnswers: [true],
+    });
+
+    const err = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(err.name).toBe('RedactionBlockedError');
   });
 });

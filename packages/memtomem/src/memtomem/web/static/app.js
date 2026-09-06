@@ -352,11 +352,15 @@ async function ensureCsrfToken() {
 // SPA parses it via ``api()`` below and surfaces a confirm-and-retry UX
 // through ``apiWithRedactionRetry()``. Issue #785.
 class RedactionBlockedError extends Error {
-  constructor({ hits, surface }) {
+  constructor({ hits, surface, scope }) {
     super('redaction_blocked');
     this.name = 'RedactionBlockedError';
     this.hits = hits;
     this.surface = surface;
+    // The tier the server decided this refusal under, when it says. Absent
+    // on surfaces that do not report one — callers must treat undefined as
+    // "unknown", never as "not shared".
+    this.scope = scope;
   }
 }
 
@@ -415,6 +419,7 @@ async function api(method, path, body, opts = {}) {
       throw new RedactionBlockedError({
         hits: err.detail.hits,
         surface: err.detail.surface,
+        scope: err.detail.scope,
       });
     }
     if (
@@ -534,7 +539,17 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
     if (!ok) return null;
     const retryBody = Object.assign({}, body || {}, { force_unsafe: true });
     const data = await api(method, path, retryBody, opts);
-    showToast(t('toast.redaction_bypassed', { hits: err.hits }), 'info');
+    // A 200 is not proof of a write. Since #2317 one route answers an
+    // un-consented request with the ``needs_confirmation`` envelope at 200
+    // and writes nothing, and a chunk can be re-scoped into that tier
+    // *between* the first request and this retry — the confirm dialog above
+    // holds the window open for however long the user takes. Announcing the
+    // bypass here would then be the only toast the user sees, saying the
+    // entry was written when nothing was, and the caller still has an
+    // envelope to answer. Say nothing and let the caller decide.
+    if (!data || data.status !== 'needs_confirmation') {
+      showToast(t('toast.redaction_bypassed', { hits: err.hits }), 'info');
+    }
     return data;
   }
 }
@@ -594,13 +609,19 @@ async function saveChunkBody(chunkId, body, opts = {}) {
     return await api('PATCH', path, confirmedBody, opts);
   } catch (err) {
     if (!(err instanceof RedactionBlockedError)) throw err;
-    // The scanner refused, and on this tier the bypass is not on offer.
-    // Re-thrown as a shared-tier refusal so the caller's catch-arm reports
-    // "cannot be bypassed here" rather than the generic redaction wording,
-    // which would read as though a force_unsafe retry were available.
+    // Branch on the tier the SERVER decided this refusal under, not on the
+    // one the envelope implied a moment ago. A re-index can re-scope the
+    // chunk while the confirm dialog is open, and then the bypass this
+    // message says is unavailable is in fact available — telling the user
+    // otherwise denies them a real option on a claim that is false.
+    // ``scope`` absent means the surface did not report one: unknown, so
+    // fall through to the generic redaction error rather than assert.
+    if (err.scope !== 'project_shared') throw err;
+    // Still the shared tier: the bypass genuinely is not on offer, because
+    // enforce_write_guard refuses force_unsafe there unconditionally.
     throw new ProjectTierBlockedError({
       surface: err.surface,
-      scope: 'project_shared',
+      scope: err.scope,
       message: t('toast.chunk_edit_shared_redaction_blocked', { hits: err.hits }),
     });
   }

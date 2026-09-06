@@ -202,6 +202,16 @@ async def edit_chunk(
                     "detail": "redaction_blocked",
                     "hits": len(guard.hits),
                     "surface": "web_api_chunk_edit",
+                    # The tier this refusal was decided under, read from the
+                    # chunk re-fetched inside the lock — authoritative for
+                    # this request and no other. A client that has to choose
+                    # between "offer the bypass" and "say it cannot be
+                    # bypassed here" must branch on what the server just
+                    # saw, not on what an earlier response implied: a
+                    # re-index can re-scope the chunk between two requests,
+                    # and the SPA's confirm dialog holds that window open
+                    # for as long as the user takes to answer (#2317).
+                    "scope": inferred_scope,
                 },
             )
         if guard.decision == "blocked_project_shared":
