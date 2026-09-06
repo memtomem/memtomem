@@ -10,8 +10,9 @@ Three load-bearing pins for the memory write surface:
    ``blocked_project_shared`` regardless of the surface (single
    ``mem_add``, batch ``mem_batch_add``).
 3. **Inferred scope on edit.** ``mem_edit`` reads the loaded chunk's
-   ``metadata.scope`` and feeds it to the guard — a client cannot
-   bypass Gate A by omitting an explicit scope param.
+   ``metadata.scope`` and feeds it to *both* gates — a client cannot
+   bypass Gate A, or skip Gate B's confirmation, by omitting an explicit
+   scope param (#2317).
 
 The mocks in this file pre-stage the canonical pieces ``_mem_add_core``
 calls: the embedding mismatch check, the AppContext, the index_engine
@@ -152,7 +153,7 @@ async def test_mem_add_default_user_scope_force_unsafe_still_works(bm25_only_com
 
 @pytest.mark.asyncio
 async def test_mem_edit_inferred_scope_blocks_project_shared_force_unsafe(
-    bm25_only_components, monkeypatch, tmp_path
+    bm25_only_components, monkeypatch, tmp_path, caplog
 ):
     comp, _mem_dir = bm25_only_components
     app = AppContext.from_components(comp)
@@ -182,18 +183,31 @@ async def test_mem_edit_inferred_scope_blocks_project_shared_force_unsafe(
         "memtomem.server.tools.search._resolve_project_context_root", lambda _app: proj
     )
 
-    out = await memory_crud.mem_edit(
-        chunk_id=str(chunk_id),
-        new_content=_SECRET,
-        force_unsafe=True,
-        ctx=ctx,
-    )
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_edit(
+            chunk_id=str(chunk_id),
+            new_content=_SECRET,
+            force_unsafe=True,
+            # Gate B is satisfied (#2317) so the call reaches Gate A, which is
+            # what this test measures. Passing the consent also makes the
+            # assertion the stronger one: even a caller who has explicitly
+            # authorised the git-tracked write cannot carry a secret through it.
+            confirm_project_shared=True,
+            ctx=ctx,
+        )
     # The edit surface inferred scope=project_shared from the loaded
     # chunk's metadata; force_unsafe=True is hard-refused.
     assert "force_unsafe=True is not permitted" in out
     assert "git history is forever" in out
     snap = privacy.snapshot()
     assert snap["by_tool"]["mem_edit"]["blocked_project_shared"] == 1
+    # Consent recorded ≠ write landed. Gate A refused afterwards, and the
+    # line stays: someone did authorise a repository-tracked write, which
+    # is the fact with no other record. Also the ordering pin — moving the
+    # emit behind Gate A would drop this line and leave the rest green.
+    # Mirrors ``test_gate_a_refusal_after_consent_still_records_the_consent``
+    # on the add path.
+    assert len(consent_lines(caplog)) == 1
 
 
 @pytest.mark.asyncio
@@ -240,6 +254,263 @@ async def test_mem_edit_inferred_user_scope_force_unsafe_proceeds(
     assert "force_unsafe=True is not permitted" not in out
     snap = privacy.snapshot()
     assert snap["by_tool"]["mem_edit"]["bypassed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# mem_edit Gate B — the consent half, added in #2317
+#
+# Gate A was on this path from PR-D; Gate B was not, which made ``mem_edit``
+# the one repository-tracked write nobody was asked to confirm while
+# ``mem_delete`` asked before removing the very same chunk.
+# ---------------------------------------------------------------------------
+
+
+#: Which ``storage.get_chunk`` call inside ``mem_edit`` is the one the gates
+#: read. ``_locked_chunk`` fetches twice: an unlocked probe to learn the
+#: source file (the lock key), then a re-fetch under L1+L2. The gates must
+#: consume the second. Pinned as a number so a change to that sequence makes
+#: the re-scope tests below fail loudly rather than silently start measuring
+#: the probe again.
+_MEM_EDIT_FRESH_FETCH = 2
+
+
+def _stage_edit_chunk(
+    comp,
+    monkeypatch,
+    tmp_path,
+    *,
+    scope="project_shared",
+    fresh_scope=None,
+    body="original body",
+):
+    """A chunk backed by a real file, addressable by id, with a re-scope hook.
+
+    The file is real because a refusal must be distinguishable from a
+    write that failed for an unrelated reason: the "unchanged on disk"
+    assertion is vacuous against a path that never existed. The project
+    context is pinned because ADR-0036 makes a project_shared id resolve
+    only from inside its own project — without it the gate is never
+    reached and a refusal assertion would pass for the wrong reason.
+
+    ``fresh_scope`` stages the race the gate exists to survive: the
+    unlocked probe answers with ``scope`` and the re-fetch under the lock
+    answers with ``fresh_scope``. The **source file stays the same** on
+    both, so ``_locked_chunk`` does not take its "moved" re-key branch and
+    the test isolates one variable — which fetch the gate reads.
+
+    Which real writer produces that state, stated precisely because an
+    earlier draft of this docstring named the wrong one. **Not**
+    ``memory-migrate``: its update sets ``source_file`` and ``scope`` in a
+    single statement (``storage/sqlite_backend.py``), so a migrated chunk
+    always arrives with a new path and takes the re-key branch instead —
+    a different pin, and one this shape deliberately excludes. The writer
+    that does produce same-path-new-scope is an **incremental re-index**:
+    ``IndexEngine.index_file`` re-derives scope from the path on every
+    pass (``_resolve_scope``), and chunk UUIDs are stable across re-index
+    (ADR-0005, #1788). So a re-index that lands after
+    ``project_memory_dirs`` gains a directory — a config edit, a
+    ``config.d`` reload, a newly discovered ``.memtomem/`` — flips a
+    chunk's scope at a fixed id and a fixed path, which is exactly this.
+
+    Returns ``(chunk, source, calls)``; ``calls["n"]`` is the number of
+    ``get_chunk`` calls, so a test can refuse to pass vacuously if the
+    fetch it is aiming at never happened.
+    """
+    project_root = tmp_path / "proj_edit"
+    proj_dir = project_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    source = proj_dir / "rule.md"
+    source.write_text(f"## team rule\n\n{body}\n", encoding="utf-8")
+    comp.config.indexing.project_memory_dirs = [proj_dir]
+
+    def _chunk(chunk_scope):
+        return Chunk(
+            content=body,
+            metadata=ChunkMetadata(
+                source_file=source,
+                scope=chunk_scope,
+                project_root=None if chunk_scope == "user" else project_root,
+                start_line=1,
+                end_line=3,
+            ),
+            embedding=[0.1] * 1024,
+        )
+
+    probe = _chunk(scope)
+    fresh = probe if fresh_scope is None else _chunk(fresh_scope)
+    # Both share one id: this is the same row being re-read, not two rows.
+    fresh = Chunk(
+        content=fresh.content,
+        metadata=fresh.metadata,
+        embedding=fresh.embedding,
+        id=probe.id,
+    )
+    calls = {"n": 0}
+
+    async def _get_chunk(_uid):
+        calls["n"] += 1
+        return probe if calls["n"] < _MEM_EDIT_FRESH_FETCH else fresh
+
+    monkeypatch.setattr(comp.storage, "get_chunk", AsyncMock(side_effect=_get_chunk))
+    monkeypatch.setattr(
+        "memtomem.server.tools.search._resolve_project_context_root",
+        lambda _app: project_root,
+    )
+
+    async def fake_index_file(*args, **kwargs):
+        from memtomem.models import IndexingStats
+
+        return IndexingStats(0, 0, 0, 0, 0, 0.0)
+
+    monkeypatch.setattr(comp.index_engine, "index_file", fake_index_file)
+    return probe, source, calls
+
+
+@pytest.mark.asyncio
+async def test_mem_edit_project_shared_without_confirm_rejects(
+    bm25_only_components, monkeypatch, tmp_path, caplog
+):
+    """Gate B on the edit path: no consent, no write, no consent record."""
+    comp, _mem_dir = bm25_only_components
+    chunk, source, _calls = _stage_edit_chunk(comp, monkeypatch, tmp_path)
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_edit(
+            chunk_id=str(chunk.id),
+            new_content="rewritten body",
+            ctx=ctx,
+        )
+    assert "confirm_project_shared=True" in out
+    # Refused before the mutation, not after it.
+    assert "original body" in source.read_text(encoding="utf-8")
+    assert "rewritten body" not in source.read_text(encoding="utf-8")
+    # A refusal is not a consent.
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_mem_edit_project_shared_with_confirm_records_one_consent(
+    bm25_only_components, monkeypatch, tmp_path, caplog
+):
+    comp, _mem_dir = bm25_only_components
+    chunk, source, _calls = _stage_edit_chunk(comp, monkeypatch, tmp_path)
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_edit(
+            chunk_id=str(chunk.id),
+            new_content="rewritten body",
+            confirm_project_shared=True,
+            ctx=ctx,
+        )
+    assert "Memory updated in" in out, out
+    assert "rewritten body" in source.read_text(encoding="utf-8")
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=mem_edit" in lines[0]
+    assert "mechanism=param" in lines[0]
+    # ``action`` distinguishes this record from the delete of the same
+    # chunk, which is the other consent an operator would be reading for.
+    assert "action=edit" in lines[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_scope", ["user", "project_local"])
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_mem_edit_other_tiers_record_no_consent(
+    bm25_only_components, monkeypatch, tmp_path, caplog, other_scope, confirmed
+):
+    """The emit must mirror the gate's predicate, which the AST guard
+    cannot check.
+
+    Two axes, both of which a plausible regression widens. ``project_local``
+    is the tier a ``scope != "user"`` predicate would sweep in — it lives
+    inside a project and is not committed, so it is exactly the case a
+    reader mistakes for the shared one. And passing the flag on a tier that
+    did not ask for it is not a consent either: the record says a
+    repository-tracked write was authorised, and a flag on a
+    ``project_local`` edit authorised no such thing.
+    """
+    comp, _mem_dir = bm25_only_components
+    chunk, source, _calls = _stage_edit_chunk(comp, monkeypatch, tmp_path, scope=other_scope)
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_edit(
+            chunk_id=str(chunk.id),
+            new_content="rewritten body",
+            confirm_project_shared=confirmed,
+            ctx=ctx,
+        )
+    # The edit landed without a confirmation being required — the flag is
+    # not a blanket requirement, only a project_shared one.
+    assert "Memory updated in" in out, out
+    assert "rewritten body" in source.read_text(encoding="utf-8")
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_mem_edit_gate_b_reads_the_chunk_re_fetched_under_the_lock(
+    bm25_only_components, monkeypatch, tmp_path, caplog
+):
+    """A re-scope landing while we wait for the lock must not get its edit
+    in on the probe's tier.
+
+    The unlocked probe says ``user``; the re-fetch under L1+L2 says
+    ``project_shared``. A gate reading the probe would let this through
+    and write into the repository-tracked tier with no consent at all —
+    the whole reason ``_locked_chunk`` re-fetches. See
+    ``_stage_edit_chunk`` for which writer produces this state and which
+    one does not.
+    """
+    comp, _mem_dir = bm25_only_components
+    chunk, source, calls = _stage_edit_chunk(
+        comp, monkeypatch, tmp_path, scope="user", fresh_scope="project_shared"
+    )
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_edit(
+            chunk_id=str(chunk.id),
+            new_content="rewritten body",
+            ctx=ctx,
+        )
+    # The re-fetch has to have happened, or this passes for the wrong reason.
+    assert calls["n"] >= _MEM_EDIT_FRESH_FETCH, calls
+    assert "confirm_project_shared=True" in out
+    assert "rewritten body" not in source.read_text(encoding="utf-8")
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_mem_edit_gate_b_does_not_refuse_on_a_stale_project_shared_probe(
+    bm25_only_components, monkeypatch, tmp_path, caplog
+):
+    """The inverse, which the refusal test alone leaves open.
+
+    A gate that read the probe would *also* refuse an edit the fresh chunk
+    says needs no consent — same bug, opposite sign, and a test that only
+    checks the refusal direction cannot tell "reads the fresh chunk" from
+    "refuses whenever either fetch says project_shared".
+    """
+    comp, _mem_dir = bm25_only_components
+    chunk, source, calls = _stage_edit_chunk(
+        comp, monkeypatch, tmp_path, scope="project_shared", fresh_scope="user"
+    )
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await memory_crud.mem_edit(
+            chunk_id=str(chunk.id),
+            new_content="rewritten body",
+            ctx=ctx,
+        )
+    assert calls["n"] >= _MEM_EDIT_FRESH_FETCH, calls
+    assert "Memory updated in" in out, out
+    assert "rewritten body" in source.read_text(encoding="utf-8")
+    # No consent was asked for, so none is recorded.
+    assert consent_lines(caplog) == []
 
 
 # ---------------------------------------------------------------------------

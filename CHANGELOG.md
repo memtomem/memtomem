@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Breaking
+
+- **Rewriting a note that lives in the Git-tracked tier now asks first.**
+  `mem_edit` and the web editor's save both refused a privacy-scan bypass on a
+  `project_shared` chunk but took no confirmation, so replacing the body of a
+  note everyone with repo access can read was the one such write nobody was
+  asked to authorise — while deleting that very same chunk did ask. Both now
+  require the explicit consent the rest of the tier's writes take:
+  `confirm_project_shared=True` on the MCP tool, `"confirm_project_shared":
+  true` in the `PATCH /api/chunks/{id}` body. A call that omits it writes
+  nothing and the file on disk is left alone. Nothing about editing a `user`
+  or `project_local` note changes. The consent that is given is recorded like
+  every other, as `project_shared.confirmed_via=mem_edit` /
+  `=web_api_chunk_edit` with `action=edit`, so an operator can tell a rewrite
+  from the deletion of the same chunk.
+
+  In the browser this is a prompt, not an error: saving a shared-tier entry
+  now says what the save would do and completes when you agree, the same
+  disclose-then-confirm step deleting a shared source already used. The
+  unconfirmed answer is deliberately *not* the "blocked" response the privacy
+  scanner returns on the same route — that one can never be satisfied by
+  answering a question, and a client that could not tell the two apart would
+  ask you something pointless.
+
+  **Upgrading:** an agent or script that edits shared-tier notes must pass the
+  new argument; the refusal names it. (#2317)
+
 ### Added
 
 - **Hand one skill, command, or agent to someone else as a file.**
@@ -204,11 +231,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   separately. A Windows directory junction is refused outright rather than
   walked into, which would have copied out-of-tree bytes into the store.
 - **A confirmed write into the Git-tracked tier now leaves the audit record it
-  was promised.** Most ways of writing to the shared tier take two gates: the
-  privacy scanner refuses a bypass at the boundary, and the surface requires an
-  explicit confirmation. (Editing a chunk that already lives there is the
-  exception — it has the scanner but no confirmation.) The refusal has been
-  recorded since that design shipped. The confirmation was specified to leave a
+  was promised.** Writing to the shared tier through the memory and context
+  commands takes two gates: the privacy scanner refuses a bypass at the
+  boundary, and the surface requires an explicit confirmation. (Editing a chunk
+  that already lives there had only the scanner when this shipped; the Breaking
+  entry above closes that gap in the same release. A few other writers — the
+  LangGraph adapter, imports, URL indexing, session archives — still have only
+  the scanner, tracked separately.) The refusal has been recorded since that
+  design shipped. The confirmation was specified to leave a
   matching
   `project_shared.confirmed_via=<surface>` line and left none anywhere, so a
   team reviewing how a note, an agent, a hook, or a bundle came to be in Git

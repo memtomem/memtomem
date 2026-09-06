@@ -332,7 +332,52 @@ explicit argument. Every one of those consents produces a
 `mem_edit` and `mem_delete` infer scope from the loaded chunk's
 persisted `metadata.scope`, not the caller's parameter — a client that
 omits `scope` while editing a project_shared chunk cannot bypass the
-gate by accident.
+gate by accident. Both re-read that scope from the chunk re-fetched
+*under the source file's lock*, so a re-scope landing between the
+caller's read and the write cannot carry an edit into the shared tier on
+a consent given for another one. The writer that produces a same-path
+re-scope is an incremental **re-index** after `project_memory_dirs`
+changes — `index_file` re-derives scope from the path each pass and
+chunk ids survive re-index; `memory-migrate` rewrites path and scope
+together and so arrives on the lock helper's re-key / "moved" branch
+instead.
+
+> **2026-09 (#2317):** Gate B now applies to `mem_edit` and its web twin
+> `PATCH /api/chunks/{id}`, which until this release had Gate A alone.
+> The gap was narrow and deliberate-looking — an edit does not move the
+> chunk between tiers, so one could argue the tier was consented to when
+> the chunk landed — but `mem_delete` asks before removing the same
+> chunk, so the two verbs contradicted each other about the same bytes,
+> and the paragraph above claiming two gates on every `project_shared`
+> write was false as written (the correction #2306 made to that claim
+> pointed here). What the consent covers on this path is the *write*,
+> not the destination: replacing the body of a repository-tracked note
+> puts new bytes on a path the repository tracks, which the project then
+> commits and shares (the write itself commits nothing — the exposure is
+> the destination, not the moment). The consent line
+> carries `action=edit`, distinguishing it from the `action=delete` of
+> the same chunk. This was a breaking change to both surfaces —
+> `confirm_project_shared` was added as a required-when-`project_shared`
+> argument with no accept-and-warn window, because a release spent
+> accepting unconfirmed edits would keep emitting exactly the missing
+> record #2306 closed.
+>
+> This closes the edit path and **not** the general claim. The review
+> that found it went looking for siblings and found more, so the
+> paragraph above still describes an intent on some surfaces: the
+> LangGraph `MemtomemStore.add()` adapter reaches the tier through a
+> caller-supplied `file=` with neither gate (#2321, which is the
+> load-bearing one — its Gate A also runs before the destination is
+> known, so it scans as `user` scope), and `mem_session_end`, the two
+> importers and `mem_index_url` derive a destination that Gate A already
+> classifies but no gate confirms (#2322, reachable only when
+> `memory_dirs` and `project_memory_dirs` overlap). Neither is visible to
+> `test_project_shared_confirmation_audit_guard.py`, which finds Gate B
+> sites by the `confirm_project_shared` identifier and therefore cannot
+> see a surface that carries none — the self-certification boundary that
+> guard's own docstring states. Until those close, "every
+> `project_shared` write takes two gates" is a claim about the memory
+> CRUD and context surfaces, not about every writer in the tree.
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious

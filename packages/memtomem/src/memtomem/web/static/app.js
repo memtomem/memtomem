@@ -352,11 +352,15 @@ async function ensureCsrfToken() {
 // SPA parses it via ``api()`` below and surfaces a confirm-and-retry UX
 // through ``apiWithRedactionRetry()``. Issue #785.
 class RedactionBlockedError extends Error {
-  constructor({ hits, surface }) {
+  constructor({ hits, surface, scope }) {
     super('redaction_blocked');
     this.name = 'RedactionBlockedError';
     this.hits = hits;
     this.surface = surface;
+    // The tier the server decided this refusal under, when it says. Absent
+    // on surfaces that do not report one — callers must treat undefined as
+    // "unknown", never as "not shared".
+    this.scope = scope;
   }
 }
 
@@ -415,6 +419,7 @@ async function api(method, path, body, opts = {}) {
       throw new RedactionBlockedError({
         hits: err.detail.hits,
         surface: err.detail.surface,
+        scope: err.detail.scope,
       });
     }
     if (
@@ -534,8 +539,91 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
     if (!ok) return null;
     const retryBody = Object.assign({}, body || {}, { force_unsafe: true });
     const data = await api(method, path, retryBody, opts);
-    showToast(t('toast.redaction_bypassed', { hits: err.hits }), 'info');
+    // A 200 is not proof of a write. Since #2317 one route answers an
+    // un-consented request with the ``needs_confirmation`` envelope at 200
+    // and writes nothing, and a chunk can be re-scoped into that tier
+    // *between* the first request and this retry — the confirm dialog above
+    // holds the window open for however long the user takes. Announcing the
+    // bypass here would then be the only toast the user sees, saying the
+    // entry was written when nothing was, and the caller still has an
+    // envelope to answer. Say nothing and let the caller decide.
+    if (!data || data.status !== 'needs_confirmation') {
+      showToast(t('toast.redaction_bypassed', { hits: err.hits }), 'info');
+    }
     return data;
+  }
+}
+
+// ADR-0011 §5 Gate B on a chunk edit (#2317). Saving a chunk that lives in
+// the project_shared tier comes back as the shared ``needs_confirmation``
+// envelope at HTTP 200 with no write performed; disclose what the second leg
+// would do, then re-issue carrying the flag the server named.
+//
+// Two properties this helper exists to hold, both of which a per-call-site
+// copy got wrong on the first attempt:
+//
+//   * The retry sends the *same body*. The editor's textarea can change
+//     while a dialog is open, and re-reading it on the retry would save
+//     bytes the user never saw the warning for.
+//   * The confirmed leg does NOT go back through ``apiWithRedactionRetry``.
+//     The first leg may — we do not know the tier yet — but once the
+//     envelope has told us the chunk is project_shared, offering the
+//     force_unsafe bypass is offering something the server can never
+//     accept: ``enforce_write_guard`` hard-refuses that combination
+//     unconditionally (privacy.py, ADR-0011 §5 Gate A). Routing it through
+//     the generic retry asked the user to authorise a bypass that was going
+//     to be refused, spent an extra request doing it, and — because the
+//     retry re-sent ``confirm_project_shared`` — recorded a SECOND Gate B
+//     consent line for one human consent, corrupting the very audit record
+//     #2306 added. So the confirmed leg uses plain ``api()`` and a redaction
+//     hit surfaces as a shared-tier refusal the caller reports as-is.
+//
+// Returns ``null`` when the user declines, matching the cancel contract
+// ``apiWithRedactionRetry`` already has, so call sites keep one check.
+async function saveChunkBody(chunkId, body, opts = {}) {
+  const path = `/api/chunks/${chunkId}`;
+  // Snapshot BEFORE the first request, not between the dialog and the
+  // retry. Copying at the retry copies whatever the caller's object holds
+  // by then, and an editor that writes straight into it — or a caller that
+  // reuses one object across saves — would send bytes no dialog described.
+  // The first version of this helper did exactly that and its own test
+  // caught it.
+  const disclosed = Object.assign({}, body || {});
+  const resp = await apiWithRedactionRetry('PATCH', path, disclosed, opts);
+  if (resp === null) return null;
+  if (!resp || resp.status !== 'needs_confirmation') return resp;
+  if (resp.confirm !== 'confirm_project_shared') {
+    // An envelope this build does not know how to answer. Failing loudly
+    // beats silently returning it as if the save had happened.
+    throw new Error(`unsupported confirmation: ${resp.confirm}`);
+  }
+  const agreed = await showConfirm({
+    title: t('confirm.chunk_edit_shared_title'),
+    message: t('confirm.chunk_edit_shared_msg'),
+    confirmText: t('common.save'),
+    danger: true,
+  });
+  if (!agreed) return null;
+  const confirmedBody = Object.assign({}, disclosed, { confirm_project_shared: true });
+  try {
+    return await api('PATCH', path, confirmedBody, opts);
+  } catch (err) {
+    if (!(err instanceof RedactionBlockedError)) throw err;
+    // Branch on the tier the SERVER decided this refusal under, not on the
+    // one the envelope implied a moment ago. A re-index can re-scope the
+    // chunk while the confirm dialog is open, and then the bypass this
+    // message says is unavailable is in fact available — telling the user
+    // otherwise denies them a real option on a claim that is false.
+    // ``scope`` absent means the surface did not report one: unknown, so
+    // fall through to the generic redaction error rather than assert.
+    if (err.scope !== 'project_shared') throw err;
+    // Still the shared tier: the bypass genuinely is not on offer, because
+    // enforce_write_guard refuses force_unsafe there unconditionally.
+    throw new ProjectTierBlockedError({
+      surface: err.surface,
+      scope: err.scope,
+      message: t('toast.chunk_edit_shared_redaction_blocked', { hits: err.hits }),
+    });
   }
 }
 
@@ -3653,11 +3741,7 @@ qs('d-save-btn').addEventListener('click', async () => {
   const btn = qs('d-save-btn');
   btnLoading(btn, true);
   try {
-    const resp = await apiWithRedactionRetry(
-      'PATCH',
-      `/api/chunks/${STATE.selectedChunkId}`,
-      { new_content: newContent },
-    );
+    const resp = await saveChunkBody(STATE.selectedChunkId, { new_content: newContent });
     if (resp === null) return;
     // History push must follow a confirmed write — pushing before the
     // request would pollute the undo stack with a no-op entry when the
@@ -5950,11 +6034,7 @@ function _startChunkEdit(card, chunk, sourcePath) {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
     try {
-      const resp = await apiWithRedactionRetry(
-        'PATCH',
-        `/api/chunks/${chunk.id}`,
-        { new_content: newContent },
-      );
+      const resp = await saveChunkBody(chunk.id, { new_content: newContent });
       if (resp === null) {
         saveBtn.disabled = false;
         saveBtn.textContent = 'Save';
