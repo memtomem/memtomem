@@ -60,15 +60,24 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
+class _UnregisteredProjectTarget(Exception):
+    """An explicit ``file=`` names a project tree that no config entry covers.
+
+    Raised rather than returned so the refusal cannot be dropped. An optional
+    return would let a caller that ignores it fall through as ``user`` tier —
+    which is the exact failure ADR-0011 §5 exists to prevent, and the one this
+    module was fixed for (#2321).
+    """
+
+
 def _resolve_target_scope(
     target: Path,
     memory_dirs: list,
     project_memory_dirs: list,
-) -> tuple[str | None, str | None]:
+) -> str:
     """Classify an explicit ``file=`` target into an ADR-0011 tier.
 
-    Returns ``(scope, None)``, or ``(None, detail)`` when the target must be
-    refused outright.
+    Raises :class:`_UnregisteredProjectTarget` when the target must be refused.
 
     ``classify_scope`` alone is not enough here, in both directions.
 
@@ -107,7 +116,7 @@ def _resolve_target_scope(
                 covering.append((len(root.parts), root_tier))
     if covering:
         covering.sort()
-        return covering[-1][1], None
+        return covering[-1][1]
 
     # 2. A configured user memory dir covering the target makes it user-tier
     #    whatever the path happens to be spelled like.
@@ -117,18 +126,18 @@ def _resolve_target_scope(
         except OSError:  # pragma: no cover - unreadable configured dir
             continue
         if target == base or target.is_relative_to(base):
-            return "user", None
+            return "user"
 
     # 3. Covered by nothing, but shaped like a project canonical path.
     pattern_scope, _ = classify_scope(target, None)
     if pattern_scope != "user":
-        return None, (
+        raise _UnregisteredProjectTarget(
             f"{target} is a project-canonical path, but no "
             "indexing.project_memory_dirs entry covers it. Register the tier "
             "or choose a target inside a configured memory directory."
         )
 
-    return "user", None
+    return "user"
 
 
 class MemtomemStore:
@@ -404,15 +413,14 @@ class MemtomemStore:
         # unchosen.
         if file:
             target = Path(file).expanduser().resolve()
-            resolved_scope, scope_err = _resolve_target_scope(
-                target,
-                comp.config.indexing.memory_dirs,
-                comp.config.indexing.project_memory_dirs,
-            )
-            if scope_err is not None:
-                return {"error": "unregistered_project_target", "detail": scope_err}
-            assert resolved_scope is not None
-            effective_scope = resolved_scope
+            try:
+                effective_scope = _resolve_target_scope(
+                    target,
+                    comp.config.indexing.memory_dirs,
+                    comp.config.indexing.project_memory_dirs,
+                )
+            except _UnregisteredProjectTarget as exc:
+                return {"error": "unregistered_project_target", "detail": str(exc)}
         else:
             from memtomem.errors import ConfigError
             from memtomem.memory_scope import day_file_name, require_user_base
