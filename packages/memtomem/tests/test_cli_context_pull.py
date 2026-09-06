@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -461,6 +463,36 @@ def test_gate_a_block_warns_but_records_no_consent(proj: Path, caplog) -> None:
     assert res.stderr.count(_FLIP_NOTICE) == 1
     assert consent_lines(caplog) == []
     assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
+
+
+def test_the_yes_deprecation_window_expires_at_0_6_0() -> None:
+    """The window is a promise with a date on it; this is the alarm clock.
+
+    Nothing else in the suite notices when that date passes. The AST guard is
+    green whether or not ``--yes`` is accepted — it only checks that a gate
+    which mentions the flag also emits — and every test above is *written for*
+    the window, so they all keep passing too. A 0.6.0 release with the
+    compatibility block still in place would therefore ship green, and the
+    deprecation would quietly become permanent, which is the outcome ADR-0011
+    §5 objects to in the first place.
+
+    So the version bump itself has to be what goes red. When it does, the flip
+    is: turn the ``deprecated_yes`` block in ``pull_cmd`` into the siblings'
+    refusal, rewrite (do not delete) the three window tests above —
+    ``test_yes_flag_records_the_consent_and_names_the_flag``,
+    ``test_yes_alone_warns_on_stderr_and_still_applies`` and
+    ``test_gate_a_block_warns_but_records_no_consent``, the last of which
+    should then pin that the Gate B refusal precedes Gate A — and delete this
+    test.
+    """
+    raw = metadata.version("memtomem")
+    match = re.match(r"^(\d+)\.(\d+)", raw)
+    assert match is not None, f"unparseable version {raw!r}"
+    assert (int(match.group(1)), int(match.group(2))) < (0, 6), (
+        f"memtomem {raw} still accepts a bare --yes as Gate B on "
+        "`mm context pull`. The #2318 deprecation window ended at 0.6.0 — see "
+        "this test's docstring for the flip."
+    )
 
 
 def test_declined_prompt_records_no_consent(proj: Path, caplog) -> None:

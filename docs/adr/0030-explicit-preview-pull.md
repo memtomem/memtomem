@@ -334,7 +334,8 @@ This section is the design baseline; it has had its design-gate review
 ### 11. CLI shape
 
 `mm context pull <kind> <name> [--from RUNTIME] [--scope SCOPE]
-[--overwrite] [--diff] [--apply] [--yes] [--force-unsafe-import]` — a
+[--overwrite] [--diff] [--apply] [--yes] [--confirm-project-shared]
+[--force-unsafe-import]` — a
 new verb (not an `init --only` extension; `init` is already overloaded
 with context.md seeding and Gate B prompts). Dry-run preview is the
 default; `--apply` executes (the `migrate` precedent). `project_local`

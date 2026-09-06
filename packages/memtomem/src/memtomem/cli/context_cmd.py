@@ -1525,8 +1525,8 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     is_flag=True,
     help=(
         "Consent for a project_shared landing, as on every other mm write "
-        "surface. Becomes required in 0.6.0, when --yes stops satisfying "
-        "Gate B here (#2318); adopt it now."
+        "surface. From 0.6.0 it is the only flag that carries it — --yes "
+        "stops substituting, leaving this or the prompt (#2318); adopt it now."
     ),
 )
 @click.option(
@@ -1674,21 +1674,21 @@ def pull_cmd(
     # tiers is untouched — there it was never Gate B. The 0.6.0 flip is made in
     # the compatibility block above, not here.
     #
-    # ``consent_mechanism`` is decided in this one place, by whichever arm
-    # actually established the consent, and is the audit line's only input. It
-    # is seeded for the ``--confirm-project-shared`` path, which takes no arm.
+    # ``consent_mechanism`` is the audit line's only input. Both flag paths —
+    # the standard one and the deprecated ``--yes`` — record ``flag``, so the
+    # seed covers them and only the prompt arm has to say otherwise. The gate
+    # keeps ``not confirm_project_shared`` literally for the AST guard, and
+    # reuses ``deprecated_yes`` rather than re-testing ``yes``: one definition
+    # decides the notice, this branch, and the ``flag=`` key together.
     consent_mechanism = "flag"
-    if gate_b_applies and not confirm_project_shared:
-        if yes:
-            consent_mechanism = "flag"  # deprecated --yes; the notice fired above
-        elif click.confirm(
+    if gate_b_applies and not confirm_project_shared and not deprecated_yes:
+        if not click.confirm(
             f"\n--scope=project_shared writes to git-tracked {root}/.memtomem/. "
             f"Pull {kind}/{name} from {plan.selected_runtime}. Continue?",
             default=False,
         ):
-            consent_mechanism = "prompt"
-        else:
             raise click.Abort()
+        consent_mechanism = "prompt"
     elif not gate_b_applies and not yes:
         click.confirm(
             f"\nPull {kind}/{name} from {plan.selected_runtime} into {scope}?",
