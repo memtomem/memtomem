@@ -100,7 +100,9 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    RestoreOutcome,
     StagingClaim,
+    StagingIdentityLostError,
     _detect_source_scope,
     _discard_claimed_staging,
     _existing_fanout_targets,
@@ -1287,44 +1289,6 @@ def transfer_artifact(
                         src_path,
                         restore_from.path,
                     )
-                elif not restore_from.still_ours() and os.path.lexists(restore_from.path):
-                    # The entry holding the pre-move bytes was replaced out of
-                    # band. Renaming it back would put a stranger's object on
-                    # the canonical source path while the artifact we parked
-                    # stays lost under whatever name they gave it, and removing
-                    # it would destroy something we did not create (#2314).
-                    #
-                    # This is not the ordinary "nothing happened, retry"
-                    # refusal: the stage consumed the source by an atomic
-                    # rename on BOTH paths, so the artifact is missing from
-                    # where the user left it. That is a PARTIAL transfer, the
-                    # state ``MigratePartialError`` exists for and the one
-                    # every surface renders with its recovery text intact
-                    # rather than as a retryable conflict. Raised from inside
-                    # the rollback so it replaces the original failure as the
-                    # reported one — accurately: whatever sent us here matters
-                    # less than an artifact that is now missing from both ends.
-                    logger.error(
-                        "transfer rollback: %s no longer names the entry this "
-                        "transfer created (replaced out of band); neither "
-                        "renaming it back to %s nor removing it — the source "
-                        "bytes may survive under another name in that store. "
-                        "Manual reconciliation required.",
-                        restore_from.path,
-                        src_path,
-                    )
-                    raise MigratePartialError(
-                        f"transfer left {kind}/{name} unaccounted for: the move "
-                        f"consumed the source and the entry holding its bytes "
-                        f"was replaced out of band, so it was neither promoted "
-                        f"nor rolled back. Do NOT retry — look for the artifact "
-                        f"in {restore_from.path.parent} under a name it was "
-                        f"renamed to, and restore it to {src_path} by hand. The "
-                        f"entry now at {restore_from.path} belongs to whoever "
-                        f"put it there.",
-                        src_path=src_path,
-                        dst_path=dst_path,
-                    ) from exc
                 elif os.path.lexists(restore_from.path):
                     # src is gone as expected; try the rename-back. Success
                     # means the bytes are home and any remaining copy is
@@ -1342,11 +1306,36 @@ def transfer_artifact(
                     # it is still same-filesystem, since staging only exists
                     # because that rename succeeded (#2309/#2312). The EXDEV
                     # holding entry is a sibling of src and keeps the guard.
-                    cleanup_staging = _restore_source(
+                    outcome = _restore_source(
                         restore_from,
                         src_path,
                         allow_cross_parent=holding is None,
                     )
+                    cleanup_staging = outcome is RestoreOutcome.RESTORED
+                    if outcome is RestoreOutcome.IDENTITY_LOST:
+                        # The entry holding the pre-move bytes was replaced out
+                        # of band, and the stage consumed the source by an
+                        # atomic rename on BOTH paths — so the artifact is not
+                        # where the user left it, and it is not anywhere we can
+                        # name. That is a PARTIAL transfer, the state
+                        # ``MigratePartialError`` exists for and the one every
+                        # surface renders with its recovery text intact rather
+                        # than as a retryable conflict. Asked as an OUTCOME of
+                        # the restore rather than as a check before it, so the
+                        # answer cannot go stale between the two (#2314).
+                        raise MigratePartialError(
+                            f"transfer left {kind}/{name} unaccounted for: the "
+                            f"move consumed the source and the entry holding "
+                            f"its bytes was replaced out of band, so it was "
+                            f"neither promoted nor rolled back. Do NOT retry — "
+                            f"look for the artifact in {restore_from.path.parent} "
+                            f"under a name it was renamed to, and restore it to "
+                            f"{src_path} by hand. The entry now at "
+                            f"{restore_from.path} belongs to whoever put it "
+                            f"there.",
+                            src_path=src_path,
+                            dst_path=dst_path,
+                        ) from exc
                 elif holding is None:
                     # Same-FS: the source and the staging entry it became are
                     # both gone. Nothing to put back and nothing to name.
@@ -1390,6 +1379,31 @@ def transfer_artifact(
             if holding is not None:
                 try:
                     _remove_entry(holding)
+                except StagingIdentityLostError as exc:
+                    # The destination canonical is in place, so the move
+                    # COMMITTED; what failed is dropping the pre-move copy —
+                    # and the reason is that the entry at that name is no
+                    # longer the one we parked. The generic partial-move
+                    # message must not be reused here: it tells the operator
+                    # to remove that path, which this error proves is somebody
+                    # else's (#2314 round 3). Point them at the object instead.
+                    logger.error(
+                        "EXDEV cleanup: %s no longer names the pre-move copy "
+                        "this transfer parked; leaving it alone.",
+                        holding.path,
+                    )
+                    raise MigratePartialError(
+                        f"{kind}/{name} was moved to {dst_path}, but the "
+                        f"pre-move copy could not be cleaned up: the entry at "
+                        f"{holding.path} is no longer the one this transfer "
+                        f"parked there, so it was left untouched — do NOT "
+                        f"remove it. Verify {dst_path} holds the artifact you "
+                        f"expect, then look for the parked copy in "
+                        f"{holding.path.parent} under a name it was renamed to "
+                        f"and remove that. Fan-out cleanup has not run.",
+                        src_path=holding.path,
+                        dst_path=dst_path,
+                    ) from exc
                 except OSError as exc:
                     # Canonical is at dst but the pre-move copy survives.
                     # Rolling back dst would just restore the duplicate state

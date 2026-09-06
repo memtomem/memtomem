@@ -4450,6 +4450,161 @@ def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
     )
 
 
+class TestTheHoldingEntryIsCarriedAsAnObject:
+    """#2314 on the #2313 holding entry: a parked source is claimed too.
+
+    The EXDEV path renames the canonical source into a holding entry beside
+    itself and copies THAT into staging. Every later step — the copy that
+    reads it, the cleanup that decides whether the partial fill may go, the
+    rename-back, the post-promote removal — used to address it by pathname.
+    An entry replaced in any of those windows is somebody else's object, and
+    the artifact we parked is under a name we no longer know.
+    """
+
+    @staticmethod
+    def _usurp(path: Path) -> Path:
+        """Rename the parked entry aside and leave a foreign one behind."""
+        aside = path.with_name(path.name + ".aside")
+        path.rename(aside)
+        if aside.is_dir() and not aside.is_symlink():
+            path.mkdir()
+            path.chmod(0o700)
+            (path / "theirs.md").write_text("theirs", encoding="utf-8")
+        else:
+            path.write_text("theirs", encoding="utf-8")
+        return aside
+
+    def test_the_copy_refuses_to_read_a_replaced_holding_entry(self, tmp_path, monkeypatch):
+        """A read is a way to launder a stranger's bytes into a canonical name.
+
+        The copy feeds staging, staging is promoted: copying whatever answers
+        to the holding pathname would publish an artifact this transfer never
+        parked, and Gate A would have scanned it under our name.
+        """
+        import memtomem.context.migrate as migrate_mod
+        from memtomem.context.migrate import (
+            MigratePartialError,
+            StagingIdentityLostError,
+            _stage_move,
+        )
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+        aside: list[Path] = []
+        real_claim = migrate_mod._claim_transfer_staging
+
+        def claim_then_usurp(parent, name_hint, claim):
+            # The replacement lands the instant after the source is parked and
+            # BEFORE the copy reads it — the window a check inside the copy's
+            # own callee would already be too late for.
+            claimed = real_claim(parent, name_hint, claim)
+            if parent == src.parent and not aside:
+                aside.append(self._usurp(claimed.path))
+            return claimed
+
+        monkeypatch.setattr(migrate_mod, "_claim_transfer_staging", claim_then_usurp)
+
+        # The read is refused, and the unwind then reports the state that
+        # refusal leaves behind: the canonical name is empty and the parked
+        # entry is not ours, so the artifact is unaccounted for. The refusal
+        # itself is the cause, which is what names the guard that fired.
+        with pytest.raises(MigratePartialError) as exc_info:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        cause = exc_info.value.__cause__ or exc_info.value.__context__
+        assert isinstance(cause, StagingIdentityLostError), cause
+        assert "Refused: copy the parked source into staging" in str(cause)
+        # Their entry is untouched, ours is still on disk under the aside name,
+        # and nothing was staged at the destination from either.
+        planted = [p for p in src.parent.glob(".migrate-*") if not p.name.endswith(".aside")]
+        assert len(planted) == 1 and (planted[0] / "theirs.md").exists()
+        assert (aside[0] / "agent.md").read_text(encoding="utf-8") == "source"
+
+    def test_a_replaced_holding_entry_does_not_authorize_dropping_the_partial(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Presence is not ownership, and the partial copy is what is left.
+
+        The cleanup asks "are these bytes recoverable from the source?". A
+        replacement satisfies a presence check as convincingly as our own
+        entry did, and answering yes deletes the only partial copy of the
+        artifact we parked.
+        """
+        import logging as _logging
+        import shutil as shutil_mod
+
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+        caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+        done: list[bool] = []
+
+        def fill_then_usurp(source, target, *args, **kwargs):
+            # A partial fill lands; the parked entry is then REPLACED (not
+            # removed) and only afterwards does the copy fail.
+            Path(target).mkdir(parents=True, exist_ok=True)
+            (Path(target) / "agent.md").write_text("source", encoding="utf-8")
+            if not done:
+                self._usurp(Path(source))
+                done.append(True)
+            raise OSError(errno.EIO, "I/O error")
+
+        monkeypatch.setattr(shutil_mod, "copytree", fill_then_usurp)
+
+        with pytest.raises(Exception):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        survivors = list(dst_parent.glob(".migrate-reviewer-*"))
+        assert len(survivors) == 1, survivors
+        assert (survivors[0] / "agent.md").read_text(encoding="utf-8") == "source"
+        assert any("preserving the partial copy" in r.getMessage() for r in caplog.records)
+
+    def test_a_replaced_holding_entry_is_not_renamed_back_onto_the_source(
+        self, tmp_path, monkeypatch
+    ):
+        """The unwind's rename-back is a consumer, and reports the real state.
+
+        The canonical name is empty and the entry we parked is gone from the
+        name we parked it under, so the artifact is unaccounted for. Reporting
+        the fill's own error would send the operator to retry a move whose
+        source is no longer where they left it.
+        """
+        import shutil as shutil_mod
+
+        from memtomem.context.migrate import MigratePartialError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+        done: list[bool] = []
+
+        def fail_after_usurp(source, target, *args, **kwargs):
+            # The replacement lands after the copy has read what it needed, so
+            # the failure below sends us into the unwind with a foreign entry
+            # sitting on the parked name.
+            Path(target).mkdir(parents=True, exist_ok=True)
+            if not done:
+                self._usurp(Path(source))
+                done.append(True)
+            raise OSError(errno.EIO, "I/O error")
+
+        monkeypatch.setattr(shutil_mod, "copytree", fail_after_usurp)
+
+        with pytest.raises(MigratePartialError) as exc_info:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert "Do NOT retry" in exc_info.value.message
+        assert not os.path.lexists(src), "the canonical name stays empty"
+        planted = [p for p in src.parent.glob(".migrate-*") if not p.name.endswith(".aside")]
+        assert len(planted) == 1 and (planted[0] / "theirs.md").exists()
+
+
 @pytest.mark.parametrize("shape", ["dir", "flat"])
 def test_copy_mode_still_sweeps_its_own_partial_fill(tmp_path, monkeypatch, shape):
     """The preservation rule must not leak into copy mode.

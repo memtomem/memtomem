@@ -42,6 +42,7 @@ import stat
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, NamedTuple
@@ -1304,21 +1305,21 @@ def _refuse_junction(path: Path) -> None:
         )
 
 
-def _drop_partial_fill(staging: StagingClaim, src: Path, *, src_is_recoverable: bool) -> None:
+def _drop_partial_fill(staging: StagingClaim, src: Path, *, src_claim: StagingClaim | None) -> None:
     """Remove a half-filled staging entry, unless it is the last copy (#2313).
 
     The fill failed, so *staging* holds an incomplete tree this call created
     and normally owns. Dropping it is right whenever the bytes it was copying
-    still exist at *src* — always true for copy mode, and true for an EXDEV
-    move as long as the holding entry it reads is still there.
+    still exist at *src* — always true for copy mode (*src_claim* is ``None``:
+    the canonical artifact was never consumed).
 
-    When the caller cannot make that claim, the question is settled by
-    LOOKING: if *src* is gone, this partial entry is the only thing left
-    carrying any of those bytes, and deleting it to tidy up a failure would
-    complete the loss the failure only started. It is preserved and named at
-    ERROR instead, because a recovery copy nobody can name is a copy nobody
-    recovers. ``lexists``, so a dangling symlink source still counts as
-    present.
+    For an EXDEV move the source is the holding entry this transfer parked,
+    and "still there" is settled by IDENTITY, not by presence: a replacement
+    occupies that pathname exactly as convincingly as our own entry did, and
+    dropping the partial copy on that evidence would complete a loss the
+    failure only started. So the partial tree is preserved and named at ERROR
+    whenever the holding claim is gone or no longer ours — a recovery copy
+    nobody can name is a copy nobody recovers.
 
     Two questions in order, and both must answer "yes" before anything is
     removed: is dropping this entry safe for the BYTES (above), and is the
@@ -1329,9 +1330,10 @@ def _drop_partial_fill(staging: StagingClaim, src: Path, *, src_is_recoverable: 
     Best-effort removal, as before: this runs while an exception is in flight
     and must not replace it with its own.
     """
-    if not src_is_recoverable and not os.path.lexists(src):
+    if src_claim is not None and not src_claim.still_ours():
         logger.error(
-            "transfer staging: the copy of %s failed and that entry is gone; "
+            "transfer staging: the copy of %s failed and that entry is gone "
+            "or is no longer the one this transfer parked; "
             "preserving the partial copy at %s — it is incomplete, but it is "
             "the only thing left holding any of those bytes, so it is kept "
             "for manual recovery rather than removed.",
@@ -1343,7 +1345,11 @@ def _drop_partial_fill(staging: StagingClaim, src: Path, *, src_is_recoverable: 
 
 
 def _stage_copy_into(
-    src: Path, dst_parent: Path, name_hint: str, *, src_is_recoverable: bool = True
+    src: Path,
+    dst_parent: Path,
+    name_hint: str,
+    *,
+    src_claim: StagingClaim | None = None,
 ) -> StagingClaim:
     """Build a staging entry under *dst_parent* from a byte copy of *src*.
 
@@ -1381,18 +1387,26 @@ def _stage_copy_into(
     window too would need an fd-relative copy tree, which the stdlib does not
     offer — recorded here as a known residual rather than fixed.
 
-    *src_is_recoverable* is the caller's claim that dropping a half-filled
-    staging entry cannot lose anything, because *src* is a source that still
-    exists independently of this call. Copy mode owns that claim outright: it
-    reads the canonical artifact and never consumes it. The EXDEV move does
-    NOT, and passes ``False``: its *src* is the holding entry the canonical
-    path was renamed into, so if that entry disappears while the fill is
-    failing, the partial staging tree is the last thing on disk carrying any
-    of those bytes. It is then preserved and named rather than deleted —
-    incomplete, but the caller cannot make more of it, and the rule this
-    package applies to every transient is that a copy goes only when the bytes
-    are provably elsewhere.
+    *src_claim* is present when *src* is an entry THIS transfer created and
+    parked — the EXDEV move's holding entry — and absent for copy mode, which
+    reads the canonical artifact and never consumes it. It answers two
+    questions the pathname cannot.
+
+    Before the read: is *src* still the object we parked? Copying without
+    asking would let an entry someone put on that name be copied into staging
+    and promoted onto a canonical name, which is the #2314 hazard arriving by
+    a different door (a read rather than a delete).
+
+    After a failed fill: may the half-filled staging entry be dropped? Copy
+    mode always may. The EXDEV path may only while its holding entry is still
+    ours — mere presence is not enough, since a replacement occupies the
+    pathname just as convincingly as our own entry did, and dropping the
+    partial copy on that evidence completes a loss the failure only started.
+    When it is not ours, the partial tree is preserved and named instead:
+    incomplete, but the last thing on disk carrying any of those bytes.
     """
+    if src_claim is not None:
+        src_claim.assert_still_ours("copy the parked source into staging")
     _refuse_junction(src)
 
     if src.is_symlink():
@@ -1422,7 +1436,7 @@ def _stage_copy_into(
             # just made and own.
             shutil.copytree(src, claimed.path, symlinks=True, dirs_exist_ok=True)
         except BaseException:
-            _drop_partial_fill(claimed, src, src_is_recoverable=src_is_recoverable)
+            _drop_partial_fill(claimed, src, src_claim=src_claim)
             raise
         return claimed
 
@@ -1434,7 +1448,7 @@ def _stage_copy_into(
         # destination a regular file we created, so that shape cannot arise.
         shutil.copy2(src, claimed.path, follow_symlinks=False)
     except BaseException:
-        _drop_partial_fill(claimed, src, src_is_recoverable=src_is_recoverable)
+        _drop_partial_fill(claimed, src, src_claim=src_claim)
         raise
     return claimed
 
@@ -1463,8 +1477,26 @@ class StagedMove(NamedTuple):
     holding: StagingClaim | None
 
 
-def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool) -> bool:
-    """Rename *entry* back onto *src*; ``True`` iff the bytes are home.
+class RestoreOutcome(Enum):
+    """What :func:`_restore_source` was able to do (#2313 + #2314).
+
+    Three answers, not two. ``REFUSED`` and ``IDENTITY_LOST`` both leave the
+    bytes where they are, but they are different events with different
+    remediations: a refused rename means something occupies the source name
+    and the entry we hold is still ours to move, while a lost identity means
+    the entry itself is no longer the object we parked — the artifact is
+    somewhere we can no longer name, and the operator has to go looking rather
+    than retry. Collapsing them into one boolean is what made the caller
+    report a Gate A block for a state where the artifact had gone missing.
+    """
+
+    RESTORED = "restored"
+    REFUSED = "refused"
+    IDENTITY_LOST = "identity_lost"
+
+
+def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool) -> RestoreOutcome:
+    """Rename *entry* back onto *src*, and say what happened.
 
     The one rename-back, shared by :func:`_stage_move`'s own unwind and by
     ``transfer.transfer_artifact``'s rollback ladder, because both are asking
@@ -1496,12 +1528,17 @@ def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool)
     move whatever occupies that pathname onto the canonical source path, and if
     someone replaced our entry there, that is their object being published
     under our name while the artifact we parked stays lost under theirs
-    (#2314). A lost identity returns False with everything left where it is —
-    the same answer as a refused rename, and the callers already preserve on
-    False — with its own message, because "someone replaced it" and "the name
-    is occupied" need different things from the operator.
+    (#2314). A lost identity leaves everything where it is, like a refused
+    rename, but reports :attr:`RestoreOutcome.IDENTITY_LOST` so the caller can
+    say the artifact is unaccounted for instead of blaming whatever failure
+    sent it here.
     """
-    if not entry.still_ours():
+    if os.path.lexists(entry.path) and not entry.still_ours():
+        # Only for an entry that IS there and is not ours. An ABSENT one is a
+        # different event — nothing was substituted, the bytes simply are not
+        # here — and it belongs to the rename below, whose ``ENOENT`` says so
+        # in the caller's own vocabulary. Same rule as
+        # :meth:`StagingClaim.assert_still_ours`.
         logger.error(
             "transfer rollback: %s no longer names the entry this transfer "
             "created (replaced out of band, or this filesystem cannot report "
@@ -1511,7 +1548,7 @@ def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool)
             entry.path,
             src,
         )
-        return False
+        return RestoreOutcome.IDENTITY_LOST
     try:
         rename_no_replace(entry.path, src, allow_cross_parent=allow_cross_parent)
     except OSError as exc:
@@ -1534,8 +1571,8 @@ def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool)
                 entry.path,
                 src,
             )
-        return False
-    return True
+        return RestoreOutcome.REFUSED
+    return RestoreOutcome.RESTORED
 
 
 def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
@@ -1621,7 +1658,7 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
                 # here — the canonical path is already empty — so a failed
                 # fill may not assume the source will still be there to
                 # rebuild from (#2313).
-                _stage_copy_into(holding.path, dst_parent, name_hint, src_is_recoverable=False),
+                _stage_copy_into(holding.path, dst_parent, name_hint, src_claim=holding),
                 holding,
             )
         except BaseException:
@@ -1630,7 +1667,23 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
             # that failed. ``_restore_source`` preserves the holding entry and
             # logs when it cannot put it back, so the bytes are never dropped
             # to make a failure tidy.
-            _restore_source(holding, src, allow_cross_parent=False)
+            outcome = _restore_source(holding, src, allow_cross_parent=False)
+            if outcome is RestoreOutcome.IDENTITY_LOST:
+                # The parked source is not where we parked it any more, and
+                # the canonical name is empty: the artifact is unaccounted
+                # for. Replacing the in-flight failure with that fact is the
+                # honest report — whatever made the stage fail matters less
+                # than an artifact nobody can name (#2314).
+                raise MigratePartialError(
+                    f"transfer left {src.name} unaccounted for: the move parked "
+                    f"the source and that entry was replaced out of band, so it "
+                    f"could not be put back. Do NOT retry — look for the "
+                    f"artifact in {src.parent} under a name it was renamed to, "
+                    f"and restore it to {src} by hand. The entry now at "
+                    f"{holding.path} belongs to whoever put it there.",
+                    src_path=src,
+                    dst_path=dst_parent,
+                )
             raise
     return StagedMove(staging, None)
 

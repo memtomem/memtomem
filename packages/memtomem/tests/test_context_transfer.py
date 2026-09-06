@@ -1403,6 +1403,78 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
+    def test_a_replaced_parked_source_is_not_recommended_for_deletion(
+        self, two_projects, monkeypatch, caplog
+    ):
+        """A committed move whose parked copy was replaced must not say "remove it".
+
+        On the EXDEV path the move commits at the promote and then drops the
+        entry it parked the source in. If that entry has been replaced, the
+        generic partial-move remediation — which names the path and tells the
+        operator to remove it — is now pointing at somebody else's object. The
+        identity error proves that, so it gets its own message: leave that
+        entry alone, verify the destination, and go looking for the parked copy
+        under whatever name it was renamed to (#2314 round 3).
+        """
+        import logging as _logging
+
+        import memtomem.context.transfer as transfer_mod
+        from memtomem.context import migrate as migrate_mod
+        from memtomem.context.migrate import MigratePartialError
+
+        src_manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        src_dir = src_manifest.parent
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        # Cross-STORE renames only: parking the source and renaming it back
+        # are same-parent by construction, and answering EXDEV to those would
+        # make the copy fallback unreachable (the shape #2313's own cell uses).
+        real_rename = migrate_mod.rename_no_replace
+
+        def exdev_rename(src, dst, **kwargs):
+            if Path(src).parent != Path(dst).parent:
+                raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
+            return real_rename(src, dst, **kwargs)
+
+        monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", exdev_rename)
+        replaced: list[Path] = []
+        real_promote = transfer_mod._promote_move
+
+        def promote_then_usurp(claim, dst):
+            # The promote commits the move; the parked source is replaced
+            # immediately afterwards, before the cleanup that removes it.
+            real_promote(claim, dst)
+            parked = [p for p in src_dir.parent.glob(".migrate-*") if p.is_dir()]
+            assert len(parked) == 1, parked
+            parked[0].rename(parked[0].with_name(parked[0].name + ".aside"))
+            parked[0].mkdir()
+            parked[0].chmod(0o700)
+            (parked[0] / "theirs.md").write_text("theirs", encoding="utf-8")
+            replaced.append(parked[0])
+
+        monkeypatch.setattr(transfer_mod, "_promote_move", promote_then_usurp)
+        caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+        with pytest.raises(MigratePartialError) as exc_info:
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="move",
+                apply_=True,
+            )
+
+        message = exc_info.value.message
+        assert "do NOT" in message and "remove it" in message
+        assert "Fan-out cleanup has not run." in message
+        # The move itself committed, and the replacement is untouched.
+        assert (dst_root / "foo" / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+        assert (replaced[0] / "theirs.md").read_text(encoding="utf-8") == "theirs"
+
     def test_a_flat_rename_refuses_to_rewrite_a_replacement(self, two_projects, monkeypatch):
         """The rewrite reads, mutates and re-writes the staging entry itself.
 
