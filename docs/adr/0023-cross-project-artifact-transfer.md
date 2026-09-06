@@ -355,16 +355,18 @@ not there; and the rename-back called the entry it failed to move "the ONLY
 surviving copy", which is exact on the same-filesystem path — staging IS the
 pre-move tree — and wrong on the EXDEV one, where the destination-side copy
 survives on purpose and the operator was sent to one of the two places the
-bytes were. Every arm now ends in a single message written from an
-`os.path.lexists` probe of both candidates, listing the survivors observed and
-their number; `lexists`, so a parked flat artifact that is itself a dangling
-symlink still counts. The rename-back stays cardinality-neutral — it is handed
-one entry and cannot see the other — and the caller, which knows whether the
-EXDEV path is holding a second copy, does the counting. It probes the entry it
-was handed all the same: the writer that can occupy the source name inside the
-syscall window can also remove that entry, and `_stage_move`'s own unwind calls
-the rename-back with no caller line after it, so a false "preserved at" there
-would be the last word. Nothing about what is
+bytes were. Every arm of the rollback ladder that does not get the bytes
+home now ends in ONE aggregate message written from an `os.path.lexists` probe
+of both candidates, listing the survivors observed and their number; `lexists`,
+so a parked flat artifact that is itself a dangling symlink still counts. The
+rename-back keeps its own diagnostic — it says why the rename did not happen,
+which the aggregate line cannot — but stays cardinality-neutral there, since it
+is handed one entry and cannot see the other; the caller, which knows whether
+the EXDEV path is holding a second copy, does the counting. It probes the entry
+it was handed all the same: the writer that can occupy the source name inside
+the syscall window can also remove that entry, and `_stage_move`'s own unwind
+calls the rename-back with no aggregate line after it at all, so a false
+"preserved at" there would be the last word. Nothing about what is
 preserved changes; these messages are the entire interface a hand recovery
 has, so a path named in one must be a path that exists.
 

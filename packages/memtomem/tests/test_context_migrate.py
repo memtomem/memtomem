@@ -4120,6 +4120,76 @@ def test_e4_exdev_rename_back_of_a_vanished_entry_says_it_is_gone(
     assert "1 surviving copy: " + str(staged[0]) in survivor_lines[0], survivor_lines
 
 
+def test_e4_exdev_rename_back_loses_both_ends_at_once(scope_layout, monkeypatch, caplog):
+    """The fourth quadrant: src taken AND the entry gone, in the same window.
+
+    ``_restore_source``'s failure message makes two claims, and each is now
+    probed, so there are four states — refused/failed x preserved/gone. Three
+    of them are pinned by the cells above; without this one, collapsing
+    "refused and the entry is gone too" back into the preserved wording passes
+    the whole suite and puts a false recovery path back in front of an
+    operator whose bytes are down to a single copy.
+
+    One racer does both here because that is one actor's natural move: it
+    takes the canonical name and clears the leftover it found beside it.
+
+    Mutation: drop the ``preserved`` split from the refused arm and this cell
+    reports the removed holding entry as preserved while the survivor line,
+    which probes, names only the staged copy.
+    """
+    import logging as _logging
+    import shutil as shutil_mod
+
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN).parent
+    vanished: list[Path] = []
+
+    def take_the_name_and_clear_the_leftover(entry: Path) -> None:
+        vanished.append(entry)
+        shutil_mod.rmtree(entry)
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "agent.md").write_text(_WRITER_BODY, encoding="utf-8")
+
+    raised = _exdev_then_break_the_rename_back(
+        monkeypatch, src, take_the_name_and_clear_the_leftover
+    )
+    _fail_promote(monkeypatch, src)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+    with pytest.raises(OSError):
+        _invoke_migrate(
+            _migrate_args(
+                "agents",
+                "foo",
+                from_scope="user",
+                to_scope="project_shared",
+                confirm_project_shared=True,
+            )
+        )
+
+    assert raised["once"]
+    assert len(vanished) == 1, vanished
+    # The racer keeps the canonical name; the source side holds nothing of ours.
+    assert (src / "agent.md").read_text(encoding="utf-8") == _WRITER_BODY
+    assert not list(root.glob(".migrate-foo-*.tmp"))
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    staged = list(dst_root.glob(".migrate-foo-*.tmp"))
+    assert len(staged) == 1, staged
+    assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "rename-back refused" in m and str(vanished[0]) + ", which held the" in m for m in messages
+    ), messages
+    assert not any("preserving the pre-move bytes at " + str(vanished[0]) in m for m in messages), (
+        messages
+    )
+    survivor_lines = [m for m in messages if "surviving" in m]
+    assert len(survivor_lines) == 1, messages
+    assert "1 surviving copy: " + str(staged[0]) in survivor_lines[0], survivor_lines
+
+
 def test_e4_rollback_with_nothing_left_offers_no_recovery_path(scope_layout, monkeypatch, caplog):
     """When no copy survives, the log says that — it does not name one.
 

@@ -1234,10 +1234,13 @@ def _restore_source(entry: Path, src: Path, *, allow_cross_parent: bool) -> bool
     counts (:func:`~memtomem.context.transfer._log_rollback_survivors`).
 
     **Nothing here removes anything, on any path.** A refusal returns False
-    with *entry* intact; the caller decides what to preserve, and every caller
-    preserves it. That is the same rule the staging claim follows
+    having touched nothing; the caller decides what to preserve, and every
+    caller preserves it. That is the same rule the staging claim follows
     (:func:`_claim_transfer_staging`): a leaked directory is cheap, a deleted
-    canonical is not.
+    canonical is not. It is a promise about what THIS function does, not about
+    what is left: a concurrent actor can remove *entry* inside the rename
+    window, which is why the failure probes it rather than describing it from
+    the fact that we created it.
 
     No-replace, never :func:`os.replace`: an external writer can recreate the
     source path while we are staging, and a replacing rename would delete
