@@ -327,6 +327,9 @@ def _usurp_staging_after_scan(monkeypatch, dst_store):
         assert len(staged) == 1, staged
         staged[0].rename(staged[0].with_name(staged[0].name + ".aside"))
         staged[0].mkdir()
+        # umask-independent: a pathological umask elsewhere in this suite would
+        # otherwise leave the replacement unsearchable (0o177 clears owner-x).
+        staged[0].chmod(0o700)
         (staged[0] / "theirs.md").write_text("theirs", encoding="utf-8")
         replaced.append(staged[0])
         return result

@@ -995,6 +995,11 @@ def _usurp(path: Path) -> Path:
     path.rename(aside)
     if aside.is_dir() and not aside.is_symlink():
         path.mkdir()
+        # ``mkdir`` masks its mode with the ambient umask, and this suite sets
+        # a pathological one in places (0o177 clears the owner-exec bit), so an
+        # explicit chmod is what keeps this replacement readable whatever ran
+        # before it in the same worker.
+        path.chmod(0o700)
         (path / "theirs.md").write_text("theirs", encoding="utf-8")
     else:
         path.write_text("theirs", encoding="utf-8")

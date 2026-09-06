@@ -778,6 +778,8 @@ class TestReceipt:
             aside = staging.with_name(staging.name + ".aside")
             staging.rename(aside)
             staging.mkdir()
+            # umask-independent, see the transfer suite's _usurp_staging.
+            staging.chmod(0o700)
             (staging / "theirs.md").write_text("theirs", newline="\n")
             replaced.append(staging)
             return result

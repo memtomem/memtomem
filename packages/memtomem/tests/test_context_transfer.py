@@ -1171,6 +1171,12 @@ def _usurp_staging(dst_root: Path) -> tuple[Path, Path]:
     aside = path.with_name(path.name + ".aside")
     path.rename(aside)
     path.mkdir()
+    # Explicit chmod: ``mkdir`` masks its mode with the ambient umask, and this
+    # suite sets a pathological one in places (0o177 clears the owner-exec
+    # bit). Depending on what ran before this cell in the same worker the
+    # replacement would otherwise be an unsearchable directory, and these
+    # assertions would fail with EACCES on one platform's shard order only.
+    path.chmod(0o700)
     (path / "theirs.md").write_text("theirs", encoding="utf-8")
     return path, aside
 
