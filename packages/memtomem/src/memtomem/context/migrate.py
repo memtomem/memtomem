@@ -891,11 +891,232 @@ def _claim_hit_an_occupied_name(staging: Path) -> bool:
     return os.path.lexists(staging)
 
 
+#: A staging entry's filesystem identity: ``(st_dev, st_ino)`` off an ``lstat``.
+StagingIdentity = tuple[int, int]
+
+
+class StagingIdentityLostError(OSError):
+    """The staging pathname no longer names the object we claimed (#2314).
+
+    Raised only by :meth:`StagingClaim.assert_still_ours`, immediately before
+    an operation that would CONSUME the entry (promote, rename-back, hard-link
+    promote). It means the pathname was re-pointed at something we did not
+    create, so consuming it would move a stranger's bytes into a canonical
+    name — bytes Gate A never scanned.
+
+    A separate class from :class:`TransferStagingBusyError` because the
+    remediation differs: a busy name is retried with a fresh suffix, while a
+    lost identity is an unexplained mutation of a private path and stops the
+    operation.
+    """
+
+
+@dataclass(slots=True)
+class StagingClaim:
+    """The staging entry an exclusive claim created, carried as an OBJECT.
+
+    A successful claim proves we owned a *pathname* at that instant, and
+    nothing more (#2314). Every later step that removes or consumes staging
+    used to reach for the pathname again, so an entry renamed aside and
+    replaced between the claim and the cleanup meant we deleted — or
+    promoted — somebody else's object. Recording ``(st_dev, st_ino)`` at claim
+    time lets those steps ask "is this still the thing I made?" first.
+
+    **A narrowing, not a close.** The verifying ``lstat`` and the
+    ``rmtree`` / ``unlink`` / ``rename`` that follows are two syscalls, so a
+    replacement landing between them is still consumed. Closing that would
+    need ``unlinkat`` / ``renameat`` against a claim-time directory fd, which
+    has no Windows spelling and no ``shutil.rmtree`` support. The residual
+    windows are named in the module docs rather than implied away: claim →
+    capture, the fill itself (``copytree`` populates whatever the name points
+    at), and verify → act.
+
+    ``identity`` is ``None`` only when the ``lstat`` right after our own
+    successful claim failed — an anomaly, since the entry provably existed a
+    syscall earlier. Removal and consumption both refuse on that, because
+    "cannot establish ownership" is indistinguishable from the race being
+    defended against, and this package's standing asymmetry is that a leaked
+    staging tree is cheap while a destroyed canonical is not
+    (``_names.REAPABLE_INTERNAL_ARTIFACT_KINDS``).
+
+    ``identity`` is likewise ``None`` on a filesystem that reports
+    ``st_ino == 0`` for everything (POSIX requires real inode numbers; some
+    Windows network shares do not supply a file index). Comparing zeros would
+    pass for any replacement while reading like a guarantee — a check that
+    cannot fail is worse than no check, because the next reader believes it.
+    The cost is stated plainly: a transfer staged on such a filesystem refuses
+    to promote instead of promoting something it cannot vouch for, and
+    :func:`_staging_identity` logs why.
+    """
+
+    path: Path
+    identity: StagingIdentity | None
+
+    @classmethod
+    def capture(cls, path: Path) -> "StagingClaim":
+        """Record the identity of the entry a claim just created at *path*."""
+        return cls(path=path, identity=_staging_identity(path))
+
+    def adopt(self, placed: StagingIdentity) -> None:
+        """Record an identity we KNOW we placed at :attr:`path`.
+
+        Exactly one in-tree writer replaces the staging entry itself:
+        ``transfer._rewrite_staged_manifest_name`` writes through
+        ``atomic_write_bytes`` (``mkstemp`` + ``os.replace``), and for a FLAT
+        artifact the manifest IS the staging entry — so a ``--as`` rename
+        legitimately swaps the inode. Leaving the old identity there would make
+        the later cleanup read our own rewrite as a stranger's entry and
+        preserve it, which is the guaranteed leak #2314 argues against.
+
+        *placed* must come from the writer's own descriptor, never from an
+        ``lstat`` of :attr:`path` afterwards. Re-reading the pathname to
+        "refresh" would ADOPT whatever occupies it — so an entry a usurper put
+        there before the rewrite would be rewritten, blessed as ours, and
+        promoted onto the canonical name. That is a worse bug than the one
+        this class exists to close, and the reason the obligation is expressed
+        as "carry the number you placed" rather than "look again".
+        """
+        self.identity = placed
+
+    def still_ours(self) -> bool:
+        """Whether the pathname still names the object this claim created."""
+        if self.identity is None:
+            return False
+        return _staging_identity(self.path) == self.identity
+
+    def assert_still_ours(self, action: str) -> None:
+        """Refuse *action* when the pathname now names something else.
+
+        *action* is a short verb phrase and must not carry a path: both wires
+        that render this (``error_redact`` for MCP, the web route's twin)
+        hard-truncate an engine reason at 200 characters, so a remediation
+        written after the paths reaches a remote caller as a promise with no
+        instruction attached. Instruction FIRST, paths LAST — the same shape
+        :class:`TransferStagingBusyError` uses, pinned by a surface test on
+        each wire.
+
+        An ABSENT entry is not a mismatch and is deliberately allowed through:
+        there is nothing there to consume, and the operation's own ``ENOENT``
+        is the honest error for it — for a move, "staging vanished" is a
+        different emergency from "something is in the way", and only the
+        syscall can tell the caller which one happened (the classification
+        :data:`_RENAME_COLLISION_ERRNOS` performs). The check fires only for
+        the state it exists to catch: an entry that IS there and is not ours.
+        """
+        if not os.path.lexists(self.path) or self.still_ours():
+            return
+        if self.identity is None:
+            reason = (
+                "transfer staging cannot be verified: this filesystem does not "
+                "report file identity, so nothing was promoted and nothing was "
+                "removed. Stage on a filesystem that reports it, then retry."
+            )
+        else:
+            reason = (
+                "transfer staging was replaced out of band: it no longer names "
+                "the entry this transfer created, so nothing was promoted and "
+                "nothing was removed. Inspect it by hand, then retry."
+            )
+        raise StagingIdentityLostError(f"{reason} Refused: {action}. Staging: {self.path}")
+
+
+def _staging_identity(path: Path) -> StagingIdentity | None:
+    """``(st_dev, st_ino)`` for *path*, or ``None`` when it cannot be trusted.
+
+    ``lstat``, never ``stat``: staging can BE a symlink
+    (:func:`_stage_copy_into` preserves a link source as a link), and
+    following it would compare the identity of the link's target — which some
+    other writer owns — instead of the entry we created.
+
+    ``st_ino == 0`` is ``None``, not an identity. POSIX requires real inode
+    numbers and Windows supplies a file index on NTFS and ReFS, but a
+    filesystem that cannot answer reports zero for EVERY entry — and a
+    comparison of zeros is vacuously true, so keeping it would hand back a
+    check that passes for any replacement while reading like a guarantee. An
+    unanswerable question must not be answered "yes": callers treat ``None``
+    as "not provably ours" and refuse to remove or consume, which is the same
+    asymmetry the rest of this module runs on.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if info.st_ino == 0:
+        logger.warning(
+            "filesystem holding %s does not report file identity (st_ino is 0), "
+            "so this transfer cannot prove a staging entry is still its own; it "
+            "will refuse to promote or remove it rather than act on the name. "
+            "Stage on a filesystem that reports file identity.",
+            path,
+        )
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _remove_staging_entry(staging: Path) -> None:
+    """Best-effort removal of a staging entry whose bytes are safe elsewhere.
+
+    The removal ladder ONLY — the ownership question is the caller's, and
+    :func:`_discard_claimed_staging` is the answer for anyone holding a claim.
+
+    The symlink test comes first, and both other tests are reached only when
+    the entry is not a link: ``exists()`` and ``is_dir()`` follow links, so a
+    dangling staging link answers False to the first (leaked, never removed)
+    and a link to a directory answers True to the second (``rmtree`` refuses a
+    link, also a leak). Staging can be a link since :func:`_stage_copy_into`
+    preserves a symlink source as a link rather than dereferencing it.
+    """
+    if staging.is_symlink():
+        with contextlib.suppress(OSError):
+            staging.unlink()
+        return
+    if staging.exists():
+        if staging.is_dir():
+            shutil.rmtree(staging, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                staging.unlink()
+
+
+def _discard_claimed_staging(claim: StagingClaim) -> None:
+    """Remove the entry *claim* created — or nothing at all (#2314).
+
+    The identity gate is the whole point: a cleanup that reaches for the
+    pathname deletes whatever is sitting there, and "whatever is sitting
+    there" is only our own entry until someone renames ours aside and drops
+    their own in its place. On a mismatch (or an unreadable identity) this
+    removes NOTHING and logs a warning naming the path, because the leftover
+    it declines to touch is now invisible to discovery and reaped by nobody.
+
+    An entry that is simply GONE is not a mismatch: the rename-back and the
+    promote both consume staging on success, and their callers still run the
+    cleanup arm afterwards. That case returns silently — there is nothing to
+    remove and nothing to warn about — so the warning below means "something
+    is there and it is not ours", which is the only state an operator has to
+    act on.
+
+    Callers that did NOT create the entry — ``bundle._reap_own_staging``
+    sweeping a previous run's leftovers — have no claim to compare against and
+    use :func:`_remove_staging_entry` directly.
+    """
+    if not os.path.lexists(claim.path):
+        return
+    if not claim.still_ours():
+        logger.warning(
+            "leaving staging %s in place: it no longer names the entry this "
+            "transfer created (identity changed out of band), so removing it "
+            "would delete an object we did not make. Inspect it by hand.",
+            claim.path,
+        )
+        return
+    _remove_staging_entry(claim.path)
+
+
 def _claim_transfer_staging(
     dst_parent: Path,
     name_hint: str,
     claim: Callable[[Path], None],
-) -> Path:
+) -> StagingClaim:
     """Claim a fresh transfer staging name exclusively, or fail closed (#2309).
 
     *claim* must be an exclusive-create and NOTHING else — a no-replace
@@ -928,6 +1149,11 @@ def _claim_transfer_staging(
     (``bundle.receive_artifact_bundle``). Retrying forever would spin against a
     permanent obstruction — two independent collisions on 32 bits of entropy
     means something other than chance.
+
+    Returns a :class:`StagingClaim`, not a path: this is the one place a
+    staging entry is created, so capturing its identity here is what makes
+    "you cannot hold a staging path without knowing which object it was"
+    structural rather than a rule every call site has to remember (#2314).
     """
     first = transfer_staging_path(dst_parent, name_hint)
     try:
@@ -936,7 +1162,7 @@ def _claim_transfer_staging(
         if not _claim_hit_an_occupied_name(first):
             raise
     else:
-        return first
+        return StagingClaim.capture(first)
 
     second = transfer_staging_path(dst_parent, name_hint)
     try:
@@ -962,7 +1188,7 @@ def _claim_transfer_staging(
             "only copy of an artifact. Inspect it by hand, then retry. "
             f"Occupied: {occupied}"
         ) from exc
-    return second
+    return StagingClaim.capture(second)
 
 
 def _link_target_is_directory(link: Path) -> bool:
@@ -1029,7 +1255,7 @@ def _create_exclusive_file(path: Path) -> None:
     )
 
 
-def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
+def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
     """Build a staging entry under *dst_parent* from a byte copy of *src*.
 
     Shared by the :func:`_stage_move` EXDEV fallback and by
@@ -1055,8 +1281,16 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
     something else.
 
     Cleanup on a failed fill removes only an entry this call created — the
-    claim ran first and succeeded, so the entry is provably ours. A failed
-    claim creates nothing and therefore cleans nothing.
+    claim ran first and succeeded, so the entry is provably ours, and the
+    removal re-checks that identity rather than trusting the pathname a second
+    time (#2314). A failed claim creates nothing and therefore cleans nothing.
+
+    The fill itself is still addressed by name: ``copytree`` populates, and
+    ``copy2`` writes through, whatever the pathname points at when they run.
+    An entry replaced inside that window is written to, not deleted, and only
+    the identity-checked cleanup declines to compound it. Closing the fill
+    window too would need an fd-relative copy tree, which the stdlib does not
+    offer — recorded here as a known residual rather than fixed.
     """
     if src.is_junction():
         raise OSError(
@@ -1075,47 +1309,46 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
         # makes it its own exclusive claim.
         target = os.readlink(src)
         target_is_dir = _link_target_is_directory(src)
-        staging = _claim_transfer_staging(
+        claimed = _claim_transfer_staging(
             dst_parent,
             name_hint,
             lambda path: os.symlink(target, path, target_is_directory=target_is_dir),
         )
         with contextlib.suppress(OSError, NotImplementedError):
-            shutil.copystat(src, staging, follow_symlinks=False)
-        return staging
+            shutil.copystat(src, claimed.path, follow_symlinks=False)
+        return claimed
 
     if src.is_dir():
-        staging = _claim_transfer_staging(
+        claimed = _claim_transfer_staging(
             dst_parent, name_hint, lambda path: path.mkdir(exist_ok=False)
         )
         try:
             # ``dirs_exist_ok`` because the claim already created the root —
             # the directory copytree would otherwise refuse is the empty one we
             # just made and own.
-            shutil.copytree(src, staging, symlinks=True, dirs_exist_ok=True)
+            shutil.copytree(src, claimed.path, symlinks=True, dirs_exist_ok=True)
         except BaseException:
-            shutil.rmtree(staging, ignore_errors=True)
+            _discard_claimed_staging(claimed)
             raise
-        return staging
+        return claimed
 
-    staging = _claim_transfer_staging(dst_parent, name_hint, _create_exclusive_file)
+    claimed = _claim_transfer_staging(dst_parent, name_hint, _create_exclusive_file)
     try:
         # Writes through our own placeholder. ``copy2`` onto an existing
         # DIRECTORY would instead copy INTO it, which is exactly the hazard the
         # old clear-the-collider comment worried about; the claim makes the
         # destination a regular file we created, so that shape cannot arise.
-        shutil.copy2(src, staging, follow_symlinks=False)
+        shutil.copy2(src, claimed.path, follow_symlinks=False)
     except BaseException:
-        with contextlib.suppress(OSError):
-            staging.unlink(missing_ok=True)
+        _discard_claimed_staging(claimed)
         raise
-    return staging
+    return claimed
 
 
-def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool]:
+def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[StagingClaim, bool]:
     """Move *src* into a same-fs staging entry under *dst_parent*.
 
-    Returns ``(staging_path, src_consumed)``. ``src_consumed=True`` when the
+    Returns ``(staging_claim, src_consumed)``. ``src_consumed=True`` when the
     no-replace rename succeeded (same-FS fast path) and the source is now
     gone from disk. ``False`` when EXDEV forced a copy fallback; the
     caller is responsible for removing the source after a successful
@@ -1135,7 +1368,7 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
     try:
-        staging = _claim_transfer_staging(
+        claimed = _claim_transfer_staging(
             dst_parent,
             name_hint,
             lambda path: rename_no_replace(src, path, allow_cross_parent=True),
@@ -1149,7 +1382,7 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool
         # EXDEV: src is on another filesystem, so fall back to copying bytes
         # into staging without touching src.
         return _stage_copy_into(src, dst_parent, name_hint), False
-    return staging, True
+    return claimed, True
 
 
 #: Rename refusals that can ONLY mean "the destination name is occupied".
@@ -1195,8 +1428,19 @@ _RENAME_COLLISION_ERRNOS = (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR)
 _RENAME_AMBIGUOUS_ERRNOS = (errno.ENOTDIR,)
 
 
-def _promote_move(staging: Path, dst: Path) -> None:
+def _promote_move(staging: StagingClaim, dst: Path) -> None:
     """Promote *staging* onto an absent *dst*, or refuse atomically (#2312).
+
+    Takes the CLAIM, not a path, and verifies the pathname still names the
+    object we created before consuming it (#2314). Promotion is the one
+    by-name consumer whose failure is not a leak: renaming a stranger's entry
+    onto the canonical name publishes bytes Gate A scanned on a different
+    object. On a mismatch it raises
+    :class:`StagingIdentityLostError` and promotes nothing; the caller's
+    rollback ladder then re-asks the same question before touching staging
+    again. The verify→rename pair is still two syscalls — see
+    :class:`StagingClaim` for the residual window this narrows rather than
+    closes.
 
     Pre-condition (pinned by :func:`migrate_scope` Row 15 contract): dst
     must not exist. The refusal is the SYSCALL's, not a check of ours.
@@ -1239,8 +1483,9 @@ def _promote_move(staging: Path, dst: Path) -> None:
             f"destination parent is not a directory: {dst.parent}",
             str(dst),
         ) from exc
+    staging.assert_still_ours("promote onto the canonical name")
     try:
-        rename_no_replace(staging, dst)
+        rename_no_replace(staging.path, dst)
     except OSError as exc:
         occupied = exc.errno in _RENAME_COLLISION_ERRNOS or (
             exc.errno in _RENAME_AMBIGUOUS_ERRNOS and os.path.lexists(dst)

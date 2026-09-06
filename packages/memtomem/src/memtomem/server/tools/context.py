@@ -1560,6 +1560,7 @@ async def mem_context_artifact_migrate(
     from memtomem.context.migrate import (
         MigratePartialError,
         SCOPE_MIGRATABLE_KINDS,
+        StagingIdentityLostError,
         TransferStagingBusyError,
         classify_migrate,
         migrate_scope,
@@ -1647,6 +1648,13 @@ async def mem_context_artifact_migrate(
             # message embeds canonical staging paths, so it is redacted like
             # the arms around it.
             return f"refused: transfer_staging_busy: {_redact_reason(str(exc), project_root)}"
+        except StagingIdentityLostError as exc:
+            # The staging entry this transfer created was replaced out of band
+            # (#2314), so nothing was promoted and nothing was removed. Same
+            # ``refused:`` shape and the same redaction as the busy arm above:
+            # a human has to look at the destination store, and the message
+            # names paths that must not leave the host unredacted.
+            return f"refused: transfer_staging_replaced: {_redact_reason(str(exc), project_root)}"
         except TransferRecoveryError as exc:
             # ``migrate_scope`` is a thin wrapper over the transfer engine, so
             # this is the shape an interrupted swap arrives in. BEFORE the
@@ -1995,6 +2003,7 @@ async def mem_context_artifact_transfer(
         SCOPE_MIGRATABLE_KINDS,
         ArtifactNotFoundError,
         MigratePartialError,
+        StagingIdentityLostError,
         TransferStagingBusyError,
         _detect_source_scope,
     )
@@ -2223,6 +2232,10 @@ async def mem_context_artifact_transfer(
         # deliberately left alone (#2309). Both roots are stripped, since the
         # occupied names live under the destination store.
         return f"refused: transfer_staging_busy: {_redact_reason(str(exc), src_root, dst_root)}"
+    except StagingIdentityLostError as exc:
+        # Twin of the migrate action's arm: the entry this transfer created was
+        # replaced out of band (#2314), so it was neither promoted nor removed.
+        return f"refused: transfer_staging_replaced: {_redact_reason(str(exc), src_root, dst_root)}"
     except PrivacyScanError as exc:
         return f"privacy block: {exc.message}"
     except MigratePartialError as exc:

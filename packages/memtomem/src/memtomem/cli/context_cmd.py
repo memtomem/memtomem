@@ -74,6 +74,7 @@ from memtomem.context.migrate import (
     MigrateRow,
     MigrateScopeResult,
     SCOPE_MIGRATABLE_KINDS,
+    StagingIdentityLostError,
     TransferStagingBusyError,
     _detect_source_scope,
     adopt_flat_to_dir,
@@ -3806,6 +3807,7 @@ def _migrate_scope_dispatch(
         PrivacyScanError,
         MigratePartialError,
         TransferStagingBusyError,
+        StagingIdentityLostError,
     ):
         result = migrate_scope(
             asset_type,  # type: ignore[arg-type]
@@ -4494,6 +4496,7 @@ def _transfer_dispatch(
         PrivacyScanError,
         MigratePartialError,
         TransferStagingBusyError,
+        StagingIdentityLostError,
     ):
         if is_mcp:
             # Cross-project-only, copy-only; the adapter re-raises the

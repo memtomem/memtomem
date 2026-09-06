@@ -728,6 +728,70 @@ async def test_mcp_same_project_destination_rejected(projects) -> None:
     assert "resolves to the source project" in out
 
 
+def _usurp_staging_after_scan(monkeypatch, dst_store):
+    """Replace the in-flight staging entry once Gate A has read ours (#2314).
+
+    Faithful to the engine's own cells: the swap happens between the scan and
+    the promote, which is the window the claim's identity exists to survive.
+    Returns the list the pathname is appended to, so the cell can assert the
+    replacement was left alone.
+    """
+    from memtomem.context import transfer as transfer_mod
+
+    real_scan = transfer_mod.scan_artifact_tree
+    replaced = []
+
+    def scan_then_usurp(*args, **kwargs):
+        result = real_scan(*args, **kwargs)
+        staged = [p for p in dst_store.glob(".migrate-*") if not p.name.endswith(".aside")]
+        assert len(staged) == 1, staged
+        staged[0].rename(staged[0].with_name(staged[0].name + ".aside"))
+        staged[0].mkdir()
+        (staged[0] / "theirs.md").write_text("theirs", encoding="utf-8")
+        replaced.append(staged[0])
+        return result
+
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_then_usurp)
+    return replaced
+
+
+@pytest.mark.anyio
+async def test_replaced_staging_refuses_with_its_own_reason_code(
+    projects, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replaced staging entry is a ``refused:`` state of its own (#2314).
+
+    Sibling of the busy arm above, and deliberately NOT the same code: a busy
+    name is retried with a fresh suffix, while an entry replaced out of band
+    has to be understood before anything is retried. Falling through to the
+    generic handler would hand the calling agent a raw OSError traceback for a
+    state that is actionable.
+    """
+    _seed_agent(projects, "project_shared")
+    sid = _register_b(projects)
+    dst_store = projects["b"] / ".memtomem" / "agents"
+    dst_store.mkdir(parents=True, exist_ok=True)
+    replaced = _usurp_staging_after_scan(monkeypatch, dst_store)
+
+    out = await mem_context_artifact_transfer(
+        asset_type="agents",
+        name="foo",
+        mode="copy",
+        to_scope="project_shared",
+        to_project_scope_id=sid,
+        apply=True,
+        confirm_project_shared=True,
+    )
+
+    assert out.startswith("refused: transfer_staging_replaced:"), out
+    assert "was replaced out of band" in out, out
+    # Instruction before paths: both wires hard-truncate an engine reason at
+    # 200 characters, so a remediation written after them never arrives.
+    assert "Inspect it by hand, then retry." in out, out
+    assert (replaced[0] / "theirs.md").exists(), "the replacement was deleted for the usurper"
+    assert not (dst_store / "foo").exists()
+
+
 @pytest.mark.anyio
 async def test_staging_collision_refuses_with_its_own_reason_code(
     projects, monkeypatch: pytest.MonkeyPatch

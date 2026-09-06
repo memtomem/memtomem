@@ -66,7 +66,6 @@ either result without engine-type casts.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import shlex
@@ -84,12 +83,16 @@ from memtomem.context.mcp_servers import (
     canonical_mcp_server_path,
     parse_mcp_server_text,
 )
-from memtomem.context.migrate import ArtifactNotFoundError, _acquire_pair_lock
+from memtomem.context.migrate import (
+    ArtifactNotFoundError,
+    StagingClaim,
+    _acquire_pair_lock,
+    _discard_claimed_staging,
+)
 from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
 from memtomem.context.projects import compute_scope_id
 from memtomem.context.transfer import (
     TransferCollisionError,
-    _remove_staging,
     _stage_copy,
 )
 
@@ -240,8 +243,17 @@ def _parse_definition_text(text: str, *, name: str, src_path: Path) -> None:
     parse_mcp_server_text(text, name=name, source=src_path)
 
 
-def _promote_no_clobber(staging: Path, dst: Path) -> None:
+def _promote_no_clobber(staging: StagingClaim, dst: Path) -> None:
     """Promote *staging* to *dst*, atomically refusing an existing *dst*.
+
+    Takes the CLAIM: both promote shapes here consume the staging entry BY
+    NAME — ``os.link`` reads whatever the name points at, and the post-link
+    ``unlink`` deletes whatever it points at afterwards — so an entry replaced
+    out of band would be published into the destination's tracked tree and
+    then have the replacement deleted for us (#2314). The identity is verified
+    before the link and again (inside ``_discard_claimed_staging``) before the
+    unlink; both remain verify-then-act pairs, narrowing the window rather
+    than closing it.
 
     ``os.link`` fails with EEXIST instead of replacing, so a canonical
     created by a writer outside our sidecar pair lock (the mcp web CRUD
@@ -255,8 +267,9 @@ def _promote_no_clobber(staging: Path, dst: Path) -> None:
     both paths.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
+    staging.assert_still_ours("promote onto the canonical name")
     try:
-        os.link(staging, dst)
+        os.link(staging.path, dst)
     except FileExistsError:
         raise TransferCollisionError(f"destination appeared during lock acquire: {dst}.") from None
     except OSError as exc:
@@ -265,10 +278,15 @@ def _promote_no_clobber(staging: Path, dst: Path) -> None:
             raise TransferCollisionError(
                 f"destination appeared during lock acquire: {dst}."
             ) from None
-        os.replace(staging, dst)
+        # A SECOND consume attempt, so it needs its own verification: the
+        # failed ``os.link`` above is a syscall's worth of window, and an entry
+        # swapped inside it would be published by this replace even though the
+        # link path checked (#2314). Not the unavoidable verify-then-act gap —
+        # a distinct act with a stale verification behind it.
+        staging.assert_still_ours("promote onto the canonical name (link fallback)")
+        os.replace(staging.path, dst)
         return
-    with contextlib.suppress(OSError):
-        staging.unlink()
+    _discard_claimed_staging(staging)
 
 
 def copy_mcp_server(
@@ -402,7 +420,8 @@ def copy_mcp_server(
         if dst_path.exists():
             raise TransferCollisionError(f"destination appeared during lock acquire: {dst_path}.")
 
-        staging = _stage_copy(src_path, dst_path.parent, name_hint=name)
+        claimed = _stage_copy(src_path, dst_path.parent, name_hint=name)
+        staging = claimed.path
         try:
             if staging.is_symlink():
                 # The source turned into a symlink between the pre-flight
@@ -449,11 +468,13 @@ def copy_mcp_server(
                     f"{src_path} is not valid UTF-8; fix the source definition before copying."
                 ) from exc
             _parse_definition_text(staged_text, name=name, src_path=src_path)
-            _promote_no_clobber(staging, dst_path)
+            _promote_no_clobber(claimed, dst_path)
         except BaseException:
             # Copy staging never consumed the source — dropping staging is
-            # always safe (zero residue at the destination, source intact).
-            _remove_staging(staging)
+            # always safe (zero residue at the destination, source intact) —
+            # as long as "staging" means the object this claim created and not
+            # whatever now answers to its name (#2314).
+            _discard_claimed_staging(claimed)
             raise
 
     return _result(transferred=True)

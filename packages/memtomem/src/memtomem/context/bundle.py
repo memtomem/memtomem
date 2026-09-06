@@ -77,7 +77,10 @@ from memtomem.context.migrate import (
     _DIR_MANIFEST,
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
+    StagingClaim,
     _detect_source_scope,
+    _discard_claimed_staging,
+    _remove_staging_entry,
 )
 from memtomem.context.agents import _AGENT_ADAPTER
 from memtomem.context.commands import _COMMAND_ADAPTER
@@ -107,7 +110,6 @@ from memtomem.context.transfer import (
     TransferCollisionError,
     TransferRecoveryError,
     _classify_provenance_carry,
-    _remove_staging,
     _sync_followup,
     rewrite_manifest_name_bytes,
 )
@@ -1697,7 +1699,12 @@ def _reap_own_staging(dst_store: Path, dst_name: str) -> None:
         if internal_artifact_owner(entry.name) != dst_name:
             continue
         logger.info("removing staging leftover %s", entry)
-        _remove_staging(entry)
+        # By NAME, deliberately, and the only such caller left (#2314): a
+        # leftover from an earlier run has no live claim to compare an
+        # identity against — the process that created it is gone. Everything
+        # that removes an entry it created itself goes through
+        # ``_discard_claimed_staging`` instead.
+        _remove_staging_entry(entry)
 
 
 def receive_artifact_bundle(
@@ -1855,6 +1862,10 @@ def receive_artifact_bundle(
         except FileExistsError:
             staging = _staging_path(dst_store, dst_name)
             staging.mkdir(parents=False, exist_ok=False)
+        # The mkdir is this transport's exclusive claim; capture what it
+        # created so the promote and the cleanup below act on that object
+        # rather than on the pathname a second time (#2314).
+        claimed = StagingClaim.capture(staging)
         try:
             write_tree_payload(staging, [(rel, data) for rel, data, _ in payload])
             for rel in bundle.dirs:
@@ -1864,6 +1875,7 @@ def receive_artifact_bundle(
                     if is_exec:
                         (staging / rel).chmod(0o755)
             try:
+                claimed.assert_still_ours("promote onto the canonical name")
                 rename_no_replace(staging, dst_path)
             except OSError as exc:
                 if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR, errno.ENOTDIR):
@@ -1872,7 +1884,7 @@ def receive_artifact_bundle(
                     ) from exc
                 raise
         except BaseException:
-            _remove_staging(staging)
+            _discard_claimed_staging(claimed)
             raise
     return _result(received=True)
 

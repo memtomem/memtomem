@@ -66,6 +66,7 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    StagingIdentityLostError,
     TransferStagingBusyError,
 )
 from memtomem.context.privacy_scan import PrivacyScanError
@@ -562,6 +563,22 @@ async def transfer_context_artifact(
             detail={
                 "error_kind": "conflict",
                 "reason_code": "transfer_staging_busy",
+                "message": _redact_message(str(exc)),
+            },
+        ) from exc
+    except StagingIdentityLostError as exc:
+        # The staging entry this transfer created was replaced out of band
+        # (#2314): nothing was promoted, nothing was removed. Conflict for the
+        # same reason as the busy arm above — nothing is broken, something is
+        # in the way and a human has to look at it — with its own reason code,
+        # because the remediation differs: a busy name is retried, a replaced
+        # entry has to be understood first. Redacted like its sibling; the
+        # unredacted text stays in the server log via ``raise ... from``.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_kind": "conflict",
+                "reason_code": "transfer_staging_replaced",
                 "message": _redact_message(str(exc)),
             },
         ) from exc

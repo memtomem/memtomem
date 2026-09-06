@@ -114,7 +114,7 @@ def test_stage_copy_produces_an_internal_artifact_name(tmp_path: Path) -> None:
     src.mkdir()
     (src / "agent.md").write_text("---\nname: reviewer\n---\nbody\n", encoding="utf-8")
 
-    staging = _stage_copy(src, tmp_path / "dest", name_hint="reviewer")
+    staging = _stage_copy(src, tmp_path / "dest", name_hint="reviewer").path
 
     assert staging.is_dir()
     assert is_internal_artifact_dir(staging.name), staging.name
@@ -227,7 +227,7 @@ class TestStageCopyNeverClearsTheCollider:
         src.mkdir()
         (src / "agent.md").write_text("source", encoding="utf-8")
 
-        staging = _stage_copy(src, dst_parent, name_hint="reviewer")
+        staging = _stage_copy(src, dst_parent, name_hint="reviewer").path
 
         assert staging == self._staged(dst_parent, "bbbbbbbb")
         assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
@@ -240,8 +240,13 @@ class TestStageCopyNeverClearsTheCollider:
         ``exists()`` and ``is_dir()`` both follow links: a link to a directory
         would reach ``rmtree``, which refuses one, and a dangling link answers
         False to ``exists()`` and would be skipped entirely.
+
+        Driven through the claim-aware discard (#2314) rather than the removal
+        ladder alone, because that is what every cleanup site now calls: the
+        identity is read with ``lstat``, so a link's own identity — not its
+        target's — is what the check compares.
         """
-        from memtomem.context.transfer import _remove_staging
+        from memtomem.context.migrate import StagingClaim, _discard_claimed_staging
 
         target = tmp_path / "target"
         target.mkdir()
@@ -249,7 +254,7 @@ class TestStageCopyNeverClearsTheCollider:
         staging = tmp_path / ".migrate-reviewer-424242-aaaaaaaa.tmp"
         staging.symlink_to(target)
 
-        _remove_staging(staging)
+        _discard_claimed_staging(StagingClaim.capture(staging))
 
         assert not staging.is_symlink()
         assert (target / "keep.md").read_text(encoding="utf-8") == "keep"
@@ -1149,6 +1154,290 @@ def _plant_at_rename(module, target: Path, shape: str, calls: list[Path]):
         return real(src, dst, **kwargs)
 
     return wrapper
+
+
+def _usurp_staging(dst_root: Path) -> tuple[Path, Path]:
+    """Replace the in-flight ``.migrate-*`` entry under *dst_root* out of band.
+
+    Renames the entry the transfer claimed aside and creates a foreign one at
+    the same pathname, returning ``(pathname, aside)``. This is the #2314
+    actor: it must know a name carrying our pid and 32 bits of randomness
+    generated moments earlier, so it is external and targeted — the cells
+    below simulate it rather than claiming an in-tree writer does this.
+    """
+    staged = [p for p in dst_root.glob(".migrate-*") if not p.name.endswith(".aside")]
+    assert len(staged) == 1, staged
+    path = staged[0]
+    aside = path.with_name(path.name + ".aside")
+    path.rename(aside)
+    path.mkdir()
+    (path / "theirs.md").write_text("theirs", encoding="utf-8")
+    return path, aside
+
+
+class TestReplacedStagingIsNeitherRemovedNorPromoted:
+    """#2314: cleanup and promotion act on the OBJECT the claim created.
+
+    Sibling of the migrate-level cells in ``test_context_migrate.py``; these
+    drive the whole engine so the rollback ladders — the ones that decide
+    between removing staging, renaming it back, and preserving it — are the
+    code under test rather than the primitive.
+    """
+
+    @staticmethod
+    def _usurp_at_gate_a(monkeypatch, dst_root: Path, seen: list[tuple[Path, Path]]):
+        """Replace staging in the instant Gate A refuses, before the rollback."""
+        import memtomem.context.transfer as transfer_mod
+
+        real = transfer_mod.raise_or_collect
+
+        def wrapper(*args, **kwargs):
+            if not seen:
+                seen.append(_usurp_staging(dst_root))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(transfer_mod, "raise_or_collect", wrapper)
+
+    def test_copy_rollback_leaves_a_replacement_alone(self, two_projects, monkeypatch):
+        src_manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        _write_versions(src_manifest.parent, f"---\nname: foo\n---\n\nkey={_SECRET_LITERAL}\n")
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        seen: list[tuple[Path, Path]] = []
+        self._usurp_at_gate_a(monkeypatch, dst_root, seen)
+
+        with pytest.raises(PrivacyBlockedError):
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="copy",
+                apply_=True,
+            )
+
+        staged, aside = seen[0]
+        assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
+        assert (aside / "agent.md").exists(), "our own staging survived under its new name"
+        assert not (dst_root / "foo").exists()
+        # The source was never consumed by a copy, replacement or not.
+        assert src_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+    def test_move_rollback_does_not_rename_a_replacement_back_onto_src(
+        self, two_projects, monkeypatch, caplog
+    ):
+        """The rename-back is a CONSUMER, so it needs the same identity gate.
+
+        Move staging IS the artifact — the source is gone from disk — so a
+        rollback that renames the pathname back would put a stranger's entry on
+        the canonical source path and leave the real artifact lost under the
+        name the usurper gave it. Nothing is moved and nothing is deleted; the
+        state is the "manual reconciliation" one the ladder already reports for
+        a reappeared source.
+        """
+        import logging as _logging
+
+        src_manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        src_dir = src_manifest.parent
+        _write_versions(src_dir, f"---\nname: foo\n---\n\nkey={_SECRET_LITERAL}\n")
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        seen: list[tuple[Path, Path]] = []
+        self._usurp_at_gate_a(monkeypatch, dst_root, seen)
+        caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+        with pytest.raises(PrivacyBlockedError):
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="move",
+                apply_=True,
+            )
+
+        staged, aside = seen[0]
+        assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
+        assert not src_dir.exists(), "the same-fs stage consumed the source"
+        assert (aside / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "no longer names the entry this transfer created" in m and str(staged) in m
+            for m in messages
+        ), messages
+
+    def test_promote_refuses_a_replacement_end_to_end(self, two_projects, monkeypatch):
+        """Gate A scanned OUR entry; the promote must not publish another one."""
+        import memtomem.context.transfer as transfer_mod
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        real_scan = transfer_mod.scan_artifact_tree
+        seen: list[tuple[Path, Path]] = []
+
+        def scan_then_usurp(*args, **kwargs):
+            result = real_scan(*args, **kwargs)
+            seen.append(_usurp_staging(dst_root))
+            return result
+
+        monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_then_usurp)
+
+        with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="copy",
+                apply_=True,
+            )
+
+        staged, aside = seen[0]
+        assert not (dst_root / "foo").exists(), "a stranger's bytes reached the canonical name"
+        assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
+        assert (aside / "agent.md").exists()
+
+    def test_a_vanished_move_staging_is_reported_not_shrugged_off(
+        self, two_projects, monkeypatch, caplog
+    ):
+        """``ENOENT`` stays ``ENOENT``, but the rollback must not read as clean.
+
+        The same-fs stage consumed the source, so if the staging entry is gone
+        by the time the promote runs, the artifact's only copy left this
+        process's sight. Nothing can be moved and nothing can be deleted — the
+        one thing the rollback owes is saying so, because a silent
+        "nothing to do" is indistinguishable from a clean rollback in the log.
+        """
+        import logging as _logging
+        import shutil as _shutil
+
+        import memtomem.context.transfer as transfer_mod
+
+        src_manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        src_dir = src_manifest.parent
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        real_scan = transfer_mod.scan_artifact_tree
+
+        def scan_then_vanish(*args, **kwargs):
+            result = real_scan(*args, **kwargs)
+            for staged in dst_root.glob(".migrate-*"):
+                _shutil.rmtree(staged)
+            return result
+
+        monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_then_vanish)
+        caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+        with pytest.raises(OSError) as exc_info:
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="move",
+                apply_=True,
+            )
+
+        assert exc_info.value.errno == errno.ENOENT
+        assert not isinstance(exc_info.value, FileExistsError)
+        assert not src_dir.exists()
+        assert any(
+            "cannot account for the artifact's bytes" in r.getMessage() for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_a_flat_rename_refuses_to_rewrite_a_replacement(self, two_projects, monkeypatch):
+        """The rewrite reads, mutates and re-writes the staging entry itself.
+
+        For a FLAT artifact the manifest IS staging, so a replaced entry would
+        otherwise have ITS bytes read, its ``name:`` rewritten to our
+        destination name, and the result written back — and, if ownership were
+        refreshed by looking at the pathname afterwards, blessed as ours and
+        promoted. The check therefore comes before the READ, and the identity
+        after the write is the one ``atomic_write_bytes`` reports off its own
+        descriptor.
+        """
+        import memtomem.context.transfer as transfer_mod
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        src_root = _canonical_root(two_projects, "agents", "project_shared", "a")
+        src_root.mkdir(parents=True)
+        (src_root / "foo.md").write_text(_AGENT_BODY_CLEAN, encoding="utf-8")
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        seen: list[tuple[Path, Path]] = []
+        original_stage = transfer_mod._stage_copy
+
+        def stage_then_usurp(*args, **kwargs):
+            claimed = original_stage(*args, **kwargs)
+            seen.append(_usurp_staging(dst_root))
+            return claimed
+
+        monkeypatch.setattr(transfer_mod, "_stage_copy", stage_then_usurp)
+
+        with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="copy",
+                apply_=True,
+                new_name="bar",
+            )
+
+        staged, aside = seen[0]
+        assert not (dst_root / "bar.md").exists()
+        assert staged.is_dir() and (staged / "theirs.md").exists()
+        assert aside.exists(), "our own staging survived under its new name"
+
+    def test_a_flat_rename_still_cleans_up_its_own_staging(self, two_projects):
+        """The anti-leak pin for the identity refresh (#2314).
+
+        For a FLAT artifact the manifest IS the staging entry, and the ``--as``
+        rewrite goes through ``atomic_write_bytes`` — ``mkstemp`` + ``os.replace``
+        — so it legitimately swaps the inode the claim recorded. Without
+        ``claim.refresh_identity()`` the rollback would read our own rewrite as
+        a stranger's entry and preserve it, leaking a full staging entry into
+        the destination store on EVERY ordinary failure. ``.migrate-*`` is not
+        reapable, so that leak is permanent and invisible to discovery.
+        """
+        src_root = _canonical_root(two_projects, "agents", "project_shared", "a")
+        src_root.mkdir(parents=True)
+        flat = src_root / "foo.md"
+        flat.write_text(
+            f"---\nname: foo\ndescription: d\n---\n\nkey={_SECRET_LITERAL}\n",
+            encoding="utf-8",
+        )
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+
+        with pytest.raises(PrivacyBlockedError):
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="copy",
+                apply_=True,
+                new_name="bar",
+            )
+
+        assert not list(dst_root.glob(".migrate-*")), "the rewritten staging entry leaked"
+        assert not (dst_root / "bar.md").exists()
 
 
 _OCCUPANT_SHAPES = [

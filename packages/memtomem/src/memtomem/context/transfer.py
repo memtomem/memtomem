@@ -49,7 +49,6 @@ untracked, with the reason on the result
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
 import os
@@ -101,7 +100,9 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    StagingClaim,
     _detect_source_scope,
+    _discard_claimed_staging,
     _existing_fanout_targets,
     _promote_move,
     _remove_runtime_fanout_for,
@@ -498,29 +499,7 @@ def _provenance_fields(
     return "not_carried", plan.reason, plan.reason_code
 
 
-def _remove_staging(staging: Path) -> None:
-    """Best-effort removal of a staging entry whose bytes are safe elsewhere.
-
-    The symlink test comes first, and both other tests are reached only when
-    the entry is not a link: ``exists()`` and ``is_dir()`` follow links, so a
-    dangling staging link answers False to the first (leaked, never removed)
-    and a link to a directory answers True to the second (``rmtree`` refuses a
-    link, also a leak). Staging can be a link since ``_stage_copy_into``
-    preserves a symlink source as a link rather than dereferencing it.
-    """
-    if staging.is_symlink():
-        with contextlib.suppress(OSError):
-            staging.unlink()
-        return
-    if staging.exists():
-        if staging.is_dir():
-            shutil.rmtree(staging, ignore_errors=True)
-        else:
-            with contextlib.suppress(OSError):
-                staging.unlink()
-
-
-def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
+def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
     """Copy *src* into a same-dir staging entry under *dst_parent*.
 
     Copy-mode sibling of :func:`memtomem.context.migrate._stage_move`:
@@ -534,14 +513,17 @@ def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
 
     The name is claimed exclusively and a colliding entry is never cleared:
     a copy's staging is rebuildable but the name cannot say whose leftover it
-    found, and a move's staging can be the only copy of an artifact.
+    found, and a move's staging can be the only copy of an artifact. The
+    returned :class:`StagingClaim` carries the identity of the object the
+    claim created, so cleanup and promotion act on that object rather than on
+    the pathname again (#2314).
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
     return _stage_copy_into(src, dst_parent, name_hint)
 
 
 def _rewrite_staged_manifest_name(
-    staging: Path,
+    staging: StagingClaim,
     kind: ArtifactKind,
     layout: Literal["dir", "flat"],
     new_name: str,
@@ -585,7 +567,12 @@ def _rewrite_staged_manifest_name(
     (ADR-0022) and override bytes are verbatim-by-contract. The caller
     surfaces a :attr:`TransferResult.notes` entry when overrides exist.
     """
-    manifest = staging if layout == "flat" else staging / _DIR_MANIFEST[kind]
+    # Before reading, not only before writing: for a flat artifact the
+    # manifest IS the staging entry, so a replaced entry would otherwise have
+    # ITS bytes read, rewritten and written back — publishing a stranger's
+    # artifact under our name (#2314).
+    staging.assert_still_ours("rewrite the staged manifest")
+    manifest = staging.path if layout == "flat" else staging.path / _DIR_MANIFEST[kind]
     original = manifest.read_bytes()
     rewritten = rewrite_manifest_name_bytes(original, new_name, manifest_label=manifest.name)
     if rewritten == original:
@@ -594,7 +581,16 @@ def _rewrite_staged_manifest_name(
     # surface-wide (test_context_atomic_write_guard): no bare writes on
     # gateway modules. Mode is preserved from the copied manifest —
     # copy semantics, not the helper's 0600 default.
-    atomic_write_bytes(manifest, rewritten, mode=stat.S_IMODE(manifest.stat().st_mode))
+    placed = atomic_write_bytes(manifest, rewritten, mode=stat.S_IMODE(manifest.stat().st_mode))
+    if layout == "flat":
+        # ``atomic_write_bytes`` is mkstemp + ``os.replace``, so for a flat
+        # artifact — where the manifest IS the staging entry — that write just
+        # replaced the inode the claim recorded. The claim adopts the number
+        # the WRITE reports, off its own descriptor; looking the pathname up
+        # again would adopt an entry someone else may have put there. The
+        # obligation lives here, in the function that does the replacing,
+        # rather than with callers.
+        staging.adopt(placed)
 
 
 def rewrite_manifest_name_bytes(
@@ -1078,10 +1074,11 @@ def transfer_artifact(
         provenance_plan = _plan_provenance()
 
         if mode == "copy":
-            staging = _stage_copy(src_path, dst_path.parent, name_hint=dst_name)
+            claimed = _stage_copy(src_path, dst_path.parent, name_hint=dst_name)
+            staging = claimed.path
             try:
                 if new_name is not None:
-                    _rewrite_staged_manifest_name(staging, kind, layout, new_name)
+                    _rewrite_staged_manifest_name(claimed, kind, layout, new_name)
                     if layout == "dir":
                         # Shared derivation with the dry-run preview (probed
                         # off src there) — see _rename_overrides_note. Appended,
@@ -1107,7 +1104,7 @@ def transfer_artifact(
                             ),
                         )
                 try:
-                    _promote_move(staging, dst_path)
+                    _promote_move(claimed, dst_path)
                 except FileExistsError as exc:
                     # TOCTOU: an external writer (one not holding our sidecar
                     # lock) created dst between the in-lock ``dst_path.exists()``
@@ -1123,11 +1120,15 @@ def transfer_artifact(
                 # Copy staging never consumed the source — the source
                 # bytes are intact at src_path by construction, so
                 # dropping staging is always safe (zero residue at the
-                # destination, nothing to rename back).
-                _remove_staging(staging)
+                # destination, nothing to rename back). "Dropping staging"
+                # means the object this claim created, not the pathname:
+                # an entry replaced out of band belongs to whoever made it
+                # and is left alone with a warning (#2314).
+                _discard_claimed_staging(claimed)
                 raise
         else:
-            staging, src_consumed = _stage_move(src_path, dst_path.parent, name_hint=name)
+            claimed, src_consumed = _stage_move(src_path, dst_path.parent, name_hint=name)
+            staging = claimed.path
 
             try:
                 # Gate A on the staged content if landing in project_shared.
@@ -1158,7 +1159,7 @@ def transfer_artifact(
                         )
 
                 try:
-                    _promote_move(staging, dst_path)
+                    _promote_move(claimed, dst_path)
                 except FileExistsError as exc:
                     # Same promote-window TOCTOU as the copy branch — typed
                     # collision so the move rollback below runs and the caller
@@ -1200,6 +1201,25 @@ def transfer_artifact(
                         "required.",
                         src_path,
                         staging,
+                    )
+                elif not claimed.still_ours() and os.path.lexists(staging):
+                    # Something replaced our staging entry out of band. The
+                    # rename-back is a CONSUMER, so doing it by name would
+                    # move a stranger's object onto the canonical source path
+                    # while the artifact we renamed aside stays lost under
+                    # whatever name they gave it (#2314). Move nothing, delete
+                    # nothing, and say so — this lands in the same
+                    # "manual reconciliation" state the branch above uses when
+                    # src reappears, which is the worst outcome we already
+                    # know how to report.
+                    logger.error(
+                        "transfer rollback: staging %s no longer names the "
+                        "entry this transfer created (replaced out of band); "
+                        "neither renaming it back to %s nor removing it — the "
+                        "source bytes may survive under another name in that "
+                        "store. Manual reconciliation required.",
+                        staging,
+                        src_path,
                     )
                 elif os.path.lexists(staging):
                     # Same-FS path consumed src; src is gone as expected;
@@ -1252,10 +1272,25 @@ def transfer_artifact(
                                 staging,
                                 src_path,
                             )
-                # else: src_consumed and staging is gone too — nothing to do.
+                else:
+                    # src_consumed and the staging entry is gone too. There is
+                    # nothing to move and nothing to delete, but this is not
+                    # "nothing happened": the same-fs stage consumed the
+                    # source, so the only copy of the artifact left this
+                    # process's sight. Silence here reads as a clean rollback
+                    # to whoever is looking at the log (#2314 review).
+                    logger.error(
+                        "transfer rollback: the source at %s was consumed by the "
+                        "staging rename and the staging entry %s is gone — this "
+                        "process cannot account for the artifact's bytes. Manual "
+                        "recovery required; look for it under another name in %s.",
+                        src_path,
+                        staging,
+                        dst_path.parent,
+                    )
 
                 if cleanup_staging:
-                    _remove_staging(staging)
+                    _discard_claimed_staging(claimed)
                 raise
 
             # EXDEV cleanup — promoted dst now holds the bytes; src copy is

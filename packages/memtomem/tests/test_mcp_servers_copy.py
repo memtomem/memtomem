@@ -29,7 +29,7 @@ from memtomem.context.mcp_servers_copy import (
     _promote_no_clobber,
     copy_mcp_server,
 )
-from memtomem.context.migrate import ArtifactNotFoundError
+from memtomem.context.migrate import ArtifactNotFoundError, StagingClaim
 from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.context.projects import compute_scope_id
 from memtomem.context.transfer import TransferCollisionError, TransferResult
@@ -204,10 +204,13 @@ def test_staged_bytes_are_parse_validated(roots, monkeypatch: pytest.MonkeyPatch
 
     real_stage = mod._stage_copy
 
-    def corrupting_stage(src: Path, dst_parent: Path, name_hint: str) -> Path:
-        staging = real_stage(src, dst_parent, name_hint=name_hint)
-        staging.write_text(json.dumps(_NETWORK_DEFINITION), encoding="utf-8")
-        return staging
+    def corrupting_stage(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
+        claimed = real_stage(src, dst_parent, name_hint=name_hint)
+        # Truncate-and-write THROUGH the staged file: the entry keeps the
+        # identity the claim recorded, so this simulates a racing source edit
+        # rather than the out-of-band replacement #2314 refuses to clean up.
+        claimed.path.write_text(json.dumps(_NETWORK_DEFINITION), encoding="utf-8")
+        return claimed
 
     monkeypatch.setattr(mod, "_stage_copy", corrupting_stage)
     with pytest.raises(McpServerParseError, match="Only stdio servers are supported"):
@@ -244,11 +247,15 @@ def test_staging_turned_symlink_refused_in_lock(roots, monkeypatch: pytest.Monke
 
     real_stage = mod._stage_copy
 
-    def symlinking_stage(src: Path, dst_parent: Path, name_hint: str) -> Path:
-        staging = real_stage(src, dst_parent, name_hint=name_hint)
-        staging.unlink()
-        staging.symlink_to(src)
-        return staging
+    def symlinking_stage(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
+        claimed = real_stage(src, dst_parent, name_hint=name_hint)
+        # Re-capture: the real stager would have CLAIMED the link (a symlink
+        # source stages as a link), so the claim must name the entry that is
+        # actually there. Returning the stale identity would test #2314's
+        # refusal-to-clean instead of the symlink guard this test is about.
+        claimed.path.unlink()
+        claimed.path.symlink_to(src)
+        return StagingClaim.capture(claimed.path)
 
     monkeypatch.setattr(mod, "_stage_copy", symlinking_stage)
     with pytest.raises(click.ClickException, match="refuses symlinked canonicals"):
@@ -314,6 +321,84 @@ def test_collision_detected_inside_lock_window(roots, monkeypatch: pytest.Monkey
     assert not list(dst.parent.glob(".migrate-*"))
 
 
+def test_replaced_staging_is_neither_promoted_nor_deleted(
+    roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2314: this adapter consumes staging BY NAME twice, and both were open.
+
+    ``os.link`` publishes whatever the pathname points at into the
+    destination's tracked tree, and the unlink after it removes whatever is
+    there afterwards. An entry replaced between the claim and the promote
+    would therefore be copied into project B AND then deleted for the usurper.
+    Both steps now check the identity the claim recorded.
+    """
+    _seed_server(roots["a"])
+    import memtomem.context.mcp_servers_copy as mod
+    from memtomem.context.migrate import StagingIdentityLostError
+
+    dst = _dst_path(roots)
+    real_parse = mod._parse_definition_text
+    replaced: list[Path] = []
+
+    def usurp_then_parse(*args, **kwargs):
+        # Immediately before the promote, and after the Gate A scan has read
+        # OUR bytes — the window the claim's identity exists to survive.
+        result = real_parse(*args, **kwargs)
+        # The pre-flight parse runs before anything is staged; only the
+        # in-lock parse — the one right before the promote — has an entry to
+        # replace.
+        staged = [p for p in dst.parent.glob(".migrate-*") if not p.name.endswith(".aside")]
+        if not staged:
+            return result
+        assert len(staged) == 1, staged
+        aside = staged[0].with_name(staged[0].name + ".aside")
+        staged[0].rename(aside)
+        staged[0].write_text('{"command": "theirs"}', encoding="utf-8")
+        replaced.append(staged[0])
+        return result
+
+    monkeypatch.setattr(mod, "_parse_definition_text", usurp_then_parse)
+
+    with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+        _copy(roots, apply_=True)
+
+    assert not dst.exists(), "a stranger's definition reached the destination canonical"
+    assert replaced[0].read_text(encoding="utf-8") == '{"command": "theirs"}'
+
+
+def test_promote_fallback_refuses_a_replacement_too(tmp_path: Path, monkeypatch) -> None:
+    """#2314: a failed ``os.link`` is a window, and the fallback must re-verify.
+
+    The link path checks the claim, then ``os.link`` fails (no hard links on
+    this filesystem) and the fallback consumes staging with ``os.replace``.
+    Between those two syscalls an entry can be swapped, so the fallback carries
+    its own check rather than inheriting the first one's answer.
+    """
+    import errno
+    import os
+
+    from memtomem.context.migrate import StagingClaim, StagingIdentityLostError
+
+    staging = tmp_path / ".migrate-pg-1.tmp"
+    staging.write_text('{"command": "ours"}', encoding="utf-8")
+    claim = StagingClaim.capture(staging)
+    dst = tmp_path / "pg.json"
+
+    def link_then_usurp(src, target):
+        aside = Path(src).with_name(Path(src).name + ".aside")
+        Path(src).rename(aside)
+        Path(src).write_text('{"command": "theirs"}', encoding="utf-8")
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr(os, "link", link_then_usurp)
+
+    with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+        _promote_no_clobber(claim, dst)
+
+    assert not dst.exists(), "the fallback published an entry we never created"
+    assert staging.read_text(encoding="utf-8") == '{"command": "theirs"}'
+
+
 def test_promote_no_clobber_never_overwrites(tmp_path: Path) -> None:
     """The Codex design-gate blocker: a writer outside the sidecar locks
     (mcp web CRUD holds only the in-process gateway lock) landing a
@@ -324,7 +409,7 @@ def test_promote_no_clobber_never_overwrites(tmp_path: Path) -> None:
     dst.write_text('{"command": "theirs"}', encoding="utf-8")
 
     with pytest.raises(TransferCollisionError):
-        _promote_no_clobber(staging, dst)
+        _promote_no_clobber(StagingClaim.capture(staging), dst)
     assert dst.read_text(encoding="utf-8") == '{"command": "theirs"}'
     assert staging.is_file()  # caller owns staging cleanup on refusal
 

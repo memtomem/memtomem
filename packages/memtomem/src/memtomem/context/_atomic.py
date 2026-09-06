@@ -536,8 +536,15 @@ def fsync_dir(path: Path) -> bool:
 
 def atomic_write_bytes(
     path: Path, data: bytes, mode: int = 0o600, *, full_fsync: bool = False
-) -> None:
+) -> tuple[int, int]:
     """Atomically write *data* to *path* with an explicit file mode.
+
+    Returns ``(st_dev, st_ino)`` of the object it placed at *path*, read off
+    the tempfile's own descriptor BEFORE the rename. Callers that track a
+    staging entry by identity need that number and cannot recover it
+    afterwards: this function replaces the inode at *path*, and re-reading the
+    pathname to find out what is there now would adopt whatever else may have
+    landed on it (#2314). Every other caller ignores the value.
 
     ``mode`` is applied via ``os.fchmod`` on the tempfile before the rename
     where available, so the result is independent of the process umask.
@@ -566,10 +573,14 @@ def atomic_write_bytes(
             f.write(data)
             f.flush()
             _fsync_fd(f.fileno(), full=full_fsync)
+            # Off the descriptor we own, while we still own it — the only
+            # moment this identity is knowable without a second lookup.
+            placed = os.fstat(f.fileno())
         os.replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+    return (placed.st_dev, placed.st_ino)
 
 
 def atomic_write_text(
