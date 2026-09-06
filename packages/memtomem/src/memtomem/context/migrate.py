@@ -50,7 +50,12 @@ import click
 
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
-from memtomem.context._atomic import _file_lock, _lock_path_for, rename_no_replace
+from memtomem.context._atomic import (
+    _file_lock,
+    _lock_path_for,
+    rename_no_replace,
+    rename_refused_by_occupant,
+)
 from memtomem.context._canonical_txn import canonical_sidecar_lock
 from memtomem.context._dir_swap import has_pending_swap
 from memtomem.context._names import (
@@ -1000,8 +1005,9 @@ class StagingClaim:
         is the honest error for it — for a move, "staging vanished" is a
         different emergency from "something is in the way", and only the
         syscall can tell the caller which one happened (the classification
-        :data:`_RENAME_COLLISION_ERRNOS` performs). The check fires only for
-        the state it exists to catch: an entry that IS there and is not ours.
+        :func:`~memtomem.context._atomic.rename_refused_by_occupant` performs).
+        The check fires only for the state it exists to catch: an entry that IS
+        there and is not ours.
         """
         if not os.path.lexists(self.path) or self.still_ours():
             return
@@ -1391,49 +1397,6 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[StagingCla
     return claimed, True
 
 
-#: Rename refusals that can ONLY mean "the destination name is occupied".
-#:
-#: A no-replace rename reports an occupied target as ``EEXIST`` whatever
-#: shape it is — measured on macOS, where a directory renamed onto an
-#: existing FILE answers ``EEXIST`` rather than the ``ENOTDIR`` a plain
-#: ``rename`` would give. ``ENOTEMPTY`` and ``EISDIR`` are the other
-#: spellings POSIX kernels are permitted to choose. Windows needs none of
-#: them (its :func:`os.rename` refuses every existing destination with
-#: ``FileExistsError``) but they cost nothing there.
-#:
-#: ``ENOTDIR`` is deliberately NOT in this tuple — see
-#: :data:`_RENAME_AMBIGUOUS_ERRNOS`.
-_RENAME_COLLISION_ERRNOS = (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR)
-
-#: Refusals that mean "occupied" OR something else entirely (#2312).
-#:
-#: ``ENOTDIR`` is reported both for an occupied destination and for a
-#: **broken path component** on either side, and only a look can tell them
-#: apart. An earlier version of this code claimed the second reading was
-#: impossible here because :func:`_promote_move` ensures ``dst.parent``
-#: immediately beforehand. That was wrong, and the Codex review that caught
-#: it reproduced the counter-example: ensuring a directory does not PIN it,
-#: so a writer outside our lock that replaces the store directory with a
-#: file in that window produces ``ENOTDIR`` with nothing at ``dst`` at all.
-#: Reporting that as "destination already exists" sends the operator to
-#: look for a collision that is not there, while the real event — the
-#: parent, and therefore the staged artifact inside it, is gone — goes
-#: unnamed.
-#:
-#: The probe is a CONJUNCTION, which is what keeps it safe: it can only
-#: ever turn a wrong "collision" back into the error that actually
-#: happened. The inverse rule ("collision, OR something is at dst") was
-#: rejected at the design gate for the opposite reason — it would report an
-#: ``ENOENT`` (staging gone, and for a move staging is the ONLY copy), the
-#: deliberate cross-parent ``EXDEV``, or an ``EIO`` as an ordinary
-#: collision whenever the name happened to be taken.
-#:
-#: ``lexists``, not ``exists``: a dangling symlink occupies a name just as
-#: firmly as anything else. Same rule, same reason, as
-#: :func:`_claim_hit_an_occupied_name`.
-_RENAME_AMBIGUOUS_ERRNOS = (errno.ENOTDIR,)
-
-
 def _promote_move(staging: StagingClaim, dst: Path) -> None:
     """Promote *staging* onto an absent *dst*, or refuse atomically (#2312).
 
@@ -1469,8 +1432,9 @@ def _promote_move(staging: StagingClaim, dst: Path) -> None:
     boundary contract both call sites in :mod:`~memtomem.context.transfer`
     translate into the typed :class:`TransferCollisionError` the surfaces
     declare. Every other ``OSError`` propagates unchanged, including an
-    ``ENOTDIR`` that turns out not to be about the destination at all
-    (:data:`_RENAME_AMBIGUOUS_ERRNOS`).
+    ``ENOTDIR`` that turns out not to be about the destination at all —
+    :func:`~memtomem.context._atomic.rename_refused_by_occupant` settles that
+    one by looking.
     """
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1493,10 +1457,7 @@ def _promote_move(staging: StagingClaim, dst: Path) -> None:
     try:
         rename_no_replace(staging.path, dst)
     except OSError as exc:
-        occupied = exc.errno in _RENAME_COLLISION_ERRNOS or (
-            exc.errno in _RENAME_AMBIGUOUS_ERRNOS and os.path.lexists(dst)
-        )
-        if occupied:
+        if rename_refused_by_occupant(exc, dst):
             raise FileExistsError(f"destination already exists: {dst}") from exc
         raise
 

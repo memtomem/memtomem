@@ -770,7 +770,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
                     swap_failure_text(exc),
                 )
             except OSError as exc:
-                if _promote_race_conflict(exc):
+                if _promote_race_conflict(exc, dst):
                     return _refusal_for(
                         plan, "target_conflict", skip_codes.TARGET_CONFLICT, str(exc)
                     )

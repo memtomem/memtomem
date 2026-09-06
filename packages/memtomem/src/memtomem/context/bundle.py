@@ -61,6 +61,7 @@ from memtomem.context._atomic import (
     DIRTY_SKIP_SUFFIXES,
     atomic_write_bytes,
     rename_no_replace,
+    rename_refused_by_occupant,
     write_tree_payload,
 )
 from memtomem.context._canonical_txn import canonical_sidecar_lock
@@ -1629,7 +1630,7 @@ def _publish_bundle(out_path: Path, data: bytes) -> None:
             logger.warning("could not remove temporary bundle file %s", tmp)
         if not isinstance(exc, OSError):
             raise
-        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR, errno.ENOTDIR):
+        if rename_refused_by_occupant(exc, out_path):
             raise BundleSourceError(
                 f"{out_path} already exists; export never overwrites (choose another --out)"
             ) from exc
@@ -1878,7 +1879,7 @@ def receive_artifact_bundle(
                 claimed.assert_still_ours("promote onto the canonical name")
                 rename_no_replace(staging, dst_path)
             except OSError as exc:
-                if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR, errno.ENOTDIR):
+                if rename_refused_by_occupant(exc, dst_path):
                     raise TransferCollisionError(
                         f"destination appeared during promote: {dst_path}."
                     ) from exc

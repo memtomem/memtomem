@@ -9,6 +9,7 @@ worse, makes this very file unindexable.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -501,6 +502,87 @@ class TestExport:
             _export(root, out)
         assert out.read_text() == "previous\n"
 
+    @pytest.mark.requires_symlinks
+    def test_a_dangling_symlink_out_path_is_never_followed(self, tmp_path: Path) -> None:
+        """#2319 — a link occupies the name even though ``exists()`` says no.
+
+        Export publishes with a no-replace rename, so the kernel refuses; the
+        operator is told the path is taken rather than having their link
+        silently replaced by a bundle.
+        """
+        root = tmp_path / "p"
+        _write_skill(root)
+        out = tmp_path / "b.json"
+        out.symlink_to(tmp_path / "no-such-target")
+
+        with pytest.raises(BundleSourceError, match="already exists"):
+            _export(root, out)
+
+        assert out.is_symlink()
+        assert not out.exists()
+
+    def test_an_unrelated_write_failure_is_not_reported_as_a_collision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2319 — only occupancy earns the "choose another --out" remedy.
+
+        Telling someone their output file already exists, when the real failure
+        was a full disk or a broken path component, sends them to rename a file
+        that is not there. The publish now classifies with the shared predicate,
+        so an unrelated errno keeps its own message.
+        """
+        import memtomem.context.bundle as bundle_mod
+
+        root = tmp_path / "p"
+        _write_skill(root)
+        out = tmp_path / "b.json"
+
+        def enospc(*_a, **_kw):
+            raise OSError(errno.ENOSPC, "No space left on device", str(out))
+
+        monkeypatch.setattr(bundle_mod, "rename_no_replace", enospc)
+
+        with pytest.raises(BundleSourceError) as exc_info:
+            _export(root, out)
+
+        message = str(exc_info.value)
+        assert "already exists" not in message, message
+        assert "No space left" in message
+        # The sibling temp is cleaned up rather than left to confuse the reader.
+        assert not list(tmp_path.glob(".b.json.*"))
+
+    def test_enotdir_with_a_free_out_path_is_not_reported_as_a_collision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2319 — the one cell where the old tuple was actually wrong.
+
+        ``ENOTDIR`` means both "something is in the way" and "a component of
+        the path is not a directory". The old classifier took it as proof of
+        occupancy, so an operator whose ``--out`` DIRECTORY had been replaced
+        by a file was told their output file already existed and to choose
+        another name — advice that cannot work, about a file that is not
+        there. The shared predicate settles it by looking.
+        """
+        import memtomem.context.bundle as bundle_mod
+
+        root = tmp_path / "p"
+        _write_skill(root)
+        out = tmp_path / "b.json"
+
+        def broken_component(*_a, **_kw):
+            raise OSError(errno.ENOTDIR, "Not a directory", str(out))
+
+        monkeypatch.setattr(bundle_mod, "rename_no_replace", broken_component)
+
+        with pytest.raises(BundleSourceError) as exc_info:
+            _export(root, out)
+
+        message = str(exc_info.value)
+        assert not out.exists(), "the destination really is free"
+        assert "already exists" not in message, message
+        assert "choose another --out" not in message, message
+        assert "Not a directory" in message
+
     def test_wiki_commit_only_travels_when_clean_and_pinned(self, tmp_path: Path) -> None:
         """Fails if the lockfile entry is copied without the carry gate."""
         root = tmp_path / "p"
@@ -809,6 +891,37 @@ class TestReceipt:
         landed = dst / ".memtomem" / "skills.local" / "demo"
         assert landed.joinpath("run.sh").stat().st_mode & 0o111
         assert not landed.joinpath("SKILL.md").stat().st_mode & 0o111
+
+    def test_enotdir_with_a_free_destination_is_not_a_collision(
+        self, bundle, dst, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2319, receipt side — the twin of the export cell.
+
+        A false ``TransferCollisionError`` here tells the operator their
+        destination already holds an artifact, and `mm context import` prints
+        that as a one-line refusal. The destination is genuinely free, so this
+        must stay the error that actually happened.
+        """
+        import memtomem.context.bundle as bundle_mod
+        from memtomem.context.transfer import TransferCollisionError
+
+        landed = dst / ".memtomem" / "skills.local" / "demo"
+
+        def broken_component(*_a, **_kw):
+            raise OSError(errno.ENOTDIR, "Not a directory", str(landed))
+
+        monkeypatch.setattr(bundle_mod, "rename_no_replace", broken_component)
+
+        with pytest.raises(OSError) as exc_info:
+            receive_artifact_bundle(
+                bundle, dst_project_root=dst, to_scope="project_local", apply_=True
+            )
+
+        assert not isinstance(exc_info.value, TransferCollisionError)
+        assert exc_info.value.errno == errno.ENOTDIR
+        assert not landed.exists(), "the destination really is free"
+        # The staging tree is cleaned up rather than left behind.
+        assert not list((dst / ".memtomem" / "skills.local").glob(".*staging*"))
 
     def test_dry_run_touches_nothing(self, bundle, dst) -> None:
         result = receive_artifact_bundle(

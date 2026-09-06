@@ -89,6 +89,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   a filesystem that cannot report file identity at all (some Windows network
   shares) is now refused rather than silently trusted.
 
+- **A store path that is not a directory is reported as that, instead of as a
+  collision with an artifact that is not there** (#2319) — several operations
+  answer "the destination name is taken" by looking at the error a no-replace
+  rename returns, and they were reading one of those errors wrong. The system
+  uses that error for two unrelated situations: something really is in the way,
+  or a directory along the path has been replaced by a file. Taken as proof of
+  the first, it sent people to resolve a conflict that did not exist while the
+  real problem went unnamed. That one ambiguous case now confirms by looking
+  before it calls the name taken, which can only ever turn a wrong answer back
+  into the true one; the errors that can only mean "taken" are unchanged. Sharing a file now refuses a `--out` path that is occupied
+  and reports a full disk or a broken path as itself; receiving one no longer
+  answers "already exists" about a free destination.
+
+  Two related repairs came out of the same sweep. Taking the lock that guards
+  an artifact used to fail with the same signal several callers read as "the
+  destination is taken", so a store folder replaced by a file arrived dressed
+  as an ordinary conflict — one web response even reported it as a conflict
+  with a specific artifact. It now says the path is not a directory, before
+  anything else runs. And installing a skill over an existing one could fail
+  while setting the old copy aside; because the old copy was still in place,
+  that looked like a routine conflict and the install was quietly skipped. It
+  now says which path refused, and is never mistaken for a conflict at the
+  destination.
+
 - **A cross-store transfer no longer replaces something that appears at the
   destination while it is landing** (#2312) — `mm context move` and `mm context
   copy` finish by renaming the staged artifact onto its final name, and they
