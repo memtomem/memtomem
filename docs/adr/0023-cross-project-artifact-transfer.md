@@ -252,6 +252,41 @@ an ordinary collision. The same window has one more edge the promote handles
 explicitly: `mkdir(exist_ok=True)` on a parent that is now a *file* raises
 `FileExistsError`, which is the promote's own signal for a taken destination,
 so it is translated to `ENOTDIR` before it can be mistaken for one.
+
+**Amendment (2026-09, #2319): this rule is one shared predicate, and the lock
+enforces the same distinction earlier.** The classification above was written
+for the transfer promote and then found in four more places, in three further
+spellings — both bundle promotes (export's `--out` publish and receipt's
+landing), the swap recovery rename-in, and the skills promote race. Swap
+recovery's tuple was missing `EISDIR` outright; the bundle pair took `ENOTDIR`
+as proof of occupancy; the skills copy reached `EISDIR` only through an
+isinstance test that was too broad in the other direction (below). All five now call `_atomic.rename_refused_by_occupant`, a pure
+boolean that answers only "did this rename refuse because the destination is
+taken". Each caller keeps its own domain error, because the same fact means
+different things to them: export refuses the operator's `--out` path, receipt
+and the transfer engine raise the typed collision, recovery reports a foreign
+destination it will not clobber, and the skills promote demotes to a skip.
+
+Two findings from that sweep are worth recording because neither is where the
+issue looked. First, **the `mkdir` translation above cannot be the only one**:
+`_file_lock` creates the lock's parent before any caller body runs, so a store
+path that is a plain file failed *there* first, with the same `FileExistsError`
+that several callers read as "taken" — one web route mapped it straight to a
+409 naming a conflict that did not exist. The lock now raises `ENOTDIR` itself,
+which covers every canonical mutation at once. Second, **Python maps `ENOTDIR`
+and `EISDIR` onto `NotADirectoryError` and `IsADirectoryError`**, the same two
+classes `skills._target_conflict` constructs as its own refusals, so an
+`isinstance` test there was silently demoting every kernel refusal of those
+shapes to a skip. Our own refusals are built with a single string and carry no
+errno; the kernel's carry one. That is the discriminator, and it is pinned at
+the producer so a later edit cannot quietly give a refusal an errno.
+
+A third repair belongs to the same family. `_promote_staging` parks an existing
+tree at a `.old-*` name before renaming staging in; a failure *there* is about
+that path, not about the destination, which is still sitting where it was. A
+classifier that probes the destination sees it occupied and calls it a routine
+race. The park now re-raises with its cause chained, which is the marker the
+race predicate already reads to refuse demoting a state to a skip.
 The **rollback** rename-back is cross-parent by construction (staging sits in
 the destination store, the source path in another), so it passes
 `allow_cross_parent=True`; it preserves staging on every refusal and chooses its

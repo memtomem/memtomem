@@ -1058,6 +1058,69 @@ class TestRecoveryTypeGate:
         assert stat.S_ISFIFO(os.lstat(p[slot]).st_mode)
 
 
+class TestRecoveryRenameOccupancyClassification:
+    """#2319 — recovery must recognize every "the destination is taken" shape.
+
+    Recovery rows 2, 5 and 6 reach ``_rename_recovery``. Its old test was
+    ``(EEXIST, ENOTEMPTY)``, so a foreign destination that the kernel reported
+    as ``EISDIR`` — or as ``ENOTDIR`` for a shape mismatch — fell through to
+    the generic ``SwapRecoveryError``. That loses the distinction the recovery
+    contract is built on: ``SwapForeignDestination`` carries ``retained=`` so
+    neither tree is reaped, and it tells the operator someone else's content is
+    sitting at the canonical name. The generic error says only "rename failed".
+    """
+
+    @staticmethod
+    def _pair(tmp_path: Path) -> tuple[Path, Path]:
+        src = tmp_path / ".swap-src"
+        src.mkdir()
+        (src / "SKILL.md").write_text("---\nname: foo\n---\n", encoding="utf-8")
+        return src, tmp_path / "foo"
+
+    @pytest.mark.parametrize("code", ["EEXIST", "ENOTEMPTY", "EISDIR", "ENOTDIR"])
+    def test_an_occupied_destination_is_foreign_not_generic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str
+    ) -> None:
+        src, dst = self._pair(tmp_path)
+        dst.mkdir()
+        (dst / "theirs.md").write_text("someone else", encoding="utf-8")
+
+        def refuse(*_a, **_kw):
+            raise OSError(getattr(errno, code), "refused", str(dst))
+
+        monkeypatch.setattr(_dir_swap, "rename_no_replace", refuse)
+
+        with pytest.raises(SwapForeignDestination) as exc_info:
+            _dir_swap._rename_recovery(src, dst)
+
+        assert exc_info.value.retained == (src, dst)
+        # Neither tree is touched — that is what ``retained`` promises.
+        assert (dst / "theirs.md").read_text(encoding="utf-8") == "someone else"
+        assert (src / "SKILL.md").is_file()
+
+    def test_enotdir_with_a_free_destination_stays_generic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The conjunction, on the recovery path.
+
+        Nothing is at ``dst``, so nobody recreated anything: calling this a
+        foreign destination would tell the operator to go inspect content that
+        does not exist, and would retain two trees on that basis.
+        """
+        src, dst = self._pair(tmp_path)
+
+        def refuse(*_a, **_kw):
+            raise OSError(errno.ENOTDIR, "broken component", str(dst))
+
+        monkeypatch.setattr(_dir_swap, "rename_no_replace", refuse)
+
+        with pytest.raises(SwapRecoveryError) as exc_info:
+            _dir_swap._rename_recovery(src, dst)
+
+        assert not isinstance(exc_info.value, SwapForeignDestination)
+        assert not dst.exists()
+
+
 class TestMarkerOwnsTransient:
     @pytest.mark.parametrize("slot", ["staging", "old"])
     def test_true_only_while_the_marker_is_live(self, tmp_path: Path, slot: str) -> None:

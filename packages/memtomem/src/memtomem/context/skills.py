@@ -43,6 +43,7 @@ from memtomem.context._atomic import (
     atomic_write_bytes,
     copy_tree_atomic,
     rename_no_replace,
+    rename_refused_by_occupant,
 )
 from memtomem.context._dir_swap import (
     SwapRecoveryError,
@@ -760,14 +761,30 @@ def _target_conflict(dst: Path) -> OSError | None:
     return None
 
 
-def _promote_race_conflict(exc: OSError) -> bool:
+def _promote_race_conflict(exc: OSError, dst: Path) -> bool:
     """Whether a :func:`_promote_staging` ``OSError`` is a destination race.
 
     ``True`` only for the shapes a NON-gateway writer (manual shell, editor)
     can produce by landing content at ``dst`` mid-swap — the
-    :func:`_target_conflict` refusal pair, and ENOTEMPTY/EEXIST from the
-    rename-in hitting a recreated destination. Callers convert those into a
-    typed ``target_conflict`` skip and keep going.
+    :func:`_target_conflict` refusal pair, and the kernel's occupied-target
+    refusals from the rename-in hitting a recreated destination. Callers
+    convert those into a typed ``target_conflict`` skip and keep going.
+
+    The errno half is
+    :func:`~memtomem.context._atomic.rename_refused_by_occupant` (#2319), which
+    is why *dst* is a parameter: it settles ``ENOTDIR`` by looking rather than
+    assuming. (``EISDIR`` was never missing HERE — the isinstance branch below
+    already caught the kernel's spelling of it, over-broadly. Swap recovery is
+    the copy whose tuple actually lacked it.) Demoting a
+    broken-path ``ENOTDIR`` to a skip would drop a destination on the floor
+    with nothing at ``dst`` to justify it. The isinstance branch below is NOT
+    that question — those two are refusals :func:`_target_conflict` builds
+    itself, after proving ``dst`` exists, and carry no errno at all — which is
+    exactly how they are told apart here. Python maps ``ENOTDIR`` / ``EISDIR``
+    onto these SAME two classes, so a bare ``isinstance`` check also swallowed
+    every kernel refusal of those shapes and demoted it to a skip
+    unconditionally. That is the #2319 defect wearing a different hat, and the
+    ``errno is None`` test is what separates our own refusal from the kernel's.
 
     Everything else stays ``False`` so it RE-RAISES: ENOSPC, permission
     errors, and — critically — the rollback-failure chain from #1123
@@ -788,9 +805,9 @@ def _promote_race_conflict(exc: OSError) -> bool:
         return False
     if exc.__cause__ is not None:
         return False
-    if isinstance(exc, (IsADirectoryError, NotADirectoryError)):
+    if isinstance(exc, (IsADirectoryError, NotADirectoryError)) and exc.errno is None:
         return True
-    return exc.errno in (errno.ENOTEMPTY, errno.EEXIST)
+    return rename_refused_by_occupant(exc, dst)
 
 
 # Moved to ``_atomic`` (ADR-0030 PR-G3) — the version store's write-once
@@ -860,7 +877,22 @@ def _promote_staging(
         # so concurrent runs (different pids) cannot collide.
         suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
         old = dst.parent / f".old-{dst.name}-{suffix}.tmp"
-        os.replace(dst, old)
+        try:
+            os.replace(dst, old)
+        except OSError as move_aside_exc:
+            # A failure HERE is about ``old``, not about ``dst`` — and ``dst``
+            # is still sitting there untouched, so a classifier that probes the
+            # destination would see it occupied and call this a routine
+            # destination race (#2319). It is not: nothing landed, and the tree
+            # the caller wanted to replace is intact. Re-raise with the cause
+            # chained, which is the marker ``_promote_race_conflict`` already
+            # reads to refuse demoting a state to a skip, and name ``old`` so
+            # the message points at the path that actually refused.
+            raise OSError(
+                move_aside_exc.errno,
+                f"could not move the existing tree aside to {old}: {move_aside_exc.strerror}",
+                str(old),
+            ) from move_aside_exc
         try:
             os.replace(staging, dst)
         except BaseException as promote_exc:
@@ -1281,7 +1313,7 @@ def generate_all_skills(
                         # (the finally below reaps the unconsumed staging
                         # tree). Anything else — ENOSPC, permissions, the
                         # #1123 rollback-failure chain — re-raises loud.
-                        if not _promote_race_conflict(exc):
+                        if not _promote_race_conflict(exc, dst):
                             raise
                         skipped.append((dst.name, str(exc), skip_codes.TARGET_CONFLICT))
                         continue
@@ -1468,7 +1500,7 @@ def generate_all_skills(
                         try:
                             _promote_staging(staging, dst, reap_move_aside=True)
                         except OSError as exc:
-                            if not _promote_race_conflict(exc):
+                            if not _promote_race_conflict(exc, dst):
                                 raise
                             skipped.append((skill_dir.name, str(exc), skip_codes.TARGET_CONFLICT))
                         else:
@@ -1987,7 +2019,7 @@ def extract_skills_to_canonical(
                         # skips; anything else, including the #1123
                         # rollback-failure chain, re-raises loud.
                         shutil.rmtree(staging, ignore_errors=True)
-                        if not _promote_race_conflict(exc):
+                        if not _promote_race_conflict(exc, dst):
                             raise
                         skipped.append((skill_name, str(exc), skip_codes.TARGET_CONFLICT))
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)

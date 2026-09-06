@@ -191,7 +191,25 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
       failures logged; releasing the descriptor is what drops the lock, and
       the OS reclaims it even when ``close`` itself reports an error.
     """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as exc:
+        # ``exist_ok=True`` swallows this only when what is already there IS a
+        # directory; a plain file or a dangling symlink on the store's own path
+        # still raises (#2319). Letting a bare ``FileExistsError`` out of the
+        # LOCK is worse than it looks: every canonical mutation enters through
+        # here, and several of them use that exact type as their own "the
+        # destination is taken" signal — so an unusable store path arrives at
+        # the caller wearing the costume of a routine collision, pointing the
+        # operator at an artifact that does not exist. It also lands before any
+        # guard in the caller's body, which is why translating it there is not
+        # enough. ``ENOTDIR`` says what is actually wrong and is not a
+        # ``FileExistsError``, so no collision arm catches it.
+        raise NotADirectoryError(
+            errno.ENOTDIR,
+            f"lock directory is not a directory: {lock_path.parent}",
+            str(lock_path),
+        ) from exc
     # os.open + os.fdopen: pin 0o600 mode while still handing portalocker
     # a file object — its Windows backend calls .fileno() on the argument,
     # so a bare fd int won't do.
@@ -1102,6 +1120,57 @@ def rename_no_replace(staging: Path, dst: Path, *, allow_cross_parent: bool = Fa
     if rename(*args) != 0:
         native_errno = ctypes.get_errno() or errno.EIO
         raise OSError(native_errno, os.strerror(native_errno), str(dst))
+
+
+#: Rename refusals that can ONLY mean "the destination name is occupied".
+#:
+#: A no-replace rename reports an occupied target as ``EEXIST`` whatever shape
+#: it is — measured on macOS, where a directory renamed onto an existing FILE
+#: answers ``EEXIST`` rather than the ``ENOTDIR`` a plain ``rename`` gives.
+#: ``ENOTEMPTY`` and ``EISDIR`` are the other spellings POSIX kernels may
+#: choose. Windows needs none of the latter two (its :func:`os.rename` refuses
+#: every existing destination with ``FileExistsError``) but they cost nothing.
+RENAME_COLLISION_ERRNOS = (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR)
+
+#: Refusals that mean "occupied" OR something else entirely (#2312, #2319).
+#:
+#: ``ENOTDIR`` is reported both for an occupied destination and for a **broken
+#: path component** on either side, and only a look can tell them apart.
+RENAME_AMBIGUOUS_ERRNOS = (errno.ENOTDIR,)
+
+
+def rename_refused_by_occupant(exc: OSError, dst: Path | str) -> bool:
+    """Whether *exc* from a no-replace rename means "*dst* is taken".
+
+    One predicate for a question five call sites were answering in four
+    different spellings (#2319): the transfer promote, both bundle promotes
+    (export's ``--out`` publish and receipt's landing), the swap recovery
+    rename-in, and the skills promote race. Divergence was not cosmetic —
+    the narrow copies missed ``EISDIR`` entirely, and the wide ones took
+    ``ENOTDIR`` as proof of occupancy when it is not.
+
+    **Pure boolean; it never raises and never removes anything.** Each caller
+    keeps its own domain error, because the same fact means different things
+    to them: export refuses the operator's ``--out`` path, receipt and the
+    transfer engine raise the typed collision, recovery reports a foreign
+    destination it will not clobber.
+
+    ``ENOTDIR`` is settled by **looking**, as a CONJUNCTION. That direction is
+    what keeps the probe safe: it can only ever turn a wrong "occupied" back
+    into the error that actually happened. The inverse rule — "occupied, OR
+    something is at dst" — was rejected at #2312's design gate because it
+    would report an ``ENOENT`` (staging gone, and for a move staging is the
+    only copy), a deliberate cross-parent ``EXDEV``, or an ``EIO`` as an
+    ordinary collision whenever the name happened to be taken.
+
+    ``lexists``, not ``exists``: a dangling symlink occupies a name just as
+    firmly as anything else, and answers False to the latter.
+    """
+    if exc.errno in RENAME_COLLISION_ERRNOS:
+        return True
+    if exc.errno in RENAME_AMBIGUOUS_ERRNOS:
+        return os.path.lexists(dst)
+    return False
 
 
 def is_copy_skipped_rel(rel: str | PurePosixPath) -> bool:
