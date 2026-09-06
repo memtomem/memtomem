@@ -1068,7 +1068,49 @@ def _refuse_junction(path: Path) -> None:
         )
 
 
-def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
+def _drop_partial_fill(staging: Path, src: Path, *, src_is_recoverable: bool) -> None:
+    """Remove a half-filled staging entry, unless it is the last copy (#2313).
+
+    The fill failed, so *staging* holds an incomplete tree this call created
+    and normally owns. Dropping it is right whenever the bytes it was copying
+    still exist at *src* — always true for copy mode, and true for an EXDEV
+    move as long as the holding entry it reads is still there.
+
+    When the caller cannot make that claim, the question is settled by
+    LOOKING: if *src* is gone, this partial entry is the only thing left
+    carrying any of those bytes, and deleting it to tidy up a failure would
+    complete the loss the failure only started. It is preserved and named at
+    ERROR instead, because a recovery copy nobody can name is a copy nobody
+    recovers. ``lexists``, so a dangling symlink source still counts as
+    present.
+
+    Best-effort removal, as before: this runs while an exception is in flight
+    and must not replace it with its own.
+    """
+    if not src_is_recoverable and not os.path.lexists(src):
+        logger.error(
+            "transfer staging: the copy of %s failed and that entry is gone; "
+            "preserving the partial copy at %s — it is incomplete, but it is "
+            "the only thing left holding any of those bytes, so it is kept "
+            "for manual recovery rather than removed.",
+            src,
+            staging,
+        )
+        return
+    if staging.is_symlink():
+        with contextlib.suppress(OSError):
+            staging.unlink()
+        return
+    if staging.is_dir():
+        shutil.rmtree(staging, ignore_errors=True)
+        return
+    with contextlib.suppress(OSError):
+        staging.unlink(missing_ok=True)
+
+
+def _stage_copy_into(
+    src: Path, dst_parent: Path, name_hint: str, *, src_is_recoverable: bool = True
+) -> Path:
     """Build a staging entry under *dst_parent* from a byte copy of *src*.
 
     Shared by the :func:`_stage_move` EXDEV fallback and by
@@ -1096,6 +1138,18 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
     Cleanup on a failed fill removes only an entry this call created — the
     claim ran first and succeeded, so the entry is provably ours. A failed
     claim creates nothing and therefore cleans nothing.
+
+    *src_is_recoverable* is the caller's claim that dropping a half-filled
+    staging entry cannot lose anything, because *src* is a source that still
+    exists independently of this call. Copy mode owns that claim outright: it
+    reads the canonical artifact and never consumes it. The EXDEV move does
+    NOT, and passes ``False``: its *src* is the holding entry the canonical
+    path was renamed into, so if that entry disappears while the fill is
+    failing, the partial staging tree is the last thing on disk carrying any
+    of those bytes. It is then preserved and named rather than deleted —
+    incomplete, but the caller cannot make more of it, and the rule this
+    package applies to every transient is that a copy goes only when the bytes
+    are provably elsewhere.
     """
     _refuse_junction(src)
 
@@ -1126,7 +1180,7 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
             # just made and own.
             shutil.copytree(src, staging, symlinks=True, dirs_exist_ok=True)
         except BaseException:
-            shutil.rmtree(staging, ignore_errors=True)
+            _drop_partial_fill(staging, src, src_is_recoverable=src_is_recoverable)
             raise
         return staging
 
@@ -1138,8 +1192,7 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
         # destination a regular file we created, so that shape cannot arise.
         shutil.copy2(src, staging, follow_symlinks=False)
     except BaseException:
-        with contextlib.suppress(OSError):
-            staging.unlink(missing_ok=True)
+        _drop_partial_fill(staging, src, src_is_recoverable=src_is_recoverable)
         raise
     return staging
 
@@ -1296,7 +1349,14 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
             lambda path: rename_no_replace(src, path),
         )
         try:
-            return StagedMove(_stage_copy_into(holding, dst_parent, name_hint), holding)
+            return StagedMove(
+                # The copy reads the holding entry, which IS the artifact
+                # here — the canonical path is already empty — so a failed
+                # fill may not assume the source will still be there to
+                # rebuild from (#2313).
+                _stage_copy_into(holding, dst_parent, name_hint, src_is_recoverable=False),
+                holding,
+            )
         except BaseException:
             # The source is renamed away at this point, so unwinding is this
             # function's job: the caller's rollback ladder never sees a stage

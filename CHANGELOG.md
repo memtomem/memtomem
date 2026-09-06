@@ -120,7 +120,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   same-filesystem move already used, and nothing removes it automatically:
   rename it back onto the artifact's name to recover it, or delete it once you
   have checked that the destination is complete. Until you do, the artifact
-  reads as missing at the source rather than as a half-moved copy.
+  reads as missing at the source rather than as a half-moved copy. If a copy
+  fails outright, a half-written one is normally cleaned up — but not when the
+  set-aside original has also gone missing, because then the incomplete copy is
+  the last thing holding any of those bytes, and the error names where it is.
 
 - **A cross-store transfer no longer replaces something that appears at the
   destination while it is landing** (#2312) — `mm context move` and `mm context

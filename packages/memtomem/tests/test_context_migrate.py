@@ -2453,7 +2453,7 @@ def test_e4_unreadable_canonical_blocks_project_shared_promotion(scope_layout, m
 # ── PR-E4 Codex review fold #2: EXDEV + Gate A combined path ─────────
 
 
-def test_e4_exdev_then_gate_a_blocks_src_untouched(scope_layout, monkeypatch):
+def test_e4_exdev_then_gate_a_blocks_src_restored(scope_layout, monkeypatch):
     """Codex review #2 — EXDEV-fallback path must roll back cleanly when
     Gate A then blocks. Combines two branches that Row 11 (clean EXDEV)
     and Row 2 (same-FS Gate A block) cover separately:
@@ -2502,7 +2502,9 @@ def test_e4_exdev_then_gate_a_blocks_src_untouched(scope_layout, monkeypatch):
     assert "Gate A" in result.output
     assert raised["once"], "EXDEV branch should have triggered"
 
-    # POSITIVE: src untouched (EXDEV path never consumed it).
+    # POSITIVE: src is back, byte for byte. Since #2313 the EXDEV path DOES
+    # consume it — into a holding entry — so this is the rollback's rename-back
+    # having succeeded, not the source having stayed put.
     assert src.is_file()
     assert src.read_text(encoding="utf-8") == _AGENT_BODY_SECRET
     # NEGATIVE: dst absent + no staging tmp leftover (rollback dropped it).
@@ -4073,3 +4075,95 @@ def test_e4_exdev_a_holding_entry_removed_by_someone_else_is_not_a_partial_move(
     dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
     assert (dst_root / "foo" / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
     assert not list(root.glob(".migrate-foo-*.tmp"))
+
+
+@pytest.mark.parametrize("shape", ["dir", "flat"])
+def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
+    tmp_path, monkeypatch, caplog, shape
+):
+    """A half-filled staging entry is not swept when it is all that is left.
+
+    The fill's cleanup rests on "the source is still there to rebuild from".
+    Copy mode owns that claim; an EXDEV move does not, because the source it
+    reads IS the holding entry and the canonical path is already empty. If
+    that entry disappears while the fill is failing, deleting the partial copy
+    would complete a loss the failure only started — and the rollback then has
+    nothing to put back, so the bytes exist nowhere.
+
+    Mutation: drop the ``src_is_recoverable`` argument (or let the cleanup run
+    unconditionally) and the surviving-copy assertion fails with the bytes
+    gone from disk entirely.
+    """
+    import logging as _logging
+    import shutil as shutil_mod
+
+    from memtomem.context.migrate import _stage_move
+
+    dst_parent = tmp_path / "dest"
+    dst_parent.mkdir()
+    src = _src_tree(tmp_path) if shape == "dir" else _src_file(tmp_path)
+    _exdev_always(monkeypatch)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+
+    def fill_then_vanish(source, target, *args, **kwargs):
+        # A partial fill lands, then an outside actor removes the holding
+        # entry we were reading, and only then does the copy fail.
+        if shape == "dir":
+            Path(target).mkdir(parents=True, exist_ok=True)
+            (Path(target) / "agent.md").write_text("source", encoding="utf-8")
+            shutil_mod.rmtree(source)
+        else:
+            Path(target).write_text("source", encoding="utf-8")
+            Path(source).unlink()
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(shutil_mod, "copytree" if shape == "dir" else "copy2", fill_then_vanish)
+
+    with pytest.raises(OSError) as exc_info:
+        _stage_move(src, dst_parent, name_hint="reviewer")
+
+    assert exc_info.value.errno == errno.EIO
+    # Nothing survives on the source side — that is the premise of the cell.
+    assert not os.path.lexists(src)
+    assert not list(src.parent.glob(".migrate-*"))
+    # ...so the partial copy is kept, and named.
+    survivors = list(dst_parent.glob(".migrate-reviewer-*"))
+    assert len(survivors) == 1, survivors
+    body = survivors[0] / "agent.md" if shape == "dir" else survivors[0]
+    assert body.read_text(encoding="utf-8") == "source"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("preserving the partial copy" in m and str(survivors[0]) in m for m in messages), (
+        messages
+    )
+
+
+@pytest.mark.parametrize("shape", ["dir", "flat"])
+def test_copy_mode_still_sweeps_its_own_partial_fill(tmp_path, monkeypatch, shape):
+    """The preservation rule must not leak into copy mode.
+
+    Copy mode reads the canonical artifact and never consumes it, so a
+    half-filled staging entry there is always rebuildable and always goes —
+    otherwise every ordinary copy failure would leak a tree nothing reaps.
+
+    Mutation: preserve unconditionally and this cell fails with a leftover in
+    the destination store.
+    """
+    import shutil as shutil_mod
+
+    from memtomem.context.migrate import _stage_copy_into
+
+    dst_parent = tmp_path / "dest"
+    dst_parent.mkdir()
+    src = _src_tree(tmp_path) if shape == "dir" else _src_file(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(shutil_mod, "copytree" if shape == "dir" else "copy2", boom)
+
+    with pytest.raises(OSError):
+        _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+    assert list(dst_parent.iterdir()) == []
+    body = (src / "agent.md") if shape == "dir" else src
+    assert body.read_text(encoding="utf-8") == "source"

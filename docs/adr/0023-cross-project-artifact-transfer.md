@@ -287,13 +287,17 @@ that path, not about the destination, which is still sitting where it was. A
 classifier that probes the destination sees it occupied and calls it a routine
 race. The park now re-raises with its cause chained, which is the marker the
 race predicate already reads to refuse demoting a state to a skip.
-The **rollback** rename-back is cross-parent by construction (staging sits in
-the destination store, the source path in another), so it passes
-`allow_cross_parent=True`; it preserves staging on every refusal and chooses its
-message by looking at the source path, because "something is there" is a claim
-about the world and telling an operator to move the tree back on top of it would
-be wrong. The rollback's staging probe is `lexists`, since a flat canonical may
-itself be a symlink and stages as one.
+
+The **rollback** rename-back preserves what it moved on every refusal and
+chooses its message by looking at the source path, because "something is there"
+is a claim about the world and telling an operator to move the tree back on top
+of it would be wrong. Whether it crosses a parent depends on which entry holds
+the pre-move bytes, and the #2313 amendment below settles that: staging on the
+same-filesystem path, which sits in the destination store while the source path
+is in another, so it passes `allow_cross_parent=True`; the holding entry on the
+EXDEV path, which is a sibling of the source and keeps the promote-shape
+guard. The rollback's probe on that entry is `lexists`, since a flat canonical
+may itself be a symlink and is staged, or parked, as one.
 
 **Amendment (2026-09, #2313): the EXDEV fallback gives the copy a source only
 the engine can name.** A move whose stores sit on different filesystems cannot
@@ -347,8 +351,14 @@ under the internal grammar, hidden, never reaped, recovered by hand (`mv` it
 back onto the canonical name, or delete it once the destination is complete) —
 but not the same set of states, and the difference is worth writing down. A
 single atomic rename can only be caught before or after; the EXDEV path adds
-three: a holding entry with no staging yet, a holding entry beside a partially
-filled staging tree, and a promoted destination beside a stale holding entry.
+four: a holding entry with no staging yet, a holding entry beside a partially
+filled staging tree, a holding entry beside a complete staging tree that was
+never promoted, and a promoted destination beside a stale holding entry. The
+partial-fill state is also why a failed fill does not always sweep the tree it
+was building: copy mode reads the canonical artifact and can always rebuild, but
+an EXDEV move reads the holding entry, so if that entry disappears mid-fill the
+partial tree is the last thing carrying any of those bytes and is preserved and
+named rather than removed.
 The visibility trade is the other half: a crash mid-copy used to leave the
 source visible and intact at its canonical name, and now leaves it hidden under
 the holding name, so a retry reports the artifact as missing rather than
