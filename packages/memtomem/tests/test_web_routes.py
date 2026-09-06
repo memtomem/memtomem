@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import os
 import stat
 import unicodedata
@@ -29,7 +30,7 @@ from memtomem.context.projects import KnownProjectsStore
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.web.app import create_app
-from .helpers import set_home
+from .helpers import consent_lines, set_home
 from .web.test_upload_quarantine import (
     TestUploadQuarantineBoundaries,  # noqa: F401
     TestUploadQuarantineLifecycle,  # noqa: F401
@@ -2738,6 +2739,12 @@ class TestEditChunkRedaction:
         assert resp.status_code == 403, resp.text
         snap = privacy.snapshot()["by_tool"]["web_api_chunk_edit"]
         assert snap["blocked"] == 1
+        # #2317: the refusal reports the tier it was decided under, so a
+        # client can tell "the bypass is available here" from "it is not".
+        # Pinned on the server side because the JS tests cannot: their
+        # fixtures build this payload themselves, so deleting the field in
+        # the route leaves every one of them green.
+        assert resp.json()["detail"]["scope"] == "user"
 
     async def test_force_unsafe_passes_guard(self, app, client: AsyncClient, tmp_path: Path):
         from memtomem import privacy
@@ -2775,7 +2782,7 @@ class TestEditChunkRedaction:
         assert snap["bypassed"] == 1
 
     async def test_force_unsafe_on_project_shared_chunk_blocks(
-        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
     ):
         """ADR-0011 PR-D review round 7 pin: PATCH on a project_shared
         chunk must infer scope from the loaded metadata so Gate A's
@@ -2817,13 +2824,19 @@ class TestEditChunkRedaction:
         # project_shared chunk only resolves by id from inside its project.
         monkeypatch.setattr(chunks_route, "_boundary", lambda _config: proj)
 
-        resp = await client.patch(
-            f"/api/chunks/{CHUNK_ID}",
-            json={
-                "new_content": "secret token=sk-" + "a" * 30,
-                "force_unsafe": True,
-            },
-        )
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={
+                    "new_content": "secret token=sk-" + "a" * 30,
+                    "force_unsafe": True,
+                    # Gate B is satisfied (#2317) so the request reaches Gate A,
+                    # which is what this test measures — and the assertion becomes
+                    # the stronger one: consent to a repository-tracked write does
+                    # not buy a secret a way through the scan.
+                    "confirm_project_shared": True,
+                },
+            )
         assert resp.status_code == 403, resp.text
         body = resp.json()
         detail = body.get("detail", {})
@@ -2832,6 +2845,298 @@ class TestEditChunkRedaction:
         assert snap.get("blocked_project_shared", 0) == 1
         # The bypass counter must NOT have ticked — that was the bug.
         assert snap.get("bypassed", 0) == 0
+        # Consent recorded ≠ write landed: Gate A refused after Gate B
+        # passed, and the consent is the half with no other record. Also
+        # the ordering pin — moving the emit behind Gate A drops this line
+        # while every other assertion here stays green.
+        assert len(consent_lines(caplog)) == 1
+
+
+class TestEditChunkProjectSharedGateB:
+    """ADR-0011 §5 Gate B on ``PATCH /api/chunks/{id}`` (#2317).
+
+    The route had Gate A from PR-D review round 7 and no Gate B, while its
+    sibling ``DELETE`` on the same id had both — so replacing the body of a
+    repository-tracked note was the one such write nobody confirmed. These
+    are the behavioural half the AST guard cannot cover: that the emit's
+    predicate mirrors the gate's, and that the surface name is the route's
+    own rather than a neighbour's.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_counters(self):
+        from memtomem import privacy
+
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    #: Which ``storage.get_chunk`` call the gate reads. The route fetches
+    #: three times before it decides: the screened preflight, then
+    #: ``locked_source_chunk``'s unlocked probe and its re-fetch under the
+    #: sidecar lock. The gate must consume the third. Pinned as a number so
+    #: a change to that sequence fails the re-scope tests loudly instead of
+    #: silently reverting them to measuring the probe.
+    FRESH_FETCH = 3
+
+    def _stage(
+        self,
+        app,
+        monkeypatch,
+        tmp_path: Path,
+        *,
+        scope: str = "project_shared",
+        fresh_scope: str | None = None,
+    ):
+        """Stage a chunk for the PATCH route, optionally re-scoped mid-flight.
+
+        ``fresh_scope`` makes the fetches before the lock and the re-fetch
+        under it disagree. The source file is identical on both, so
+        ``locked_source_chunk`` does not take its ``"moved"`` branch and the
+        test isolates one variable: which fetch the gate reads.
+
+        Same-path-new-scope is produced by an incremental **re-index** after
+        ``project_memory_dirs`` changes, not by ``memory-migrate`` — migrate
+        rewrites path and scope together and therefore lands on the
+        ``"moved"`` branch instead. The MCP twin's ``_stage_edit_chunk``
+        carries the full note.
+
+        Returns ``(source, calls)``; ``calls["n"]`` lets a test refuse to
+        pass vacuously when the fetch it aims at never happened.
+        """
+        proj = tmp_path / "proj"
+        (proj / ".memtomem" / "memories").mkdir(parents=True)
+        source = proj / ".memtomem" / "memories" / "rule.md"
+        source.write_text("## H\n\noriginal body\n", encoding="utf-8")
+        base = _make_test_chunk(source=str(source))
+
+        def _chunk(chunk_scope: str):
+            return base.__class__(
+                content=base.content,
+                metadata=base.metadata.__class__(
+                    source_file=source,
+                    heading_hierarchy=("## H",),
+                    tags=base.metadata.tags,
+                    namespace=base.metadata.namespace,
+                    start_line=1,
+                    end_line=3,
+                    scope=chunk_scope,
+                    project_root=None if chunk_scope == "user" else proj,
+                ),
+                # One id: this is the same row being re-read, not two rows.
+                id=base.id,
+                content_hash=base.content_hash,
+                embedding=base.embedding,
+                created_at=base.created_at,
+                updated_at=base.updated_at,
+            )
+
+        probe = _chunk(scope)
+        fresh = probe if fresh_scope is None else _chunk(fresh_scope)
+        calls = {"n": 0}
+
+        async def _get_chunk(_chunk_id):
+            calls["n"] += 1
+            return probe if calls["n"] < self.FRESH_FETCH else fresh
+
+        app.state.storage.get_chunk = AsyncMock(side_effect=_get_chunk)
+        from memtomem.web.routes import chunks as chunks_route
+
+        # ADR-0036: a project_shared id resolves only from inside its own
+        # project, so without this the route 404s and the gate is never
+        # reached — the refusal assertion would pass for the wrong reason.
+        monkeypatch.setattr(chunks_route, "_boundary", lambda _config: proj)
+        return source, calls
+
+    async def test_edit_without_confirm_refuses_and_leaves_the_file_alone(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
+    ):
+        source, _calls = self._stage(app, monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={"new_content": "rewritten body"},
+            )
+        # 200 with the disclose-then-confirm envelope, not a 403: a missing
+        # consent is application state the client can resolve, and the 403
+        # ``blocked_project_shared`` discriminant on this route already means
+        # Gate A's never-satisfiable refusal.
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        assert payload["status"] == "needs_confirmation"
+        # The envelope names the field to re-send. The SPA matches that name
+        # against the one confirmation it can answer and refuses anything
+        # else, so this string is a contract with the client, not decoration.
+        assert payload["confirm"] == "confirm_project_shared"
+        assert payload["reason"]
+        # Nothing that would read as a completed edit came back.
+        assert "id" not in payload
+        # Refused before the mutation, not after it.
+        assert "original body" in source.read_text(encoding="utf-8")
+        assert "rewritten body" not in source.read_text(encoding="utf-8")
+        # A refusal is not a consent.
+        assert consent_lines(caplog) == []
+
+    async def test_confirmed_shared_edit_with_a_secret_reports_its_tier(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
+    ):
+        """The combination the SPA branches on, and the one no test reached.
+
+        Consent given, no ``force_unsafe``, secret present: Gate B passes,
+        Gate A returns the ordinary ``blocked`` (not
+        ``blocked_project_shared``, which needs the bypass flag). The client
+        has to decide whether to offer that bypass, and on this tier it must
+        not — so the refusal has to say which tier it was decided under.
+        Without this the field is only ever asserted for ``user``.
+        """
+        source, _calls = self._stage(app, monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={
+                    "new_content": "secret token=sk-" + "a" * 30,
+                    "confirm_project_shared": True,
+                },
+            )
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        assert detail["detail"] == "redaction_blocked"
+        assert detail["scope"] == "project_shared"
+        assert "original body" in source.read_text(encoding="utf-8")
+        # Gate B passed before Gate A refused, so the consent is on record.
+        assert len(consent_lines(caplog)) == 1
+
+    async def test_gate_a_refusal_stays_a_403_and_is_not_confirmable(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
+    ):
+        """The two refusals on this route must not look alike.
+
+        Gate B says "ask and re-send"; Gate A's ``force_unsafe`` refusal on a
+        project_shared chunk says "never". Before #2317 gave Gate B its own
+        envelope both answered 403 ``blocked_project_shared``, and a client
+        could not tell them apart — it would have prompted the user and
+        retried into a wall. Pinned from the outside, on the wire, because
+        that is where the client has to make the distinction.
+        """
+        source, _calls = self._stage(app, monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={
+                    "new_content": "secret token=sk-" + "a" * 30,
+                    "force_unsafe": True,
+                    "confirm_project_shared": True,
+                },
+            )
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"]["detail"] == "blocked_project_shared"
+        assert "original body" in source.read_text(encoding="utf-8")
+        # Consent was given and recorded; Gate A refused afterwards.
+        assert len(consent_lines(caplog)) == 1
+
+    async def test_edit_with_confirm_proceeds_and_records_one_consent(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
+    ):
+        source, _calls = self._stage(app, monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={"new_content": "rewritten body", "confirm_project_shared": True},
+            )
+        assert resp.status_code == 200, resp.text
+        assert "rewritten body" in source.read_text(encoding="utf-8")
+        lines = consent_lines(caplog)
+        assert len(lines) == 1
+        assert "project_shared.confirmed_via=web_api_chunk_edit" in lines[0]
+        assert "mechanism=request" in lines[0]
+        assert "action=edit" in lines[0]
+
+    @pytest.mark.parametrize("other_scope", ["user", "project_local"])
+    @pytest.mark.parametrize("confirmed", [False, True])
+    async def test_other_tiers_record_no_consent(
+        self,
+        app,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch,
+        caplog,
+        other_scope,
+        confirmed,
+    ):
+        """The predicate mirror, on both axes a regression widens.
+
+        ``project_local`` is the tier a ``scope != "user"`` predicate would
+        sweep in — inside a project, not committed — and sending the field
+        on a tier that never asked for it is not a consent either: the
+        record claims a repository-tracked write was authorised.
+        """
+        source, _calls = self._stage(app, monkeypatch, tmp_path, scope=other_scope)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={
+                    "new_content": "rewritten body",
+                    "confirm_project_shared": confirmed,
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        # 200 is now two different answers on this route; say which one.
+        assert resp.json().get("status") != "needs_confirmation", resp.text
+        assert "rewritten body" in source.read_text(encoding="utf-8")
+        assert consent_lines(caplog) == []
+
+    async def test_gate_b_reads_the_chunk_re_fetched_under_the_lock(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
+    ):
+        """A re-scope landing while the route waits for the sidecar must not
+        get its edit in on the probe's tier.
+
+        The fetches before the lock say ``user``; the re-fetch under it says
+        ``project_shared``. A gate reading the probe would write into the
+        repository-tracked tier with no consent — the reason
+        ``locked_source_chunk`` re-fetches at all.
+        """
+        source, calls = self._stage(
+            app, monkeypatch, tmp_path, scope="user", fresh_scope="project_shared"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={"new_content": "rewritten body"},
+            )
+        # The re-fetch has to have happened, or this passes for the wrong reason.
+        assert calls["n"] >= self.FRESH_FETCH, calls
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "needs_confirmation"
+        assert "rewritten body" not in source.read_text(encoding="utf-8")
+        assert consent_lines(caplog) == []
+
+    async def test_gate_b_does_not_refuse_on_a_stale_project_shared_probe(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
+    ):
+        """The inverse, which the refusal test alone leaves open: a gate
+        reading the probe would also refuse an edit the fresh chunk says
+        needs no consent — same bug, opposite sign.
+        """
+        source, calls = self._stage(
+            app, monkeypatch, tmp_path, scope="project_shared", fresh_scope="user"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            resp = await client.patch(
+                f"/api/chunks/{CHUNK_ID}",
+                json={"new_content": "rewritten body"},
+            )
+        assert calls["n"] >= self.FRESH_FETCH, calls
+        assert resp.status_code == 200, resp.text
+        assert "rewritten body" in source.read_text(encoding="utf-8")
+        assert consent_lines(caplog) == []
 
 
 # ---------------------------------------------------------------------------

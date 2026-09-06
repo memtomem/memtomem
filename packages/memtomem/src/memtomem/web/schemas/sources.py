@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -120,6 +121,38 @@ class EditRequest(BaseModel):
     # confirms the matched-pattern count with the user before retrying
     # with this flag set.
     force_unsafe: bool = False
+    # ADR-0011 §5 Gate B (#2317): required when the edited chunk lives in
+    # scope='project_shared'. Rewriting a repository-tracked note puts the
+    # new bytes on a path the project commits and shares, and the DELETE
+    # route already takes the same consent to remove that very chunk.
+    # Default False — an unconfirmed request gets the disclose-then-confirm
+    # envelope below, not a write.
+    confirm_project_shared: bool = False
+
+
+class ChunkEditNeedsConfirmation(BaseModel):
+    """Unconfirmed edit of a ``project_shared`` chunk (#2317).
+
+    The shared disclose-then-confirm envelope
+    (``_confirm.needs_confirmation_envelope``), returned at HTTP **200**
+    because a missing consent is application state, not a transport error —
+    the same shape ``DELETE /api/sources`` and the Pull apply route use, and
+    the reason this gate does not reuse the ``blocked_project_shared`` 403.
+    That discriminant already carries Gate A's ``force_unsafe`` refusal on
+    this very route, and that refusal is *never* satisfiable by re-sending:
+    a client seeing it cannot tell "ask the user and retry" from "stop".
+
+    ``confirm`` names the exact request-body field whose ``true`` completes
+    the round-trip. The SPA checks that name against the one confirmation
+    it knows how to answer and refuses anything else, rather than following
+    it dynamically — so a future envelope asking for a *different* consent
+    fails loudly instead of being answered with the wrong flag. The field
+    still earns its place: it is what makes that check possible.
+    """
+
+    status: Literal["needs_confirmation"]
+    confirm: str
+    reason: str
 
 
 class ChunkSizeBucket(BaseModel):
